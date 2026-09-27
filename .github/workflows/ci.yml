@@ -27,41 +27,52 @@ jobs:
         with:
           python-version: "3.12"
 
+      # Every command below is a declared gate step in the Makefile: the ordered
+      # check set lives there once (see `make check`). This job adds only the
+      # setup steps, the root-only vulture scan, and the coverage artifact
+      # upload, so a gate change is a one-file edit.
+
       # Reads the freshly checked-out committed uv.lock BEFORE `uv sync` can heal
       # it. Fails if a release bumped pyproject.toml but forgot `uv lock`, so a
       # stale lock (which breaks `uv sync --locked` for reproducible installs)
       # can never merge.
       - name: Verify uv.lock is in sync
-        run: uv lock --check
+        run: make lockcheck
 
       - name: Install dependencies
         # The benchmark extra (harbor) is required by the benchmark objective/
-        # aggregate tests in the default suite; a default `uv sync` installs it
-        # only on the (optional) benchmark extra. Install all extras so the full
-        # suite runs with every dependency it exercises.
-        run: uv sync --all-extras
+        # aggregate tests in the default suite; the `install` step syncs all
+        # extras so the full suite runs with every dependency it exercises.
+        run: make install
 
       - name: Lint with ruff
-        run: uv run ruff check daydream tests
+        run: make lint
 
       - name: Run vulture
+        # Root project only: the standalone RL scan is the separate rl-check
+        # job's business, so this deliberately does not call `make deadcode`
+        # (whose scan also covers rl/daydream_review, the richer local gate).
         run: uv run vulture --config pyproject.toml daydream tests
 
       - name: Type check with mypy
-        run: uv run mypy daydream tests
+        run: make typecheck
 
       - name: Naming grep-gate
-        run: bash scripts/check-naming.sh
+        run: make check-naming
 
       - name: Lint workflows with actionlint
-        run: docker run --rm -v "$PWD":/repo -w /repo rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml
+        # Required here: the step skips with a note when no Docker daemon is
+        # available, and a silent skip would turn a workflow-lint failure into
+        # a green run.
+        env:
+          ACTIONLINT_REQUIRE_DOCKER: "1"
+        run: make actionlint
 
       - name: Run tests
-        # The coverage flags live here (not in pyproject addopts), so targeted
-        # runs like `pytest tests/foo.py` stay plain and never trip the 87%
-        # floor even when all their tests pass (#336). Keep in sync with the
-        # local Makefile test recipe (local == CI).
-        run: uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
+        # The coverage flags live in the `test` step (not in pyproject addopts),
+        # so targeted runs like `pytest tests/foo.py` stay plain and never trip
+        # the enforced floor even when all their tests pass (#336).
+        run: make test
 
       - name: Upload coverage report
         # Machine-readable XML from pytest-cov (--cov-report=xml on the Run tests
@@ -126,8 +137,8 @@ jobs:
 
       # The full documented standalone gate (rl/daydream_review/README.md:17-21),
       # including the two `slow` Docker-baseline image tests. The runner's daemon
-      # must be usable so they PASS rather than skip (Task 0 spike); the live
-      # actionlint `docker run` step in the `check` job proves this runner runs
-      # containers. No selection flags: the full suite is the gate.
+      # must be usable so they PASS rather than skip (Task 0 spike); the check
+      # job's required Docker-backed `make actionlint` step proves this runner
+      # runs containers. No selection flags: the full suite is the gate.
       - name: Run tests
         run: uv run pytest

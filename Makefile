@@ -20,9 +20,10 @@ deadcode:
 	cd rl/daydream_review && uv run vulture --config pyproject.toml daydream_review tests
 
 # Coverage flags live here (not in global addopts) so targeted runs like
-# `uv run pytest tests/foo.py` stay plain and never trip the 87% floor (#336).
-# These mirror the CI check job's Run tests step (local == CI), and keep
-# xdist parallelism via -n auto. No --no-cov-on-fail so coverage.xml survives
+# `uv run pytest tests/foo.py` stay plain and never trip the floor enforced by
+# [tool.coverage.report] fail_under in pyproject.toml (#336).
+# CI reaches these flags through `make test`; xdist parallelism stays via
+# -n auto. No --no-cov-on-fail so coverage.xml survives
 # a failed run for the coverage-report / CI artifact upload.
 test:
 	uv run pytest -n auto --cov --cov-branch --cov-report=term-missing --cov-report=xml
@@ -35,17 +36,19 @@ coverage-report:
 	@echo "coverage.xml present (uploaded as a CI artifact on the check job)."
 
 # Docker-backed actionlint over every workflow the project ships (repo-owned
-# plus all template files, nested included). Image is digest-pinned exactly as
-# .github/workflows/ci.yml does; mounting $(CURDIR) at /repo so the selectors
-# expand to the same set CI checks. Enforced whenever a Docker daemon is
-# available; skipped with a note when it is not, so the local/pre-push gate is
-# not a hard Docker-daemon requirement (CI always runs it).
+# plus all template files, nested included). This recipe owns the pinned image
+# digest and mounts $(CURDIR) at /repo so the selectors include all workflows.
+# CI reaches it through `make actionlint` with ACTIONLINT_REQUIRE_DOCKER set,
+# making a missing daemon fatal. Without that variable, the local/pre-push gate
+# skips with a note when no Docker daemon is available.
 actionlint:
 	@if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then \
 	  docker run --rm \
 	    -v "$(CURDIR)":/repo -w /repo \
 	    rhysd/actionlint:1.7.7@sha256:887a259a5a534f3c4f36cb02dca341673c6089431057242cdc931e9f133147e9 \
 	    -color .github/workflows/*.yml daydream/templates/workflows/*.yml daydream/templates/workflows/single/*.yml; \
+	elif [ -n "$$ACTIONLINT_REQUIRE_DOCKER" ]; then \
+	  echo "actionlint: Docker daemon is required here but is not available" >&2; exit 1; \
 	else \
 	  echo "actionlint skipped: Docker daemon is not available"; \
 fi
