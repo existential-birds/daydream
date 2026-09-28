@@ -17,7 +17,7 @@ from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.snapshot import record_evidence_digest
 from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import project_findings
-from tests.harness.adjudication import make_hydrated_sqlite_index, seed_index_dispositions
+from tests.harness.adjudication import make_hydrated_sqlite_index, seed_index_dispositions, write_sessions_jsonl
 
 _PIN = {
     "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
@@ -30,7 +30,6 @@ _PIN = {
 
 def _index(tmp_path: Path, digest: str = "d" * 32) -> Path:
     root = tmp_path / "index"
-    root.mkdir(exist_ok=True)
     sessions = [{
         "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
         "resolutions": [{
@@ -41,9 +40,7 @@ def _index(tmp_path: Path, digest: str = "d" * 32) -> Path:
             "comment_id": 7,
         }],
     }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
     return root
 
@@ -273,9 +270,7 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
             "comment_id": 7,
         }],
     }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     run_materialize(root, tmp_path / "mat2", pin=_PIN)
     out = _harvest(root, archive, tmp_path / "mat2", None)
     assert out["evidence_after_as_of"] == [json.loads(
@@ -313,9 +308,7 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
             "comment_id": 7,
         }],
     }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     pin_a = dict(_PIN, as_of="2026-03-01T00:00:00+00:00")  # evidence before as_of
     pin_b = dict(_PIN, as_of="2026-02-01T00:00:00+00:00", rubric_version="v2")  # after
     run_materialize(root, tmp_path / "mat-a", pin=pin_a)

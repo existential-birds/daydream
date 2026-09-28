@@ -2659,6 +2659,15 @@ async def phase_fix_parallel(
                 f"item(s); skipping remaining {skipped}.",
             )
 
+    def _restore_group_or_raise(context: str, paths: frozenset[str]) -> None:
+        """Restore the complete group from the round snapshot, or fail the group."""
+        try:
+            git_ops.restore_group_worktree_from_snapshot(work.repo, round_snapshot, paths)
+        except Exception as restore_err:  # noqa: BLE001
+            raise RuntimeError(
+                f"failed to restore the complete fix group {context}"
+            ) from restore_err
+
     async def _fix_group_serially(
         fkey: str,
         grp: list[tuple[dict[str, Any], int]],
@@ -2716,14 +2725,7 @@ async def phase_fix_parallel(
                     # restore the complete group from the round snapshot so the
                     # half-applied change cannot reach fix-verify/test/commit,
                     # mirroring the batched fallback recovery.
-                    try:
-                        git_ops.restore_group_worktree_from_snapshot(
-                            work.repo, round_snapshot, edit_scope
-                        )
-                    except Exception as restore_err:  # noqa: BLE001
-                        raise RuntimeError(
-                            "failed to restore the complete fix group after its wall budget cut"
-                        ) from restore_err
+                    _restore_group_or_raise("after its wall budget cut", edit_scope)
                 await _record_budget_stop(fkey, "group_wall_budget_exceeded", len(grp), budget)
                 return
             # Any other turn reason (a ``tool_vetoed:<tool>`` supervisor veto is
@@ -2801,14 +2803,7 @@ async def phase_fix_parallel(
                                         # Restore the file to HEAD before falling back so
                                         # per-finding fixes don't re-apply partial edits
                                         # that the batched turn may have already written.
-                                        try:
-                                            git_ops.restore_group_worktree_from_snapshot(
-                                                work.repo, round_snapshot, edit_scope
-                                            )
-                                        except Exception as restore_err:  # noqa: BLE001
-                                            raise RuntimeError(
-                                                "failed to restore the complete fix group before fallback"
-                                            ) from restore_err
+                                        _restore_group_or_raise("before fallback", edit_scope)
                                         await _fix_group_serially(fkey, grp, budget, edit_scope)
                             except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                                 # Recovery restores the complete group, so earlier

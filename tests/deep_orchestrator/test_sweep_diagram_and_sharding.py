@@ -58,6 +58,23 @@ if TYPE_CHECKING:
     from daydream.review_profile import ResolvedProfile
 
 
+async def _seed_uncovered_sweep_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> tuple[Path, Path]:
+    """Run the sweep fixture once and return ``(target, deep)`` after a clean pass.
+
+    Three per-stack-resume tests share this exact seed; each then installs a
+    second stub to exercise its own resume behavior.
+    """
+    target = _uncovered_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    stub = _install_uncovered_sweep_stub(monkeypatch, target)
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+    assert await _run_deep(target) == 0
+    return target, target / ".daydream" / "deep"
+
+
 @pytest.mark.parametrize("failure_mode", ["exception", "missing-output"])
 async def test_uncovered_sweep_failure_is_audited_without_claiming_coverage(
     tmp_path: Path,
@@ -177,15 +194,7 @@ async def test_uncovered_sweep_per_stack_resume_clears_stale_artifacts(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A ``--start-at per-stack`` resume drops the prior run's sweep artifacts."""
-    target = _uncovered_sweep_target(tmp_path)
-    _silence(monkeypatch)
-
-    stub = _install_uncovered_sweep_stub(monkeypatch, target)
-    stub.sweep_file = "notes.txt"
-    stub.merge_echo_records = True
-    assert await _run_deep(target) == 0
-
-    deep = target / ".daydream" / "deep"
+    target, deep = await _seed_uncovered_sweep_run(tmp_path, monkeypatch)
     assert (deep / "stack-uncovered-records.json").is_file()
     assert (deep / "coverage-stats.json").is_file()
     assert list(deep.glob("uncovered-*-review.md"))
@@ -211,15 +220,7 @@ async def test_uncovered_sweep_per_stack_resume_no_findings_writes_empty_records
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A per-stack resume whose rerun sweep produces no findings writes ``[]``."""
-    target = _uncovered_sweep_target(tmp_path)
-    _silence(monkeypatch)
-
-    stub = _install_uncovered_sweep_stub(monkeypatch, target)
-    stub.sweep_file = "notes.txt"
-    stub.merge_echo_records = True
-    assert await _run_deep(target) == 0
-
-    deep = target / ".daydream" / "deep"
+    target, deep = await _seed_uncovered_sweep_run(tmp_path, monkeypatch)
     assert json.loads((deep / "stack-uncovered-records.json").read_text())
 
     stub2 = _install_uncovered_sweep_stub(monkeypatch, target)
@@ -324,15 +325,7 @@ async def test_uncovered_sweep_per_stack_resume_fails_closed_on_unremovable_arti
 ) -> None:
     """A per-stack resume whose stale sweep artifact cannot be removed STOPS with an actionable error instead of
     continuing (issue #309 finding 8)."""
-    target = _uncovered_sweep_target(tmp_path)
-    _silence(monkeypatch)
-
-    stub = _install_uncovered_sweep_stub(monkeypatch, target)
-    stub.sweep_file = "notes.txt"
-    stub.merge_echo_records = True
-    assert await _run_deep(target) == 0
-
-    deep = target / ".daydream" / "deep"
+    target, deep = await _seed_uncovered_sweep_run(tmp_path, monkeypatch)
     assert (deep / "stack-uncovered-records.json").is_file()
 
     # Make one artifact unremovable: a directory sharing the artifact name makes

@@ -70,6 +70,14 @@ def make_hydrated_sqlite_index(
     return root
 
 
+def write_sessions_jsonl(root: Path, sessions: list[dict[str, Any]]) -> None:
+    """Write ``sessions`` as the canonical sort-keys newline-delimited JSON the index reader expects."""
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "sessions.jsonl").write_text(
+        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
+    )
+
+
 def write_sessions_index(root: Path, *, profiles: list[str] | None = None) -> Path:
     """Write a two-session hydrated ``sessions.jsonl`` under *root* and return *root*.
 
@@ -78,7 +86,6 @@ def write_sessions_index(root: Path, *, profiles: list[str] | None = None) -> Pa
     per-session profile (default: both ``pr_review``).
     """
     session_profiles = profiles or ["pr_review", "pr_review"]
-    root.mkdir(parents=True, exist_ok=True)
     sessions = [
         {
             "session_id": "s1", "trajectory_id": "s1-traj", "segment_id": "s1-seg",
@@ -97,15 +104,12 @@ def write_sessions_index(root: Path, *, profiles: list[str] | None = None) -> Pa
             }],
         },
     ]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     return root
 
 
 def seed_index_dispositions(root: Path) -> None:
     """Write the accepted/rejected/unanswered finding index both decisive fixtures re-derive."""
-    root.mkdir(exist_ok=True)
     resolutions = [
         {
             "fingerprint": f"fp-{n}", "disposition": disposition,
@@ -123,7 +127,5 @@ def seed_index_dispositions(root: Path) -> None:
         }
         for n, resolution in enumerate(resolutions, start=1)
     ]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")

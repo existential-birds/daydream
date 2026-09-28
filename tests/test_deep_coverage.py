@@ -94,19 +94,6 @@ def _write_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
     )
 
 
-def _write_claude_fork(run_dir: Path, name: str, calls: list[dict[str, Any]]) -> None:
-    """Write one completed sibling trajectory with arbitrary Claude-spelled calls.
-
-    ``_write_fork`` is hardcoded to emit ``function_name: "Read"`` with
-    ``arguments.file_path``, so it cannot exercise the ``Bash``/``Grep``
-    spellings that Issue #739 routes through the live sweep. This helper writes
-    a single completed step whose calls carry matching
-    ``observation.results[].source_call_id``s (so they count as coverage) for
-    caller-supplied ``{"function_name", "arguments"}`` dicts.
-    """
-    _write_fork_calls(run_dir, name, calls)
-
-
 def _write_interrupted_read_fork(run_dir: Path, name: str, read_paths: list[str]) -> None:
     """Write a sibling trajectory whose reads carry NO ToolResult observation.
 
@@ -596,7 +583,9 @@ def test_omitted_assigned_file_is_still_swept(tmp_path: Path) -> None:
 def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path, tool: Any) -> None:
     """An import-only grep (Bash or Grep tool) covers nothing (issue #739 / AC2/AC3)."""
     daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-grep")
-    _write_claude_fork(run_dir, "deep-python.json", [tool])
+    # Bash/Grep spellings (Issue #739) can't go through _write_fork, which is
+    # hardcoded to Read/file_path; emit the raw calls for the live sweep.
+    _write_fork_calls(run_dir, "deep-python.json", [tool])
     _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
 
     uncovered, stats = compute_uncovered_files(daydream_dir, "sess-grep")

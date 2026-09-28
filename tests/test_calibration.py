@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from daydream.training.calibration import (
+    _CORRUPTION_FLAGS,
     CalibrationConfig,
     CalibrationError,
     run_calibration,
@@ -43,18 +44,7 @@ LABEL_STAMPS = {
 REWARD_VERSION = _PRODUCTION_REWARD_VERSION
 
 # Corruption flags the fixture understands; these are test seams, never CLI surface.
-CORRUPTION_FLAGS = frozenset(
-    {
-        "schema_version",
-        "posterior",
-        "label-version",
-        "c5-repo",
-        "license",
-        "digest",
-        "split-overlap",
-        "drop-session",
-    }
-)
+CORRUPTION_FLAGS = _CORRUPTION_FLAGS
 
 
 def _record(i: int) -> dict[str, Any]:

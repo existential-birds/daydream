@@ -14,7 +14,7 @@ from daydream.training.adjudication.preview import _load_sessions, run_preview
 from daydream.training.adjudication.queue import build_queue
 from daydream.training.corpus_projection.identity import record_id as rid
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
-from tests.harness.adjudication import write_sessions_index
+from tests.harness.adjudication import write_sessions_index, write_sessions_jsonl
 from tests.test_training_adjudication_materialize import _hydrated_sqlite_index
 
 
@@ -27,9 +27,7 @@ def _mutate_one_digest(source: Path, target: Path) -> Path:
         for resolution in session["resolutions"]:
             if resolution["fingerprint"] == "fp-a":
                 resolution["evidence_digest"] = "ff" * 32
-    sessions_path.write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(target, sessions)
     return target
 
 
@@ -113,9 +111,7 @@ def test_preview_malformed_evidence_raises_value_error_naming_source(tmp_path: P
     sessions_path = root / "sessions.jsonl"
     sessions = [json.loads(line) for line in sessions_path.read_text().splitlines() if line.strip()]
     del sessions[0]["resolutions"][0]["evidence_digest"]
-    sessions_path.write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     with pytest.raises(ValueError, match="fp-b"):
         run_preview(root, tmp_path / "ledger.json")
 

@@ -25,6 +25,7 @@ from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.publish import publish_annotation_state, resume_annotation_state
 from tests.fixtures.training.build_hub_snapshot import build_annotations_hub
+from tests.harness.adjudication import write_sessions_jsonl
 from tests.harness.trajectory import make_manifest
 
 _OBSERVED = "2026-04-30T00:00:00+00:00"
@@ -125,9 +126,7 @@ def _import_args(
                         "evidence": [], "evidence_digest": "d" * 64,
                     }],
                 })
-        (index_root / "sessions.jsonl").write_text(
-            "".join(json.dumps(s) + "\n" for s in sessions), encoding="utf-8",
-        )
+        write_sessions_jsonl(index_root, sessions)
     if archive_dir is None:
         archive_dir = state_dir.parent / "archive"
     argv += [
@@ -159,9 +158,7 @@ def _materialized_snapshot(root: Path, session: str, fingerprint: str) -> Path:
             "comment_id": 7,
         }],
     }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     return root
 
 

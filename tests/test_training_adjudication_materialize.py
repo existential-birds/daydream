@@ -10,7 +10,7 @@ from daydream.archive.index import append_label_observation
 from daydream.training.adjudication.cli import _hydrated_identity_index
 from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly, run_materialize
 from daydream.trajectory import run_directory, run_document_path
-from tests.harness.adjudication import make_hydrated_sqlite_index
+from tests.harness.adjudication import make_hydrated_sqlite_index, write_sessions_jsonl
 from tests.test_training_adjudication_canonical import _PIN, _index
 
 
@@ -76,7 +76,6 @@ def test_materialize_drift_yields_new_snapshot_id(tmp_path: Path) -> None:
 
 def _index_all_dispositions(tmp_path: Path) -> Path:
     root = tmp_path / "index"
-    root.mkdir()
     evidence = [{"reply_id": 1, "body_sha256": "abc"}]
     digest = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
     dispositions = ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
@@ -92,9 +91,7 @@ def _index_all_dispositions(tmp_path: Path) -> Path:
         "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
         "resolutions": resolutions,
     }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
     return root
 
