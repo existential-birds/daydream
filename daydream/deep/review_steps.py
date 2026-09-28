@@ -234,7 +234,10 @@ async def _step_exploration(ctx: FlowContext) -> None:
         _record_exploration("regenerated", "exploration pre-scan unavailable")
     elif config.exploration_context is None:
         # The in-process context short-circuits first; the disk cache is only
-        # consulted when there is no in-memory context to reuse.
+        # consulted when there is no in-memory context to reuse. Issue #733
+        # (MH13): ``--no-review-cache`` bypasses BOTH the pre-scan cache read and
+        # its write, so a forensic run genuinely recomputes the pre-scan rather
+        # than restoring an earlier run's grounding.
         cache_key = exploration_cache_key(
             ctx.work.head_sha or "", diff, tier,
             strategies={name: ctx.strategy(name) for name in (
@@ -242,7 +245,8 @@ async def _step_exploration(ctx: FlowContext) -> None:
             )},
         )
         if (
-            exploration_path.is_dir()
+            reuse_enabled
+            and exploration_path.is_dir()
             and read_cache_key(exploration_path) == cache_key
         ):
             # Early return BEFORE the pre_scan/write_to_dir block below: routing
@@ -288,7 +292,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(exploration_path)
-            if config.exploration_context.completed:
+            if reuse_enabled and config.exploration_context.completed:
                 cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
             _record_exploration("regenerated", "exploration pre-scan regenerated")
             deep_state.exploration_dir = exploration_dir

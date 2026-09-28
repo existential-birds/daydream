@@ -29,7 +29,10 @@ from tests.deep_orchestrator.support import (
     _install_uncovered_sweep_stub,
     _uncovered_sweep_target,
 )
-from tests.harness.review_profile import independent_alternatives_profile
+from tests.harness.review_profile import (
+    independent_alternatives_profile,
+    independent_exploration_profile,
+)
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_deep_orchestrator import MakeConfig
 
@@ -543,5 +546,35 @@ async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
     finally:
         os.close(parent_fd)
     assert "## Coverage" in content
+
+
+async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH13: `--no-review-cache` must give a run that would be forensic-clean —
+    no entry is read, none is written, and the exploration pre-scan cache is
+    bypassed too, with the bypass recorded in provenance."""
+    # The real pre-scan must be live for the bypass to be observable: the warm
+    # run leaves a cache-key on disk, so a disabled run that still consulted the
+    # pre-scan cache would emit no exploration specialist calls.
+    stub = install_stub_backend(monkeypatch, multi_stack_target, enable_exploration=True)
+    profile = independent_exploration_profile()
+    assert await run(make_config(multi_stack_target, review_profile=profile)) == 0
+    store = multi_stack_target / ".daydream" / "review-cache"
+    entries_before = sorted(p.name for p in (store / "entries").iterdir())
+    assert entries_before, "the warm run must have populated the store"
+    stub.calls.clear()
+    assert await run(
+        make_config(multi_stack_target, review_profile=profile, review_cache_enabled=False)
+    ) == 0
+    assert _count_review_prompts(stub.calls) > 0, "a disabled run must do the work"
+    assert _count_unit_prompts(stub.calls, "dependency-tracer") > 0, (
+        "--no-review-cache must bypass the exploration pre-scan cache and recompute it"
+    )
+    assert sorted(p.name for p in (store / "entries").iterdir()) == entries_before
+    latest = _latest_provenance(multi_stack_target / ".daydream" / "deep")
+    units = cast(dict[str, dict[str, object]], latest["units"])
+    assert units["exploration"]["outcome"] == "disabled"
+    assert any(v["outcome"] == "disabled" for v in units.values())
 
 
