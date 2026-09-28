@@ -35,7 +35,7 @@ from daydream.run_snapshot import (
     ArchiveRecorderProvenance as ArchiveRecorderProvenance,
     ArchiveRunSnapshot,
 )
-from daydream.trajectory import DaydreamRunFlow
+from daydream.trajectory import DaydreamRunFlow, compute_timing_summary, snapshot_trajectories
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -439,8 +439,6 @@ def build_manifest_from_snapshot(
     identity = run.identity
     if recorder_provenance.session_id != write_snapshot.root_trajectory_id:
         raise ValueError("archive provenance does not match frozen snapshot")
-    from daydream.trajectory import compute_timing_summary, snapshot_trajectories
-
     frozen = snapshot_trajectories(write_snapshot)
     frozen_root = frozen.get("main")
     raw_final_metrics = frozen_root.get("final_metrics") if isinstance(frozen_root, dict) else None

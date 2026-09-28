@@ -1084,17 +1084,6 @@ def replace_findings(
     _with_case_lock(root, case_id, "replace", mutate)
 
 
-_EVIDENCE_REASONS = frozenset({
-    "fixed_before_snapshot",
-    "not_actionable",
-    "incorrect",
-    "duplicate",
-    "style_only",
-    "out_of_scope",
-    "other",
-})
-
-
 def _set_clean(curation: dict[str, Any]) -> None:
     """Attest one case's gold set as reviewed-clean (deterministic derivation).
 
@@ -1303,9 +1292,6 @@ def attest_clean(root: Path, case_id: str) -> None:
     _with_case_lock(root, case_id, "attest-clean", mutate)
 
 
-_CASE_EXCLUSION_REASONS = frozenset({"unreplayable", "not_suitable", "duplicate_case", "other"})
-
-
 def _apply_case_exclusion(
     curation: dict[str, Any], *, reason: str, note: str | None
 ) -> None:
@@ -1461,9 +1447,9 @@ def _validate_exclusion_contract(
 
 def _validate_evidence_exclusion_contract(reason: str, note: str | None) -> None:
     """Evidence-level reason/note contract (shared by exclude and fragment)."""
-    _validate_exclusion_contract(reason, note, valid_reasons=_EVIDENCE_REASONS, noun="evidence")
+    _validate_exclusion_contract(reason, note, valid_reasons=schema.EVIDENCE_REASONS, noun="evidence")
 
 
 def _validate_case_exclusion_contract(reason: str, note: str | None) -> None:
     """Case-level reason/note contract (shared by exclude and apply-gold)."""
-    _validate_exclusion_contract(reason, note, valid_reasons=_CASE_EXCLUSION_REASONS, noun="case")
+    _validate_exclusion_contract(reason, note, valid_reasons=schema.CASE_EXCLUSION_REASONS, noun="case")

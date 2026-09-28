@@ -133,10 +133,6 @@ class TraceSession:
         )
         self.tracer = self.provider.get_tracer("daydream", version("daydream"))
 
-    @staticmethod
-    def _sdk_resource_version() -> str:
-        return version("opentelemetry-sdk")
-
     def _build_resource(self, config: ObservabilityConfig) -> Resource:
         """Assemble the immutable session resource from declared sources only.
 
@@ -162,7 +158,7 @@ class TraceSession:
             "service.version": version("daydream"),
             "telemetry.sdk.name": _SDK_NAME,
             "telemetry.sdk.language": _SDK_LANGUAGE,
-            "telemetry.sdk.version": self._sdk_resource_version(),
+            "telemetry.sdk.version": version("opentelemetry-sdk"),
             "daydream.observability.contract.version": CONTRACT_VERSION,
         }
         for key, value in reserved_overrides.items():

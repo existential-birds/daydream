@@ -19,7 +19,7 @@ from typing import Any, Callable
 import yaml
 from pydantic import ValidationError
 
-from daydream.benchmark import curation as cu
+from daydream.benchmark import curation as cu, schema
 from daydream.benchmark.harbor import build
 from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 
@@ -562,10 +562,7 @@ def _edit_author_evidence(
     )
 
 
-# Single source of truth lives on the curation service; re-export here so a
-# reason added on one side cannot drift apart from the other.
-_EVIDENCE_REASONS = cu._EVIDENCE_REASONS
-_CASE_EXCLUSION_REASONS = cu._CASE_EXCLUSION_REASONS
+# Single source of truth lives on the schema vocabulary; never duplicate it here.
 
 
 def _action_exclude_case(
@@ -578,9 +575,9 @@ def _action_exclude_case(
     """The ``[z]`` case-exclusion action (4 fixed reasons + optional note)."""
     del binding
     reason = _prompt(
-        read_line, f"reason ({'|'.join(_CASE_EXCLUSION_REASONS)}): "
+        read_line, f"reason ({'|'.join(schema.CASE_EXCLUSION_REASONS)}): "
     ).strip()
-    if reason not in _CASE_EXCLUSION_REASONS:
+    if reason not in schema.CASE_EXCLUSION_REASONS:
         print(f"invalid case exclusion reason {reason!r}")
         return "continue"
     note: str | None = None
@@ -691,9 +688,9 @@ def _action_exclude(
         return "continue"
     source_ids = [binding[i] for i in indices]
     reason = _prompt(
-        read_line, f"reason ({'|'.join(_EVIDENCE_REASONS)}): "
+        read_line, f"reason ({'|'.join(schema.EVIDENCE_REASONS)}): "
     ).strip()
-    if reason not in _EVIDENCE_REASONS:
+    if reason not in schema.EVIDENCE_REASONS:
         print(f"invalid evidence reason {reason!r}")
         return "continue"
     note: str | None = None

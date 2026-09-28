@@ -1225,6 +1225,4 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(
     # The pinned replay clock must be restored to the host clock when the
     # replay returns (guarded global environment: never skew the host or
     # the pytest worker's later tests).
-    import time as _stdlib_time
-
-    assert _stdlib_time.time_ns is _replay._stdlib_real_time_ns
+    assert time.time_ns is _replay._stdlib_real_time_ns

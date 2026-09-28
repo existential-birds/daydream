@@ -16,6 +16,7 @@ overstate gold coverage.
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -80,8 +81,6 @@ def write_export_rows(rows: list[dict[str, Any]], out_path: Path) -> str:
 
     Returns the SHA-256 of the written bytes.
     """
-    import hashlib
-
-    payload = "".join(_canonical(row) + "\n" for row in rows)
-    atomic_write_bytes(out_path, payload.encode("utf-8"), fsync=False, dir_fsync=False, mode=umask_derived_mode())
-    return hashlib.sha256(out_path.read_bytes()).hexdigest()
+    payload = "".join(_canonical(row) + "\n" for row in rows).encode("utf-8")
+    atomic_write_bytes(out_path, payload, fsync=False, dir_fsync=False, mode=umask_derived_mode())
+    return hashlib.sha256(payload).hexdigest()

@@ -183,15 +183,7 @@ def test_merge_prompt_requires_one_path_per_item(tmp_path: Path) -> None:
 def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) -> None:
     """Structural reviewer sees the whole change — no 'Focus ONLY on these files' clause."""
 
-    prompt = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api/main.py", "ui/App.tsx"],
-        diff_path=tmp_path / "diff.patch",
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alternatives.json",
-        output_path=tmp_path / "out.md",
-        cwd=tmp_path,
-    )
+    prompt = _review_prompt("structural", tmp_path, files=["api/main.py", "ui/App.tsx"])
     assert "Focus ONLY on these files" not in prompt
     assert "Do NOT review files from other stacks" not in prompt
     # M12: no skill token may appear in the native structural prompt.
@@ -204,28 +196,10 @@ def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> No
     """AC5: structural reviewer is pointed at affected_files.md instead of discarding the dir."""
 
     exploration_dir = tmp_path / "exploration"
-    prompt = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["main.py"],
-        diff_path=tmp_path / "diff.patch",
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alternatives.json",
-        output_path=tmp_path / "out.md",
-        exploration_dir=exploration_dir,
-        cwd=tmp_path,
-    )
+    prompt = _review_prompt("structural", tmp_path, files=["main.py"], exploration_dir=exploration_dir)
     assert str(exploration_dir / "affected_files.md") in prompt
 
-    prompt_none = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["main.py"],
-        diff_path=tmp_path / "diff.patch",
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alternatives.json",
-        output_path=tmp_path / "out.md",
-        exploration_dir=None,
-        cwd=tmp_path,
-    )
+    prompt_none = _review_prompt("structural", tmp_path, files=["main.py"], exploration_dir=None)
     assert "affected_files.md" not in prompt_none
 
 
@@ -233,13 +207,7 @@ def test_merge_prompt_does_not_request_structural_findings(tmp_path: Path) -> No
     """Structural findings are appended by the host (phase_cross_stack_merge) in
     Python, NOT requested via prose; the agent is told not to emit them itself."""
 
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=[tmp_path / "stack-python-records.json"],
-        intent_path=tmp_path / "intent.md",
-        alternatives_path=tmp_path / "alts.json",
-        dedup_candidates_path=tmp_path / "dedup.json",
-    )
+    prompt = build_merge_prompt(strategy=_default_strategy("merge"), **_merge_paths(tmp_path))  # type: ignore[arg-type]
     assert "## Structural Review" not in prompt
     assert "do NOT emit them yourself" in prompt
 
@@ -432,11 +400,7 @@ def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -
     """
 
     p = _paths(tmp_path)
-    out = build_structural_prompt(
-        strategy=_default_strategy("discovery.structural"),
-        files=["api.py"],
-        **p,
-    )
+    out = _review_prompt("structural", tmp_path, files=["api.py"])
     assert _default_strategy("discovery.structural") in out
     assert str(p["diff_path"]) in out  # keeps its pointer
     assert "Read it directly" in out   # structural prompt unchanged

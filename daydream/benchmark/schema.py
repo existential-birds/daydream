@@ -19,7 +19,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime, timezone
-from typing import Annotated, Any, ClassVar, Literal
+from typing import Annotated, Any, ClassVar, Literal, get_args
 from uuid import UUID
 
 from pydantic import (
@@ -66,6 +66,8 @@ __all__ = [
     "derive_finding_id",
     "derive_gold_status",
     "derive_gold_mode",
+    "EVIDENCE_REASONS",
+    "CASE_EXCLUSION_REASONS",
 ]
 
 _REPOSITORY_SHAPE = re.compile(r"^[^/]+/[^/]+$")
@@ -804,6 +806,11 @@ class EvidenceExclusion(_NoteForOther):
 
 
 _CASE_EXCLUSION_REASON = Literal["unreplayable", "not_suitable", "duplicate_case", "other"]
+
+# Runtime spelling of the exclusion vocabularies above; the Literals remain the
+# single owner so a reason cannot be declared in one place and rejected in the other.
+EVIDENCE_REASONS = frozenset(get_args(_EVIDENCE_REASON))
+CASE_EXCLUSION_REASONS = frozenset(get_args(_CASE_EXCLUSION_REASON))
 
 
 class CaseExclusion(_NoteForOther):
