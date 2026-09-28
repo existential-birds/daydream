@@ -31,11 +31,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, overload
 
+from daydream.trajectory import RUNS_DIRNAME
+
 #: Bump whenever a payload shape changes so a stale entry can never be served.
 REUSE_KEY_FORMAT: int = 1
 
 #: A run-scoped artifact segment (``/runs/<id>/...``) inside any digest input.
-_RUN_SEGMENT_RE = re.compile(r"/runs/[^/\s]+/")
+#: The directory name comes from the layout surface, never a bare literal, so
+#: it stays in lockstep with the recorder's own run-document layout.
+_RUN_SEGMENT_RE = re.compile(rf"/{RUNS_DIRNAME}/[^/\s]+/")
 #: A bare session/run UUID anywhere in a digest input.
 _SESSION_RE = re.compile(
     r"\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b"
@@ -460,6 +464,78 @@ def sweep_key_payload(
     return {
         "format": REUSE_KEY_FORMAT,
         "unit": "sweep",
+        "components": components,
+        "grounding": dict(grounding),
+    }
+
+
+def _arbiter_schema_digest() -> str:
+    """Digest of the exact ``ARBITER_SCHEMA`` the step validates against.
+
+    Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    import would be a cycle. The schema is part of the arbiter's contract, so a
+    schema change must miss rather than serve output the new schema would have
+    rejected.
+    """
+    from daydream.phases import ARBITER_SCHEMA
+
+    return digest_text(
+        json.dumps(ARBITER_SCHEMA, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def arbiter_key_payload(
+    *,
+    contributing_records: Mapping[str, bytes | None],
+    structural_records: bytes | None,
+    plan: Mapping[str, Any],
+    precision_mode: bool,
+    identity: PhaseIdentity,
+    grounding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the whole-arbiter payload.
+
+    ``contributing_records`` is the canonical ``name -> bytes`` map of every
+    per-stack records file the arbiter reads (structural included) and is
+    *subject*: a recomputed shard moves the arbiter's key (MH8). A named file
+    that could not be read maps to ``None``, which makes the whole payload an
+    absent component and so a named miss rather than a partial key. ``structural``
+    is the structural records digest, or the literal ``"absent"`` when the run
+    has no structural stack (a value, not a miss). ``plan`` carries the group
+    plan's target user ids and the sharded flag, and ``precision_mode`` the
+    resolved suppression opt-in; both are contract. Intent, alternatives and
+    the pre-scan are the loop's own re-derived grounding, so they are recorded
+    and never keyed (MH2/MH16). ``#732``'s per-group identity is left to the
+    group markers and is not adjudicated here.
+    """
+    # A record that could not be read makes the whole component absent, so
+    # ``unit_key`` returns ``None`` (a named miss) rather than keying the subset
+    # that did read.
+    record_component: dict[str, str] | None = {}
+    if any(data is None for data in contributing_records.values()):
+        record_component = None
+    else:
+        record_component = {
+            name: digest_bytes(data)
+            for name, data in contributing_records.items()
+            if data is not None
+        }
+    components: dict[str, Any] = {
+        "format": REUSE_KEY_FORMAT,
+        "records": record_component,
+        "structural": (
+            _ABSENT if structural_records is None else digest_bytes(structural_records)
+        ),
+        "plan": dict(plan),
+        "precision_mode": precision_mode,
+        "schema": _arbiter_schema_digest(),
+        "profile": identity.profile_digest,
+        "model": identity.model,
+        "effort": identity.effort if identity.effort else "default",
+    }
+    return {
+        "format": REUSE_KEY_FORMAT,
+        "unit": "arbiter",
         "components": components,
         "grounding": dict(grounding),
     }

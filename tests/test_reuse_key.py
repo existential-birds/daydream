@@ -257,3 +257,56 @@ def test_sweep_key_tracks_contributing_records_not_this_runs_counters(tmp_path: 
     assert reuse_key.unit_key(_sweep_payload(
         tmp_path, records={"stack-python#0-records.json": b"{}"},
         uncovered=["mod0.py"], hunk_digest="h" * 64, intent="j" * 64)) == key
+
+
+def _arbiter_payload(
+    *,
+    records: dict[str, bytes | None] | None = None,
+    structural: bytes | None = b'{"issues": []}',
+    plan: dict[str, Any] | None = None,
+    precision_mode: bool = False,
+    intent: str = "i" * 64,
+) -> dict[str, Any]:
+    return reuse_key.arbiter_key_payload(
+        contributing_records=(
+            records if records is not None else {"stack-python-records.json": b"{}"}
+        ),
+        structural_records=structural,
+        plan=plan if plan is not None else {"sharded": True, "groups": [["python:1"], ["react:1"]]},
+        precision_mode=precision_mode,
+        identity=_identity(),
+        grounding={
+            "intent": {"digest": intent},
+            "alternatives": {"digest": "absent"},
+            "exploration": {"digest": "absent"},
+        },
+    )
+
+
+def test_arbiter_key_tracks_records_plan_and_precision_but_not_grounding() -> None:
+    """MH8: the arbiter is one content key over its own inputs (all contributing
+    records + plan + precision), and the loop-re-derived intent/alternatives/
+    pre-scan are recorded grounding that can never move it."""
+    base = _arbiter_payload()
+    key = reuse_key.unit_key(base)
+    assert key is not None and len(key) == 64
+    assert reuse_key.unit_key(
+        _arbiter_payload(records={"stack-python-records.json": b'{"issues": [1]}'})
+    ) != key
+    # A contributing records file that could not be read is a named miss, never
+    # a partial key over the files that did read.
+    assert reuse_key.unit_key(
+        _arbiter_payload(records={"stack-python-records.json": None})
+    ) is None
+    # A structural stack appearing or moving is a subject change.
+    assert reuse_key.unit_key(_arbiter_payload(structural=None)) != key
+    assert reuse_key.unit_key(_arbiter_payload(structural=b'{"issues": [1]}')) != key
+    assert reuse_key.unit_key(
+        _arbiter_payload(plan={"sharded": False, "groups": [["python:1"]]})
+    ) != key
+    assert reuse_key.unit_key(_arbiter_payload(precision_mode=True)) != key
+    # Grounding is recorded on every payload, never read by the key (MH2/MH16).
+    moved = _arbiter_payload(intent="j" * 64)
+    assert reuse_key.unit_key(moved) == key
+    assert reuse_key.grounding_digests(moved)["intent"] == "j" * 64
+    assert set(reuse_key.grounding_digests(base)) == {"intent", "alternatives", "exploration"}

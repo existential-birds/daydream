@@ -334,3 +334,67 @@ async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it
     assert _entry_count_for_unit(deep, f"shard:{STRUCTURE_STACK_NAME}") == 1
     assert _stack_bytes(deep, {STRUCTURE_STACK_NAME}) == origin_structure
     assert _origin_stack_bytes(deep, {STRUCTURE_STACK_NAME}) == origin_structure
+
+
+_ARBITER_DISCRIMINATOR = "you are the arbiter"
+
+
+def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
+    """How many captured calls carried the production arbiter prompt."""
+    return sum(
+        1
+        for call in calls
+        if _ARBITER_DISCRIMINATOR in str(call.get("prompt", "")).lower()
+    )
+
+
+def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
+    """Per-stack findings at three distinct ``(file, line)`` locations.
+
+    Three locations make ``partition_arbiter_targets`` return more than one
+    co-located group under a sharding route, which is the real-path
+    precondition for a sharded whole-unit arbiter key.
+    """
+    locations = {
+        "python": ("api.py", "python finding"),
+        "react": ("App.tsx", "react finding"),
+        "generic": ("README.md", "generic finding"),
+    }
+    return {
+        name: {
+            "severity": severities[name],
+            "confidence": "high",
+            "file": file,
+            "line": 1,
+            "description": description,
+        }
+        for name, (file, description) in locations.items()
+    }
+
+
+async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_per_group_when_one_is(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH1/MH8: one content key per arbiter unit; #732's per-group markers still resume
+    a partially adjudicated run without re-running the groups already done."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_by_stack = _arbiter_stacks(
+        {"python": "high", "react": "high", "generic": "high"}
+    )
+    stub.merge_echo_records = True
+    config = make_config(
+        multi_stack_target,
+        latency_profile="balanced",
+        review_profile=independent_alternatives_profile(),
+    )
+    assert await run(config) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert _count_arbiter_prompts(stub.calls) >= 1
+    merged = (deep / "merged-items.json").read_bytes()
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_arbiter_prompts(stub.calls) == 0                  # whole-unit hit
+    assert (deep / "merged-items.json").read_bytes() == merged
+    # A partially completed earlier adjudication still resumes group-by-group:
+    # the group markers are read from the fresh run's own artifacts, not from the store.
+    assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))

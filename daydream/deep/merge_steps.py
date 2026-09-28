@@ -45,11 +45,29 @@ from daydream.deep.latency import (
     PlannedGroup,
     arbiter_plan,
 )
-from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
+from daydream.deep.records import (
+    record_uid,
+    stack_name_from_records_source,
+    stack_name_from_uid,
+    stamp_record_uids,
+)
 from daydream.deep.render import _PIPELINE_STAGE_NAMES, render_held_section, render_report
+from daydream.deep.reuse_key import (
+    PhaseIdentity,
+    absent_components,
+    arbiter_key_payload,
+    digest_or_absent,
+    exploration_digest,
+    grounding_digests,
+    phase_identity_for,
+    unit_key,
+)
+from daydream.deep.reuse_store import ReuseCache, ReuseHit, reuse_cache_for
+from daydream.deep.review_steps import _restore_entry_payload, _reuse_grounding_status
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
+from daydream.eval.analyzer import _records_issues_or_empty
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
 from daydream.phases import (
@@ -672,6 +690,182 @@ def _unsharded_arbiter_backend(ctx: FlowContext, *, effort_pin: str | None) -> B
     return ctx.backend_for_effort("arbiter", "xhigh")
 
 
+def _arbiter_contributing_records(paths: list[Path]) -> dict[str, bytes | None]:
+    """Every records file the arbiter reads, keyed by basename.
+
+    A file that cannot be read maps to ``None`` so :func:`arbiter_key_payload`
+    turns the whole unit into a named miss rather than keying a partial set.
+    """
+    records: dict[str, bytes | None] = {}
+    for path in paths:
+        try:
+            records[path.name] = path.read_bytes()
+        except OSError:
+            records[path.name] = None
+    return records
+
+
+def _arbiter_plan_component(plan: ArbiterPlan) -> dict[str, Any]:
+    """The keying view of the arbiter plan: sharded flag + each group's target uids."""
+    return {
+        "sharded": plan.sharded,
+        "groups": [list(group.target_uids) for group in plan.groups],
+    }
+
+
+def _arbiter_grounding(deep_state: DeepState) -> dict[str, Any]:
+    """The arbiter's loop-re-derived inputs, recorded but never keyed (MH2/MH16).
+
+    Intent and alternatives are read back as the prompt sees them (the restored
+    artifact on a hit), and the pre-scan is digested by directory content so
+    its ``cache-key`` bookkeeping can never move anything.
+    """
+    alts_path = deep_state.alts_path
+    try:
+        alternatives_text = alts_path.read_text(encoding="utf-8") if alts_path.is_file() else None
+    except OSError:
+        alternatives_text = None
+    return {
+        "intent": digest_or_absent(deep_state.intent_summary_or_none),
+        "alternatives": digest_or_absent(alternatives_text),
+        "exploration": {"digest": exploration_digest(deep_state.exploration_dir)},
+    }
+
+
+def _arbiter_store_payload(
+    dd: Path, rewrite_paths: list[Path], plan: ArbiterPlan
+) -> dict[str, bytes] | None:
+    """Collect a completed arbiter's on-disk outputs, or ``None`` if any is missing.
+
+    The unit is storable only as a whole: every rewritten records file, each
+    planned group's verdicts + marker when the plan sharded (the unsharded path
+    persists no group files), and the whole-block ``arbiter-complete`` marker.
+    A missing piece leaves no entry rather than a partial one.
+    """
+    payload: dict[str, bytes] = {}
+    for path in rewrite_paths:
+        try:
+            payload[path.name] = path.read_bytes()
+        except OSError:
+            return None
+    if plan.sharded:
+        for group in plan.groups:
+            verdicts_path = arbiter_group_verdicts_path(dd, group.group_id)
+            marker_path = arbiter_group_complete_path(dd, group.group_id)
+            try:
+                payload[verdicts_path.name] = verdicts_path.read_bytes()
+                payload[marker_path.name] = marker_path.read_bytes()
+            except OSError:
+                return None
+    marker_path = adjudication_complete_path(dd)
+    try:
+        payload[marker_path.name] = marker_path.read_bytes()
+    except OSError:
+        return None
+    return payload
+
+
+def _reload_adjudicated_records(deep_state: DeepState) -> bool:
+    """Refresh ``ctx.data`` from the restored post-arbitration records files.
+
+    A whole-unit hit must present exactly what a real adjudication left behind,
+    not the pre-arbitration in-memory copy, so dedup and merge see the revised
+    records. Returns ``False`` (leaving the caller's state untouched) when any
+    file cannot be parsed, which makes the hit a miss instead of a split brain.
+    """
+    language: list[dict[str, Any]] = []
+    sources: list[str] = []
+    for path in deep_state.records_paths:
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        records = _records_issues_or_empty(loaded)
+        stamp_record_uids(records, path.name)
+        language.extend(records)
+        sources.extend(path.name for _ in records)
+    structural: list[dict[str, Any]] = []
+    structural_sources: list[str] = []
+    structural_path = deep_state.structural_records_path_or_none
+    if structural_path is not None:
+        try:
+            loaded = json.loads(structural_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        structural = _records_issues_or_empty(loaded)
+        stamp_record_uids(structural, structural_path.name)
+        structural_sources = [structural_path.name for _ in structural]
+    deep_state.records = language
+    deep_state.record_sources = sources
+    deep_state.structural_records = structural
+    deep_state.structural_record_sources = structural_sources
+    return True
+
+
+def _try_reuse_arbiter(
+    reuse: ReuseCache,
+    deep_state: DeepState,
+    plan: ArbiterPlan,
+    key: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Try to restore a completed whole-arbiter unit; ``True`` when it hit.
+
+    A hit restores every rewritten records file, the per-group verdicts and
+    markers (a sharded payload), and the whole-block marker, then reloads
+    ``ctx.data`` from those files and records the hit with its grounding delta.
+    Any failure is recorded as a miss and the caller runs the real adjudication.
+    """
+    hit = reuse.lookup(key)
+    if not isinstance(hit, ReuseHit):
+        reuse.record("arbiter", outcome="miss", reason=hit.reason, key=key)
+        return False
+    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+    if restore_reason is not None or not _reload_adjudicated_records(deep_state):
+        reuse.record(
+            "arbiter",
+            outcome="miss",
+            reason=(
+                f"restore failed: {restore_reason}"
+                if restore_reason is not None
+                else "restored records unreadable"
+            ),
+            key=key,
+        )
+        return False
+    reuse.record(
+        "arbiter",
+        outcome="hit",
+        reason="complete entry",
+        key=key,
+        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+        detail={
+            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
+            "grounding_status": {
+                "intent": _reuse_grounding_status(reuse, "intent"),
+                "exploration": _reuse_grounding_status(reuse, "exploration"),
+            },
+        },
+    )
+    write_routing_record(
+        deep_state.dd,
+        {
+            "arbiter": {
+                "sharded": plan.sharded,
+                "reason": f"reused whole unit ({plan.reason})",
+                "groups": _arbiter_groups_record(
+                    plan,
+                    effort_pin=None,
+                    reused={group.group_id: True for group in plan.groups},
+                ),
+                "verdicts_applied": 0,
+                "failed_groups": [],
+            }
+        },
+    )
+    return True
+
+
 async def _step_arbiter(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168).
 
@@ -734,6 +928,19 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             "failed_groups": [],
         }
         adjudication_complete = True
+        # The resolved suppression opt-in is part of the arbiter unit's contract
+        # (MH8): a payload stored with it off must not be served to a run with it
+        # on, so it is keyed, not merely recorded.
+        precision_mode = bool(
+            ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode")
+        )
+        # The reuse handles are populated only when there are arbiter targets;
+        # the whole-unit store at the end of the block reads them back.
+        reuse: ReuseCache | None = None
+        arbiter_identity: PhaseIdentity | None = None
+        arbiter_payload: dict[str, Any] | None = None
+        arbiter_key: str | None = None
+        plan: ArbiterPlan | None = None
         if arbiter_targets:
             route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
             # A route that does not shard never partitions: the unsharded path is
@@ -774,6 +981,36 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             from daydream.runner import _explicit_reasoning_effort_pin
 
             effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
+            # Issue #733 — the arbiter is one content-addressed unit over the
+            # pre-arbitration records it reads, its plan, and the precision-mode
+            # opt-in. Compute the key BEFORE dispatch, while those records are
+            # still what the arbiter would see, then reuse or run and store
+            # under that same key.
+            reuse = reuse_cache_for(ctx)
+            arbiter_identity = phase_identity_for(ctx, "arbiter")
+            if reuse is not None:
+                contributing = _arbiter_contributing_records(rewrite_paths)
+                arbiter_payload = arbiter_key_payload(
+                    contributing_records=contributing,
+                    structural_records=(
+                        contributing.get(structural_path.name)
+                        if structural_path is not None
+                        else None
+                    ),
+                    plan=_arbiter_plan_component(plan),
+                    precision_mode=precision_mode,
+                    identity=arbiter_identity,
+                    grounding=_arbiter_grounding(deep_state),
+                )
+                arbiter_key = unit_key(arbiter_payload)
+                if arbiter_key is None:
+                    reuse.record(
+                        "arbiter",
+                        outcome="miss",
+                        reason="absent components: " + ", ".join(absent_components(arbiter_payload)),
+                    )
+                elif _try_reuse_arbiter(reuse, deep_state, plan, arbiter_key, arbiter_payload):
+                    return
             if plan.sharded:
                 verdicts, reused, failed_groups = await _run_sharded_arbiter(
                     ctx,
@@ -831,7 +1068,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # opinion on borderline (LOW-confidence / low-severity uncontested)
         # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
         # arbiter's targets; one batched call via the cheaper `suppression` key.
-        if ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode"):
+        if precision_mode:
             # Exclude structural records (high-conviction by construction,
             # #1103) and any record with no uid: suppression is fail-CLOSED, so
             # unidentifiable records must be kept rather than droppable.
@@ -875,6 +1112,30 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # reruns only its incomplete groups (and the opt-in suppression pass).
         if adjudication_complete:
             adjudication_marker.write_text("")
+            # Store only a completed whole-unit adjudication (every planned
+            # group's files present) under the pre-dispatch key; a partial entry
+            # must never be served as this unit's output.
+            if (
+                reuse is not None
+                and plan is not None
+                and arbiter_payload is not None
+                and arbiter_key is not None
+                and arbiter_identity is not None
+            ):
+                store_payload = _arbiter_store_payload(dd, rewrite_paths, plan)
+                if store_payload is not None:
+                    reuse.store(
+                        arbiter_key,
+                        unit="arbiter",
+                        payload=store_payload,
+                        components=arbiter_payload["components"],
+                        identity=arbiter_identity,
+                        grounding=grounding_digests(arbiter_payload),
+                        grounding_status={
+                            "intent": _reuse_grounding_status(reuse, "intent"),
+                            "exploration": _reuse_grounding_status(reuse, "exploration"),
+                        },
+                    )
         all_records, record_sources, structural_records, structural_sources = (
             _split_structural_records(adjudicated, adjudicated_sources, structural_ids)
         )
