@@ -9,7 +9,7 @@ if TYPE_CHECKING:
     from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
     from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
-    from daydream.deep.latency import ArbiterPlan, LatencyRoute, ProfileResolution, RiskSummary
+    from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
     from daydream.deep.prompts import DeepDiffBoundInfo
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
@@ -216,23 +216,6 @@ class DeepState:
         return cast(
             RiskSummary,
             self._check("risk_summary", value, RiskSummary, "RiskSummary or None"),
-        )
-
-    @property
-    def latency_profile_resolution(self) -> ProfileResolution | None:
-        value: object | None = self._data.get("latency_profile_resolution")
-        if value is None:
-            return None
-        from daydream.deep.latency import ProfileResolution
-
-        return cast(
-            ProfileResolution,
-            self._check(
-                "latency_profile_resolution",
-                value,
-                ProfileResolution,
-                "ProfileResolution or None",
-            ),
         )
 
     @property

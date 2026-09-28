@@ -58,11 +58,17 @@ _HARNESS_DIR = Path(__file__).resolve().parent
 _TESTS_ROOT = _HARNESS_DIR.parent
 
 
-def _protocol_shaped_declarations() -> set[str]:
-    """Every class outside tests/harness/ whose execute() re-types >=5 protocol parameters."""
-    found: set[str] = set()
-    for path in sorted(_TESTS_ROOT.rglob("*.py")):
-        if _HARNESS_DIR in path.parents:
+def _execute_declarations(root: Path, *, min_params: int, skip: set[Path]) -> dict[str, str]:
+    """Map ``<relpath>::<Class>`` to ``<Class>`` for every class under ``root``
+    whose ``execute`` names at least ``min_params`` protocol parameters.
+
+    A forwarding override that names no protocol parameter (``*args,
+    **kwargs``) delegates the signature to its base and is deliberately exempt.
+    Paths living inside any directory in ``skip`` are ignored.
+    """
+    found: dict[str, str] = {}
+    for path in sorted(root.rglob("*.py")):
+        if any(directory in path.parents for directory in skip):
             continue
         for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
             if not isinstance(node, ast.ClassDef):
@@ -70,41 +76,19 @@ def _protocol_shaped_declarations() -> set[str]:
             for member in node.body:
                 if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == "execute":
                     names = {a.arg for a in (*member.args.posonlyargs, *member.args.args, *member.args.kwonlyargs)}
-                    if len(names & set(_PROTOCOL_PARAMS)) >= 5:
-                        found.add(f"{path.relative_to(_TESTS_ROOT)}::{node.name}")
+                    if len(names & set(_PROTOCOL_PARAMS)) >= min_params:
+                        found[f"{path.relative_to(root)}::{node.name}"] = node.name
     return found
 
 
 def test_no_module_outside_the_harness_declares_the_protocol_execute() -> None:
     """The acceptance criterion: one declaration of the protocol signature, in the harness."""
-    violations = _protocol_shaped_declarations()
+    violations = set(_execute_declarations(_TESTS_ROOT, min_params=5, skip={_HARNESS_DIR}))
 
     assert violations == set(), (
         "these declarations re-type the Backend protocol's execute() outside tests/harness/ — "
         f"migrate them or narrow them to a forwarding override: {sorted(violations)}"
     )
-
-
-def _harness_execute_declarations() -> set[str]:
-    """Harness classes whose own ``execute`` names protocol parameters.
-
-    The mirror of ``_protocol_shaped_declarations`` restricted to
-    ``tests/harness/``, the directory that scan skips by design. A forwarding
-    override that names no protocol parameter (``*args, **kwargs``) delegates
-    the signature to its base and is deliberately exempt, exactly as outside the
-    harness.
-    """
-    found: set[str] = set()
-    for path in sorted(_HARNESS_DIR.rglob("*.py")):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if not isinstance(node, ast.ClassDef):
-                continue
-            for member in node.body:
-                if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef)) and member.name == "execute":
-                    names = {a.arg for a in (*member.args.posonlyargs, *member.args.args, *member.args.kwonlyargs)}
-                    if names & set(_PROTOCOL_PARAMS):
-                        found.add(node.name)
-    return found
 
 
 def test_every_harness_protocol_declaration_is_in_the_parity_list() -> None:
@@ -114,7 +98,7 @@ def test_every_harness_protocol_declaration_is_in_the_parity_list() -> None:
     whole harness out, so an unlisted harness fake that re-types ``execute``
     would be checked by nothing.
     """
-    declared = _harness_execute_declarations()
+    declared = set(_execute_declarations(_HARNESS_DIR, min_params=1, skip=set()).values())
     listed = {class_name for _, _, class_name in _SHARED_HARNESS_BACKENDS}
 
     unlisted = declared - listed

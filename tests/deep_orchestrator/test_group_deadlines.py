@@ -26,6 +26,14 @@ from tests.test_deep_orchestrator import (
     _silence,
 )
 
+_STRUCTURAL_FINDING = {
+    "severity": "medium",
+    "confidence": "MEDIUM",
+    "file": "web.ts",
+    "line": 1,
+    "description": "Structural maintainability concern",
+}
+
 
 async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
     multi_stack_target: Path,
@@ -185,15 +193,7 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
     # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
     # otherwise fold into api.py and make it a two-item batched group, which by
     # design does not take the single-turn runaway branch.
-    stub.parse_by_stack = {
-        "structure": {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "web.ts",
-            "line": 1,
-            "description": "Structural maintainability concern",
-        },
-    }
+    stub.parse_by_stack = {"structure": _STRUCTURAL_FINDING}
     stub.runaway_single_fix_file = "api.py"  # the group that must expire
     stub.clock_advance = fake.advance
     stub.clock_advance_per_event_s = 200.0
@@ -239,13 +239,7 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     # otherwise fold into api.py and make it a two-item batched group, whose fix
     # fan-out runs one batched ladder plus per-finding serial fallback ladders
     # (up to three) instead of the single ladder the comments below describe.
-    stub.parse_by_stack = {
-        "structure": {
-            "severity": "medium", "confidence": "MEDIUM",
-            "file": "web.ts", "line": 1,
-            "description": "Structural maintainability concern",
-        },
-    }
+    stub.parse_by_stack = {"structure": _STRUCTURAL_FINDING}
     stub.fix_retryable_file = "api.py"  # only api.py's ladder may fail: web.ts must succeed, or its
     # retryable failures would share the run-scoped circuit and cut both
     # ladders before the allowance binds
@@ -295,13 +289,7 @@ async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_comple
     # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
     # otherwise fold into api.py and make it a batched group, whose fallback
     # ladder would multiply the attempts the circuit is meant to bound.
-    stub.parse_by_stack = {
-        "structure": {
-            "severity": "medium", "confidence": "MEDIUM",
-            "file": "web.ts", "line": 1,
-            "description": "Structural maintainability concern",
-        },
-    }
+    stub.parse_by_stack = {"structure": _STRUCTURAL_FINDING}
     stub.fix_retryable_file = "api.py"
     stub.fix_retryable_failures = 20
     stub.fix_retryable_error = PiError("503 Service Unavailable", retryable=True, category="SERVER_ERROR")

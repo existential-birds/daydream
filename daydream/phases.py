@@ -5512,7 +5512,6 @@ def build_commit_message(
     items: list[dict[str, Any]],
     run_id: str,
     version: str,
-    staged_diff: list[Path] | None = None,
 ) -> str:
     """Build a deterministic conventional commit message from applied findings.
 
@@ -5521,8 +5520,6 @@ def build_commit_message(
     under 72 chars; the body lists the applied findings; the message ends with
     the ``Daydream-Run`` / ``Daydream-Version`` trailers after a blank line.
     """
-    del staged_diff  # accepted for future subject refinement; keeps determinism
-
     summary = "apply automated review fixes"
     if items:
         first = str(items[0].get("description") or "").strip()

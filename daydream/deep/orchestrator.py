@@ -949,7 +949,6 @@ async def _run_review_spine(
                 # and the risk floors that forced it without recomputing.
                 "latency_route": latency_route,
                 "risk_summary": latency_summary,
-                "latency_profile_resolution": latency_resolution,
                 "dd": dd,
                 "stacks": stacks,
                 # Issue #1113: the changed-file import graph, published so the
