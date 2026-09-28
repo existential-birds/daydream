@@ -517,11 +517,7 @@ def _relocate_existing_new_paths(
         role = entry.get("role") if isinstance(entry, dict) else None
         source = (
             _read_repo_file(repo, path)
-            if isinstance(path, str)
-            and isinstance(role, str)
-            and _valid_repository_file_path(path)
-            and _path_is_confined(repo, path)
-            and _exists_on_disk(repo, path)
+            if isinstance(path, str) and isinstance(role, str)
             else None
         )
         line_count = len(source.splitlines()) if source is not None else 0

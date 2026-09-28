@@ -25,6 +25,10 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from typing import Any, Literal
 
+from daydream.training.dispositions import (
+    DECISIVE_DISPOSITIONS,
+    NON_DECISIVE_DISPOSITIONS,
+)
 from daydream.training.labeler_signals import (
     CommentResolutionSignal,
     FixAppliedSignal,
@@ -37,9 +41,6 @@ from daydream.training.labeler_signals import (
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
 
 PerFindingLabel = Literal["accepted", "rejected", "ambiguous", "unanswered", "missing", "unknown"]
-
-_DECISIVE = ("accepted", "rejected")
-_NON_DECISIVE = ("ambiguous", "unanswered", "missing")
 
 
 @dataclass(frozen=True)
@@ -131,10 +132,10 @@ def derive_outcome_label(rubric: Rubric) -> str:
         dispositions = [r.disposition for r in (rubric.per_finding_resolutions or [])]
         if not dispositions:
             return "unknown"
-        decisive = [d for d in dispositions if d in _DECISIVE]
+        decisive = [d for d in dispositions if d in DECISIVE_DISPOSITIONS]
         if not decisive:
             return "unknown"
-        if any(d in _NON_DECISIVE for d in dispositions):
+        if any(d in NON_DECISIVE_DISPOSITIONS for d in dispositions):
             return "contested"
         if all(d == "accepted" for d in decisive):
             return "accepted"

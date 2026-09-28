@@ -300,11 +300,6 @@ def _innermost_owner(
     return best
 
 
-def _candidate_order(roots: list[CandidateRoot]) -> list[CandidateRoot]:
-    """Sort candidate roots by branch points descending, then file, then line."""
-    return sorted(roots, key=lambda root: (-root.branch_points, root.file, root.line))
-
-
 def _changed_functions(
     repo_root: Path, code_files: list[str], hunk_ranges: dict[str, list[tuple[int, int]]]
 ) -> list[CandidateRoot]:
@@ -318,7 +313,8 @@ def _changed_functions(
         if time.monotonic() > deadline:
             break
         found.extend(count_function_branch_points(repo_root, file, ranges))
-    return _candidate_order(found)
+    # Branch points descending, then file, then line.
+    return sorted(found, key=lambda root: (-root.branch_points, root.file, root.line))
 
 
 def _decide_sequence(

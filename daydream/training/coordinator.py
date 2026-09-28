@@ -551,9 +551,8 @@ def _reward_weights_snapshot() -> dict[str, float]:
     the run identity is serializable without pickling.
     """
     return {
-        name: value
+        name: float(getattr(DEFAULT_WEIGHTS, name))
         for name in ("w_correctness", "w_grounding", "w_len", "w_fp", "len_tau", "len_scale")
-        for value in (float(getattr(DEFAULT_WEIGHTS, name)),)
     }
 
 

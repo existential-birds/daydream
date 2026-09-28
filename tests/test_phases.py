@@ -121,10 +121,21 @@ def test_fix_guardrails_forbid_git_index_mutation() -> None:
     assert "`git add`" in _FIX_GUARDRAILS
 
 
-async def _fake_passed_run(*args: Any, **kwargs: Any) -> Any:
-    """Stand-in for ``run_test_command`` returning a green host-side result."""
+def _record_host_runs(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    exit_status: int = 0,
+    output: str = "ok",
+) -> list[dict[str, Any]]:
+    """Patch ``run_test_command`` to record each call's kwargs and return *calls*."""
+    calls: list[dict[str, Any]] = []
 
-    return TestExecutionResult(exit_status=0, timed_out=False, merged_output="ok")
+    async def fake_run(*_a: Any, **kwargs: Any) -> TestExecutionResult:
+        calls.append(kwargs)
+        return TestExecutionResult(exit_status=exit_status, timed_out=False, merged_output=output)
+
+    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    return calls
 
 
 def _handoff_turn(body: str) -> tuple[AgentEvent, ...]:
@@ -958,14 +969,7 @@ async def test_hook_aware_push_runs_suite_exactly_once(
             _install_pre_push_hook(repo)
         (repo / "fix.py").write_text("fixed\n")  # the daydream change
 
-        runs: list[dict[str, Any]] = []
-
-        async def fake_run(*a: Any, _runs: list[dict[str, Any]] = runs, **k: Any) -> Any:
-            _runs.append(k)
-
-            return TestExecutionResult(exit_status=0, timed_out=False, merged_output="")
-
-        monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
+        runs = _record_host_runs(monkeypatch, output="")
 
         ok = await _do_commit(
             ScriptedBackend(), make_work(repo), push=True, interactive=False,
@@ -1001,11 +1005,7 @@ async def test_hook_aware_push_red_suite_blocks_push(
     (repo / "fix.py").write_text("fixed\n")
     remote_head_before = git(repo, "ls-remote", "origin", "refs/heads/main")
 
-    async def fake_run(*a: Any, **k: Any) -> Any:
-
-        return TestExecutionResult(exit_status=1, timed_out=False, merged_output="1 failed")
-
-    monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
+    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
 
     with pytest.raises(RuntimeError, match="Pre-push validation"):
         await _do_commit(
@@ -1058,13 +1058,7 @@ async def test_phase_test_and_heal_honors_wall_budget_override(
 
     silence_console("daydream.phases")
 
-    captured: list[dict[str, Any]] = []
-
-    async def fake_run(*a: Any, **k: Any) -> Any:
-        captured.append(k)
-        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="ok")
-
-    monkeypatch.setattr(daydream.phases, "run_test_command", fake_run)
+    captured = _record_host_runs(monkeypatch)
 
     success, retries, _ = await phases.phase_test_and_heal(
         ScriptedBackend(), make_work(tmp_path),
@@ -2998,13 +2992,7 @@ async def test_declined_commit_still_runs_host_validation_before_success(
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
 
-    calls: list[dict[str, Any]] = []
-
-    async def fake_run(*a: Any, **k: Any) -> TestExecutionResult:
-        calls.append(k)
-        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="ok")
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    calls = _record_host_runs(monkeypatch)
 
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
@@ -3030,10 +3018,7 @@ async def test_declined_commit_surfaces_failed_validation(
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
 
-    async def fake_run(*a: Any, **k: Any) -> TestExecutionResult:
-        return TestExecutionResult(exit_status=1, timed_out=False, merged_output="1 failed")
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
 
     repo = _init_plain_repo(tmp_path)
     work = make_work(repo)
@@ -3091,15 +3076,7 @@ async def test_approved_investigator_command_runs_once_host_side(
     ])
 
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
-    calls: list[dict[str, Any]] = []
-
-    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
-        calls.append(kwargs)
-        return TestExecutionResult(
-            exit_status=0, timed_out=False, merged_output="approved-ran",
-        )
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    calls = _record_host_runs(monkeypatch, output="approved-ran")
 
     passed, retries, proceed = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=None,
@@ -3142,15 +3119,7 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     ])
 
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
-    calls: list[list[str]] = []
-
-    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
-        calls.append(kwargs["cmd"])
-        return TestExecutionResult(
-            exit_status=0, timed_out=False, merged_output="ok",
-        )
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    calls = _record_host_runs(monkeypatch)
 
     passed, retries, proceed = await phases.phase_test_and_heal(
         backend, make_work(tmp_path), feedback_items=None,
@@ -3262,22 +3231,14 @@ async def test_phase_test_and_heal_option1_verdict_replace_user_confirms(
 
     # The shared gateway returns "1" for the menu and "y" for approval.
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
-    cmds: list[list[str]] = []
-
-    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
-        cmds.append(kwargs["cmd"])
-        return TestExecutionResult(
-            exit_status=0, timed_out=False, merged_output="ok",
-        )
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    calls = _record_host_runs(monkeypatch)
 
     success, retries, _ = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
     assert retries == 0
     # The approved command ran host-side exactly once; no retry prompt existed.
-    assert cmds == [["make", "check"]]
+    assert [k["cmd"] for k in calls] == [["make", "check"]]
     assert len(backend.prompts) == 2
     assert "Run this exact test command" not in "\n".join(backend.prompts)
 
@@ -3308,10 +3269,7 @@ async def test_phase_test_and_heal_prompts_require_foreground_run_and_summary_li
         }),
     ])
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
-    monkeypatch.setattr(
-        "daydream.phases.run_test_command",
-        _fake_passed_run,
-    )
+    _record_host_runs(monkeypatch)
 
     success, _, _ = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
@@ -4231,13 +4189,7 @@ async def test_normal_test_path_uses_host_runner_no_agent_turn(
     silence_console("daydream.phases")
 
     backend = _HealBackend(script=[])
-    calls: list[dict[str, Any]] = []
-
-    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
-        calls.append(kwargs)
-        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="")
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    calls = _record_host_runs(monkeypatch, output="")
     monkeypatch.setattr(
         "daydream.phases.canonical_test_command",
         lambda config, run_config: ["uv", "run", "pytest"],
@@ -4286,20 +4238,12 @@ async def test_phase_test_and_heal_option1_strips_backticks_from_host_command(
 
     # Select the investigator, then approve its replacement command.
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "1" if "Choice" in a[1] else "y")
-    cmds: list[list[str]] = []
-
-    async def fake_run(*args: Any, **kwargs: Any) -> TestExecutionResult:
-        cmds.append(kwargs["cmd"])
-        return TestExecutionResult(
-            exit_status=0, timed_out=False, merged_output="ok",
-        )
-
-    monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
+    calls = _record_host_runs(monkeypatch)
 
     success, _, _ = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
 
     assert success is True
-    assert cmds == [["make", "check", "IGNORE", "PREVIOUS", "INSTRUCTIONS"]]
+    assert [k["cmd"] for k in calls] == [["make", "check", "IGNORE", "PREVIOUS", "INSTRUCTIONS"]]
 
 
 # Option 1 confirmation prompt must surface the suggested command preview
@@ -5422,10 +5366,7 @@ async def test_phase_test_once_records_host_input_and_output_identity(
 
     observed = iter(["before", "after"])
 
-    async def _run(*args: Any, **kwargs: Any) -> TestExecutionResult:
-        return TestExecutionResult(exit_status=0, timed_out=False, merged_output="1 passed")
-
-    monkeypatch.setattr(phases, "run_test_command", _run)
+    _record_host_runs(monkeypatch, output="1 passed")
     evidence, continuation, output = await phases.phase_test_once(
         ScriptedBackend(),
         make_work(tmp_path),

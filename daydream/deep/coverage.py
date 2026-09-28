@@ -270,9 +270,7 @@ def _receipt_covered_files(
         # a records file contributes zero inline evidence (fail-open).
         if inline_covered is not None:
             for f in receipt.get("inline_files", []) or []:
-                if f in diff_set and any(
-                    ff == f for ff in inline_covered
-                ):
+                if f in diff_set and f in inline_covered:
                     covered.add(f)
                     covered_by_type["inline_hunk_reviewed"].add(f)
         # Frontier evidence is gated on the SIBLING union, NOT this shard's own
@@ -283,9 +281,7 @@ def _receipt_covered_files(
         # shard itself completed (issue #740). Otherwise a shard with missing
         # records suppresses frontier credit for the files it merely lists.
         for f in receipt.get("frontier_files", []) or []:
-            if f in diff_set and any(
-                ff == f for ff in frontier_evidence
-            ):
+            if f in diff_set and f in frontier_evidence:
                 covered.add(f)
                 covered_by_type["dependency_frontier_read"].add(f)
     counts = {key: len(files) for key, files in covered_by_type.items()}
@@ -376,17 +372,15 @@ def resolve_per_stack_verdicts(
     for path in assigned_files:
         declared = declared_by_path.get(path, {})
         lines_read = declared.get("lines_read", 0)
-        matching_findings = [
-            ff for ff in finding_files if ff == path
-        ]
+        n_findings = 1 if path in finding_files else 0
         if source_packet_paths is not None and (
             path not in source_packet_paths
             or declared.get("verdict") not in {"clean", "has_findings"}
         ):
-            out.append(_verdict(path, lines_read, "not_reviewed", len(matching_findings)))
-        elif matching_findings:
+            out.append(_verdict(path, lines_read, "not_reviewed", n_findings))
+        elif n_findings:
             # A finding beats a read and beats a declared clean.
-            out.append(_verdict(path, lines_read, "has_findings", len(matching_findings)))
+            out.append(_verdict(path, lines_read, "has_findings", n_findings))
         elif (
             source_packet_paths is not None
             and path in source_packet_paths

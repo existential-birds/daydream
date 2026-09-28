@@ -218,9 +218,6 @@ def detect_stacks(
         if owner and owner in present_stacks:
             assigned[path] = owner
 
-    # Refresh present stacks after promotion.
-    present_stacks = {s for s in assigned.values() if s != GENERIC_STACK}
-
     # Ambiguous files (D-12).
     for path in ambiguous:
         if len(present_stacks) == 1:

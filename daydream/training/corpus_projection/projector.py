@@ -1167,6 +1167,11 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     }
     content_digests["annotations.jsonl"] = snapshot_digest
     annotation_as_of = annotation_lineage.get("as_of")
+    license_distribution = _license_decision_distribution(decisions)
+    caps_report = {"configured": dict(sorted(config.caps.items())),
+                   "applied": _caps_applied(records, config.caps)}
+    share_caps_entry = {"share_caps": share_caps_report} if share_caps_report is not None else {}
+    copyleft_opt_ins = sorted(config.allow_copyleft)
     lineage = {
         "schema_version": "lineage",
         "curation_id": bundle.curation_id,
@@ -1198,13 +1203,8 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         ),
         "split_counts": split_counts,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
-        "caps": {"configured": dict(sorted(config.caps.items())),
-                 "applied": _caps_applied(records, config.caps)},
-        **(
-            {"share_caps": share_caps_report}
-            if share_caps_report is not None
-            else {}
-        ),
+        "caps": caps_report,
+        **share_caps_entry,
         "adjudication_count": len(adjudication),
         # License identity pin (M7/AC4, issue #1080): the digest-pinned policy
         # the re-evaluation consumed, the C5 exclusion list the C5 gate
@@ -1216,11 +1216,11 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             "policy_version": policy.policy_version,
         },
         "exclusion_list_digest": hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest(),
-        "copyleft_opt_ins": sorted(config.allow_copyleft),
+        "copyleft_opt_ins": copyleft_opt_ins,
         "license_decisions": {
             str(session_id): decision for session_id, decision in decisions.items()
         },
-        "license_decision_distribution": _license_decision_distribution(decisions),
+        "license_decision_distribution": license_distribution,
     }
     _write_artifact(
         config.out_dir / "lineage.json",
@@ -1236,11 +1236,11 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     license_report = {
         "policy": {"policy_version": policy.policy_version, "digest": policy_digest},
         "exclusion_list_digest": lineage["exclusion_list_digest"],
-        "copyleft_opt_ins": sorted(config.allow_copyleft),
+        "copyleft_opt_ins": copyleft_opt_ins,
         "decisions": dict(sorted(
             (str(session_id), decision) for session_id, decision in decisions.items()
         )),
-        "distribution": _license_decision_distribution(decisions),
+        "distribution": license_distribution,
     }
     _write_artifact(
         config.out_dir / "license-report.json",
@@ -1260,13 +1260,8 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "records_by_type": _count_by(records, lambda r: str(r["record_type"])),
         "records_by_tier": _count_by(records, lambda r: str(r["tier"])),
         "records_by_split": dict(split_counts),
-        "caps": {"configured": dict(sorted(config.caps.items())),
-                 "applied": _caps_applied(records, config.caps)},
-        **(
-            {"share_caps": share_caps_report}
-            if share_caps_report is not None
-            else {}
-        ),
+        "caps": caps_report,
+        **share_caps_entry,
         "exclusions_by_reason": dict(sorted(exclusions_by_reason.items())),
-        "license_distribution": _license_decision_distribution(decisions),
+        "license_distribution": license_distribution,
     }
