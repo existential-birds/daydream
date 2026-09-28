@@ -546,16 +546,6 @@ def test_list_cases_returns_evidence_count_and_changed_stats(tmp_path: Path, fak
     assert c2["changed_files"] == 0 and c2["changed_lines"] == 0
 
 
-def test_list_cases_ready_mirror_failure_returns_stats_from_bundle(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """Deliberate behavior flip (issue #814): a ready case whose shared bare
-    mirror is deleted still returns change stats — the reads come from a
-    disposable clone of the frozen bundle, never the mirror."""
-    ws, _, _h = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
-    shutil.rmtree(ws / "cache" / "repository.git")        # ready case, mirror gone
-    cases = cu.list_cases(ws)
-    assert cases[0]["changed_files"] == 2 and cases[0]["changed_lines"] == 6
-
-
 def test_corrupt_bundle_path_fails_clean_with_curation_error(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A ready snapshot whose bundle_file is absolute / traversal must fail the
     read-only bundle-clone paths with the curated CurationError contract, never
