@@ -4276,6 +4276,18 @@ def _read_text_or_none(path: Path | None) -> str | None:
         return None
 
 
+def _frontier_files_for_stack(stack: "StackAssignment") -> list[str]:
+    """The recorded cross-shard frontier a shard's review is grounded with.
+
+    Single-sourced and read-only: this is the exact list the coverage receipt
+    records, the prompt's ``Cross-shard interface file(s)`` block names, and the
+    reuse key hashes (MH7). Never recompute a frontier from the import graph
+    here -- a fresh graph could name a file no prompt ever carried, letting the
+    key miss a change the review actually depended on.
+    """
+    return list(stack.frontier_files)
+
+
 @bind_resolved_run_context
 async def phase_per_stack_reviews(
     backend: Backend,
@@ -4368,7 +4380,7 @@ async def phase_per_stack_reviews(
             receipts[stack.stack_name] = {
                 "assigned_files": list(stack.files),
                 "inline_files": inline_files,
-                "frontier_files": list(stack.frontier_files),
+                "frontier_files": _frontier_files_for_stack(stack),
             }
         _write_coverage_receipts(deep_dir_path, receipts)
 
@@ -4443,7 +4455,7 @@ async def phase_per_stack_reviews(
                 stack_payload = shard_key_payload(
                     stack_name=stack.stack_name,
                     files=stack.files,
-                    frontier_files=stack.frontier_files,
+                    frontier_files=_frontier_files_for_stack(stack),
                     docs_only=stack.is_docs_only,
                     diff_path_or_hunks=diff_text,
                     hunk_index=hunk_index,
@@ -4552,7 +4564,7 @@ async def phase_per_stack_reviews(
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
                         include_alternatives=include_alternatives,
-                        frontier_files=stack.frontier_files,
+                        frontier_files=_frontier_files_for_stack(stack),
                     )
                 else:
                     # Per-stack reviewer for language + fork stacks. The review
@@ -4572,7 +4584,7 @@ async def phase_per_stack_reviews(
                         inline_diff=inline_diff,
                         intent_authoritative=intent_authoritative,
                         include_alternatives=include_alternatives,
-                        frontier_files=stack.frontier_files,
+                        frontier_files=_frontier_files_for_stack(stack),
                     )
 
             task_context = FinalizationContext(
