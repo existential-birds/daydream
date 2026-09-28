@@ -150,7 +150,8 @@ arbitration_min_severity = "CRITICAL"''')   # not in the allowed severity enum
 # Task 4 (R5): host invariants unoverridable + host caps.
 def test_forbidden_host_fields_rejected() -> None:
     for field in ("backend", "model", "effort", "trust_mode", "egress",
-                  "harbor_judge_model", "skill_name", "findings_schema"):
+                  "harbor_judge_model", "skill_name", "findings_schema",
+                  "verifier", "judge", "scoring", "gold"):
         with pytest.raises(rp.ProfileError) as e:
             rp.parse_profile(f'schema_version = 1\nname = "p"\n{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
