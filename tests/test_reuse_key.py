@@ -42,6 +42,15 @@ def _mutate(payload: dict[str, Any], dotted: str, value: Any = _UNSET) -> dict[s
     return clone
 
 
+def _identity() -> reuse_key.PhaseIdentity:
+    return reuse_key.PhaseIdentity(
+        backend="claude",
+        model="claude-sonnet-4-5",
+        effort="high",
+        profile_digest="d" * 64,
+    )
+
+
 def _shard_diff(run_id: str) -> str:
     return (
         "diff --git a/a.py b/a.py\n"
@@ -172,6 +181,36 @@ def test_blob_map_missing_file_is_none(tmp_path: Path) -> None:
     assert reuse_key.blob_map_digest(tmp_path, ["missing.py"]) is None
     assert reuse_key.blob_map_digest(tmp_path, ["a.py"]) is not None
     assert reuse_key.blob_map_digest(tmp_path, []) is not None
+
+
+def test_intent_key_tracks_its_contract_inputs_and_ignores_the_exploration_content(
+    tmp_path: Path,
+) -> None:
+    intent = reuse_key.intent_key_payload(
+        diff_text="+ x = 1\n", commit_log="abc fix", exploration_dir=None, pr_description="absent",
+        branch_name="b", worktree_root=tmp_path, identity=_identity(),
+    )
+    for name, changed in (("components.diff", "+ x = 2\n"), ("components.commit_log", "abc fix\ndef fix2"),
+                          ("components.branch_name", "b-renamed"),
+                          ("components.pr_description", "a PR body")):
+        assert reuse_key.unit_key(_mutate(intent, name, value=changed)) != reuse_key.unit_key(intent), name
+    # The pre-scan is the loop's own re-derived grounding: it never moves the key (MH2).
+    assert reuse_key.unit_key(_mutate(intent, "grounding.exploration", value={"digest": "f" * 64})) \
+        == reuse_key.unit_key(intent)
+    # Wonder follows the diff, not the intent artifact it is grounded with.
+    wonder = reuse_key.wonder_key_payload(diff_text="+ x = 1\n", horse_mode=False, identity=_identity(),
+                                          grounding={"intent": {"digest": "a" * 64},
+                                                     "exploration": {"digest": "absent"}})
+    assert reuse_key.unit_key(
+        reuse_key.wonder_key_payload(diff_text="+ x = 1\n", horse_mode=False, identity=_identity(),
+                                     grounding={"intent": {"digest": "b" * 64},
+                                                "exploration": {"digest": "absent"}})
+    ) == reuse_key.unit_key(wonder)
+    assert reuse_key.unit_key(
+        reuse_key.wonder_key_payload(diff_text="+ x = 2\n", horse_mode=False, identity=_identity(),
+                                     grounding={"intent": {"digest": "a" * 64},
+                                                "exploration": {"digest": "absent"}})
+    ) != reuse_key.unit_key(wonder)
 
 
 def test_grounding_is_recorded_even_when_absent(tmp_path: Path) -> None:

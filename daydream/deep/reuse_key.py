@@ -338,6 +338,73 @@ def shard_key_payload(
     }
 
 
+def intent_key_payload(
+    *,
+    diff_text: str,
+    commit_log: str,
+    exploration_dir: str | Path | None,
+    pr_description: str | None,
+    branch_name: str,
+    worktree_root: str | Path,
+    identity: PhaseIdentity,
+) -> dict[str, Any]:
+    """Build the whole-change intent payload.
+
+    The diff, the commit log, the branch name and the PR description are all
+    prompt inputs of this unit, so they are hard components. The exploration
+    pre-scan is the loop's own re-derived grounding and is recorded, never
+    keyed (MH2/MH16). ``worktree_root`` scopes the run-path normalization of
+    the diff digest (A9); the payload stores no path.
+    """
+    components: dict[str, Any] = {
+        "format": REUSE_KEY_FORMAT,
+        "diff": digest_text(normalize_run_scoped(diff_text, run_root=worktree_root)),
+        "commit_log": digest_text(commit_log),
+        "branch_name": digest_text(branch_name),
+        "pr_description": (
+            _ABSENT if pr_description is None else digest_text(pr_description)
+        ),
+        "profile": identity.profile_digest,
+        "model": identity.model,
+        "effort": identity.effort if identity.effort else "default",
+    }
+    return {
+        "format": REUSE_KEY_FORMAT,
+        "unit": "intent",
+        "components": components,
+        "grounding": {"exploration": {"digest": exploration_digest(exploration_dir)}},
+    }
+
+
+def wonder_key_payload(
+    *,
+    diff_text: str,
+    horse_mode: bool,
+    identity: PhaseIdentity,
+    grounding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the whole-change alternatives/wonder payload.
+
+    The intent artifact is grounding *inside a grounding unit* — the tie-breaker
+    that closes the classification table. Only the diff and ``horse_mode`` are
+    subject; ``grounding`` is stored verbatim and never read by ``unit_key``.
+    """
+    components: dict[str, Any] = {
+        "format": REUSE_KEY_FORMAT,
+        "diff": digest_text(diff_text),
+        "horse_mode": horse_mode,
+        "profile": identity.profile_digest,
+        "model": identity.model,
+        "effort": identity.effort if identity.effort else "default",
+    }
+    return {
+        "format": REUSE_KEY_FORMAT,
+        "unit": "alternatives",
+        "components": components,
+        "grounding": dict(grounding),
+    }
+
+
 def phase_identity_for(ctx: Any, phase: str) -> PhaseIdentity:
     """Resolve ``phase``'s contract identity from the live flow context."""
     from daydream.review_profile import build_default_profile

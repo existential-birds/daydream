@@ -45,8 +45,18 @@ from daydream.deep.latency import (
 )
 from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
-from daydream.deep.reuse_key import phase_identity_for
-from daydream.deep.reuse_store import reuse_cache_for, review_cache_enabled
+from daydream.deep.reuse_key import (
+    PhaseIdentity,
+    absent_components,
+    digest_text,
+    exploration_digest,
+    grounding_digests,
+    intent_key_payload,
+    phase_identity_for,
+    unit_key,
+    wonder_key_payload,
+)
+from daydream.deep.reuse_store import ReuseHit, reuse_cache_for, review_cache_enabled
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
@@ -84,6 +94,7 @@ from daydream.ui import (
 )
 
 if TYPE_CHECKING:
+    from daydream.deep.reuse_store import ReuseCache
     from daydream.trajectory import PhaseScopeHandle, TrajectoryRecorder
 
 try:
@@ -97,6 +108,46 @@ try:
     EXPLORATION_AVAILABLE = True
 except ImportError:  # pragma: no cover -- optional exploration dependency
     EXPLORATION_AVAILABLE = False
+
+
+def _restore_entry_payload(hit: ReuseHit, dest_dir: Path) -> str | None:
+    """Copy a verified entry's payload files into ``dest_dir``.
+
+    Returns ``None`` on success or a reason string when the restore could not
+    complete; a partial restore is a miss, so the unit then does its own real
+    work rather than shipping half of an entry.
+    """
+    recorded = hit.manifest.get("payload")
+    if not isinstance(recorded, dict):
+        return "manifest payload unreadable"
+    try:
+        for name in recorded:
+            (dest_dir / str(name)).write_bytes((hit.payload_dir / str(name)).read_bytes())
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _reuse_grounding_status(reuse: "ReuseCache", unit: str) -> str:
+    """Whether a grounding unit was restored this iteration or regenerated.
+
+    Read from the run's own provenance, which records each grounding unit
+    before the consumers that need its status (exploration before intent,
+    intent before wonder). An absent record is ``regenerated``: the run did the
+    work, it just did not record it.
+    """
+    units = reuse.provenance().get("units")
+    entry = units.get(unit) if isinstance(units, dict) else None
+    outcome = entry.get("outcome") if isinstance(entry, dict) else None
+    return "reused" if outcome in {"hit", "reused"} else "regenerated"
+
+
+def _whole_change_diff_text(ctx: FlowContext) -> str:
+    """The whole-change diff text a TTT unit keys on (the full on-disk diff)."""
+    try:
+        return _read_full_diff(ctx)
+    except OSError:
+        return str(DeepState(ctx.data).diff)
 
 
 def _uncovered_sweep_max_files(ctx: FlowContext) -> int:
@@ -307,6 +358,66 @@ async def _step_intent(ctx: FlowContext) -> None:
     # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
     deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
     review_budget_path(deep_state.dd).unlink(missing_ok=True)
+    intent_p = _intent_path(deep_state.dd)
+    # Issue #733 — intent is a whole-change unit: its subject is the diff plus
+    # the commit log, branch name and PR description that reach its prompt. Its
+    # exploration pre-scan is recorded grounding only (MH2/MH16), so a moved
+    # pre-scan can never move the key; the hit path restores the recorded
+    # ``intent.md`` byte-for-byte rather than re-rendering it.
+    reuse = reuse_cache_for(ctx)
+    intent_payload: dict[str, Any] | None = None
+    intent_reuse_key: str | None = None
+    intent_identity = phase_identity_for(ctx, "intent")
+    if reuse is not None:
+        intent_payload = intent_key_payload(
+            diff_text=_whole_change_diff_text(ctx),
+            commit_log=deep_state.log,
+            exploration_dir=deep_state.exploration_dir,
+            pr_description=pr_description,
+            branch_name=deep_state.branch,
+            worktree_root=work.repo,
+            identity=intent_identity,
+        )
+        intent_reuse_key = unit_key(intent_payload)
+        if intent_reuse_key is None:
+            reuse.record(
+                "intent",
+                outcome="miss",
+                reason="absent components: " + ", ".join(absent_components(intent_payload)),
+            )
+        else:
+            hit = reuse.lookup(intent_reuse_key)
+            if isinstance(hit, ReuseHit):
+                restore_reason = _restore_entry_payload(hit, deep_state.dd)
+                if restore_reason is None:
+                    reuse.record(
+                        "intent",
+                        outcome="hit",
+                        reason="complete entry",
+                        key=intent_reuse_key,
+                        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                        detail={
+                            "grounding": reuse.grounding_delta(
+                                hit, grounding_digests(intent_payload)
+                            ),
+                            "grounding_status": {
+                                "exploration": _reuse_grounding_status(reuse, "exploration"),
+                            },
+                        },
+                    )
+                    deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
+                    deep_state.intent_path = intent_p
+                    return
+                print_warning(console, f"Reuse restore failed for intent: {restore_reason}")
+                reuse.record(
+                    "intent",
+                    outcome="miss",
+                    reason=f"restore failed: {restore_reason}",
+                    key=intent_reuse_key,
+                )
+            else:
+                reuse.record("intent", outcome="miss", reason=hit.reason, key=intent_reuse_key)
+    intent_complete = True
     async with phase_scope(DaydreamPhase.INTENT) as phase:
         try:
             backend = ctx.backend_for("intent")
@@ -355,6 +466,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         except ReviewBudgetExceeded as exc:
             phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
             record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
+            intent_complete = False
             print_warning(console, f"{exc}; continuing with incomplete intent context.")
             deep_state.intent_summary = (
                 "Intent analysis did not finish within its budget. Infer intent from the diff.\n"
@@ -364,9 +476,25 @@ async def _step_intent(ctx: FlowContext) -> None:
             )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
-    intent_p = _intent_path(deep_state.dd)
     intent_p.write_text(deep_state.intent_summary)
     deep_state.intent_path = intent_p
+    # Store only a completed intent: a budget-exceeded partial is a degraded
+    # result and must never be served to a later run as this unit's output.
+    if (
+        intent_complete
+        and reuse is not None
+        and intent_payload is not None
+        and intent_reuse_key is not None
+    ):
+        reuse.store(
+            intent_reuse_key,
+            unit="intent",
+            payload={intent_p.name: intent_p.read_bytes()},
+            components=intent_payload["components"],
+            identity=intent_identity,
+            grounding=grounding_digests(intent_payload),
+            grounding_status={"exploration": _reuse_grounding_status(reuse, "exploration")},
+        )
 
 
 def _fold_default_alternatives(ctx: FlowContext) -> bool:
@@ -389,42 +517,133 @@ async def _wonder(ctx: FlowContext) -> None:
     intent_summary = deep_state.intent_summary
     route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
     summary = deep_state.risk_summary or summarize_risk(diff_signals(diff="", changed_files=0, stack_count=0))
-    decision = wonder_decision(
-        route, summary, folded=_fold_default_alternatives(ctx), tier=deep_state.tier
-    )
+    folded = _fold_default_alternatives(ctx)
+    decision = wonder_decision(route, summary, folded=folded, tier=deep_state.tier)
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
+    # Issue #733 — alternatives is a whole-change unit: its subject is the diff
+    # and whether it runs as its own pass. The intent artifact and the pre-scan
+    # are recorded grounding (MH2/MH16), so neither moves the key; the hit path
+    # restores the recorded ``alternatives.json`` rather than re-rendering it.
+    reuse = reuse_cache_for(ctx)
+    alt_issues: list[dict[str, Any]] = []
+    wonder_reused = False
+    wonder_complete = True
+    wonder_payload: dict[str, Any] | None = None
+    wonder_reuse_key: str | None = None
+    wonder_identity: PhaseIdentity | None = None
     if decision.outcome == "folded":
-        alt_issues: list[dict[str, Any]] = []
         print_dim(console, "Design alternatives are included in the structural review")
     elif decision.outcome == "skip":
-        alt_issues = []
         if decision.reason == "trivial diff (<=1 changed file)":
             print_dim(console, "Skipping alternatives -- trivial diff")
         else:
             print_dim(console, f"Skipping alternatives -- {decision.reason}")
     else:
-        async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
-            try:
-                alt_issues = await phase_alternative_review(
-                    ctx.backend_for("wonder"),
-                    ctx.work,
-                    deep_state.diff_path,
-                    intent_summary,
-                    exploration_dir=deep_state.exploration_dir,
-                    diff_text=_ttt_diff_text(ctx),
-                    strategy=ctx.strategy("alternatives"),
-                    run_context=ctx.run_context,
+        if reuse is not None:
+            wonder_identity = phase_identity_for(ctx, "wonder")
+            wonder_payload = wonder_key_payload(
+                diff_text=_whole_change_diff_text(ctx),
+                horse_mode=not folded,
+                identity=wonder_identity,
+                grounding={
+                    "intent": {"digest": digest_text(intent_summary)},
+                    "exploration": {"digest": exploration_digest(deep_state.exploration_dir)},
+                },
+            )
+            wonder_reuse_key = unit_key(wonder_payload)
+            if wonder_reuse_key is None:
+                reuse.record(
+                    "alternatives",
+                    outcome="miss",
+                    reason="absent components: " + ", ".join(absent_components(wonder_payload)),
                 )
-            except ReviewBudgetExceeded as exc:
-                phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
-                record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
-                print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
-                alt_issues = exc.partial_result.get("issues", []) if isinstance(exc.partial_result, dict) else []
+            else:
+                hit = reuse.lookup(wonder_reuse_key)
+                if isinstance(hit, ReuseHit):
+                    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+                    if restore_reason is None:
+                        reuse.record(
+                            "alternatives",
+                            outcome="hit",
+                            reason="complete entry",
+                            key=wonder_reuse_key,
+                            origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                            detail={
+                                "grounding": reuse.grounding_delta(
+                                    hit, grounding_digests(wonder_payload)
+                                ),
+                                "grounding_status": {
+                                    "intent": _reuse_grounding_status(reuse, "intent"),
+                                    "exploration": _reuse_grounding_status(
+                                        reuse, "exploration"
+                                    ),
+                                },
+                            },
+                        )
+                        wonder_reused = True
+                    else:
+                        print_warning(
+                            console, f"Reuse restore failed for alternatives: {restore_reason}"
+                        )
+                        reuse.record(
+                            "alternatives",
+                            outcome="miss",
+                            reason=f"restore failed: {restore_reason}",
+                            key=wonder_reuse_key,
+                        )
+                else:
+                    reuse.record(
+                        "alternatives", outcome="miss", reason=hit.reason, key=wonder_reuse_key
+                    )
+        if not wonder_reused:
+            async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
+                try:
+                    alt_issues = await phase_alternative_review(
+                        ctx.backend_for("wonder"),
+                        ctx.work,
+                        deep_state.diff_path,
+                        intent_summary,
+                        exploration_dir=deep_state.exploration_dir,
+                        diff_text=_ttt_diff_text(ctx),
+                        strategy=ctx.strategy("alternatives"),
+                        run_context=ctx.run_context,
+                    )
+                except ReviewBudgetExceeded as exc:
+                    phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
+                    record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
+                    wonder_complete = False
+                    print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
+                    alt_issues = exc.partial_result.get("issues", []) if isinstance(exc.partial_result, dict) else []
 
     alts_p = _alternatives_path(deep_state.dd)
-    alts_p.write_text(json.dumps(alt_issues, indent=2))
+    # A hit restores the recorded bytes verbatim; re-serializing the parsed
+    # findings would re-render the JSON and break the byte-equality claim (MH10).
+    if not wonder_reused:
+        alts_p.write_text(json.dumps(alt_issues, indent=2))
     deep_state.alts_path = alts_p
+    # Store only a completed pass: a budget-exceeded partial is never served to
+    # a later run as this unit's output.
+    if (
+        wonder_complete
+        and not wonder_reused
+        and reuse is not None
+        and wonder_payload is not None
+        and wonder_reuse_key is not None
+        and wonder_identity is not None
+    ):
+        reuse.store(
+            wonder_reuse_key,
+            unit="alternatives",
+            payload={alts_p.name: alts_p.read_bytes()},
+            components=wonder_payload["components"],
+            identity=wonder_identity,
+            grounding=grounding_digests(wonder_payload),
+            grounding_status={
+                "intent": _reuse_grounding_status(reuse, "intent"),
+                "exploration": _reuse_grounding_status(reuse, "exploration"),
+            },
+        )
     write_routing_record(
         deep_state.dd,
         {

@@ -11,12 +11,14 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
+from typing import cast
 
 import pytest
 
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.runner import run
 from tests.deep_orchestrator.support import _count_review_prompts
+from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_deep_orchestrator import MakeConfig
 
@@ -48,10 +50,20 @@ def _expected_stack_files(deep: Path) -> list[str]:
 
 def _stack_receipts(deep: Path) -> dict[str, dict[str, list[str]]]:
     """The deterministic pre-fan-out coverage receipts, keyed by stack name."""
-    return json.loads((deep / "coverage-receipts.json").read_text(encoding="utf-8"))
+    receipts: dict[str, dict[str, list[str]]] = json.loads(
+        (deep / "coverage-receipts.json").read_text(encoding="utf-8")
+    )
+    return receipts
 
 
 _PER_STACK_PROMPT = re.compile(r"you are reviewing the (\S+) stack", re.IGNORECASE)
+_INTENT_DISCRIMINATOR = "understand the intent of these changes"
+_WONDER_DISCRIMINATOR = "evaluate the implementation"
+
+
+def _count_unit_prompts(calls: list[dict[str, object]], needle: str) -> int:
+    """How many captured calls carried the given production prompt discriminator."""
+    return sum(1 for call in calls if needle in str(call.get("prompt", "")).lower())
 
 
 def _reviewed_stacks(calls: list[dict[str, object]]) -> set[str]:
@@ -114,17 +126,53 @@ def _entry_count_for_unit(deep: Path, unit: str) -> int:
 
 def _reused_stacks(deep: Path) -> set[str]:
     """The shard units this run's provenance recorded with a hit outcome."""
-    provenance = deep.parent / "review-cache" / "provenance"
-    records = sorted(provenance.glob("*.json"), key=lambda path: path.stat().st_mtime)
-    if not records:
-        return set()
-    record = json.loads(records[-1].read_text(encoding="utf-8"))
+    record = _latest_provenance(deep)
+    units = cast(dict[str, object], record.get("units") or {})
     return {
         unit.removeprefix("shard:")
-        for unit, trace in (record.get("units") or {}).items()
+        for unit, trace in units.items()
         if unit.startswith("shard:")
         and isinstance(trace, dict)
         and trace.get("outcome") == "hit"
+    }
+
+
+def _latest_provenance(deep: Path) -> dict[str, object]:
+    """The most recently written per-run provenance record in the store."""
+    provenance = deep.parent / "review-cache" / "provenance"
+    records = sorted(provenance.glob("*.json"), key=lambda path: path.stat().st_mtime)
+    assert records, "the run must record its reuse provenance inside the store"
+    record: dict[str, object] = json.loads(records[-1].read_text(encoding="utf-8"))
+    return record
+
+
+async def test_identical_rerun_reuses_intent_and_wonder_units(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH1/MH2/MH16: an identical rerun performs no intent or alternatives model
+    call at all; the two whole-change units restore their recorded artifacts
+    byte-for-byte, because a moved pre-scan (grounding) never moves their keys."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target, review_profile=independent_alternatives_profile())
+    assert await run(config) == 0
+    assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 1
+    assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 1
+    deep = multi_stack_target / ".daydream" / "deep"
+    intent_bytes = (deep / "intent.md").read_bytes()
+    alternatives_bytes = (deep / "alternatives.json").read_bytes()
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 0
+    assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 0
+    assert (deep / "intent.md").read_bytes() == intent_bytes
+    assert (deep / "alternatives.json").read_bytes() == alternatives_bytes
+    units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
+    assert units["intent"]["outcome"] == "hit"
+    assert set(cast(dict[str, object], units["intent"]["grounding_status"])) == {"exploration"}
+    assert units["alternatives"]["outcome"] == "hit"
+    assert set(cast(dict[str, object], units["alternatives"]["grounding_status"])) == {
+        "intent",
+        "exploration",
     }
 
 
