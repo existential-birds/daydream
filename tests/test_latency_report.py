@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from daydream.eval.latency_report import attribute_shipped_lens, build_report, main
+from daydream.eval.latency_report import (
+    _phase_timings,
+    attribute_shipped_lens,
+    build_report,
+    main,
+)
 
 _MANIFEST = Path(__file__).resolve().parent / "fixtures" / "latency_profiles" / "manifest.json"
 
@@ -44,3 +49,28 @@ def test_main_emits_the_report_from_a_clean_checkout(capsys: pytest.CaptureFixtu
     assert main(["--corpus", str(_MANIFEST)]) == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["profiles"]["fast"]["runs"] == 1
+
+
+def test_arbiter_phase_latency_reads_the_deep_bucket_real_runs_write() -> None:
+    """MH13: real runs key the arbiter wall-clock under ``deep``, never ``arbiter``.
+
+    Every arbiter call runs inside ``phase_scope(DaydreamPhase.DEEP,
+    stage="arbiter")`` and ``compute_timing_summary`` keys ``phase_timings`` by
+    the phase value alone, so the report must read the deep bucket instead of
+    silently reporting an absent one as 0.0. The legacy ``arbiter`` bucket stays
+    honoured so hand-authored corpora keep reporting their own number.
+    """
+    real = {
+        "timing": {
+            "phase_timings": {
+                "alternatives": {"wall_clock_seconds": 20.0},
+                "deep": {"wall_clock_seconds": 90.0},
+            }
+        }
+    }
+    assert _phase_timings(real) == {"wonder": 20.0, "arbiter": 90.0}
+
+    legacy = {"timing": {"phase_timings": {"arbiter": {"wall_clock_seconds": 30.0}}}}
+    assert _phase_timings(legacy) == {"wonder": None, "arbiter": 30.0}
+
+    assert _phase_timings({"timing": {"phase_timings": {}}}) == {"wonder": None, "arbiter": None}

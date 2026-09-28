@@ -462,7 +462,10 @@ default. A deliberate `--reasoning-effort` pin still outranks the profile.
 
 The route selects effort only on Codex, the one backend whose deep-review phases
 use the built-in effort table; on Claude and Pi it still selects wonder and
-arbiter scheduling while their effort stays the backend default. Each run writes
+arbiter scheduling while their effort stays the backend default. A selection
+that fits one group is unsharded and keeps the pre-profile arbiter effort
+(Codex `xhigh`, the Claude/Pi ambient default) whatever the profile: the
+route's arbiter effort is a per-group knob. Each run writes
 its decision to `.daydream/deep/latency-routing.json`, and the archived
 `evaluation.json` carries the selected profile. See
 [review runtime](docs/review-runtime.md#latency-profiles-and-the-per-profile-report)

@@ -775,14 +775,19 @@ def _resolve_backend(
     """Resolve one phase backend from CLI, file, and built-in defaults, reusing the optional cache.
 
     ``effort_override`` replaces the resolver's value for this one resolution;
-    it is the arbiter group fan-out's per-group effort. Because the cache key
-    already includes the resolved effort, an override never collides with the
-    phase default.
+    it is the arbiter group fan-out's per-group effort, and it is honoured only
+    on backends the deep effort table tunes (today: Codex) -- the same gate
+    :func:`_profile_phase_effort` applies to the route tier, so a profile can
+    never move Claude's or Pi's historical deep-review effort. Because the cache
+    key already includes the resolved effort, an override never collides with
+    the phase default.
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
     resolved_effort = (
-        effort_override if effort_override is not None else _resolved_reasoning_effort(config, phase)
+        effort_override
+        if effort_override is not None and backend_name in DEEP_PHASE_DEFAULT_EFFORT
+        else _resolved_reasoning_effort(config, phase)
     )
     audit_root = (
         audit_workspace.repo.resolve(strict=True)

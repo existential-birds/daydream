@@ -11,7 +11,7 @@ import anyio
 
 from daydream.agent import console
 from daydream.artifact_visibility import review_output_path_for
-from daydream.backends import effective_fanout_concurrency
+from daydream.backends import Backend, effective_fanout_concurrency
 from daydream.deep.arbiter import (
     ArbiterGroup,
     contested_indices,
@@ -657,6 +657,21 @@ async def _run_sharded_arbiter(
     )
 
 
+def _unsharded_arbiter_backend(ctx: FlowContext, *, effort_pin: str | None) -> Backend:
+    """Resolve the single-group arbiter call: an explicit pin wins, else today's ``xhigh``.
+
+    A6/MH9: a selection that fits one group is unsharded and keeps the pre-profile
+    arbiter effort whatever the latency profile -- the route's arbiter effort is a
+    per-group (sharded) knob, and the record written by :func:`arbiter_plan` names
+    ``xhigh`` for this path. A deliberate ``--reasoning-effort`` pin still outranks
+    it, and :func:`_resolve_backend` drops the override on backends the deep effort
+    table does not tune (Claude and Pi keep their ambient default).
+    """
+    if effort_pin is not None:
+        return ctx.backend_for("arbiter")
+    return ctx.backend_for_effort("arbiter", "xhigh")
+
+
 async def _step_arbiter(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168).
 
@@ -774,7 +789,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 failed_groups = []
                 reused = {plan.groups[0].group_id: False}
                 async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                    arbiter_backend = ctx.backend_for("arbiter")
+                    arbiter_backend = _unsharded_arbiter_backend(ctx, effort_pin=effort_pin)
                     verdicts, arbiter_continuation = await phase_arbiter_review(
                         arbiter_backend,
                         ctx.work,

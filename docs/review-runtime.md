@@ -550,7 +550,11 @@ one thing:
 - `runs`: how many corpus runs were observed under that profile.
 - `phase_latency_seconds.<phase>.p50` / `.p90`: nearest-rank percentiles of the
   per-run `wall_clock_seconds` for the wonder (`alternatives`) and arbiter
-  phases.
+  phases. Real runs carry no `arbiter` timing bucket -- every arbiter call runs
+  inside the `deep` phase -- so the arbiter number is read from
+  `timing.phase_timings.deep`, which aggregates the whole deep phase (arbiter,
+  suppression, supervision, review, uncovered sweep). A legacy `arbiter` bucket
+  is honoured only for hand-authored corpora that predate the pipeline keying.
 - `high_severity_recall`: golden `(file, line)` pairs found among shipped items
   at `high` severity, over the corpus's golden high-severity pairs.
 - `false_positive_rate`: shipped items matching no golden pair, over all shipped

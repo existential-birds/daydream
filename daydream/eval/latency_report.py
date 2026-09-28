@@ -52,8 +52,22 @@ _LENSES: tuple[str, ...] = ("per-stack", "cross-stack", "structural", "wonder")
 _SOURCES_RE = re.compile(r"\(Sources:[^)]*\)")
 """One compiled matcher for the ``(Sources: ...)`` citation contract."""
 
-_PHASE_TIMING_KEYS: dict[str, str] = {"wonder": "alternatives", "arbiter": "arbiter"}
-"""Report phase -> the ``timing.phase_timings`` key that measures it."""
+_PHASE_TIMING_KEYS: dict[str, tuple[str, ...]] = {
+    "wonder": ("alternatives",),
+    "arbiter": ("deep", "arbiter"),
+}
+"""Report phase -> the ``timing.phase_timings`` keys that measure it, in order.
+
+``compute_timing_summary`` keys ``phase_timings`` by the ``DaydreamPhase``
+value only, and every arbiter call runs inside ``phase_scope(DaydreamPhase.DEEP,
+stage="arbiter")`` -- there is no ``ARBITER`` phase member, so real runs carry
+the arbiter wall-clock under ``deep``, never ``arbiter``. The ``deep`` bucket
+aggregates all deep-phase brackets (arbiter, suppression, supervision, review,
+uncovered sweep), so the report's ``arbiter`` latency is that shared aggregate.
+The legacy ``arbiter`` key is kept only as a fallback for hand-authored corpora
+that predate the pipeline keying, so the committed fixtures still report their
+arbiter bucket instead of silently collapsing to an empty sample.
+"""
 
 _HIGH_SEVERITIES = frozenset({"high", "critical"})
 """Severities that count toward high-severity recall (``critical`` is defensive)."""
@@ -169,11 +183,13 @@ def _phase_timings(evaluation: Mapping[str, Any]) -> dict[str, float | None]:
     if not isinstance(phase_timings, Mapping):
         return {"wonder": None, "arbiter": None}
     result: dict[str, float | None] = {"wonder": None, "arbiter": None}
-    for phase, key in _PHASE_TIMING_KEYS.items():
-        bucket = phase_timings.get(key)
-        seconds = bucket.get("wall_clock_seconds") if isinstance(bucket, Mapping) else None
-        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-            result[phase] = float(seconds)
+    for phase, keys in _PHASE_TIMING_KEYS.items():
+        for key in keys:
+            bucket = phase_timings.get(key)
+            seconds = bucket.get("wall_clock_seconds") if isinstance(bucket, Mapping) else None
+            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+                result[phase] = float(seconds)
+                break
     return result
 
 

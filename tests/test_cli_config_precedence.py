@@ -18,7 +18,16 @@ from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend
 from daydream.cli import _parse_args, _parse_improve_args
 from daydream.config_file import DaydreamFileConfig, load_file_config
-from daydream.deep.latency import DiffSignals, diff_signals, route_for, summarize_risk
+from daydream.deep.latency import (
+    PROFILE_ROUTES,
+    DiffSignals,
+    diff_signals,
+    route_for,
+    summarize_risk,
+)
+from daydream.deep.merge_steps import _unsharded_arbiter_backend
+from daydream.extensions.registry import Registry
+from daydream.flows.engine import FlowContext
 from daydream.runner import (
     RunConfig,
     _default_backend_name,
@@ -31,6 +40,7 @@ from daydream.runner import (
     _resolved_review_backend_name,
 )
 from daydream.test_execution import MissingTestCommandError, canonical_test_command
+from daydream.workspace import WorkContext
 
 
 def _routine_signals() -> DiffSignals:
@@ -359,3 +369,64 @@ def test_explicit_effort_pin_is_visible_to_the_arbiter_fan_out(tmp_path: Path) -
     assert _explicit_reasoning_effort_pin(cfg, "arbiter") is None
     cfg.reasoning_effort = "medium"
     assert _explicit_reasoning_effort_pin(cfg, "arbiter") == "medium"
+
+
+def _arbiter_flow_context(tmp_path: Path, backend: str) -> FlowContext:
+    """The smallest FlowContext whose effort seam is production's (no test factory)."""
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="0" * 40,
+        head_branch="main",
+        head_sha="0" * 40,
+        is_ephemeral=False,
+        run_id="session-test",
+    )
+    return FlowContext(
+        config=RunConfig(
+            target=str(tmp_path), backend=backend, model=None, file_config=DaydreamFileConfig()
+        ),
+        work=work,
+        registry=Registry(),
+    )
+
+
+def test_arbiter_effort_override_is_codex_only(tmp_path: Path) -> None:
+    """A6/MH9 + the Codex-only effort scope: the fan-out may only move table backends.
+
+    ``FlowContext.backend_for_effort`` is the seam both arbiter call sites use
+    (the sharded per-group call and the unsharded ``xhigh`` pin), so the gate
+    here is the one that keeps a latency profile from moving Claude's or Pi's
+    historical deep-review effort while Codex still honours it.
+    """
+    codex = _arbiter_flow_context(tmp_path, "codex")
+    assert getattr(codex.backend_for_effort("arbiter", "xhigh"), "reasoning_effort") == "xhigh"
+    assert getattr(codex.backend_for_effort("arbiter", "medium"), "reasoning_effort") == "medium"
+
+    claude = _arbiter_flow_context(tmp_path, "claude")
+    assert getattr(claude.backend_for_effort("arbiter", "xhigh"), "reasoning_effort") is None
+    assert getattr(claude.backend_for_effort("arbiter", "medium"), "reasoning_effort") is None
+
+
+def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(tmp_path: Path) -> None:
+    """A6/MH9: the single-group arbiter call is ``xhigh`` on Codex, pinned by the route tier.
+
+    The record ``arbiter_plan`` writes for the unsharded path names ``xhigh``; this
+    asserts the call the same path actually resolves agrees with it for a sharding
+    profile, that an explicit pin still outranks it, and that Claude keeps its
+    ambient default rather than inheriting the Codex value.
+    """
+    codex = _arbiter_flow_context(tmp_path, "codex")
+    codex.config.latency_route = PROFILE_ROUTES["balanced"]
+    pinned = _unsharded_arbiter_backend(codex, effort_pin=None)
+    assert getattr(pinned, "reasoning_effort") == "xhigh"
+    codex.config.reasoning_effort = "low"
+    explicit = _unsharded_arbiter_backend(
+        codex, effort_pin=_explicit_reasoning_effort_pin(codex.config, "arbiter")
+    )
+    assert getattr(explicit, "reasoning_effort") == "low"
+
+    claude = _arbiter_flow_context(tmp_path, "claude")
+    claude.config.latency_route = PROFILE_ROUTES["balanced"]
+    assert getattr(_unsharded_arbiter_backend(claude, effort_pin=None), "reasoning_effort") is None
