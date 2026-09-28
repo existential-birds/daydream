@@ -285,6 +285,25 @@ async def test_run_terminates_under_fix_turn_budget(
     assert stop_reason in stop_reasons, stop_reasons
 
 
+def _assert_group_budget_failure(
+    target: Path, traj: Path, *, reason: str, processed: int, skipped: int
+) -> None:
+    """Assert the skipped ``api.py`` group landed in both artifact and trajectory."""
+    fix_failures_p = target / ".daydream" / "deep" / "fix-failures.json"
+    assert fix_failures_p.is_file(), "budget-skipped group must write the fix-failures artifact"
+    recorded = json.loads(fix_failures_p.read_text())
+    assert "api.py" in recorded
+    assert recorded["api.py"].startswith(f"file_group_budget_exceeded: {reason}")
+
+    events = _scan_phase_events(target / ".daydream", traj, "file_group_budget_exceeded")
+    assert events, "no file_group_budget_exceeded event emitted"
+    meta = events[0]["metadata"]
+    assert meta["file"] == "api.py"
+    assert meta["reason"] == reason
+    assert meta["items_processed"] == processed
+    assert meta["items_skipped"] == skipped
+
+
 async def test_run_caps_runaway_file_group_serial_fixes(
     multi_stack_target: Path,
     tmp_path: Path,
@@ -341,20 +360,10 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     assert len(api_singles) == 3, f"expected 3 fallback fixes, got {len(api_singles)}"
 
     # The skipped group is recorded as a budget failure (surfaces to the user).
-    fix_failures_p = multi_stack_target / ".daydream" / "deep" / "fix-failures.json"
-    assert fix_failures_p.is_file(), "budget-skipped group must write the fix-failures artifact"
-    recorded = json.loads(fix_failures_p.read_text())
-    assert "api.py" in recorded
-    assert recorded["api.py"].startswith("file_group_budget_exceeded: group_serial_item_limit")
-
-    # The trajectory carries the budget event with processed/skipped accounting.
-    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
-    assert events, "no file_group_budget_exceeded event emitted"
-    meta = events[0]["metadata"]
-    assert meta["file"] == "api.py"
-    assert meta["reason"] == "group_serial_item_limit"
-    assert meta["items_processed"] == 3
-    assert meta["items_skipped"] == group_size - 3
+    _assert_group_budget_failure(
+        multi_stack_target, traj,
+        reason="group_serial_item_limit", processed=3, skipped=group_size - 3,
+    )
 
 
 async def test_run_leaves_small_file_group_unbudgeted(
@@ -425,20 +434,10 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     assert len(api_singles) == 0, f"expected 0 fallback fixes (wall carried over), got {len(api_singles)}"
 
     # The skipped group is recorded as a WALL budget failure (surfaces to the user).
-    fix_failures_p = multi_stack_target / ".daydream" / "deep" / "fix-failures.json"
-    assert fix_failures_p.is_file(), "budget-skipped group must write the fix-failures artifact"
-    recorded = json.loads(fix_failures_p.read_text())
-    assert "api.py" in recorded
-    assert recorded["api.py"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
-
-    # The trajectory carries the budget event: 0 processed, the whole group skipped.
-    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
-    assert events, "no file_group_budget_exceeded event emitted"
-    meta = events[0]["metadata"]
-    assert meta["file"] == "api.py"
-    assert meta["reason"] == "group_wall_budget_exceeded"
-    assert meta["items_processed"] == 0
-    assert meta["items_skipped"] == group_size
+    _assert_group_budget_failure(
+        multi_stack_target, traj,
+        reason="group_wall_budget_exceeded", processed=0, skipped=group_size,
+    )
 
     # Discriminator: the batched turn failed via run_agent's REAL per-invocation
     # wall budget (a budget_reason), not a synchronous stub raise -- its aborted

@@ -220,6 +220,33 @@ def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
         assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY"}
 
 
+def _assert_single_reject_funnel(run: str, *, label: str) -> None:
+    """Guard the single write/exit point every drift rejection funnels through.
+
+    The gate records ``pr_number`` plus the instructive message in
+    ``findings/failure.json`` before exiting, so a rejection that exits without
+    the write would degrade the PR comment to the generic fallback body.
+    """
+    lines = run.splitlines()
+    write_idx = [i for i, ln in enumerate(lines) if "> findings/failure.json" in ln]
+    exit_idx = [i for i, ln in enumerate(lines) if ln.strip() == "exit 1"]
+    reject_calls = [i for i, ln in enumerate(lines) if re.match(r"reject \"", ln.strip())]
+    assert len(write_idx) == 1 and len(exit_idx) == 1, (
+        f"{label}: every drift rejection must funnel through the single "
+        "failure-context helper (one write, one exit) (issue #336)"
+    )
+    assert write_idx[0] < exit_idx[0], (
+        f"{label}: the helper must record the failure context before exiting"
+    )
+    assert '"message"' in lines[write_idx[0]], (
+        f"{label}: the recorded failure context must carry the instructive message (issue #336)"
+    )
+    assert len(reject_calls) >= 3, (
+        f"{label}: the drift gate must reject head changes, unresolvable "
+        "push times, and pushes at/after the approving comment"
+    )
+
+
 @pytest.mark.parametrize(
     "wf_path",
     [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
@@ -236,37 +263,14 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     steps = job_steps(wf, "analyze")
 
     # The drift gate funnels every rejection through one helper that records
-    # the failure context (pr_number + the instructive message) before exiting
-    # — head changed, unresolvable push time, push at-or-after the approving
-    # comment — so surface-analyze-failure comments the instructive message on
-    # the PR (issue #336). A rejection that exits without the write would
-    # degrade the comment to the generic fallback body. The single write/exit
-    # point lives in the helper, so a new rejection branch only has to call it
-    # (rather than re-triplicating the mkdir/printf/exit skeleton).
+    # the failure context (pr_number + the instructive message) before exiting;
+    # ``_assert_single_reject_funnel`` pins that invariant.
     verify = next(
         step
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
-    lines = verify["run"].splitlines()
-    write_idx = [i for i, ln in enumerate(lines) if "> findings/failure.json" in ln]
-    exit_idx = [i for i, ln in enumerate(lines) if ln.strip() == "exit 1"]
-    reject_calls = [i for i, ln in enumerate(lines) if re.match(r"reject \"", ln.strip())]
-    assert len(write_idx) == 1 and len(exit_idx) == 1, (
-        f"{wf_path.name}: every drift rejection must funnel through the single "
-        "failure-context helper (one write, one exit) (issue #336)"
-    )
-    assert write_idx[0] < exit_idx[0], (
-        f"{wf_path.name}: the helper must record the failure context before exiting"
-    )
-    assert '"message"' in lines[write_idx[0]], (
-        f"{wf_path.name}: the recorded failure context must carry the "
-        "instructive message (issue #336)"
-    )
-    assert len(reject_calls) >= 3, (
-        f"{wf_path.name}: the drift gate must reject head changes, unresolvable "
-        "push times, and pushes at/after the approving comment"
-    )
+    _assert_single_reject_funnel(verify["run"], label=wf_path.name)
 
     # Any other failure still records the PR number via the job-level handler.
     record = next(step for step in steps if step.get("name") == "Record failure context")
@@ -389,23 +393,9 @@ def test_single_workflow_head_bound_gate() -> None:
     assert r'\< "$APPROVED_AT"' in verify["run"]
     assert "APPROVED_AT" in wf["jobs"]["analyze"]["env"]
 
-    # The drift gate funnels every rejection through one helper that records
-    # the failure context (pr_number + the instructive message) before exiting
-    # — head changed, unresolvable push time, push at-or-after the approving
-    # comment — so surface-failure comments the instructive message instead of
-    # the generic fallback body (issue #336). The single write/exit point lives
-    # in the helper, so a new rejection branch only has to call it.
-    lines = verify["run"].splitlines()
-    write_idx = [i for i, ln in enumerate(lines) if "> findings/failure.json" in ln]
-    exit_idx = [i for i, ln in enumerate(lines) if ln.strip() == "exit 1"]
-    reject_calls = [i for i, ln in enumerate(lines) if re.match(r"reject \"", ln.strip())]
-    assert len(write_idx) == 1 and len(exit_idx) == 1, (
-        "single/daydream.yml: every drift rejection must funnel through the "
-        "single failure-context helper (one write, one exit) (issue #336)"
-    )
-    assert write_idx[0] < exit_idx[0]
-    assert '"message"' in lines[write_idx[0]]
-    assert len(reject_calls) >= 3
+    # The drift gate funnels every rejection through one helper that records the
+    # failure context before exiting; ``_assert_single_reject_funnel`` pins it.
+    _assert_single_reject_funnel(verify["run"], label="single/daydream.yml")
 
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx

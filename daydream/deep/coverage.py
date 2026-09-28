@@ -23,7 +23,6 @@ from typing import Any
 
 from daydream.deep.artifacts import per_stack_records_path
 from daydream.deep.prompts import (
-    _DIFF_BLOCK_SPLIT,
     VERIFICATION_PROTOCOL_INSTRUCTION,
     _diff_block_path,
 )
@@ -520,19 +519,6 @@ def compute_uncovered_files(
             **receipt_counts,
         }
     return uncovered, stats
-
-
-def diff_block_for_file(diff: str, file: str) -> str | None:
-    """Return the unified-diff block for ``file``, or ``None`` when absent.
-
-    Reuses the shared ``diff --git`` block splitter and post-state path
-    resolution from ``daydream.deep.prompts`` so the unified-diff parse
-    contract is not duplicated here.
-    """
-    for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if _diff_block_path(block) == file:
-            return block if block.endswith("\n") else block + "\n"
-    return None
 
 
 def bounded_diff_block_for_file(path: Path, file: str) -> str:

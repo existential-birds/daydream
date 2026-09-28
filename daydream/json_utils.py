@@ -27,6 +27,12 @@ def _fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def _fsync_file(path: Path) -> None:
+    """Best-effort fsync of a file's contents (durable before publication)."""
+    with open(path, "rb", buffering=0) as f:
+        os.fsync(f.fileno())
+
+
 # Serialises the read-modify-restore fallback in ``_read_umask`` on platforms
 # that do not expose the umask without mutating it.
 _UMASK_LOCK = threading.Lock()
