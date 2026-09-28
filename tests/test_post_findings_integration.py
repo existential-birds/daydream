@@ -663,17 +663,7 @@ def test_post_findings_drops_forged_diagram_grounding_attestation(
         {"from": "process", "to": "end", "label": None},
     ]
     flowchart["grounding"]["elements"] = [
-        {
-            "element": element,
-            "ref": ref,
-            "grounded": True,
-            "reason": None,
-            "strength": "definition",
-            "snapped_line": None,
-            "in_changed_hunk": True,
-            "defined_at": "a.py:1",
-            "final_index": index,
-        }
+        _grounded_element(element, ref, index)
         for element, ref, index in (
             ("root", "run", 0),
             ("node", "start", 0),

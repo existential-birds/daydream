@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import signal
 import subprocess
-from collections.abc import AsyncGenerator
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -59,6 +58,7 @@ from daydream.trajectory import (
     snapshot_trajectories,
 )
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
+from tests.harness.backend import ScriptedBackend
 from tests.harness.trajectory import (
     make_recorder,
     observe_metrics_and_result,
@@ -2868,17 +2868,6 @@ async def test_do_commit_records_commit_phase_event(
     """Real-path: _do_commit's host-native commit emits a distinct ``commit``
     phase event with duration_ms + stop_reason (issue #726 task 12)."""
 
-
-    class _Backend:
-        model = "mock-model"
-
-        async def cancel(self) -> None:
-            return None
-
-        async def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
-            yield TextEvent(text="unused on the host commit path")
-            yield ResultEvent(structured_output=None, continuation=None)
-
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")
     _git_add_commit(git_repo)
@@ -2886,7 +2875,7 @@ async def test_do_commit_records_commit_phase_event(
 
     rec = make_recorder(git_repo)
     async with rec:
-        ok = await _do_commit(_Backend(), work, push=False, preexisting_untracked=set())
+        ok = await _do_commit(ScriptedBackend(), work, push=False, preexisting_untracked=set())
     assert ok.committed is True
     assert ok.push is None
 

@@ -1360,14 +1360,19 @@ def test_emit_reward_emits_full_reward_dict_and_exit_code(sr_module: Any, capsys
     assert sr._emit_reward(r2) == 1
 
 
-def test_run_verifier_without_client_is_unscored(sr_module: Any, tmp_path: Path) -> None:
-    sr = sr_module
+def _seed_scored_case(sr: Any, tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Seed the canonical scored-verifier case; return ``(gold, artifact, out)``."""
     gold_path = tmp_path / "golden-review.json"
     gold_path.write_text(json.dumps(_gold_list(1)))
     _write_metadata(gold_path)
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
-    out = tmp_path / "out"
+    return gold_path, artifact_path, tmp_path / "out"
+
+
+def test_run_verifier_without_client_is_unscored(sr_module: Any, tmp_path: Path) -> None:
+    sr = sr_module
+    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
     reward = sr.run_verifier(gold_path, artifact_path, out, client=None,
         env=judge_env())
     assert reward.verifier_error == 1
@@ -1378,13 +1383,8 @@ def test_run_verifier_without_client_is_unscored(sr_module: Any, tmp_path: Path)
 
 def test_run_verifier_missing_gold_file_is_unscored(sr_module: Any, tmp_path: Path) -> None:
     sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1)))
-    _write_metadata(gold_path)
+    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
     gold_path.unlink()                                    # metadata present, gold missing
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
-    out = tmp_path / "out"
     reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
         env=judge_env())
     assert reward.verifier_error == 1
@@ -1403,13 +1403,8 @@ def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tm
     file-absent vs file-invalid distinction.
     """
     sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1)))
-    _write_metadata(gold_path)
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
+    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
     artifact_path.unlink()                                 # artifact missing
-    out = tmp_path / "out"
     reward = sr.run_verifier(gold_path, artifact_path, out, client=_CountingClient(),
         env=judge_env())
     assert reward.verifier_error == 1
@@ -1421,12 +1416,7 @@ def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tm
 
 def test_run_verifier_malformed_judge_output_is_unscored(sr_module: Any, tmp_path: Path) -> None:
     sr = sr_module
-    gold_path = tmp_path / "golden-review.json"
-    gold_path.write_text(json.dumps(_gold_list(1)))
-    _write_metadata(gold_path)
-    artifact_path = tmp_path / "review.json"
-    artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
-    out = tmp_path / "out"
+    gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
     class BadJudge:
         async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> dict[str, Any]:
             return {"match": True, "confidence": 0.0}    # missing reasoning -> parse VerifierError

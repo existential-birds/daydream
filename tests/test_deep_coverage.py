@@ -14,6 +14,7 @@ import pytest
 
 from daydream import review_profile as rp, severity
 from daydream.deep.coverage import (
+    bounded_diff_block_for_file,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
     coverage_receipt_path,
@@ -770,8 +771,6 @@ def test_uncovered_sweep_prompt_carries_severity_rubric(tmp_path: Path) -> None:
 
 
 def test_non_pi_sweep_excerpt_streams_past_large_lines(tmp_path: Path) -> None:
-    from daydream.deep.coverage import bounded_diff_block_for_file
-
     path = tmp_path / "diff.patch"
     path.write_text("diff --git a/large.txt b/large.txt\n--- a/large.txt\n+++ b/large.txt\n"
                     "@@ -0,0 +1 @@\n+" + "x" * 3_690_129 + "\n" + _DIFF)

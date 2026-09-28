@@ -359,7 +359,6 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real CodexBackend, public real-capture shape, through runner.run."""
@@ -428,7 +427,6 @@ async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Multi-turn protocol shape the golden does not cover (plan §789)."""
@@ -477,7 +475,6 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The 395.332-second replay through runner.run: exact ns, choice, billing.
@@ -589,7 +586,6 @@ async def test_pi_metadata_mode_omits_generation_choice_content(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Metadata mode through a real adapter: generation choice content absent.
@@ -657,7 +653,6 @@ async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The committed lifecycle fixture: two generations, one tool, canary linkage."""
@@ -762,7 +757,6 @@ async def test_osprey_strict_protocol_fixture_through_runner(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real OspreyBackend via strict fake process: argv, session usage, no gen child."""
@@ -828,7 +822,6 @@ async def test_attempt_input_messages_validate_against_pinned_schema(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """gen_ai.input.messages on the attempt validates against the pinned schema."""
@@ -872,7 +865,6 @@ async def test_generic_http_protobuf_reaches_every_destination(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """HTTP/protobuf transport for every destination consumes Task 4A's contract."""
@@ -906,7 +898,6 @@ async def test_generic_grpc_transport_reaches_real_loopback_server(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The generic gRPC destination speaks the real TraceService protocol."""
@@ -937,7 +928,6 @@ async def test_grpc_outage_fails_open_and_review_completes(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
     make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:

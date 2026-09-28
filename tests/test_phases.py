@@ -772,17 +772,10 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
     raises the project error (surfaced as Stop(1) by the commit step) and never
     reports final completion."""
 
-    work_repo = tmp_path / "clone"
-    work_repo.mkdir()
-    git(work_repo, "init", "-b", "main")
-    git(work_repo, "config", "user.email", "t@example.com")
-    git(work_repo, "config", "user.name", "t")
-    (work_repo / "app.py").write_text("x = 0\n")
-    git(work_repo, "add", "app.py")
-    git_commit(work_repo, "baseline")
+    work_repo = _pushable_repo(tmp_path)
     (work_repo / "fix.py").write_text("fixed\n")
     # Remote points at a non-existent repository so the push fails.
-    git(work_repo, "remote", "add", "origin", str(tmp_path / "missing.git"))
+    git(work_repo, "remote", "set-url", "origin", str(tmp_path / "missing.git"))
 
 
     work = make_work(work_repo)
