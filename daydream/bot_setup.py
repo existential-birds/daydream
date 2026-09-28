@@ -478,6 +478,23 @@ def _installed_owner_logins(repo_dir: Path, creds: AppCredentials) -> set[str | 
     }
 
 
+def _skipped_no_app_credentials(name: str, purpose: str) -> Check:
+    """Passing, non-required Check note when no local App credentials exist.
+
+    The App-level reads (installations, permissions) cannot be authenticated
+    without them, so the check is reported as a skip rather than a failure.
+    """
+    return Check(
+        name=name,
+        passed=True,
+        detail=(
+            "Skipped: no local App credentials "
+            f"({APP_ID_ENV}/{APP_PRIVATE_KEY_ENV}) {purpose}"
+        ),
+        required=False,
+    )
+
+
 def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | None) -> Check:
     """Check (1): the App is installed on the target owner.
 
@@ -486,15 +503,9 @@ def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | N
     local App credentials are available to authenticate the App-level read.
     """
     if creds is None:
-        return Check(
-            name="app_installed",
-            passed=True,
-            detail=(
-                "Skipped: no local App credentials "
-                f"({APP_ID_ENV}/{APP_PRIVATE_KEY_ENV}) to read installations. "
-                "Export them to verify the App is installed on the target."
-            ),
-            required=False,
+        return _skipped_no_app_credentials(
+            "app_installed",
+            "to read installations. Export them to verify the App is installed on the target.",
         )
     owner = _owner_of(scope)
     try:
@@ -557,15 +568,7 @@ def _check_secrets_and_var(repo_dir: Path, scope: Scope) -> Check:
 def _check_permissions(repo_dir: Path, creds: AppCredentials | None) -> Check:
     """Check (3): App permissions are a superset of the required set."""
     if creds is None:
-        return Check(
-            name="permissions",
-            passed=True,
-            detail=(
-                "Skipped: no local App credentials "
-                f"({APP_ID_ENV}/{APP_PRIVATE_KEY_ENV}) to read App permissions."
-            ),
-            required=False,
-        )
+        return _skipped_no_app_credentials("permissions", "to read App permissions.")
     try:
         meta = get_app_metadata(repo_dir, creds.app_id, creds.private_key)
     except GitHubAppError as exc:

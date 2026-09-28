@@ -645,11 +645,25 @@ def _prepare_review_stacks(
     # uses the FULL on-disk ``diff``, not the bounded in-memory value.
     import_graph: dict[str, set[str]] = {}
     sharding_enabled = _deep_shard_enabled(config, diff=diff)
-    if sharding_enabled and not single_stack_mode:
+    shard_this_run = sharding_enabled and not single_stack_mode
+    # Issue #1113: the sequence diagram's cross-module rule needs the
+    # changed-file import graph, but the sharding gate builds it only when
+    # sharding is enabled (off by default) AND the run is not in
+    # single_stack_mode -- so in practice essentially never. The diagram step
+    # publishes the graph on ``ctx.data`` when it can run. ``build_import_graph``
+    # is deterministic and fail-open, so both needs share one build. The bare
+    # ``except Exception`` is required, not defensive: ``build_import_graph``
+    # documents itself as never raising, but its ``get_parser`` call reaches
+    # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
+    diagram_needs_graph = (
+        config.start_at != "fix" and _diagram_mode_for(config, mode) != "off"
+    )
+    if shard_this_run or diagram_needs_graph:
         try:
             import_graph = build_import_graph(changed_files, target_dir)
         except Exception:
             import_graph = {}
+    if shard_this_run:
         stacks = shard_stacks(
             stacks,
             diff,
@@ -659,24 +673,6 @@ def _prepare_review_stacks(
             frontier_max=_deep_shard_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX),
             graph=import_graph,
         )
-
-    # Issue #1113: the sequence diagram's cross-module rule needs the
-    # changed-file import graph, but the sharding branch above builds it
-    # only when sharding is enabled (off by default) AND the run is not in
-    # single_stack_mode -- so in practice essentially never. Build it here
-    # when the diagram step can run, and publish it on ctx.data. The bare
-    # ``except Exception`` is required, not defensive: ``build_import_graph``
-    # documents itself as never raising, but its ``get_parser`` call reaches
-    # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
-    if (
-        not import_graph
-        and config.start_at != "fix"
-        and _diagram_mode_for(config, mode) != "off"
-    ):
-        try:
-            import_graph = build_import_graph(changed_files, target_dir)
-        except Exception:
-            import_graph = {}
 
     return stacks, single_stack_mode, import_graph
 
