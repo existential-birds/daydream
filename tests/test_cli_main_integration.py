@@ -53,6 +53,7 @@ from tests.harness.protocol_cli import ProtocolCli, install_protocol_cli
 from tests.test_artifact_visibility_integration import (
     _assert_frozen_outputs,
     _seed_visibility_canaries,
+    _write_probe_extension,
 )
 
 # Reuse the deep-pipeline stub from the exemplar instead of duplicating it.
@@ -371,53 +372,6 @@ _PROBE_ARGV = ("--flow", "artifact-visibility-probe", "--backend", "codex", "--m
 _OVERSIZE_PAYLOAD = ("OVERSIZE-1234" * 1000)[:12_289]
 
 
-def _write_visibility_probe_extension(
-    ext_dir: Any, sanctioned_path: Path, *, oversize: bool = False
-) -> None:
-    """Register the ``artifact-visibility-probe`` extension flow.
-
-    Two real ``run_agent`` calls against the resolved backend: the first
-    response's canary lands in the live trajectory, then the second external
-    invocation searches its actual model cwd — proving an earlier response is
-    not discoverable during the same run. With ``oversize`` the sanctioned
-    input is one byte beyond the 12,288 inline budget, so
-    ``prepare_sanctioned_inputs`` must fail closed before anything spawns.
-    """
-    ext_dir.write_module(
-        "from pathlib import Path\n"
-        "from daydream.agent import run_agent\n"
-        "from daydream.extensions import FlowStep\n"
-        "from daydream.prompt_budget import prepare_sanctioned_inputs\n"
-        "from daydream.trajectory import DaydreamPhase\n"
-        "async def _probe(ctx):\n"
-        "    assert ctx.artifacts is not None\n"
-        "    backend = ctx.backend_for('review')\n"
-        f"    sanctioned_path = Path({str(sanctioned_path)!r})\n"
-        "    prepared = prepare_sanctioned_inputs(\n"
-        "        backend, ctx.work.repo, {'external evidence': sanctioned_path},\n"
-        f"        read_only={oversize!r},\n"
-        "    )\n"
-        + (
-            # Oversize row: preparation itself must raise; nothing below runs.
-            "    raise AssertionError('oversize sanctioned input must not reach run_agent')\n"
-            if oversize
-            else
-            "    first, _discarded_continuation, _reason = await run_agent(\n"
-            "        backend, ctx.work.repo, 'FIRST VISIBILITY PROBE',\n"
-            "        phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared,\n"
-            "    )\n"
-            "    assert 'CURRENT_REASONING_CANARY' in first\n"
-            "    await run_agent(\n"
-            "        backend, ctx.work.repo, 'SECOND VISIBILITY PROBE',\n"
-            "        phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared,\n"
-            "    )\n"
-        )
-        + "def register(registry):\n"
-        "    registry.register_phase(FlowStep(name='artifact-visibility-probe', run=_probe))\n"
-        "    registry.set_flow('artifact-visibility-probe', ['artifact-visibility-probe'])\n"
-    )
-
-
 @dataclass(frozen=True)
 class _VisibilityCase:
     """One seeded repo + probe extension + real Codex executable on ``PATH``."""
@@ -451,7 +405,9 @@ def visibility_case(
         sanctioned_dir.mkdir()
         sanctioned_path = (sanctioned_dir / "evidence artifact.txt").resolve()
         sanctioned_path.write_text(payload, encoding="utf-8")
-        _write_visibility_probe_extension(ext_dir, sanctioned_path, oversize=oversize)
+        _write_probe_extension(
+            ext_dir, sanctioned_path, read_only=oversize, oversize=oversize
+        )
         fixture = install_protocol_cli(
             tmp_path / "codex protocol fixture with spaces",
             "codex",

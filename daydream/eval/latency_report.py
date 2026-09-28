@@ -40,7 +40,7 @@ from daydream.deep.latency import (
     _SECURITY_TRIGGERS,
     LATENCY_PROFILES,
 )
-from daydream.severity import normalize_severity
+from daydream.severity import is_high_severity
 from daydream.trajectory import RUNS_DIRNAME
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -68,9 +68,6 @@ The legacy ``arbiter`` key is kept only as a fallback for hand-authored corpora
 that predate the pipeline keying, so the committed fixtures still report their
 arbiter bucket instead of silently collapsing to an empty sample.
 """
-
-_HIGH_SEVERITIES = frozenset({"high", "critical"})
-"""Severities that count toward high-severity recall (``critical`` is defensive)."""
 
 
 def attribute_shipped_lens(items: Iterable[Any]) -> dict[str, Any]:
@@ -162,11 +159,6 @@ def _golden_pairs(case: Mapping[str, Any]) -> set[tuple[Any, Any]]:
         ):
             pairs.add((entry[0], entry[1]))
     return pairs
-
-
-def _is_high_severity(item: Mapping[str, Any]) -> bool:
-    normalized = normalize_severity(item.get("severity"))
-    return normalized in _HIGH_SEVERITIES
 
 
 def _line_of(item: Mapping[str, Any]) -> int | None:
@@ -318,7 +310,7 @@ def build_report(
                 key = (item.get("file"), _line_of(item))
                 if key not in golden:
                     false_positives[str(profile)] += 1
-                elif _is_high_severity(item):
+                elif is_high_severity(item.get("severity")):
                     matched_here.add(key)
             golden_total[str(profile)] += len(golden)
             golden_found[str(profile)] += len(matched_here)

@@ -8,6 +8,23 @@ from typing import Any
 
 from daydream.archive.hydrate_rules import derive_curation_id
 from daydream.archive.index import _get_connection
+from daydream.training.corpus_projection.identity import record_id
+
+
+def accepted_observation() -> dict[str, Any]:
+    """The accepted ``s1`` human observation the final-bundle fixtures materialize."""
+    return {
+        "record_id": record_id("s1", "s1-t", "s1-seg", "fp-1"),
+        "disposition": "accepted",
+        "evidence_digest": "d" * 32,
+        "evidence": [{"reply_id": 1, "body_sha256": "abc",
+                      "created_at": "2026-01-01T00:00:00+00:00"}],
+        "labeler": "alice", "role": "rater",
+        "rationale": "clear maintainer approval",
+        "valid_at": "2026-02-02T00:00:00+00:00",
+        "observed_at": "2026-02-02T00:00:00+00:00",
+        "rubric_version": "v1",
+    }
 
 
 def policy_binding(source: str) -> tuple[dict[str, Any], str]:

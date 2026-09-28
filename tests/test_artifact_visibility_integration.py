@@ -65,7 +65,16 @@ def _write_probe_extension(
     *,
     sink_backend: bool = False,
     read_only: bool = False,
+    oversize: bool = False,
 ) -> None:
+    """Register the ``artifact-visibility-probe`` extension flow.
+
+    Two real ``run_agent`` calls against the resolved backend: the first
+    response's canary lands in the live trajectory, then the second external
+    invocation searches its actual model cwd. With ``oversize`` the sanctioned
+    input is one byte beyond the 12,288 inline budget, so
+    ``prepare_sanctioned_inputs`` must fail closed before anything spawns.
+    """
     read_only_lines = "        read_only=True,\n" if read_only else ""
     prompt_kind = "READ-ONLY" if read_only else "VISIBILITY"
     sink_lines = (
@@ -73,6 +82,23 @@ def _write_probe_extension(
         "    BACKEND_SINK.append(backend)\n"
         if sink_backend
         else ""
+    )
+    run_lines = (
+        # Oversize row: preparation itself must raise; nothing below runs.
+        "    raise AssertionError('oversize sanctioned input must not reach run_agent')\n"
+        if oversize
+        else
+        "    first, _discarded_continuation, _reason = await run_agent(\n"
+        f"        backend, ctx.work.repo, 'FIRST {prompt_kind} PROBE',\n"
+        "        phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared,\n"
+        + read_only_lines
+        + "    )\n"
+        "    assert 'CURRENT_REASONING_CANARY' in first\n"
+        "    await run_agent(\n"
+        f"        backend, ctx.work.repo, 'SECOND {prompt_kind} PROBE',\n"
+        "        phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared,\n"
+        + read_only_lines
+        + "    )\n"
     )
     ext_dir.write_module(
         "from pathlib import Path\n"
@@ -89,18 +115,8 @@ def _write_probe_extension(
         "        backend, ctx.work.repo, {'external evidence': sanctioned_path},\n"
         f"        read_only={read_only!r},\n"
         "    )\n"
-        "    first, _discarded_continuation, _reason = await run_agent(\n"
-        f"        backend, ctx.work.repo, 'FIRST {prompt_kind} PROBE',\n"
-        "        phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared,\n"
-        + read_only_lines
-        + "    )\n"
-        "    assert 'CURRENT_REASONING_CANARY' in first\n"
-        "    await run_agent(\n"
-        f"        backend, ctx.work.repo, 'SECOND {prompt_kind} PROBE',\n"
-        "        phase=DaydreamPhase.REVIEW, sanctioned_inputs=prepared,\n"
-        + read_only_lines
-        + "    )\n"
-        "def register(registry):\n"
+        + run_lines
+        + "def register(registry):\n"
         "    registry.register_phase(FlowStep(name='artifact-visibility-probe', run=_probe))\n"
         "    registry.set_flow('artifact-visibility-probe', ['artifact-visibility-probe'])\n"
     )

@@ -11,7 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from daydream.deep.arbiter import ArbiterGroup
-from daydream.severity import SEVERITY_RANK, normalize_severity
+from daydream.severity import is_high_severity
 
 LatencyProfile = Literal["fast", "balanced", "forensic"]
 WonderRoute = Literal["skip", "medium", "high"]
@@ -193,12 +193,6 @@ class ArbiterPlan:
     reason: str | None
 
 
-def _is_high_severity(record: dict[str, Any]) -> bool:
-    """Whether a record's severity is at or above high (absent/unknown is never high)."""
-    severity = normalize_severity(record.get("severity"))
-    return severity is not None and SEVERITY_RANK[severity] <= SEVERITY_RANK["high"]
-
-
 def group_effort(route: LatencyRoute, *, high_severity: bool, contested: bool) -> str:
     """The effort for one sharded group: ``xhigh`` when a risk signal forces it, else the route.
 
@@ -243,7 +237,7 @@ def arbiter_plan(
     contested_set = set(contested)
     planned: list[PlannedGroup] = []
     for group in groups:
-        high_severity = any(_is_high_severity(records[i]) for i in group.target_indices)
+        high_severity = any(is_high_severity(records[i].get("severity")) for i in group.target_indices)
         is_contested = any(i in contested_set for i in group.target_indices)
         effort = group_effort(route, high_severity=high_severity, contested=is_contested)
         if high_severity:

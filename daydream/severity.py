@@ -81,6 +81,11 @@ def normalize_severity(value: object) -> str | None:
     return normalized if normalized in CANONICAL_LEVELS else None
 
 
+def is_high_severity(value: object) -> bool:
+    """Whether *value* normalizes to the ``high`` level (unknown/absent is never high)."""
+    return normalize_severity(value) == "high"
+
+
 def stronger_severity(a: object, b: object) -> str | None:
     """Return the more severe of two severity values.
 

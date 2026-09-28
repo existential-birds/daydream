@@ -3625,46 +3625,34 @@ async def test_phase_test_and_heal_option4_no_recorder_writes_fallback_handoff(
 
 
 @pytest.mark.asyncio
-async def test_phase_test_and_heal_option4_summarizer_failure_writes_minimal(
+@pytest.mark.parametrize(
+    ("turn", "expected_substrings"),
+    [
+        (
+            (RuntimeError("scripted summarizer failure"),),
+            ("# Daydream handoff", "Instructions for the next agent", "```"),
+        ),
+        (_structured_turn({"unexpected": "shape"}), ("# Daydream handoff",)),
+    ],
+)
+async def test_phase_test_and_heal_option4_summarizer_fallback_writes_minimal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None],
+    turn: Sequence[AgentEvent | BaseException],
+    expected_substrings: tuple[str, ...],
 ) -> None:
-    """Summarizer raising → minimal handoff is written anyway."""
+    """Summarizer raising or returning no 'handoff_prompt' → minimal handoff is still written."""
     silence_console("daydream.phases")
-    _, success, _ = await _run_option4_handoff(
-        monkeypatch, tmp_path, make_work, (RuntimeError("scripted summarizer failure"),),
-    )
+    _, success, _ = await _run_option4_handoff(monkeypatch, tmp_path, make_work, turn)
     assert success is False
 
     handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
     assert handoff.is_file()
     body = handoff.read_text(encoding="utf-8")
-    assert "# Daydream handoff" in body
-    assert "Instructions for the next agent" in body
-    # Failing test output included as a tail block.
-    assert "```" in body
-
-
-@pytest.mark.asyncio
-async def test_phase_test_and_heal_option4_summarizer_garbage_writes_minimal(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_work: Callable[..., WorkContext],
-    silence_console: Callable[..., None],
-) -> None:
-    """Summarizer returning a structured_output without 'handoff_prompt' → minimal fallback."""
-    silence_console("daydream.phases")
-    _, success, _ = await _run_option4_handoff(
-        monkeypatch, tmp_path, make_work, _structured_turn({"unexpected": "shape"}),
-    )
-    assert success is False
-
-    handoff = tmp_path / ".daydream" / "runs" / "test-session-id" / "handoff.md"
-    assert handoff.is_file()
-    body = handoff.read_text(encoding="utf-8")
-    assert "# Daydream handoff" in body
+    for expected in expected_substrings:
+        assert expected in body
 
 
 @pytest.mark.asyncio

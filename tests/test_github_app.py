@@ -29,6 +29,7 @@ from daydream.github_app import (
     resolve_user_identity,
 )
 from tests.harness.fake_gh import block_real_gh
+from tests.harness.git_helpers import refreshing_session
 from tests.harness.rsa import generate_rsa_pem
 
 
@@ -205,29 +206,8 @@ def test_two_refreshing_sessions_keep_subprocess_credentials_isolated() -> None:
     captured: list[dict[str, str] | None] = []
     refresh_calls = {"a": 0, "b": 0}
 
-    def session(name: str) -> Any:
-        def refresh() -> tuple[Any, float]:
-            refresh_calls[name] += 1
-            return (
-                git_ops.StaticGitHubAuth(
-                    {
-                        "PATH": f"/{name}/tools",
-                        "GH_TOKEN": f"ghs_{name}_fresh_token_1234567890",
-                    }
-                ),
-                float("inf"),
-            )
-
-        return git_ops.RefreshingGitHubAuth(
-            git_ops.StaticGitHubAuth(
-                {
-                    "PATH": f"/{name}/tools",
-                    "GH_TOKEN": f"ghs_{name}_expired_token_1234567890",
-                }
-            ),
-            expires_at=0,
-            refresh=refresh,
-        )
+    def session(name: str) -> git_ops.RefreshingGitHubAuth:
+        return refreshing_session(name, refresh_calls)
 
     def spy_run(*args: list[Any], **kwargs: Any) -> Any:
         captured.append(kwargs["env"])

@@ -1,5 +1,4 @@
 {
-  "session_id": "routine-fast",
   "timing": {
     "phase_timings": {
       "alternatives": {
@@ -9,8 +8,5 @@
         "wall_clock_seconds": 8.0
       }
     }
-  },
-  "findings": {
-    "total": 2
   }
 }
