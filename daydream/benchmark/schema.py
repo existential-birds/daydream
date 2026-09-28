@@ -35,6 +35,13 @@ from pydantic import (
 from daydream.pr_review import FINDING_MARKER_RE
 from daydream.severity import SeverityLevel
 
+
+class _StrictModel(BaseModel):
+    """Shared schema base: every benchmark model rejects unknown fields."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 __all__ = [
     "Source",
     "Privacy",
@@ -166,10 +173,8 @@ def _normalize_host_list(values: list[str], what: str) -> list[str]:
 # manifest blocks
 
 
-class Source(BaseModel):
+class Source(_StrictModel):
     """Immutable repository identity for the workspace's forge (github.com)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     provider: Literal["github"]
     hostname: str
@@ -204,10 +209,8 @@ class Source(BaseModel):
         return stripped
 
 
-class Privacy(BaseModel):
+class Privacy(_StrictModel):
     """Privacy / egress configuration for a private benchmark."""
-
-    model_config = ConfigDict(extra="forbid")
 
     classification: Literal["confidential"]
     reviewer_data: Literal["source_snapshot"]
@@ -228,10 +231,8 @@ class Privacy(BaseModel):
         return _normalize_host_list(v, "judge_allowed_hosts")
 
 
-class PullRequestEntry(BaseModel):
+class PullRequestEntry(_StrictModel):
     """One entry in the ``pull_requests[]`` ledger."""
-
-    model_config = ConfigDict(extra="forbid")
 
     number: int
     import_state: Literal["pending", "fetched", "fetch_failed"]
@@ -272,20 +273,16 @@ class PullRequestEntry(BaseModel):
         return self
 
 
-class CaseIndexEntry(BaseModel):
+class CaseIndexEntry(_StrictModel):
     """One entry of the ``cases[]`` index."""
-
-    model_config = ConfigDict(extra="forbid")
 
     case_id: str
     pr_number: int
     case_file: str
 
 
-class BenchmarkManifest(BaseModel):
+class BenchmarkManifest(_StrictModel):
     """The ``benchmark.yaml`` workspace manifest."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1] = 1
     benchmark_id: UUID
@@ -366,8 +363,7 @@ def derive_finding_id(finding: "Finding | dict[str, Any]", *, case_id: str) -> s
 # snapshot union
 
 
-class _SnapshotBase(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class _SnapshotBase(_StrictModel):
 
     status: str
     policy: Literal["final_pr_head", "explicit_head"]
@@ -403,8 +399,7 @@ _SNAPSHOT_ERROR_REASON = Literal[
 ]
 
 
-class _SnapshotError(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class _SnapshotError(_StrictModel):
     reason: _SNAPSHOT_ERROR_REASON
     detail: str
 
@@ -475,10 +470,8 @@ def _relative_path(v: str, *, what: str = "location") -> str:
     return v
 
 
-class Location(BaseModel):
+class Location(_StrictModel):
     """A POSIX-relative source location with a positive ordered line span."""
-
-    model_config = ConfigDict(extra="forbid")
 
     path: str
     start_line: int
@@ -498,16 +491,14 @@ class Location(BaseModel):
         return self
 
 
-class _EvidenceAuthor(BaseModel):
+class _EvidenceAuthor(_StrictModel):
     """The author of an evidence record (login + GitHub user/bot type)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     login: str
     type: str
 
 
-class AuthoringAnchor(BaseModel):
+class AuthoringAnchor(_StrictModel):
     """The strict, versioned authoring-time anchor of one inline evidence record.
 
     Derived once during case materialization from the authenticated mirror (the
@@ -516,8 +507,6 @@ class AuthoringAnchor(BaseModel):
     full data payload; every non-derived status is fail-closed with all four data
     fields unset. Version 1 is the current shape.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     version: Literal[1]
     status: Literal["derived", "history-unavailable", "path-unavailable", "range-unavailable"]
@@ -551,10 +540,8 @@ class AuthoringAnchor(BaseModel):
         return self
 
 
-class EvidenceRecord(BaseModel):
+class EvidenceRecord(_StrictModel):
     """One normalized GitHub PR evidence record."""
-
-    model_config = ConfigDict(extra="forbid")
 
     source_id: SourceId
     kind: Literal["review", "inline_comment", "thread_comment", "issue_comment"]
@@ -595,10 +582,8 @@ class EvidenceRecord(BaseModel):
         return self
 
 
-class Candidate(BaseModel):
+class Candidate(_StrictModel):
     """An import-time deterministic candidate projected from one evidence record."""
-
-    model_config = ConfigDict(extra="forbid")
 
     source_id: SourceId
     title: str
@@ -617,10 +602,8 @@ class Candidate(BaseModel):
         return self
 
 
-class _ImportRepository(BaseModel):
+class _ImportRepository(_StrictModel):
     """The resolved repository identity captured at import time."""
-
-    model_config = ConfigDict(extra="forbid")
 
     id: str
     name_with_owner: str
@@ -634,26 +617,22 @@ class _ImportRepository(BaseModel):
         return value
 
 
-class _FetchInfo(BaseModel):
+class _FetchInfo(_StrictModel):
     """The fetch bookkeeping of one import document."""
-
-    model_config = ConfigDict(extra="forbid")
 
     fetched_at: str
     etag: str | None = None
     payload_sha256: Sha64
 
 
-class _PrRef(BaseModel):
+class _PrRef(_StrictModel):
     """A base/head ref-sha pair of a pull request."""
-
-    model_config = ConfigDict(extra="forbid")
 
     sha: str
     ref: str | None = None
 
 
-class PullRequestMeta(BaseModel):
+class PullRequestMeta(_StrictModel):
     """The typed pull-request block shared by ``ImportDocument`` and ``CaseDocument``.
 
     Required structural fields (number/url/title/state/base/head/timestamps/author)
@@ -662,8 +641,6 @@ class PullRequestMeta(BaseModel):
     default empty/None so predate imports that lack them read as empty, while a
     newly imported PR carries the full set (``extra="forbid"`` everywhere).
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     number: int
     url: str
@@ -707,19 +684,15 @@ class PullRequestMeta(BaseModel):
         return self
 
 
-class CaseSource(BaseModel):
+class CaseSource(_StrictModel):
     """The typed source block of a case document (import provenance)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     import_file: str
     import_sha256: Sha64
 
 
-class ImportDocument(BaseModel):
+class ImportDocument(_StrictModel):
     """A normalized, verifiable import of one PR's full evidence set."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1] = 1
     repository: _ImportRepository
@@ -728,10 +701,8 @@ class ImportDocument(BaseModel):
     fetch: _FetchInfo
 
 
-class Provenance(BaseModel):
+class Provenance(_StrictModel):
     """Where a finding came from (historical review output, edited, or authored)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     kind: Literal["historical", "edited", "authored"]
     source_ids: list[str] = []
@@ -745,10 +716,8 @@ class Provenance(BaseModel):
         return self
 
 
-class Finding(BaseModel):
+class Finding(_StrictModel):
     """A single gold finding (or an authored/edited candidate)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     finding_id: str
     title: str
@@ -806,7 +775,7 @@ _EVIDENCE_REASON = Literal[
 ]
 
 
-class _NoteForOther(BaseModel):
+class _NoteForOther(_StrictModel):
     """Require a note on an exclusion model when ``reason == "other"``.
 
     ``reason`` / ``note`` are declared here so the shared validator typechecks;
@@ -828,7 +797,6 @@ class _NoteForOther(BaseModel):
 class EvidenceExclusion(_NoteForOther):
     """A reason an individual finding/evidence item was excluded from gold."""
 
-    model_config = ConfigDict(extra="forbid")
     _exclusion_noun: ClassVar[str] = "evidence exclusion"
 
     source_id: str
@@ -841,7 +809,6 @@ _CASE_EXCLUSION_REASON = Literal["unreplayable", "not_suitable", "duplicate_case
 class CaseExclusion(_NoteForOther):
     """Why an entire case was excluded from the dataset."""
 
-    model_config = ConfigDict(extra="forbid")
     _exclusion_noun: ClassVar[str] = "case exclusion"
 
     reason: _CASE_EXCLUSION_REASON
@@ -853,10 +820,8 @@ class CaseExclusion(_NoteForOther):
 EXTRACTION_VERSION = 1
 
 
-class PrioritizationCandidate(BaseModel):
+class PrioritizationCandidate(_StrictModel):
     """Per-evidence comparison facts against the pinned snapshot head."""
-
-    model_config = ConfigDict(extra="forbid")
 
     commit_relation: Literal["at_head", "ancestor", "non_ancestor", "unavailable"]
     anchor_delta: Literal[
@@ -864,14 +829,12 @@ class PrioritizationCandidate(BaseModel):
     ]
 
 
-class PrioritizationFacts(BaseModel):
+class PrioritizationFacts(_StrictModel):
     """Additive per-case prioritization facts (schema_version stays 2).
 
     Written once at case materialization/refresh; all new data stays out of
     every hash surface.
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     extraction_version: int
     head_sha: Sha40
@@ -879,10 +842,8 @@ class PrioritizationFacts(BaseModel):
     non_candidates: dict[str, PrioritizationCandidate] = {}
 
 
-class Curation(BaseModel):
+class Curation(_StrictModel):
     """Curated gold state for one case."""
-
-    model_config = ConfigDict(extra="forbid")
 
     state: Literal["draft", "ready", "stale", "excluded", "unreplayable"]
     snapshot_attested: bool = False
@@ -946,10 +907,8 @@ def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
     return doc
 
 
-class CaseDocument(BaseModel):
+class CaseDocument(_StrictModel):
     """One ``cases/<case-id>.yaml`` document."""
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1, 2] = 2
     case_id: str
@@ -1050,7 +1009,7 @@ class TransitionError(Exception):
         self.to = to
 
 
-class PreflightLedger(BaseModel):
+class PreflightLedger(_StrictModel):
     """The mode-0600 ``runtime/preflight.json`` repository-verification ledger.
 
     Written by preflight only after it verifies exact repository identity +
@@ -1058,8 +1017,6 @@ class PreflightLedger(BaseModel):
     ``matched`` is True when the freshly verified repository matched the
     stored identity (or was just resolved).
     """
-
-    model_config = ConfigDict(extra="forbid")
 
     schema_version: Literal[1] = 1
     last_verified_at: str

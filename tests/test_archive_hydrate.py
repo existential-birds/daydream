@@ -1333,6 +1333,24 @@ class TestLicenseAdmissionGate:
             stage, curation_id=str(ledger["curation_id"]), source_commit=self.REV, ledger=ledger
         )
 
+    def _c5_exclusion(self, stage: Path, tmp_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Apply the license gate and return the manifest plus the excluded C5 batch."""
+        hydrate.apply_license_gate(
+            stage, revision=self.REV,
+            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
+        manifest = self._built_manifest(stage)
+        c5 = next(
+            (b for b in manifest["batches"]
+             if b["status"] == "excluded"
+             and b["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
+            None,
+        )
+        assert c5 is not None, "C5 gate failed to exclude the sentry repo (needs C5 batch)"
+        assert c5["session_id"] == "sess-c5"
+        assert not (stage / "runs" / "sess-c5").exists()
+        assert (stage / "excluded" / "sess-c5").exists()
+        return manifest, c5
+
     def test_manifest_batches_carry_repo_slug_and_license_evidence(self, tmp_path: Path) -> None:
         stage = self._seed_stage(tmp_path, {
             "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
@@ -1349,21 +1367,8 @@ class TestLicenseAdmissionGate:
             "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
             "sess-c5": self._session_manifest("sess-c5", "getsentry/sentry", spdx="MIT"),
         })
-        hydrate.apply_license_gate(
-            stage, revision=self.REV,
-            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
-        manifest = self._built_manifest(stage)
-        c5 = next(
-            (b for b in manifest["batches"]
-             if b["status"] == "excluded"
-             and b["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
-            None,
-        )
-        assert c5 is not None, "C5 gate failed to exclude the sentry repo (needs C5 batch)"
-        assert c5["session_id"] == "sess-c5"
+        manifest, c5 = self._c5_exclusion(stage, tmp_path)
         assert c5["artifact_relpath"].startswith("excluded/")
-        assert not (stage / "runs" / "sess-c5").exists()
-        assert (stage / "excluded" / "sess-c5").exists()
         # the admitted MIT repo is untouched
         admitted = [b for b in manifest["batches"] if b["status"] == "admitted"]
         assert [b["session_id"] for b in admitted] == ["sess-a"]
@@ -1384,20 +1389,7 @@ class TestLicenseAdmissionGate:
             "sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
             "sess-c5": json.dumps(c5_manifest).encode(),
         })
-        hydrate.apply_license_gate(
-            stage, revision=self.REV,
-            license_policy_path=self._write_policy(tmp_path), allow_copyleft=frozenset())
-        manifest = self._built_manifest(stage)
-        c5 = next(
-            (b for b in manifest["batches"]
-             if b["status"] == "excluded"
-             and b["reason_code"] == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO),
-            None,
-        )
-        assert c5 is not None, "C5 gate failed to exclude the sentry repo (needs C5 batch)"
-        assert c5["session_id"] == "sess-c5"
-        assert not (stage / "runs" / "sess-c5").exists()
-        assert (stage / "excluded" / "sess-c5").exists()
+        self._c5_exclusion(stage, tmp_path)
 
     def test_hydration_excludes_unopted_copyleft_and_missing_evidence(self, tmp_path: Path) -> None:
         stage = self._seed_stage(tmp_path, {

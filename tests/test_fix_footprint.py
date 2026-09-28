@@ -18,9 +18,9 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent, Backend, ResultEvent
-from daydream.deep.scope_issues import enforce_authorized_fix_footprint
+from daydream.deep.scope_issues import ScopeEnforcementResult, enforce_authorized_fix_footprint
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.git_ops import GitError, WorktreeRollbackSnapshot
+from daydream.git_ops import GitError, GitPathState, WorktreeRollbackSnapshot
 from daydream.phases import _restore_round_index_after_fanout, phase_fix_parallel
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
@@ -38,6 +38,28 @@ def _seed(repo: Path, files: dict[str, bytes]) -> None:
         path.write_bytes(content)
     _git(repo, "add", ".")
     _commit(repo, "seed footprint files")
+
+
+def _enforce_fix(
+    git_repo: Path,
+    footprint: AuthorizedFixFootprint,
+    *,
+    phase: str,
+    preexisting_untracked: dict[str, GitPathState],
+    file_scope_issues: bool = False,
+    preexisting_gitlinks: tuple[GitPathState, ...] = (),
+) -> ScopeEnforcementResult:
+    """Enforce ``footprint`` against ``git_repo`` at HEAD with the test-run context."""
+    return enforce_authorized_fix_footprint(
+        work_context(git_repo, run_id="test-run"),
+        "HEAD",
+        footprint,
+        preexisting_untracked=preexisting_untracked,
+        preexisting_gitlinks=preexisting_gitlinks,
+        phase=phase,
+        round_number=1,
+        file_scope_issues=file_scope_issues,
+    )
 
 
 def _install_scope_boundary_shims(
@@ -387,14 +409,7 @@ def test_preexisting_untracked_state_is_restored_exactly_and_new_residual_is_rem
     residual = git_repo / "odd\n$(ignored).txt"
     residual.write_bytes(b"remove me")
 
-    result = enforce_authorized_fix_footprint(
-        work_context(git_repo, run_id="test-run"),
-        "HEAD",
-        footprint,
-        preexisting_untracked=baseline,
-        phase="post-fix",
-        round_number=1,
-    )
+    result = _enforce_fix(git_repo, footprint, phase="post-fix", preexisting_untracked=baseline)
 
     assert result.retained_paths == frozenset({"allowed.txt"})
     assert result.mutated
@@ -440,10 +455,7 @@ def test_runtime_artifacts_do_not_enter_fix_scope_or_invalidate_content_evidence
         git_repo, "HEAD", preexisting_untracked=protected,
     )) != before
     footprint = AuthorizedFixFootprint.build(git_repo, {"allowed.txt"}, [])
-    result = enforce_authorized_fix_footprint(
-        work_context(git_repo, run_id="test-run"), "HEAD", footprint, preexisting_untracked=protected,
-        phase="post-test", round_number=1,
-    )
+    result = _enforce_fix(git_repo, footprint, phase="post-test", preexisting_untracked=protected)
     assert result.mutated
     assert not result.retained_paths
     assert scratch.read_bytes() == b"user scratch"
@@ -548,15 +560,7 @@ def test_scope_issue_diff_failure_still_restores_and_audits_without_sensitive_wa
         watched_paths=("outside.py",),
     )
 
-    result = enforce_authorized_fix_footprint(
-        work_context(git_repo, run_id="test-run"),
-        "HEAD",
-        footprint,
-        preexisting_untracked={},
-        phase="fix",
-        round_number=1,
-        file_scope_issues=True,
-    )
+    result = _enforce_fix(git_repo, footprint, phase="fix", preexisting_untracked={}, file_scope_issues=True)
 
     assert result.mutated is True
     assert (git_repo / "outside.py").read_bytes() == b"owner\n"
@@ -592,15 +596,7 @@ def test_scope_issue_diff_failure_skips_only_that_filing_after_restoring_all_res
         watched_paths=("outside-a.py", "outside-b.py"),
     )
 
-    result = enforce_authorized_fix_footprint(
-        work_context(git_repo, run_id="test-run"),
-        "HEAD",
-        footprint,
-        preexisting_untracked={},
-        phase="fix",
-        round_number=1,
-        file_scope_issues=True,
-    )
+    result = _enforce_fix(git_repo, footprint, phase="fix", preexisting_untracked={}, file_scope_issues=True)
 
     assert result.mutated is True
     assert (git_repo / "outside-a.py").read_bytes() == b"owner a\n"
@@ -631,15 +627,7 @@ def test_scope_issue_filing_failure_occurs_after_verified_restore_and_is_best_ef
         fail_issue_create=True,
     )
 
-    result = enforce_authorized_fix_footprint(
-        work_context(git_repo, run_id="test-run"),
-        "HEAD",
-        footprint,
-        preexisting_untracked={},
-        phase="fix",
-        round_number=1,
-        file_scope_issues=True,
-    )
+    result = _enforce_fix(git_repo, footprint, phase="fix", preexisting_untracked={}, file_scope_issues=True)
 
     assert result.mutated is True
     assert (git_repo / "outside.py").read_bytes() == b"owner\n"
@@ -982,14 +970,8 @@ def test_scope_guard_restores_pre_run_non_index_gitlink_checkout(git_repo: Path)
     footprint = AuthorizedFixFootprint.build(git_repo, set(), [])
     _git(nested, "checkout", "--detach", indexed)
 
-    result = enforce_authorized_fix_footprint(
-        work_context(git_repo, run_id="test-run"),
-        "HEAD",
-        footprint,
-        preexisting_untracked={},
-        preexisting_gitlinks=gitlinks,
-        phase="terminal",
-        round_number=1,
+    result = _enforce_fix(
+        git_repo, footprint, phase="terminal", preexisting_untracked={}, preexisting_gitlinks=gitlinks,
     )
 
     assert result.mutated

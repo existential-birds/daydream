@@ -321,6 +321,21 @@ def _configure_verifier_env(monkeypatch: pytest.MonkeyPatch, *, base_url: str) -
     monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
 
 
+def _verify_against(
+    fake_vendor: FakeVendorServer,
+    monkeypatch: pytest.MonkeyPatch,
+    receipt: Path,
+    tmp_path: Path,
+    *,
+    expect_zero: bool = True,
+) -> Path:
+    """Configure, run the verifier against ``fake_vendor``, and return the result path."""
+    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
+    result_path = tmp_path / "result.json"
+    assert (_run_verify(receipt, result_path) == 0) == expect_zero
+    return result_path
+
+
 # HoneyHive verifier behavior
 
 
@@ -393,9 +408,7 @@ def test_honeyhive_paginates_until_count_satisfied(
         return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 250}).encode()
 
     fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) == 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
     result = json.loads(result_path.read_text())
     assert result["stored_contract_passed"] is True
     # Two stable complete snapshots: each full read is 3 pages (100+100+50).
@@ -441,9 +454,7 @@ def test_honeyhive_rejects_invalid_readbacks(
         return 200, {"Content-Type": "application/json"}, body_builder(session_id)
 
     fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == disposition
 
@@ -458,9 +469,7 @@ def test_honeyhive_status_errors_are_bounded(
         return status, {"Content-Type": "application/json"}, b'{"secret": "' + _SECRET_KEY.encode() + b'"}'
 
     fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     if status == 404:
         assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
@@ -482,9 +491,7 @@ def test_honeyhive_redirect_is_rejected_without_following(
 
     fake_vendor.respond("POST", "/v1/events/search", search)
     fake_vendor.respond("POST", "/elsewhere", fake_vendor.json_responder({"events": [], "count": 0}))
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_REDIRECT
     assert not [r for r in fake_vendor.requests if r["path"] == "/elsewhere"]
@@ -555,9 +562,7 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
 
     fake_vendor.respond("GET", "/api/v1/sessions", sessions)
     fake_vendor.respond("POST", "/runs/query", query)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) == 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
     result = json.loads(result_path.read_text())
     assert result["stored_contract_passed"] is True
     resolution = discovered[0]
@@ -591,9 +596,7 @@ def test_langsmith_ambiguous_root_rejected(
 
     fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
     fake_vendor.respond("POST", "/runs/query", query)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_AMBIGUOUS_ROOT
 
@@ -766,9 +769,7 @@ def test_verifier_output_never_leaks_keys_endpoints_or_bodies(
         return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 3}).encode()
 
     fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) == 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
     text = result_path.read_text()
     for forbidden in (_SECRET_KEY, "private prompt", "private response", fake_vendor.base_url):
         assert forbidden not in text
@@ -993,9 +994,7 @@ def test_honeyhive_requires_two_stable_complete_snapshots(
         return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 2}).encode()
 
     fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
 
@@ -1021,9 +1020,7 @@ def test_honeyhive_two_stable_complete_snapshots_pass(
         return 200, {"Content-Type": "application/json"}, json.dumps({"events": events, "count": 3}).encode()
 
     fake_vendor.respond("POST", "/v1/events/search", search)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) == 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
     result = json.loads(result_path.read_text())
     assert result["stored_contract_passed"] is True
     # First complete read + second complete read of the same single page.
@@ -1121,9 +1118,7 @@ def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
 
     fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
     fake_vendor.respond("POST", "/runs/query", query)
-    _configure_verifier_env(monkeypatch, base_url=fake_vendor.base_url)
-    result_path = tmp_path / "result.json"
-    assert _run_verify(receipt, result_path) != 0
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
 

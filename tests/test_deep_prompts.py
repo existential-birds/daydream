@@ -8,7 +8,7 @@ from typing import Any
 import pytest
 
 from daydream import review_profile as rp, severity
-from daydream.deep.coverage import build_uncovered_sweep_prompt, diff_block_for_file
+from daydream.deep.coverage import build_uncovered_sweep_prompt
 from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,
     CONFIG_FLOW_TRACE_INSTRUCTION,
@@ -295,8 +295,8 @@ def test_bound_deep_diff_keeps_whole_blocks_up_to_budget() -> None:
     assert "diff --git a/c.py b/c.py" not in out
     assert "-" + "x" * body in out  # a retained block's hunk body is present, unchanged
     # Every retained block is byte-identical to its source block.
-    assert diff_block_for_file(out, "a.py") == diff_block_for_file(diff, "a.py")
-    assert diff_block_for_file(out, "b.py") == diff_block_for_file(diff, "b.py")
+    assert _diff_blocks_for_files(out, ["a.py"]) == _diff_blocks_for_files(diff, ["a.py"])
+    assert _diff_blocks_for_files(out, ["b.py"]) == _diff_blocks_for_files(diff, ["b.py"])
     assert info.original_bytes == len(diff.encode("utf-8"))
     assert info.retained_bytes == len(out.encode("utf-8")) - len((info.marker or "").encode("utf-8"))
     assert info.retained_blocks < info.total_blocks
@@ -325,11 +325,11 @@ def test_bound_deep_diff_marker_is_parse_safe() -> None:
     out, info = bound_deep_diff(diff)
     assert info.marker is not None
     assert out.startswith("# daydream: deep diff truncated:")
-    # count_changed_files / _diff_changed_files / diff_block_for_file ignore the marker.
+    # count_changed_files / _diff_changed_files / _diff_blocks_for_files ignore the marker.
 
     assert count_changed_files(out) == 2
-    assert diff_block_for_file(out, "a.py") == diff_block_for_file(diff, "a.py")
-    assert diff_block_for_file(out, "c.py") is None
+    assert _diff_blocks_for_files(out, ["a.py"]) == _diff_blocks_for_files(diff, ["a.py"])
+    assert _diff_blocks_for_files(out, ["c.py"]) is None
 
 
 def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
