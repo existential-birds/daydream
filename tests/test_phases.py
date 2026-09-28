@@ -200,7 +200,6 @@ async def _intent_inline_fixture(
         prompt_user if prompt_user is not None else (lambda *a, **kw: "y"),
     )
     repo = tmp_path / "repo"
-    repo.mkdir()
     init_repo(repo)
     (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
     git(repo, "add", ".")
@@ -1390,7 +1389,6 @@ async def test_bound_phase_fix_transports_only_named_private_inputs(
 
     silence_console("daydream.phases")
     repo = tmp_path / "repo"
-    repo.mkdir()
     init_repo(repo)
     source_file = repo / "src" / "app.py"
     source_file.parent.mkdir()
@@ -2389,7 +2387,6 @@ async def test_phase_understand_intent_clone_inline_diff_is_byte_bounded(
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     repo = tmp_path / "repo"
-    repo.mkdir()
     init_repo(repo)
     (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
     git(repo, "add", ".")
@@ -4388,7 +4385,6 @@ async def test_failure_summarizer_handles_changed_symlink_outside_repo(
     """A changed tracked symlink remains a lexical changed-file identity."""
 
     repo = tmp_path / "repo"
-    repo.mkdir()
     init_repo(repo)
     outside_one = tmp_path / "outside-one.txt"
     outside_two = tmp_path / "outside-two.txt"
@@ -4450,7 +4446,6 @@ async def test_failure_summarizer_falls_back_for_non_live_private_runtime_paths(
     """A model cannot echo private control or sibling-workspace identities."""
 
     repo = tmp_path / "repo"
-    repo.mkdir()
     init_repo(repo)
     work = make_work(repo)
     async with _private_session(tmp_path, work, "handoff-private-roots") as session:
@@ -4743,7 +4738,6 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
 
     silence_console("daydream.phases")
     repo = tmp_path / "repo"
-    repo.mkdir()
     init_repo(repo)
     (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
     git(repo, "add", ".")
