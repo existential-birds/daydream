@@ -277,7 +277,8 @@ def _hunk_slice_component(
     return hunk_slice_digest(hunk_index, files)
 
 
-def _digest_or_absent(text: str | None) -> dict[str, str]:
+def digest_or_absent(text: str | None) -> dict[str, str]:
+    """Grounding row for optional text: a content digest or the absent sentinel."""
     if text is None:
         return {"digest": _ABSENT}
     return {"digest": digest_text(text)}
@@ -326,9 +327,9 @@ def shard_key_payload(
     }
     grounding = {
         "exploration": {"digest": exploration_digest(exploration_dir)},
-        "intent": _digest_or_absent(intent_text),
-        "alternatives": _digest_or_absent(alternatives_text),
-        "settled_decisions": _digest_or_absent(prior_commits),
+        "intent": digest_or_absent(intent_text),
+        "alternatives": digest_or_absent(alternatives_text),
+        "settled_decisions": digest_or_absent(prior_commits),
     }
     return {
         "format": REUSE_KEY_FORMAT,
@@ -400,6 +401,65 @@ def wonder_key_payload(
     return {
         "format": REUSE_KEY_FORMAT,
         "unit": "alternatives",
+        "components": components,
+        "grounding": dict(grounding),
+    }
+
+
+def _sweep_schema_digest() -> str:
+    """Digest of the exact ``UNCOVERED_SWEEP_SCHEMA`` the step validates against.
+
+    Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    import would be a cycle. The schema is part of the sweep's contract, so a
+    schema change must miss rather than serve output the new schema would have
+    rejected.
+    """
+    from daydream.phases import UNCOVERED_SWEEP_SCHEMA
+
+    return digest_text(
+        json.dumps(UNCOVERED_SWEEP_SCHEMA, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def sweep_key_payload(
+    *,
+    contributing_records: Mapping[str, bytes],
+    uncovered_files: Sequence[str],
+    hunk_index: Mapping[str, Any],
+    bounds: Mapping[str, Any],
+    identity: PhaseIdentity,
+    grounding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the uncovered-sweep payload.
+
+    ``contributing_records`` are the project-stack records the sweep runs
+    beside (structural excluded, matching what it consumes) and are *subject*:
+    a recomputed shard moves the sweep's key (MH8). ``uncovered_files`` is the
+    receipt-derived set and ``hunk_index`` supplies its hunks. Intent and
+    exploration are the loop's own re-derived grounding, so they are recorded
+    and never keyed (MH2/MH16). ``bounds`` is the resolved sweep budget
+    (``min_hunk_lines``/``max_files``), so a changed budget misses.
+    """
+    ordered_uncovered = sorted(set(uncovered_files))
+    components: dict[str, Any] = {
+        "format": REUSE_KEY_FORMAT,
+        "records": {
+            name: digest_bytes(data) for name, data in contributing_records.items()
+        },
+        "uncovered_set": ordered_uncovered,
+        "hunk_slice": hunk_slice_digest(hunk_index, ordered_uncovered),
+        "profile": identity.profile_digest,
+        "schema": _sweep_schema_digest(),
+        "model": identity.model,
+        "effort": identity.effort if identity.effort else "default",
+        "bounds": {
+            "min_hunk_lines": bounds.get("min_hunk_lines"),
+            "max_files": bounds.get("max_files"),
+        },
+    }
+    return {
+        "format": REUSE_KEY_FORMAT,
+        "unit": "sweep",
         "components": components,
         "grounding": dict(grounding),
     }

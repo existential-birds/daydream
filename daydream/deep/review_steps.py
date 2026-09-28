@@ -48,11 +48,13 @@ from daydream.deep.render import _PIPELINE_STAGE_NAMES
 from daydream.deep.reuse_key import (
     PhaseIdentity,
     absent_components,
+    digest_or_absent,
     digest_text,
     exploration_digest,
     grounding_digests,
     intent_key_payload,
     phase_identity_for,
+    sweep_key_payload,
     unit_key,
     wonder_key_payload,
 )
@@ -1137,6 +1139,67 @@ def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
         return None
 
 
+def _sweep_contributing_records(deep_state: DeepState) -> dict[str, bytes] | None:
+    """The project-stack record bytes the sweep's key covers.
+
+    ``records_paths`` carries the primary-scope stacks (the structural records
+    are partitioned out by ``_step_per_stack_parse``). The sweep's own prior
+    records file is never a prompt input and is excluded. An unreadable record
+    makes the whole component absent -- ``None`` becomes a named miss, never a
+    key built over a file that could not be read.
+    """
+    uncovered_name = per_stack_records_path(deep_state.dd, "uncovered").name
+    records: dict[str, bytes] = {}
+    for path in deep_state.records_paths:
+        if path.name == uncovered_name:
+            continue
+        try:
+            records[path.name] = path.read_bytes()
+        except OSError:
+            return None
+    return records
+
+
+def _sweep_store_payload(dd: Path) -> dict[str, bytes] | None:
+    """The sweep's owned artifacts as a payload map, or ``None`` when incomplete.
+
+    ``stack-uncovered-records.json`` and ``coverage-stats.json`` are mandatory
+    outputs of a completed sweep; the per-file Markdown sidecars are optional.
+    An incomplete set must never be stored, so a later lookup cannot serve a
+    half-result.
+    """
+    mandatory = (per_stack_records_path(dd, "uncovered").name, "coverage-stats.json")
+    payload: dict[str, bytes] = {}
+    for name in mandatory:
+        path = dd / name
+        if not path.is_file():
+            return None
+        payload[name] = path.read_bytes()
+    for sidecar in sorted(dd.glob("uncovered-*-review.md")):
+        payload[sidecar.name] = sidecar.read_bytes()
+    return payload
+
+
+def _restore_swept_records(deep_state: DeepState) -> None:
+    """Append a restored sweep's records to the live pool (MH6).
+
+    Mirrors exactly where the real sweep appends its records, so the arbiter
+    and merge consume a reused sweep's findings as ordinary per-stack records.
+    A missing or unreadable restored file leaves the pool untouched (fail-open,
+    like the sweep itself).
+    """
+    records_path = per_stack_records_path(deep_state.dd, "uncovered")
+    try:
+        loaded = json.loads(records_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    records = _records_issues_or_empty(loaded)
+    stamp_record_uids(records, "uncovered")
+    deep_state.records_paths.append(records_path)
+    deep_state.records.extend(records)
+    deep_state.record_sources.extend("uncovered" for _ in records)
+
+
 async def _run_uncovered_sweep(
     ctx: FlowContext, *, phase: "PhaseScopeHandle | None" = None
 ) -> None:
@@ -1157,12 +1220,95 @@ async def _run_uncovered_sweep(
     # from the short display diff. Discovery receives the actual live path.
     diff_path = deep_state.diff_path
 
+    hunk_index = load_hunk_index(dd.parent)
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
-        load_hunk_index(dd.parent),
+        hunk_index,
         min_hunk_lines=_uncovered_sweep_min_hunk_lines(ctx),
         max_files=_uncovered_sweep_max_files(ctx),
     )
+
+    # Issue #733 — the sweep is keyed on its own prompt inputs (contributing
+    # records, the receipt-derived uncovered set, those files' hunks, the
+    # resolved profile/model/effort and the sweep budget), never on this run's
+    # trajectory-derived counters (A8). Intent and the pre-scan are recorded
+    # grounding: a moved pre-scan can never move the key (MH2/MH16). Reuse runs
+    # only when there is a sweep to reuse; the no-eligible-work return below is
+    # already free of a model call.
+    reuse = reuse_cache_for(ctx)
+    sweep_payload: dict[str, Any] | None = None
+    sweep_reuse_key: str | None = None
+    sweep_identity: PhaseIdentity | None = None
+    if reuse is not None and swept_files:
+        contributing_records = _sweep_contributing_records(deep_state)
+        if contributing_records is None:
+            reuse.record(
+                "sweep", outcome="miss", reason="contributing record unreadable"
+            )
+        else:
+            sweep_identity = phase_identity_for(ctx, "parse")
+            sweep_payload = sweep_key_payload(
+                contributing_records=contributing_records,
+                uncovered_files=uncovered_files,
+                hunk_index=hunk_index,
+                bounds={
+                    "min_hunk_lines": _uncovered_sweep_min_hunk_lines(ctx),
+                    "max_files": _uncovered_sweep_max_files(ctx),
+                },
+                identity=sweep_identity,
+                grounding={
+                    "intent": digest_or_absent(deep_state.intent_summary_or_none),
+                    "exploration": {
+                        "digest": exploration_digest(deep_state.exploration_dir_or_none)
+                    },
+                },
+            )
+            sweep_reuse_key = unit_key(sweep_payload)
+            if sweep_reuse_key is None:
+                reuse.record(
+                    "sweep",
+                    outcome="miss",
+                    reason="absent components: "
+                    + ", ".join(absent_components(sweep_payload)),
+                )
+            else:
+                hit = reuse.lookup(sweep_reuse_key)
+                if isinstance(hit, ReuseHit):
+                    restore_reason = _restore_entry_payload(hit, dd)
+                    if restore_reason is None:
+                        _restore_swept_records(deep_state)
+                        reuse.record(
+                            "sweep",
+                            outcome="hit",
+                            reason="complete entry",
+                            key=sweep_reuse_key,
+                            origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                            detail={
+                                "grounding": reuse.grounding_delta(
+                                    hit, grounding_digests(sweep_payload)
+                                ),
+                                "grounding_status": {
+                                    "intent": _reuse_grounding_status(reuse, "intent"),
+                                    "exploration": _reuse_grounding_status(
+                                        reuse, "exploration"
+                                    ),
+                                },
+                            },
+                        )
+                        return
+                    print_warning(
+                        console, f"Reuse restore failed for uncovered sweep: {restore_reason}"
+                    )
+                    reuse.record(
+                        "sweep",
+                        outcome="miss",
+                        reason=f"restore failed: {restore_reason}",
+                        key=sweep_reuse_key,
+                    )
+                else:
+                    reuse.record(
+                        "sweep", outcome="miss", reason=hit.reason, key=sweep_reuse_key
+                    )
 
     stats: dict[str, Any] = {
         "pre_sweep": {
@@ -1393,6 +1539,30 @@ async def _run_uncovered_sweep(
         if config.start_at == "per-stack":
             per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
     stats_p.write_text(json.dumps(stats, indent=2))
+    # Issue #733 — store only a completed sweep, after the same artifacts a
+    # fresh run leaves are final on disk (records + coverage accounting +
+    # sidecars). A sweep with any failure is not a result a later run may serve.
+    if (
+        not sweep_failures
+        and reuse is not None
+        and sweep_payload is not None
+        and sweep_reuse_key is not None
+        and sweep_identity is not None
+    ):
+        store_payload = _sweep_store_payload(dd)
+        if store_payload is not None:
+            reuse.store(
+                sweep_reuse_key,
+                unit="sweep",
+                payload=store_payload,
+                components=sweep_payload["components"],
+                identity=sweep_identity,
+                grounding=grounding_digests(sweep_payload),
+                grounding_status={
+                    "intent": _reuse_grounding_status(reuse, "intent"),
+                    "exploration": _reuse_grounding_status(reuse, "exploration"),
+                },
+            )
     if sweep_failures and phase is not None:
         phase.finish(*partial_or_failed_terminal(completed_reviews))
 

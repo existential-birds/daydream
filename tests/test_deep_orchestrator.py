@@ -129,6 +129,7 @@ async def _run_deep(
     precision_mode: bool = False,
     approve_on_clean: bool = False,
     review_profile: "ResolvedProfile | None" = None,
+    review_cache_enabled: bool = True,
 ) -> int:
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
     config = RunConfig(
@@ -138,6 +139,7 @@ async def _run_deep(
         precision_mode=precision_mode,
         approve_on_clean=approve_on_clean,
         review_profile=review_profile,
+        review_cache_enabled=review_cache_enabled,
     )
     return await run(config)
 

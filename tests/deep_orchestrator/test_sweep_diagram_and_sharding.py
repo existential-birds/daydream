@@ -226,7 +226,9 @@ async def test_uncovered_sweep_per_stack_resume_no_findings_writes_empty_records
     stub2 = _install_uncovered_sweep_stub(monkeypatch, target)
     stub2.fail_sweep = True  # the rerun sweep attempts and fails -> no findings
     stub2.merge_echo_records = True
-    assert await _run_deep(target, start_at="per-stack") == 0
+    # Issue #733: a resume with identical inputs reuses the prior sweep, so this
+    # test pins the real rerun path (fresh sweep, no output) with reuse disabled.
+    assert await _run_deep(target, start_at="per-stack", review_cache_enabled=False) == 0
 
     assert json.loads((deep / "stack-uncovered-records.json").read_text()) == []
 

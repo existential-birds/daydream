@@ -17,7 +17,11 @@ import pytest
 
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.runner import run
-from tests.deep_orchestrator.support import _count_review_prompts
+from tests.deep_orchestrator.support import (
+    _count_review_prompts,
+    _install_uncovered_sweep_stub,
+    _uncovered_sweep_target,
+)
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_deep_orchestrator import MakeConfig
@@ -59,6 +63,8 @@ def _stack_receipts(deep: Path) -> dict[str, dict[str, list[str]]]:
 _PER_STACK_PROMPT = re.compile(r"you are reviewing the (\S+) stack", re.IGNORECASE)
 _INTENT_DISCRIMINATOR = "understand the intent of these changes"
 _WONDER_DISCRIMINATOR = "evaluate the implementation"
+# A sentence only the uncovered-sweep prompt carries (coverage.py).
+_SWEEP_DISCRIMINATOR = "you may only comment on hunks you have read"
 
 
 def _count_unit_prompts(calls: list[dict[str, object]], needle: str) -> int:
@@ -144,6 +150,38 @@ def _latest_provenance(deep: Path) -> dict[str, object]:
     assert records, "the run must record its reuse provenance inside the store"
     record: dict[str, object] = json.loads(records[-1].read_text(encoding="utf-8"))
     return record
+
+
+async def test_identical_rerun_reuses_the_uncovered_sweep_and_restores_coverage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH8/A8: an identical rerun performs no sweep model call and restores the
+    origin run's uncovered records AND its coverage accounting byte-for-byte --
+    the counters are read back from the entry, never recomputed against a
+    different run's trajectory."""
+    target = _uncovered_sweep_target(tmp_path)
+    stub = _install_uncovered_sweep_stub(monkeypatch, target)
+    stub.sweep_file = "notes.txt"
+    stub.merge_echo_records = True
+    config = make_config(target, assume="yes", output_mode="loop")
+    assert await run(config) == 0
+    deep = target / ".daydream" / "deep"
+    assert _count_unit_prompts(stub.calls, _SWEEP_DISCRIMINATOR) >= 1
+    records_bytes = (deep / "stack-uncovered-records.json").read_bytes()
+    coverage_bytes = (deep / "coverage-stats.json").read_bytes()
+    assert json.loads(records_bytes), "the seed sweep must produce findings"
+    assert json.loads(coverage_bytes)["sweep_finding_count"] >= 1
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_unit_prompts(stub.calls, _SWEEP_DISCRIMINATOR) == 0
+    assert (deep / "stack-uncovered-records.json").read_bytes() == records_bytes
+    assert (deep / "coverage-stats.json").read_bytes() == coverage_bytes
+    units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
+    assert units["sweep"]["outcome"] == "hit"
+    assert set(cast(dict[str, object], units["sweep"]["grounding_status"])) == {
+        "intent",
+        "exploration",
+    }
 
 
 async def test_identical_rerun_reuses_intent_and_wonder_units(

@@ -282,6 +282,10 @@ class DeepState:
         self._data["intent_summary"] = value
 
     @property
+    def intent_summary_or_none(self) -> str | None:
+        return cast(str | None, self._optional("intent_summary", str, "str or None"))
+
+    @property
     def records_paths(self) -> list[Path]:
         return cast(list[Path], self._required("records_paths", list, "list"))
 

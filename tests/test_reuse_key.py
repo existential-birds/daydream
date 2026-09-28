@@ -220,3 +220,40 @@ def test_grounding_is_recorded_even_when_absent(tmp_path: Path) -> None:
     }
     assert reuse_key.grounding_digests(payload)["exploration"] != "absent"
     assert reuse_key.grounding_digests(payload)["intent"] == "absent"
+
+
+def _sweep_payload(
+    tmp_path: Path,
+    *,
+    records: dict[str, bytes],
+    uncovered: list[str],
+    hunk_digest: str,
+    intent: str,
+) -> dict[str, Any]:
+    del tmp_path  # the payload takes record bytes directly; the path is unused
+    hunk_index = {name: {"hunks": [{"digest": hunk_digest}]} for name in uncovered}
+    return reuse_key.sweep_key_payload(
+        contributing_records=records,
+        uncovered_files=uncovered,
+        hunk_index=hunk_index,
+        bounds={"min_hunk_lines": 5, "max_files": 10},
+        identity=_identity(),
+        grounding={"intent": {"digest": intent}, "exploration": {"digest": "absent"}},
+    )
+
+
+def test_sweep_key_tracks_contributing_records_not_this_runs_counters(tmp_path: Path) -> None:
+    base = _sweep_payload(tmp_path, records={"stack-python#0-records.json": b"{}"},
+                          uncovered=["mod0.py"], hunk_digest="h" * 64, intent="i" * 64)
+    key = reuse_key.unit_key(base)
+    assert key is not None
+    assert reuse_key.unit_key(_sweep_payload(
+        tmp_path, records={"stack-python#0-records.json": b'{"verdicts": []}'},
+        uncovered=["mod0.py"], hunk_digest="h" * 64, intent="i" * 64)) != key
+    assert reuse_key.unit_key(_sweep_payload(
+        tmp_path, records={"stack-python#0-records.json": b"{}"},
+        uncovered=["mod0.py", "mod1.py"], hunk_digest="h" * 64, intent="i" * 64)) != key
+    # The two artifacts the loop re-derives are grounding, not key inputs (MH2).
+    assert reuse_key.unit_key(_sweep_payload(
+        tmp_path, records={"stack-python#0-records.json": b"{}"},
+        uncovered=["mod0.py"], hunk_digest="h" * 64, intent="j" * 64)) == key
