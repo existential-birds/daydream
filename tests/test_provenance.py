@@ -1,14 +1,16 @@
 
+import importlib.metadata
 from typing import Any
 
 import pytest
 
+import daydream
 from daydream import git_ops
 from daydream.archive import provenance
+from daydream.git_ops import GitError
 
 
 def test_version_is_package_version() -> None:
-    import daydream
     p = provenance.capture_executable_provenance()
     assert p.version == daydream.__version__
 
@@ -43,8 +45,6 @@ def test_install_source_is_known_or_unknown() -> None:
 
 
 def test_commit_and_dirty_unknown_on_git_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    from daydream.git_ops import GitError
-
     def _raise(_repo: Any) -> None:
         raise GitError("synthetic git failure")
 
@@ -72,7 +72,6 @@ def test_install_source_unknown_on_distribution_error(monkeypatch: pytest.Monkey
     Closes the remaining smoke-test gap in finding #5 (daydream covered the
     git-error branch; this covers the distribution-error branch).
     """
-    import importlib.metadata
 
     def _raise(_name: Any) -> None:
         raise importlib.metadata.PackageNotFoundError("synthetic dist lookup failure")

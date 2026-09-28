@@ -140,22 +140,6 @@ def _finding_files_from_records(findings: list[Any]) -> set[str]:
     return files
 
 
-def _load_records_or_none(records_path: Path) -> Any | None:
-    """Load and parse a per-stack records file, or ``None`` when absent/unreadable.
-
-    The single ``json.loads`` / ``(OSError, ValueError)`` opener for
-    :func:`_parsed_covered_files` so the fail-open loader lives in one place
-    instead of being copy-pasted. A missing
-    or malformed records file degrades to ``None``; callers treat that as an
-    incomplete shard contributing ZERO coverage (fail-open: swept, never
-    skipped).
-    """
-    try:
-        return json.loads(records_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-
-
 def _parsed_covered_files(records_path: Path) -> set[str] | None:
     """Set of files a completed shard's evidence-gated verdicts mark covered.
 
@@ -170,8 +154,9 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
     incomplete shard contributes ZERO inline/frontier coverage (fail-open: the
     reviewer failed/omitted, so its files stay uncovered and get swept).
     """
-    records = _load_records_or_none(records_path)
-    if records is None:
+    try:
+        records = json.loads(records_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return None
     if isinstance(records, dict):
         verdicts = records.get("verdicts")

@@ -82,31 +82,14 @@ def test_run_gh_passes_exact_static_environment_without_ambient_merge(
 
 
 def test_refreshing_auth_serializes_refresh_across_callers() -> None:
-    refresh_calls = 0
-
-    def refresh() -> tuple[Any, float]:
-        nonlocal refresh_calls
-        refresh_calls += 1
-        return (
-            git_ops.StaticGitHubAuth(
-                {"PATH": "/tools", "GH_TOKEN": "ghs_fresh_token_1234567890"}
-            ),
-            float("inf"),
-        )
-
-    auth = git_ops.RefreshingGitHubAuth(
-        git_ops.StaticGitHubAuth(
-            {"PATH": "/tools", "GH_TOKEN": "ghs_expired_token_1234567890"}
-        ),
-        expires_at=0,
-        refresh=refresh,
-    )
+    refresh_calls = {"auth": 0}
+    auth = refreshing_session("auth", refresh_calls)
 
     with ThreadPoolExecutor(max_workers=8) as executor:
         environments = list(executor.map(lambda _index: auth.environment_for_request(), range(8)))
 
-    assert refresh_calls == 1
-    assert all(env is not None and env["GH_TOKEN"] == "ghs_fresh_token_1234567890" for env in environments)
+    assert refresh_calls == {"auth": 1}
+    assert all(env is not None and env["GH_TOKEN"] == "ghs_auth_fresh_token_1234567890" for env in environments)
 
 
 def test_run_gh_passes_none_for_inherited_auth() -> None:
@@ -625,26 +608,10 @@ def test_get_app_metadata_uses_bearer_jwt_and_explicit_auth() -> None:
 def test_get_app_metadata_does_not_mutate_refreshing_installation_auth() -> None:
     """A separate App JWT call leaves the installation session refreshable."""
     captured: dict[str, Any] = {}
-    refresh_calls = 0
-
-    def refresh() -> tuple[Any, float]:
-        nonlocal refresh_calls
-        refresh_calls += 1
-        return (
-            git_ops.StaticGitHubAuth(
-                {"PATH": "/tools", "GH_TOKEN": "ghs_fresh_token_1234567890"}
-            ),
-            float("inf"),
-        )
+    refresh_calls = {"installation": 0}
 
     spy_run = _spy_run(captured)
-    installation_auth = git_ops.RefreshingGitHubAuth(
-        git_ops.StaticGitHubAuth(
-            {"PATH": "/tools", "GH_TOKEN": "ghs_expired_token_1234567890"}
-        ),
-        expires_at=0,
-        refresh=refresh,
-    )
+    installation_auth = refreshing_session("installation", refresh_calls)
     with patch("daydream.git_ops.gh_api", return_value={"permissions": {}, "slug": "acme-bot"}):
         get_app_metadata(Path("."), 42, _TEST_PEM)
     with patch("subprocess.run", side_effect=spy_run):
@@ -654,8 +621,8 @@ def test_get_app_metadata_does_not_mutate_refreshing_installation_auth() -> None
             auth=installation_auth,
         )
 
-    assert refresh_calls == 1
-    assert captured["env"]["GH_TOKEN"] == "ghs_fresh_token_1234567890"
+    assert refresh_calls == {"installation": 1}
+    assert captured["env"]["GH_TOKEN"] == "ghs_installation_fresh_token_1234567890"
 
 
 def test_get_app_metadata_wraps_gh_api_failure() -> None:

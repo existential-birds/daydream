@@ -85,6 +85,23 @@ def _required_env(environment: Mapping[str, str], name: str) -> str:
     return value
 
 
+def _require_https_endpoint(url: str, *, message: str, host: str = "") -> None:
+    """Reject a non-HTTPS endpoint, a mismatched host, or any embedded userinfo.
+
+    ``host=""`` requires only that a hostname is present (the claude base-URL
+    contract); a non-empty *host* must also match it case-insensitively.
+    """
+    parsed = urllib.parse.urlsplit(url)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.hostname
+        or (host and parsed.hostname.lower() != host)
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise EntrypointError(message)
+
+
 def _sanitize_reviewer_environment(
     environment: Mapping[str, str], *, backend: str,
 ) -> dict[str, str]:
@@ -111,14 +128,9 @@ def _sanitize_reviewer_environment(
             )
         base_url = (source.get(env_policy.ANTHROPIC_BASE_URL_ENV) or "").strip()
         if base_url:
-            parsed = urllib.parse.urlsplit(base_url)
-            if (
-                parsed.scheme.lower() != "https"
-                or not parsed.hostname
-                or parsed.username is not None
-                or parsed.password is not None
-            ):
-                raise EntrypointError("ANTHROPIC_BASE_URL must be an HTTPS endpoint")
+            _require_https_endpoint(
+                base_url, message="ANTHROPIC_BASE_URL must be an HTTPS endpoint"
+            )
             sanitized[env_policy.ANTHROPIC_BASE_URL_ENV] = base_url
         if api_key:
             sanitized[env_policy.ANTHROPIC_API_KEY_ENV] = api_key
@@ -132,16 +144,10 @@ def _sanitize_reviewer_environment(
         raise EntrypointError(
             "missing required environment variable 'DAYDREAM_REVIEW_BASE_URL'"
         )
-    parsed = urllib.parse.urlsplit(base_url)
-    if (
-        parsed.scheme.lower() != "https"
-        or (parsed.hostname or "").lower() != "openrouter.ai"
-        or parsed.username is not None
-        or parsed.password is not None
-    ):
-        raise EntrypointError(
-            "DAYDREAM_REVIEW_BASE_URL must be an HTTPS openrouter.ai endpoint"
-        )
+    _require_https_endpoint(
+        base_url, message="DAYDREAM_REVIEW_BASE_URL must be an HTTPS openrouter.ai endpoint",
+        host="openrouter.ai",
+    )
     if not api_key:
         raise EntrypointError(
             "missing required environment variable 'DAYDREAM_REVIEW_API_KEY'"

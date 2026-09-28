@@ -183,11 +183,21 @@ async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd
     assert backend._transports == []
 
 
+@pytest.fixture
+def pi_workspace(tmp_path: Path) -> Path:
+    """Return a workspace whose ``.pi/settings.json`` selects a default model."""
+    settings = tmp_path / ".pi" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}')
+    return tmp_path
+
+
 async def _run_and_capture_args(
     backend: Any,
     prompt: Any="p",
     *,
     fixture: Any="simple_text.jsonl",
+    cwd: Path = Path("/tmp"),
     **kwargs: Any,
 ) -> tuple[Any, ...]:
     """Drive ``execute`` over a canned fixture and return the subprocess argv.
@@ -198,7 +208,7 @@ async def _run_and_capture_args(
     """
     mock_proc = make_mock_process_from_fixture(fixture)
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc) as mock_exec:
-        async for _ in backend.execute(Path("/tmp"), prompt, **kwargs):
+        async for _ in backend.execute(cwd, prompt, **kwargs):
             pass
     return list(mock_exec.call_args.args), mock_exec
 
@@ -876,56 +886,37 @@ async def test_provider_flag(monkeypatch: pytest.MonkeyPatch, env_provider: Any,
 
 
 @pytest.mark.asyncio
-async def test_default_model_does_not_override_pi_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_default_model_does_not_override_pi_settings(
+    pi_workspace: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """A Pi-configured default wins when daydream did not select a model."""
-    settings = tmp_path / ".pi" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text(
-        '{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}'
-    )
     monkeypatch.delenv("PI_PROVIDER", raising=False)
 
     backend = PiBackend()
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc
-    ) as mock_exec:
-        async for _ in backend.execute(tmp_path, "Reply"):
-            pass
+    flat_args, _ = await _run_and_capture_args(backend, cwd=pi_workspace)
 
-    flat_args = list(mock_exec.call_args.args)
     assert "--model" not in flat_args
     assert "--provider" not in flat_args
 
 
-def test_public_model_reflects_pi_settings_before_execute(tmp_path: Path) -> None:
+def test_public_model_reflects_pi_settings_before_execute(pi_workspace: Path) -> None:
     """The public model is resolved from the target workspace at construction."""
-    settings = tmp_path / ".pi" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text('{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}')
 
-    backend = PiBackend(cwd=tmp_path)
+    backend = PiBackend(cwd=pi_workspace)
 
     assert backend.model == "gpt-5.6-luna"
 
 
 @pytest.mark.asyncio
-async def test_explicit_model_overrides_pi_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_explicit_model_overrides_pi_settings(
+    pi_workspace: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """An explicit daydream model still wins over Pi's configured default."""
-    settings = tmp_path / ".pi" / "settings.json"
-    settings.parent.mkdir()
-    settings.write_text('{"defaultProvider": "openai", "defaultModel": "gpt-5.6-luna"}')
     monkeypatch.delenv("PI_PROVIDER", raising=False)
 
     backend = PiBackend(model="custom-model")
-    mock_proc = make_mock_process_from_fixture("simple_text.jsonl")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc
-    ) as mock_exec:
-        async for _ in backend.execute(tmp_path, "Reply"):
-            pass
+    flat_args, _ = await _run_and_capture_args(backend, cwd=pi_workspace)
 
-    flat_args = list(mock_exec.call_args.args)
     assert flat_args[flat_args.index("--model") + 1] == "custom-model"
 
 

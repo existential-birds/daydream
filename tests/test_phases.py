@@ -359,6 +359,14 @@ def _seed_healing_repo(
     return file_path, git_ops.stash_create(tmp_path)
 
 
+def _reject_violations(tmp_path: Path, snapshot: str | None) -> list[str] | None:
+    """Run the healing guard with the standard captured-snapshot arguments."""
+    return _reject_test_healing_generated_file_edits(
+        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
+        allow_standalone=True,
+    )
+
+
 def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migration(
     tmp_path: Path,
     silence_console: Callable[..., None],
@@ -371,10 +379,7 @@ def test_test_healing_guard_reverts_existing_generated_file_and_keeps_new_migrat
     new_migration = tmp_path / "migrations" / "0002_add_users.sql"
     new_migration.write_text("-- allowed new migration\n")
 
-    violations = _reject_test_healing_generated_file_edits(
-        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
-        allow_standalone=True,
-    )
+    violations = _reject_violations(tmp_path, snapshot)
 
     assert violations == ["migrations/0001_init.sql"]
     assert migration.read_text() == "-- original\n"
@@ -396,10 +401,7 @@ def test_test_healing_guard_uses_snapshot_bytes_to_detect_marker_generated_file(
     )
     generated.write_text("MANUAL = True\n")
 
-    violations = _reject_test_healing_generated_file_edits(
-        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
-        allow_standalone=True,
-    )
+    violations = _reject_violations(tmp_path, snapshot)
 
     assert violations == ["client.py"]
     assert generated.read_text() == "# @generated\nORIGINAL = True\n"
@@ -444,10 +446,7 @@ def test_test_healing_guard_uses_unique_recovery_patch_names(
     for path in paths:
         (tmp_path / path).write_text(f"-- forbidden {path}\n")
 
-    _reject_test_healing_generated_file_edits(
-        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
-        allow_standalone=True,
-    )
+    _reject_violations(tmp_path, snapshot)
 
     patches = list((tmp_path / ".daydream" / "partial-fixes").glob("*.patch"))
     assert len(patches) == 2
@@ -468,10 +467,7 @@ def test_test_healing_guard_skips_restoration_when_change_discovery_fails(
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("unavailable")),
     )
 
-    violations = _reject_test_healing_generated_file_edits(
-        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
-        allow_standalone=True,
-    )
+    violations = _reject_violations(tmp_path, snapshot)
 
     assert violations == []
     assert migration.read_text() == "-- healing edit\n"
@@ -494,10 +490,7 @@ def test_test_healing_guard_reports_restoration_failure(
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
     )
 
-    violations = _reject_test_healing_generated_file_edits(
-        tmp_path, snapshot=snapshot, snapshot_captured=True, pre_untracked=set(),
-        allow_standalone=True,
-    )
+    violations = _reject_violations(tmp_path, snapshot)
 
     assert violations is None
     assert migration.read_text() == "-- healing edit\n"

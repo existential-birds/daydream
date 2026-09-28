@@ -30,6 +30,7 @@ from daydream.git_ops import (
     WrongBranchError,
 )
 from tests.conftest import _make_repo_with_main
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
     bare_remote as _bare_remote,
     commit as _commit,
@@ -2999,10 +3000,6 @@ def test_github_request_budget_preserves_subsecond_deadline() -> None:
 def test_pr_list_fields_include_gh_245_head_ref_name() -> None:
     assert "headRefName" in git_ops.GH_PR_LIST_FIELDS
     assert "baseRefOid" not in git_ops.GH_PR_LIST_FIELDS
-
-
-
-from tests.harness.fake_gh import FakeGh  # noqa: E402
 
 
 @pytest.mark.parametrize("extra_field", ["baseRefOid", "futureCompatibilityFloor"])
