@@ -541,6 +541,70 @@ def arbiter_key_payload(
     }
 
 
+def _merge_schema_digest() -> str:
+    """Digest of the exact ``MERGED_ITEMS_SCHEMA`` the merge validates against.
+
+    Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    import would be a cycle. The schema is part of the merge's contract, so a
+    schema change must miss rather than serve output the new schema would have
+    rejected.
+    """
+    from daydream.phases import MERGED_ITEMS_SCHEMA
+
+    return digest_text(
+        json.dumps(MERGED_ITEMS_SCHEMA, sort_keys=True, separators=(",", ":"))
+    )
+
+
+def merge_key_payload(
+    *,
+    contributing_records: Mapping[str, bytes | None],
+    structural_records_present: bool,
+    failed_stacks: Sequence[str],
+    identity: PhaseIdentity,
+    grounding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Build the cross-stack merge payload.
+
+    ``contributing_records`` is the canonical ``name -> bytes`` map of every
+    per-stack record file the merge reads -- the primary stacks, the uncovered
+    sweep's records, and the structural meta-stack -- and is *subject*: a
+    recomputed shard moves the merge's key (MH8), so the aggregation unit misses
+    and recomputes rather than serving output synthesized from stale records. A
+    named file that could not be read maps to ``None``, which makes the whole
+    unit a named miss rather than a partial key. ``structural_records_present``
+    records whether the run had a structural meta-stack at all, and
+    ``failed_stacks`` the sorted uncovered-stack names (an empty list is a
+    value). Intent, alternatives and the pre-scan are the loop's own re-derived
+    grounding, so they are recorded and never keyed (MH2/MH16).
+    """
+    record_component: dict[str, str] | None
+    if any(data is None for data in contributing_records.values()):
+        record_component = None
+    else:
+        record_component = {
+            name: digest_bytes(data)
+            for name, data in contributing_records.items()
+            if data is not None
+        }
+    components: dict[str, Any] = {
+        "format": REUSE_KEY_FORMAT,
+        "records": record_component,
+        "structural": structural_records_present,
+        "failed_stacks": sorted(failed_stacks),
+        "schema": _merge_schema_digest(),
+        "profile": identity.profile_digest,
+        "model": identity.model,
+        "effort": identity.effort if identity.effort else "default",
+    }
+    return {
+        "format": REUSE_KEY_FORMAT,
+        "unit": "merge",
+        "components": components,
+        "grounding": dict(grounding),
+    }
+
+
 def phase_identity_for(ctx: Any, phase: str) -> PhaseIdentity:
     """Resolve ``phase``'s contract identity from the live flow context."""
     from daydream.review_profile import build_default_profile

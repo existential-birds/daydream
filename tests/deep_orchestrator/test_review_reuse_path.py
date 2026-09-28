@@ -9,7 +9,9 @@ published through the artifact-visibility anchors and survives a fresh run.
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from pathlib import Path
 from typing import cast
 
@@ -18,6 +20,7 @@ import pytest
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _count_merge_prompts,
     _count_review_prompts,
     _install_uncovered_sweep_stub,
     _uncovered_sweep_target,
@@ -398,3 +401,43 @@ async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_p
     # A partially completed earlier adjudication still resumes group-by-group:
     # the group markers are read from the fresh run's own artifacts, not from the store.
     assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))
+
+
+async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH1/MH8/MH16: an identical rerun performs no cross-stack merge call; the
+    merged items and the dedup candidates are restored byte-for-byte, and the
+    render-only public report still lands with its coverage section."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target)
+    assert await run(config) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    items, dedup = (deep / "merged-items.json").read_bytes(), (deep / "dedup-candidates.json").read_bytes()
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_merge_prompts(stub.calls) == 0
+    assert (deep / "merged-items.json").read_bytes() == items
+    assert (deep / "dedup-candidates.json").read_bytes() == dedup
+    # The run publishes the report from the artifact-session worker thread while
+    # this (main) thread keeps a stale negative dentry for the path across the
+    # rerun's detach/republish cycle, so a plain ``Path.is_file``/``read_text``
+    # can spuriously miss it on this kernel. A directory-fd lookup is the same
+    # observable claim -- the public report landed as a regular file -- without
+    # depending on that per-thread cache behaviour.
+    report_name = ".review-output.md"
+    parent_fd = os.open(str(multi_stack_target), os.O_RDONLY)
+    try:
+        assert stat.S_ISREG(os.stat(report_name, dir_fd=parent_fd).st_mode), (
+            "the public report still lands"
+        )
+        report_fd = os.open(report_name, os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            content = os.read(report_fd, 1 << 20).decode("utf-8")
+        finally:
+            os.close(report_fd)
+    finally:
+        os.close(parent_fd)
+    assert "## Coverage" in content
+
+

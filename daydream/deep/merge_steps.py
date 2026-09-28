@@ -59,6 +59,7 @@ from daydream.deep.reuse_key import (
     digest_or_absent,
     exploration_digest,
     grounding_digests,
+    merge_key_payload,
     phase_identity_for,
     unit_key,
 )
@@ -713,10 +714,10 @@ def _arbiter_plan_component(plan: ArbiterPlan) -> dict[str, Any]:
     }
 
 
-def _arbiter_grounding(deep_state: DeepState) -> dict[str, Any]:
-    """The arbiter's loop-re-derived inputs, recorded but never keyed (MH2/MH16).
+def _loop_grounding(deep_state: DeepState) -> dict[str, Any]:
+    """The loop-re-derived inputs shared by the arbiter and merge units (MH2/MH16).
 
-    Intent and alternatives are read back as the prompt sees them (the restored
+    Intent and alternatives are read back as each prompt sees them (the restored
     artifact on a hit), and the pre-scan is digested by directory content so
     its ``cache-key`` bookkeeping can never move anything.
     """
@@ -866,6 +867,94 @@ def _try_reuse_arbiter(
     return True
 
 
+def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None]:
+    """Every records file the merge reads, keyed by basename.
+
+    The primary-scope stacks (including the uncovered sweep's records) plus the
+    structural meta-stack. A file that cannot be read maps to ``None`` so
+    :func:`merge_key_payload` turns the whole unit into a named miss rather than
+    keying a partial record set.
+    """
+    records: dict[str, bytes | None] = {}
+    paths = list(deep_state.records_paths)
+    structural = deep_state.structural_records_path_or_none
+    if structural is not None:
+        paths.append(structural)
+    for path in paths:
+        try:
+            records[path.name] = path.read_bytes()
+        except OSError:
+            records[path.name] = None
+    return records
+
+
+def _merge_store_payload(dd: Path) -> dict[str, bytes] | None:
+    """The merge's owned artifacts as a payload map, or ``None`` when incomplete.
+
+    ``merged-items.json`` and ``dedup-candidates.json`` are mandatory outputs of
+    a completed cross-stack merge; the rendered ``review-output.md`` is the
+    render-only report and its absence degrades only the copy, never the store
+    (the JSON artifacts are the claim).
+    """
+    mandatory = (merged_items_path(dd).name, dedup_candidates_path(dd).name)
+    payload: dict[str, bytes] = {}
+    for name in mandatory:
+        path = dd / name
+        if not path.is_file():
+            return None
+        payload[name] = path.read_bytes()
+    report = merged_report_path(dd)
+    if report.is_file():
+        payload[report.name] = report.read_bytes()
+    return payload
+
+
+def _try_reuse_merge(
+    reuse: ReuseCache,
+    deep_state: DeepState,
+    key: str,
+    payload: dict[str, Any],
+) -> bool:
+    """Try to restore a completed cross-stack merge; ``True`` when it hit.
+
+    A hit restores the canonical ``merged-items.json``, the ``dedup-candidates``
+    pre-filter output and the rendered deep-dir report, then records the hit with
+    its grounding delta. Any failure is recorded as a miss and the caller runs
+    the real merge; ``_step_load_items`` (which runs afterwards on every path)
+    copies the report to the repo and appends the coverage section, an
+    idempotent no-op because a restored report already carries it (A7).
+    """
+    hit = reuse.lookup(key)
+    if not isinstance(hit, ReuseHit):
+        reuse.record("merge", outcome="miss", reason=hit.reason, key=key)
+        return False
+    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+    if restore_reason is not None:
+        reuse.record(
+            "merge",
+            outcome="miss",
+            reason=f"restore failed: {restore_reason}",
+            key=key,
+        )
+        return False
+    reuse.record(
+        "merge",
+        outcome="hit",
+        reason="complete entry",
+        key=key,
+        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+        detail={
+            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
+            "grounding_status": {
+                "intent": _reuse_grounding_status(reuse, "intent"),
+                "alternatives": _reuse_grounding_status(reuse, "alternatives"),
+                "exploration": _reuse_grounding_status(reuse, "exploration"),
+            },
+        },
+    )
+    return True
+
+
 async def _step_arbiter(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168).
 
@@ -1000,7 +1089,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     plan=_arbiter_plan_component(plan),
                     precision_mode=precision_mode,
                     identity=arbiter_identity,
-                    grounding=_arbiter_grounding(deep_state),
+                    grounding=_loop_grounding(deep_state),
                 )
                 arbiter_key = unit_key(arbiter_payload)
                 if arbiter_key is None:
@@ -1289,6 +1378,46 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             )
         )
 
+        # Issue #733 — the cross-stack merge is one content-addressed unit over
+        # every contributing records file (per-stack, uncovered and structural),
+        # the failed-stack set, the structural presence flag, and its
+        # schema/profile/model/effort contract. Intent, alternatives and the
+        # pre-scan are recorded grounding only, so a moved pre-scan can never
+        # move the key (MH2/MH16). The key is computed before dispatch, then a
+        # hit restores the JSON artifacts and rendered report and skips the
+        # model call; a miss runs and stores under that same key.
+        # A resume (``--start-at ttt|per-stack|merge``) is an explicit request
+        # to re-run the merge, so reuse never short-circuits it (A13: reuse does
+        # not change ``--start-at`` semantics). Only the default ``"review"``
+        # fresh run looks up or writes the store; every resume takes the
+        # unchanged path.
+        reuse = (
+            reuse_cache_for(ctx) if ctx.config.start_at == "review" else None
+        )
+        merge_payload: dict[str, Any] | None = None
+        merge_reuse_key: str | None = None
+        merge_identity: PhaseIdentity | None = None
+        if reuse is not None:
+            merge_identity = phase_identity_for(ctx, "merge")
+            merge_payload = merge_key_payload(
+                contributing_records=_merge_contributing_records(deep_state),
+                structural_records_present=deep_state.structural_records_path is not None,
+                failed_stacks=sorted(failed_stacks),
+                identity=merge_identity,
+                grounding=_loop_grounding(deep_state),
+            )
+            merge_reuse_key = unit_key(merge_payload)
+            if merge_reuse_key is None:
+                reuse.record(
+                    "merge",
+                    outcome="miss",
+                    reason="absent components: " + ", ".join(absent_components(merge_payload)),
+                )
+            elif _try_reuse_merge(reuse, deep_state, merge_reuse_key, merge_payload):
+                _clear_merge_failure(dd)
+                clear_review_budget_stop(dd, "Cross-stack merge")
+                return None
+
         # Cross-stack merge (D-23..D-26).
         try:
             await phase_cross_stack_merge(
@@ -1323,6 +1452,30 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         # PARTIAL' even though the cross-stack merge has since succeeded.
         _clear_merge_failure(dd)
         clear_review_budget_stop(dd, "Cross-stack merge")
+        # Issue #733 — store only a completed merge, once the same artifacts a
+        # fresh run leaves are final on disk. A failed or budget-exhausted
+        # merge returns above and never reaches here.
+        if (
+            reuse is not None
+            and merge_payload is not None
+            and merge_reuse_key is not None
+            and merge_identity is not None
+        ):
+            store_payload = _merge_store_payload(dd)
+            if store_payload is not None:
+                reuse.store(
+                    merge_reuse_key,
+                    unit="merge",
+                    payload=store_payload,
+                    components=merge_payload["components"],
+                    identity=merge_identity,
+                    grounding=grounding_digests(merge_payload),
+                    grounding_status={
+                        "intent": _reuse_grounding_status(reuse, "intent"),
+                        "alternatives": _reuse_grounding_status(reuse, "alternatives"),
+                        "exploration": _reuse_grounding_status(reuse, "exploration"),
+                    },
+                )
     return None
 
 

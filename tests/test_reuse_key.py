@@ -310,3 +310,85 @@ def test_arbiter_key_tracks_records_plan_and_precision_but_not_grounding() -> No
     assert reuse_key.unit_key(moved) == key
     assert reuse_key.grounding_digests(moved)["intent"] == "j" * 64
     assert set(reuse_key.grounding_digests(base)) == {"intent", "alternatives", "exploration"}
+
+
+def _merge_payload(
+    *,
+    records: dict[str, bytes | None] | None = None,
+    structural_present: bool = True,
+    failed_stacks: list[str] | None = None,
+    intent: str = "i" * 64,
+) -> dict[str, Any]:
+    return reuse_key.merge_key_payload(
+        contributing_records=(
+            records
+            if records is not None
+            else {
+                "stack-python-records.json": b"{}",
+                "stack-uncovered-records.json": b"[]",
+                "stack-structure-records.json": b'{"issues": []}',
+            }
+        ),
+        structural_records_present=structural_present,
+        failed_stacks=failed_stacks if failed_stacks is not None else ["react"],
+        identity=_identity(),
+        grounding={
+            "intent": {"digest": intent},
+            "alternatives": {"digest": "absent"},
+            "exploration": {"digest": "absent"},
+        },
+    )
+
+
+def test_merge_key_tracks_records_failures_and_structural_but_not_grounding() -> None:
+    """MH8/MH16: the cross-stack merge keys on every contributing record file
+    (including the uncovered and structural units), the failed-stack set and the
+    structural presence flag; the loop-re-derived intent/alternatives/pre-scan
+    are recorded grounding that can never move it."""
+    base = _merge_payload()
+    key = reuse_key.unit_key(base)
+    assert key is not None and len(key) == 64
+    assert reuse_key.unit_key(
+        _merge_payload(
+            records={
+                "stack-python-records.json": b'{"issues": [1]}',
+                "stack-uncovered-records.json": b"[]",
+                "stack-structure-records.json": b'{"issues": []}',
+            }
+        )
+    ) != key, "a recomputed shard must move the merge key"
+    assert reuse_key.unit_key(
+        _merge_payload(
+            records={
+                "stack-python-records.json": b"{}",
+                "stack-uncovered-records.json": b'[1]',
+                "stack-structure-records.json": b'{"issues": []}',
+            }
+        )
+    ) != key, "the uncovered unit's records are subject"
+    assert reuse_key.unit_key(
+        _merge_payload(
+            records={
+                "stack-python-records.json": b"{}",
+                "stack-uncovered-records.json": b"[]",
+                "stack-structure-records.json": b'{"issues": [1]}',
+            }
+        )
+    ) != key, "the structural unit's records are subject"
+    # A contributing records file that could not be read is a named miss.
+    assert reuse_key.unit_key(
+        _merge_payload(
+            records={
+                "stack-python-records.json": None,
+                "stack-uncovered-records.json": b"[]",
+                "stack-structure-records.json": b'{"issues": []}',
+            }
+        )
+    ) is None
+    assert reuse_key.unit_key(_merge_payload(structural_present=False)) != key
+    assert reuse_key.unit_key(_merge_payload(failed_stacks=[])) != key
+    # Grounding is recorded on every payload, never read by the key (MH2/MH16).
+    moved = _merge_payload(intent="j" * 64)
+    assert reuse_key.unit_key(moved) == key
+    assert reuse_key.grounding_digests(moved)["intent"] == "j" * 64
+    assert set(reuse_key.grounding_digests(base)) == {"intent", "alternatives", "exploration"}
