@@ -590,6 +590,22 @@ one thing:
 - `calibration.surface_signals`: the committed trigger lists the route uses,
   restated so the report is the evidence used to revise them.
 
+### Cold and warm review reuse
+
+The same corpus carries an explicit `sample_group` on its reuse-measurement
+cases, so the report's `review_runtime` block keeps a cold fix and a warm reuse
+loop apart instead of averaging them together. Its `header` names the corpus
+(`latency-profiles` here), the sample size observed in each group (`n=1` cold and
+`n=1` warm in the committed corpus), the per-series p50/p90 -- using the same
+nearest-rank helper as the per-profile block -- and the stated target,
+`Target: 5-15 min for a small follow-up fix`. A case without `sample_group`
+reports as `ungrouped`, so the existing comparison cases still render as before.
+
+To refresh the measurement, record a cold run and a warm rerun into the same
+corpus, then rerun the command above. The numbers are only meaningful when both
+runs were measured on the org's review VM, never on an orchestrator host, and the
+report makes no claim beyond the cases it names.
+
 The corpus is small and fixed, so the report makes no statistical claim beyond
 those exact runs: it states the observed subset and its coverage rather than
 extrapolating. `analyze_findings.per_lens` remains raw pre-merge attribution and

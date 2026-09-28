@@ -19,6 +19,11 @@ Two attribution rules are deliberately kept apart from
 
 Every percentage is reported over the runs that exist. A profile with no runs
 reports zeroed metrics rather than extrapolating from another profile.
+
+A case may additionally declare ``sample_group`` (``cold`` or ``warm``); the
+report then emits a ``review_runtime`` block that keeps a cold fix and a warm
+reuse loop apart, using the same nearest-rank percentiles (MH14). A case with no
+``sample_group`` reports as ``ungrouped`` and is otherwise rendered as before.
 """
 
 from __future__ import annotations
@@ -183,6 +188,119 @@ def _phase_timings(evaluation: Mapping[str, Any]) -> dict[str, float | None]:
                 result[phase] = float(seconds)
                 break
     return result
+
+_UNGROUPED = "ungrouped"
+"""Sample-group key for a case that declares no ``sample_group``."""
+
+_RUNTIME_TARGET = "Target: 5-15 min for a small follow-up fix"
+"""MH14's stated target, carried verbatim beside the cold/warm measurements."""
+
+
+def _seconds(value: Any) -> float | None:
+    """Coerce a corpus sample to float seconds, rejecting bools and non-numbers."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value)
+
+
+def _seconds_text(value: float) -> str:
+    """Render a measured second count without a spurious trailing ``.0``."""
+    return f"{value:g}"
+
+
+def _case_sample_series(
+    case: Mapping[str, Any], root: Path
+) -> tuple[dict[str, list[float]], list[dict[str, str]]]:
+    """Named elapsed-second series for one corpus case, plus any skipped files.
+
+    A case may declare ``profiles`` as an inline mapping of series name to the
+    seconds observed for that series, or as the list of latency profiles whose
+    ``evaluation.json`` run directories hold the measurements. Inline samples are
+    the unit-test path; run directories are the committed-corpus path. A run file
+    that cannot be read is reported with its path and reason instead of being
+    silently dropped.
+    """
+    declared = case.get("profiles")
+    series: dict[str, list[float]] = {}
+    skipped: list[dict[str, str]] = []
+    if isinstance(declared, Mapping):
+        for name, values in declared.items():
+            if not isinstance(values, list):
+                continue
+            collected = [seconds for value in values if (seconds := _seconds(value)) is not None]
+            if collected:
+                series[str(name)] = collected
+        return series, skipped
+    name = case.get("name")
+    if not isinstance(name, str) or not isinstance(declared, list):
+        return series, skipped
+    for profile in declared:
+        evaluation_path = root / RUNS_DIRNAME / name / str(profile) / "evaluation.json"
+        if not evaluation_path.is_file():
+            skipped.append({"case": name, "path": str(evaluation_path), "error": "evaluation.json is missing"})
+            continue
+        timings = _phase_timings(_load_object(evaluation_path))
+        for phase, seconds in timings.items():
+            if seconds is not None:
+                series.setdefault(f"{profile}.{phase}", []).append(seconds)
+    return series, skipped
+
+
+def _runtime_report(
+    manifest: Mapping[str, Any], cases: Sequence[Mapping[str, Any]], root: Path
+) -> dict[str, Any]:
+    """Group the corpus's measured samples by ``sample_group`` (MH14).
+
+    A case without ``sample_group`` is ungrouped; a group is only reported when
+    at least one of its cases carried samples. Percentiles reuse the module's
+    nearest-rank helper, so the cold/warm report and the per-profile report agree
+    by construction. The header names the corpus, the observed sample size per
+    group, and the stated target, so the report stands without the docs.
+    """
+    groups: dict[str, dict[str, Any]] = {}
+    order: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for case in cases:
+        group = case.get("sample_group")
+        group_name = group if isinstance(group, str) and group else _UNGROUPED
+        series, case_skipped = _case_sample_series(case, root)
+        skipped.extend(case_skipped)
+        if not series:
+            continue
+        if group_name not in groups:
+            groups[group_name] = {"n": 0, "profiles": {}}
+            order.append(group_name)
+        bucket = groups[group_name]
+        bucket["n"] += 1
+        for name, values in series.items():
+            bucket["profiles"].setdefault(name, []).extend(values)
+
+    corpus = manifest.get("corpus", "latency-profiles")
+    rendered: dict[str, Any] = {}
+    lines = [f"Review runtime corpus: {corpus}", _RUNTIME_TARGET]
+    for group_name in order:
+        bucket = groups[group_name]
+        profiles = {
+            name: {"p50": _percentile(values, 0.5), "p90": _percentile(values, 0.9)}
+            for name, values in bucket["profiles"].items()
+        }
+        rendered[group_name] = {"n": bucket["n"], "profiles": profiles}
+        parts = [
+            f"{name} p50={_seconds_text(stats['p50'])} p90={_seconds_text(stats['p90'])}"
+            for name, stats in profiles.items()
+        ]
+        lines.append(f"{group_name}: n={bucket['n']}" + ("; " + "; ".join(parts) if parts else ""))
+    counted = sum(bucket["n"] for bucket in groups.values())
+    if skipped:
+        lines.append(f"skipped: {len(skipped)} unreadable case file(s)")
+    return {
+        "corpus": corpus,
+        "target": _RUNTIME_TARGET,
+        "groups": rendered,
+        "considered": counted + len(skipped),
+        "skipped": skipped,
+        "header": "\n".join(lines),
+    }
 
 
 def _contested_outcomes(routing: Mapping[str, Any], items: Sequence[Any]) -> tuple[int, int]:
@@ -358,6 +476,7 @@ def build_report(
     return {
         "corpus": manifest.get("corpus", "latency-profiles"),
         "profiles": profiles_report,
+        "review_runtime": _runtime_report(manifest, cases, root),
         "cases": case_names,
         "citations": {
             "present": citations_present,
@@ -398,6 +517,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if not isinstance(manifest, dict):
         print(f"latency_report: corpus manifest {corpus_path} is not a JSON object", file=sys.stderr)
         return 2
+    manifest.setdefault("corpus", corpus_path.name)
     report = build_report(manifest, corpus_dir=corpus_path.parent)
     print(json.dumps(report, indent=2, sort_keys=True))
     return 0

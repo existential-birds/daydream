@@ -1,0 +1,12 @@
+{
+  "timing": {
+    "phase_timings": {
+      "alternatives": {
+        "wall_clock_seconds": 480.0
+      },
+      "deep": {
+        "wall_clock_seconds": 540.0
+      }
+    }
+  }
+}
