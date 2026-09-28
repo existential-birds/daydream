@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Literal, cast
 import anyio
 
 from daydream import git_ops
-from daydream.json_utils import _fsync_directory, atomic_write_bytes
+from daydream.json_utils import _fsync_directory, _fsync_file, atomic_write_bytes
 
 if TYPE_CHECKING:
     from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot
@@ -682,11 +682,6 @@ def derive_workspace_identity(work: WorkContext, *, owner: PrivateWorkspaceOwner
         state_root=owner.artifact_state_root,
         workspace_key=owner.workspace_key,
     )
-
-
-def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
 
 
 def _atomic_json(path: Path, payload: object) -> None:

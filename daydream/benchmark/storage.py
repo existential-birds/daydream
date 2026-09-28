@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 import yaml
 
-from daydream.json_utils import _fsync_directory as _fsync_dir, atomic_write_bytes
+from daydream.json_utils import _fsync_directory, _fsync_file, atomic_write_bytes
 
 
 class WorkspaceError(Exception):
@@ -393,7 +393,7 @@ class Transaction:
 
     def prepare(self) -> None:
         """Persist the ``prepared`` journal (fsync'd) for startup recovery."""
-        _fsync_dir(self._dir)
+        _fsync_directory(self._dir)
         self._state = "prepared"
         self._write_journal()
         _fsync_file(self._journal_path())
@@ -422,7 +422,7 @@ class Transaction:
         """
         self._begin_committing()
         self._apply_replacements()
-        _fsync_dir(self._root)
+        _fsync_directory(self._root)
 
     def _apply_replacements(self) -> None:
         """Apply targets in ``replacement_order``, fsyncing each rename.
@@ -454,7 +454,7 @@ class Transaction:
             os.replace(st.stage_path, target)
             _fsync_file(target)
             os.chmod(target, 0o600)
-        _fsync_dir(target.parent)
+        _fsync_directory(target.parent)
 
     def _complete_commit(self) -> None:
         """Publish and verify the durable complete state before cleanup."""
@@ -498,14 +498,6 @@ class Transaction:
     # the persisted crash-state remains for recover_startup to heal.
     def __exit__(self, *_exc: object) -> Literal[False]:
         return False
-
-
-# fsync helpers
-
-
-def _fsync_file(path: Path) -> None:
-    with open(path, "rb", buffering=0) as f:
-        os.fsync(f.fileno())
 
 
 @lru_cache(maxsize=None)
@@ -836,11 +828,11 @@ def _rollback_committing(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
         if backup is not None:
             os.replace(op_dir / backup, target)
             os.chmod(target, 0o600)
-            _fsync_dir(target.parent)
+            _fsync_directory(target.parent)
         else:
             with suppress(OSError):
                 target.unlink()
-            _fsync_dir(target.parent)
+            _fsync_directory(target.parent)
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
     _remove_created_dirs(root, doc)

@@ -493,24 +493,9 @@ def test_malformed_repo_config_warns_and_still_posts(
     """
     (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
-    code = cli_main(_forged_marker_argv(artifact, "--target", str(tmp_path)))
+    code = cli_main(_post_argv(artifact, target=tmp_path))
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 1
-
-
-def _forged_marker_argv(artifact: Path, *extra: str) -> list[str]:
-    """``post-findings`` argv for a single-finding artifact, plus extra flags."""
-    return [
-        "post-findings",
-        str(artifact),
-        "--pr",
-        "7",
-        "--head-sha",
-        "h" * 40,
-        "--repo",
-        "o/r",
-        *extra,
-    ]
 
 
 def _write_single_finding_artifact(path: Path, fingerprint: str) -> Path:
@@ -544,7 +529,7 @@ def test_marker_suppression_depends_on_prior_thread_author(
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_X"], authors=[author]
     )
-    code = cli_main(_forged_marker_argv(artifact, "--bot-login", "daydream"))
+    code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == expected_posts
 
@@ -557,7 +542,7 @@ def test_bot_login_env_fallback(
         fingerprints=["a" * 64], thread_ids=["RT_X"], authors=["daydream[bot]"]
     )
     monkeypatch.setenv("DAYDREAM_BOT_HANDLE", "daydream")  # no --bot-login flag
-    code = cli_main(_forged_marker_argv(artifact))  # env supplies the login
+    code = cli_main(_post_argv(artifact))  # env supplies the login
     assert code == 0
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")) == 0
 
