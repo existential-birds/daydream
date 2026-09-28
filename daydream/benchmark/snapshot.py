@@ -501,19 +501,13 @@ def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapp
 
 def resolve_trees(mirror_repo: Path, base_sha: str, head_sha: str) -> str | tuple[str, str]:
     """Peel ``^{tree}`` for both commits, or return ``"missing_object"``."""
-    def _tree(sha: str) -> str | None:
-        proc = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{sha}^{{tree}}"], retries=0)
-        if proc.returncode != 0:
-            return None
-        return proc.stdout.strip()
-
-    bt = _tree(base_sha)
-    if bt is None:
+    try:
+        return (
+            rev_parse(mirror_repo, f"{base_sha}^{{tree}}"),
+            rev_parse(mirror_repo, f"{head_sha}^{{tree}}"),
+        )
+    except git_ops.GitError:
         return "missing_object"
-    ht = _tree(head_sha)
-    if ht is None:
-        return "missing_object"
-    return (bt, ht)
 
 
 def degenerate(base_tree: str, head_tree: str) -> str | None:
