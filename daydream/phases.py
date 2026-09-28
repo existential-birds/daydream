@@ -83,6 +83,16 @@ from daydream.deep.records import (
     union_source_uids,
 )
 from daydream.deep.render import render_report
+from daydream.deep.reuse_key import (
+    PhaseIdentity,
+    absent_components,
+    blob_map_digest,
+    digest_text,
+    grounding_digests,
+    shard_key_payload,
+    unit_key,
+)
+from daydream.deep.reuse_store import ReuseCache, ReuseHit
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -4256,6 +4266,16 @@ async def phase_alternative_review(
 # Deep-mode: per-stack fan-out
 
 
+def _read_text_or_none(path: Path | None) -> str | None:
+    """Read a text artifact, or ``None`` when it is absent or unreadable."""
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
 @bind_resolved_run_context
 async def phase_per_stack_reviews(
     backend: Backend,
@@ -4275,6 +4295,8 @@ async def phase_per_stack_reviews(
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
+    reuse_cache: ReuseCache | None = None,
+    phase_identity: PhaseIdentity | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result."""
     active_registry = registry if registry is not None else get_registry()
@@ -4340,6 +4362,23 @@ async def phase_per_stack_reviews(
             }
         _write_coverage_receipts(deep_dir_path, receipts)
 
+    hunk_index = load_hunk_index(deep_dir_path.parent)
+    grounding_statuses: dict[str, str] = {}
+    if reuse_cache is not None:
+        recorded_units = reuse_cache.provenance().get("units", {})
+
+        def _grounding_status(unit: str) -> str:
+            entry = recorded_units.get(unit) if isinstance(recorded_units, dict) else None
+            outcome = entry.get("outcome") if isinstance(entry, dict) else None
+            return "reused" if outcome in {"hit", "reused"} else "regenerated"
+
+        grounding_statuses = {
+            "exploration": _grounding_status("exploration"),
+            "intent": _grounding_status("intent"),
+            "alternatives": _grounding_status("alternatives"),
+            "settled_decisions": "regenerated",
+        }
+
     prepared: dict[str, tuple[str | None, PreparedSanctionedInputs | None]] = {}
     for stack in stacks:
         inline_diff = (
@@ -4359,6 +4398,26 @@ async def phase_per_stack_reviews(
     # its compatibility artifacts. Primaries must finish before a new marker exists.
     for stale_path in (delegation_path, delegation_temp, structural_records, structural_output):
         stale_path.unlink(missing_ok=True)
+
+    def _restore_shard(hit: ReuseHit) -> str | None:
+        """Copy a verified entry's payload onto this run's artifacts.
+
+        Returns ``None`` on success or a reason string when the restore could
+        not complete; a partial restore is a miss, so the run then performs a
+        real review rather than shipping half of an entry.
+        """
+        recorded = hit.manifest.get("payload")
+        if not isinstance(recorded, dict):
+            return "manifest payload unreadable"
+        try:
+            for name in recorded:
+                (deep_dir_path / str(name)).write_bytes(
+                    (hit.payload_dir / str(name)).read_bytes()
+                )
+        except OSError as exc:
+            return f"{type(exc).__name__}: {exc}"
+        return None
+
     dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
     async with dispatch_scope(
         recorder,
@@ -4367,8 +4426,84 @@ async def phase_per_stack_reviews(
     ) as dispatch:
         async def _review_stack(stack: "StackAssignment") -> None:
             output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
-            per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
             inline_diff, stack_sanctioned_inputs = prepared[stack.stack_name]
+            stack_reuse_key: str | None = None
+            stack_payload: dict[str, Any] | None = None
+            if reuse_cache is not None and phase_identity is not None:
+                stack_payload = shard_key_payload(
+                    stack_name=stack.stack_name,
+                    files=stack.files,
+                    frontier_files=stack.frontier_files,
+                    docs_only=stack.is_docs_only,
+                    diff_path_or_hunks=diff_text,
+                    hunk_index=hunk_index,
+                    exploration_dir=exploration_dir,
+                    worktree_root=work.repo,
+                    identity=phase_identity,
+                    intent_authoritative=intent_authoritative,
+                    include_alternatives=include_alternatives,
+                    prior_commits=prior_commits,
+                    intent_text=_read_text_or_none(intent_path),
+                    alternatives_text=(
+                        _read_text_or_none(alternatives_path) if include_alternatives else None
+                    ),
+                )
+                if stack.stack_name == STRUCTURE_STACK_NAME:
+                    # The structural reviewer is never inline-grounded: it reads
+                    # the whole change through the recorded diff pointer, so its
+                    # per-file content is grounding, not subject. Key only its
+                    # scope envelope (file names) and contract; a file-set change
+                    # still misses, a content edit does not.
+                    components = stack_payload["components"]
+                    components["hunk_slice"] = digest_text("")
+                    components["assigned_blobs"] = blob_map_digest(work.repo, [])
+                    components["frontier_blobs"] = blob_map_digest(work.repo, [])
+                candidate_key = unit_key(stack_payload)
+                if candidate_key is None:
+                    reuse_cache.record(
+                        f"shard:{stack.stack_name}",
+                        outcome="miss",
+                        reason="absent components: " + ", ".join(absent_components(stack_payload)),
+                    )
+                else:
+                    stack_reuse_key = candidate_key
+                    hit = reuse_cache.lookup(candidate_key)
+                    if isinstance(hit, ReuseHit):
+                        restore_reason = _restore_shard(hit)
+                        if restore_reason is None:
+                            reuse_cache.record(
+                                f"shard:{stack.stack_name}",
+                                outcome="hit",
+                                reason="complete entry",
+                                key=candidate_key,
+                                origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                                detail={
+                                    "grounding": reuse_cache.grounding_delta(
+                                        hit, grounding_digests(stack_payload)
+                                    ),
+                                    "grounding_status": grounding_statuses,
+                                },
+                            )
+                            results[stack.stack_name] = output_path
+                            return
+                        print_warning(
+                            console,
+                            f"Reuse restore failed for {stack.stack_name}: {restore_reason}",
+                        )
+                        reuse_cache.record(
+                            f"shard:{stack.stack_name}",
+                            outcome="miss",
+                            reason=f"restore failed: {restore_reason}",
+                            key=candidate_key,
+                        )
+                    else:
+                        reuse_cache.record(
+                            f"shard:{stack.stack_name}",
+                            outcome="miss",
+                            reason=hit.reason,
+                            key=candidate_key,
+                        )
+            per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
             pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
             if stack.stack_name == STRUCTURE_STACK_NAME:
                 # Structural is a first-class stack scope (not a skill): its
@@ -4535,6 +4670,29 @@ async def phase_per_stack_reviews(
                     failures[stack_name] = f"{type(exc).__name__}: {exc}"
                     return
                 results[stack_name] = output_path
+                if (
+                    reuse_cache is not None
+                    and phase_identity is not None
+                    and stack_payload is not None
+                    and stack_reuse_key is not None
+                    and budget_reason is None
+                ):
+                    # Persist the finished review under the key computed on the
+                    # miss path (A14). The bytes are read back from disk so the
+                    # entry restores exactly what this run wrote.
+                    records_path = per_stack_records_path(deep_dir_path, stack_name)
+                    reuse_cache.store(
+                        stack_reuse_key,
+                        unit=f"shard:{stack_name}",
+                        payload={
+                            records_path.name: records_path.read_bytes(),
+                            output_path.name: output_path.read_bytes(),
+                        },
+                        components=stack_payload["components"],
+                        identity=phase_identity,
+                        grounding=grounding_digests(stack_payload),
+                        grounding_status=grounding_statuses,
+                    )
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:

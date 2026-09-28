@@ -45,7 +45,8 @@ from daydream.deep.latency import (
 )
 from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
-from daydream.deep.reuse_store import review_cache_enabled
+from daydream.deep.reuse_key import phase_identity_for
+from daydream.deep.reuse_store import reuse_cache_for, review_cache_enabled
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
@@ -488,6 +489,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     stacks = deep_state.stacks
 
     failed_stacks: dict[str, str] = deep_state.failed_stacks
+    reuse_cache = reuse_cache_for(ctx)
+    phase_identity = (
+        phase_identity_for(ctx, "per_stack_review") if reuse_cache is not None else None
+    )
     if config.start_at not in ("merge", "fix"):
         structural_strategy = ctx.strategy("discovery.structural")
         if _fold_default_alternatives(ctx):
@@ -521,6 +526,8 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
+                reuse_cache=reuse_cache,
+                phase_identity=phase_identity,
             )
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).

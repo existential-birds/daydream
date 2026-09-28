@@ -133,11 +133,17 @@ async def test_second_run_reuses_exploration(
     assert (exploration / "cache-key").read_text().strip() == first_key
     assert (exploration / "exploration.json").read_bytes() == first_exploration
 
-    # Reviewers are still grounded by the pointer.
+    # Reviewers are still grounded by the pointer. An identical rerun reuses
+    # the completed per-stack shards (issue #733), so the pointer grounding is
+    # inspected on the run that produced the reviews.
     review_prompt = next(
-        c["prompt"] for c in stub2.calls if "you are reviewing the" in c["prompt"].lower()
+        c["prompt"] for c in stub1.calls if "you are reviewing the" in c["prompt"].lower()
     )
     assert ".daydream/exploration" in review_prompt
+    assert not any(
+        "you are reviewing the" in c["prompt"].lower() for c in stub2.calls
+    ), "an identical rerun must reuse the per-stack reviews"
+
 
     # Run 1's content survived: the hit did NOT clobber the cache with the
     # empty-context stubs a naive hit path would write.
