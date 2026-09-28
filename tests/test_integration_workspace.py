@@ -30,7 +30,6 @@ from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_context import current_run_context
 from daydream.runner import RunConfig
-from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
 
@@ -84,10 +83,10 @@ def _stub_run_loop_deep(
     monkeypatch.setattr("daydream.runner._run_loop_deep", _stub)
 
 
-@pytest.fixture
-def silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.fixture(autouse=True)
+def _silence_runner_ui(silence_console: Callable[..., None]) -> None:
     """Silence Rich panels emitted from the runner so test output stays clean."""
-    silence_module_console(monkeypatch, "daydream.runner")
+    silence_console("daydream.runner")
 
 
 @pytest.fixture
@@ -113,7 +112,6 @@ def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> ScriptedBackend:
 async def test_default_loop_on_base_branch_raises_wrong_branch_error(
     repo_with_origin: Path,
     install_mock_backend: ScriptedBackend,
-    silence_ui: None,  # noqa
 ) -> None:
     """Default loop (no --branch, no --worktree) on the base branch errors loudly.
 
@@ -143,7 +141,6 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
     repo_with_origin: Path,
     bare_origin: Path,
     artifact_runtime_root: Path,
-    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``daydream --branch feat/X`` (X only on origin) fetches, runs, cleans up."""
@@ -208,7 +205,6 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
     repo_with_origin: Path,
     bare_origin: Path,
     artifact_runtime_root: Path,
-    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """When --branch X is also checked out locally and stale, warn + use origin/X."""
@@ -270,7 +266,6 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--comment --branch feat/Z`` with no open PR runs the deep flow.
@@ -319,7 +314,6 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
     tmp_path: Path,
     repo_with_origin: Path,
     bare_origin: Path,
-    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An open PR's ``baseRefName`` is what ``open_workspace`` resolves as base."""
@@ -377,7 +371,6 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
 async def test_review_mode_on_base_branch_does_not_error(
     repo_with_origin: Path,
     install_mock_backend: ScriptedBackend,
-    silence_ui: None,  # noqa
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """``--review`` on base branch must NOT raise WrongBranchError.
