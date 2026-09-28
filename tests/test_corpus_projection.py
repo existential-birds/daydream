@@ -217,24 +217,19 @@ def _write_annotations_snapshot(
                             "profile_source_kind": "builtin", "profile_digest": "d" * 64},
                 "stack": stack,
             })
-    (ann_dir / "annotations.jsonl").write_text(
-        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows))
     _write_sumsums(bundle_dir)  # the trajectory joins the curation digest pin
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
     # batch_fileset_digest pins the curation bundle's canonical file-set digest
     # (_derivative_digest = the same digest vocabulary each batch's
     # content_digest uses) — computed AFTER the bundle is final so the gate's
     # equality check against the bundle dir passes.
-    (ann_dir / "lineage.json").write_text(json.dumps({
-        "curation_id": manifest["curation_id"],
-        "sanitized_hub_commit": manifest["source_hub_commit"],
-        "schema_version": "annotation-snapshot/1055-snapshot-r1",
-        "batch_fileset_digest": _derivative_digest(bundle_dir),
-        "labeler_version": "v1", "rubric_version": "v1",
-        "classifier_version": "v1", "as_of": None,
-    }, sort_keys=True) + "\n")
-    _write_ann_sumsums(ann_dir)
-    (ann_dir / "_SUCCESS").write_text("ok\n")
+    _write_annotation_bundle(
+        ann_dir,
+        rows,
+        curation_id=manifest["curation_id"],
+        sanitized_commit=manifest["source_hub_commit"],
+        batch_fileset_digest=_derivative_digest(bundle_dir),
+    )
     return ann_dir / "annotations.jsonl"
 
 
