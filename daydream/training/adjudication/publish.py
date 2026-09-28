@@ -958,20 +958,24 @@ def publish_final_annotation_bundle(
     commit_message = f"daydream annotation final data {curation_id} {final_id}"
     _scan_for_secrets("final commit message", commit_message.encode("utf-8"))
 
+    def verified_receipt(revision: str, remote_files: set[str]) -> dict[str, Any]:
+        """Re-verify an already-committed success prefix and return its receipt."""
+        return _verified_existing_success(
+            client,
+            revision=revision,
+            remote_files=remote_files,
+            prefix=prefix,
+            final_id=final_id,
+            data_payloads=data_payloads,
+        )
+
     data_oid: str | None = None
     for _attempt in range(_ATOMIC_ATTEMPTS):
         current = _pin_repository(client)
         remote_files = _list_remote(client, current)
         names = _prefix_names(remote_files, prefix)
         if _SUCCESS_FILENAME in names:
-            return _verified_existing_success(
-                client,
-                revision=current,
-                remote_files=remote_files,
-                prefix=prefix,
-                final_id=final_id,
-                data_payloads=data_payloads,
-            )
+            return verified_receipt(current, remote_files)
         if names:
             _verify_prefix(
                 client,
@@ -1011,14 +1015,7 @@ def publish_final_annotation_bundle(
         remote_files = _list_remote(client, current)
         names = _prefix_names(remote_files, prefix)
         if _SUCCESS_FILENAME in names:
-            return _verified_existing_success(
-                client,
-                revision=current,
-                remote_files=remote_files,
-                prefix=prefix,
-                final_id=final_id,
-                data_payloads=data_payloads,
-            )
+            return verified_receipt(current, remote_files)
         _verify_prefix(
             client,
             revision=current,
@@ -1042,14 +1039,7 @@ def publish_final_annotation_bundle(
             continue
         pinned_success = _pin_repository(client, revision=success_oid)
         success_files = _list_remote(client, pinned_success)
-        return _verified_existing_success(
-            client,
-            revision=pinned_success,
-            remote_files=success_files,
-            prefix=prefix,
-            final_id=final_id,
-            data_payloads=data_payloads,
-        )
+        return verified_receipt(pinned_success, success_files)
     raise HubUnavailableError("final success publication could not win the concurrent-update race")
 
 
