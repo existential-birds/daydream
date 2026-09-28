@@ -109,6 +109,11 @@ def _cli_main_exit(monkeypatch: pytest.MonkeyPatch, *argv: str) -> int | str | N
     return exc.value.code
 
 
+def _denied_observability(*a: Any, **k: Any) -> Any:
+    """Injected failing observability resolver: the pre-config failure case."""
+    raise RuntimeError("observability boom")
+
+
 def test_cli_main_clean_deep_run_exits_0(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -764,10 +769,7 @@ def test_cli_main_verbose_diagnoses_pre_config_failure(
 ) -> None:
     _silence(monkeypatch)
 
-    def _denied(*a: Any, **k: Any) -> Any:
-        raise RuntimeError("observability boom")
-
-    monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied)
+    monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied_observability)
 
     code = _cli_main_exit(monkeypatch, "--verbose", str(git_repo))
     _out, err = capsys.readouterr()
@@ -783,10 +785,7 @@ def test_cli_main_default_hides_pre_config_failure_details(
 ) -> None:
     _silence(monkeypatch)
 
-    def _denied(*a: Any, **k: Any) -> Any:
-        raise RuntimeError("observability boom")
-
-    monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied)
+    monkeypatch.setattr("daydream.cli._resolve_cli_observability", _denied_observability)
 
     code = _cli_main_exit(monkeypatch, str(git_repo))
     _out, err = capsys.readouterr()

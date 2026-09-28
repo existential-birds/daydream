@@ -123,7 +123,7 @@ def _completed_read_paths(
 def _finding_files_from_records(findings: list[Any]) -> set[str]:
     """Normalized ``file`` fields across parsed finding records (issue #742).
 
-    Shared between the findings-only fallback (:func:`_parsed_finding_files`)
+    Shared between the findings-only fallback in :func:`_parsed_covered_files`
     and the per-stack verdict reconciliation in the orchestrator (in-memory
     parsed records) so the ``./`` strip lives in one place
     (:func:`strip_dot_slash`): a leading ``./`` is a legal path spelling
@@ -143,9 +143,9 @@ def _finding_files_from_records(findings: list[Any]) -> set[str]:
 def _load_records_or_none(records_path: Path) -> Any | None:
     """Load and parse a per-stack records file, or ``None`` when absent/unreadable.
 
-    The single ``json.loads`` / ``(OSError, ValueError)`` opener shared by
-    :func:`_parsed_finding_files` and :func:`_parsed_covered_files` so the
-    fail-open loader lives in one place instead of being copy-pasted. A missing
+    The single ``json.loads`` / ``(OSError, ValueError)`` opener for
+    :func:`_parsed_covered_files` so the fail-open loader lives in one place
+    instead of being copy-pasted. A missing
     or malformed records file degrades to ``None``; callers treat that as an
     incomplete shard contributing ZERO coverage (fail-open: swept, never
     skipped).
@@ -156,23 +156,6 @@ def _load_records_or_none(records_path: Path) -> Any | None:
         return None
 
 
-def _parsed_finding_files(records: Any) -> set[str] | None:
-    """Set of ``file`` fields across a completed shard's parsed records.
-
-    Operates on an already-loaded records object (:func:`_load_records_or_none`)
-    so the findings-only extraction is shared rather than copy-pasted, and used
-    as the fallback by :func:`_parsed_covered_files` when a shard's records
-    predate the evidence-gated ``verdicts`` array. Returns ``None`` when the
-    records shape carries no parseable findings (a non-list load, or a dict
-    without an ``issues`` list); the caller keeps its own fail-open for that
-    case.
-    """
-    findings = _records_issues(records)
-    if findings is None:
-        return None
-    return _finding_files_from_records(findings)
-
-
 def _parsed_covered_files(records_path: Path) -> set[str] | None:
     """Set of files a completed shard's evidence-gated verdicts mark covered.
 
@@ -181,7 +164,7 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
     verdict is evidence-backed, never raw declared self-report). An unread
     file records ``not_reviewed`` and never enters the set. Legacy record
     shapes -- a bare findings list, a dict without a ``verdicts`` key, or an
-    empty ``verdicts`` list -- fall back to the findings-only set (:func:`_parsed_finding_files`).
+    empty ``verdicts`` list -- fall back to the findings-only set below.
 
     Returns ``None`` when the records file is absent or unreadable -- an
     incomplete shard contributes ZERO inline/frontier coverage (fail-open: the
@@ -202,7 +185,10 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
                 path = strip_dot_slash(entry["path"])
                 covered.add(path)
             return covered
-    return _parsed_finding_files(records)
+    findings = _records_issues(records)
+    if findings is None:
+        return None
+    return _finding_files_from_records(findings)
 
 
 def _receipt_covered_files(

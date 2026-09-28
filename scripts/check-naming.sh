@@ -22,25 +22,16 @@ EXCLUDED_PATHS=(
   "rl/daydream_review/tests/test_env_identity.py"  # deletion-pin test: asserts the v1 package name is gone
 )
 
-# Allowlisted line patterns. Each entry names the external contract it covers —
-# keep these narrow so a project-owned versioned name can never hide behind one.
-ALLOWLIST_RE=(
-  'verifiers\.v1'                     # verifiers package: external RL env API protocol name
-  'ATIF'                              # Harbor ATIF trajectory format (vendored, externally versioned)
-  '/inference/v1/'                    # external inference-API endpoint path
-  'honeyhive\.ai/v2'                  # HoneyHive SaaS API version in the URL
-  'opentelemetry.*v1'                 # OpenTelemetry protobuf/API v1 versions
-)
-
-allowlisted() {
-  local line="$1" pattern
-  for pattern in "${ALLOWLIST_RE[@]}"; do
-    if [[ "$line" =~ $pattern ]]; then
-      return 0
-    fi
-  done
-  return 1
-}
+# Allowlisted line patterns, combined into one ERE alternation so a single
+# ``grep -vE`` drops allowlisted hits before the report loop. Each alternative
+# names the external contract it covers — keep these narrow so a project-owned
+# versioned name can never hide behind one:
+#   verifiers\.v1     verifiers package: external RL env API protocol name
+#   ATIF              Harbor ATIF trajectory format (vendored, externally versioned)
+#   /inference/v1/    external inference-API endpoint path
+#   honeyhive\.ai/v2  HoneyHive SaaS API version in the URL
+#   opentelemetry.*v1 OpenTelemetry protobuf/API v1 versions
+ALLOWLIST_RE='verifiers\.v1|ATIF|/inference/v1/|honeyhive\.ai/v2|opentelemetry.*v1'
 
 violations=0
 while IFS= read -r file; do
@@ -52,18 +43,16 @@ while IFS= read -r file; do
     fi
   done
   [[ "$skip" -eq 1 ]] && continue
-  while IFS= read -r lineno; do
-    line=$(sed -n "${lineno}p" "$file")
-    if allowlisted "$line"; then
-      continue
-    fi
+  while IFS= read -r hit; do
+    lineno="${hit%%:*}"
+    line="${hit#*:}"
     if [[ "$violations" -eq 0 ]]; then
       echo "project-owned versioned names found (external contracts are allowlisted):"
       echo "offending lines:"
     fi
     echo "  $file:$lineno: $line"
     violations=$((violations + 1))
-  done < <(grep -En "$VERSIONED_RE" -- "$file" | cut -d: -f1 || true)
+  done < <(grep -En "$VERSIONED_RE" -- "$file" | grep -vE "$ALLOWLIST_RE" || true)
 done < <(git ls-files)
 
 if [[ "$violations" -gt 0 ]]; then

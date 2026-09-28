@@ -5973,8 +5973,12 @@ async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched()
     assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved
 
 
-def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
-    """A beyond-tolerance citation is demoted-with-annotation, not snapped."""
+def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path: Path) -> None:
+    """A beyond-tolerance citation is demoted-with-annotation, not snapped.
+
+    R2.1/R2.4: the original severity stays recoverable and a machine-readable
+    ``location_distrust`` mark survives the merge.
+    """
 
     dd = tmp_path / ".daydream" / "deep"
     dd.mkdir(parents=True)
@@ -6000,34 +6004,6 @@ def test_merge_validates_finding_locations_before_write(tmp_path: Path) -> None:
     items = json.loads(merged_items_path(dd).read_text())["items"]
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
     assert "location_note" in items[0]  # demoted-with-annotation
-
-
-def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path: Path) -> None:
-    """R2.1/R2.4: a beyond-tolerance demotion keeps the original severity recoverable
-    and carries a machine-readable ``location_distrust`` mark through the merge."""
-
-    dd = tmp_path / ".daydream" / "deep"
-    dd.mkdir(parents=True)
-    write_hunk_index(
-        tmp_path / ".daydream",
-        "diff --git a/orchestrator.py b/orchestrator.py\n--- a/orchestrator.py\n+++ b/orchestrator.py\n"
-        "@@ -2270,3 +2284,5 @@\n x\n+x1\n+x2\n",
-    )
-    records = [
-        {
-            "id": 1,
-            "description": "off-citation",
-            "file": "orchestrator.py",
-            "line": 2272,
-            "severity": "high",
-            "confidence": "HIGH",
-            "rationale": "r",
-            "evidence": "e",
-        }
-    ]
-    _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
-
-    items = json.loads(merged_items_path(dd).read_text())["items"]
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
     assert items[0]["severity_before_demotion"] == "high"  # original preserved (R2.1)
     assert items[0]["location_distrust"] is True  # machine-readable demotion mark

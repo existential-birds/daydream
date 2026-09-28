@@ -234,12 +234,7 @@ def classify_http_ack(
         response.ParseFromString(body)
     except DecodeError:
         return (_ACK_MALFORMED, 0)
-    rejected = int(response.partial_success.rejected_spans)
-    if rejected > 0:
-        return (_ACK_PARTIAL, rejected)
-    if response.HasField("partial_success"):
-        return (_ACK_PARTIAL, 0)  # zero-rejected warning form
-    return (_ACK_OK, 0)
+    return classify_grpc_ack(response)
 
 
 def classify_grpc_ack(payload: ExportTraceServiceResponse | None) -> tuple[str, int]:
