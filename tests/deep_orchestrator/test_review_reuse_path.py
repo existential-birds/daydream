@@ -9,6 +9,7 @@ published through the artifact-visibility anchors and survives a fresh run.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import stat
@@ -489,6 +490,25 @@ async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_w
     for unit in reused:                                        # MH16, per reused unit
         assert provenance["units"][unit]["grounding"]["settled_decisions"]["moved"] is True
         assert provenance["units"][unit]["grounding_status"]["exploration"] == "regenerated"
+
+
+async def test_run_reports_which_units_were_reused_and_that_their_grounding_moved(
+    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    install_stub_backend(monkeypatch, shard_many_python_target, enable_exploration=True)
+    config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
+                         deep_shard_max_bytes=10**9)
+    assert await run(config) == 0
+    (shard_many_python_target / "mod0.py").write_text("def f0():\n    return 'fixed'\n")
+    git_ops.commit_paths(shard_many_python_target, [Path("mod0.py")],
+                         build_commit_message(items=[], run_id="fix-loop-2", version=daydream.__version__))
+    with caplog.at_level(logging.INFO):
+        assert await run(config) == 0
+    summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Review reuse:")]
+    assert summary, "the run must report its reuse outcome"
+    assert "hit" in summary[-1] and "shard:" in summary[-1]
+    assert "grounding moved" in summary[-1], "MH16: a reused unit's moved grounding must be reported"
 
 
 async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_byte(

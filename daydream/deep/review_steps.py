@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from functools import lru_cache
@@ -99,6 +100,11 @@ if TYPE_CHECKING:
     from daydream.deep.reuse_store import ReuseCache
     from daydream.trajectory import PhaseScopeHandle, TrajectoryRecorder
 
+logger = logging.getLogger(__name__)
+
+#: Outcomes that mean the store served the unit's result (never a recompute).
+_REUSE_HIT_OUTCOMES = frozenset({"hit", "reused"})
+
 try:
     from daydream.exploration import ExplorationContext, safe_explore
     from daydream.exploration_runner import (
@@ -141,7 +147,75 @@ def _reuse_grounding_status(reuse: "ReuseCache", unit: str) -> str:
     units = reuse.provenance().get("units")
     entry = units.get(unit) if isinstance(units, dict) else None
     outcome = entry.get("outcome") if isinstance(entry, dict) else None
-    return "reused" if outcome in {"hit", "reused"} else "regenerated"
+    return "reused" if outcome in _REUSE_HIT_OUTCOMES else "regenerated"
+
+
+def _grounding_moved(entry: object) -> bool:
+    """Whether any recorded grounding input moved for a reused unit (MH16)."""
+    if not isinstance(entry, dict):
+        return False
+    grounding = entry.get("grounding")
+    if not isinstance(grounding, dict):
+        return False
+    return any(
+        isinstance(row, dict) and row.get("moved") is True
+        for row in grounding.values()
+    )
+
+
+def _reuse_summary_line(record: dict[str, Any]) -> str:
+    """Format one run's reuse outcome from its provenance record (SH1/MH16).
+
+    Carries the total unit count, hits, misses, the shard-unit count, the
+    reused unit names, the store's entry/byte counts (SH2), and -- the MH16
+    consumer -- how many reused units ran under moved grounding, omitted when
+    none moved. Pure: the caller owns reading the record.
+    """
+    units = record.get("units")
+    units = units if isinstance(units, dict) else {}
+    store = record.get("store")
+    store = store if isinstance(store, dict) else {}
+    reused = sorted(
+        name
+        for name, entry in units.items()
+        if isinstance(entry, dict) and entry.get("outcome") in _REUSE_HIT_OUTCOMES
+    )
+    misses = sum(
+        1
+        for entry in units.values()
+        if isinstance(entry, dict) and entry.get("outcome") == "miss"
+    )
+    shard_count = sum(1 for name in units if str(name).startswith("shard:"))
+    moved = sum(1 for name in reused if _grounding_moved(units[name]))
+    line = (
+        f"Review reuse: {len(units)} units ({len(reused)} hit, {misses} miss); "
+        f"shard: {shard_count}; "
+        f"reused: {', '.join(reused) if reused else 'none'}; "
+        f"store: {store.get('entries', 0)} entries, {store.get('bytes', 0)} bytes"
+    )
+    if moved:
+        line += f"; grounding moved in {moved} reused"
+    return line
+
+
+def _log_reuse_summary(ctx: FlowContext) -> None:
+    """Emit the run's one-line reuse outcome (SH1), including moved grounding.
+
+    Observability only: a store that cannot be read degrades to an
+    ``unavailable`` line and never raises. Emitted once per run from the review
+    surface's last step, so an operator reading logs alone can tell a warm run
+    from a forensic one (MH13/MH16).
+    """
+    reuse = DeepState(ctx.data).reuse_cache
+    if reuse is None:
+        return
+    if not review_cache_enabled(ctx.config):
+        logger.info("Review reuse: disabled (--no-review-cache)")
+        return
+    try:
+        logger.info(_reuse_summary_line(reuse.provenance()))
+    except Exception as exc:  # noqa: BLE001 -- observability, never correctness
+        logger.info("Review reuse: unavailable (%s: %s)", type(exc).__name__, exc)
 
 
 def _whole_change_diff_text(ctx: FlowContext) -> str:
@@ -1124,6 +1198,10 @@ async def _step_uncovered_sweep(ctx: FlowContext) -> None:
                 console,
                 f"Uncovered-file sweep failed (fail-open): {type(exc).__name__}: {exc}",
             )
+    # Issue #733 (SH1/MH16): the review surface's last step reports the run's
+    # reuse outcome once, after every review_steps unit has recorded its
+    # provenance (the sweep's early reuse return still reaches this line).
+    _log_reuse_summary(ctx)
 
 
 def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
