@@ -614,6 +614,20 @@ async def _evaluate_quality_gate(
             after_entry = after_per_file.get(rel)
             if before_entry is None and after_entry is None:
                 continue
+            erosion_before = before_entry.get("erosion") if before_entry is not None else None
+            erosion_after = after_entry.get("erosion") if after_entry is not None else None
+            verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
+            verbosity_after = after_entry.get("verbosity") if after_entry is not None else None
+            erosion_delta = _quality_delta(erosion_before, erosion_after)
+            verbosity_delta = _quality_delta(verbosity_before, verbosity_after)
+            entry: dict[str, Any] = {
+                "erosion_before": erosion_before,
+                "erosion_after": erosion_after,
+                "erosion_delta": erosion_delta,
+                "verbosity_before": verbosity_before,
+                "verbosity_after": verbosity_after,
+                "verbosity_delta": verbosity_delta,
+            }
             # Issue #329 / Finding 5: a candidate that parsed pre-fix but is
             # MISSING from the post-fix analyzer output is unparseable after the
             # fix (analyze_quality omits malformed files). Recording null
@@ -622,50 +636,20 @@ async def _evaluate_quality_gate(
             # that breaks a file is a regression, never a pass. Still fail-open:
             # never raises, never stops the run.
             if before_entry is not None and after_entry is None:
-                per_file[rel] = {
-                    "erosion_before": before_entry.get("erosion"),
-                    "erosion_after": None,
-                    "erosion_delta": None,
-                    "verbosity_before": before_entry.get("verbosity"),
-                    "verbosity_after": None,
-                    "verbosity_delta": None,
-                    "unparseable": True,
-                    "flagged": True,
-                    "reason": "file missing from post-fix analyzer output (unparseable?)",
-                }
-                continue
+                entry["unparseable"] = True
+                entry["flagged"] = True
+                entry["reason"] = "file missing from post-fix analyzer output (unparseable?)"
             # A missing pre-fix baseline (e.g. a secondary edit outside the
             # reviewed diff) means the delta is unknowable: flag the file, never
             # read it as a clean pass. Fail-open (issue #329 / #457).
-            if before_entry is None and after_entry is not None:
-                per_file[rel] = {
-                    "erosion_before": None,
-                    "erosion_after": after_entry.get("erosion"),
-                    "erosion_delta": None,
-                    "verbosity_before": None,
-                    "verbosity_after": after_entry.get("verbosity"),
-                    "verbosity_delta": None,
-                    "flagged": True,
-                    "reason": (
-                        "missing pre-fix baseline: file edited by the fix pass but not "
-                        "covered by the pre-fix quality snapshot"
-                    ),
-                }
-                continue
-            erosion_before = before_entry.get("erosion") if before_entry is not None else None
-            erosion_after = after_entry.get("erosion") if after_entry is not None else None
-            verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
-            verbosity_after = after_entry.get("verbosity") if after_entry is not None else None
-            erosion_delta = _quality_delta(erosion_before, erosion_after)
-            verbosity_delta = _quality_delta(verbosity_before, verbosity_after)
-            per_file[rel] = {
-                "erosion_before": erosion_before,
-                "erosion_after": erosion_after,
-                "erosion_delta": erosion_delta,
-                "verbosity_before": verbosity_before,
-                "verbosity_after": verbosity_after,
-                "verbosity_delta": verbosity_delta,
-                "flagged": _quality_flagged(
+            elif before_entry is None and after_entry is not None:
+                entry["flagged"] = True
+                entry["reason"] = (
+                    "missing pre-fix baseline: file edited by the fix pass but not "
+                    "covered by the pre-fix quality snapshot"
+                )
+            else:
+                entry["flagged"] = _quality_flagged(
                     erosion_before=erosion_before,
                     erosion_after=erosion_after,
                     erosion_delta=erosion_delta,
@@ -673,8 +657,8 @@ async def _evaluate_quality_gate(
                     verbosity_after=verbosity_after,
                     verbosity_delta=verbosity_delta,
                     thresholds=thresholds,
-                ),
-            }
+                )
+            per_file[rel] = entry
         rounds = [r for r in rounds if r.get("round") != round_no]
         rounds.append({"round": round_no, "per_file": per_file})
         payload = {

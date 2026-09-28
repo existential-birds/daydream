@@ -33,29 +33,15 @@ EXCLUDED_PATHS=(
 #   opentelemetry.*v1 OpenTelemetry protobuf/API v1 versions
 ALLOWLIST_RE='verifiers\.v1|ATIF|/inference/v1/|honeyhive\.ai/v2|opentelemetry.*v1'
 
-violations=0
-while IFS= read -r file; do
-  skip=0
-  for excluded in "${EXCLUDED_PATHS[@]}"; do
-    if [[ "$file" == "$excluded"* ]]; then
-      skip=1
-      break
-    fi
-  done
-  [[ "$skip" -eq 1 ]] && continue
-  while IFS= read -r hit; do
-    lineno="${hit%%:*}"
-    line="${hit#*:}"
-    if [[ "$violations" -eq 0 ]]; then
-      echo "project-owned versioned names found (external contracts are allowlisted):"
-      echo "offending lines:"
-    fi
-    echo "  $file:$lineno: $line"
-    violations=$((violations + 1))
-  done < <(grep -En "$VERSIONED_RE" -- "$file" | grep -vE "$ALLOWLIST_RE" || true)
-done < <(git ls-files)
-
-if [[ "$violations" -gt 0 ]]; then
-  echo "$violations offending line(s)."
+# One git grep over the tracked tree, excluding the out-of-scope paths above and
+# dropping allowlisted lines before formatting the report. ``|| true`` keeps the
+# no-match exit (1) from tripping ``set -e``.
+hits="$(git grep -nE "$VERSIONED_RE" -- . "${EXCLUDED_PATHS[@]/#/:(exclude)}" | grep -vE "$ALLOWLIST_RE" || true)"
+if [[ -n "$hits" ]]; then
+  echo "project-owned versioned names found (external contracts are allowlisted):"
+  echo "offending lines:"
+  # git grep prints ``file:line:text``; restore the gate's ``  file:line: text`` spacing.
+  sed -E 's/^([^:]*:[0-9]+:)/  \1 /' <<<"$hits"
+  echo "$(wc -l <<<"$hits") offending line(s)."
   exit 1
 fi

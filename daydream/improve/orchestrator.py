@@ -44,7 +44,6 @@ from daydream.improve.assemble import (
 from daydream.improve.command_contract import (
     RECON_COMMAND_SCHEMA,
     path_is_confined,
-    valid_repository_file_path,
     validate_host_commands,
     validate_recon_commands,
 )
@@ -798,19 +797,9 @@ def _evidence_paths(
         if match is None:
             return None
         path = match.group(1).strip("`")
-        if (
-            not valid_repository_file_path(path)
-            or not path_is_confined(repo, path)
-        ):
+        if not path_is_confined(repo, path):
             return None
-        candidate = Path(path)
-        if candidate.is_absolute():
-            return None
-        try:
-            resolved = (repo / candidate).resolve()
-            resolved.relative_to(repo.resolve())
-        except (OSError, ValueError):
-            return None
+        resolved = (repo / path).resolve()
         if not resolved.is_file():
             return None
         try:

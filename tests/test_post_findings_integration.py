@@ -834,6 +834,21 @@ def test_post_findings_reports_a_damaged_local_object_as_unreadable_not_missing(
 _API_HEAD_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
+def _api_head_artifact(
+    tmp_path: Path,
+    findings: list[dict[str, Any]] | None = None,
+    *,
+    diagrams: dict[str, Any] | None = None,
+) -> Path:
+    """An artifact pinned to the immutable API head, flowchart diagram by default."""
+    return _write_artifact(
+        tmp_path / "findings.json",
+        findings if findings is not None else [],
+        diagrams=_flowchart_payload() if diagrams is None else diagrams,
+        head_sha=_API_HEAD_SHA,
+    )
+
+
 def _serve_contents(fake_gh: FakeGh, path: str, source: str) -> None:
     """Serve *source* as the contents-API body for *path* (the ``?ref=`` is asserted separately)."""
     fake_gh.set_response(
@@ -863,9 +878,7 @@ def test_post_findings_posts_flowchart_evidence_read_without_a_checkout(
 ) -> None:
     """The regression: an empty (non-repository) target must still post."""
     _serve_contents(fake_gh, "a.py", "def run():\n    return 1\n")
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
+    artifact = _api_head_artifact(tmp_path)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
@@ -886,9 +899,7 @@ def test_post_findings_posts_sequence_evidence_read_without_a_checkout(
         "from worker import worker\ndef api():\n    worker()\n    if enabled:\n        worker()\n",
     )
     _serve_contents(fake_gh, "worker.py", "def worker():\n    return 1\n")
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_sequence_payload(), head_sha=_API_HEAD_SHA,
-    )
+    artifact = _api_head_artifact(tmp_path, diagrams=_sequence_payload())
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
@@ -921,9 +932,7 @@ def test_post_findings_reads_oversized_evidence_through_the_blob_endpoint(
             "content": base64.b64encode(b"def run():\n    return 1\n").decode(),
         },
     )
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
+    artifact = _api_head_artifact(tmp_path)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
@@ -942,11 +951,9 @@ def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
     the artifact's validated findings is posted without a mermaid block.
     """
     _serve_contents(fake_gh, "a.py", "x = 1\n")  # no `run` definition, one line
-    artifact = _write_artifact(
-        tmp_path / "findings.json",
+    artifact = _api_head_artifact(
+        tmp_path,
         [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
-        diagrams=_flowchart_payload(),
-        head_sha=_API_HEAD_SHA,
     )
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
@@ -1000,9 +1007,7 @@ def test_post_findings_classifies_api_head_reads(
     not the old fail-closed diagram gate (#1176) -- and posts no review.
     """
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
+    artifact = _api_head_artifact(tmp_path)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
@@ -1030,11 +1035,10 @@ def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
         node["evidence"]["file"] = "a.py\n"
     for element in flowchart["grounding"]["elements"]:
         element["defined_at"] = "a.py\n:1"
-    artifact = _write_artifact(
-        tmp_path / "findings.json",
+    artifact = _api_head_artifact(
+        tmp_path,
         [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
         diagrams=payload,
-        head_sha=_API_HEAD_SHA,
     )
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
@@ -1071,9 +1075,7 @@ def test_post_findings_reports_an_unreadable_api_head_as_unreadable(
     claimed only where the read positively proved it.
     """
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
+    artifact = _api_head_artifact(tmp_path)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
@@ -1096,11 +1098,9 @@ def test_post_findings_posts_findings_when_an_unreadable_diagram_is_dropped(
         "repos/o/r/contents/a.py",
         value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
     )
-    artifact = _write_artifact(
-        tmp_path / "findings.json",
+    artifact = _api_head_artifact(
+        tmp_path,
         [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
-        diagrams=_flowchart_payload(),
-        head_sha=_API_HEAD_SHA,
     )
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
@@ -1132,9 +1132,7 @@ def test_post_findings_minimizes_stale_threads_on_a_degraded_artifact(
     fake_gh.serve_prior_threads(
         fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True,
     )
-    artifact = _write_artifact(
-        tmp_path / "findings.json", [], diagrams=_flowchart_payload(), head_sha=_API_HEAD_SHA,
-    )
+    artifact = _api_head_artifact(tmp_path)
 
     code = cli_main(_post_argv(artifact, head_sha=_API_HEAD_SHA, target=tmp_path))
 
@@ -1159,11 +1157,9 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(
         "repos/o/r/contents/a.py",
         value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
     )
-    artifact = _write_artifact(
-        tmp_path / "findings.json",
+    artifact = _api_head_artifact(
+        tmp_path,
         [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Nit", severity="low")],
-        diagrams=_flowchart_payload(),
-        head_sha=_API_HEAD_SHA,
     )
 
     code = cli_main(
