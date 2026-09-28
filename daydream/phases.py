@@ -2299,6 +2299,21 @@ def _preflight_finding_file_refs(repo: Path, items: list[dict[str, Any]]) -> str
     return file_ref
 
 
+def _console_progress_callback(console_lock: anyio.Lock | None) -> Callable[[Text], Any] | None:
+    """Serialize output through *console_lock*, or ``None`` when unlocked.
+
+    Suppresses the per-agent Rich Live renderer that would otherwise garble the
+    shared console under the concurrent parallel-fix path.
+    """
+    if console_lock is None:
+        return None
+
+    async def _cb(text: Text) -> None:
+        async with console_lock:
+            console.print(text)
+    return _cb
+
+
 @bind_resolved_run_context
 async def phase_fix(
     backend: Backend,
@@ -2363,17 +2378,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
 
     prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
 
-    progress_cb: Callable[[Text], Any] | None = None
-    if console_lock is not None:
-        # Concurrent path: suppress the Live/LiveToolPanelRegistry renderer in
-        # run_agent so multiple concurrent agents don't each start their own
-        # Rich Live context on the shared console (which garbles output).
-        # The callback serializes progress lines through the shared lock.
-        async def _cb(text: Text) -> None:
-            async with console_lock:
-                console.print(text)
-
-        progress_cb = _cb
+    progress_cb = _console_progress_callback(console_lock)
 
     _, _, budget_reason = await run_agent(
         backend, work.repo, prompt,
@@ -2489,15 +2494,7 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
     scaled_tool_budget = None if DEFAULT_TOOL_CALL_BUDGET is None else DEFAULT_TOOL_CALL_BUDGET * count
     scaled_wall_budget = DEFAULT_WALL_BUDGET_S * count
 
-    progress_cb: Callable[[Text], Any] | None = None
-    if console_lock is not None:
-        # Concurrent path: suppress the Live renderer in run_agent and serialize
-        # progress lines through the shared lock (see phase_fix).
-        async def _cb(text: Text) -> None:
-            async with console_lock:
-                console.print(text)
-
-        progress_cb = _cb
+    progress_cb = _console_progress_callback(console_lock)
 
     _, _, budget_reason = await run_agent(
         backend, work.repo, prompt,
