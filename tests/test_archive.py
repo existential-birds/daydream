@@ -5,7 +5,6 @@ Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flo
 import json
 import re
 import sqlite3
-import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -90,6 +89,7 @@ from daydream.trajectory import (
     sibling_document_path,
 )
 from tests.harness.backend import ScriptedBackend
+from tests.harness.git_helpers import configure_identity as _configure_identity, git as _git
 from tests.harness.improve_backend import install_improve_stub
 from tests.harness.trajectory import make_manifest, make_recorder
 
@@ -311,14 +311,10 @@ def _archive_snapshot(
 
 def _run_git_init_with_credential_origin(repo: Path, origin_url: str) -> None:
     """git init + one commit + credential-bearing origin remote."""
-    for argv in (
-        ["git", "init"],
-        ["git", "config", "user.email", "test@test.com"],
-        ["git", "config", "user.name", "Test"],
-        ["git", "commit", "--allow-empty", "-m", "init"],
-        ["git", "remote", "add", "origin", origin_url],
-    ):
-        subprocess.run(argv, cwd=repo, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
+    _git(repo, "init")
+    _configure_identity(repo)
+    _git(repo, "commit", "--allow-empty", "-m", "init")
+    _git(repo, "remote", "add", "origin", origin_url)
 
 
 def test_capture_git_context_stores_credential_free_remote(tmp_path: Path) -> None:
@@ -334,16 +330,9 @@ def test_capture_git_context_stores_credential_free_remote(tmp_path: Path) -> No
 
 
 def test_capture_git_context_real_repo(tmp_path: Path) -> None:
-    subprocess.run(["git", "init"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "commit", "--allow-empty", "-m", "init"], cwd=tmp_path, capture_output=True, check=True,
-    )
+    _git(tmp_path, "init")
+    _configure_identity(tmp_path)
+    _git(tmp_path, "commit", "--allow-empty", "-m", "init")
 
     ctx = capture_git_context(tmp_path)
     assert isinstance(ctx, GitContext)
@@ -364,31 +353,17 @@ def test_capture_git_context_populates_base_sha_and_changed_files(
     tmp_path: Path,
 ) -> None:
     """Real repo with a feature branch surfaces merge-base SHA + diff paths."""
-    subprocess.run(["git", "init", "-b", "main"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "config", "user.email", "test@test.com"], cwd=tmp_path, capture_output=True, check=True,
-    )
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "config", "user.name", "Test"], cwd=tmp_path, capture_output=True, check=True,
-    )
+    _git(tmp_path, "init", "-b", "main")
+    _configure_identity(tmp_path)
     (tmp_path / "a.py").write_text("print('a')\n")
-    subprocess.run(["git", "add", "a.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "commit", "-m", "base"], cwd=tmp_path, capture_output=True, check=True,
-    )
-    base_sha = subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "rev-parse", "HEAD"], cwd=tmp_path, capture_output=True, check=True, text=True,
-    ).stdout.strip()
-
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "checkout", "-b", "feat/x"], cwd=tmp_path, capture_output=True, check=True,
-    )
+    _git(tmp_path, "add", "a.py")
+    _git(tmp_path, "commit", "-m", "base")
+    base_sha = _git(tmp_path, "rev-parse", "HEAD")
+    _git(tmp_path, "checkout", "-b", "feat/x")
     (tmp_path / "b.py").write_text("print('b')\n")
     (tmp_path / "a.py").write_text("print('a-changed')\n")
-    subprocess.run(["git", "add", "a.py", "b.py"], cwd=tmp_path, capture_output=True, check=True)  # noqa: S603, S607 - arguments are not user-controlled
-    subprocess.run(  # noqa: S603, S607 - arguments are not user-controlled
-        ["git", "commit", "-m", "feat"], cwd=tmp_path, capture_output=True, check=True,
-    )
+    _git(tmp_path, "add", "a.py", "b.py")
+    _git(tmp_path, "commit", "-m", "feat")
 
     ctx = capture_git_context(tmp_path)
     assert ctx.base_sha == base_sha

@@ -1239,6 +1239,13 @@ def _decision_edge_reason(
     return None
 
 
+def _edges_with_live_endpoints(
+    edges: list[tuple[str, dict[str, Any]]], alive: set[str]
+) -> list[tuple[str, dict[str, Any]]]:
+    """Drop edges whose ``from`` or ``to`` endpoint has been pruned."""
+    return [item for item in edges if item[1]["from"] in alive and item[1]["to"] in alive]
+
+
 def _structural_pass(
     node_ids: list[str],
     nodes: dict[str, dict[str, Any]],
@@ -1261,11 +1268,7 @@ def _structural_pass(
     for _ in range(len(node_ids) + 2):
         changed = False
         alive = set(kept_ids)
-        kept_edges = [
-            item
-            for item in kept_edges
-            if item[1]["from"] in alive and item[1]["to"] in alive
-        ]
+        kept_edges = _edges_with_live_endpoints(kept_edges, alive)
         for node_id in kept_ids:
             if node_id in demoted or nodes[node_id]["kind"] != "decision":
                 continue
@@ -1464,12 +1467,7 @@ def ground_flowchart(
             # last node in spec order for it rather than exceed the cap.
             head = [start_id, *head[:-1]]
         kept_ids = head
-    alive = set(kept_ids)
-    kept_edges = [
-        item
-        for item in kept_edges
-        if item[1]["from"] in alive and item[1]["to"] in alive
-    ]
+    kept_edges = _edges_with_live_endpoints(kept_edges, set(kept_ids))
     kept_edges = kept_edges[:DIAGRAM_MAX_EDGES]
     kept_ids, kept_edges, demoted = _structural_pass(
         kept_ids, nodes, kept_edges, start_id

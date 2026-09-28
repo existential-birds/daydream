@@ -86,8 +86,7 @@ def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:
 
 def seeded_commit(repo: Path, message: str) -> str:
     """Commit with the deterministic ``SEED_ENV`` identity and return the new SHA."""
-    git(repo, "commit", "-m", message, env=SEED_ENV)
-    return git(repo, "rev-parse", "HEAD")
+    return commit(repo, message, env=SEED_ENV)
 
 
 def seed_pr_origin(

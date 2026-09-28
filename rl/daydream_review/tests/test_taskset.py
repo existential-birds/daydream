@@ -214,12 +214,6 @@ def test_load_rejects_excluded_repo_case_insensitively(tmp_path: Path, stage0_ga
 def test_load_rejects_manifest_without_pr_snapshots(tmp_path: Path) -> None:
     """An entry without at least one PR snapshot is a load error, not an empty taskset."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [("acme/widgets", [])])
-    manifest.write_text(
-        # _manifest_entry with an empty prs list still writes the entry table;
-        # strip the (absent) pr tables and rely on min_length to reject.
-        manifest.read_text(encoding="utf-8"),
-        encoding="utf-8",
-    )
 
     with pytest.raises(ValidationError) as excinfo:
         load_manifest(manifest)
