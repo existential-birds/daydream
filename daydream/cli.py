@@ -283,7 +283,9 @@ def _add_shared_arguments(parser: argparse.ArgumentParser, *, full_help: bool = 
         dest="dump_artifacts",
         help="Merge the finalized run bundle (ATIF trajectory, review output, deep artifacts, diffs, "
              "findings, manifest, evaluation) into DIR for CI upload. Preserves unrelated destination "
-             "files. Opt-in because the logs may contain sensitive data. Works on every flow."
+             "files. Blocking secret-scan findings trigger sanitization of a separate copy, then a "
+             "rescan. A refused dump warns without failing the review; the local archive stays "
+             "unchanged. Opt-in because logs may contain sensitive data. Works on every flow."
         if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(

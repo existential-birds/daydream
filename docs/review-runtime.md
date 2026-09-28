@@ -353,6 +353,29 @@ later findings export failed. Use CLI exit status and validated findings as the
 publication gates, not that manifest field alone. A process/platform kill can
 still prevent finalization or later upload steps.
 
+Dump publication now handles blocking secret-scan findings independently of the
+review result. `--dump-artifacts` copies clean or advisory-only bundles unchanged.
+For blocking findings, it sanitizes a separate private copy, scans that copy,
+and exports it only if no blocking findings remain. The original archive and
+review evidence retain their original bytes. Accepted dumps keep the existing
+bundle layout and manifest session ID, including `bundle/manifest.json` for the
+Hugging Face upload job; no additional CLI flag is required.
+
+A remaining blocking finding, scanner error, or sanitization failure withholds
+the dump with a warning. It does not discard completed findings, trajectories,
+or the local archive, and it does not change the review's exit status. Archive
+integrity and output publication errors remain fatal. Accepted dumps merge into
+the destination while preserving unrelated files; refusal leaves the destination
+unchanged. The scan covers generated bundle files, not pre-existing unrelated
+destination content.
+
+The Shelfspace upload job currently assumes `bundle/manifest.json` exists.
+Sanitized bundles satisfy that contract after a Daydream pin update, but an
+irreducible refusal still leaves that separate job without a bundle to upload.
+Handling a missing bundle is a separate workflow change. This Daydream change
+does not update Shelfspace's workflow or pin, or change the direct Hugging Face
+upload policy.
+
 Shelfspace was not modified in this session; its PR #2826 must be rolled out
 separately after these Daydream changes become available. Pin analysis and
 posting/validation to the **same fixed Daydream revision**. Keep the 60-minute

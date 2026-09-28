@@ -30,6 +30,7 @@ import pytest
 from rich.console import Console
 
 from daydream import artifact_visibility, git_ops
+from daydream.archive import hub, scan
 from daydream.archive.index import query_runs
 from daydream.backends import (
     AgentEvent,
@@ -690,16 +691,8 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
 
 
 async def _assert_target_is_reusable(target: Path) -> None:
-    """A blocking dump refusal must not wedge the checkout for the next run.
-
-    Without a rollback that can restore an absent dump destination, the refusal
-    left a ``DETACHED`` transaction behind and every later run at this path —
-    with or without ``--dump-artifacts`` — exited 1 during session open before
-    any review work started (#1172). ``exit_code == 1`` and a missing dump
-    directory hold either way, so this is what makes the refusal tests real
-    guards rather than assertions that pass through the wedge.
-    """
-    exit_code = await run(_deep_run_config(target))
+    """Refused diagnostic publication must not leave a wedged transaction."""
+    exit_code = await run(_deep_run_config(target, output_mode="review"))
     assert exit_code == 0
 
 
@@ -725,7 +718,7 @@ async def _assert_target_is_reusable(target: Path) -> None:
         ),
     ],
 )
-async def test_dump_artifacts_refuses_credentials_in_diff(
+async def test_dump_artifacts_sanitizes_credentials_in_diff(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
@@ -736,82 +729,167 @@ async def test_dump_artifacts_refuses_credentials_in_diff(
     canary: str,
     expected_rule: str,
 ) -> None:
-    """#1170: real credential material in the diff refuses every egress path.
-
-    The blocking tier keeps PR #1161's disposition exactly: no dump, no archive
-    row, exit 1 — and the console names the file and rule that refused, without
-    echoing the credential.
-
-    ``diff.patch`` is scanned line by line and ``_PEM_KEY_PATTERN`` spans
-    BEGIN..END, so the token-canary and multi-line-PEM cases stay separate on
-    purpose. A bundle carrying both would block on the canary alone, letting a
-    combined test pass with the multi-line pass unimplemented.
-    """
-
-    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    """A sanitized dump passes egress without rewriting the private review evidence."""
+    silence(monkeypatch)
+    install_stub_backend(monkeypatch, multi_stack_target)
     _commit_scanned_file(multi_stack_target, filename, content)
-
     dump_dir = tmp_path / "uploaded-artifacts"
 
     exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            dump_artifacts=str(dump_dir),
-        )
+        _deep_run_config(multi_stack_target, output_mode="review", dump_artifacts=str(dump_dir))
     )
-    assert exit_code == 1
-    assert not dump_dir.exists()
-    assert query_runs(archive_dir) == []
+    assert exit_code == 0
+    run_dir = _only_archived_run(archive_dir)
+    assert query_runs(archive_dir)
+    assert (multi_stack_target / ".review-output.md").is_file()
+    assert canary in (run_dir / "diff.patch").read_text()
+    assert canary not in (dump_dir / "diff.patch").read_text()
+    assert not scan.scan_run_dir(dump_dir).blocking
+    assert expected_rule in {finding.category for finding in scan.scan_run_dir(run_dir).findings}
+    manifest = json.loads((dump_dir / "manifest.json").read_text())
+    assert manifest["session_id"] == json.loads((run_dir / "manifest.json").read_text())["session_id"]
+    assert json.loads((dump_dir / "trajectory.json").read_text())["session_id"] == manifest["session_id"]
 
     out = "".join(capfd.readouterr())
     assert canary not in out
     assert "diff.patch" in out
     assert expected_rule in out
-    # #1171: the scan refusal is the message, not the rollback's own failure.
-    assert "dump destination projection is malformed" not in out
-
     await _assert_target_is_reusable(multi_stack_target)
 
 
-async def test_dump_refusal_reports_the_archive_error_when_the_rollback_also_fails(
+async def test_dump_sanitizes_added_and_deleted_url_fixtures_for_hub_upload(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+) -> None:
+    """The external workflow can still upload bundle/ using its manifest session id."""
+    removed_url = "https://token@api.firecrawl.dev/v1/source"
+    added_url = "https://public-key@sentry.example.com/123"
+    git(multi_stack_target, "checkout", "main")
+    _commit_scanned_file(multi_stack_target, "removed_fixture.py", f'URL = "{removed_url}"\n')
+    git(multi_stack_target, "checkout", "feature")
+    git(multi_stack_target, "merge", "main", "--no-edit")
+    git(multi_stack_target, "rm", "removed_fixture.py")
+    git(multi_stack_target, "commit", "-m", "remove URL fixture")
+    _commit_scanned_file(multi_stack_target, "added_fixture.py", f'URL = "{added_url}"\n')
+    raw_diff = git(multi_stack_target, "diff", "main...HEAD")
+    silence(monkeypatch)
+    install_stub_backend(monkeypatch, multi_stack_target)
+    bundle = tmp_path / "diagnostics" / "bundle"
+    assert await run(_deep_run_config(
+        multi_stack_target, output_mode="review", dump_artifacts=str(bundle),
+    )) == 0
+
+    run_dir = _only_archived_run(archive_dir)
+    assert (run_dir / "diff.patch").read_text().strip() == raw_diff.strip()
+    assert f'-URL = "{removed_url}"' in raw_diff
+    assert f'+URL = "{added_url}"' in raw_diff
+    exported_diff = (bundle / "diff.patch").read_text()
+    assert removed_url not in exported_diff
+    assert added_url not in exported_diff
+    assert "api.firecrawl.dev/v1/source" in exported_diff
+    assert "sentry.example.com/123" in exported_diff
+    assert not scan.scan_run_dir(bundle).blocking
+    session_id = json.loads((bundle / "manifest.json").read_text())["session_id"]
+    assert session_id == json.loads((run_dir / "manifest.json").read_text())["session_id"]
+    uploaded: dict[str, bytes] = {}
+
+    class FakeHub:
+        def create_repo(self, **_kwargs: Any) -> None:
+            pass
+
+        def repo_info(self, **_kwargs: Any) -> Any:
+            return type("RepoInfo", (), {"private": True})()
+
+        def upload_folder(self, *, folder_path: str, path_in_repo: str, **_kwargs: Any) -> None:
+            for file in Path(folder_path).rglob("*"):
+                if file.is_file():
+                    uploaded[f"{path_in_repo}/{file.relative_to(folder_path).as_posix()}"] = file.read_bytes()
+
+    monkeypatch.setattr(hub, "HfApi", FakeHub)
+    monkeypatch.setenv("HF_TOKEN", "hf_test_token")
+    assert hub.upload_run_bundle(bundle, "acme/trajectories", session_id)
+    assert json.loads(uploaded[f"{session_id}/manifest.json"])["session_id"] == session_id
+    assert uploaded[f"{session_id}/diff.patch"] == (bundle / "diff.patch").read_bytes()
+    assert uploaded[f"{session_id}/trajectory.json"] == (bundle / "trajectory.json").read_bytes()
+
+
+@pytest.mark.parametrize("preexisting", [False, True], ids=["absent", "preexisting"])
+async def test_residual_dump_refusal_preserves_review_exports_and_destination(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    tmp_path: Path,
+    capfd: pytest.CaptureFixture[str],
+    fake_gh: FakeGh,
+    preexisting: bool,
+) -> None:
+    """A real scanner-only rule simulates a secret the redactor cannot remove."""
+    canary = "unredactable-diagnostic-canary"
+    monkeypatch.setattr(scan, "_RULES", (*scan._RULES, (
+        re.compile(re.escape(canary)), "unredactable_fixture", scan.SEVERITY_BLOCKING,
+    )))
+    silence(monkeypatch)
+    install_stub_backend(monkeypatch, multi_stack_target)
+    _commit_scanned_file(multi_stack_target, "fixture.py", f'VALUE = "{canary}"\n')
+    fake_gh.serve_open_pr(multi_stack_target)
+    dump_dir = tmp_path / "diagnostics" / "bundle"
+    if preexisting:
+        dump_dir.mkdir(parents=True)
+        (dump_dir / "manifest.json").write_bytes(b"prior manifest bytes")
+        (dump_dir / "nested").mkdir()
+        (dump_dir / "nested" / "prior.bin").write_bytes(b"prior unrelated bytes")
+    baseline = {p.relative_to(dump_dir): p.read_bytes() for p in dump_dir.rglob("*") if p.is_file()}
+    trajectory = tmp_path / "trajectory.json"
+    findings = tmp_path / "findings.json"
+    exit_code = await run(_deep_run_config(
+        multi_stack_target, output_mode="review", non_interactive=True,
+        pr_number=7, findings_out=str(findings), trajectory_path=trajectory,
+        dump_artifacts=str(dump_dir),
+    ))
+    assert exit_code == 0
+    assert dump_dir.exists() is preexisting
+    assert {p.relative_to(dump_dir): p.read_bytes() for p in dump_dir.rglob("*") if p.is_file()} == baseline
+    run_dir = _only_archived_run(archive_dir)
+    assert query_runs(archive_dir)
+    assert canary in (run_dir / "diff.patch").read_text()
+    assert (multi_stack_target / ".review-output.md").is_file()
+    assert json.loads(findings.read_text())["findings"]
+    assert json.loads(trajectory.read_text())["steps"]
+    out = "".join(capfd.readouterr())
+    assert "diff.patch" in out
+    assert "unredactable_fixture" in out
+    assert canary not in out
+    await _assert_target_is_reusable(multi_stack_target)
+
+
+async def test_strict_archive_error_is_reported_when_rollback_also_fails(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """#1171: a failing rollback must not be the only thing the operator sees.
+    """Nonfatal diagnostic refusal does not weaken strict archive failure handling."""
+    silence(monkeypatch)
+    install_stub_backend(monkeypatch, multi_stack_target)
 
-    The pending ``ArchiveFinalizationError`` reaches the re-raised storage error
-    only through ``add_note``, which carries its type name and which nothing
-    renders — so the gate that refused and the file that tripped it were
-    invisible whenever the rollback itself failed. With an absent dump
-    destination now restorable this branch is no longer on the ordinary refusal
-    path, so the rollback is forced to fail to keep the report proven.
-    """
-
-    canary = "ghp_canaryfake123"
-    _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    _commit_scanned_file(multi_stack_target, "creds.py", f'GITHUB_TOKEN = "{canary}"\n')
+    def fail_index(*_args: Any, **_kwargs: Any) -> None:
+        raise OSError("synthetic archive index failure")
 
     def refuse_restore(_session: object) -> None:
         raise artifact_visibility.ArtifactVisibilityError("synthetic rollback failure")
 
+    monkeypatch.setattr("daydream.archive.upsert_run", fail_index)
     monkeypatch.setattr(artifact_visibility.ArtifactSession, "_restore_prior", refuse_restore)
-
-    exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            dump_artifacts=str(tmp_path / "uploaded-artifacts"),
-        )
-    )
+    exit_code = await run(_deep_run_config(
+        multi_stack_target, output_mode="review", dump_artifacts=str(tmp_path / "uploaded-artifacts"),
+    ))
     assert exit_code == 1
-
     out = "".join(capfd.readouterr())
     assert "Artifact Finalization" in out
-    assert "api_key" in out
-    assert "diff.patch" in out
+    assert "archive finalization failed" in out
     assert "synthetic rollback failure" in out
-    assert canary not in out
 
 
 async def test_no_eval_leaves_manifest_eval_fields_null(

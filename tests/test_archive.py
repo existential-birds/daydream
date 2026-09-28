@@ -3,6 +3,7 @@
 Covers git_context, manifest, index, and the strict ``finalize_archive_run`` flow.
 """
 import json
+import re
 import sqlite3
 import subprocess
 from collections.abc import Callable, Mapping
@@ -24,6 +25,7 @@ from daydream.archive import (
     get_archive_dir,
     index,
     pipeline,
+    scan,
 )
 from daydream.archive.git_context import GitContext, capture_git_context
 from daydream.archive.index import (
@@ -47,7 +49,6 @@ from daydream.archive.manifest import (
 )
 from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 from daydream.archive.provenance import ExecutableProvenance
-from daydream.archive.scan import SEVERITY_BLOCKING, Finding, ScanResult
 from daydream.artifact_visibility import (
     ArtifactEvidenceProvenance,
     ArtifactTreeSnapshot,
@@ -1472,45 +1473,32 @@ def test_bundle_findings_artifact_skipped_without_route(
     assert not (run_dir / "findings.json").exists()
 
 
-def test_dump_artifacts_refuses_credential_bearing_bundle(
+def test_dump_artifacts_sanitizes_credential_bearing_bundle(
     tmp_path: Path,
     archive_dir: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """M12: a bundle whose serialized artifacts carry a credential is never published.
-
-    The real scanner (no monkeypatched verdict) reads the assembled bundle. The
-    strict finalizer refuses closed: neither the ``--dump-artifacts``
-    destination nor the archive receives the dirty bundle, and the failure never
-    echoes the credential (M11)."""
+    """Only the sanitized derivative leaves the archive; source evidence is retained."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
     dest.mkdir()
     config = RunConfig(target=str(tmp_path), archive=True, dump_artifacts=str(dest))
-
     target, _, recorder = _setup_bundle(tmp_path, session_id)
-    # Inject a credential into the serialized trajectory the bundle will carry.
     traj = json.loads(recorder.path.read_text())
     traj["remote_url"] = "https://user:ghp_canaryfake123@github.com/o/r"
     recorder.path.write_text(json.dumps(traj))
-
-    with pytest.raises(ArchiveFinalizationError, match="secret scan") as excinfo:
-        _strict_archive(
-            target=target,
-            session_id=session_id,
-            config=config,
-            write_snapshot=_write_snapshot(recorder),
-            dump_path=dest,
-        )
-
-    assert list(dest.iterdir()) == []
-    assert not (archive_dir / "runs" / session_id).exists()
-    assert query_runs(archive_dir) == []
-
-    # The refusal is value-free (M11): the credential never echoes.
+    _strict_archive(
+        target=target, session_id=session_id, config=config,
+        write_snapshot=_write_snapshot(recorder), dump_path=dest,
+    )
+    assert (dest / "manifest.json").is_file()
+    assert not scan.scan_run_dir(dest).blocking
+    run_dir = archive_dir / "runs" / session_id
+    assert "ghp_canaryfake123" in (run_dir / "trajectory.json").read_text()
+    assert "ghp_canaryfake123" not in (dest / "trajectory.json").read_text()
+    assert query_runs(archive_dir)
     captured = capsys.readouterr()
-    out = captured.out + captured.err + str(excinfo.value)
-    assert "ghp_canaryfake123" not in out
+    assert "ghp_canaryfake123" not in captured.out + captured.err
 
 
 def test_dump_artifacts_copies_clean_bundle(
@@ -4390,11 +4378,11 @@ def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
     assert not (get_archive_dir() / "runs" / session_id).exists()
 
 
-def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
+def test_dump_scan_refusal_preserves_archive_and_removes_late_stage(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused secret scan publishes neither an archive nor dump bytes."""
+    """Unredactable scan findings suppress only the diagnostic export."""
     session_id = "strict-dump"
     arguments = _finalizer_arguments(
         tmp_path, session_id,
@@ -4402,24 +4390,10 @@ def test_strict_archive_dump_scan_refusal_leaves_late_stage_empty(
     )
     dump_stage = tmp_path / "late"
     dump_stage.mkdir()
-    monkeypatch.setattr(
-        "daydream.archive.scan.scan_run_dir",
-        lambda _path: ScanResult(
-            clean=False,
-            findings=[
-                Finding(
-                    path="trajectory.json",
-                    location="steps.[0].observation (json)",
-                    category="api_key",
-                    digest="0123456789ab",
-                    severity=SEVERITY_BLOCKING,
-                )
-            ],
-        ),
-    )
-
-    with pytest.raises(ArchiveFinalizationError, match="secret scan"):
-        finalize_archive_run(**arguments, dump_path=dump_stage)
-
-    assert list(dump_stage.iterdir()) == []
-    assert not (get_archive_dir() / "runs" / session_id).exists()
+    monkeypatch.setattr(scan, "_RULES", (
+        (re.compile(session_id), "unredactable_fixture", scan.SEVERITY_BLOCKING),
+    ))
+    finalize_archive_run(**arguments, dump_path=dump_stage)
+    assert not dump_stage.exists()
+    assert (get_archive_dir() / "runs" / session_id / "manifest.json").is_file()
+    assert query_runs(get_archive_dir())

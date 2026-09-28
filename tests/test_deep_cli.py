@@ -18,7 +18,7 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """--help-all names the public post-finalization trajectory default, live external
-    updates, and --dump-artifacts as a preserving per-file merge.
+    updates, and --dump-artifacts as a preserving merge with nonfatal refusal.
 
     Semantics only: stable option names and source/public-path wording, never
     frozen argparse wrapping.
@@ -34,6 +34,9 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(
         "--dump-artifacts",
         "Merge the finalized run bundle",
         "Preserves unrelated destination files",
+        "Blocking secret-scan findings trigger sanitization of a separate copy",
+        "A refused dump warns without failing the review",
+        "the local archive stays unchanged",
     ):
         assert fragment in out, fragment
 

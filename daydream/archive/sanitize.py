@@ -45,7 +45,10 @@ from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
 from daydream.timeutil import now_iso_utc
 from daydream.trajectory import RUNS_DIRNAME, redact_text, redact_value
 
-__all__ = ["ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive", "sanitize_bundle"]
+__all__ = [
+    "ImportResult", "SanitizeResult", "import_bundle", "sanitize_archive", "sanitize_bundle",
+    "sanitize_bundle_files",
+]
 
 _PROGRESS_FILENAME = "progress.jsonl"
 _AUDIT_FILENAME = "audit.jsonl"
@@ -120,8 +123,12 @@ def _sanitize_json_document(doc: Any) -> Any:
     return doc
 
 
-def _sanitize_derivative(derivative_dir: Path) -> None:
-    """Transform every file of a copied bundle in place."""
+def sanitize_bundle_files(derivative_dir: Path) -> None:
+    """Transform a private bundle copy in place; callers must scan before release.
+
+    This transformation does not copy, publish, or record archive audit state.
+    Never pass an original or frozen evidence directory.
+    """
     for file_path in sorted(derivative_dir.rglob("*")):
         if not file_path.is_file():
             continue
@@ -265,7 +272,7 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
                 shutil.copytree(item, target)
             else:
                 shutil.copy2(item, target)
-        _sanitize_derivative(derivative_dir)
+        sanitize_bundle_files(derivative_dir)
 
         # Fail-closed release gate: a blocking finding (or a scanner error)
         # withholds the derivative. An advisory finding is by construction not
