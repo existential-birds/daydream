@@ -17,7 +17,11 @@ from typing import cast
 
 import pytest
 
+import daydream
+from daydream import git_ops
 from daydream.config import STRUCTURE_STACK_NAME
+from daydream.deep import reuse_store
+from daydream.phases import build_commit_message
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _count_merge_prompts,
@@ -153,6 +157,47 @@ def _latest_provenance(deep: Path) -> dict[str, object]:
     assert records, "the run must record its reuse provenance inside the store"
     record: dict[str, object] = json.loads(records[-1].read_text(encoding="utf-8"))
     return record
+
+
+def _session_id_of(deep: Path) -> str:
+    """The provenance key of the run that just finished.
+
+    ``ReuseCache`` names each run's provenance file after ``WorkContext.run_id``
+    and keeps every earlier run's record, so the run under test is the newest
+    file by mtime. The file stem is what :func:`reuse_store.provenance_path`
+    expects.
+    """
+    provenance = deep.parent / "review-cache" / "provenance"
+    records = sorted(provenance.glob("*.json"), key=lambda path: path.stat().st_mtime)
+    assert records, "the run must record its reuse provenance inside the store"
+    return records[-1].stem
+
+
+_MERGE_DISCRIMINATOR = "cross-stack merge agent"
+
+
+def _review_surface_prompts(
+    calls: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    """Captured calls that performed deep review work (the paid review surface).
+
+    Filters by the production prompt discriminators, so an unrelated fix or test
+    call never masks a genuine review call and a warm run that still calls a
+    reviewer fails the assertion instead of passing vacuously.
+    """
+    surface: list[dict[str, object]] = []
+    for call in calls:
+        prompt = str(call.get("prompt", "")).lower()
+        if (
+            _PER_STACK_PROMPT.search(prompt)
+            or _SWEEP_DISCRIMINATOR in prompt
+            or _ARBITER_DISCRIMINATOR in prompt
+            or _INTENT_DISCRIMINATOR in prompt
+            or _WONDER_DISCRIMINATOR in prompt
+            or _MERGE_DISCRIMINATOR in prompt
+        ):
+            surface.append(call)
+    return surface
 
 
 async def test_identical_rerun_reuses_the_uncovered_sweep_and_restores_coverage(
@@ -401,6 +446,65 @@ async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_p
     # A partially completed earlier adjudication still resumes group-by-group:
     # the group markers are read from the fresh run's own artifacts, not from the store.
     assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))
+
+
+async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_with_grounding(
+    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH8/MH9/MH16 -- the S4 gate. A one-file fix committed the way the fix phase
+    commits (build_commit_message -> 'Daydream-Run:' trailer) moves ``head``, so the
+    pre-scan and intent are regenerated; the untouched shards must still hit, the
+    affected shard and the aggregation units downstream must recompute, and every
+    reused unit must carry its grounding provenance."""
+    stub = install_stub_backend(monkeypatch, shard_many_python_target, enable_exploration=True)
+    config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
+                         deep_shard_max_bytes=10**9)
+    assert await run(config) == 0
+    touched = shard_many_python_target / "mod0.py"
+    touched.write_text("def f0():\n    return 'fixed'\n")
+    git_ops.commit_paths(shard_many_python_target, [Path("mod0.py")],
+                         build_commit_message(items=[{"file": "mod0.py", "description": "fix f0"}],
+                                              run_id="fix-loop-1", version=daydream.__version__))
+    # The aggregation units' subject is the contributing record *bytes* (A5), so
+    # the gate only means something if the recompute changes them. The stub's
+    # default finding is content-independent; make the recomputed shard emit a
+    # HIGH, differently-worded finding so the merge and arbiter keys move.
+    stub.parse_by_stack = {"python#0": {"severity": "high", "confidence": "HIGH",
+                                        "file": "mod0.py", "line": 1,
+                                        "description": "regression after fix"}}
+    stub.calls.clear()
+    assert await run(config) == 0
+    deep = shard_many_python_target / ".daydream" / "deep"
+    assert len(_reviewed_stacks(stub.calls)) == 1              # exactly the shard owning mod0.py
+    assert _count_arbiter_prompts(stub.calls) >= 1             # records changed -> arbiter recomputes
+    assert _count_merge_prompts(stub.calls) >= 1               # merged set consumes records
+    provenance = json.loads(reuse_store.provenance_path(
+        shard_many_python_target / ".daydream" / "review-cache", _session_id_of(deep)).read_text())
+    reused = [k for k, v in provenance["units"].items()
+              if k.startswith("shard:") and v["outcome"] == "hit"]
+    assert reused, "sibling shards must still reuse after the fix commit"
+    for unit in reused:                                        # MH16, per reused unit
+        assert provenance["units"][unit]["grounding"]["settled_decisions"]["moved"] is True
+        assert provenance["units"][unit]["grounding_status"]["exploration"] == "regenerated"
+
+
+async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_byte(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH9/MH10: no model call anywhere on the review surface, and the canonical
+    artifacts come back byte-identical."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target)
+    assert await run(config) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    canonical = {p.name: p.read_bytes() for p in deep.glob("stack-*-records.json")}
+    canonical["merged-items.json"] = (deep / "merged-items.json").read_bytes()
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _review_surface_prompts(stub.calls) == [], f"paid work on a warm run: {stub.calls}"
+    assert {p.name: p.read_bytes() for p in deep.glob("stack-*-records.json")} == \
+        {k: v for k, v in canonical.items() if k != "merged-items.json"}
+    assert (deep / "merged-items.json").read_bytes() == canonical["merged-items.json"]
 
 
 async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
