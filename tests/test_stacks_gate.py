@@ -69,20 +69,10 @@ def _load_records(out: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in lines if line.strip()]
 
 
-def _strip(tmp_path: Path, *path: str) -> None:
-    out = tmp_path / "proj"
-    records = _load_records(out)
-    for record in records:
-        node: Any = record
-        for key in path[:-1]:
-            node = node[key]
-        del node[path[-1]]
-    (out / "train.jsonl").write_text(
-        "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
-    )
+_MISSING = object()
 
 
-def _set(tmp_path: Path, dotted: str, value: object) -> None:
+def _edit(tmp_path: Path, dotted: str, value: object = _MISSING) -> None:
     out = tmp_path / "proj"
     records = _load_records(out)
     keys = dotted.split(".")
@@ -90,7 +80,10 @@ def _set(tmp_path: Path, dotted: str, value: object) -> None:
         node: Any = record
         for key in keys[:-1]:
             node = node[key]
-        node[keys[-1]] = value
+        if value is _MISSING:
+            del node[keys[-1]]
+        else:
+            node[keys[-1]] = value
     (out / "train.jsonl").write_text(
         "".join(json.dumps(r) + "\n" for r in records), encoding="utf-8"
     )
@@ -98,21 +91,21 @@ def _set(tmp_path: Path, dotted: str, value: object) -> None:
 
 def test_load_v2_raises_on_stripped_repo_slug(tmp_path: Path) -> None:
     _write_projection(tmp_path, [_record()])
-    _strip(tmp_path, "lineage", "repo_slug")
+    _edit(tmp_path, "lineage.repo_slug")
     with pytest.raises(ValueError, match="repo_slug"):
         load_dataset_v2(tmp_path / "proj")
 
 
 def test_load_v2_raises_on_stripped_license_decision(tmp_path: Path) -> None:
     _write_projection(tmp_path, [_record()])
-    _strip(tmp_path, "lineage", "license_decision")
+    _edit(tmp_path, "lineage.license_decision")
     with pytest.raises(ValueError, match="license_decision"):
         load_dataset_v2(tmp_path / "proj")
 
 
 def test_load_v2_raises_on_unknown_license_status(tmp_path: Path) -> None:
     _write_projection(tmp_path, [_record()])
-    _set(tmp_path, "lineage.license_decision.status", "maybe")
+    _edit(tmp_path, "lineage.license_decision.status", "maybe")
     with pytest.raises(ValueError, match="license_decision"):
         load_dataset_v2(tmp_path / "proj")
 

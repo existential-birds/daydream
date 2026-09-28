@@ -293,6 +293,30 @@ PIPELINE_PY = (
 # Canonical grounded specs
 
 
+def _participant(name: str, files: list[str], *, service: str | None = None) -> dict[str, Any]:
+    return {"name": name, "kind": "internal", "files": files, "service": service}
+
+
+def _message(
+    frm: str,
+    to: str,
+    label: str,
+    kind: str,
+    *,
+    file: str,
+    line: int,
+    symbol: str,
+) -> dict[str, Any]:
+    return {
+        "from": frm,
+        "to": to,
+        "label": label,
+        "kind": kind,
+        "changed": True,
+        "evidence": {"file": file, "line": line, "symbol": symbol},
+    }
+
+
 def sequence_spec() -> dict[str, Any]:
     """A fully grounded sequence spec for the cross-module fixture.
 
@@ -306,82 +330,31 @@ def sequence_spec() -> dict[str, Any]:
     """
     return {
         "participants": [
-            {
-                "name": "Client",
-                "kind": "internal",
-                "files": ["pkg_b/client.py"],
-                "service": None,
-            },
-            {
-                "name": "Core",
-                "kind": "internal",
-                "files": ["pkg_a/core.py"],
-                "service": None,
-            },
-            {
-                "name": "Util",
-                "kind": "internal",
-                "files": ["pkg_a/util.py"],
-                "service": None,
-            },
+            _participant("Client", ["pkg_b/client.py"]),
+            _participant("Core", ["pkg_a/core.py"]),
+            _participant("Util", ["pkg_a/util.py"]),
         ],
         "messages": [
-            {
-                "from": "Client",
-                "to": "Util",
-                "label": "Normalize payload",
-                "kind": "call",
-                "changed": True,
-                "evidence": {
-                    "file": "pkg_b/client.py",
-                    "line": 6,
-                    "symbol": "normalize",
-                },
-            },
-            {
-                "from": "Util",
-                "to": "Client",
-                "label": "Stripped text",
-                "kind": "reply",
-                "changed": True,
-                "evidence": {
-                    "file": "pkg_a/util.py",
-                    "line": 2,
-                    "symbol": "normalize",
-                },
-            },
-            {
-                "from": "Client",
-                "to": "Core",
-                "label": "Handle cleaned payload",
-                "kind": "call",
-                "changed": True,
-                "evidence": {
-                    "file": "pkg_b/client.py",
-                    "line": 7,
-                    "symbol": "handle",
-                },
-            },
-            {
-                "from": "Core",
-                "to": "Client",
-                "label": "Cleaned payload",
-                "kind": "reply",
-                "changed": True,
-                "evidence": {"file": "pkg_a/core.py", "line": 3, "symbol": "handle"},
-            },
-            {
-                "from": "Core",
-                "to": "Core",
-                "label": "Normalize inside handler",
-                "kind": "self",
-                "changed": True,
-                "evidence": {
-                    "file": "pkg_a/core.py",
-                    "line": 2,
-                    "symbol": "normalize_payload",
-                },
-            },
+            _message(
+                "Client", "Util", "Normalize payload", "call",
+                file="pkg_b/client.py", line=6, symbol="normalize",
+            ),
+            _message(
+                "Util", "Client", "Stripped text", "reply",
+                file="pkg_a/util.py", line=2, symbol="normalize",
+            ),
+            _message(
+                "Client", "Core", "Handle cleaned payload", "call",
+                file="pkg_b/client.py", line=7, symbol="handle",
+            ),
+            _message(
+                "Core", "Client", "Cleaned payload", "reply",
+                file="pkg_a/core.py", line=3, symbol="handle",
+            ),
+            _message(
+                "Core", "Core", "Normalize inside handler", "self",
+                file="pkg_a/core.py", line=2, symbol="normalize_payload",
+            ),
         ],
         "blocks": [],
     }
@@ -435,56 +408,22 @@ def cross_service_sequence_spec() -> dict[str, Any]:
     """A three-message sequence spec for the cross-service fixture."""
     return {
         "participants": [
-            {
-                "name": "Alpha",
-                "kind": "internal",
-                "files": ["services/alpha/api.py"],
-                "service": "alpha",
-            },
-            {
-                "name": "Beta",
-                "kind": "internal",
-                "files": ["services/beta/api.py"],
-                "service": "beta",
-            },
+            _participant("Alpha", ["services/alpha/api.py"], service="alpha"),
+            _participant("Beta", ["services/beta/api.py"], service="beta"),
         ],
         "messages": [
-            {
-                "from": "Alpha",
-                "to": "Alpha",
-                "label": "Call alpha endpoint",
-                "kind": "call",
-                "changed": True,
-                "evidence": {
-                    "file": "services/alpha/api.py",
-                    "line": 1,
-                    "symbol": "endpoint",
-                },
-            },
-            {
-                "from": "Alpha",
-                "to": "Alpha",
-                "label": "Return alpha body",
-                "kind": "reply",
-                "changed": True,
-                "evidence": {
-                    "file": "services/alpha/api.py",
-                    "line": 2,
-                    "symbol": "endpoint",
-                },
-            },
-            {
-                "from": "Beta",
-                "to": "Beta",
-                "label": "Serve beta endpoint",
-                "kind": "self",
-                "changed": True,
-                "evidence": {
-                    "file": "services/beta/api.py",
-                    "line": 1,
-                    "symbol": "endpoint",
-                },
-            },
+            _message(
+                "Alpha", "Alpha", "Call alpha endpoint", "call",
+                file="services/alpha/api.py", line=1, symbol="endpoint",
+            ),
+            _message(
+                "Alpha", "Alpha", "Return alpha body", "reply",
+                file="services/alpha/api.py", line=2, symbol="endpoint",
+            ),
+            _message(
+                "Beta", "Beta", "Serve beta endpoint", "self",
+                file="services/beta/api.py", line=1, symbol="endpoint",
+            ),
         ],
         "blocks": [],
     }

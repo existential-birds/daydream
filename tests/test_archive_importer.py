@@ -42,6 +42,7 @@ from daydream.archive.importer import (
     run_pure_import,
 )
 from daydream.archive.index import (
+    LABEL_OBSERVATION_NAMES,
     append_label_observation,
     label_observation_history,
     upsert_run,
@@ -55,27 +56,6 @@ D = "d" * 64
 
 _OBSERVED_A = "2026-05-01T00:00:00+00:00"
 _OBSERVED_B = "2026-05-02T00:00:00+00:00"
-
-_OBSERVATION_COLUMNS = [
-    "session_id",
-    "observed_at",
-    "labels",
-    "pr_state",
-    "labeler_version",
-    "evidence_sha",
-    "rubric_json",
-    "valid_at",
-    "reward_version",
-    "reward_json",
-    "composite_reward",
-    "reviewer_logins",
-    "has_posterior",
-    "source",
-    "labeler_policy_version",
-    "reply_classifier_version",
-    "reply_evidence_digest",
-    "legacy",
-]
 
 
 def build_hydrated_index_with_session(tmp_path: Path, session_id: str, digest: str) -> dict[str, dict[str, str]]:
@@ -190,7 +170,7 @@ def read_label_rows(root: Path) -> list[dict[str, Any]]:
     conn = sqlite3.connect(f"file:{root / 'index.db'}?mode=ro", uri=True)
     try:
         conn.row_factory = sqlite3.Row
-        cols = ", ".join(_OBSERVATION_COLUMNS)
+        cols = ", ".join(LABEL_OBSERVATION_NAMES)
         rows = conn.execute(f"SELECT {cols} FROM label_observations ORDER BY observed_at").fetchall()
         return [dict(r) for r in rows]
     finally:
