@@ -4297,8 +4297,18 @@ async def phase_per_stack_reviews(
     run_context: RunContext | None = None,
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
+    reuse_pending: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
-    """Run scoped per-stack reviews under the backend fan-out limit and record each result."""
+    """Run scoped per-stack reviews under the backend fan-out limit and record each result.
+
+    ``reuse_pending`` is an optional out-channel for the real pipeline: a
+    freshly reviewed stack's store inputs are collected here instead of being
+    committed by the fan-out, because the records file is only final after
+    ``_step_per_stack_parse`` reconciles verdicts against the completed review
+    forks (issue #745). The caller persists the entries once that finalization
+    has happened, so a cached shard restores exactly the bytes a fresh run
+    leaves. Direct callers that omit it keep the immediate-store behavior.
+    """
     active_registry = registry if registry is not None else get_registry()
     run_context = resolve_run_context(run_context)
     # Prompt builders import phases, so keep this import local.
@@ -4677,22 +4687,42 @@ async def phase_per_stack_reviews(
                     and stack_reuse_key is not None
                     and budget_reason is None
                 ):
-                    # Persist the finished review under the key computed on the
-                    # miss path (A14). The bytes are read back from disk so the
-                    # entry restores exactly what this run wrote.
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
-                    reuse_cache.store(
-                        stack_reuse_key,
-                        unit=f"shard:{stack_name}",
-                        payload={
-                            records_path.name: records_path.read_bytes(),
-                            output_path.name: output_path.read_bytes(),
+                    store_inputs: dict[str, Any] = {
+                        "key": stack_reuse_key,
+                        "unit": f"shard:{stack_name}",
+                        # Paths, not yet-read bytes: the records file is rewritten
+                        # by verdict reconciliation after the fan-out, and the
+                        # entry must capture the reconciled bytes.
+                        "payload_names": {
+                            records_path.name: str(records_path),
+                            output_path.name: str(output_path),
                         },
-                        components=stack_payload["components"],
-                        identity=phase_identity,
-                        grounding=grounding_digests(stack_payload),
-                        grounding_status=grounding_statuses,
-                    )
+                        "components": stack_payload["components"],
+                        "identity": phase_identity,
+                        "grounding": grounding_digests(stack_payload),
+                        "grounding_status": grounding_statuses,
+                    }
+                    if reuse_pending is not None:
+                        # Defer the store until verdicts are final; the parse step
+                        # commits it (issue #733, MH6).
+                        reuse_pending[stack_name] = store_inputs
+                    else:
+                        # Direct callers without a deferral channel keep the
+                        # original immediate store; bytes are read from disk so
+                        # the entry restores exactly what this run wrote (A14).
+                        reuse_cache.store(
+                            stack_reuse_key,
+                            unit=f"shard:{stack_name}",
+                            payload={
+                                name: Path(path).read_bytes()
+                                for name, path in store_inputs["payload_names"].items()
+                            },
+                            components=stack_payload["components"],
+                            identity=phase_identity,
+                            grounding=grounding_digests(stack_payload),
+                            grounding_status=grounding_statuses,
+                        )
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:

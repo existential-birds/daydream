@@ -502,6 +502,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 structural_strategy += "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION
         print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
         async with phase_scope(DaydreamPhase.DEEP, stage="review"):
+            # Issue #733 (MH6): a freshly reviewed stack's store entry is
+            # committed by ``_step_per_stack_parse`` after verdict
+            # reconciliation, so the cached bytes match the final artifact.
+            reuse_pending: dict[str, Any] = {}
             _, failed_stacks = await phase_per_stack_reviews(
                 ctx.backend_for("per_stack_review"),
                 ctx.work,
@@ -528,7 +532,12 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 allow_standalone=ctx.allow_standalone_artifacts,
                 reuse_cache=reuse_cache,
                 phase_identity=phase_identity,
+                reuse_pending=reuse_pending,
             )
+            if reuse_pending:
+                ctx.data["reuse_pending_shards"] = reuse_pending
+            else:
+                ctx.data.pop("reuse_pending_shards", None)
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
         failures_p = per_stack_failures_path(dd)
@@ -560,6 +569,69 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     deep_state.failed_stacks = failed_stacks
 
 
+def _commit_pending_shard_store(
+    deep_state: DeepState, ctx: FlowContext, stack_name: str
+) -> None:
+    """Persist a freshly reviewed stack's reuse entry from its pending inputs.
+
+    The fan-out hands the store inputs to ``_step_per_stack_parse`` through
+    ``ctx.data["reuse_pending_shards"]`` rather than committing them itself,
+    because verdict reconciliation (which rewrites the records file) happens
+    here. Unknown names are ignored, so a resume with no fan-out is a no-op.
+    """
+    pending = ctx.data.get("reuse_pending_shards")
+    entry = pending.get(stack_name) if isinstance(pending, dict) else None
+    if not isinstance(entry, dict):
+        return
+    reuse_cache = deep_state.reuse_cache
+    if reuse_cache is None:
+        return
+    payload_names = entry.get("payload_names")
+    if not isinstance(payload_names, dict):
+        return
+    reuse_cache.store(
+        entry["key"],
+        unit=entry["unit"],
+        payload={
+            str(name): Path(str(path)).read_bytes()
+            for name, path in payload_names.items()
+        },
+        components=entry["components"],
+        identity=entry["identity"],
+        grounding=entry["grounding"],
+        grounding_status=entry["grounding_status"],
+    )
+
+
+def _reused_stack_names(deep_state: DeepState) -> set[str]:
+    """Stacks this run restored from the reuse store, per its own provenance.
+
+    A reused stack ran no ``deep-<stack>`` review fork, so this run's
+    trajectory-derived read set is empty; re-reconciling the restored records
+    against it would downgrade the origin run's evidence-gated verdicts to
+    ``not_reviewed`` and rewrite bytes that must stay identical to what the
+    origin run left (MH6). The provenance record is the host-assigned fact of
+    which stacks were hits, so it -- never a heuristic over absent forks --
+    decides which stacks skip reconciliation.
+    """
+    reuse_cache = deep_state.reuse_cache
+    if reuse_cache is None:
+        return set()
+    units = reuse_cache.provenance().get("units")
+    if not isinstance(units, dict):
+        return set()
+    return {
+        unit.removeprefix("shard:")
+        for unit, entry in units.items()
+        if (
+            isinstance(unit, str)
+            and unit.startswith("shard:")
+            and isinstance(entry, dict)
+            and entry.get("outcome") == "hit"
+        )
+    }
+
+
 async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     """Load per-stack records (written by the reviewers) + structural partition.
 
@@ -573,6 +645,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     dd = deep_state.dd
     stacks = deep_state.stacks
     failed_stacks: dict[str, str] = deep_state.failed_stacks
+    reused_stacks = _reused_stack_names(deep_state)
 
     print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
     # Issue #745 (AC4): the per-stack reviewers emit PER_STACK_RECORD_SCHEMA
@@ -645,7 +718,17 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         # rewrite them to disk. The on-disk verdicts are already finalized;
         # reconcile (and rewrite) only when this session actually ran the
         # per-stack review fan-out above.
-        if ctx.config.start_at not in ("merge", "fix") and not delegated_structure:
+        #
+        # Issue #733 (MH6): a reused stack took the same shape -- its restored
+        # records already carry the origin run's evidence-gated verdicts and
+        # this session ran no review fork for it -- so reconciliation is
+        # skipped for it too, leaving the restored bytes exactly as the origin
+        # run wrote them.
+        if (
+            ctx.config.start_at not in ("merge", "fix")
+            and not delegated_structure
+            and stack.stack_name not in reused_stacks
+        ):
             verdicts = _reconcile_stack_verdicts(
                 dd.parent,
                 recorder,
@@ -659,6 +742,11 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
                 **({"source_evidence": loaded["source_evidence"]}
                    if isinstance(loaded, dict) and isinstance(loaded.get("source_evidence"), list)
                    else {})}, indent=2))
+        # Issue #733 (MH6): commit the deferred store entry now that the records
+        # file is final. The bytes are read back here, after reconciliation and
+        # after the delegation carve-out, so a cached shard restores exactly the
+        # artifact this run leaves -- and a reused shard is never re-stored.
+        _commit_pending_shard_store(deep_state, ctx, stack.stack_name)
         expected_paths.append(records_path)
     if missing_stacks:
         print_error(
