@@ -2016,31 +2016,22 @@ def test_resolve_repo_never_clones_raw_archived_url(
     assert seen == ["https://github.com/o/r"]
 
 
-def test_resolve_repo_fails_closed_on_untrusted_host(
+@pytest.mark.parametrize(
+    "remote_url",
+    ["https://evil.example.com/o/r", "file:///tmp/evil"],
+    ids=["untrusted-host", "file-scheme"],
+)
+def test_resolve_repo_fails_closed_before_clone(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    remote_url: str,
 ) -> None:
     calls: list[str] = []
     monkeypatch.setattr(git_ops, "clone_with_token", lambda url, target, **kwargs: calls.append(url))
     assert _resolve_repo_with_services(
         tmp_path,
         clone_cache=tmp_path / "cache",
-        remote_url="https://evil.example.com/o/r",
-        repo_slug="o/r",
-    ) is None
-    assert calls == []
-
-
-def test_resolve_repo_fails_closed_on_file_scheme(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[str] = []
-    monkeypatch.setattr(git_ops, "clone_with_token", lambda url, target, **kwargs: calls.append(url))
-    assert _resolve_repo_with_services(
-        tmp_path,
-        clone_cache=tmp_path / "cache",
-        remote_url="file:///tmp/evil",
+        remote_url=remote_url,
         repo_slug="o/r",
     ) is None
     assert calls == []

@@ -41,17 +41,23 @@ def test_single_trajectory_file_produces_renderer_output(
     assert "**Mode:**" not in captured.out
 
 
-def test_run_directory_with_parent_and_forks(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """A run dir with trajectory.json + 2 fork siblings aggregates all three."""
-    run_dir = tmp_path / "runs" / "abcd1234-fixture"
+def _write_deep_run_dir(tmp_path: Path, name: str) -> Path:
+    """A run dir with trajectory.json plus two fork siblings in ``trajectories/``."""
+    run_dir = tmp_path / "runs" / name
     run_dir.mkdir(parents=True)
     shutil.copy(_DEEP_PARENT, run_dir / "trajectory.json")
     siblings = run_dir / "trajectories"
     siblings.mkdir()
     shutil.copy(_DEEP_FORK_A, siblings / "fix-0.json")
     shutil.copy(_DEEP_FORK_B, siblings / "fix-1.json")
+    return run_dir
+
+
+def test_run_directory_with_parent_and_forks(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A run dir with trajectory.json + 2 fork siblings aggregates all three."""
+    run_dir = _write_deep_run_dir(tmp_path, "abcd1234-fixture")
 
     rc = summarize(run_dir)
     assert rc == 0
@@ -106,13 +112,8 @@ def test_summarize_matches_render_run_info_block_directly(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Summarize on a run dir matches calling render_run_info_block with the same paths."""
-    run_dir = tmp_path / "runs" / "abcd1234-parity"
-    run_dir.mkdir(parents=True)
-    shutil.copy(_DEEP_PARENT, run_dir / "trajectory.json")
+    run_dir = _write_deep_run_dir(tmp_path, "abcd1234-parity")
     siblings = run_dir / "trajectories"
-    siblings.mkdir()
-    shutil.copy(_DEEP_FORK_A, siblings / "fix-0.json")
-    shutil.copy(_DEEP_FORK_B, siblings / "fix-1.json")
 
     rc = summarize(run_dir)
     assert rc == 0
