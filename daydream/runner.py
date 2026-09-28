@@ -239,6 +239,15 @@ class RunConfig:
     deep_shard_max_bytes: int | None = None
     deep_shard_fanout_cap: int | None = None
     deep_shard_frontier_max: int | None = None
+    # Issue #733: content-addressed reuse of completed deep review results.
+    # CLI-tier overrides; ``None`` falls through to the file-config scalar then
+    # the built-in default (reuse enabled). ``--no-review-cache`` sets
+    # ``review_cache_enabled=False`` for one forensic run. The three budget
+    # fields are independent of the enable flag and of each other.
+    review_cache_enabled: bool | None = None
+    review_cache_max_entries: int | None = None
+    review_cache_max_bytes: int | None = None
+    review_cache_max_age_days: int | None = None
     # Issue #885: versioned benchmark-tunable review profile. The path field is
     # the CLI/env-carried explicit source; the profile field is the resolved
     # value (validated object + source kind + digest), set once by

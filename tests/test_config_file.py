@@ -402,3 +402,33 @@ def test_an_absent_retry_recovery_allowance_stays_silent(
 
     assert config.retry_recovery_allowance_s is None
     assert not any("retry_recovery_allowance_s" in r.message for r in caplog.records)
+
+
+def test_review_cache_keys_round_trip_and_ill_typed_values_degrade(tmp_path: Path) -> None:
+    (tmp_path / ".daydream.toml").write_text(
+        "review_cache_enabled = false\n"
+        "review_cache_max_entries = 7\n"
+        "review_cache_max_bytes = 2048\n"
+        "review_cache_max_age_days = 3\n",
+        encoding="utf-8",
+    )
+
+    config = load_file_config(tmp_path)
+
+    assert config.review_cache_enabled is False
+    assert config.review_cache_max_entries == 7
+    assert config.review_cache_max_bytes == 2048
+    assert config.review_cache_max_age_days == 3
+
+    (tmp_path / ".daydream.toml").write_text(
+        'review_cache_enabled = "yes"\n'
+        "review_cache_max_entries = -1\n"
+        "review_cache_max_bytes = 1.5\n",
+        encoding="utf-8",
+    )
+
+    degraded = load_file_config(tmp_path)
+
+    assert degraded.review_cache_enabled is None
+    assert degraded.review_cache_max_entries is None
+    assert degraded.review_cache_max_bytes is None

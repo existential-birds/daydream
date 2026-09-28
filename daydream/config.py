@@ -329,6 +329,16 @@ DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES
 DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
 DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
 
+# Issue #733: content-addressed reuse of completed deep review results.
+# Reuse is on by default; ``--no-review-cache`` (MH13) disables the store and
+# the exploration pre-scan cache for one forensic run. The three retention
+# bounds (MH12) are entries, bytes, and age since last use — whichever binds
+# first evicts the oldest-last-used entries.
+DEFAULT_REVIEW_CACHE_ENABLED: bool = True
+DEFAULT_REVIEW_CACHE_MAX_ENTRIES: int = 1024
+DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
+DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
+
 # Structural-maintainability meta-stack. Deep mode appends a synthetic
 # ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` so the structural
 # reviewer always runs alongside per-language reviewers. It is a scope metadata

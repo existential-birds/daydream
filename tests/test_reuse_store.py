@@ -10,7 +10,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from daydream.config_file import DaydreamFileConfig
 from daydream.deep import reuse_key, reuse_store
+from daydream.runner import RunConfig
 
 
 def _identity() -> reuse_key.PhaseIdentity:
@@ -98,3 +100,17 @@ def test_prune_evicts_oldest_last_used_and_spares_the_fresh_entry(tmp_path: Path
     store2.store("f" * 64, unit="shard:python#0", payload={"x.json": b"{}"}, components={},
                  identity=_identity(), grounding={}, grounding_status={})
     assert isinstance(store2.lookup("e" * 64), reuse_store.ReuseMiss)
+
+
+def test_review_cache_enablement_and_budget_resolve_cli_then_file_then_default(tmp_path: Path) -> None:
+    cfg = RunConfig(target=str(tmp_path))
+    assert reuse_store.review_cache_enabled(cfg) is True          # MH13 default
+    budget = reuse_store.review_cache_budget(cfg)
+    assert (budget.max_entries, budget.max_bytes, budget.max_age_seconds) == (1024, 1024**3, 30 * 86400)
+    file_cfg = DaydreamFileConfig(review_cache_enabled=False, review_cache_max_entries=7)
+    fcfg = RunConfig(target=str(tmp_path), file_config=file_cfg)
+    assert reuse_store.review_cache_enabled(fcfg) is False
+    assert reuse_store.review_cache_budget(fcfg).max_entries == 7
+    cli = RunConfig(target=str(tmp_path), file_config=file_cfg, review_cache_enabled=True)
+    assert reuse_store.review_cache_enabled(cli) is True          # CLI tier wins
+    assert reuse_store.review_cache_budget(cli).max_entries == 7  # budget tiers are independent

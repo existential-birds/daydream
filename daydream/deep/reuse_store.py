@@ -26,10 +26,21 @@ from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
+from daydream.config import (
+    DEFAULT_REVIEW_CACHE_ENABLED,
+    DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS,
+    DEFAULT_REVIEW_CACHE_MAX_BYTES,
+    DEFAULT_REVIEW_CACHE_MAX_ENTRIES,
+)
+from daydream.config_file import _coerce_non_negative_int
 from daydream.deep.reuse_key import REUSE_KEY_FORMAT, PhaseIdentity
+from daydream.deep.settings import _resolve_config_value
 from daydream.json_utils import atomic_write_bytes
+
+if TYPE_CHECKING:
+    from daydream.runner import RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +83,52 @@ class ReuseMiss:
 
     key: str
     reason: str
+
+
+# ---------------------------------------------------------------------------
+# Config resolution (CLI tier -> file config -> built-in default)
+# ---------------------------------------------------------------------------
+
+
+def review_cache_enabled(config: RunConfig) -> bool:
+    """Resolve the reuse-cache enable flag (MH13).
+
+    Precedence mirrors :func:`daydream.deep.settings._resolve_config_value`: 1)
+    ``RunConfig.review_cache_enabled`` (CLI ``--no-review-cache``), 2)
+    ``DaydreamFileConfig.review_cache_enabled`` (file-config scalar), 3) the
+    built-in default (reuse on). An explicit ``False`` at either tier wins.
+    """
+    value = _resolve_config_value(
+        config, "review_cache_enabled", DEFAULT_REVIEW_CACHE_ENABLED
+    )
+    return bool(value)
+
+
+def _budget_bound(config: RunConfig, attr: str, default: int) -> int:
+    """Resolve one retention bound, coercing-and-degrading to the default."""
+    coerced = _coerce_non_negative_int(_resolve_config_value(config, attr, default))
+    return coerced if coerced is not None else default
+
+
+def review_cache_budget(config: RunConfig) -> ReuseBudget:
+    """Resolve the three retention bounds independently (MH12).
+
+    Each bound rides the same three tiers as :func:`review_cache_enabled`; the
+    enable flag never affects the budget and each bound resolves on its own.
+    Config-file values are days since last use; the returned budget is seconds.
+    """
+    return ReuseBudget(
+        max_entries=_budget_bound(
+            config, "review_cache_max_entries", DEFAULT_REVIEW_CACHE_MAX_ENTRIES
+        ),
+        max_bytes=_budget_bound(
+            config, "review_cache_max_bytes", DEFAULT_REVIEW_CACHE_MAX_BYTES
+        ),
+        max_age_seconds=86400
+        * _budget_bound(
+            config, "review_cache_max_age_days", DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
