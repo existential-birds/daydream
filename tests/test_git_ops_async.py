@@ -16,6 +16,7 @@ import pytest
 from daydream import git_ops
 from daydream.backends._subprocess import terminate_process
 from tests.harness.fake_gh import FakeGh
+from tests.harness.git_helpers import refreshing_session
 from tests.harness.processes import wait_for_process_group_exit
 
 
@@ -93,28 +94,7 @@ async def test_async_requests_keep_refreshing_session_environments_isolated(
         return CompletedProcess()
 
     def session(name: str) -> git_ops.RefreshingGitHubAuth:
-        def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
-            refresh_calls[name] += 1
-            return (
-                git_ops.StaticGitHubAuth(
-                    {
-                        "PATH": f"/{name}/tools",
-                        "GH_TOKEN": f"ghs_{name}_fresh_token_1234567890",
-                    }
-                ),
-                float("inf"),
-            )
-
-        return git_ops.RefreshingGitHubAuth(
-            git_ops.StaticGitHubAuth(
-                {
-                    "PATH": f"/{name}/tools",
-                    "GH_TOKEN": f"ghs_{name}_expired_token_1234567890",
-                }
-            ),
-            expires_at=0,
-            refresh=refresh,
-        )
+        return refreshing_session(name, refresh_calls)
 
     monkeypatch.setattr(
         "daydream.git_ops.asyncio.create_subprocess_exec",

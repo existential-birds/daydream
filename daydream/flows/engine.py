@@ -89,38 +89,8 @@ class FlowContext:
         default_factory=dict, repr=False
     )
 
-    def backend_for(self, phase: str) -> Backend:
-        """Get or create the backend for ``phase``, reusing per-context instances.
-
-        Instance-sharing semantics are identical to the flow helpers'
-        ``backend_cache`` dicts today: backends are cached per resolved
-        ``(backend_name, model, reasoning_effort, audit_root)`` tuple for the
-        lifetime of this context.
-        """
-        if self._backend_factory is not None:
-            return self._backend_factory(
-                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
-            )
-
-        from daydream.runner import _resolve_backend
-
-        return _resolve_backend(
-            self.config,
-            phase,
-            cache=self._backend_cache,
-            cwd=self.work.repo,
-            audit_workspace=self.audit_workspace,
-        )
-
-    def backend_for_effort(self, phase: str, effort: str) -> Backend:
-        """Get or create ``phase``'s backend with ``effort`` overriding the resolver.
-
-        The arbiter group fan-out resolves one backend per group effort. When a
-        runner-bound factory is installed the same seam is used, so test
-        factories observe the resolution path production takes; otherwise the
-        effort override is threaded through :func:`_resolve_backend` and cached
-        under the resulting ``(backend, model, effort, audit_root)`` key.
-        """
+    def _backend(self, phase: str, *, effort: str | None = None) -> Backend:
+        """Resolve ``phase``'s backend, honoring a runner-bound factory seam."""
         if self._backend_factory is not None:
             return self._backend_factory(
                 self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
@@ -136,6 +106,27 @@ class FlowContext:
             audit_workspace=self.audit_workspace,
             effort_override=effort,
         )
+
+    def backend_for(self, phase: str) -> Backend:
+        """Get or create the backend for ``phase``, reusing per-context instances.
+
+        Instance-sharing semantics are identical to the flow helpers'
+        ``backend_cache`` dicts today: backends are cached per resolved
+        ``(backend_name, model, reasoning_effort, audit_root)`` tuple for the
+        lifetime of this context.
+        """
+        return self._backend(phase)
+
+    def backend_for_effort(self, phase: str, effort: str) -> Backend:
+        """Get or create ``phase``'s backend with ``effort`` overriding the resolver.
+
+        The arbiter group fan-out resolves one backend per group effort. When a
+        runner-bound factory is installed the same seam is used, so test
+        factories observe the resolution path production takes; otherwise the
+        effort override is threaded through :func:`_resolve_backend` and cached
+        under the resulting ``(backend, model, effort, audit_root)`` key.
+        """
+        return self._backend(phase, effort=effort)
 
     def strategy(self, stage: str) -> str:
         """Return the profile-owned strategy content for a model-bearing stage.

@@ -23,11 +23,10 @@ from daydream.training.adjudication.final_bundle import (
 from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.publish import publish_final_annotation_bundle
 from daydream.training.corpus_projection.bundle import load_curated_bundle
-from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import _verify_annotation_bundle
 from daydream.training.labeler_versions import ANNOTATION_SNAPSHOT_SCHEMA_VERSION
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import policy_binding, seed_index_dispositions
+from tests.harness.adjudication import accepted_observation, policy_binding, seed_index_dispositions
 from tests.test_training_adjudication_canonical import _PIN as _CANONICAL_PIN
 
 _SOURCE = "b" * 40
@@ -96,18 +95,7 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     # accepts the s1 finding (the same shape the CLI `label` verb records).
 
     obs_path = tmp_path / "observations.jsonl"
-    obs_path.write_text(json.dumps({
-        "record_id": record_id("s1", "s1-t", "s1-seg", "fp-1"),
-        "disposition": "accepted",
-        "evidence_digest": "d" * 32,
-        "evidence": [{"reply_id": 1, "body_sha256": "abc",
-                       "created_at": "2026-01-01T00:00:00+00:00"}],
-        "labeler": "alice", "role": "rater",
-        "rationale": "clear maintainer approval",
-        "valid_at": "2026-02-02T00:00:00+00:00",
-        "observed_at": "2026-02-02T00:00:00+00:00",
-        "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    obs_path.write_text(json.dumps(accepted_observation()) + "\n", encoding="utf-8")
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=obs_path)
     out = tmp_path / "final-bundle"
     summary = build_final_bundle(

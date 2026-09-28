@@ -576,6 +576,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
         *,
         cwd: Any = None,
         audit_workspace: Any = None,
+        effort_override: Any = None,
     ) -> Any:
         seen_phases.append(phase)
         return original(
@@ -584,6 +585,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
             cache,
             cwd=cwd,
             audit_workspace=audit_workspace,
+            effort_override=effort_override,
         )
 
     # run_deep imports _resolve_backend from daydream.runner, so patching it there

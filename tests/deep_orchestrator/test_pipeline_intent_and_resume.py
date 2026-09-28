@@ -39,6 +39,7 @@ from tests.test_deep_orchestrator import (
     _prime_merge_resume,
     _profile_with_pipeline,
     _record,
+    _recording_prompter,
     _run_deep,
     _silence,
 )
@@ -362,12 +363,7 @@ async def test_fix_gate_prompt(multi_stack_target: Path, monkeypatch: pytest.Mon
     _force_interactive(monkeypatch)
 
     asked: list[str] = []
-
-    def _record_prompt(_console: Any, message: str, _default: str = "") -> str:
-        if "understanding correct" in message.lower():
-            return "y"
-        asked.append(message)
-        return "n"  # decline the fix gate
+    _record_prompt = _recording_prompter(asked)
 
     monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
     monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", lambda *a, **kw: None)

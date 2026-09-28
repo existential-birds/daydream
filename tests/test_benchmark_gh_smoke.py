@@ -10,7 +10,6 @@ import json
 import os
 import shutil
 from pathlib import Path
-from typing import Any
 
 import pytest
 
@@ -27,15 +26,11 @@ pytestmark = pytest.mark.skipif(
 _SMOKE_PRS = os.environ.get("DAYDREAM_SMOKE_PRS", "")
 
 
-def _seed_manifest(ws: Any, repository: str) -> None:
-    init_workspace(ws, repository, ["h1.example.com"], ["h2.example.com"])
-
-
 def test_private_preflight_smoke_with_installed_gh(tmp_path: Path) -> None:
     """A public repo the operator can read; proves the real authenticated path."""
     ws = tmp_path / "ws"
     ws.mkdir()
-    _seed_manifest(ws, "existential-birds/daydream")
+    init_workspace(ws, "existential-birds/daydream", ["h1.example.com"], ["h2.example.com"])
     out = gi.preflight(ws, pr_count=0)
     assert out.login
     assert out.repository_id.startswith("R_kgD") and out.visibility in ("public", "private")

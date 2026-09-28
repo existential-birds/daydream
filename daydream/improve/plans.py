@@ -363,17 +363,16 @@ def _index_field(value: Any) -> str:
     return redact_text(str(value or "").strip())
 
 
-def _string_tuple(value: Any) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        return ()
-    return tuple(dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip()))
-
-
 def _string_sequence(value: Any) -> tuple[str, ...]:
     """Normalize a string sequence while preserving meaningful multiplicity."""
     if not isinstance(value, (list, tuple)):
         return ()
     return tuple(item.strip() for item in value if isinstance(item, str) and item.strip())
+
+
+def _string_tuple(value: Any) -> tuple[str, ...]:
+    """Like :func:`_string_sequence`, keeping first-seen order but dropping duplicates."""
+    return tuple(dict.fromkeys(_string_sequence(value)))
 
 
 def _finding_package_fingerprint(finding: dict[str, Any]) -> str:

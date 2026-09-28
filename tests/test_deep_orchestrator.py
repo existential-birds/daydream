@@ -47,6 +47,18 @@ def _accept_intent_decline_other(_console: Any, message: str, _default: str = ""
     return "y" if "understanding correct" in message.lower() else "n"
 
 
+def _recording_prompter(asked: list[str]) -> Callable[..., str]:
+    """Accept intent confirmation, recording then declining later optional gates."""
+
+    def _prompt(_console: Any, message: str, _default: str = "") -> str:
+        if "understanding correct" in message.lower():
+            return "y"
+        asked.append(message)
+        return "n"
+
+    return _prompt
+
+
 def _add_bare_remote(repo: Path) -> Path:
     """Give *repo* a real, pushable ``origin``: a sibling bare clone.
 

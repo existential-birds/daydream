@@ -19,6 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from daydream import git_ops
 from daydream.workspace import WorkContext
 
 SEED_ENV: dict[str, str] = {
@@ -132,6 +133,37 @@ def init_repo(repo: Path) -> None:
     repo.mkdir(parents=True, exist_ok=True)
     git(repo, "init", "-b", "main")
     configure_identity(repo)
+
+
+def refreshing_session(name: str, refresh_calls: dict[str, int]) -> git_ops.RefreshingGitHubAuth:
+    """An expired-token session that mints ``ghs_<name>_fresh_token_...`` on refresh.
+
+    Bumps ``refresh_calls[name]`` each time so callers can assert per-session
+    credential isolation without rebuilding the closure.
+    """
+
+    def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
+        refresh_calls[name] += 1
+        return (
+            git_ops.StaticGitHubAuth(
+                {
+                    "PATH": f"/{name}/tools",
+                    "GH_TOKEN": f"ghs_{name}_fresh_token_1234567890",
+                }
+            ),
+            float("inf"),
+        )
+
+    return git_ops.RefreshingGitHubAuth(
+        git_ops.StaticGitHubAuth(
+            {
+                "PATH": f"/{name}/tools",
+                "GH_TOKEN": f"ghs_{name}_expired_token_1234567890",
+            }
+        ),
+        expires_at=0,
+        refresh=refresh,
+    )
 
 
 def bare_remote(path: Path) -> Path:

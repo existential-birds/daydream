@@ -12,14 +12,13 @@ from daydream.training.adjudication.materialize import run_materialize
 from daydream.training.adjudication.observations import append_observation
 from daydream.training.adjudication.preview import run_preview
 from daydream.training.adjudication.publish import AnnotationHubClient, publish_final_annotation_bundle
-from daydream.training.corpus_projection.identity import record_id
 from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
 )
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import write_sessions_index, write_sessions_jsonl
+from tests.harness.adjudication import accepted_observation, write_sessions_index, write_sessions_jsonl
 from tests.test_training_adjudication_publish import _final_bundle
 
 
@@ -635,18 +634,9 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(
     # for the 80% admission gate to pass (the same shape the CLI `label` verb
     # records): alice decisive on the s1 finding, evidence digest matching the
     # materialized record.
-    (state / "observations.jsonl").write_text(json.dumps({
-        "record_id": record_id("s1", "s1-t", "s1-seg", "fp-1"),
-        "disposition": "accepted",
-        "evidence_digest": "d" * 32,
-        "evidence": [{"reply_id": 1, "body_sha256": "abc",
-                       "created_at": "2026-01-01T00:00:00+00:00"}],
-        "labeler": "alice", "role": "rater",
-        "rationale": "clear maintainer approval",
-        "valid_at": "2026-02-02T00:00:00+00:00",
-        "observed_at": "2026-02-02T00:00:00+00:00",
-        "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    (state / "observations.jsonl").write_text(
+        json.dumps(accepted_observation()) + "\n", encoding="utf-8"
+    )
     run_canonical_harvest(index_root, mat, archive_dir,
                           observations_path=state / "observations.jsonl")
     scratch = mat / "final-bundle" / ".publish-stage"

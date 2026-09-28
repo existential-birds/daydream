@@ -34,6 +34,7 @@ from tests.test_deep_orchestrator import (
     _install_stub_backend,
     _prime_merge_resume,
     _record_issues,
+    _recording_prompter,
     _run_deep,
     _severity_sort_key,
     _silence,
@@ -442,12 +443,7 @@ async def test_cleanup_none_interactive_prompts_before_keeping(
     _force_interactive(monkeypatch)
 
     asked: list[str] = []
-
-    def _record_prompt(_console: Any, message: str, _default: str = "") -> str:
-        if "understanding correct" in message.lower():
-            return "y"
-        asked.append(message)
-        return "n"  # decline cleanup
+    _record_prompt = _recording_prompter(asked)
 
     monkeypatch.setattr("daydream.run_context._prompt_user", _record_prompt)
 
