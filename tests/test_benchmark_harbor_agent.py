@@ -20,7 +20,7 @@ from daydream.config_file import DaydreamFileConfig
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.stub_backend import install_stub_backend
-from tests.test_benchmark_harbor_build import _seed_ready_workspace
+from tests.test_benchmark_harbor_build import _seed_ready_workspace, _stub_wheel
 
 
 def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -30,9 +30,7 @@ def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -
     pytest.importorskip("harbor")
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    ver = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    wheel, _ = _stub_wheel(tmp_path)
     pkg.build_harbor(ws, wheel=wheel)      # real compile -> per-case task.toml
 
     case = ws / "harbor" / build.derive_task_key(case_id)
@@ -606,9 +604,7 @@ def test_validate_compiled_imports_agent_path_same_interpreter(
     pytest.importorskip("harbor")
 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    ver = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    wheel, _ = _stub_wheel(tmp_path)
     pkg.build_harbor(ws, wheel=wheel)
 
     assert pkg.validate_compiled(ws) == 0  # agent class imports in the same interpreter
@@ -768,9 +764,7 @@ def test_local_harbor_task_with_fake_backend(
     # Compile the wheel + validate the compiled tree, including the custom-agent
     # same-interpreter preflight.
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    ver = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    wheel, _ = _stub_wheel(tmp_path)
     pkg.build_harbor(ws, wheel=wheel)
     assert pkg.validate_compiled(ws) == 0
     key = build.derive_task_key(case_id)

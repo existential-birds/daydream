@@ -127,6 +127,21 @@ def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
 
 
+PK_BODY = b"PK\x05\x06" + b"\x00" * 18
+
+
+def _stub_wheel(directory: Path, content: bytes = PK_BODY) -> tuple[Path, str]:
+    """Write a minimal wheel for the installed ``daydream`` version into *directory*.
+
+    Returns ``(wheel_path, version)`` so callers asserting on the version do not
+    re-read package metadata.
+    """
+    version = importlib.metadata.version("daydream")
+    wheel = directory / f"daydream-{version}-py3-none-any.whl"
+    wheel.write_bytes(content)
+    return wheel, version
+
+
 def _import_case(
     tmp_path: Path, fake_gh: FakeGh, *, number: int, lines: int = 3,
     ws: Path | None = None, with_candidate: bool = True,
@@ -656,9 +671,7 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
     assert finding["provenance"]["source_ids"] == [evidence["source_id"]]
     assert finding["body"] == edited_body
     _mark_ready(ws, case_id, head_sha)
-    version = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{version}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    wheel, _ = _stub_wheel(tmp_path)
     assert _handle_benchmark_command([
         "build-harbor", str(ws), "--daydream-wheel", str(wheel),
     ]) == 0

@@ -128,6 +128,9 @@ def test_parse_reviewer_environment_maps_claude_without_openrouter_requirement()
 @pytest.mark.parametrize("environment", [
     {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": ""},
     {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_BASE_URL": "http://api.anthropic.com"},
+    # an empty userinfo (https://@host) is still embedded credentials, not absent
+    {"DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_API_KEY": "sk-ant",
+     "ANTHROPIC_BASE_URL": "https://@api.anthropic.com"},
 ])
 def test_parse_reviewer_environment_rejects_invalid_claude_credentials(
     environment: dict[str, str],

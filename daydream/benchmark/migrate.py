@@ -195,19 +195,19 @@ def _migrate_workspace_unlocked(root: Path, *, dry_run: bool) -> UpgradeReport:
                 # candidate, prove an unmarked ready snapshot, or repair the
                 # one legacy producer state pairing. A current valid v2 case
                 # stays byte-unchanged and is not reported.
-                repaired = dict(raw)
-                changed = _backfill_requested_base_sha(repaired)
-                changed = _repair_ready_base_provenance(root, repaired) or changed
-                changed = _repair_legacy_unreplayable_curation(repaired) or changed
-                new_raw, recomputed = repaired, 0
+                new_raw = dict(raw)
+                recomputed = 0
+                changed = _backfill_requested_base_sha(new_raw)
             else:
                 if current != 1:
                     raise ValueError(
                         f"case {case_id} has unsupported schema_version {current!r}"
                     )
                 new_raw, recomputed = _upgrade_case(raw, case_id)
-                _repair_ready_base_provenance(root, new_raw)
-                _repair_legacy_unreplayable_curation(new_raw)
+            # Both schema versions share the same repair suffix; a v1 upgrade is
+            # already ``changed`` and never needs the repair return value.
+            changed = _repair_ready_base_provenance(root, new_raw) or changed
+            changed = _repair_legacy_unreplayable_curation(new_raw) or changed
             # strip the persisted audit field for validation (curation pattern),
             # but keep it in the written output — authored content is preserved.
             schema.CaseDocument.model_validate(schema._schema_ready(new_raw))

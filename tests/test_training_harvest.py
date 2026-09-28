@@ -1739,18 +1739,28 @@ def _resolve_repo_with_services(
     return services.resolve_repo(row, console=create_console())
 
 
+def _resolve_org_repo(
+    tmp_path: Path,
+    *,
+    clone_cache: Path | None = None,
+    source_path: Path | None = None,
+) -> Path | None:
+    """Resolve a row pointing at the canonical ``org/repo`` remote via the standard cache."""
+    return _resolve_repo_with_services(
+        tmp_path,
+        clone_cache=clone_cache or tmp_path / "cache",
+        source_path=source_path,
+        remote_url="https://github.com/org/repo.git",
+        repo_slug="org/repo",
+    )
+
+
 def test_resolve_repo_for_row_prefers_source_path(tmp_path: Path) -> None:
     """source_path is preferred when it exists and contains .git."""
     source = tmp_path / "source_repo"
     source.mkdir()
     (source / ".git").mkdir()
-    result = _resolve_repo_with_services(
-        tmp_path,
-        clone_cache=tmp_path / "cache",
-        source_path=source,
-        remote_url="https://github.com/org/repo.git",
-        repo_slug="org/repo",
-    )
+    result = _resolve_org_repo(tmp_path, source_path=source)
     assert result == source
 
 
@@ -1766,12 +1776,7 @@ def test_resolve_repo_for_row_clones_when_source_path_missing(
         (target / ".git").mkdir()
 
     monkeypatch.setattr(git_ops, "clone_with_token", fake_clone)
-    result = _resolve_repo_with_services(
-        tmp_path,
-        clone_cache=cache,
-        remote_url="https://github.com/org/repo.git",
-        repo_slug="org/repo",
-    )
+    result = _resolve_org_repo(tmp_path)
     assert result == cache / "org" / "repo"
 
 
@@ -1792,12 +1797,7 @@ def test_resolve_repo_for_row_fetches_existing_cache(
         "clone_with_token",
         lambda *args, **kwargs: pytest.fail("should not clone"),
     )
-    result = _resolve_repo_with_services(
-        tmp_path,
-        clone_cache=cache,
-        remote_url="https://github.com/org/repo.git",
-        repo_slug="org/repo",
-    )
+    result = _resolve_org_repo(tmp_path)
     assert result == cached_repo
     assert fetched == [cached_repo]
 
@@ -1813,7 +1813,6 @@ def test_resolve_repo_for_row_clone_failure_returns_none(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Clone failure is swallowed and None is returned (no .git left on disk)."""
-    cache = tmp_path / "cache"
     monkeypatch.setattr(
         git_ops,
         "clone_with_token",
@@ -1821,12 +1820,7 @@ def test_resolve_repo_for_row_clone_failure_returns_none(
             GitError("network error")
         ),
     )
-    result = _resolve_repo_with_services(
-        tmp_path,
-        clone_cache=cache,
-        remote_url="https://github.com/org/repo.git",
-        repo_slug="org/repo",
-    )
+    result = _resolve_org_repo(tmp_path)
     assert result is None
 
 
@@ -1845,12 +1839,7 @@ def test_resolve_repo_for_row_fetch_failure_returns_cached_path(
         "fetch",
         lambda repo, remote="origin": (_ for _ in ()).throw(GitError("fetch failed")),
     )
-    result = _resolve_repo_with_services(
-        tmp_path,
-        clone_cache=cache,
-        remote_url="https://github.com/org/repo.git",
-        repo_slug="org/repo",
-    )
+    result = _resolve_org_repo(tmp_path)
     assert result == cached_repo
 
 

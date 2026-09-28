@@ -529,14 +529,9 @@ _ENVELOPE_BY_STAGE: dict[str, str] = {
     "supervision": "daydream.deep.prompts.CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION",
     "verification": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
     # Improve audits render against the host finding format + hard rules.
-    "improve.audit.correctness": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.security": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.performance": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.tests": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.tech-debt": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.dependencies": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.dx": "daydream.improve.prompts.FINDING_FORMAT",
-    "improve.audit.docs": "daydream.improve.prompts.FINDING_FORMAT",
+    # The category set is owned by the production playbook mapping, so a new
+    # audit category cannot leave this envelope table behind.
+    **{f"improve.audit.{c}": "daydream.improve.prompts.FINDING_FORMAT" for c in AUDIT_PLAYBOOK_SECTIONS},
     "improve.vetting": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
 }
 

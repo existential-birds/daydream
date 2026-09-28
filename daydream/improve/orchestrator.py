@@ -1581,37 +1581,16 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
     selected_numbers = default_numbers
 
     if not default_findings:
+        selected: list[str] = []
         ctx.data["selected_findings"] = []
         ctx.data["selection_mode"] = mode
-        (ctx.data["improve_dir"] / "selected.json").write_text(
-            json.dumps(
-                _with_artifact_provenance(
-                    {"mode": mode, "selected": []},
-                    phase=DaydreamPhase.PLAN_WRITE,
-                ),
-                indent=2,
-            )
-            + "\n"
-        )
         print_success(console, "No vetted defect findings -- done.")
-        return None
-
-    if interactive:
-        default_text = f"1-{len(default_numbers)}" if len(default_numbers) > 1 else "1"
-        prompt = _selection_prompt(default_findings)
-        raw = run_context.choice(
-            prompt,
-            default=default_text,
-            safe_default=default_text,
-            console=console,
-        )
-        parsed = _parse_selection(
-            raw,
-            total=len(default_findings),
-        )
-        if parsed is None:
+    else:
+        if interactive:
+            default_text = f"1-{len(default_numbers)}" if len(default_numbers) > 1 else "1"
+            prompt = _selection_prompt(default_findings)
             raw = run_context.choice(
-                "Invalid selection; try once more",
+                prompt,
                 default=default_text,
                 safe_default=default_text,
                 console=console,
@@ -1620,12 +1599,23 @@ async def _step_select(ctx: FlowContext) -> Stop | None:
                 raw,
                 total=len(default_findings),
             )
-        selected_numbers = parsed if parsed is not None else default_numbers
+            if parsed is None:
+                raw = run_context.choice(
+                    "Invalid selection; try once more",
+                    default=default_text,
+                    safe_default=default_text,
+                    console=console,
+                )
+                parsed = _parse_selection(
+                    raw,
+                    total=len(default_findings),
+                )
+            selected_numbers = parsed if parsed is not None else default_numbers
 
-    selectable = default_findings
-    selected = [selectable[number - 1]["fingerprint"] for number in selected_numbers]
-    ctx.data["selected_findings"] = [selectable[number - 1] for number in selected_numbers]
-    ctx.data["selection_mode"] = mode
+        selectable = default_findings
+        selected = [selectable[number - 1]["fingerprint"] for number in selected_numbers]
+        ctx.data["selected_findings"] = [selectable[number - 1] for number in selected_numbers]
+        ctx.data["selection_mode"] = mode
     (ctx.data["improve_dir"] / "selected.json").write_text(
         json.dumps(
             _with_artifact_provenance(

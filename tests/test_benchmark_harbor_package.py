@@ -15,7 +15,12 @@ import yaml
 from daydream.benchmark.harbor import build, package as pkg
 from daydream.benchmark.harbor.build import TEMPLATE_VERSION
 from tests.harness.fake_gh import FakeGh
-from tests.test_benchmark_harbor_build import _harbor_tree_bytes, _seed_clean_workspace, _seed_ready_workspace
+from tests.test_benchmark_harbor_build import (
+    _harbor_tree_bytes,
+    _seed_clean_workspace,
+    _seed_ready_workspace,
+    _stub_wheel,
+)
 
 
 def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -52,9 +57,7 @@ def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) ->
 
 
 
-    ver = importlib.metadata.version("daydream")
-    good = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    good.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    good, ver = _stub_wheel(tmp_path)
     info = pkg.validate_wheel(good, daydream_version=ver)
     assert info.distribution == "daydream" and info.version == ver
     assert len(info.sha256) == 64
@@ -319,9 +322,7 @@ def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: Fa
 
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    ver = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    wheel, ver = _stub_wheel(tmp_path)
     lock = build.compile_workspace(ws, wheel=wheel)
     key = build.derive_task_key(case_id)
     case = ws / "harbor" / key
@@ -343,9 +344,7 @@ def test_build_harbor_refuses_without_ready_workspace(tmp_path: Path, fake_gh: F
 
 
     ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)
-    ver = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    wheel.write_bytes(b"x")
+    wheel, _ = _stub_wheel(tmp_path, content=b"x")
     with pytest.raises(pkg.PackageError) as rejected:
         pkg.build_harbor(ws, wheel=wheel)
     assert "validate" in str(rejected.value).lower() or "ready" in str(rejected.value).lower()
@@ -377,9 +376,7 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
 
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    ver = importlib.metadata.version("daydream")
-    wheel = tmp_path / f"daydream-{ver}-py3-none-any.whl"
-    wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
+    wheel, _ = _stub_wheel(tmp_path)
     pkg.build_harbor(ws, wheel=wheel)
     assert pkg.validate_compiled(ws) == 0
     case = ws / "harbor" / build.derive_task_key(case_id)
