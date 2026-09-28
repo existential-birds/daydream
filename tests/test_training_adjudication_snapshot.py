@@ -96,12 +96,7 @@ def _snapshot_session() -> dict[str, object]:
 
 
 def test_build_canonical_record_pins_identity_and_provenance() -> None:
-    session = {
-        "session_id": "s1",
-        "trajectory_id": "s1-t",
-        "segment_id": "s1-seg",
-        "resolutions": [{"fingerprint": "fp-1", "profile_name": "pr_review", "stack": "python"}],
-    }
+    session = _snapshot_session()
     record = build_canonical_record(
         session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00"
     )
@@ -207,12 +202,7 @@ def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[di
 
 
 def test_build_canonical_record_as_of_passthrough() -> None:
-    session = {
-        "session_id": "s1",
-        "trajectory_id": "t",
-        "segment_id": "g",
-        "resolutions": [{"fingerprint": "fp-1", "profile_name": "pr_review", "stack": "python"}],
-    }
+    session = _snapshot_session()
     record = build_canonical_record(
         session,
         _resolution(),
