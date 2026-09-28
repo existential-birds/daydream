@@ -62,13 +62,19 @@ def make_fake_hub(tmp_path: Path) -> FakeHub:
     return hub
 
 
-def _ingested_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
-    """A staged snapshot downloaded and ingested at ``revision``."""
-    hub = make_fake_hub(tmp_path)
+def _stage_and_ingest(
+    hub: FakeHub, tmp_path: Path, revision: str = "a" * 40
+) -> tuple[Path, list[hydrate.IngestResult]]:
+    """Pin the hub tree at ``revision``, download it, and ingest into a new stage."""
     hub.commit_revision(revision)
     stage = tmp_path / "stage"
     hydrate.download_snapshot(hub, revision=revision, stage_dir=stage / "downloads")
-    hydrate.ingest_bundles(stage, revision=revision)
+    return stage, hydrate.ingest_bundles(stage, revision=revision)
+
+
+def _ingested_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
+    """A staged snapshot downloaded and ingested at ``revision``."""
+    stage, _ = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path, revision)
     return stage
 
 
@@ -782,10 +788,7 @@ def _staged_with(tmp_path: Path, remote_urls: dict[str, str | None]) -> Path:
         files[f"bundles/{sid}/manifest.json"] = json.dumps(manifest).encode()
         files[f"bundles/{sid}/trajectory.json"] = b"{}"
     hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
-    hub.commit_revision("a" * 40)
-    stage = tmp_path / "stage"
-    hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-    hydrate.ingest_bundles(stage, revision="a" * 40)
+    stage, _ = _stage_and_ingest(hub, tmp_path)
     hydrate.rebuild_index(stage)
     return stage
 
@@ -896,10 +899,7 @@ class TestIngestAndIndex:
         hub.files["bundles/sess-bad/manifest.json"] = \
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
         hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, results = _stage_and_ingest(hub, tmp_path)
         bad = [r for r in results if r.session_id == "sess-bad"]
         assert bad and bad[0].status == "quarantined"
         assert bad[0].reason_code == "secrets_scan_dirty"
@@ -915,10 +915,7 @@ class TestIngestAndIndex:
             b' "remote_url": "file:///etc/passwd"}'
         )
         hub.files["bundles/sess-evil/trajectory.json"] = b"{}"
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, results = _stage_and_ingest(hub, tmp_path)
         evil = [r for r in results if r.session_id == "sess-evil"]
         assert evil and evil[0].status == "quarantined"   # non-allowlisted host fails closed
         # nothing outside staging was touched
@@ -931,10 +928,7 @@ class TestIngestAndIndex:
                 b'{"session_id": "../escape", "remote_url": "https://github.com/o/r"}',
             "bundles/sess-evil/trajectory.json": b"{}",
         })
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, results = _stage_and_ingest(hub, tmp_path)
         evil = [r for r in results if r.session_id == "../escape"]
         assert evil and evil[0].status == "quarantined"
         assert evil[0].reason_code == hydrate_rules.REASON_CODE_PATH_TRAVERSAL
@@ -956,10 +950,7 @@ class TestIngestAndIndex:
             "bundles/sess-real/manifest.json": json.dumps(manifest.to_dict()).encode(),
             "bundles/sess-real/trajectory.json": b"{}",
         })
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        results = hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, results = _stage_and_ingest(hub, tmp_path)
         assert [r.status for r in results] == ["admitted"]
         hydrate.rebuild_index(stage)  # must not raise: nested daydream dict is dropped
         rows = [r for r in query_runs(stage) if r["session_id"] == "sess-real"]
@@ -1228,10 +1219,7 @@ class TestDedupeAndLedger:
         """A collision re-quarantines on every later run; the mutated derivative
         is never re-admitted over the published baseline (M7 durability)."""
         hub = make_fake_hub(tmp_path)
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, _ = _stage_and_ingest(hub, tmp_path)
         hydrate.dedupe_admitted(stage, revision="a" * 40)  # run 1: admit baseline
         baseline_manifest = (stage / "runs" / "sess-a" / "manifest.json").read_bytes()
         # mutate + re-download + re-ingest (runs 2 and 3 see the same mutated tree)
@@ -1259,10 +1247,7 @@ class TestDedupeAndLedger:
 
     def test_identity_collision_quarantined(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, _ = _stage_and_ingest(hub, tmp_path)
         hydrate.dedupe_admitted(stage, revision="a" * 40)
         # same session identity, different content -> quarantine, never overwrite
         hub.files["bundles/sess-a/trajectory.json"] = b'{"different": true}'
@@ -1285,10 +1270,7 @@ class TestDedupeAndLedger:
             b'{"session_id": "sess-fixture", "source_path": "/tmp/pytest-of-user/test_x"}'
         )
         hub.files["bundles/sess-fixture/trajectory.json"] = b"{}"
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, _ = _stage_and_ingest(hub, tmp_path)
         result = hydrate.dedupe_admitted(stage, revision="a" * 40)
         assert ("sess-fixture", "fixture_pytest_path") in result.excluded
         assert not (stage / "runs" / "sess-fixture").exists()  # never indexed/harvest-visible
@@ -1299,10 +1281,7 @@ class TestDedupeAndLedger:
             b'{"session_id": "sess-bad", "remote_url": "https://user:hunter2@github.com/o/r"}'
         )
         hub.files["bundles/sess-bad/trajectory.json"] = b"{}"
-        hub.commit_revision("a" * 40)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision="a" * 40)
+        stage, _ = _stage_and_ingest(hub, tmp_path)
         ledger = hydrate.build_import_ledger(stage, revision="a" * 40, source_commit="a" * 40)
         text = json.dumps(ledger)
         assert "hunter2" not in text and "user:" not in text  # no matched secret values (M11)
@@ -1336,10 +1315,7 @@ class TestLicenseAdmissionGate:
             files[f"bundles/{sid}/manifest.json"] = manifest
             files[f"bundles/{sid}/trajectory.json"] = b"{}"
         hub = FakeHub(repo_id="org/private-ds", private=True, files=files)
-        hub.commit_revision(self.REV)
-        stage = tmp_path / "stage"
-        hydrate.download_snapshot(hub, revision=self.REV, stage_dir=stage / "downloads")
-        hydrate.ingest_bundles(stage, revision=self.REV)
+        stage, _ = _stage_and_ingest(hub, tmp_path, self.REV)
         hydrate.dedupe_admitted(stage, revision=self.REV)
         return stage
 

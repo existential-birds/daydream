@@ -73,22 +73,10 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     with refs/pull/1/head off base2, plus a diverged `dev` branch (off base1) whose
     first commit is PR2's base tip and second commit is PR2's head. Returns
     (bare, dev_base_tip_sha, pr2_head_sha)."""
+    bare, _, pr1_head = seed_pr_origin(
+        tmp_path, repo_name="seed_wt", bare_name="origin.git", number=1
+    )
     repo = tmp_path / "seed_wt"
-    repo.mkdir()
-    _git(repo, "init", "-b", "main")
-    write_and_stage(repo, "readme.txt", "base1\n")
-    seeded_commit(repo, "base1")
-    write_and_stage(repo, "base.py", "BASE = 2\n")
-    seeded_commit(repo, "base2")
-    write_and_stage(repo, "beyond.py", "BEYOND = 3\n")
-    seeded_commit(repo, "base3")
-    # PR 1 head off base2 (identical seed to _seed_origin => same _SHA_HEAD)
-    _git(repo, "checkout", "--detach", "HEAD~1")            # base2
-    repo.joinpath("base.py").write_text("BASE = 20\n")
-    _git(repo, "add", "base.py")
-    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
-    seeded_commit(repo, "feature")
-    pr1_head = _git(repo, "rev-parse", "HEAD")
     # PR 2: unrelated `dev` branch diverged from base1; base tip = dev1, head = dev2
     _git(repo, "checkout", "-b", "dev", "HEAD~2")           # base1
     write_and_stage(repo, "dev.py", "DEV = 1\n")
@@ -96,12 +84,9 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     repo.joinpath("dev.py").write_text("DEV = 2\n")
     _git(repo, "add", "dev.py")
     pr2_head = seeded_commit(repo, "dev2")
-    bare = tmp_path / "origin.git"
-    _publish_origin(
-        repo, bare, "main:main", "dev:dev",
-        f"!{pr1_head}:refs/pull/1/head", f"!{pr2_head}:refs/pull/2/head",
-    )
-    return str(bare), dev_tip, pr2_head
+    _git(repo, "push", "origin", "dev:dev")
+    _git(repo, "push", "origin", f"{pr2_head}:refs/pull/2/head", check=False)
+    return bare, dev_tip, pr2_head
 
 
 def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:

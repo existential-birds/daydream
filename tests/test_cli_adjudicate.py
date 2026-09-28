@@ -19,7 +19,7 @@ from daydream.training.labeler_versions import (
     RUBRIC_SCHEMA_VERSION,
 )
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import write_sessions_index
+from tests.harness.adjudication import write_sessions_index, write_sessions_jsonl
 from tests.test_training_adjudication_publish import _final_bundle
 
 
@@ -308,7 +308,6 @@ _PIN_ARGS = [
 
 def _cli_index(tmp_path: Path) -> Path:
     root = tmp_path / "index"
-    root.mkdir(parents=True, exist_ok=True)
     sessions = [{
         "session_id": "s1", "trajectory_id": "t", "segment_id": "g",
         "resolutions": [{
@@ -317,9 +316,7 @@ def _cli_index(tmp_path: Path) -> Path:
             "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
         }],
     }]
-    (root / "sessions.jsonl").write_text(
-        "".join(json.dumps(s, sort_keys=True) + "\n" for s in sessions), encoding="utf-8"
-    )
+    write_sessions_jsonl(root, sessions)
     return root
 
 

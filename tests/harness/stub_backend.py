@@ -505,6 +505,18 @@ class StubBackend:
             )
         return issues
 
+    async def _runaway_burst(
+        self, prefix: str, sleep_s: float
+    ) -> AsyncIterator[AgentEvent]:
+        """Emit 500 unbounded tool calls, never a ResultEvent, pacing each on the
+        stub clock when installed (else sleeping *sleep_s*)."""
+        for n in range(500):
+            yield ToolStartEvent(id=f"{prefix}-{n}", name="Bash", input={"command": "find /"})
+            if self.clock_advance is not None:
+                self._tick()
+            else:
+                await anyio.sleep(sleep_s)
+
     async def execute(
         self,
         cwd: Path,
@@ -535,9 +547,8 @@ class StubBackend:
         if self._is_runaway(prompt, pl):
             # Unbounded burst, never a ResultEvent -- run_agent's tool-call
             # budget is the only thing that ends this stream.
-            for n in range(500):
-                yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
-                await anyio.sleep(0)
+            async for event in self._runaway_burst("tc", 0):
+                yield event
             return
 
         # TTT alternative-review -> structured output. Checked BEFORE intent: the
@@ -982,12 +993,8 @@ class StubBackend:
                 # Emit a long burst of tool calls and NEVER a ResultEvent. A
                 # generator that never returns models the 1.5-5h time-tail the
                 # tool-call budget exists to cut; the budget breaks the loop.
-                for n in range(500):
-                    yield ToolStartEvent(id=f"tc-{n}", name="Bash", input={"command": "find /"})
-                    if self.clock_advance is not None:
-                        self._tick()
-                    else:
-                        await anyio.sleep(self.runaway_fix_sleep_s)
+                async for event in self._runaway_burst("tc", self.runaway_fix_sleep_s):
+                    yield event
                 return
             # Single-finding prompts carry "File: <path>"; batched prompts name the
             # one target file in their "Fix these N issues in <path>:" header.
@@ -1023,12 +1030,8 @@ class StubBackend:
             ):
                 while self.runaway_gate is not None and not self.runaway_gate():
                     await anyio.sleep(0)
-                for n in range(500):
-                    yield ToolStartEvent(id=f"stc-{n}", name="Bash", input={"command": "find /"})
-                    if self.clock_advance is not None:
-                        self._tick()
-                    else:
-                        await anyio.sleep(self.runaway_fix_sleep_s)
+                async for event in self._runaway_burst("stc", self.runaway_fix_sleep_s):
+                    yield event
                 return
             # Runaway ONLY the batched turn for the marked file: burn real wall so
             # run_agent's per-invocation wall budget trips, returns a budget_reason,
@@ -1038,12 +1041,8 @@ class StubBackend:
                 and batched_hdr is not None
                 and fixed_name == self.runaway_batched_fix_file
             ):
-                for n in range(500):
-                    yield ToolStartEvent(id=f"btc-{n}", name="Bash", input={"command": "find /"})
-                    if self.clock_advance is not None:
-                        self._tick()
-                    else:
-                        await anyio.sleep(self.runaway_batched_sleep_s)
+                async for event in self._runaway_burst("btc", self.runaway_batched_sleep_s):
+                    yield event
                 return
             # Fail ONLY the batched turn for the marked file so the group falls
             # back to per-finding fixes (the #186 pattern under budget test).
