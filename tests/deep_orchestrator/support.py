@@ -393,7 +393,7 @@ class _RejectingArbiterBackend(_StubBackend):
     ) -> AsyncIterator[AgentEvent]:
         if "you are the arbiter" in prompt.lower():
             self.calls.append({"prompt": prompt, "model": self.model})
-            match = re.search(r"listed in (\S+arbiter-input\.json)", prompt)
+            match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
             assert match is not None, "arbiter prompt did not point at its input artifact"
             entries = json.loads(Path(match.group(1)).read_text())
             yield TextEvent(text="")

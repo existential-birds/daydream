@@ -29,6 +29,7 @@ from daydream._tree_sitter_safety import (
     assert_tree_sitter_safe,
 )
 from daydream.artifact_visibility import ArtifactEvidenceProvenance
+from daydream.deep.routing_record import read_routing_record
 from daydream.generated_files import is_generated_file
 from daydream.hunk_index import load_hunk_index, parse_hunks, range_distance
 from daydream.timeutil import parse_iso_timestamp
@@ -2649,6 +2650,30 @@ def analyze_quality(
     }
 
 
+def analyze_routing(daydream_dir: str | Path) -> dict[str, Any]:
+    """Read a run's latency-routing decision (issue #732, SH1).
+
+    Returns ``{"profile": <selected name or None>, "decisions": {...}}`` where
+    ``decisions`` carries the ``wonder`` and/or ``arbiter`` slices the run wrote,
+    keyed only when present. The record is *evidence*, not an input, so an
+    absent, malformed, or pre-#732 directory degrades to
+    ``{"profile": None, "decisions": {}}`` and never raises -- an old archived
+    run must still evaluate.
+    """
+    record = read_routing_record(Path(daydream_dir) / "deep")
+    profile_block = record.get("profile")
+    selected = profile_block.get("selected") if isinstance(profile_block, dict) else None
+    decisions: dict[str, Any] = {}
+    for name in ("wonder", "arbiter"):
+        slice_ = record.get(name)
+        if isinstance(slice_, dict):
+            decisions[name] = slice_
+    return {
+        "profile": selected if isinstance(selected, str) else None,
+        "decisions": decisions,
+    }
+
+
 # Top-level entry point
 
 def analyze_session(
@@ -2660,6 +2685,11 @@ def analyze_session(
     code_workspace: Path | None = None,
 ) -> dict[str, Any]:
     """Run full quantitative analysis on a .daydream directory.
+
+    The result carries the run's latency-routing decision under
+    ``latency_profile`` (the selected profile name, ``None`` when the run
+    predates issue #732) and ``routing`` (the :func:`analyze_routing` payload),
+    so an archived run's profile is readable without opening its directory.
 
     On a known-bad tree-sitter install (issue #1087) only the ``quality``
     section degrades: :class:`TreeSitterBadVersionError` raised by the
@@ -2708,6 +2738,7 @@ def analyze_session(
         trajectories, findings_data["findings"], daydream_dir, artifact_provenance=artifact_provenance
     )
     location = analyze_location(daydream_dir)
+    routing = analyze_routing(daydream_dir)
     shipped_duplication = analyze_shipped_duplication(daydream_dir)
     exploration = analyze_exploration_utilization(
         trajectories, daydream_dir=daydream_dir, artifact_provenance=artifact_provenance
@@ -2763,6 +2794,8 @@ def analyze_session(
         },
         "grounding": grounding,
         "location": location,
+        "latency_profile": routing["profile"],
+        "routing": routing,
         "exploration_utilization": exploration,
         "training_signals": training,
         "quality": quality,

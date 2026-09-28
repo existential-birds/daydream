@@ -18,16 +18,43 @@ from daydream.backends import Backend
 from daydream.backends.codex import CodexBackend
 from daydream.cli import _parse_args, _parse_improve_args
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.deep.latency import (
+    PROFILE_ROUTES,
+    DiffSignals,
+    diff_signals,
+    route_for,
+    summarize_risk,
+)
+from daydream.deep.merge_steps import _unsharded_arbiter_backend
+from daydream.extensions.registry import Registry
+from daydream.flows.engine import FlowContext
 from daydream.runner import (
     RunConfig,
     _default_backend_name,
+    _explicit_reasoning_effort_pin,
     _resolve_backend,
     _resolved_backend_name,
+    _resolved_latency_profile,
     _resolved_model,
     _resolved_reasoning_effort,
     _resolved_review_backend_name,
 )
 from daydream.test_execution import MissingTestCommandError, canonical_test_command
+from daydream.workspace import WorkContext
+
+
+def _routine_signals() -> DiffSignals:
+    """A small diff with no escalation surface (A2: size never escalates)."""
+    return diff_signals(diff="", changed_files=3, stack_count=1)
+
+
+def _sec_signals() -> DiffSignals:
+    """A diff touching a security surface, which must escalate the route."""
+    return diff_signals(
+        diff="+++ b/auth.py\n+def authenticate(password):\n+    return password\n",
+        changed_files=1,
+        stack_count=1,
+    )
 
 
 def test_model_precedence_cli_over_file_over_table(tmp_path: Path) -> None:
@@ -295,3 +322,111 @@ def test_test_command_precedence_cli_over_file_config(tmp_path: Path) -> None:
     assert "test_command" in msg
     assert "tool.daydream" in msg
     assert "--test-command" in msg
+
+
+def test_latency_profile_precedence_cli_over_file_over_default(tmp_path: Path) -> None:
+    """CLI > [tool.daydream] latency_profile > balanced; unknown never goes cheap."""
+    fc = DaydreamFileConfig(latency_profile="forensic")
+    cfg = RunConfig(target=str(tmp_path), file_config=fc)
+    assert _resolved_latency_profile(cfg).profile == "forensic"
+
+    cfg.latency_profile = "fast"
+    assert _resolved_latency_profile(cfg).profile == "fast"
+
+    cfg.latency_profile = "turbo"
+    resolved = _resolved_latency_profile(cfg)
+    assert resolved.profile == "forensic" and resolved.fail_safe is True
+
+    bare = RunConfig(target=str(tmp_path), file_config=DaydreamFileConfig())
+    assert _resolved_latency_profile(bare).profile == "balanced"
+
+
+def test_cli_accepts_the_profile_flag_and_it_wins(tmp_path: Path) -> None:
+    args = _parse_args(["--latency-profile", "forensic", str(tmp_path)])
+    assert args.latency_profile == "forensic"
+
+
+def test_profile_route_sets_wonder_and_arbiter_effort_on_codex(tmp_path: Path) -> None:
+    """The profile is a tier below the explicit user knobs (A4)."""
+    cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
+    assert _resolved_reasoning_effort(cfg, "wonder") == "high"  # table baseline
+    cfg.latency_route = route_for("balanced", summarize_risk(_routine_signals()))
+    assert _resolved_reasoning_effort(cfg, "wonder") == "medium"
+    assert _resolved_reasoning_effort(cfg, "arbiter") == "high"
+
+    cfg.reasoning_effort = "low"  # explicit pin still wins
+    assert _resolved_reasoning_effort(cfg, "wonder") == "low"
+
+
+def test_profile_route_does_not_touch_backends_absent_from_the_table(tmp_path: Path) -> None:
+    cfg = RunConfig(target=str(tmp_path), backend="claude", file_config=DaydreamFileConfig())
+    cfg.latency_route = route_for("forensic", summarize_risk(_sec_signals()))
+    assert _resolved_reasoning_effort(cfg, "wonder") is None
+
+
+def test_explicit_effort_pin_is_visible_to_the_arbiter_fan_out(tmp_path: Path) -> None:
+    cfg = RunConfig(target=str(tmp_path), backend="codex", file_config=DaydreamFileConfig())
+    assert _explicit_reasoning_effort_pin(cfg, "arbiter") is None
+    cfg.reasoning_effort = "medium"
+    assert _explicit_reasoning_effort_pin(cfg, "arbiter") == "medium"
+
+
+def _arbiter_flow_context(tmp_path: Path, backend: str) -> FlowContext:
+    """The smallest FlowContext whose effort seam is production's (no test factory)."""
+    work = WorkContext(
+        repo=tmp_path,
+        source=tmp_path,
+        base_branch="main",
+        base_sha="0" * 40,
+        head_branch="main",
+        head_sha="0" * 40,
+        is_ephemeral=False,
+        run_id="session-test",
+    )
+    return FlowContext(
+        config=RunConfig(
+            target=str(tmp_path), backend=backend, model=None, file_config=DaydreamFileConfig()
+        ),
+        work=work,
+        registry=Registry(),
+    )
+
+
+def test_arbiter_effort_override_is_codex_only(tmp_path: Path) -> None:
+    """A6/MH9 + the Codex-only effort scope: the fan-out may only move table backends.
+
+    ``FlowContext.backend_for_effort`` is the seam both arbiter call sites use
+    (the sharded per-group call and the unsharded ``xhigh`` pin), so the gate
+    here is the one that keeps a latency profile from moving Claude's or Pi's
+    historical deep-review effort while Codex still honours it.
+    """
+    codex = _arbiter_flow_context(tmp_path, "codex")
+    assert getattr(codex.backend_for_effort("arbiter", "xhigh"), "reasoning_effort") == "xhigh"
+    assert getattr(codex.backend_for_effort("arbiter", "medium"), "reasoning_effort") == "medium"
+
+    claude = _arbiter_flow_context(tmp_path, "claude")
+    assert getattr(claude.backend_for_effort("arbiter", "xhigh"), "reasoning_effort") is None
+    assert getattr(claude.backend_for_effort("arbiter", "medium"), "reasoning_effort") is None
+
+
+def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(tmp_path: Path) -> None:
+    """A6/MH9: the single-group arbiter call is ``xhigh`` on Codex, pinned by the route tier.
+
+    The record ``arbiter_plan`` writes for the unsharded path names ``xhigh``; this
+    asserts the call the same path actually resolves agrees with it for a sharding
+    profile, that an explicit pin still outranks it, and that Claude keeps its
+    ambient default rather than inheriting the Codex value.
+    """
+    codex = _arbiter_flow_context(tmp_path, "codex")
+    codex.config.latency_route = PROFILE_ROUTES["balanced"]
+    pinned = _unsharded_arbiter_backend(codex, effort_pin=None)
+    assert getattr(pinned, "reasoning_effort") == "xhigh"
+    codex.config.reasoning_effort = "low"
+    explicit = _unsharded_arbiter_backend(
+        codex, effort_pin=_explicit_reasoning_effort_pin(codex.config, "arbiter")
+    )
+    assert getattr(explicit, "reasoning_effort") == "low"
+
+    claude = _arbiter_flow_context(tmp_path, "claude")
+    claude.config.latency_route = PROFILE_ROUTES["balanced"]
+    assert getattr(_unsharded_arbiter_backend(claude, effort_pin=None), "reasoning_effort") is None

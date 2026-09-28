@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
     from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
+    from daydream.deep.latency import ArbiterPlan, LatencyRoute, ProfileResolution, RiskSummary
     from daydream.deep.prompts import DeepDiffBoundInfo
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
@@ -192,6 +193,63 @@ class DeepState:
     @property
     def single_stack_mode(self) -> bool:
         return cast(bool, self._required("single_stack_mode", bool, "bool"))
+
+    @property
+    def latency_route(self) -> LatencyRoute | None:
+        value: object | None = self._data.get("latency_route")
+        if value is None:
+            return None
+        from daydream.deep.latency import LatencyRoute
+
+        return cast(
+            LatencyRoute,
+            self._check("latency_route", value, LatencyRoute, "LatencyRoute or None"),
+        )
+
+    @property
+    def risk_summary(self) -> RiskSummary | None:
+        value: object | None = self._data.get("risk_summary")
+        if value is None:
+            return None
+        from daydream.deep.latency import RiskSummary
+
+        return cast(
+            RiskSummary,
+            self._check("risk_summary", value, RiskSummary, "RiskSummary or None"),
+        )
+
+    @property
+    def latency_profile_resolution(self) -> ProfileResolution | None:
+        value: object | None = self._data.get("latency_profile_resolution")
+        if value is None:
+            return None
+        from daydream.deep.latency import ProfileResolution
+
+        return cast(
+            ProfileResolution,
+            self._check(
+                "latency_profile_resolution",
+                value,
+                ProfileResolution,
+                "ProfileResolution or None",
+            ),
+        )
+
+    @property
+    def arbiter_plan(self) -> ArbiterPlan | None:
+        value: object | None = self._data.get("arbiter_plan")
+        if value is None:
+            return None
+        from daydream.deep.latency import ArbiterPlan
+
+        return cast(
+            ArbiterPlan,
+            self._check("arbiter_plan", value, ArbiterPlan, "ArbiterPlan or None"),
+        )
+
+    @arbiter_plan.setter
+    def arbiter_plan(self, value: ArbiterPlan) -> None:
+        self._data["arbiter_plan"] = value
 
     @property
     def log(self) -> str:

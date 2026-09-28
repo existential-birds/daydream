@@ -1,0 +1,16 @@
+{
+  "session_id": "security-forensic",
+  "timing": {
+    "phase_timings": {
+      "alternatives": {
+        "wall_clock_seconds": 50.0
+      },
+      "arbiter": {
+        "wall_clock_seconds": 70.0
+      }
+    }
+  },
+  "findings": {
+    "total": 1
+  }
+}

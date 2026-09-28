@@ -1,0 +1,47 @@
+{
+  "profile": {
+    "selected": "fast",
+    "requested": "fast",
+    "source": "cli",
+    "fail_safe": false,
+    "reason": null
+  },
+  "risk": {
+    "signals": {},
+    "floors": [],
+    "size_score": 0,
+    "breadth_score": 0
+  },
+  "wonder": {
+    "outcome": "skip",
+    "effort": null,
+    "reason": "profile fast routes wonder to skip",
+    "tier": "standard"
+  },
+  "arbiter": {
+    "sharded": true,
+    "reason": "sharded fast path into 2 groups",
+    "groups": [
+      {
+        "group_id": "arbiter-group-0",
+        "target_uids": [
+          "python:1"
+        ],
+        "effort": "medium",
+        "reason": "arbiter-group-0: routine group",
+        "reused": false
+      },
+      {
+        "group_id": "arbiter-group-1",
+        "target_uids": [
+          "react:1"
+        ],
+        "effort": "medium",
+        "reason": "arbiter-group-1: contested findings",
+        "reused": false
+      }
+    ],
+    "verdicts_applied": 2,
+    "failed_groups": []
+  }
+}

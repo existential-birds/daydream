@@ -680,11 +680,14 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
 
 
 @pytest.mark.parametrize(
-    ("target_fixture", "independent", "alternatives_run"),
+    ("target_fixture", "independent", "alternatives_run", "latency_profile"),
     [
-        pytest.param("feature_branch_repo", True, False, id="independent-one-file-skips"),
-        pytest.param("multi_stack_target", True, True, id="independent-multi-file-runs"),
-        pytest.param("multi_stack_target", False, False, id="default-multi-file-folds"),
+        # The legacy trivial-diff wonder gate survives only under `forensic`
+        # (latency.py `wonder_decision`); the `balanced` default runs wonder on a
+        # one-file diff, so the tiered-skip case pins the profile that keeps it.
+        pytest.param("feature_branch_repo", True, False, "forensic", id="independent-one-file-skips"),
+        pytest.param("multi_stack_target", True, True, None, id="independent-multi-file-runs"),
+        pytest.param("multi_stack_target", False, False, None, id="default-multi-file-folds"),
     ],
 )
 async def test_alternatives_phase_follows_diff_size(
@@ -696,6 +699,7 @@ async def test_alternatives_phase_follows_diff_size(
     target_fixture: str,
     independent: bool,
     alternatives_run: bool,
+    latency_profile: str | None,
 ) -> None:
     """Independent wonder remains tiered; the default shares structural review."""
 
@@ -705,6 +709,7 @@ async def test_alternatives_phase_follows_diff_size(
     assert (
         await run(make_config(
             target, trajectory_path=traj, assume="yes", output_mode="loop", non_interactive=False,
+            latency_profile=latency_profile,
             review_profile=independent_alternatives_profile() if independent else None,
         ))
         == 0

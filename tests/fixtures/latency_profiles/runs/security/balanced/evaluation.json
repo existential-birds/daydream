@@ -1,0 +1,16 @@
+{
+  "session_id": "security-balanced",
+  "timing": {
+    "phase_timings": {
+      "alternatives": {
+        "wall_clock_seconds": 25.0
+      },
+      "arbiter": {
+        "wall_clock_seconds": 35.0
+      }
+    }
+  },
+  "findings": {
+    "total": 2
+  }
+}

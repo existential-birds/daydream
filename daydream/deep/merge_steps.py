@@ -7,13 +7,25 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import anyio
+
 from daydream.agent import console
 from daydream.artifact_visibility import review_output_path_for
-from daydream.deep.arbiter import select_arbiter_targets, select_suppression_targets
+from daydream.backends import Backend, effective_fanout_concurrency
+from daydream.deep.arbiter import (
+    ArbiterGroup,
+    contested_indices,
+    partition_arbiter_targets,
+    select_arbiter_targets,
+    select_suppression_targets,
+)
 from daydream.deep.artifacts import (
     MERGE_FAILURE_KEY,
     _load_failures,
     adjudication_complete_path,
+    arbiter_group_complete_path,
+    arbiter_group_input_path,
+    arbiter_group_verdicts_path,
     dedup_candidates_path,
     merged_items_path,
     merged_report_path,
@@ -26,8 +38,16 @@ from daydream.deep.dedup import (
     build_dedup_candidates,
     build_record_dedup_candidates,
 )
+from daydream.deep.latency import (
+    FAIL_SAFE_LATENCY_PROFILE,
+    PROFILE_ROUTES,
+    ArbiterPlan,
+    PlannedGroup,
+    arbiter_plan,
+)
 from daydream.deep.records import record_uid, stack_name_from_records_source, stack_name_from_uid
 from daydream.deep.render import _PIPELINE_STAGE_NAMES, render_held_section, render_report
+from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.extensions.api import Stop
@@ -47,7 +67,15 @@ from daydream.review_budget import (
     review_warnings,
 )
 from daydream.supervision import RuleBasedSupervisor, apply_findings_verdicts, revise_finding_fields
-from daydream.trajectory import DaydreamPhase, LifecycleReasonCode, LifecycleStatus, get_current_recorder, phase_scope
+from daydream.trajectory import (
+    DaydreamPhase,
+    LifecycleReasonCode,
+    LifecycleStatus,
+    dispatch_scope,
+    get_current_recorder,
+    maybe_fork,
+    phase_scope,
+)
 from daydream.ui import print_error, print_info, print_stage_progress, print_warning
 
 if TYPE_CHECKING:
@@ -411,8 +439,248 @@ def _split_structural_records(
     return all_records, record_sources, structural_records, structural_sources
 
 
+def _load_group_verdicts(dd: Path, group: PlannedGroup) -> dict[int, dict[str, Any]] | None:
+    """Load a completed group's persisted verdicts, or ``None`` when it must rerun.
+
+    A group is reusable only when its completion marker *and* its verdicts file
+    exist and the file's persisted ``target_uids`` still match the planned
+    group. A membership mismatch means the diff/selection moved under the saved
+    group, so reusing it would bind verdicts to the wrong records -- rerun.
+    """
+    marker = arbiter_group_complete_path(dd, group.group_id)
+    verdicts_path = arbiter_group_verdicts_path(dd, group.group_id)
+    if not marker.is_file() or not verdicts_path.is_file():
+        return None
+    try:
+        payload = json.loads(verdicts_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if list(payload.get("target_uids", [])) != list(group.target_uids):
+        return None
+    raw = payload.get("verdicts")
+    if not isinstance(raw, dict):
+        return None
+    loaded: dict[int, dict[str, Any]] = {}
+    for key, verdict in raw.items():
+        if not isinstance(verdict, dict):
+            return None
+        try:
+            loaded[int(key)] = verdict
+        except (TypeError, ValueError):
+            return None
+    return loaded
+
+
+def _persist_group_verdicts(
+    dd: Path, group: PlannedGroup, verdicts: dict[int, dict[str, Any]]
+) -> None:
+    """Persist one group's verdicts, then its completion marker.
+
+    The marker is written last so a crash between the two leaves a group that a
+    resume will rerun rather than reuse half-written verdicts.
+    """
+    payload = {
+        "group_id": group.group_id,
+        "target_uids": list(group.target_uids),
+        "verdicts": {str(key): verdict for key, verdict in sorted(verdicts.items())},
+    }
+    arbiter_group_verdicts_path(dd, group.group_id).write_text(
+        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
+    )
+    arbiter_group_complete_path(dd, group.group_id).write_text("")
+
+
+def _merge_group_verdicts(
+    plan: ArbiterPlan,
+    arbiter_targets: list[int],
+    group_verdicts: dict[str, dict[int, dict[str, Any]]],
+    targets_by_group: dict[str, list[int]],
+) -> dict[int, dict[str, Any]]:
+    """Translate each group's local ``arb_id`` into the shared selection ordinal.
+
+    ``phase_arbiter_review`` numbers its records from 1 within the slice it is
+    given, so a group-local id is a position inside ``group.target_indices``.
+    ``_apply_adjudication_verdicts`` keys by the target's position in the
+    run-wide ``arbiter_targets`` list, so the two are bridged here. Doing it by
+    ordinal (never by re-deriving indices after compaction) is what makes the
+    merged mapping independent of the order groups completed in.
+    """
+    positions = {index: offset + 1 for offset, index in enumerate(arbiter_targets)}
+    merged: dict[int, dict[str, Any]] = {}
+    for group in plan.groups:
+        target_indices = targets_by_group.get(group.group_id, ())
+        for local_id, verdict in group_verdicts.get(group.group_id, {}).items():
+            if local_id < 1 or local_id > len(target_indices):
+                continue
+            global_index = target_indices[local_id - 1]
+            position = positions.get(global_index)
+            if position is None:
+                continue
+            revised = dict(verdict)
+            revised["arb_id"] = position
+            merged[position] = revised
+    return merged
+
+
+def _arbiter_groups_record(
+    plan: ArbiterPlan,
+    *,
+    effort_pin: str | None,
+    reused: dict[str, bool],
+) -> list[dict[str, Any]]:
+    """Serialize the plan's groups for the routing record.
+
+    An explicit effort pin (A4) replaces every group's planned effort and says
+    so in the reason, so the record states when a conscious user knob overrode
+    the route rather than silently reporting a route the run did not take.
+    """
+    records: list[dict[str, Any]] = []
+    for group in plan.groups:
+        if effort_pin is not None:
+            effort = effort_pin
+            reason = f"explicit {effort_pin} effort pin overrode the route (A4)"
+        else:
+            effort = group.effort
+            reason = group.reason
+        records.append(
+            {
+                "group_id": group.group_id,
+                "target_uids": list(group.target_uids),
+                "effort": effort,
+                "reason": reason,
+                "reused": reused.get(group.group_id, False),
+            }
+        )
+    return records
+
+
+async def _run_sharded_arbiter(
+    ctx: FlowContext,
+    deep_state: DeepState,
+    plan: ArbiterPlan,
+    arbiter_targets: list[int],
+    adjudicated: list[dict[str, Any]],
+    *,
+    effort_pin: str | None,
+    targets_by_group: dict[str, list[int]],
+) -> tuple[dict[int, dict[str, Any]], dict[str, bool], list[str]]:
+    """Fan one arbiter call per incomplete group out under the run's ceiling.
+
+    Returns the merged verdict mapping (keyed by run-wide target ordinal), the
+    per-group ``reused`` flags, and the ids of groups whose call raised. A
+    group's exception is caught here rather than propagated: the run continues,
+    the group contributes no verdicts, and its targets retain their original
+    records (``_apply_adjudication_verdicts(..., fail_closed=False)``).
+    """
+    dd = deep_state.dd
+    group_verdicts: dict[str, dict[int, dict[str, Any]]] = {}
+    reused: dict[str, bool] = {}
+    failed_groups: list[str] = []
+    pending: list[PlannedGroup] = []
+    for group in plan.groups:
+        loaded = _load_group_verdicts(dd, group)
+        if loaded is None:
+            pending.append(group)
+        else:
+            group_verdicts[group.group_id] = loaded
+            reused[group.group_id] = True
+
+    if pending:
+        recorder = get_current_recorder()
+        arbiter_backend = ctx.backend_for("arbiter")
+        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, arbiter_backend))
+        descriptors = tuple(f"deep-{group.group_id}" for group in pending)
+        async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+            async with dispatch_scope(
+                recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors
+            ) as dispatch:
+                async with anyio.create_task_group() as tg:
+                    for group in pending:
+
+                        async def _arbitrate_one(
+                            planned: PlannedGroup = group,
+                        ) -> None:
+                            async with limiter:
+                                try:
+                                    async with maybe_fork(
+                                        recorder,
+                                        f"deep-{planned.group_id}",
+                                        dispatch=dispatch,
+                                    ):
+                                        call_backend = (
+                                            ctx.backend_for("arbiter")
+                                            if effort_pin is not None
+                                            else ctx.backend_for_effort("arbiter", planned.effort)
+                                        )
+                                        group_verdicts_call, _continuation = await phase_arbiter_review(
+                                            call_backend,
+                                            ctx.work,
+                                            selected_records=[
+                                                adjudicated[i]
+                                                for i in targets_by_group.get(planned.group_id, ())
+                                            ],
+                                            input_path=arbiter_group_input_path(
+                                                dd, planned.group_id
+                                            ),
+                                            diff_path=deep_state.diff_path,
+                                            intent_path=deep_state.intent_path,
+                                            alternatives_path=deep_state.alts_path,
+                                            exploration_dir=deep_state.exploration_dir,
+                                            intent_authoritative=deep_state.intent_authoritative,
+                                            strategy=ctx.strategy("arbitration"),
+                                            run_context=ctx.run_context,
+                                            artifact_session=ctx.artifacts,
+                                            allow_standalone=ctx.allow_standalone_artifacts,
+                                        )
+                                except Exception as exc:  # noqa: BLE001 -- per-group isolation; fail-open
+                                    failed_groups.append(planned.group_id)
+                                    reused[planned.group_id] = False
+                                    print_warning(
+                                        console,
+                                        f"Arbiter group {planned.group_id} failed "
+                                        f"({type(exc).__name__}: {exc}); its findings "
+                                        "remain unadjudicated.",
+                                    )
+                                    return
+                                _persist_group_verdicts(dd, planned, group_verdicts_call)
+                                group_verdicts[planned.group_id] = group_verdicts_call
+                                reused[planned.group_id] = False
+
+                        tg.start_soon(_arbitrate_one)
+
+    return (
+        _merge_group_verdicts(plan, arbiter_targets, group_verdicts, targets_by_group),
+        reused,
+        failed_groups,
+    )
+
+
+def _unsharded_arbiter_backend(ctx: FlowContext, *, effort_pin: str | None) -> Backend:
+    """Resolve the single-group arbiter call: an explicit pin wins, else today's ``xhigh``.
+
+    A6/MH9: a selection that fits one group is unsharded and keeps the pre-profile
+    arbiter effort whatever the latency profile -- the route's arbiter effort is a
+    per-group (sharded) knob, and the record written by :func:`arbiter_plan` names
+    ``xhigh`` for this path. A deliberate ``--reasoning-effort`` pin still outranks
+    it, and :func:`_resolve_backend` drops the override on backends the deep effort
+    table does not tune (Claude and Pi keep their ambient default).
+    """
+    if effort_pin is not None:
+        return ctx.backend_for("arbiter")
+    return ctx.backend_for_effort("arbiter", "xhigh")
+
+
 async def _step_arbiter(ctx: FlowContext) -> None:
-    """Scoped arbiter over high-severity/contested findings (#168)."""
+    """Scoped arbiter over high-severity/contested findings (#168).
+
+    Two shapes: the unsharded path (forensic, or a selection that fits one
+    co-located group) is today's single serial call at ``xhigh``; the sharded
+    path fans one call per planned group out under the run's fan-out ceiling,
+    applies one merged verdict mapping, and persists per-group artifacts so a
+    resume reruns only the incomplete groups.
+    """
     deep_state = DeepState(ctx.data)
     config = ctx.config
     dd = deep_state.dd
@@ -458,28 +726,89 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         # JSON round-trip cannot shake it off; empty-uid records are left out
         # and handled at the exclusion site below.
         arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
+        arbiter_slice: dict[str, Any] = {
+            "sharded": False,
+            "reason": "no arbiter targets selected",
+            "groups": [],
+            "verdicts_applied": 0,
+            "failed_groups": [],
+        }
+        adjudication_complete = True
         if arbiter_targets:
-            async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                arbiter_backend = ctx.backend_for("arbiter")
-                verdicts, arbiter_continuation = await phase_arbiter_review(
-                    arbiter_backend,
-                    ctx.work,
-                    selected_records=[adjudicated[i] for i in arbiter_targets],
-                    diff_path=deep_state.diff_path,
-                    intent_path=deep_state.intent_path,
-                    alternatives_path=deep_state.alts_path,
-                    exploration_dir=deep_state.exploration_dir,
-                    intent_authoritative=deep_state.intent_authoritative,
-                    strategy=ctx.strategy("arbitration"),
-                    run_context=ctx.run_context,
-                    artifact_session=ctx.artifacts,
-                    allow_standalone=ctx.allow_standalone_artifacts,
+            route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
+            # A route that does not shard never partitions: the unsharded path is
+            # today's single call over every selected target, and a non-sharding
+            # route's ``group_max_targets`` of 0 is not a valid partition bound
+            # (MH2/A6). Sharding is what the route turns on, so only a sharding
+            # route reaches ``partition_arbiter_targets``.
+            groups = (
+                partition_arbiter_targets(
+                    adjudicated,
+                    arbiter_targets,
+                    edges=deep_state.import_graph,
+                    max_targets=route.group_max_targets,
                 )
-                # Identity gate: only resume when merge runs on the very same
-                # backend instance. A per-phase override that resolves a
-                # different backend gets the cold path.
-                if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
-                    deep_state.arbiter_continuation = arbiter_continuation
+                if route.arbiter_sharded
+                else [
+                    ArbiterGroup(
+                        "arbiter-group-0",
+                        tuple(arbiter_targets),
+                        tuple(record_uid(adjudicated[i]) for i in arbiter_targets),
+                    )
+                ]
+            )
+            contested = (
+                contested_indices(
+                    adjudicated,
+                    adjudicated_sources,
+                    contested_only=structural_range,
+                )
+                if ctx.pipeline().arbitration.contested_location
+                else frozenset()
+            )
+            plan = arbiter_plan(route, groups, records=adjudicated, contested=contested)
+            deep_state.arbiter_plan = plan
+            targets_by_group = {
+                group.group_id: list(group.target_indices) for group in groups
+            }
+            from daydream.runner import _explicit_reasoning_effort_pin
+
+            effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
+            if plan.sharded:
+                verdicts, reused, failed_groups = await _run_sharded_arbiter(
+                    ctx,
+                    deep_state,
+                    plan,
+                    arbiter_targets,
+                    adjudicated,
+                    effort_pin=effort_pin,
+                    targets_by_group=targets_by_group,
+                )
+                adjudication_complete = not failed_groups
+            else:
+                failed_groups = []
+                reused = {plan.groups[0].group_id: False}
+                async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+                    arbiter_backend = _unsharded_arbiter_backend(ctx, effort_pin=effort_pin)
+                    verdicts, arbiter_continuation = await phase_arbiter_review(
+                        arbiter_backend,
+                        ctx.work,
+                        selected_records=[adjudicated[i] for i in arbiter_targets],
+                        diff_path=deep_state.diff_path,
+                        intent_path=deep_state.intent_path,
+                        alternatives_path=deep_state.alts_path,
+                        exploration_dir=deep_state.exploration_dir,
+                        intent_authoritative=deep_state.intent_authoritative,
+                        strategy=ctx.strategy("arbitration"),
+                        run_context=ctx.run_context,
+                        artifact_session=ctx.artifacts,
+                        allow_standalone=ctx.allow_standalone_artifacts,
+                    )
+                    # Identity gate: only resume when merge runs on the very same
+                    # backend instance. A per-phase override that resolves a
+                    # different backend gets the cold path.
+                    if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
+                        deep_state.arbiter_continuation = arbiter_continuation
             adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
                 adjudicated, adjudicated_sources, arbiter_targets, verdicts,
                 pass_name="arbiter",
@@ -489,6 +818,14 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             _rewrite_stack_records(
                 dd, rewrite_paths, adjudicated, adjudicated_sources
             )
+            arbiter_slice = {
+                "sharded": plan.sharded,
+                "reason": plan.reason,
+                "groups": _arbiter_groups_record(plan, effort_pin=effort_pin, reused=reused),
+                "verdicts_applied": len(verdicts),
+                "failed_groups": list(failed_groups),
+            }
+        write_routing_record(dd, {"arbiter": arbiter_slice})
 
         # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
         # opinion on borderline (LOW-confidence / low-severity uncontested)
@@ -533,7 +870,11 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 _rewrite_stack_records(
                     dd, rewrite_paths, adjudicated, adjudicated_sources
                 )
-        adjudication_marker.write_text("")
+        # Whole-block marker: written only when every planned group completed,
+        # so an interrupted sharded fan-out forces the block to re-enter and
+        # reruns only its incomplete groups (and the opt-in suppression pass).
+        if adjudication_complete:
+            adjudication_marker.write_text("")
         all_records, record_sources, structural_records, structural_sources = (
             _split_structural_records(adjudicated, adjudicated_sources, structural_ids)
         )

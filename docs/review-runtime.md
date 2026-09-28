@@ -527,3 +527,47 @@ live-session admission, child-visible references, sweep findings through merge a
 report, and no-read coverage. Separate real protocol-child tests exercise large
 arbitrary prompt transport and concurrent cancellation. These checks establish
 workflow and transport behavior without claiming live-model recall or convergence.
+
+## Latency profiles and the per-profile report
+
+Deep runs choose wonder and arbiter spend through a named latency profile
+(`fast`, `balanced`, `forensic`; `balanced` by default). A route is the
+monotone max of the profile's floor and the diff's mandatory risk floors, so a
+security-, concurrency-, persistence-, interface-, or migration-shaped diff is
+never routed cheap, and `forensic` is defined as today's behaviour. Each run
+persists its decision to `.daydream/deep/latency-routing.json`.
+
+A fixed, hand-built corpus under `tests/fixtures/latency_profiles/` and one
+documented command compare the profiles:
+
+```sh
+uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json
+```
+
+The report prints JSON with a section per profile. Each metric means exactly
+one thing:
+
+- `runs`: how many corpus runs were observed under that profile.
+- `phase_latency_seconds.<phase>.p50` / `.p90`: nearest-rank percentiles of the
+  per-run `wall_clock_seconds` for the wonder (`alternatives`) and arbiter
+  phases. Real runs carry no `arbiter` timing bucket -- every arbiter call runs
+  inside the `deep` phase -- so the arbiter number is read from
+  `timing.phase_timings.deep`, which aggregates the whole deep phase (arbiter,
+  suppression, supervision, review, uncovered sweep). A legacy `arbiter` bucket
+  is honoured only for hand-authored corpora that predate the pipeline keying.
+- `high_severity_recall`: golden `(file, line)` pairs found among shipped items
+  at `high` severity, over the corpus's golden high-severity pairs.
+- `false_positive_rate`: shipped items matching no golden pair, over all shipped
+  items.
+- `contested.kept` / `.dropped`: arbiter targets the routing record names as
+  contested that did or did not survive to the shipped set.
+- `shipped_by_lens`: shipped items attributed by the merge schema's `lens`
+  field; the top-level `citations` block separately reports the corroborating
+  `(Sources: ...)` prose and its coverage.
+- `calibration.surface_signals`: the committed trigger lists the route uses,
+  restated so the report is the evidence used to revise them.
+
+The corpus is small and fixed, so the report makes no statistical claim beyond
+those exact runs: it states the observed subset and its coverage rather than
+extrapolating. `analyze_findings.per_lens` remains raw pre-merge attribution and
+is unaffected by this shipped-lens report.

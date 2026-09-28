@@ -1,0 +1,20 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "description": "finding 1",
+      "file": "db.py",
+      "line": 4,
+      "confidence": "HIGH",
+      "rationale": "why (Sources: python-records item 1, react-records item 1)",
+      "evidence": "evidence",
+      "lens": "cross-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": [
+        "python:1",
+        "react:1"
+      ]
+    }
+  ]
+}

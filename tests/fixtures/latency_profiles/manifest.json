@@ -1,0 +1,47 @@
+{
+  "corpus": "latency-profiles",
+  "note": "Small fixed hand-built corpus for the per-profile comparison report (issue #732). The security and contested cases omit the fast profile because their risk floors escalate above it by construction (MH5), so only profiles actually taken are recorded.",
+  "corpus_dir": "tests/fixtures/latency_profiles",
+  "cases": [
+    {
+      "name": "routine",
+      "profiles": [
+        "fast",
+        "balanced",
+        "forensic"
+      ],
+      "golden_high_severity": [
+        [
+          "api.py",
+          3
+        ]
+      ]
+    },
+    {
+      "name": "security",
+      "profiles": [
+        "balanced",
+        "forensic"
+      ],
+      "golden_high_severity": [
+        [
+          "auth.py",
+          5
+        ]
+      ]
+    },
+    {
+      "name": "contested",
+      "profiles": [
+        "balanced",
+        "forensic"
+      ],
+      "golden_high_severity": [
+        [
+          "db.py",
+          4
+        ]
+      ]
+    }
+  ]
+}

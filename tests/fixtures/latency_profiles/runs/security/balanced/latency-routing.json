@@ -1,0 +1,47 @@
+{
+  "profile": {
+    "selected": "balanced",
+    "requested": "balanced",
+    "source": "cli",
+    "fail_safe": false,
+    "reason": null
+  },
+  "risk": {
+    "signals": {},
+    "floors": [],
+    "size_score": 0,
+    "breadth_score": 0
+  },
+  "wonder": {
+    "outcome": "run",
+    "effort": "medium",
+    "reason": "profile balanced routes wonder to run at medium",
+    "tier": "standard"
+  },
+  "arbiter": {
+    "sharded": true,
+    "reason": "sharded balanced path into 2 groups",
+    "groups": [
+      {
+        "group_id": "arbiter-group-0",
+        "target_uids": [
+          "python:1"
+        ],
+        "effort": "xhigh",
+        "reason": "arbiter-group-0: high severity",
+        "reused": false
+      },
+      {
+        "group_id": "arbiter-group-1",
+        "target_uids": [
+          "python:2"
+        ],
+        "effort": "xhigh",
+        "reason": "arbiter-group-1: contested findings",
+        "reused": false
+      }
+    ],
+    "verdicts_applied": 2,
+    "failed_groups": []
+  }
+}

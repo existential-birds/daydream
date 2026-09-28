@@ -4739,8 +4739,16 @@ async def phase_arbiter_review(
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
     run_context: RunContext | None = None,
+    input_path: Path | None = None,
 ) -> tuple[dict[int, dict[str, Any]], ContinuationToken | None]:
-    """Arbitrate high-severity or contested records before cross-stack merge."""
+    """Arbitrate high-severity or contested records before cross-stack merge.
+
+    ``input_path`` names where the indexed selection is written. The unsharded
+    caller leaves it ``None`` and gets the canonical ``arbiter-input.json``;
+    the sharded fan-out passes its group-scoped path so each concurrent group
+    writes its own input artifact. The prompt still names the input by its
+    role label (``arbiter-input``), never by filename.
+    """
     run_context = resolve_run_context(run_context)
     print_phase_hero(console, "ARBITRATE", phase_subtitle("ARBITRATE"))
     print_dim(console, f"Model: {backend.model}")
@@ -4751,7 +4759,7 @@ async def phase_arbiter_review(
         session=artifact_session,
         allow_standalone=allow_standalone,
     )
-    input_path = arbiter_input_path(dd)
+    input_path = input_path if input_path is not None else arbiter_input_path(dd)
     arbiter_input = _index_records(selected_records, "arb_id")
     input_path.write_text(json.dumps(arbiter_input, indent=2))
 
