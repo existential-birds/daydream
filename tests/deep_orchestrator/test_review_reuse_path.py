@@ -8,6 +8,7 @@ published through the artifact-visibility anchors and survives a fresh run.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -31,3 +32,17 @@ async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     (store / "entries" / ("a" * 64)).mkdir()
     assert await run(make_config(multi_stack_target)) == 0
     assert (store / "entries" / ("a" * 64)).is_dir(), "a fresh run must not wipe the store"
+
+
+async def test_exploration_provenance_is_recorded_in_the_store(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """MH5/MH16: every named unit is accounted for, and the record lives in the
+    store so it outlives the fresh-run wipe of `.daydream/deep/`."""
+    install_stub_backend(monkeypatch, multi_stack_target)
+    assert await run(make_config(multi_stack_target)) == 0
+    provenance = multi_stack_target / ".daydream" / "review-cache" / "provenance"
+    records = list(provenance.glob("*.json"))
+    assert records, "the run must record its reuse provenance inside the store"
+    record = json.loads(records[0].read_text(encoding="utf-8"))
+    assert record["units"]["exploration"]["outcome"] in {"reused", "regenerated"}

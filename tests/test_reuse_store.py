@@ -27,7 +27,18 @@ def _identity() -> reuse_key.PhaseIdentity:
 def _cache(
     tmp_path: Path, *, budget: reuse_store.ReuseBudget | None = None
 ) -> reuse_store.ReuseCache:
-    return reuse_store.ReuseCache(tmp_path / "review-cache", budget=budget)
+    return reuse_store.ReuseCache(
+        tmp_path / "review-cache", budget=budget, run_id="s1", session_id="s1"
+    )
+
+
+def _hit(
+    store: reuse_store.ReuseCache, *, key: str, grounding: dict[str, str]
+) -> reuse_store.ReuseHit:
+    """A verified hit-shaped manifest without writing an entry to the store."""
+    return reuse_store.ReuseHit(
+        key, reuse_store.entry_dir(store.store_dir, key), {"grounding": grounding}
+    )
 
 
 def entry_dir(tmp_path: Path, key: str) -> Path:
@@ -114,3 +125,46 @@ def test_review_cache_enablement_and_budget_resolve_cli_then_file_then_default(t
     cli = RunConfig(target=str(tmp_path), file_config=file_cfg, review_cache_enabled=True)
     assert reuse_store.review_cache_enabled(cli) is True          # CLI tier wins
     assert reuse_store.review_cache_budget(cli).max_entries == 7  # budget tiers are independent
+
+
+def test_provenance_records_the_grounding_delta_of_a_reused_unit(tmp_path: Path) -> None:
+    store = _cache(tmp_path)
+    produced = {
+        "exploration": "a" * 64,
+        "intent": "b" * 64,
+        "alternatives": "absent",
+        "settled_decisions": "c" * 64,
+    }
+    current = {
+        "exploration": "d" * 64,
+        "intent": "b" * 64,
+        "alternatives": "e" * 64,
+        "settled_decisions": "f" * 64,
+    }
+    hit = _hit(store, key="k" * 64, grounding=produced)
+    delta = store.grounding_delta(hit, current)
+    assert delta["exploration"] == {"produced": "a" * 64, "current": "d" * 64, "moved": True}
+    assert delta["intent"]["moved"] is False
+    assert delta["alternatives"] == {"produced": "absent", "current": "e" * 64, "moved": True}
+    store.record("exploration", outcome="regenerated", reason="pre-scan key moved (head changed)")
+    store.record(
+        "shard:python#0",
+        outcome="hit",
+        reason="exact match",
+        key="k" * 64,
+        origin_run_id="run-77",
+        detail={
+            "grounding": delta,
+            "grounding_status": {"exploration": "regenerated"},
+        },
+    )
+    record = store.provenance()
+    assert record["units"]["shard:python#0"]["outcome"] == "hit"
+    assert record["units"]["shard:python#0"]["origin_run_id"] == "run-77"  # MH5
+    # MH16: the whole grounding delta is durable evidence, not just a moved flag.
+    assert record["units"]["shard:python#0"]["grounding"]["settled_decisions"]["moved"] is True
+    assert record["units"]["shard:python#0"]["grounding_status"]["exploration"] == "regenerated"
+    assert record["store"]["entries"] == 0
+    assert record["store"]["oldest_last_used_age_s"] is None
+    # The record is durable inside the store, so it survives the deep-dir wipe (MH5).
+    assert reuse_store.provenance_path(store.store_dir, "s1").is_file()

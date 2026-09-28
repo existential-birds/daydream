@@ -45,6 +45,7 @@ from daydream.deep.latency import (
 )
 from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
+from daydream.deep.reuse_store import review_cache_enabled
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
@@ -150,6 +151,25 @@ async def _step_exploration(ctx: FlowContext) -> None:
     tier = deep_state.tier
     exploration_path = daydream_dir / "exploration"
 
+    # Issue #733 — exploration reuse stays on its own existing cache contract
+    # (A2), but its outcome is the exploration grounding status of every other
+    # unit in the run, so it is recorded as run provenance (MH5/MH16) even when
+    # the review cache itself is disabled.
+    reuse = deep_state.reuse_cache
+    reuse_enabled = reuse is not None and review_cache_enabled(ctx.config)
+
+    def _record_exploration(outcome: str, reason: str) -> None:
+        if reuse is None or not reuse_enabled:
+            return
+        reuse.record("exploration", outcome=outcome, reason=reason)
+
+    if reuse is not None and not reuse_enabled:
+        reuse.record(
+            "exploration",
+            outcome="disabled",
+            reason="review cache disabled for this run (--no-review-cache)",
+        )
+
     exploration_dir: Path | None = None
     if not EXPLORATION_AVAILABLE:
         print_warning(
@@ -157,6 +177,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
             "Exploration infrastructure not installed; running deep pipeline "
             "without pre-scan grounding",
         )
+        _record_exploration("regenerated", "exploration pre-scan unavailable")
     elif config.exploration_context is None:
         # The in-process context short-circuits first; the disk cache is only
         # consulted when there is no in-memory context to reuse.
@@ -172,8 +193,10 @@ async def _step_exploration(ctx: FlowContext) -> None:
         ):
             # Early return BEFORE the pre_scan/write_to_dir block below: routing
             # a hit through it with an empty in-memory context would overwrite
-            # the cached files with "No data collected" stubs.
+            # the cached files with "No data collected" stubs. Its outcome is
+            # recorded as provenance before the return.
             print_dim(console, f"Reusing exploration pre-scan from {exploration_path}")
+            _record_exploration("reused", "exploration pre-scan cache hit")
             deep_state.exploration_dir = exploration_path
             return
 
@@ -213,10 +236,12 @@ async def _step_exploration(ctx: FlowContext) -> None:
             exploration_dir = config.exploration_context.write_to_dir(exploration_path)
             if config.exploration_context.completed:
                 cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
+            _record_exploration("regenerated", "exploration pre-scan regenerated")
             deep_state.exploration_dir = exploration_dir
             return
     if EXPLORATION_AVAILABLE and config.exploration_context is not None:
         exploration_dir = config.exploration_context.write_to_dir(exploration_path)
+        _record_exploration("regenerated", "exploration context supplied in-process")
     deep_state.exploration_dir = exploration_dir
 
 

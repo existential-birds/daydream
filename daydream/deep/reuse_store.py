@@ -150,6 +150,7 @@ def build_reuse_cache(ctx: FlowContext) -> ReuseCache:
         budget=review_cache_budget(ctx.config),
         run_id=ctx.work.run_id,
         session_id=session_id,
+        enabled=review_cache_enabled(ctx.config),
     )
     _ensure_private_dir(store.store_dir)
     return store
@@ -242,11 +243,14 @@ class ReuseCache:
         budget: ReuseBudget | None = None,
         run_id: str | None = None,
         session_id: str | None = None,
+        enabled: bool = True,
     ) -> None:
         self.store_dir = Path(store_dir)
         self.budget = budget
         self.run_id = run_id
         self.session_id = session_id
+        self.enabled = enabled
+        self._provenance_warned = False
 
     def store(
         self,
@@ -441,6 +445,102 @@ class ReuseCache:
             )
         return ReuseHit(key, entry, manifest)
 
+    # -- provenance --------------------------------------------------------
+
+    def record(
+        self,
+        unit: str,
+        *,
+        outcome: str,
+        reason: str,
+        key: str | None = None,
+        origin_run_id: str | None = None,
+        detail: Mapping[str, Any] | None = None,
+    ) -> None:
+        """Merge one unit's outcome into this run's provenance record (MH5).
+
+        The write mirrors :func:`daydream.deep.routing_record.write_routing_record`:
+        read-modify-write with the per-unit key replaced, so units written by
+        different steps never clobber each other. Read/write failure is
+        best-effort — provenance is evidence, never an input.
+        """
+        path = provenance_path(self.store_dir, self._provenance_run_id())
+        entry: dict[str, Any] = {"outcome": outcome, "reason": reason}
+        if key is not None:
+            entry["key"] = key
+        if origin_run_id is not None:
+            entry["origin_run_id"] = origin_run_id
+        if detail:
+            entry.update(detail)
+        try:
+            record = _read_json_object(path)
+            units = record.get("units")
+            if not isinstance(units, dict):
+                units = {}
+            units[unit] = entry
+            record["units"] = units
+            _ensure_private_dir(path.parent)
+            atomic_write_bytes(
+                path,
+                json.dumps(record, indent=2).encode("utf-8"),
+                dir_fsync=True,
+                mode=_PRIVATE_FILE_MODE,
+            )
+        except OSError:
+            if not self._provenance_warned:
+                logger.warning(
+                    "reuse cache: could not record reuse provenance at %s",
+                    path,
+                    exc_info=True,
+                )
+                self._provenance_warned = True
+
+    def provenance(self) -> dict[str, Any]:
+        """The run's provenance record with live store statistics attached.
+
+        ``units`` carries every named unit's outcome plus, for a reused unit,
+        the grounding delta and per-input status it was recorded with (MH16).
+        The record itself lives inside the store, so it survives the fresh-run
+        ``.daydream/deep/`` wipe (MH5).
+        """
+        record = _read_json_object(provenance_path(self.store_dir, self._provenance_run_id()))
+        record["run_id"] = self.run_id
+        record["session_id"] = self.session_id
+        record["enabled"] = self.enabled
+        record["store"] = self._store_stats()
+        return record
+
+    def grounding_delta(
+        self, hit: ReuseHit, current: Mapping[str, str]
+    ) -> dict[str, dict[str, str | bool]]:
+        """The produced-under vs current grounding comparison for a hit (MH16)."""
+        return grounding_delta(hit, current)
+
+    def _provenance_run_id(self) -> str:
+        return self.run_id or self.session_id or "unknown"
+
+    def _store_stats(self) -> dict[str, Any]:
+        """Walk ``entries/`` for the provenance summary's store row (SH2)."""
+        entries_path = entries_dir(self.store_dir)
+        count = 0
+        total_bytes = 0
+        oldest_age: float | None = None
+        now = time.time()
+        if entries_path.is_dir():
+            for entry in entries_path.iterdir():
+                if not entry.is_dir():
+                    continue
+                count += 1
+                total_bytes += self._entry_bytes(entry)
+                age = now - self._entry_last_used(entry)
+                if oldest_age is None or age > oldest_age:
+                    oldest_age = age
+        return {
+            "entries": count,
+            "bytes": total_bytes,
+            "oldest_last_used_age_s": oldest_age,
+        }
+
 
 def grounding_delta(
     hit: ReuseHit, current: Mapping[str, str]
@@ -459,3 +559,12 @@ def grounding_delta(
         now = current.get(name, "absent")
         result[name] = {"produced": was, "current": now, "moved": was != now}
     return result
+
+
+def _read_json_object(path: Path) -> dict[str, Any]:
+    """Read a JSON object, degrading to ``{}`` on absence or corruption."""
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
