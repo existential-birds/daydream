@@ -40,6 +40,7 @@ from daydream.deep.settings import _resolve_config_value
 from daydream.json_utils import atomic_write_bytes
 
 if TYPE_CHECKING:
+    from daydream.flows.engine import FlowContext
     from daydream.runner import RunConfig
 
 logger = logging.getLogger(__name__)
@@ -129,6 +130,44 @@ def review_cache_budget(config: RunConfig) -> ReuseBudget:
             config, "review_cache_max_age_days", DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS
         ),
     )
+
+
+def build_reuse_cache(ctx: FlowContext) -> ReuseCache:
+    """Build the run's store handle rooted beside the run's ``deep/`` directory.
+
+    The directory is a sibling of ``.daydream/deep``; the handle carries the
+    run id and active artifact session so per-run provenance is attributable.
+    The store root is created with the handle so the artifact layer publishes
+    it back into the tree; its ``entries/`` and ``provenance/`` children stay
+    lazy until a unit actually writes.
+    """
+    deep_dir_path = ctx.data.get("dd")
+    if not isinstance(deep_dir_path, Path):
+        deep_dir_path = Path(str(deep_dir_path))
+    session_id = None if ctx.artifacts is None else ctx.artifacts.layout.session_id
+    store = ReuseCache(
+        review_cache_dir(deep_dir_path),
+        budget=review_cache_budget(ctx.config),
+        run_id=ctx.work.run_id,
+        session_id=session_id,
+    )
+    _ensure_private_dir(store.store_dir)
+    return store
+
+
+def reuse_cache_for(ctx: FlowContext) -> ReuseCache | None:
+    """The run's published store handle, or ``None`` when disabled or absent.
+
+    Every unit reaches the store through this accessor, so a disabled run (or a
+    direct flow caller that never published a handle) skips lookup and write
+    uniformly and takes the unchanged path.
+    """
+    value = ctx.data.get("reuse_cache")
+    if not isinstance(value, ReuseCache):
+        return None
+    if not review_cache_enabled(ctx.config):
+        return None
+    return value
 
 
 # ---------------------------------------------------------------------------

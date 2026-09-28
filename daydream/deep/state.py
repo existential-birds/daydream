@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
     from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
     from daydream.deep.prompts import DeepDiffBoundInfo
+    from daydream.deep.reuse_store import ReuseCache
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
 
@@ -204,6 +205,18 @@ class DeepState:
         return cast(
             LatencyRoute,
             self._check("latency_route", value, LatencyRoute, "LatencyRoute or None"),
+        )
+
+    @property
+    def reuse_cache(self) -> ReuseCache | None:
+        value: object | None = self._data.get("reuse_cache")
+        if value is None:
+            return None
+        from daydream.deep.reuse_store import ReuseCache
+
+        return cast(
+            ReuseCache,
+            self._check("reuse_cache", value, ReuseCache, "ReuseCache or None"),
         )
 
     @property
