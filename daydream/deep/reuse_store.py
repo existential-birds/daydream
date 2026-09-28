@@ -20,6 +20,7 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import time
 from collections.abc import Mapping
 from contextlib import suppress
@@ -214,6 +215,91 @@ class ReuseCache:
             dir_fsync=True,
             mode=_PRIVATE_FILE_MODE,
         )
+        self.prune(keep_key=key)
+
+    # -- retention ---------------------------------------------------------
+
+    def _entry_last_used(self, entry: Path) -> float:
+        """The manifest's ``last_used_at``; the directory mtime when unreadable."""
+        try:
+            manifest = json.loads((entry / MANIFEST_NAME).read_text(encoding="utf-8"))
+            last_used = manifest.get("last_used_at")
+            if isinstance(last_used, (int, float)):
+                return float(last_used)
+        except (OSError, ValueError):
+            pass
+        with suppress(OSError):
+            return entry.stat().st_mtime
+        return 0.0
+
+    @staticmethod
+    def _entry_bytes(entry: Path) -> int:
+        total = 0
+        for path in entry.rglob("*"):
+            if path.is_file():
+                with suppress(OSError):
+                    total += path.stat().st_size
+        return total
+
+    def _remove_entry(self, entry: Path) -> None:
+        """Remove one entry whole; a failure leaves a miss, never a partial hit."""
+        try:
+            shutil.rmtree(entry)
+        except OSError:
+            logger.debug("reuse cache: could not evict %s", entry, exc_info=True)
+
+    def prune(self, *, keep_key: str) -> None:
+        """Evict oldest-last-used entries while any retention bound is exceeded.
+
+        Runs after a write, never on a timer. ``keep_key`` (the entry just
+        written) is never a candidate, so the run's own result survives. A
+        removal failure is logged and skipped: a cache that cannot prune
+        slightly is still a correct cache.
+        """
+        if self.budget is None:
+            return
+        now = time.time()
+        entries_path = entries_dir(self.store_dir)
+        if not entries_path.is_dir():
+            self._prune_provenance(now)
+            return
+        entries = [
+            (entry, self._entry_last_used(entry), self._entry_bytes(entry))
+            for entry in entries_path.iterdir()
+            if entry.is_dir()
+        ]
+        entries.sort(key=lambda record: (record[1], record[0].name))
+        count = len(entries)
+        total_bytes = sum(record[2] for record in entries)
+        for entry, last_used, size in entries:
+            if entry.name == keep_key:
+                continue
+            too_old = (now - last_used) > self.budget.max_age_seconds
+            over_count = count > self.budget.max_entries
+            over_bytes = total_bytes > self.budget.max_bytes
+            if too_old or over_count or over_bytes:
+                self._remove_entry(entry)
+                count -= 1
+                total_bytes -= size
+        self._prune_provenance(now)
+
+    def _prune_provenance(self, now: float) -> None:
+        """Age out per-run provenance records under the same age bound."""
+        if self.budget is None:
+            return
+        provenance_dir = Path(self.store_dir) / PROVENANCE_DIRNAME
+        if not provenance_dir.is_dir():
+            return
+        for record in provenance_dir.iterdir():
+            if not record.is_file():
+                continue
+            try:
+                age = now - record.stat().st_mtime
+            except OSError:
+                continue
+            if age > self.budget.max_age_seconds:
+                with suppress(OSError):
+                    record.unlink()
 
     def lookup(self, key: str) -> ReuseHit | ReuseMiss:
         """Return a verified :class:`ReuseHit` or a named :class:`ReuseMiss`.

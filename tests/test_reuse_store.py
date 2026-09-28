@@ -32,6 +32,21 @@ def entry_dir(tmp_path: Path, key: str) -> Path:
     return reuse_store.entry_dir(tmp_path / "review-cache", key)
 
 
+def _seed_entry(
+    store: reuse_store.ReuseCache, key: str, *, last_used_at: float
+) -> None:
+    store.store(
+        key,
+        unit="shard:python#0",
+        payload={"x.json": b"{}"},
+        components={},
+        identity=_identity(),
+        grounding={},
+        grounding_status={},
+        now=last_used_at,
+    )
+
+
 def test_entry_is_a_hit_only_when_payload_and_marker_agree(tmp_path: Path) -> None:
     store = _cache(tmp_path)
     grounding = {
@@ -66,3 +81,20 @@ def test_entry_is_a_hit_only_when_payload_and_marker_agree(tmp_path: Path) -> No
     miss = store.lookup("a" * 64)
     assert isinstance(miss, reuse_store.ReuseMiss) and "marker" in miss.reason
     assert isinstance(store.lookup("b" * 64), reuse_store.ReuseMiss)  # unknown key
+
+
+def test_prune_evicts_oldest_last_used_and_spares_the_fresh_entry(tmp_path: Path) -> None:
+    store = _cache(tmp_path, budget=reuse_store.ReuseBudget(max_entries=2, max_bytes=10**9, max_age_seconds=3600))
+    for key, used in (("a" * 64, 1_000), ("b" * 64, 2_000), ("c" * 64, 3_000)):
+        _seed_entry(store, key, last_used_at=used)
+    store.store("d" * 64, unit="shard:python#0", payload={"x.json": b"{}"}, components={},
+                identity=_identity(), grounding={}, grounding_status={})
+    live = {p.name for p in reuse_store.entries_dir(store.store_dir).iterdir()}
+    assert "d" * 64 in live and "a" * 64 not in live
+    assert isinstance(store.lookup("d" * 64), reuse_store.ReuseHit)
+    # An entry evicted by age is a plain miss on the next run, never a truncated hit.
+    store2 = _cache(tmp_path, budget=reuse_store.ReuseBudget(max_entries=8, max_bytes=10**9, max_age_seconds=1))
+    _seed_entry(store2, "e" * 64, last_used_at=1)
+    store2.store("f" * 64, unit="shard:python#0", payload={"x.json": b"{}"}, components={},
+                 identity=_identity(), grounding={}, grounding_status={})
+    assert isinstance(store2.lookup("e" * 64), reuse_store.ReuseMiss)
