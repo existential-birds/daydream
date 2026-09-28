@@ -85,10 +85,6 @@ def render_issue(issue: AssemblyIssue) -> str:
     return rendered
 
 
-def _branch_name(title: str) -> str:
-    return f"improve/{plan_slug(title)}"
-
-
 _AUTHOR_PROSE_FIELD_PATTERNS: tuple[tuple[str, ...], ...] = (
     ("why_this_matters", "problem"),
     ("why_this_matters", "concrete_cost"),
@@ -1537,7 +1533,7 @@ def assemble_plan(
             "out_of_scope_behaviors": deepcopy(scope["out_of_scope_behaviors"]),
         },
         "git_workflow": {
-            "branch_name": _branch_name(normalized["title"]),
+            "branch_name": f"improve/{plan_slug(normalized['title'])}",
             "branch_basis": GIT_BRANCH_BASIS,
             "commit_boundaries": normalized["git_workflow"]["commit_boundaries"],
             "commit_message_example": (

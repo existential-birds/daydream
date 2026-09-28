@@ -39,6 +39,14 @@ def _finish(repo: Path) -> Path:
     return repo
 
 
+def _branch_off_main(repo: Path) -> None:
+    """Commit the written tree as ``init``, then check out a ``feature`` branch."""
+    init_repo(repo)
+    git(repo, "add", ".")
+    commit(repo, "init")
+    git(repo, "checkout", "-b", "feature")
+
+
 def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path:
     """Two-package initial tree with one cross-module import edge, then feature edits."""
     repo = root / name
@@ -57,10 +65,7 @@ def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path
         "    return handle(payload)\n",
         encoding="utf-8",
     )
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "init")
-    git(repo, "checkout", "-b", "feature")
+    _branch_off_main(repo)
     (repo / "pkg_a" / "core.py").write_text(CORE_PY, encoding="utf-8")
     (repo / "pkg_a" / "util.py").write_text(
         "def normalize(text):\n    return text.strip()\n", encoding="utf-8"
@@ -151,10 +156,7 @@ def build_large_cross_module_repo(
     (repo / "pkg_a").mkdir(parents=True)
     (repo / "pkg_b").mkdir(parents=True)
     _write("initial")
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "init")
-    git(repo, "checkout", "-b", "feature")
+    _branch_off_main(repo)
     _write("feature")
     return _finish(repo)
 
@@ -171,10 +173,7 @@ def build_branch_heavy_repo(root: Path) -> Path:
         "def run(payload):\n    return payload\n", encoding="utf-8"
     )
     (repo / "README.md").write_text("# app\n", encoding="utf-8")
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "init")
-    git(repo, "checkout", "-b", "feature")
+    _branch_off_main(repo)
     (repo / "app" / "pipeline.py").write_text(PIPELINE_PY, encoding="utf-8")
     return _finish(repo)
 
@@ -212,10 +211,7 @@ def build_cross_service_repo(root: Path) -> Path:
     (repo / "pyproject.toml").write_text(
         '[project]\nname = "cross-service"\n', encoding="utf-8"
     )
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "init")
-    git(repo, "checkout", "-b", "feature")
+    _branch_off_main(repo)
     for service in ("alpha", "beta"):
         (repo / "services" / service / "api.py").write_text(
             f'def endpoint():\n    return "{service}-v2"\n', encoding="utf-8"
@@ -233,10 +229,7 @@ def build_flat_repo(root: Path) -> Path:
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "one.py").write_text("VALUE = 1\n", encoding="utf-8")
     (repo / "app" / "two.py").write_text("OTHER = 2\n", encoding="utf-8")
-    init_repo(repo)
-    git(repo, "add", ".")
-    commit(repo, "init")
-    git(repo, "checkout", "-b", "feature")
+    _branch_off_main(repo)
     (repo / "app" / "one.py").write_text("VALUE = 11\n", encoding="utf-8")
     (repo / "app" / "two.py").write_text("OTHER = 22\n", encoding="utf-8")
     return _finish(repo)

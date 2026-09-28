@@ -12,12 +12,11 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from daydream.config import STRUCTURE_STACK_NAME
-from daydream.deep.detection import StackAssignment
+from daydream.deep.detection import GENERIC_STACK, StackAssignment
 from daydream.services import RepoRootPolicy, Service, ServiceMatch, owning_services
 
 PARTITION_MAX_FILES: int = 400
 
-_GENERIC_STACK = "generic"
 _RESIDUE_NAME = "residue"
 _TOP_LEVEL = ""
 
@@ -178,7 +177,7 @@ def group_partitions(
     """
     buckets: dict[str, list[Partition]] = defaultdict(list)
     for partition in partitions:
-        for stack in sorted({stack_of.get(path, _GENERIC_STACK) for path in partition.files}):
+        for stack in sorted({stack_of.get(path, GENERIC_STACK) for path in partition.files}):
             buckets[stack].append(partition)
 
     bins: list[tuple[str, list[Partition]]] = []

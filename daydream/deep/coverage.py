@@ -60,20 +60,6 @@ def _path_component_matches(absolute: str, relative: str) -> bool:
     return absolute == relative or absolute.endswith("/" + relative)
 
 
-def _same_repo_relative(a: str, b: str) -> bool:
-    """Exact dir-aware match between two repo-relative paths.
-
-    ``_path_component_matches`` pairs an absolute read path (from a tool call)
-    with a repo-relative diff file, where a basename-boundary fallback is
-    needed. When BOTH operands are repo-relative (a parsed finding ``file`` vs
-    an assigned or receipt file), that one-directional basename fallback
-    misattributes: ``lib/util.py`` ``endswith("/util.py")`` matches the
-    assigned top-level ``util.py``. Repo-relative operands share the same
-    normalization, so exact equality is the only correct comparison.
-    """
-    return a == b
-
-
 def coverage_receipt_path(deep_dir: Path) -> Path:
     """Path to the run's structured coverage receipts (issue #731).
 
@@ -285,7 +271,7 @@ def _receipt_covered_files(
         if inline_covered is not None:
             for f in receipt.get("inline_files", []) or []:
                 if f in diff_set and any(
-                    _same_repo_relative(ff, f) for ff in inline_covered
+                    ff == f for ff in inline_covered
                 ):
                     covered.add(f)
                     covered_by_type["inline_hunk_reviewed"].add(f)
@@ -298,7 +284,7 @@ def _receipt_covered_files(
         # records suppresses frontier credit for the files it merely lists.
         for f in receipt.get("frontier_files", []) or []:
             if f in diff_set and any(
-                _same_repo_relative(ff, f) for ff in frontier_evidence
+                ff == f for ff in frontier_evidence
             ):
                 covered.add(f)
                 covered_by_type["dependency_frontier_read"].add(f)
@@ -343,7 +329,7 @@ def resolve_per_stack_verdicts(
     receipt or without a completed declared verdict stays ``not_reviewed``,
     even if an independent finding was established before evidence ran out.
     Otherwise the final verdict is resolved by evidence, in order:
-    a parsed finding that exactly matches the file (``_same_repo_relative``) wins (``has_findings``
+    a parsed finding that exactly matches the file (exact equality) wins (``has_findings``
     beats a read, beats ``clean``); otherwise a completed read that
     path-component-matches the file yields ``clean``; otherwise the file is
     ``not_reviewed``. This mirrors the read-detection the sweep already uses
@@ -391,7 +377,7 @@ def resolve_per_stack_verdicts(
         declared = declared_by_path.get(path, {})
         lines_read = declared.get("lines_read", 0)
         matching_findings = [
-            ff for ff in finding_files if _same_repo_relative(ff, path)
+            ff for ff in finding_files if ff == path
         ]
         if source_packet_paths is not None and (
             path not in source_packet_paths

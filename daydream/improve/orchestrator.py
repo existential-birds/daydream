@@ -22,7 +22,7 @@ from daydream.config import (
     EffortTier,
 )
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.detection import StackAssignment, detect_stacks
+from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
 from daydream.exploration import EXPLORATION_SECTION_PREFIX
@@ -596,11 +596,11 @@ def _partition_repository(
 def _whole_surface_group(
     partition: Partition, stack_of: dict[str, str]
 ) -> PartitionGroup:
-    counts = Counter(stack_of.get(path, "generic") for path in partition.files)
+    counts = Counter(stack_of.get(path, GENERIC_STACK) for path in partition.files)
     dominant = (
         min(sorted(counts), key=lambda stack: (-counts[stack], stack))
         if counts
-        else "generic"
+        else GENERIC_STACK
     )
     return PartitionGroup(
         name="group-01", stack=dominant, partitions=(partition,)

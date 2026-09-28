@@ -28,9 +28,11 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_RUN_LEVEL_ONLY,
     REASON_CODE_IMPORT_STALE_EVIDENCE,
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
+    REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.importer import (
     IMPORT_REASON_CODES,
+    REDACTED_PATH,
     accounting,
     build_import_ledger,
     canonical_payload_digest,
@@ -39,6 +41,7 @@ from daydream.archive.importer import (
     gold_eligible,
     link_session_identity,
     merge_imported_observations,
+    redact_imported_metadata,
     run_pure_import,
 )
 from daydream.archive.index import (
@@ -48,6 +51,7 @@ from daydream.archive.index import (
     upsert_run,
 )
 from daydream.archive.known_versions import STALE_LEGACY
+from daydream.archive.scan import scan_run_dir
 from daydream.training.labeler_versions import HUMAN_LABELER_VERSION
 from tests.harness.trajectory import make_manifest
 
@@ -142,25 +146,6 @@ def _seed_run(root: Path) -> None:
     )
 
 
-def _append_observation(root: Path, *, observed_at: str, evidence_sha: str) -> None:
-    append_label_observation(
-        root,
-        SID,
-        labels=["accepted"],
-        pr_state=None,
-        labeler_version="980-rubric-r2",
-        evidence_sha=evidence_sha,
-        # Explicit valid_at: the writer collapses valid_at=None to observed_at,
-        # which would make the two roots' payloads differ by capture stamp.
-        valid_at="2026-04-30T00:00:00+00:00",
-        reply_evidence_digest=None,
-        reward_version=None,
-        has_posterior=False,
-        source="auto",
-        observed_at=observed_at,
-    )
-
-
 def read_label_rows(root: Path) -> list[dict[str, Any]]:
     """Read-only inventory of one root's ``label_observations`` rows.
 
@@ -186,8 +171,8 @@ def mk_backup_pair(tmp_path: Path, evidence_sha: str) -> tuple[Path, Path]:
     for root in (root_a, root_b):
         root.mkdir()
         _seed_run(root)
-    _append_observation(root_a, observed_at=_OBSERVED_A, evidence_sha=evidence_sha)
-    _append_observation(root_b, observed_at=_OBSERVED_B, evidence_sha=evidence_sha)
+    _seed_generation(root_a, observed_at=_OBSERVED_A, evidence_sha=evidence_sha, labels=["accepted"])
+    _seed_generation(root_b, observed_at=_OBSERVED_B, evidence_sha=evidence_sha, labels=["accepted"])
     # Each root is an independent capture: the writer's within-root auto-dedup
     # only compares the latest row, so both first-time appends insert — the
     # shared evidence payload now exists in both roots at different stamps.
@@ -231,7 +216,12 @@ def test_every_generation_kept_never_keep_latest(tmp_path: Path) -> None:
     # Two *distinct* evidence generations (different policy versions) must both
     # survive — dedupe collapses identical evidence only, never keeps-latest.
     src_a, src_b = mk_backup_pair(tmp_path, evidence_sha="c" * 64)
-    _append_observation(src_a, observed_at="2026-05-03T00:00:00+00:00", evidence_sha="e" * 64)
+    _seed_generation(
+        src_a,
+        observed_at="2026-05-03T00:00:00+00:00",
+        evidence_sha="e" * 64,
+        labels=["accepted"],
+    )
     inv_a = read_label_rows(src_a)
     inv_b = read_label_rows(src_b)
     merged = dedupe_observations([inv_a, inv_b])
@@ -629,6 +619,8 @@ def _seed_generation(root: Path, *, observed_at: str, evidence_sha: str, labels:
         pr_state=None,
         labeler_version="980-rubric-r2",
         evidence_sha=evidence_sha,
+        # Explicit valid_at: the writer collapses valid_at=None to observed_at,
+        # which would make the two roots' payloads differ by capture stamp.
         valid_at="2026-04-30T00:00:00+00:00",
         reply_evidence_digest=None,
         reward_version=None,
@@ -895,13 +887,6 @@ def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path) -> 
     assert len(hist) == 1
     assert hist[0]["labeler_policy_version"] is None
     assert hist[0]["legacy"] == "legacy"
-
-
-from daydream.archive.hydrate_rules import (  # noqa: E402
-    REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
-)
-from daydream.archive.importer import REDACTED_PATH, redact_imported_metadata  # noqa: E402
-from daydream.archive.scan import scan_run_dir  # noqa: E402
 
 
 def _metadata_row(**overrides: Any) -> dict[str, Any]:
