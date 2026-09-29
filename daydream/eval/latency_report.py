@@ -37,14 +37,8 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
-from daydream.deep.latency import (
-    _CONCURRENCY_TRIGGERS,
-    _INTERFACE_TRIGGERS,
-    _MIGRATION_TRIGGERS,
-    _PERSISTENCE_TRIGGERS,
-    _SECURITY_TRIGGERS,
-    LATENCY_PROFILES,
-)
+from daydream.deep.latency import LATENCY_PROFILES
+from daydream.deep.risk_categories import CATEGORY_TRIGGERS
 from daydream.json_utils import read_json_object
 from daydream.severity import is_high_severity
 from daydream.trajectory import RUNS_DIRNAME
@@ -477,16 +471,16 @@ def build_report(
         },
         "calibration": {
             "surface_signals": {
-                "security": list(_SECURITY_TRIGGERS),
-                "concurrency": list(_CONCURRENCY_TRIGGERS),
-                "persistence": list(_PERSISTENCE_TRIGGERS),
-                "interface": list(_INTERFACE_TRIGGERS),
-                "migration": list(_MIGRATION_TRIGGERS),
+                "security": list(CATEGORY_TRIGGERS["security"]),
+                "concurrency": list(CATEGORY_TRIGGERS["concurrency"]),
+                "persistence": list(CATEGORY_TRIGGERS["persistence"]),
+                "interface": list(CATEGORY_TRIGGERS["public-interface"]),
+                "migration": list(CATEGORY_TRIGGERS["migration"]),
             },
             "note": (
                 "These are the committed default trigger lists from "
-                "daydream.deep.latency; they are the calibration surface this "
-                "report exists to revisit, not a claim of statistical support."
+                "daydream.deep.risk_categories; they are the calibration surface "
+                "this report exists to revisit, not a claim of statistical support."
             ),
         },
     }

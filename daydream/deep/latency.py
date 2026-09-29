@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from daydream.deep.arbiter import ArbiterGroup
+from daydream.deep.risk_categories import SURFACE_CATEGORY, category_matches
 from daydream.severity import is_high_severity
 
 LatencyProfile = Literal["fast", "balanced", "forensic"]
@@ -22,17 +23,6 @@ DEFAULT_LATENCY_PROFILE: LatencyProfile = "balanced"
 FAIL_SAFE_LATENCY_PROFILE: LatencyProfile = "forensic"
 WONDER_ROUTES: tuple[WonderRoute, ...] = ("skip", "medium", "high")
 ARBITER_EFFORTS: tuple[ArbiterEffort, ...] = ("medium", "high", "xhigh")
-
-# Calibration surfaces: match only changed content and post-state paths, never context.
-_SECURITY_TRIGGERS = (
-    "authenticate", "authorization", "authz", "password", "secret", "credential", "token", "permission",
-)
-_CONCURRENCY_TRIGGERS = (
-    "threading.lock", "asyncio.lock", "mutex", "semaphore", "deadlock", "atomic", "race condition",
-)
-_PERSISTENCE_TRIGGERS = ("alter table", "create table", "drop table", "begin;", "commit;", "rollback;", "transaction")
-_INTERFACE_TRIGGERS = ("@app.route", "@router.", "openapi", "proto3", "endpoint", "api/v", "grpc")
-_MIGRATION_TRIGGERS = ("migrations/", "migration", "alembic", "schema_version")
 
 
 @dataclass(frozen=True)
@@ -59,11 +49,11 @@ def diff_signals(*, diff: str, changed_files: int, stack_count: int) -> DiffSign
         diff_bytes=len(diff.encode("utf-8")),
         changed_files=changed_files,
         stack_count=stack_count,
-        security_surface=any(trigger in changed for trigger in _SECURITY_TRIGGERS),
-        concurrency_surface=any(trigger in changed for trigger in _CONCURRENCY_TRIGGERS),
-        persistence_surface=any(trigger in changed for trigger in _PERSISTENCE_TRIGGERS),
-        interface_surface=any(trigger in changed for trigger in _INTERFACE_TRIGGERS),
-        migration_surface=any(trigger in changed for trigger in _MIGRATION_TRIGGERS),
+        security_surface=category_matches(SURFACE_CATEGORY["security_surface"], changed),
+        concurrency_surface=category_matches(SURFACE_CATEGORY["concurrency_surface"], changed),
+        persistence_surface=category_matches(SURFACE_CATEGORY["persistence_surface"], changed),
+        interface_surface=category_matches(SURFACE_CATEGORY["interface_surface"], changed),
+        migration_surface=category_matches(SURFACE_CATEGORY["migration_surface"], changed),
     )
 
 
@@ -90,13 +80,7 @@ def summarize_risk(signals: DiffSignals, findings: FindingSignals | None = None)
         size_score = 1
     else:
         size_score = 0
-    floors = [
-        name
-        for name in (
-            "security_surface", "concurrency_surface", "persistence_surface", "interface_surface", "migration_surface"
-        )
-        if getattr(signals, name)
-    ]
+    floors = [name for name in SURFACE_CATEGORY if getattr(signals, name)]
     if findings is not None:
         if findings.high_severity:
             floors.append("high_severity_findings")
