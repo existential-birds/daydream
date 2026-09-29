@@ -12,6 +12,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.improve.publish import (
     ImprovePublishError,
     IssuePublisher,
+    PublishResult,
     issue_body,
     member_fingerprint_marker,
     member_marker,
@@ -45,6 +46,21 @@ def _stub_existing_issue(
         "gh_issue_create",
         lambda *args, **kwargs: pytest.fail(create_failure),
     )
+
+
+def _publish(
+    tmp_path: Path,
+    *,
+    package_id: str,
+    title: str,
+    plan: str = "# Complete plan\n",
+    **kwargs: Any,
+) -> PublishResult:
+    """Write a plan and publish it through a connected test publisher."""
+    plan_path = tmp_path / "plan.md"
+    plan_path.write_text(plan, encoding="utf-8")
+    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
+    return publisher.publish(package_id=package_id, title=title, plan_path=plan_path, **kwargs)
 
 
 def test_issue_body_preserves_complete_plan_markdown() -> None:
@@ -132,20 +148,13 @@ def test_existing_closed_issue_is_reused_without_creating_a_duplicate(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Complete plan\n", encoding="utf-8")
     _stub_existing_issue(
         monkeypatch,
         [_issue("reuse-handler", state="closed")],
         create_failure="must not create a duplicate issue",
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
-    result = publisher.publish(
-        package_id="reuse-handler",
-        title="Reuse the existing handler",
-        plan_path=plan_path,
-    )
+    result = _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
 
     assert result.disposition == "existing"
     assert result.issue_url.endswith("/7")
@@ -155,8 +164,6 @@ def test_all_member_aliases_reconcile_a_regrouped_package(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Complete plan\n", encoding="utf-8")
     existing = _issue("older-package")
     existing["body"] = issue_body(
         "older-package",
@@ -166,12 +173,11 @@ def test_all_member_aliases_reconcile_a_regrouped_package(
     _stub_existing_issue(
         monkeypatch, [existing], create_failure="must reuse complete alias coverage"
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
-    result = publisher.publish(
+    result = _publish(
+        tmp_path,
         package_id="regrouped-package",
         title="Reuse the existing handler",
-        plan_path=plan_path,
         member_aliases=("member:aaa", "member:bbb"),
     )
 
@@ -182,8 +188,6 @@ def test_partial_member_alias_overlap_fails_instead_of_creating_duplicate_work(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Expanded plan\n", encoding="utf-8")
     existing = _issue("older-package")
     existing["body"] = issue_body(
         "older-package",
@@ -193,13 +197,13 @@ def test_partial_member_alias_overlap_fails_instead_of_creating_duplicate_work(
     _stub_existing_issue(
         monkeypatch, [existing], create_failure="must not create overlapping work"
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
     with pytest.raises(ImprovePublishError, match="partially covers"):
-        publisher.publish(
+        _publish(
+            tmp_path,
             package_id="expanded-package",
             title="Expand reuse cleanup",
-            plan_path=plan_path,
+            plan="# Expanded plan\n",
             member_aliases=("member:shared", "member:new"),
         )
 
@@ -208,8 +212,6 @@ def test_matching_package_marker_cannot_hide_stale_member_coverage(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Expanded plan\n", encoding="utf-8")
     existing = _issue("same-package")
     existing["body"] = issue_body(
         "same-package",
@@ -219,13 +221,13 @@ def test_matching_package_marker_cannot_hide_stale_member_coverage(
     _stub_existing_issue(
         monkeypatch, [existing], create_failure="must not publish stale coverage"
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
     with pytest.raises(ImprovePublishError, match="stale or overlapping"):
-        publisher.publish(
+        _publish(
+            tmp_path,
             package_id="same-package",
             title="Expanded cleanup",
-            plan_path=plan_path,
+            plan="# Expanded plan\n",
             member_aliases=("member:old", "member:new"),
         )
 
@@ -234,8 +236,6 @@ def test_colliding_member_aliases_require_every_raw_fingerprint(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Two distinct cleanups\n", encoding="utf-8")
     existing = _issue("same-package")
     existing["body"] = issue_body(
         "same-package",
@@ -246,13 +246,13 @@ def test_colliding_member_aliases_require_every_raw_fingerprint(
     _stub_existing_issue(
         monkeypatch, [existing], create_failure="one alias cannot cover two members"
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
     with pytest.raises(ImprovePublishError, match="stale or overlapping"):
-        publisher.publish(
+        _publish(
+            tmp_path,
             package_id="same-package",
             title="Two distinct cleanups",
-            plan_path=plan_path,
+            plan="# Two distinct cleanups\n",
             member_aliases=("member:shared", "member:shared"),
             member_fingerprints=("raw-first", "raw-second"),
         )
@@ -264,9 +264,7 @@ def test_publish_creates_issue_with_the_complete_local_plan(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
     plan = "# Complete plan\n\n- Delete the redundant adapter.\n"
-    plan_path.write_text(plan, encoding="utf-8")
     monkeypatch.setattr(git_ops, "gh_issue_list_strict", lambda *args, **kwargs: [])
     captured: dict[str, object] = {}
 
@@ -275,12 +273,12 @@ def test_publish_creates_issue_with_the_complete_local_plan(
         return "https://github.com/acme/widgets/issues/12"
 
     monkeypatch.setattr(git_ops, "gh_issue_create", create)
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
-    result = publisher.publish(
+    result = _publish(
+        tmp_path,
         package_id="delete-adapter",
         title="Delete the redundant adapter",
-        plan_path=plan_path,
+        plan=plan,
     )
 
     assert result.disposition == "created"
@@ -295,8 +293,6 @@ def test_ambiguous_create_failure_reconciles_before_returning(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Complete plan\n", encoding="utf-8")
     lookups = iter([[], [_issue("reuse-handler", number=19)]])
     monkeypatch.setattr(
         git_ops,
@@ -308,13 +304,8 @@ def test_ambiguous_create_failure_reconciles_before_returning(
         "gh_issue_create",
         lambda *args, **kwargs: (_ for _ in ()).throw(git_ops.GitTimeoutError("response lost")),
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
-    result = publisher.publish(
-        package_id="reuse-handler",
-        title="Reuse the existing handler",
-        plan_path=plan_path,
-    )
+    result = _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
 
     assert result.disposition == "reconciled"
     assert result.issue_url.endswith("/19")
@@ -324,43 +315,29 @@ def test_ambiguous_create_failure_without_a_marker_remains_a_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Complete plan\n", encoding="utf-8")
     monkeypatch.setattr(git_ops, "gh_issue_list_strict", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         git_ops,
         "gh_issue_create",
         lambda *args, **kwargs: (_ for _ in ()).throw(git_ops.GitTimeoutError("response lost")),
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
     with pytest.raises(ImprovePublishError, match="no matching issue"):
-        publisher.publish(
-            package_id="reuse-handler",
-            title="Reuse the existing handler",
-            plan_path=plan_path,
-        )
+        _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
 
 
 def test_duplicate_package_markers_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    plan_path = tmp_path / "plan.md"
-    plan_path.write_text("# Complete plan\n", encoding="utf-8")
     _stub_existing_issue(
         monkeypatch,
         [_issue("reuse-handler", number=2), _issue("reuse-handler", number=3)],
         create_failure="ambiguous state must not create",
     )
-    publisher = IssuePublisher.connect(tmp_path, repo_slug="acme/widgets")
 
     with pytest.raises(ImprovePublishError, match="Multiple GitHub issues"):
-        publisher.publish(
-            package_id="reuse-handler",
-            title="Reuse the existing handler",
-            plan_path=plan_path,
-        )
+        _publish(tmp_path, package_id="reuse-handler", title="Reuse the existing handler")
 
 
 def test_strict_issue_lookup_paginates_and_filters_pull_requests(
