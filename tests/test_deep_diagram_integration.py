@@ -190,14 +190,9 @@ def review_run(
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
         config_overrides.setdefault("output_mode", "comment")
-        return await _dispatch_run(make_config(target, **config_overrides)), stub
+        return await run(make_config(target, **config_overrides)), stub
 
     return _run
-
-
-async def _dispatch_run(config: Any) -> int:
-
-    return await run(config)
 
 
 def _diagram_lifecycle(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:

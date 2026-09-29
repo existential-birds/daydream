@@ -36,9 +36,15 @@ RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": 
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
 
 
-async def test_structured_output_text_is_not_rendered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", rec)
+@pytest.fixture
+def rec(monkeypatch: pytest.MonkeyPatch) -> Console:
+    """Install a recording console as ``daydream.agent.console`` and return it."""
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
+    monkeypatch.setattr("daydream.agent.console", console)
+    return console
+
+
+async def test_structured_output_text_is_not_rendered(rec: Console, tmp_path: Path) -> None:
     backend = ScriptedBackend(
         events=[TextEvent(text=RAW), ResultEvent(structured_output=PAYLOAD, continuation=None)],
         model="mock-model",
@@ -52,9 +58,7 @@ async def test_structured_output_text_is_not_rendered(monkeypatch: pytest.Monkey
     assert "{" not in out
 
 
-async def test_plain_text_still_renders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", rec)
+async def test_plain_text_still_renders(rec: Console, tmp_path: Path) -> None:
     backend = ScriptedBackend(
         events=[
             TextEvent(text="narration here"),
@@ -153,14 +157,12 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(
 
 
 async def test_structured_fallback_validates_against_output_schema(
-    monkeypatch: pytest.MonkeyPatch,
+    rec: Console,
     tmp_path: Path,
 ) -> None:
     """Must-haves #4/#5: with output_schema set and structured output failing,
     (a) valid-schema JSON is returned as structured output, and (b) invalid-
     schema JSON falls through to the plain-text return."""
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", rec)
     schema = {
         "type": "object",
         "required": ["file"],
@@ -196,7 +198,7 @@ async def test_structured_fallback_validates_against_output_schema(
 
 
 async def test_structured_fallback_recon_not_gated_all_or_nothing(
-    monkeypatch: pytest.MonkeyPatch,
+    rec: Console,
     tmp_path: Path,
 ) -> None:
     """RECON's fallback skips the structured-output gate via the caller-declared
@@ -208,8 +210,6 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
     must still reach that salvage path instead of falling through to plain text.
     Callers that do not opt out keep the gate (see the REVIEW assertions
     above)."""
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", rec)
     schema = {
         "type": "object",
         "required": ["languages", "commands", "conventions", "intent_docs"],
@@ -236,15 +236,13 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
 
 
 async def test_structured_fallback_salvages_partial_dict(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    rec: Console, tmp_path: Path
 ) -> None:
     """The fallback gate is salvage-tolerant, not all-or-nothing: a dict whose
     required top-level field is present but whose nested records contain one
     schema-invalid item still reaches the consumer. The recommendation verifier
     (and the per-stack parse) drop invalid records rather than losing the whole
     payload, so an all-or-nothing gate here would starve every valid record."""
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", rec)
     schema = {
         "type": "object",
         "required": ["verdicts"],
@@ -284,7 +282,7 @@ async def test_structured_fallback_salvages_partial_dict(
 
 
 async def test_structured_fallback_bare_array_reaches_merge_shape(
-    monkeypatch: pytest.MonkeyPatch,
+    rec: Console,
     tmp_path: Path,
 ) -> None:
     """A bare JSON array can never validate against an object-typed schema
@@ -292,8 +290,6 @@ async def test_structured_fallback_bare_array_reaches_merge_shape(
     normalizes a bare array to its item list. The gate must let it through
     instead of falling back to plain text, which would raise
     CrossStackMergeError downstream and abort the run."""
-    rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-    monkeypatch.setattr("daydream.agent.console", rec)
     schema = {
         "type": "object",
         "required": ["items"],
