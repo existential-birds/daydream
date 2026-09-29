@@ -998,11 +998,8 @@ def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh) -
     # force a mid-compile failure: drop the snapshot bundle so the case can no longer compile
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     (ws / raw["snapshot"]["bundle_file"]).unlink()
-    try:
+    with pytest.raises(CompileError):
         build.compile_workspace(ws)
-        assert False, "expected CompileError for a missing bundle"
-    except CompileError:
-        pass
     assert _harbor_tree_bytes(ws) == before                    # prior tree fully intact
     assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
 
@@ -1033,13 +1030,11 @@ def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token() -> Non
             "source github:review:42"
         ),
     }
-    try:
+    with pytest.raises(CompileError) as rejected:
         build.leakage_scan(cases, repository_slug="o/r")
-        assert False, "expected CompileError"
-    except CompileError as exc:
-        msg = str(exc)
-        assert "case-abcdef123456/README.md" in msg           # names the file
-        assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
+    msg = str(rejected.value)
+    assert "case-abcdef123456/README.md" in msg           # names the file
+    assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
 
 
 def test_leakage_scan_permits_bounded_block_raw_text() -> None:
@@ -1055,12 +1050,10 @@ def test_leakage_scan_permits_bounded_block_raw_text() -> None:
 
 def test_leakage_scan_rejects_clean_readme() -> None:
     # clean marker leaks into a README
-    try:
+    with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"},
                            repository_slug="o/r")
-        assert False, "expected CompileError"
-    except CompileError as exc:
-        assert "clean_attested" in str(exc)
+    assert "clean_attested" in str(rejected.value)
 
 
 def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path) -> None:
@@ -1085,11 +1078,9 @@ def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
         "refs/heads/extra",
         env=_BUNDLE_ENV,
     )
-    try:
+    with pytest.raises(CompileError) as rejected:
         build.validate_bundle_inventory(bp)
-        assert False, "expected to fail for an extra ref"
-    except CompileError as exc:
-        assert "ref" in str(exc)
+    assert "ref" in str(rejected.value)
 
 
 def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1187,11 +1178,9 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: 
     raw["curation"]["state"] = "stale"
     raw["curation"]["snapshot_attested"] = False
     storage.atomic_write_yaml(ws / "cases" / f"{case_id}.yaml", raw)
-    try:
+    with pytest.raises(CompileError) as rejected:
         build.compile_workspace(ws)
-        assert False, "expected CompileError for a non-ready case"
-    except CompileError as exc:
-        assert case_id in str(exc)
+    assert case_id in str(rejected.value)
 
 
 def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -1463,11 +1452,9 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> No
              "and any evidence exclusions are described here, with provenance notes.\n")
     build.leakage_scan({"case-x/Task.md": prose}, repository_slug="o/r")   # must NOT raise (R13)
     leaky = prose + " see https://github.com/o/r/pull/101 and sha 1a2b3c4d5e6f7890abcdef1234567890abcdef12\n"
-    try:
+    with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"case-x/Task.md": leaky}, repository_slug="o/r")
-        assert False, "expected CompileError for leaked identifier"
-    except CompileError as exc:
-        assert "Task.md" in str(exc)
+    assert "Task.md" in str(rejected.value)
 
 
 def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path: Path, fake_gh: FakeGh) -> None:

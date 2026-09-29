@@ -56,18 +56,16 @@ from tests.harness.harvest_services import HarvestTestServices
 from tests.harness.trajectory import diff_adding
 
 
-def _seed_deep_bronze(tmp_path: Path, *, verdict: str, grounding: float) -> Path:
-    """Write a deep-run bronze bundle and return its run directory.
+def _seed_deep_bronze(tmp_path: Path) -> Path:
+    """Write a deep-run bronze bundle (verdict ``consistent``) and return its run directory.
 
     Mirrors the seeding shape used across the labeler tests
-    (``deep/recommendation-verdicts.json`` + ``diff.patch``); ``grounding``
-    is accepted for parity with the indexed-row grounding signal supplied
-    separately to :func:`build_annotation`.
+    (``deep/recommendation-verdicts.json`` + ``diff.patch``).
     """
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     (run_dir / "deep" / "recommendation-verdicts.json").write_text(
-        json.dumps({"verdicts": [{"issue_id": 1, "verdict": verdict}]})
+        json.dumps({"verdicts": [{"issue_id": 1, "verdict": "consistent"}]})
     )
     (run_dir / "diff.patch").write_text(diff_adding("new_line"))
     return run_dir
@@ -270,7 +268,7 @@ def _acquire_annotation(
 
 
 def test_build_annotation_pr_row_labels_from_decisive_reply_evidence(tmp_path: Path) -> None:
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     _write_findings(run_dir, _FP_A)
     row = _pr_row(run_dir, "s1")
     ann = _acquire_annotation(
@@ -314,7 +312,7 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
     joined by fingerprint: the replied finding is accepted, the unreplied one unanswered."""
     fp_a = "a" * 64
     fp_b = "b" * 64
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     (run_dir / "findings.json").write_text(
         json.dumps({"findings": [{"fingerprint": fp_a}, {"fingerprint": fp_b}]})
     )
@@ -329,7 +327,7 @@ def test_build_annotation_pr_row_carries_per_finding_outcomes(tmp_path: Path) ->
 def test_harvest_626_shape_yields_both_polarities(tmp_path: Path) -> None:
     """Three findings on a merged PR: one OWNER 'Fixed in <sha>', one OWNER 'False positive',
     one qualifying question. Run label contested; per-finding exact (M22 final case)."""
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     _write_findings(run_dir, _FP_A, _FP_B, _FP_C)
     row = _pr_row(run_dir, "s_626")
     ann = _acquire_annotation(
@@ -383,7 +381,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
     # Not-merged PR -> "rejected". Under C5 the reject penalty is a SIBLING field
     # (false_positive_penalty / posterior_cost), not a deduction from the stored
     # composite, which stays pure intrinsic.
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     row = _pr_row(run_dir, "s_rej", pr_number=9)
 
     # Intrinsic-only baseline: same inputs scored with no posterior.
@@ -411,7 +409,7 @@ def test_build_annotation_rejected_pr_empty_pool_uses_default_prior(tmp_path: Pa
     # Production wiring of reviewer_set_penalty_prior (not monkeypatched): reviewer
     # "alice" makes the DB query run, but the fresh archive yields the empty-pool
     # path (None, 0), so the reducer applies the 0.5 default prior.
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     row = _pr_row(run_dir, "s_rej_prod", pr_number=9)
     _write_findings(run_dir, _FP_A)
     payload = _acquire_annotation(
@@ -446,7 +444,7 @@ def test_build_annotation_fork_pr_author_reply_is_decisive(tmp_path: Path) -> No
     wiring the reply is ``excluded:non-qualifying``, the finding stays
     ``unanswered``, and the run would resolve to ``unknown`` instead.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     _write_findings(run_dir, _FP_A)
     row = _pr_row(run_dir, "s_fork_auth", pr_number=13)
     reply_created = "2026-08-02T10:00:00Z"
@@ -492,7 +490,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
     from the ``/reviews`` lookup counts under the M6 gate through the same
     ``review_author_logins`` plumbing in ``build_annotation``.
     """
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     _write_findings(run_dir, _FP_A)
     row = _pr_row(run_dir, "s_review_auth", pr_number=14)
     comments = [
@@ -569,7 +567,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
         has_posterior=True,
     )
 
-    run_dir = _seed_deep_bronze(tmp_path / "current_run", verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path / "current_run")
     row = _pr_row(run_dir, "s_rej_populated", pr_number=9)
     _write_findings(run_dir, _FP_A)
     payload = _acquire_annotation(
@@ -597,7 +595,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
 def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
     tmp_path: Path,
 ) -> None:
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     row = _pr_row(run_dir, "s_rej", pr_number=9)
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=tmp_path)
@@ -627,7 +625,7 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(
 def test_build_annotation_below_threshold_falls_back_to_default_prior(
     tmp_path: Path,
 ) -> None:
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     row = _pr_row(run_dir, "s_rej", pr_number=9)
     _write_findings(run_dir, _FP_A)
     rb = json.loads(
@@ -657,7 +655,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
     # local verdict is withheld from the posterior axis: a local commit is not a
     # maintainer acting in a PR, so the label is kept but has_posterior is False.
 
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     row = _local_row(run_dir, "s_local", grounding_rate=1.0)
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(
@@ -685,7 +683,7 @@ def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch:
     # constant is marked custom, so publication must refuse it.
 
     monkeypatch.setattr(reward, "DEFAULT_WEIGHTS", RewardWeights())
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     row = _pr_row(run_dir, "s_custom", pr_number=9)
     with pytest.raises((AssertionError, RuntimeError), match="canonical"):
         _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path,
@@ -814,7 +812,7 @@ def _seed_archived_deep_run(
     :func:`_resolve_repo_for_row` resolves a working tree for the row (the
     caller seeds a ``.git`` dir there), making ``clone_resolved`` True.
     """
-    run_dir = _seed_deep_bronze(archive_dir, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(archive_dir)
     _seed_run_manifest(
         archive_dir,
         run_dir,
@@ -847,7 +845,7 @@ def _seed_orphan_run(
     :func:`_resolve_repo_for_row` resolves a clone for the row
     (``clone_resolved`` True), enabling the local-commit walk.
     """
-    run_dir = _seed_deep_bronze(bronze_parent, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(bronze_parent)
     _seed_run_manifest(
         archive_dir,
         run_dir,
@@ -877,7 +875,7 @@ def _seed_pr_runs(
     """
     for pr_number in range(1, count + 1):
         sid = f"s{pr_number}"
-        run_dir = _seed_deep_bronze(bronze_parent / sid, verdict="consistent", grounding=1.0)
+        run_dir = _seed_deep_bronze(bronze_parent / sid)
         _seed_run_manifest(archive_dir, run_dir, sid, pr_number=pr_number, pr_repo="org/repo")
         if fingerprints:
             _write_findings(run_dir, *fingerprints)
@@ -972,7 +970,7 @@ async def test_harvest_validates_completed_rows_before_resume_filtering(
 ) -> None:
     """An invalid completed row still counts; a valid sibling continues normally."""
     _seed_archived_deep_run(archive_dir, "done")
-    fresh_dir = _seed_deep_bronze(tmp_path / "fresh", verdict="consistent", grounding=1.0)
+    fresh_dir = _seed_deep_bronze(tmp_path / "fresh")
     _seed_run_manifest(archive_dir, fresh_dir, "fresh", pr_number=42, pr_repo="org/repo")
     completed = query_runs(archive_dir, "session_id = ?", ("done",))[0]
     fresh = query_runs(archive_dir, "session_id = ?", ("fresh",))[0]
@@ -1438,7 +1436,7 @@ async def test_harvest_unmerged_pr_with_no_semantic_reply_is_unknown(
 
 def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
     """valid_at = qualifying reply timestamp, not merged_at (M12/M22)."""
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     _write_findings(run_dir, _FP_A)
     row = _pr_row(run_dir, "s-val")
     ann = _acquire_annotation(
@@ -1453,7 +1451,7 @@ def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
 
 def test_valid_at_override_respected(tmp_path: Path) -> None:
     """An explicit override beats derived evidence time (M12)."""
-    run_dir = _seed_deep_bronze(tmp_path, verdict="consistent", grounding=1.0)
+    run_dir = _seed_deep_bronze(tmp_path)
     _write_findings(run_dir, _FP_A)
     row = _pr_row(run_dir, "s-val-ovr")
     ann = _acquire_annotation(

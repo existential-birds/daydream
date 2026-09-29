@@ -1428,6 +1428,9 @@ async def finalize_retained_tree_after_test(
     evidence = attempts[-1]
     ignored = result.ignored
 
+    def _stop(reason: str) -> Stop:
+        return _stabilization_stop(ctx, state, reason, round_number=pass_number)
+
     for pass_number in range(1, MAX_POST_TEST_STABILIZATION_PASSES + 1):
         try:
             mutated = _strict_scope_and_scrub(
@@ -1440,12 +1443,7 @@ async def finalize_retained_tree_after_test(
             key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
             _write_footprint_audit(ctx, state, key)
         except Exception as exc:
-            return _stabilization_stop(
-                ctx,
-                state,
-                f"guard/capture/audit failed: {exc}",
-                round_number=pass_number,
-            )
+            return _stop(f"guard/capture/audit failed: {exc}")
 
         if state.verifier_key != key:
             prior_outcomes = deep_state.fix_outcomes or {}
@@ -1455,12 +1453,7 @@ async def finalize_retained_tree_after_test(
                 )
                 _persist_fix_outcomes_current(ctx, state, key, outcomes)
             except Exception as exc:
-                return _stabilization_stop(
-                    ctx,
-                    state,
-                    f"final verifier failed: {exc}",
-                    round_number=pass_number,
-                )
+                return _stop(f"final verifier failed: {exc}")
             state.verifier_key = key
             deep_state.fix_outcomes = outcomes
             if any(
@@ -1472,12 +1465,7 @@ async def finalize_retained_tree_after_test(
                 )
                 for uid, outcome in outcomes.items()
             ):
-                return _stabilization_stop(
-                    ctx,
-                    state,
-                    "final verifier remains actionable",
-                    round_number=pass_number,
-                )
+                return _stop("final verifier remains actionable")
 
         matching_test = (
             evidence.session_id == state.session_id
@@ -1496,12 +1484,7 @@ async def finalize_retained_tree_after_test(
                     run_context=ctx.run_context,
                 )
             except Exception as exc:
-                return _stabilization_stop(
-                    ctx,
-                    state,
-                    f"final test failed to run: {exc}",
-                    round_number=pass_number,
-                )
+                return _stop(f"final test failed to run: {exc}")
             attempts.append(evidence)
             ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
@@ -1521,12 +1504,7 @@ async def finalize_retained_tree_after_test(
             and (evidence.passed or ignored)
         )
         if mutated or state.verifier_key != key or not stable_test:
-            return _stabilization_stop(
-                ctx,
-                state,
-                "post-test tree did not stabilize",
-                round_number=pass_number,
-            )
+            return _stop("post-test tree did not stabilize")
 
         try:
             patch_path = artifact_dir_for(
@@ -1547,12 +1525,7 @@ async def finalize_retained_tree_after_test(
                 sort_keys=True,
             )
         except OSError as exc:
-            return _stabilization_stop(
-                ctx,
-                state,
-                f"recommended capture failed: {exc}",
-                round_number=pass_number,
-            )
+            return _stop(f"recommended capture failed: {exc}")
         state.latest_retained = snapshot
         return None
 

@@ -513,8 +513,20 @@ class ReuseCache:
     def grounding_delta(
         self, hit: ReuseHit, current: Mapping[str, str]
     ) -> dict[str, dict[str, str | bool]]:
-        """The produced-under vs current grounding comparison for a hit (MH16)."""
-        return grounding_delta(hit, current)
+        """Compare a hit's produced-under grounding with the current iteration's.
+
+        Pure: reads only the manifest and the caller's digests, performs no I/O.
+        A grounding input missing on either side is the literal ``"absent"``.
+        """
+        produced = hit.manifest.get("grounding")
+        if not isinstance(produced, dict):
+            produced = {}
+        result: dict[str, dict[str, str | bool]] = {}
+        for name in sorted(set(produced) | set(current)):
+            was = produced.get(name, "absent")
+            now = current.get(name, "absent")
+            result[name] = {"produced": was, "current": now, "moved": was != now}
+        return result
 
     def _provenance_run_id(self) -> str:
         return self.run_id or self.session_id or "unknown"
@@ -540,25 +552,6 @@ class ReuseCache:
             "bytes": total_bytes,
             "oldest_last_used_age_s": oldest_age,
         }
-
-
-def grounding_delta(
-    hit: ReuseHit, current: Mapping[str, str]
-) -> dict[str, dict[str, str | bool]]:
-    """Compare a hit's produced-under grounding with the current iteration's.
-
-    Pure: reads only the manifest and the caller's digests, performs no I/O.
-    A grounding input missing on either side is the literal ``"absent"``.
-    """
-    produced = hit.manifest.get("grounding")
-    if not isinstance(produced, dict):
-        produced = {}
-    result: dict[str, dict[str, str | bool]] = {}
-    for name in sorted(set(produced) | set(current)):
-        was = produced.get(name, "absent")
-        now = current.get(name, "absent")
-        result[name] = {"produced": was, "current": now, "moved": was != now}
-    return result
 
 
 def _read_json_object(path: Path) -> dict[str, Any]:

@@ -132,6 +132,11 @@ def digest_bytes(data: bytes) -> str:
     return hashlib.sha256(_normalized_bytes(data)).hexdigest()
 
 
+def _canonical_json(value: Any) -> str:
+    """The module's canonical JSON encoding for digest inputs."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 def digest_file(path: Path) -> str | None:
     """SHA-256 of a file's run-scoped-normalized bytes, or ``None`` on failure."""
     try:
@@ -157,7 +162,7 @@ def blob_map_digest(worktree_root: str | Path, files: Sequence[str]) -> str | No
         entries[relative] = hashlib.sha256(
             relative.encode("utf-8") + b"\0" + payload
         ).hexdigest()
-    return digest_text(json.dumps(entries, sort_keys=True, separators=(",", ":")))
+    return digest_text(_canonical_json(entries))
 
 
 def diff_blocks_digest(full_diff: str, files: Sequence[str]) -> str | None:
@@ -189,7 +194,7 @@ def hunk_slice_digest(hunk_index: Mapping[str, Any], files: Sequence[str]) -> st
         if name not in hunk_index:
             return None
         selected[name] = hunk_index[name]
-    return digest_text(json.dumps(selected, sort_keys=True, separators=(",", ":")))
+    return digest_text(_canonical_json(selected))
 
 
 def exploration_digest(exploration_dir: str | Path | None) -> str:
@@ -215,7 +220,7 @@ def exploration_digest(exploration_dir: str | Path | None) -> str:
             entries[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
         except OSError:
             return _ABSENT
-    return digest_text(json.dumps(entries, sort_keys=True, separators=(",", ":")))
+    return digest_text(_canonical_json(entries))
 
 
 def grounding_digests(payload: Mapping[str, Any]) -> dict[str, str]:
@@ -247,7 +252,7 @@ def unit_key(payload: Mapping[str, Any]) -> str | None:
         "unit": payload.get("unit"),
         "components": components,
     }
-    canonical = json.dumps(keyed, sort_keys=True, separators=(",", ":"))
+    canonical = _canonical_json(keyed)
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -288,6 +293,32 @@ def digest_or_absent(text: str | None) -> dict[str, str]:
     return {"digest": digest_text(text)}
 
 
+def _identity_components(identity: PhaseIdentity) -> dict[str, Any]:
+    """The ``profile``/``model``/``effort`` contract rows every unit keys on."""
+    return {
+        "profile": identity.profile_digest,
+        "model": identity.model,
+        "effort": identity.effort if identity.effort else "default",
+    }
+
+
+def _record_digests(
+    contributing_records: Mapping[str, bytes | None],
+) -> dict[str, str] | None:
+    """Digest ``name -> bytes`` records, or ``None`` when any record is unreadable.
+
+    ``None`` makes the whole record component absent, so ``unit_key`` returns
+    ``None`` (a named miss) rather than keying the subset that did read.
+    """
+    if any(data is None for data in contributing_records.values()):
+        return None
+    return {
+        name: digest_bytes(data)
+        for name, data in contributing_records.items()
+        if data is not None
+    }
+
+
 def shard_key_payload(
     *,
     stack_name: str,
@@ -321,9 +352,7 @@ def shard_key_payload(
         "assigned_blobs": blob_map_digest(worktree_root, ordered_files),
         "frontier_files": ordered_frontier,
         "frontier_blobs": blob_map_digest(worktree_root, ordered_frontier),
-        "profile": identity.profile_digest,
-        "model": identity.model,
-        "effort": identity.effort if identity.effort else "default",
+        **_identity_components(identity),
         "intent_authoritative": intent_authoritative,
         "include_alternatives": include_alternatives,
         "exploration_present": exploration_present,
@@ -369,9 +398,7 @@ def intent_key_payload(
         "pr_description": (
             _ABSENT if pr_description is None else digest_text(pr_description)
         ),
-        "profile": identity.profile_digest,
-        "model": identity.model,
-        "effort": identity.effort if identity.effort else "default",
+        **_identity_components(identity),
     }
     return {
         "format": REUSE_KEY_FORMAT,
@@ -398,9 +425,7 @@ def wonder_key_payload(
         "format": REUSE_KEY_FORMAT,
         "diff": digest_text(diff_text),
         "horse_mode": horse_mode,
-        "profile": identity.profile_digest,
-        "model": identity.model,
-        "effort": identity.effort if identity.effort else "default",
+        **_identity_components(identity),
     }
     return {
         "format": REUSE_KEY_FORMAT,
@@ -410,19 +435,21 @@ def wonder_key_payload(
     }
 
 
-def _sweep_schema_digest() -> str:
-    """Digest of the exact ``UNCOVERED_SWEEP_SCHEMA`` the step validates against.
+def _schema_digest(schema: Any) -> str:
+    """Digest of a strict schema contract under canonical JSON.
 
-    Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    import would be a cycle. The schema is part of the sweep's contract, so a
-    schema change must miss rather than serve output the new schema would have
-    rejected.
+    The schema is part of its unit's contract, so a schema change must miss
+    rather than serve output the new schema would have rejected.
     """
+    return digest_text(_canonical_json(schema))
+
+
+def _sweep_schema_digest() -> str:
+    # Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    # import would be a cycle.
     from daydream.phases import UNCOVERED_SWEEP_SCHEMA
 
-    return digest_text(
-        json.dumps(UNCOVERED_SWEEP_SCHEMA, sort_keys=True, separators=(",", ":"))
-    )
+    return _schema_digest(UNCOVERED_SWEEP_SCHEMA)
 
 
 def sweep_key_payload(
@@ -456,15 +483,11 @@ def sweep_key_payload(
     ordered_uncovered = sorted(set(uncovered_files))
     components: dict[str, Any] = {
         "format": REUSE_KEY_FORMAT,
-        "records": {
-            name: digest_bytes(data) for name, data in contributing_records.items()
-        },
+        "records": _record_digests(contributing_records),
         "uncovered_set": ordered_uncovered,
         "hunk_slice": hunk_slice_digest(hunk_index, ordered_uncovered),
-        "profile": identity.profile_digest,
         "schema": _sweep_schema_digest(),
-        "model": identity.model,
-        "effort": identity.effort if identity.effort else "default",
+        **_identity_components(identity),
         "bounds": {
             "min_hunk_lines": bounds.get("min_hunk_lines"),
             "max_files": bounds.get("max_files"),
@@ -479,18 +502,11 @@ def sweep_key_payload(
 
 
 def _arbiter_schema_digest() -> str:
-    """Digest of the exact ``ARBITER_SCHEMA`` the step validates against.
-
-    Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    import would be a cycle. The schema is part of the arbiter's contract, so a
-    schema change must miss rather than serve output the new schema would have
-    rejected.
-    """
+    # Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    # import would be a cycle.
     from daydream.phases import ARBITER_SCHEMA
 
-    return digest_text(
-        json.dumps(ARBITER_SCHEMA, sort_keys=True, separators=(",", ":"))
-    )
+    return _schema_digest(ARBITER_SCHEMA)
 
 
 def arbiter_key_payload(
@@ -520,27 +536,16 @@ def arbiter_key_payload(
     # A record that could not be read makes the whole component absent, so
     # ``unit_key`` returns ``None`` (a named miss) rather than keying the subset
     # that did read.
-    record_component: dict[str, str] | None = {}
-    if any(data is None for data in contributing_records.values()):
-        record_component = None
-    else:
-        record_component = {
-            name: digest_bytes(data)
-            for name, data in contributing_records.items()
-            if data is not None
-        }
     components: dict[str, Any] = {
         "format": REUSE_KEY_FORMAT,
-        "records": record_component,
+        "records": _record_digests(contributing_records),
         "structural": (
             _ABSENT if structural_records is None else digest_bytes(structural_records)
         ),
         "plan": dict(plan),
         "precision_mode": precision_mode,
         "schema": _arbiter_schema_digest(),
-        "profile": identity.profile_digest,
-        "model": identity.model,
-        "effort": identity.effort if identity.effort else "default",
+        **_identity_components(identity),
     }
     return {
         "format": REUSE_KEY_FORMAT,
@@ -551,18 +556,11 @@ def arbiter_key_payload(
 
 
 def _merge_schema_digest() -> str:
-    """Digest of the exact ``MERGED_ITEMS_SCHEMA`` the merge validates against.
-
-    Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    import would be a cycle. The schema is part of the merge's contract, so a
-    schema change must miss rather than serve output the new schema would have
-    rejected.
-    """
+    # Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    # import would be a cycle.
     from daydream.phases import MERGED_ITEMS_SCHEMA
 
-    return digest_text(
-        json.dumps(MERGED_ITEMS_SCHEMA, sort_keys=True, separators=(",", ":"))
-    )
+    return _schema_digest(MERGED_ITEMS_SCHEMA)
 
 
 def merge_key_payload(
@@ -587,24 +585,13 @@ def merge_key_payload(
     value). Intent, alternatives and the pre-scan are the loop's own re-derived
     grounding, so they are recorded and never keyed (MH2/MH16).
     """
-    record_component: dict[str, str] | None
-    if any(data is None for data in contributing_records.values()):
-        record_component = None
-    else:
-        record_component = {
-            name: digest_bytes(data)
-            for name, data in contributing_records.items()
-            if data is not None
-        }
     components: dict[str, Any] = {
         "format": REUSE_KEY_FORMAT,
-        "records": record_component,
+        "records": _record_digests(contributing_records),
         "structural": structural_records_present,
         "failed_stacks": sorted(failed_stacks),
         "schema": _merge_schema_digest(),
-        "profile": identity.profile_digest,
-        "model": identity.model,
-        "effort": identity.effort if identity.effort else "default",
+        **_identity_components(identity),
     }
     return {
         "format": REUSE_KEY_FORMAT,
