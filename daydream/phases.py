@@ -4326,11 +4326,7 @@ async def phase_per_stack_reviews(
     # Prompt builders import phases, so keep this import local.
     from daydream.deep.prompts import _diff_blocks_for_files
 
-    deep_dir_path = deep_dir(
-        work.repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
+    deep_dir_path = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     recorder = get_current_recorder()
     if strategies is None:
         strategies = {
@@ -4796,11 +4792,7 @@ async def phase_supervise_review(
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Supervising {len(items)} merged finding(s)")
 
-    dd = deep_dir(
-        work.repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
+    dd = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     input_path = dd / "supervise-input.json"
     # Deliberately a verbatim dump of the canonical items, host-only fields and
     # all (``lens``, ``location_note``, ``severity_before_demotion``,
@@ -4932,11 +4924,7 @@ async def phase_arbiter_review(
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Arbitrating {len(selected_records)} high-severity/contested finding(s)")
 
-    dd = deep_dir(
-        work.repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
+    dd = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     input_path = input_path if input_path is not None else arbiter_input_path(dd)
     arbiter_input = _index_records(selected_records, "arb_id")
     input_path.write_text(json.dumps(arbiter_input, indent=2))
@@ -5034,11 +5022,7 @@ async def phase_suppression_review(
     print_dim(console, f"Model: {backend.model}")
     print_info(console, f"Suppression-reviewing {len(selected_records)} borderline finding(s)")
 
-    dd = deep_dir(
-        work.repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
+    dd = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     input_path = suppression_input_path(dd)
     suppression_input = _index_records(selected_records, "sup_id")
     input_path.write_text(json.dumps(suppression_input, indent=2))
@@ -5571,11 +5555,7 @@ async def phase_cross_stack_merge(
             (no silent ``[]`` fallback that would mask a broken merge).
     """
     run_context = resolve_run_context(run_context)
-    dd = deep_dir(
-        work.repo,
-        session=artifact_session,
-        allow_standalone=allow_standalone,
-    )
+    dd = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
     canonical_path = review_output_path_for(
         work.repo,
         session=artifact_session,
