@@ -43,10 +43,12 @@ from daydream.improve.plans import (
     PRUNE_UNSAFE_NAME,
     PlanIndexEntry,
     PlanWriteSession,
+    _entry_fingerprints,
     _entry_payload,
+    _is_retryable,
+    _merged_index,
     list_reanchor_worktrees,
     load_rejections,
-    planned_fingerprints,
     prune_named_reanchor_worktree,
     prune_stale_reanchor_worktrees,
     reanchored_plan_rows,
@@ -916,6 +918,12 @@ def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branc
 def _read_sidecar(root: Path) -> dict[str, Any]:
     """Load the production plan-index sidecar written under *root*."""
     return cast(dict[str, Any], json.loads((root / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")))
+
+
+def _planned_fingerprints(plans_dir: Path) -> set[str]:
+    """Package identities and aliases with durable plan status (test-side view)."""
+    entries = _merged_index(plans_dir).values()
+    return {fp for e in entries if not _is_retryable(plans_dir, e) for fp in _entry_fingerprints(e)}
 
 
 def _write_single_plan(
@@ -1837,7 +1845,7 @@ def test_reanchored_main_index_is_written_before_finish(
     assert reanchored[0]["status"].startswith("REANCHORED")
     assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
     # no silent re-plan on the next run: the fingerprint is already durable
-    assert "fp-fix-n-plus-one" in planned_fingerprints(repo / "daydream_plans")
+    assert "fp-fix-n-plus-one" in _planned_fingerprints(repo / "daydream_plans")
 
     # finish() must not be what made the index correct
     session.finish()
@@ -2287,7 +2295,7 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(
 
     assert result["written"] == []
     assert len(result["skipped"]) == 1
-    assert planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
     assert [path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")] == [
         "001-batch-catalog-queries.md"
     ]
@@ -2311,7 +2319,7 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
         [_authoring_failure_selection(_issues(repo, invalid))],
         planned_at=head_sha,
     )
-    assert planned_fingerprints(plans_dir) == set()
+    assert _planned_fingerprints(plans_dir) == set()
 
     index_path = plans_dir / "README.md"
     blocked_status = "BLOCKED (PLAN_VALIDATION_FAILED: AUTHOR_SCHEMA_INVALID)"
@@ -2322,7 +2330,7 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
         ),
         encoding="utf-8",
     )
-    assert planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
 
     result = _write_plans(plans_dir, [_selection(repo)], planned_at=head_sha)
 
@@ -2343,7 +2351,7 @@ def test_deleted_sidecar_is_rebuilt_from_the_rendered_index(repo: Path, head_sha
     _write_plans(plans_dir, selections, planned_at=head_sha)
     (plans_dir / PLAN_INDEX_FILENAME).unlink()
 
-    assert planned_fingerprints(plans_dir) == {
+    assert _planned_fingerprints(plans_dir) == {
         f"fp-{plan_slug(title)}" for title in _CONCURRENT_TITLES
     }
 
@@ -2511,7 +2519,7 @@ def test_host_blocked_attempt_reuses_reserved_number_when_retry_succeeds(
     )
     assert expected_failure_status in failed_index
     assert failed_index.count("fingerprint:fp-fix-n-plus-one") == 1
-    assert planned_fingerprints(plans_dir) == set()
+    assert _planned_fingerprints(plans_dir) == set()
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
 
     retried = _write_single_plan(repo, _assembled(repo), head_sha)
@@ -3990,7 +3998,7 @@ def test_plan_index_persists_package_aliases_and_maintenance_metadata(
     assert entry["maintenance_signals"] == ["dead_code", "reuse_existing"]
     assert entry["change_shape"] == "reuse"
     assert entry["reuse_target"] == "repo:src/http.py#parse_headers"
-    assert planned_fingerprints(plans_dir) == {
+    assert _planned_fingerprints(plans_dir) == {
         "pkg-parser-cleanup",
         "fp-local-parser",
         "fp-parser-tests",
@@ -4145,7 +4153,7 @@ def test_legacy_singleton_index_entry_recovers_as_its_own_package(
         sidecar["plans"][0].pop(key)
     sidecar_path.write_text(json.dumps(sidecar), encoding="utf-8")
 
-    assert planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
+    assert _planned_fingerprints(plans_dir) == {"fp-fix-n-plus-one"}
     result = _write_plans(
         plans_dir,
         [_selection(repo)],

@@ -48,7 +48,7 @@ def _fetch_env() -> dict[str, str]:
     return env
 
 
-def ensure_mirror(root: Path, repo_slug: str, origin_url: str | None = None) -> Path:
+def ensure_mirror(root: Path) -> Path:
     """Return ``root/cache/repository.git``, creating the bare mirror if absent.
 
     Idempotent: a present bare mirror is returned untouched.
@@ -95,7 +95,7 @@ def fetch_base_tip(
     """
     root = Path(root)
     origin_url = origin_url or f"https://github.com/{repo_slug}.git"
-    m = ensure_mirror(root, repo_slug, origin_url)
+    m = ensure_mirror(root)
     _git_fetch(m, origin_url, [f"+{base_tip}:refs/heads/base_tip"])
     return m
 
@@ -114,7 +114,7 @@ def fetch_head_refs(
     """
     root = Path(root)
     origin_url = origin_url or f"https://github.com/{repo_slug}.git"
-    m = ensure_mirror(root, repo_slug, origin_url)
+    m = ensure_mirror(root)
     refspecs = [f"refs/pull/{pr_number}/head:refs/pull/{pr_number}/head"]
     for sha in explicit_shas:
         refspecs.append(f"{sha}:refs/heads/explicit-{sha[:12]}")
@@ -761,7 +761,7 @@ def freeze_one(
     #    here is a base-side (environment) problem: no ref on either side can be
     #    sourced, so it classifies ``base_unreachable``.
     try:
-        m = ensure_mirror(root, repo_slug, origin_url)
+        m = ensure_mirror(root)
     except git_ops.GitError as exc:
         return unreplayable(
             "base_unreachable", f"could not establish the shared bare mirror: {exc}"

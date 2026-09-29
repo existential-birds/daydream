@@ -257,7 +257,7 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     _seed_git(src, "add", ".", env=_BUNDLE_ENV)
     _seed_git(src, "commit", "-qm", "head", env=_BUNDLE_ENV)
     head = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
-    m = snapshot.ensure_mirror(tmp_path, "o/r")
+    m = snapshot.ensure_mirror(tmp_path)
     # push the base/head commits (objects + refs) into the mirror so build_bundle can resolve trees
     _seed_git(
         src,

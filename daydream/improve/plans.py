@@ -644,16 +644,6 @@ def _is_retryable(plans_dir: Path, entry: PlanIndexEntry) -> bool:
     return entry.host_blocked and not _has_plan_file(plans_dir, entry)
 
 
-def planned_fingerprints(plans_dir: Path) -> set[str]:
-    """Return package identities and aliases with durable plan status."""
-    return {
-        fingerprint
-        for entry in _merged_index(plans_dir).values()
-        if not _is_retryable(plans_dir, entry)
-        for fingerprint in _entry_fingerprints(entry)
-    }
-
-
 def _iter_reanchor_worktrees(roots: Iterable[Path]) -> list[Path]:
     """Return the unambiguous existing ``*-reanchor`` worktree directories.
 
