@@ -2,10 +2,13 @@ import pytest
 
 from daydream.deep.adjudication_provenance import RecordProvenance
 from daydream.deep.verify_selection import (
+    SELECTION_RULE_VERSION,
     SelectionConfig,
+    SelectionDecision,
     UnknownRiskCategoryError,
     changed_text_at,
     item_content_digest,
+    plan_reuse,
     resolve_selection_config,
     select_items,
 )
@@ -88,6 +91,50 @@ def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> No
     assert [(d.item_uid, d.selected, d.reason_code) for d in decisions] == [
         ("item:1", True, "verify_all"), ("item:2", False, "exempt:structural"),
     ]
+
+
+def _decision(item_uid: str, *, digest: str) -> SelectionDecision:
+    return SelectionDecision(
+        item_uid=item_uid, item_id=1, selected=True, reason_code="unadjudicated:no_provenance",
+        reason="no recorded adjudication", provenance={}, content_digest=digest,
+    )
+
+
+def test_reuse_serves_unchanged_selected_items_and_marks_them_reused() -> None:
+    decisions = [_decision("item:1", digest="d1"), _decision("item:2", digest="d2")]
+    prior = {
+        "rule_version": SELECTION_RULE_VERSION,
+        "decisions": [
+            {"item_uid": "item:1", "content_digest": "d1", "verdict_reused": False},
+            {"item_uid": "item:2", "content_digest": "STALE", "verdict_reused": False},
+        ],
+        "verdicts": [{"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}],
+    }
+    reused, to_verify = plan_reuse(prior, decisions)
+    assert reused == {"item:1": {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}}
+    assert [d.item_uid for d in to_verify] == ["item:2"]
+
+
+def test_a_moved_rule_version_invalidates_every_prior_decision() -> None:
+    prior = {
+        "rule_version": SELECTION_RULE_VERSION + 1,
+        "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
+        "verdicts": [{"issue_id": 1}],
+    }
+    reused, to_verify = plan_reuse(prior, [_decision("item:1", digest="d1")])
+    assert reused == {} and [d.item_uid for d in to_verify] == ["item:1"]
+
+
+def test_unresolved_prior_verdicts_are_reverified_and_absent_prior_is_a_miss() -> None:
+    prior = {
+        "rule_version": SELECTION_RULE_VERSION,
+        "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
+        "verdicts": [{"issue_id": 1, "verdict": "contradicts", "evidence": "e"}],
+    }
+    reused, to_verify = plan_reuse(prior, [_decision("item:1", digest="d1")])
+    assert reused == {} and [d.item_uid for d in to_verify] == ["item:1"]
+    assert plan_reuse(None, [_decision("item:1", digest="d1")]) == ({}, [_decision("item:1", digest="d1")])
+    assert plan_reuse([], [_decision("item:1", digest="d1")])[0] == {}
 
 
 def test_unknown_extra_category_fails_loudly_and_digest_is_content_only() -> None:

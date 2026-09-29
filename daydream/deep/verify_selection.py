@@ -217,6 +217,77 @@ def resolve_selection_config(
     )
 
 
+def plan_reuse(
+    prior_payload: Mapping[str, Any] | None,
+    decisions: Sequence[SelectionDecision],
+) -> tuple[dict[str, dict[str, Any]], list[SelectionDecision]]:
+    """Split *decisions* into reusable prior verdicts and items to re-verify.
+
+    A verdict is reused only when every one of these holds (SH3/MH14):
+
+    * the prior artifact's ``rule_version`` equals
+      :data:`SELECTION_RULE_VERSION` -- a semantics move invalidates all reuse;
+    * the decision is selected (an exempt/skipped item has no verdict to reuse);
+    * the prior artifact carries a decision for the same ``item_uid`` whose
+      ``content_digest`` equals this decision's -- durable identity plus
+      verifier-relevant content, never the positional ``id``;
+    * a verdict was recorded for that item, keyed by its canonical ``issue_id``.
+
+    MH9 is re-checked here rather than trusted from the prior artifact: a prior
+    ``contradicts`` or ``uncertain`` verdict always lands in ``to_verify``,
+    whatever the digest says. Any absent, unreadable, or malformed prior
+    payload is a total miss -- every decision re-verifies, never a partial
+    reuse and never a raise (Pattern B).
+
+    Returns ``(reused, to_verify)`` where ``reused`` maps ``item_uid`` to the
+    verbatim prior verdict body and ``to_verify`` preserves input order.
+    """
+    if not isinstance(prior_payload, Mapping):
+        return {}, list(decisions)
+    if prior_payload.get("rule_version") != SELECTION_RULE_VERSION:
+        return {}, list(decisions)
+    prior_decisions = prior_payload.get("decisions")
+    if not isinstance(prior_decisions, list):
+        return {}, list(decisions)
+    verdicts = prior_payload.get("verdicts")
+    verdict_by_id: dict[int, Mapping[str, Any]] = {}
+    if isinstance(verdicts, list):
+        for verdict in verdicts:
+            if not isinstance(verdict, Mapping):
+                continue
+            issue_id = verdict.get("issue_id")
+            if isinstance(issue_id, int) and not isinstance(issue_id, bool):
+                verdict_by_id[issue_id] = verdict
+    prior_by_uid: dict[str, Mapping[str, Any]] = {}
+    for prior in prior_decisions:
+        if isinstance(prior, Mapping) and isinstance(prior.get("item_uid"), str):
+            prior_by_uid[prior["item_uid"]] = prior
+
+    reused: dict[str, dict[str, Any]] = {}
+    to_verify: list[SelectionDecision] = []
+    for decision in decisions:
+        prior = prior_by_uid.get(decision.item_uid)
+        if (
+            not decision.selected
+            or prior is None
+            or prior.get("content_digest") != decision.content_digest
+        ):
+            to_verify.append(decision)
+            continue
+        prior_id = prior.get("item_id")
+        issue_id = (
+            prior_id
+            if isinstance(prior_id, int) and not isinstance(prior_id, bool)
+            else decision.item_id
+        )
+        verdict = verdict_by_id.get(issue_id) if issue_id is not None else None
+        if verdict is None or verdict.get("verdict") in _UNRESOLVED_VERDICTS:
+            to_verify.append(decision)
+            continue
+        reused[decision.item_uid] = dict(verdict)
+    return reused, to_verify
+
+
 def item_content_digest(item: Mapping[str, Any]) -> str:
     """Return a sha256 over the verifier-relevant components of *item*.
 
@@ -430,6 +501,7 @@ __all__ = [
     "UnknownRiskCategoryError",
     "changed_text_at",
     "item_content_digest",
+    "plan_reuse",
     "resolve_selection_config",
     "select_items",
 ]
