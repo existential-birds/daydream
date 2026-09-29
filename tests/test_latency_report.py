@@ -14,6 +14,7 @@ from daydream.eval.latency_report import (
 )
 
 _MANIFEST = Path(__file__).resolve().parent / "fixtures" / "latency_profiles" / "manifest.json"
+CORPUS = _MANIFEST.parent
 
 
 def test_attribution_counts_shipped_items_per_lens_and_reports_coverage() -> None:
@@ -74,6 +75,22 @@ def test_arbiter_phase_latency_reads_the_deep_bucket_real_runs_write() -> None:
     assert _phase_timings(legacy) == {"wonder": None, "arbiter": 30.0}
 
     assert _phase_timings({"timing": {"phase_timings": {}}}) == {"wonder": None, "arbiter": None}
+
+
+def test_selection_corpus_cases_carry_every_artifact_the_predicate_reads() -> None:
+    manifest = json.loads((CORPUS / "manifest.json").read_text())
+    cases = manifest["selection_cases"]
+    assert cases, "the MH16 corpus must declare at least one selection case"
+    required = {"merged-items.json", "recommendation-verdicts.json", "adjudication-provenance.json",
+                "hunk-index.json", "diff.patch", "fix-outcomes.json", "evaluation.json"}
+    for case in cases:
+        run_dir = CORPUS / "runs" / case["name"] / case["profile"]
+        present = {p.name for p in run_dir.iterdir()}
+        assert required <= present, f"{run_dir} is missing {sorted(required - present)}"
+        verdicts = json.loads((run_dir / "recommendation-verdicts.json").read_text())["verdicts"]
+        # The archived arm is the conservative one: every non-structural item has a verdict.
+        assert verdicts, f"{run_dir} has no archived verdicts to compare against"
+        assert case["golden_high_severity"], f"{case['name']} declares no high-severity anchor"
 
 
 def test_report_separates_cold_and_warm_samples_and_names_its_corpus(tmp_path: Path) -> None:

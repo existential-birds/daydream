@@ -1,0 +1,8 @@
+diff --git a/engine.py b/engine.py
+--- a/engine.py
++++ b/engine.py
+@@ -1,2 +1,4 @@
+ def run(items):
++    while items:
++        items.pop()
+     return None

@@ -1,0 +1,30 @@
+{
+  "verdicts": [
+    {
+      "issue_id": 1,
+      "verdict": "contradicts",
+      "evidence": "the caller does not authenticate before login()",
+      "unverified_assumptions": ["the caller is trusted"]
+    }
+  ],
+  "selection": {
+    "rule_version": 1,
+    "mode": "verify_all",
+    "extra_categories": [],
+    "decisions": [
+      {
+        "item_uid": "python:1",
+        "item_id": 1,
+        "selected": true,
+        "reason_code": "verify_all",
+        "reason": "verify_all is enabled",
+        "provenance": {},
+        "content_digest": "26b2b443d374cd55bd5b4a5b8dd1b9e5d83c92751c3d005285ac49674e0b40fd",
+        "verdict_reused": false
+      }
+    ],
+    "selected": 1,
+    "skipped": 0,
+    "reused": 0
+  }
+}

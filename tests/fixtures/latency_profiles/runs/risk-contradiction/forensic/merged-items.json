@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "item_uid": "python:1",
+      "description": "login grants access without an authorization check",
+      "file": "auth.py",
+      "line": 2,
+      "confidence": "HIGH",
+      "rationale": "the caller already authenticated (Sources: python-records item 1)",
+      "evidence": "auth.py:2 rejects a missing credential",
+      "lens": "per-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": ["python:1"]
+    }
+  ]
+}

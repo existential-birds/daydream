@@ -1,0 +1,46 @@
+{
+  "verdicts": [
+    {
+      "issue_id": 1,
+      "verdict": "consistent",
+      "evidence": "the rename preserves the call contract",
+      "unverified_assumptions": []
+    },
+    {
+      "issue_id": 2,
+      "verdict": "consistent",
+      "evidence": "the constant is intentional in this stub",
+      "unverified_assumptions": []
+    }
+  ],
+  "selection": {
+    "rule_version": 1,
+    "mode": "verify_all",
+    "extra_categories": [],
+    "decisions": [
+      {
+        "item_uid": "python:1",
+        "item_id": 1,
+        "selected": true,
+        "reason_code": "verify_all",
+        "reason": "verify_all is enabled",
+        "provenance": {},
+        "content_digest": "cdfdb2fe30c31e2ebddcbee880022bde0494aa9411695110c9234cce3e71d98c",
+        "verdict_reused": false
+      },
+      {
+        "item_uid": "python:2",
+        "item_id": 2,
+        "selected": true,
+        "reason_code": "verify_all",
+        "reason": "verify_all is enabled",
+        "provenance": {},
+        "content_digest": "304ee71bdedc7b235e622dcc6bcdef2bc2c86394a00d1ca5a8d8337b78c04bbb",
+        "verdict_reused": false
+      }
+    ],
+    "selected": 2,
+    "skipped": 0,
+    "reused": 0
+  }
+}

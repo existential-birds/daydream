@@ -1,0 +1,30 @@
+{
+  "verdicts": [
+    {
+      "issue_id": 1,
+      "verdict": "uncertain",
+      "evidence": "the caller may rely on the mutation",
+      "unverified_assumptions": ["no caller depends on the list contents"]
+    }
+  ],
+  "selection": {
+    "rule_version": 1,
+    "mode": "verify_all",
+    "extra_categories": [],
+    "decisions": [
+      {
+        "item_uid": "python:1",
+        "item_id": 1,
+        "selected": true,
+        "reason_code": "verify_all",
+        "reason": "verify_all is enabled",
+        "provenance": {},
+        "content_digest": "204033ca67ba558dd7fae048ad91975dd35a733383af5057e62dadee4dd2c3b9",
+        "verdict_reused": false
+      }
+    ],
+    "selected": 1,
+    "skipped": 0,
+    "reused": 0
+  }
+}
