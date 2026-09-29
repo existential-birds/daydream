@@ -15,6 +15,7 @@ import pytest
 import verifiers.v1 as vf
 from conftest import PROJECT_ROOT, FakeRuntime, passed_gate_report
 from verifiers.v1.graph import MessageNode
+from verifiers.v1.runtimes.docker import DockerConfig, DockerRuntimeInfo
 
 from daydream_review.backends import STRATEGIES
 from daydream_review.harness import DaydreamReviewHarness, DaydreamReviewHarnessConfig
@@ -267,8 +268,6 @@ class _DockerLikeRuntime(FakeRuntime):
     """A FakeRuntime shaped like the docker runtime (wrapper-prefix contract)."""
 
     def __init__(self, *, exit_code: int = 0) -> None:
-        from verifiers.v1.runtimes.docker import DockerConfig, DockerRuntimeInfo
-
         super().__init__(exit_code=exit_code)
         self.config = DockerConfig()
         self.info = DockerRuntimeInfo(**self.config.model_dump())

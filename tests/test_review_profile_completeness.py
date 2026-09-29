@@ -5,6 +5,7 @@ classification.
 """
 
 from daydream import review_profile as rp
+from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
 # Every model-bearing review-spine and Improve-judgment stage (R2). This is
 # the canonical stage registry the completeness guard (R13) and the #886
@@ -57,8 +58,6 @@ def test_audit_stages_track_production_playbook() -> None:
     # stage, so it must already be registered as a profile strategy + envelope
     # classification. A category added to production without a corresponding
     # STAGE_KEYS edit trips the guard instead of passing silently.
-    from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
-
     default = rp.build_default_profile()
     for category in AUDIT_PLAYBOOK_SECTIONS:
         stage = f"improve.audit.{category}"

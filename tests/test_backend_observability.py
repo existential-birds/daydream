@@ -31,6 +31,7 @@ from daydream.backends.osprey import OspreyBackend, OspreyError
 from daydream.backends.pi import PiBackend, PiError, _render_tool_result
 from daydream.trajectory import DaydreamPhase
 from tests.harness.claude_sdk import scripted_client
+from tests.harness.codex_replay import make_mock_process_from_fixture as codex_fixture
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.trajectory import make_recorder
 
@@ -297,8 +298,6 @@ async def test_claude_request_event_through_real_stream_carries_config() -> None
 @pytest.mark.asyncio
 async def test_codex_and_osprey_emit_no_generation_events() -> None:
     """Only Pi is native_generation_interval; the others stay structural."""
-    from tests.harness.codex_replay import make_mock_process_from_fixture as codex_fixture
-
     codex_proc = codex_fixture("simple_text.jsonl")
     with patch(
         "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=codex_proc,

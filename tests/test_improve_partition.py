@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep.detection import detect_stacks
 from daydream.improve.partition import (
     PARTITION_MAX_FILES,
     Partition,
@@ -97,8 +98,6 @@ def test_partition_cover_is_total_and_disjoint_at_scale() -> None:
 
 
 def test_stack_by_path_excludes_the_structure_meta_stack() -> None:
-    from daydream.deep.detection import detect_stacks
-
     stacks = detect_stacks(["a.py", "b.go"])
     mapping = stack_by_path(stacks)
     assert mapping == {"a.py": "python", "b.go": "go"}

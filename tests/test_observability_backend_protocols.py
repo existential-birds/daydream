@@ -33,7 +33,10 @@ from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
+import anyio
+import jsonschema
 import pytest
+from claude_agent_sdk.types import AgentDefinition
 
 from daydream import runner
 from daydream.backends import GenerationEndEvent, GenerationStartEvent, RequestEvent
@@ -324,8 +327,6 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
     still never claims the aggregate is single-model. No generation lifecycle
     events exist for the opaque SDK protocol.
     """
-    from claude_agent_sdk.types import AgentDefinition
-
     canary = _CANARIES["claude"]
     captured: dict[str, Any] = {}
     requests: list[RequestEvent] = []
@@ -835,8 +836,6 @@ async def test_attempt_input_messages_validate_against_pinned_schema(
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
         assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="pi")) == 0
-    import jsonschema
-
     schema = json.loads(
         (Path(__file__).parent / "fixtures" / "observability_semconv" / "gen-ai-input-messages.json").read_text()
     )
@@ -932,8 +931,6 @@ async def test_grpc_outage_fails_open_and_review_completes(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Transport outage on gRPC: bounded shutdown, run succeeds, warning logged."""
-    import anyio
-
     _flow(ext_dir)
     install_fake_cli_process(monkeypatch, "osprey", lines=_osprey_lines(_CANARIES["osprey"]))
     with otlp_grpc_collector(reject=True) as receiver:

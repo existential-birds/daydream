@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from daydream.cli import _parse_args, _parse_improve_args
+from daydream.config_file import load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 
 
@@ -118,8 +119,6 @@ def test_cli_invalid_environment_is_parser_error(improve: bool, monkeypatch: pyt
 def test_repository_files_cannot_set_trace_resources_endpoints_or_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from daydream.config_file import load_file_config
-
     (tmp_path / ".daydream.toml").write_text(
         "[observability]\n"
         'destinations = ["otlp"]\n'

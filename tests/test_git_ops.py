@@ -9,6 +9,7 @@ unavailable.
 from __future__ import annotations
 
 import base64
+import errno
 import json
 import logging
 import os
@@ -375,8 +376,6 @@ def test_independent_snapshot_preserves_staged_file_to_directory_change(
 def test_independent_snapshot_preserves_non_utf8_paths(
     tmp_path: Path, include_untracked: bool,
 ) -> None:
-    import errno
-
     repo = _make_repo_with_main(tmp_path)
     tracked = os.fsdecode(b"tracked-\xff")
     scratch = os.fsdecode(b"scratch-\xfe")

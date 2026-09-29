@@ -44,6 +44,7 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.backends.pi import PiBackend
+from daydream.config import DEFAULT_WALL_BUDGET_S
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import (
     SIGKILL_RC,
@@ -320,8 +321,6 @@ def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatc
     silence is a stall. Codex generations and output-silent tools can legitimately
     remain quiet much longer and must still be bounded by the phase wall budget.
     """
-    from daydream.config import DEFAULT_WALL_BUDGET_S
-
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
     assert DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S == 600.0
