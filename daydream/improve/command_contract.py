@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 import shlex
 from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -183,6 +183,8 @@ def _schema_rejection(
     schema: dict[str, Any],
     *,
     code: str,
+    code_for_path: Mapping[str, str] | None = None,
+    append_missing: bool = True,
 ) -> ContractRejection | None:
     errors = sorted(
         Draft202012Validator(schema).iter_errors(value),
@@ -192,10 +194,12 @@ def _schema_rejection(
         return None
     error = _most_specific_schema_error(errors[0])
     path = list(error.absolute_path)
-    if error.validator == "required" and isinstance(error.instance, dict):
+    if append_missing and error.validator == "required" and isinstance(error.instance, dict):
         missing = sorted(set(error.validator_value) - set(error.instance))
         if missing:
             path.append(missing[0])
+    if code_for_path is not None:
+        code = code_for_path.get(path[0] if path else "", code)
     return ContractRejection(code, _json_pointer(path))
 
 
@@ -443,7 +447,6 @@ def _validate_command_records(
         for item in commands
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     )
-    validator = Draft202012Validator(schema)
     schema_codes = {
         "id": "RECON_COMMAND_ID_INVALID",
         "command": "RECON_MALFORMED_COMMAND",
@@ -470,18 +473,15 @@ def _validate_command_records(
                         "verbatim_excerpt": None,
                     },
                 }
-        record_errors = sorted(
-            validator.iter_errors(candidate),
-            key=lambda error: repr(list(error.absolute_path)),
+        record_rejection = _schema_rejection(
+            candidate,
+            schema,
+            code="RECON_COMMANDS_INVALID",
+            code_for_path=schema_codes,
+            append_missing=False,
         )
-        if record_errors:
-            error = _most_specific_schema_error(record_errors[0])
-            path = list(error.absolute_path)
-            code = schema_codes.get(
-                path[0] if path else "",
-                "RECON_COMMANDS_INVALID",
-            )
-            reject(index, ContractRejection(code, _json_pointer(path)))
+        if record_rejection is not None:
+            reject(index, record_rejection)
             continue
         assert isinstance(candidate, dict)
         command = candidate
