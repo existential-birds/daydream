@@ -37,7 +37,7 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
-from daydream.training.corpus_projection.splits import assign_split
+from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.corpus_projection.tiers import classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 
@@ -50,12 +50,6 @@ __all__ = [
 ]
 
 Record = dict[str, object]
-
-_SPLIT_FILENAMES: dict[str, str] = {
-    "train": "train.jsonl",
-    "validation": "validation.jsonl",
-    "holdout": "holdout.jsonl",
-}
 
 
 @dataclass(frozen=True)
@@ -1143,7 +1137,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
 
     canonical = _dump_jsonl(records)
     _write_artifact(config.out_dir / "corpus.jsonl", canonical.encode("utf-8"))
-    for split_name, filename in _SPLIT_FILENAMES.items():
+    for split_name, filename in SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
         _write_artifact(config.out_dir / filename, _dump_jsonl(split_records).encode("utf-8"))
     _write_artifact(
@@ -1154,7 +1148,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     schema_src = Path(__file__).parent.parent / "schema" / "record-schema.json"
     _write_artifact(config.out_dir / "schema.json", schema_src.read_text(encoding="utf-8").encode("utf-8"))
 
-    split_counts = {name: 0 for name in _SPLIT_FILENAMES}
+    split_counts: dict[str, int] = {name: 0 for name in SPLIT_FILENAMES}
     for r in records:
         lineage_field = cast(dict[str, Any], r["lineage"])
         split_counts[str(lineage_field["split"])] += 1

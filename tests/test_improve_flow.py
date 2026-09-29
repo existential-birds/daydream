@@ -876,16 +876,21 @@ _GROUP = {
 }
 
 
-def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
-    prompt = build_audit_prompt(
-        category="correctness",
-        strategy=_default_strategy("improve.audit.correctness"),
+def _audit_prompt(category: str, *, tier: str = "standard") -> str:
+    """Build one improve-audit prompt against the shared ``_GROUP`` envelope."""
+    return build_audit_prompt(
+        category=category,
+        strategy=_default_strategy(f"improve.audit.{category}"),
         group=_GROUP,
         scope_note="",
         recon_summary="{}",
         cwd=Path("/repo"),
-        tier=EFFORT_TIERS["standard"],
+        tier=EFFORT_TIERS[tier],
     )
+
+
+def test_audit_prompt_carries_group_roots_and_no_file_list() -> None:
+    prompt = _audit_prompt("correctness")
     assert "apps/billing" in prompt and "group-01" in prompt
     assert "Relevant tracked files:" not in prompt
     assert "frontend/web" in prompt and "service billing" in prompt
@@ -895,15 +900,7 @@ def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -
     """A prompt refactor must not silently drop the secret and injection rules."""
     for tier in ("standard", "deep"):
         for category in AUDIT_CATEGORIES:
-            prompt = build_audit_prompt(
-                category=category,
-                strategy=_default_strategy(f"improve.audit.{category}"),
-                group=_GROUP,
-                scope_note="",
-                recon_summary="{}",
-                cwd=Path("/repo"),
-                tier=EFFORT_TIERS[tier],
-            )
+            prompt = _audit_prompt(category, tier=tier)
             where = (category, tier)
             assert AUDIT_PLAYBOOK_SECTIONS[category] in prompt, where
             assert HARD_RULE_4 in prompt and HARD_RULE_6 in prompt, where
@@ -914,24 +911,8 @@ def test_every_audit_category_prompt_carries_its_own_playbook_and_hard_rules() -
 
 
 def test_maintenance_audits_demand_reuse_and_subtractive_evidence() -> None:
-    tech_debt = build_audit_prompt(
-        category="tech-debt",
-        strategy=_default_strategy("improve.audit.tech-debt"),
-        group=_GROUP,
-        scope_note="",
-        recon_summary="{}",
-        cwd=Path("/repo"),
-        tier=EFFORT_TIERS["standard"],
-    )
-    tests = build_audit_prompt(
-        category="tests",
-        strategy=_default_strategy("improve.audit.tests"),
-        group=_GROUP,
-        scope_note="",
-        recon_summary="{}",
-        cwd=Path("/repo"),
-        tier=EFFORT_TIERS["standard"],
-    )
+    tech_debt = _audit_prompt("tech-debt")
+    tests = _audit_prompt("tests")
 
     assert "existing repository code" in tech_debt
     assert "language standard library" in tech_debt

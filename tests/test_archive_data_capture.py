@@ -142,6 +142,39 @@ def _install_deep_capture_backend(
     return stub
 
 
+async def _run_real_phases_deep(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    archive_dir: Path,
+    no_ci_remote: NoCIRemote,
+    *,
+    remote_name: str = "origin.git",
+    pr_repo: str | None = None,
+    fix_edit_line: str = "# daydream recommended change\n",
+    untracked_fix: str | None = None,
+) -> tuple[Path, int]:
+    """Run one real-internal-phases deep loop over a fresh bare remote.
+
+    Returns ``(remote, exit_code)``. ``untracked_fix`` also writes a pre-existing
+    ``notes.txt`` so the two untracked-file exclusion tests share one setup.
+    """
+    remote = bare_remote(archive_dir.parent / remote_name)
+    no_ci_remote.connect(multi_stack_target, remote)
+    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch, real_internal_phases=True)
+    stub.fix_edit_line = fix_edit_line
+    if untracked_fix is not None:
+        stub.fix_new_generated = untracked_fix
+        (multi_stack_target / "notes.txt").write_text("pre-existing\n")
+    exit_code = await run(
+        _deep_run_config(
+            multi_stack_target,
+            pr_number=no_ci_remote.pr_number,
+            pr_repo=pr_repo or no_ci_remote.base_repository,
+        )
+    )
+    return remote, exit_code
+
+
 async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
 
     before = kwargs["capture_tree_key"]()
@@ -173,22 +206,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     The fix stage edits a TRACKED file (api.py), so the pre-fix → post-fix diff
     is non-empty and the real test/heal and commit phases run before archiving.
     """
-    remote = bare_remote(archive_dir.parent / "origin.git")
-    no_ci_remote.connect(multi_stack_target, remote)
-    stub = _install_deep_capture_backend(
-        multi_stack_target,
-        monkeypatch,
-        real_internal_phases=True,
-    )
-    stub.fix_edit_line = "# daydream recommended change\n"
     head_before = git_ops.head_sha(multi_stack_target)
-
-    exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
-        )
+    remote, exit_code = await _run_real_phases_deep(
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote
     )
     assert exit_code == 0
     head_after = git_ops.head_sha(multi_stack_target)
@@ -286,21 +306,10 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
 
     monkeypatch.setattr(no_ci_remote, "_serve_pr", serve_pr)
     monkeypatch.setattr(no_ci_remote, "_serve_no_ci", serve_no_ci)
-    remote = bare_remote(archive_dir.parent / "mixed-case-origin.git")
-    no_ci_remote.connect(multi_stack_target, remote)
-    stub = _install_deep_capture_backend(
-        multi_stack_target,
-        monkeypatch,
-        real_internal_phases=True,
-    )
-    stub.fix_edit_line = "# daydream mixed-case identity\n"
-
-    exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo="bAsE-uSeR/pRoJeCt",
-        )
+    _remote, exit_code = await _run_real_phases_deep(
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote,
+        remote_name="mixed-case-origin.git", pr_repo="bAsE-uSeR/pRoJeCt",
+        fix_edit_line="# daydream mixed-case identity\n",
     )
 
     assert exit_code == 0
@@ -351,21 +360,9 @@ async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_fil
 ) -> None:
     """A pre-existing untracked file (present before the run) is absent from the
     archived recommended.patch while a fix-created untracked file is present."""
-    remote = bare_remote(archive_dir.parent / "origin.git")
-    no_ci_remote.connect(multi_stack_target, remote)
-    stub = _install_deep_capture_backend(
-        multi_stack_target, monkeypatch, real_internal_phases=True
-    )
-    stub.fix_edit_line = "# daydream recommended change\n"
-    stub.fix_new_generated = "migrations/0002_add_x.sql"  # fix-created, untracked
-    (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
-
-    exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
-        )
+    _remote, exit_code = await _run_real_phases_deep(
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote,
+        untracked_fix="migrations/0002_add_x.sql",
     )
     assert exit_code == 0
 
@@ -416,21 +413,9 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
 ) -> None:
     """A pre-existing untracked file (before the run) is absent from the daydream
     commit's tree; a fix-created untracked file is present (issue #543)."""
-    remote = bare_remote(archive_dir.parent / "origin.git")
-    no_ci_remote.connect(multi_stack_target, remote)
-    stub = _install_deep_capture_backend(
-        multi_stack_target, monkeypatch, real_internal_phases=True
-    )
-    stub.fix_edit_line = "# daydream recommended change\n"
-    stub.fix_new_generated = "migrations/0002_add_x.sql"  # fix-created, untracked
-    (multi_stack_target / "notes.txt").write_text("pre-existing\n")  # pre-fix, untracked
-
-    exit_code = await run(
-        _deep_run_config(
-            multi_stack_target,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
-        )
+    remote, exit_code = await _run_real_phases_deep(
+        multi_stack_target, monkeypatch, archive_dir, no_ci_remote,
+        untracked_fix="migrations/0002_add_x.sql",
     )
     assert exit_code == 0
 

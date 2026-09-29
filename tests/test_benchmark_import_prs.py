@@ -192,8 +192,7 @@ def test_final_only_fetch_does_not_request_changed_files(
 
 def test_materialized_case_carries_full_pr_header(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)                  # REST + canned PR for pr 101
+    ws = _preflight_workspace(tmp_path, fake_gh)                  # REST + canned PR for pr 101
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     pr = case["pull_request"]
@@ -209,8 +208,7 @@ def test_import_only_snapshot_records_requested_base_sha(tmp_path: Path, fake_gh
     base is not yet computed and diverges on imported -> ready).
     """
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)                 # REST + canned PR for pr 101
+    ws = _preflight_workspace(tmp_path, fake_gh)                 # REST + canned PR for pr 101
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     snapshot = case["snapshot"]
@@ -1025,6 +1023,25 @@ def _seed_preflight(ws: Any, fake_gh: FakeGh, *, pull_header: Any=_PR_HEADER) ->
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
 
 
+def _preflight_workspace(
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    *,
+    hosts: tuple[str, str] | None = None,
+    pull_header: Any = _PR_HEADER,
+) -> Path:
+    """Build the pr-101 workspace and seed its preflight/REST responses.
+
+    ``hosts`` pins the reviewer/judge hosts for snapshot-freeze tests; without
+    it the default ``_seed_manifest`` hosts apply.
+    """
+    ws = tmp_path / "ws"
+    if hosts is not None:
+        init_workspace(ws, "o/r", [hosts[0]], [hosts[1]])
+    _seed_preflight(ws, fake_gh, pull_header=pull_header)
+    return ws
+
+
 # real-git local-origin seed for snapshot-freeze wiring (no network)
 
 
@@ -1141,9 +1158,8 @@ def test_materialization_derives_anchors_per_comment(tmp_path: Path, fake_gh: Fa
     persisted import document's evidence records.
     """
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)                   # identity + canned PR for pr 101
+    # identity + canned PR for pr 101
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_sha, authoring_sha, head_sha = _seed_anchor_origin(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
@@ -1185,8 +1201,7 @@ def test_materialization_fails_closed_without_mirror(tmp_path: Path, fake_gh: Fa
     treat it as not-exact (Task 5) instead of trusting GitHub's re-anchored data.
     """
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
@@ -1213,9 +1228,7 @@ def test_materialization_inverted_authoring_range_fails_closed(tmp_path: Path, f
     of a schema ValidationError aborting the run.
     """
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_sha, authoring_sha, head_sha = _seed_anchor_origin(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
@@ -1240,9 +1253,8 @@ def test_materialization_inverted_authoring_range_fails_closed(tmp_path: Path, f
 
 def test_import_freezes_cases_ready_with_bundle(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)                 # identity + canned PR
+    # identity + canned PR
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url)
     assert rc == 0
@@ -1267,9 +1279,7 @@ def test_e2e_import_distinct_idempotent_explicit_head_and_shared_mirror(tmp_path
     collision.
     """
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
     # default head only first
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
@@ -1294,9 +1304,7 @@ def test_refresh_demotes_clean_draft_when_historical_head_leaves_pr_scope(
     """The real import boundary applies final-inventory scope to retained heads."""
 
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
 
     assert gi.run_import_prs(
@@ -1366,9 +1374,7 @@ def test_explicit_head_path_probe_git_failure_isolated_to_that_case(
 ) -> None:
     """A real git diff failure is a typed case result, not a whole-PR abort."""
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
 
     real_git = shutil.which("git")
@@ -1451,9 +1457,7 @@ def test_bundle_retirement_preserves_a_ready_shared_reference(
 
 
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
@@ -1491,9 +1495,7 @@ def test_inventory_only_refresh_preserves_gold_when_snapshot_remains_in_scope(
     """Changed-file scope evidence is persisted but is not reviewer task input."""
 
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, base_tip, explicit_sha, final_sha = _seed_stacked_origin(tmp_path, fake_gh)
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
@@ -1546,9 +1548,7 @@ def test_in_scope_explicit_and_final_heads_validate_and_compile(
 ) -> None:
     """The real import/curation/compile path keeps a covered explicit head."""
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_tip, explicit_sha, _final_sha = _seed_stacked_origin(tmp_path, fake_gh)
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=[explicit_sha], origin_url=origin_url
@@ -1568,8 +1568,7 @@ def test_in_scope_explicit_and_final_heads_validate_and_compile(
 
 def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)  # preflight + rest/graphql canned data for pr 101 (one head)
+    ws = _preflight_workspace(tmp_path, fake_gh)  # preflight + rest/graphql canned data for pr 101 (one head)
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
@@ -1584,8 +1583,7 @@ def test_import_writes_atomic_unit_and_no_file_on_failure(tmp_path: Path, fake_g
 
 def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh, pull_header=None)  # 404 -> fetch fails
+    ws = _preflight_workspace(tmp_path, fake_gh, pull_header=None)  # 404 -> fetch fails
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc != 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
@@ -1598,8 +1596,7 @@ def test_failed_fetch_leaves_no_import_file_and_ledger_error(tmp_path: Path, fak
 
 def test_status_reflects_fetched_import_and_resolved_identity(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
     assert rc == 0
     st = workspace_status(ws)
@@ -1609,8 +1606,7 @@ def test_status_reflects_fetched_import_and_resolved_identity(tmp_path: Path, fa
 
 def test_cli_import_prs_drives_command(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     rc = _handle_benchmark_command(["import-prs", str(ws), "--pr", "101", "--head", "a" * 40])
     assert rc == 0
     raw = load_yaml_strict(ws / "benchmark.yaml")
@@ -1650,8 +1646,7 @@ def _curate_case(ws: Path, case_file: Any) -> None:
 
 def test_refresh_body_only_change_stales_gold(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # state=ready, attested
     # body-only change: same evidence, edited PR body (feeds compiled context)
@@ -1665,8 +1660,7 @@ def test_refresh_body_only_change_stales_gold(tmp_path: Path, fake_gh: FakeGh) -
 
 def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
     before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
@@ -1694,8 +1688,7 @@ def test_refresh_predate_import_metadata_change_does_not_stale(tmp_path: Path, f
     so only an evidence change can stale it until it is re-persisted."""
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     # Rewrite the persisted import in the predate shape: head.ref dropped and the
     # additive body/digest/html_url/merged/closed fields absent.
@@ -1735,8 +1728,7 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path: Path, f
     signature must compare equal and keep the curated case ready."""
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
@@ -1814,8 +1806,7 @@ def test_refresh_legacy_without_original_start_line_preserves_curation(tmp_path:
     """
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
@@ -1851,8 +1842,7 @@ def test_refresh_legacy_without_original_start_line_preserves_curation(tmp_path:
 
 def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)   # seed REST with one evidence record via the comment fixture below
+    ws = _preflight_workspace(tmp_path, fake_gh)   # seed REST with one evidence record via the comment fixture below
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
@@ -1991,8 +1981,7 @@ def test_benchmark_help_lists_import_prs() -> None:
 def test_reimport_does_not_duplicate_cases_rows(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Re-importing the same PR (unchanged evidence) must not duplicate cases[] rows."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     raw1 = load_yaml_strict(ws / "benchmark.yaml")
     assert len(raw1["cases"]) == 1
@@ -2007,8 +1996,7 @@ def test_reimport_does_not_duplicate_cases_rows(tmp_path: Path, fake_gh: FakeGh)
 def test_reimport_unchanged_evidence_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Re-import with unchanged evidence must not wipe curated findings/attestation."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_file = "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, case_file)  # state=ready, snapshot_attested=True, findings non-empty
@@ -2025,8 +2013,7 @@ def test_reimport_unchanged_evidence_preserves_curation(tmp_path: Path, fake_gh:
 def test_refresh_unchanged_signature_preserves_curation(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Refresh with an UNCHANGED evidence signature must keep curated findings."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_file = "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, case_file)
@@ -2051,9 +2038,8 @@ def test_refresh_derived_anchor_projection_flip_stales_curated_case(
     state/findings stable; the refresh never overwrites curation.
     """
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)                   # identity + canned PR for pr 101
+    # identity + canned PR for pr 101
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_sha, authoring_sha, head_sha = _seed_anchor_origin(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
@@ -2129,8 +2115,7 @@ def test_refresh_pre_anchor_projected_location_flip_stales_without_mirror(
     """
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
@@ -2175,8 +2160,7 @@ def test_graphql_review_threads_retries_rate_limit_then_fails(
 ) -> None:
     """GraphQL reviewThreads honors the rate-limit retry policy (3x)."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
 
     calls = {"n": 0}
 
@@ -2383,8 +2367,7 @@ def test_graphql_review_threads_records_rate_limit_after_retries(
     """Exhausting GraphQL rate-limit retries surfaces _ImportRateLimitError (ledger rate_limit)."""
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
 
     def always_limited(*a: Any, **kw: Any) -> None:
         raise RateLimitError("graphql rate limited", retry_after=0.0)
@@ -2440,8 +2423,7 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
 
 
 def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)   # seed REST with one evidence comment
+    ws = _preflight_workspace(tmp_path, fake_gh)   # seed REST with one evidence comment
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
         [{"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
           "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
@@ -2526,8 +2508,7 @@ def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: F
     # PR 101 imported with one referenced comment (db 1) and curated ready; a NEW
     # unrelated comment (db 99) must not stale the referenced case on refresh.
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
@@ -2545,8 +2526,7 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fa
     # Same body, moved anchor on the REFERENCED comment (db 1) -> the case stales
     # while its curated findings stay preserved.
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
@@ -2567,8 +2547,7 @@ def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeG
     # (the branch advanced) and refresh: the SAME case_id is reproduced, no
     # new case, no orphan, and the untouched pinned case stays ready.
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
     hdr = dict(_PR_HEADER)
@@ -2592,8 +2571,7 @@ def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, f
     # last-good import_file/import_sha256/case_ids are preserved and the attempt
     # is recorded separately in latest_error (NOT reset to fetch_failed).
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
     before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
@@ -2618,8 +2596,7 @@ def test_refresh_corrupt_prior_anchor_stages_ledger_failure(tmp_path: Path, fake
     failure and returns non-zero -- the pydantic ValidationError never escapes
     the run unhandled, and the fetched PR keeps its last-good linkage."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
@@ -2657,9 +2634,7 @@ def test_refresh_unreachable_pinned_head_freezes_fails_without_clobber(tmp_path:
     (rc != 0) and keep the curated ready case + its bundle intact and indexed —
     never write the unreplayable snapshot over the curated case (issue #813)."""
 
-    ws = tmp_path / "ws"
-    init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh, hosts=("api.anthropic.com", "api.anthropic.com"))
     origin_url, _base_sha, head_sha = _seed_local_origin(tmp_path, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
     case_id = f"pr-000101-{head_sha[:12]}"
@@ -2701,8 +2676,7 @@ def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path: Path, 
     dropped from the per-case stale gate — never fail open (issue #813)."""
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_path = ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
@@ -2731,8 +2705,7 @@ def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path: Path, 
     must sit in the projection hash: a comment gaining reply status shifts the
     candidate set and must flip the signature, staling a referencing case."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
@@ -2753,8 +2726,7 @@ def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: Fa
     silently keep the curated case ready — it routes through the same per-case
     stale decision as refresh (issue #813)."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     # Seed the referenced comment (db 1) at line 4 for the first import.
     fake_gh.set_response(
         "GET",
@@ -2802,8 +2774,7 @@ def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path: Pat
     """
 
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
@@ -2862,8 +2833,7 @@ def test_ready_import_persists_facts_per_candidate(tmp_path: Path, fake_gh: Fake
 def test_imported_status_case_has_no_facts(tmp_path: Path, fake_gh: FakeGh) -> None:
     """An imported (hermetic, no freeze) case persists no prioritization key at all."""
 
-    ws = tmp_path / "ws"
-    _seed_preflight(ws, fake_gh)
+    ws = _preflight_workspace(tmp_path, fake_gh)
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",

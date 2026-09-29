@@ -42,7 +42,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_C5_EXCLUDED_REPO,
     REASON_CODE_C8_COPYLEFT_UNOPTED,
 )
-from daydream.training.corpus_projection.splits import assign_split
+from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.exclusion import (
     is_copyleft,
     load_copyleft_list,
@@ -54,12 +54,6 @@ __all__ = [
     "load_dataset_v2",
     "load_v2_projection",
 ]
-
-_SPLIT_FILENAMES = {
-    "train": "train.jsonl",
-    "validation": "validation.jsonl",
-    "holdout": "holdout.jsonl",
-}
 
 
 @dataclass(frozen=True)
@@ -220,7 +214,7 @@ def load_dataset_v2(
             "refusing a partial or incomplete projection"
         )
     records: list[dict[str, object]] = []
-    for filename in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
+    for filename in SPLIT_FILENAMES.values():
         with (projection_dir / filename).open("r", encoding="utf-8") as fh:
             for line in fh:
                 stripped = line.strip()
@@ -355,7 +349,7 @@ def load_v2_projection(
     lineage = _load_lineage(projection_dir)
     _enforce_split_consistency(records, lineage, projection_dir)
 
-    by_split: dict[str, list[dict[str, object]]] = {name: [] for name in _SPLIT_FILENAMES}
+    by_split: dict[str, list[dict[str, object]]] = {name: [] for name in SPLIT_FILENAMES}
     for record in records:
         lineage_obj = record.get("lineage")
         split = lineage_obj.get("split") if isinstance(lineage_obj, dict) else None

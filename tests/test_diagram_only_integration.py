@@ -122,6 +122,13 @@ def _post_findings_cli(
     )
 
 
+def _diagram_target(tmp_path: Path, fake_gh: FakeGh) -> Path:
+    """Build the cross-module repo and serve an open PR for it."""
+    target = dr.build_cross_module_repo(tmp_path)
+    fake_gh.serve_open_pr(target)
+    return target
+
+
 def _diagram_phase_end(target: Path) -> dict[str, Any]:
     paths = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
     assert len(paths) == 1
@@ -277,8 +284,7 @@ async def test_omitted_kind_posts_an_omission_notice(
     diagram_run: Callable[..., Any],
 ) -> None:
     """An explicit request that grounds to nothing says so, with counts and codes."""
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
     thin = dr.sequence_spec()
     thin["messages"] = thin["messages"][:2]
 
@@ -543,8 +549,7 @@ async def test_agent_error_in_diagram_only_mode_exits_one(
     diagram_run: Callable[..., Any],
 ) -> None:
     """The diagram IS the deliverable here, so a failed kind fails the run."""
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(
         target,
@@ -639,8 +644,7 @@ def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The public CLI records the successful diagram it actually delivers."""
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
@@ -662,8 +666,7 @@ def test_actual_cli_diagram_only_timing_failure_persists_failed_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The public CLI preserves failure telemetry before returning one."""
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_fail = frozenset({"sequence"})
@@ -697,8 +700,7 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
         }
 
     monkeypatch.setattr(diagram_steps, "_run_diagram_kind", _return_failure)
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(
         target,
@@ -770,8 +772,7 @@ async def test_diagram_only_run_preserves_prior_deep_artifacts(
     branch, so without the mode guard the run would ``rmtree`` the previous
     deep review's resumable artifacts.
     """
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True)
     (deep / "merged-items.json").write_text('{"items": []}', encoding="utf-8")
@@ -807,8 +808,7 @@ async def test_diagram_run_flow_label_and_manifest_backends(
     previous deep review's ``merged-items.json`` as its own pipeline state --
     and regression (a) guarantees that file is still on disk.
     """
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(
         target,
@@ -870,8 +870,7 @@ async def test_diagram_only_on_the_base_branch_is_not_a_wrong_branch_error(
     diagram_run: Callable[..., Any],
 ) -> None:
     """Diagram mode neither fixes nor commits, so the base branch is allowed."""
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
     git(target, "checkout", "main")
 
     exit_code, _ = await diagram_run(target, diagram="sequence")
@@ -909,8 +908,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
         silence_console(module)
     silence(monkeypatch)
 
-    target = dr.build_cross_module_repo(tmp_path)
-    fake_gh.serve_open_pr(target)
+    target = _diagram_target(tmp_path, fake_gh)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
     stub.diagram_emit_reads = True

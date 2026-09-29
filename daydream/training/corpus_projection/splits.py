@@ -9,9 +9,15 @@ order, so the three membership sets are disjoint by construction.
 import hashlib
 from typing import Literal
 
-__all__ = ["assign_split"]
+__all__ = ["assign_split", "SPLIT_FILENAMES"]
 
 Split = Literal["train", "validation", "holdout"]
+
+SPLIT_FILENAMES: dict[Split, str] = {
+    "train": "train.jsonl",
+    "validation": "validation.jsonl",
+    "holdout": "holdout.jsonl",
+}
 
 
 def assign_split(record_id: str, *, holdout_rate: float, val_rate: float, salt: str) -> Split:

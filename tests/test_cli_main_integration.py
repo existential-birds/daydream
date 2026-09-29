@@ -64,6 +64,12 @@ from tests.test_deep_orchestrator import (
 from tests.test_improve_plans import _repo
 
 
+def _silence_all(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Silence the shared agent harness plus the cli/runner gh and UI seams."""
+    _silence(monkeypatch)
+    _silence_cli_and_runner(monkeypatch)
+
+
 def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mock only the external seams cli.main touches before/around the loop.
 
@@ -125,8 +131,7 @@ def test_cli_main_clean_deep_run_exits_0(
     only mocks are the Backend (stub) and the gh/UI seams — ``run``,
     ``_dispatch``, ``run_deep`` and the ``phase_*`` functions all run for real.
     """
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     # SystemExit.code is the int returned by runner.run, propagated through
@@ -151,8 +156,7 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     benchmark-harness pattern that regressed before the fix.
     """
 
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     trajectory_path = tmp_path / "trajectory.json"
@@ -179,8 +183,7 @@ def test_cli_main_wrong_branch_exits_1(
     ``cli.main``'s ``except git_ops.WrongBranchError`` clause calls
     ``sys.exit(1)``. The stub backend is installed but never reached.
     """
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, git_repo)
     # The error path renders a panel via print_error; silence it.
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **kw: None)
@@ -201,8 +204,7 @@ def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
     "Fatal Error". The handler matches by type (``UnconfinedFindingError``),
     not by message string.
     """
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
 
     async def _raising_run(*a: Any, **k: Any) -> int:
         raise UnconfinedFindingError("Finding file must be a confined repository-relative path")
@@ -228,8 +230,7 @@ def test_cli_main_rejects_workspace_copy_traversal(
     -> return 1. The WrongBranch guard is bypassed because force_worktree is set
     (runner.py:762), so the copy error fires first.
     """
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, repo_with_origin)
     # The error path renders a "Workspace Error" panel via runner.print_error; silence it.
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
@@ -259,8 +260,7 @@ def test_non_tty_auto_enables_non_interactive(
     environment (non-TTY) rather than requiring an explicit ``--non-interactive``
     flag. The raw input boundary must never be called, and the review completes.
     """
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)  # piped stdin
     monkeypatch.delenv("CI", raising=False)
@@ -282,8 +282,7 @@ def test_cli_main_prune_reanchor_removes_and_exits_0(
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
 
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
     assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abcd-reanchor", str(repo)) == 0
@@ -296,8 +295,7 @@ def test_cli_main_prune_reanchor_rejects_name_exits_1(
 ) -> None:
 
     repo, _ = _repo(tmp_path)
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
     assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abc", str(repo)) == 1
@@ -322,8 +320,7 @@ def test_cli_main_list_reanchor_lists_and_exits_0(
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
 
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     listed: list[str] = []
     monkeypatch.setattr(
         "daydream.cli.print_info",
@@ -339,8 +336,7 @@ def test_cli_main_list_reanchor_empty_exits_0(
     """An empty re-anchor set still exits 0 — listing nothing is not an error."""
 
     repo, _ = _repo(tmp_path)
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_info", lambda *a, **k: None)
     assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
 
@@ -681,8 +677,7 @@ def test_cli_main_fatal_default_concise_no_traceback(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
 
     code = _cli_main_exit(monkeypatch, "--review", str(multi_stack_target))
@@ -701,8 +696,7 @@ def test_cli_main_verbose_prints_redacted_chain_on_stderr(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
 
     code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
@@ -722,8 +716,7 @@ def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     sentinel = "ghp_" + "Q" * 12
     outer = CodexError(f"failed to create disposable read-only checkout token={sentinel}\x1b[31m")
     outer.__cause__ = git_ops.GitError("isolation probe failure\rBEEP\x07")
@@ -745,8 +738,7 @@ def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
 
     def _boom(*a: Any, **k: Any) -> str:
@@ -824,8 +816,7 @@ def test_cli_main_hostile_str_fatal_default_fails_closed(
     """A fatal exception whose ``__str__`` raises must not escape the generic
     handler: the panel is empty-safe, never a raw interpreter traceback, never
     the hostile message's own text (issue #1236 fail-closed contract)."""
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_exploding_str_backend(monkeypatch)
 
     code = _cli_main_exit(monkeypatch, "--review", str(multi_stack_target))
@@ -845,8 +836,7 @@ def test_cli_main_hostile_str_fatal_verbose_emits_unavailable_marker(
     """The verbose variant still fails closed: the verbose diagnostic is the
     fixed unavailable marker (never a secondary traceback), the panel stays
     safe, and exit code 1 is preserved."""
-    _silence(monkeypatch)
-    _silence_cli_and_runner(monkeypatch)
+    _silence_all(monkeypatch)
     _install_exploding_str_backend(monkeypatch)
 
     code = _cli_main_exit(monkeypatch, "--verbose", "--review", str(multi_stack_target))
