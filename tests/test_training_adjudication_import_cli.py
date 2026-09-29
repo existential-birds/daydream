@@ -212,9 +212,6 @@ def test_cli_real_path_real_archive(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert sum(report["accounting"].values()) == 2
     assert report["identity_summary"]["sess-1"]["matched_by"] == "repo_slug_sha"
     assert report["identity_summary"]["sess-2"]["matched_by"] == "repo_slug_sha"
-    report = json.loads((state / "import-report.json").read_text(encoding="utf-8"))
-    assert report["dry_run"] is False
-    assert sum(report["accounting"].values()) == 2
     ledger = json.loads((state / "import-ledger.json").read_text(encoding="utf-8"))
     assert ledger["accounting"] == report["accounting"]
     assert {entry["session_id"] for entry in ledger["observations"]} == {"sess-1", "sess-2"}
