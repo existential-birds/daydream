@@ -387,7 +387,7 @@ def _append_arg_field(
     content: Text,
     key: str,
     value: str,
-    style: str,
+    style: str | Style,
     *,
     indent: str = "",
 ) -> None:
