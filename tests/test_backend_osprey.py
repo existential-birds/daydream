@@ -26,6 +26,7 @@ from daydream.backends import (
     TurnEndEvent,
     create_backend,
 )
+from daydream.backends._transport import CliTransport
 from daydream.backends.osprey import (
     OspreyBackend,
     OspreyError,
@@ -915,8 +916,6 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_cancel_delegates_to_shared_transport_lifecycle() -> None:
     """cancel() reaps every tracked transport's process group and pipes."""
-    from daydream.backends._transport import CliTransport
-
     backend = OspreyBackend(osprey_binary="fake")
 
     proc = MagicMock()

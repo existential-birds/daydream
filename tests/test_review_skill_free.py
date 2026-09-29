@@ -4,12 +4,13 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import daydream
+from daydream import review_profile as rp
+
 FORBIDDEN = re.compile(r"/(beagle-|skill:)|\\$review-|review-verification-protocol|beagle-core")
 
 
 def _all_builtin_sources() -> Iterator[Any]:
-    import daydream
-
     root = Path(daydream.__file__).parent
     for p in sorted(root.rglob("*.py")):
         if "atif" in p.parts or "benchmark" in p.parts:
@@ -35,8 +36,6 @@ def test_no_skill_tokens_in_builtin_prompt_sources() -> None:
 
 
 def test_builtin_default_profile_has_no_skill_tokens() -> None:
-    from daydream import review_profile as rp
-
     p = rp.build_default_profile()
     for key, strat in p.strategies.items():
         assert not FORBIDDEN.search(strat.content), f"{key} default contains a skill token"

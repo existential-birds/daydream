@@ -8,7 +8,10 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from daydream import runner
+from daydream.backends import AUDIT_ROOT_ISOLATION
 from daydream.backends._subprocess import cancel_processes, terminate_process
+from daydream.backends.codex import CodexBackend
 from tests.harness.processes import GROUP_HOLDER_CLI, wait_for_process_group_gone
 
 if TYPE_CHECKING:
@@ -141,10 +144,6 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     exists (``os.killpg(pgid, 0)`` raises ``ProcessLookupError`` — no orphaned
     grandchildren) and the fd count returns to the pre-run baseline.
     """
-    from daydream import runner
-    from daydream.backends import AUDIT_ROOT_ISOLATION
-    from daydream.backends.codex import CodexBackend
-
     silence_console("daydream.runner")
     silence_console("daydream.improve.orchestrator")
     silence_console("daydream.agent")

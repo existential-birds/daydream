@@ -6,10 +6,10 @@ import importlib
 
 import pytest
 
+from daydream_review.taskset import DEFAULT_TASKSET_ID
+
 
 def test_task_identity_neutral() -> None:
-    from daydream_review.taskset import DEFAULT_TASKSET_ID
-
     assert DEFAULT_TASKSET_ID == "daydream-review"
     assert "v1" not in DEFAULT_TASKSET_ID
 

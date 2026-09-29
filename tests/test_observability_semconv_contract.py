@@ -21,6 +21,7 @@ import re
 from pathlib import Path
 from typing import Any
 
+import jsonschema
 import yaml
 
 TESTS_DIR = Path(__file__).resolve().parent
@@ -246,8 +247,6 @@ def _schema(name: str) -> dict[str, Any]:
 
 
 def _validate(name: str, instance: Any) -> None:
-    import jsonschema
-
     jsonschema.validate(instance, _schema(name))
 
 

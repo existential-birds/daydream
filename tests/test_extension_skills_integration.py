@@ -18,6 +18,7 @@ from daydream.backends import ResultEvent, TextEvent
 from daydream.runner import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
+from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
 _CLEAN_TURN = (
     TextEvent(text=""),
@@ -65,8 +66,6 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
     routed ``.proto`` file reaches the per-stack reviewer, and the prompt is
     native (profile strategy, no fork skill invocation).
     """
-    from tests.test_deep_orchestrator import _install_stub_backend, _silence
-
     ext_dir.write_module(
         "from daydream.extensions import StackRule\n"
         "def register(r):\n"

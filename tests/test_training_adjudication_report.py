@@ -1,6 +1,8 @@
 """Report separates outcome-bearing coverage from silver/task-only coverage (AC 5)."""
 from typing import Any
 
+import pytest
+
 from daydream.training.adjudication.report import build_report
 
 
@@ -108,8 +110,6 @@ def test_report_is_deterministic_and_stratified() -> None:
 
 
 def test_missing_required_field_raises_value_error() -> None:
-    import pytest
-
     with pytest.raises(ValueError, match="record_id"):
         build_report([{"disposition": "accepted", "profile": "pr_review", "stack": "python"}])
     with pytest.raises(ValueError, match="disposition"):

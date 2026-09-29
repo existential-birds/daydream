@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from test_rewards import _stage_run
+from test_rewards import _stage_run, _task
 from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 
-from daydream_review.rundir import RUN_DIR_FILES, fetch_run_dir
+from daydream_review.rundir import RUN_DIR_FILES, fetch_run_dir, verify_seal
+from daydream_review.verifier import seal_artifacts
 
 #: The RUN_DIR_FILES allowlist members the projection must include for the
 #: golden run. The deep/stack-*-records.json glob members are collected too,
@@ -91,11 +92,6 @@ async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
     This is a focused unit guard on verify_seal, complementing the scoring-level
     test_git_failure_at_verify_time_fails_closed.
     """
-    from test_rewards import _task
-
-    from daydream_review.rundir import verify_seal
-    from daydream_review.verifier import seal_artifacts
-
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(fixture_manifest_path)

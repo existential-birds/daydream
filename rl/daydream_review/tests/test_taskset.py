@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from verifiers.v1.loaders import load_taskset, taskset_config_type
 
 from daydream_review.fixture import (
     FIXTURE_BASE_SHA,
@@ -494,8 +495,6 @@ def test_loader_contract_resolves_package(
     fixture_manifest_path: Path, stage0_gate_report: Path
 ) -> None:
     """The real path the verifiers CLI/orchestrator takes (loaders.py:110-127)."""
-    from verifiers.v1.loaders import load_taskset, taskset_config_type
-
     config_type = taskset_config_type("daydream-review")
     assert config_type is DaydreamReviewConfig
 
