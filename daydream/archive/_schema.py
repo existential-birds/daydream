@@ -22,15 +22,6 @@ Used identically across append_label_observation and latest_label_observation â€
 centralised here so all callers stay in sync if the precedence rule ever changes.
 """
 
-_REVIEWER_PENALTY_MAP: dict[str, float] = {
-    "accepted": 0.0,
-    "contested": 0.5,
-    "rejected": 1.0,
-}
-"""Maintainer outcome label â†’ false-positive penalty, mirroring
-``daydream.training.reward._FP_PENALTY_MAP``.  Defined here so the archive
-layer does not depend on the training layer."""
-
 class Column(NamedTuple):
     """One table column: its SQL name, DDL body text, and run-migration flags.
 

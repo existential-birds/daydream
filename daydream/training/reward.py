@@ -50,8 +50,8 @@ scoring-config change forces a version bump).
 _VERDICT_MAP: dict[str, float] = {"consistent": 1.0, "uncertain": 0.5, "contradicts": 0.0}
 """Per-finding verdict → ``[0, 1]`` correctness sub-score (rescaled ternary)."""
 
-_FP_PENALTY_MAP: dict[str, float] = {"accepted": 0.0, "contested": 0.5, "rejected": 1.0}
-"""Maintainer outcome label → posterior false-positive penalty."""
+FP_PENALTY_MAP: dict[str, float] = {"accepted": 0.0, "contested": 0.5, "rejected": 1.0}
+"""Maintainer outcome label → posterior false-positive penalty; also the archive reviewer-prior scale."""
 
 FLOOR = 0.0
 """Composite floor — the ``[0, 1]`` range minimum, the format-gate override."""
@@ -97,7 +97,7 @@ class RewardWeights:
         default_factory=lambda: types.MappingProxyType(dict(_VERDICT_MAP))
     )
     fp_penalty_map: types.MappingProxyType[str, float] = field(
-        default_factory=lambda: types.MappingProxyType(dict(_FP_PENALTY_MAP))
+        default_factory=lambda: types.MappingProxyType(dict(FP_PENALTY_MAP))
     )
 
     def __post_init__(self) -> None:

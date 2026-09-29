@@ -73,7 +73,6 @@ from daydream.archive._schema import (
     _CREATE_LABEL_OBSERVATIONS_TABLE,
     _CREATE_TABLE,
     _PRECEDENCE_ORDER,
-    _REVIEWER_PENALTY_MAP,
     _UPSERT_SQL,
     LABEL_OBSERVATION_NAMES,
     RUNS_COLUMNS,
@@ -85,6 +84,7 @@ from daydream.archive._schema import (
 from daydream.archive.git_safe import normalize_remote_url
 from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.manifest import Manifest
+from daydream.training.reward import FP_PENALTY_MAP
 
 # The 16 non-identity columns, in the canonical declaration order: exactly the
 # values ``row_body`` supplies after the ``(session_id, observed_at)`` prefix.
@@ -657,7 +657,7 @@ def reviewer_set_penalty_prior(
     preventing cross-repo reviewer history from inflating or deflating the prior
     (C4 per-repo scoping). One outcome is taken per session (latest
     ``observed_at``); its first label is mapped to a false-positive penalty via
-    ``_REVIEWER_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
+    ``FP_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
     ``rejected→1.0``). The raw pooled mean and count are returned — the ``>=10``
     sufficiency threshold and the ``0.5`` default fallback are the caller's
     responsibility.
@@ -687,7 +687,7 @@ def reviewer_set_penalty_prior(
     # column stays chronological regardless of the caller's spelling.
     before_valid_at = canonical_utc_iso(before_valid_at)
     login_set = set(logins)
-    penalty_map = _REVIEWER_PENALTY_MAP
+    penalty_map = FP_PENALTY_MAP
 
     # Build an IN-list so SQLite's json_each() can filter reviewer intersection
     # inside the query, avoiding a full-table fetch followed by Python-side
