@@ -692,8 +692,8 @@ async def test_output_schema_temp_file_is_cleaned_when_serialization_fails(tmp_p
     handle = MagicMock()
     handle.name = str(schema_path)
     with (
-        patch("daydream.backends.osprey.tempfile.NamedTemporaryFile", return_value=handle),
-        patch("daydream.backends.osprey.json.dump", side_effect=TypeError("not serializable")),
+        patch("daydream.backends._transport.tempfile.NamedTemporaryFile", return_value=handle),
+        patch("daydream.backends._transport.json.dump", side_effect=TypeError("not serializable")),
         pytest.raises(TypeError, match="not serializable"),
     ):
         await _collect(OspreyBackend(osprey_binary="fake"), [], output_schema={"type": object})

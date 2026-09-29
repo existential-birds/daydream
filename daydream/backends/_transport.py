@@ -16,7 +16,11 @@ from __future__ import annotations
 
 import asyncio
 import enum
+import json
+import tempfile
 from collections.abc import AsyncIterator, Callable
+from pathlib import Path
+from typing import Any
 
 import anyio
 
@@ -320,3 +324,27 @@ def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> 
     else:
         detail = f"\n(no non-JSON output captured — {display.lower()} may have crashed before writing to stdout)"
     return f"{display} CLI exited with return code {returncode}.{detail}"
+
+
+def write_temp_json_schema(schema: dict[str, Any], *, prefix: str) -> str:
+    """Serialize *schema* to a ``delete=False`` temp ``.json`` file for a CLI to reopen.
+
+    Returns the path; the caller owns it and unlinks it after the child exits.
+    Because ``delete=False`` leaves the file behind on any failure, this removes
+    it itself when serialization does not complete.
+    """
+    handle = tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", suffix=".json", prefix=prefix, delete=False
+    )
+    completed = False
+    try:
+        json.dump(schema, handle, separators=(",", ":"))
+        handle.write("\n")
+        completed = True
+        return handle.name
+    finally:
+        try:
+            handle.close()
+        finally:
+            if not completed:
+                Path(handle.name).unlink(missing_ok=True)

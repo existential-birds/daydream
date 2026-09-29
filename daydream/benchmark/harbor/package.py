@@ -645,9 +645,3 @@ def render_runtime_lock(uv_lock_path: Path, *, daydream_version: str) -> tuple[s
         "\n"
     )
     return header, body
-
-
-def generate_runtime_lock(uv_lock_path: Path, *, daydream_version: str) -> bytes:
-    """Generate complete packaged lock bytes."""
-    header, body = render_runtime_lock(uv_lock_path, daydream_version=daydream_version)
-    return (header + body).encode("utf-8")

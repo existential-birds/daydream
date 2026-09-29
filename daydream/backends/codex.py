@@ -50,6 +50,7 @@ from daydream.backends._transport import (
     raise_for_exit,
     reap,
     teardown,
+    write_temp_json_schema,
 )
 from daydream.pricing import ModelPrice, compute_cost_from_totals, load_user_prices, resolve_prices
 from daydream.trajectory import redact_structured_text
@@ -680,7 +681,7 @@ class CodexBackend:
 
         schema_path: str | None = None
         if output_schema:
-            schema_path = self._write_temp_schema(output_schema)
+            schema_path = write_temp_json_schema(output_schema, prefix="daydream-schema-")
 
         thread_id: str | None = None
         provider_name: str | None = None
@@ -1296,10 +1297,3 @@ class CodexBackend:
             if isinstance(block, dict) and block.get("type") in ("text", "output_text"):
                 parts.append(block.get("text", ""))
         return "".join(parts)
-
-    @staticmethod
-    def _write_temp_schema(schema: dict[str, Any]) -> str:
-        """Write JSON schema to a temp file and return the path."""
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False, prefix="daydream-schema-") as f:
-            json.dump(schema, f)
-            return f.name

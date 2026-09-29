@@ -62,7 +62,7 @@ _OBSERVED_A = "2026-05-01T00:00:00+00:00"
 _OBSERVED_B = "2026-05-02T00:00:00+00:00"
 
 
-def build_hydrated_index_with_session(tmp_path: Path, session_id: str, digest: str) -> dict[str, dict[str, str]]:
+def build_hydrated_index_with_session(session_id: str, digest: str) -> dict[str, dict[str, str]]:
     """Hydrated-index shape follows the hydrate import-ledger join:
     ``{session_id: {"derivative_digest": ..., "record_id": ...}}``."""
     return {session_id: {"derivative_digest": digest, "record_id": f"rec-{session_id}"}}
@@ -84,15 +84,15 @@ def _record(
     }
 
 
-def test_link_session_by_session_id(tmp_path: Path) -> None:
-    idx = build_hydrated_index_with_session(tmp_path, SID, digest=D)
+def test_link_session_by_session_id() -> None:
+    idx = build_hydrated_index_with_session(SID, digest=D)
     result = link_session_identity([_record(SID)], hydrated_index=idx, repo_slug_sha_lookup={})
     entry = result["linked"][SID]
     assert entry["hub_session_id"] == SID
     assert entry["matched_by"] == "session_id"
 
 
-def test_link_fallback_repo_slug_sha(tmp_path: Path) -> None:
+def test_link_fallback_repo_slug_sha() -> None:
     # session_id absent from the hydrated index; repo_slug+SHA fallback matches.
     lookup = {("org/repo", "a" * 40, "b" * 40): "hub-999"}
     result = link_session_identity(
@@ -103,8 +103,8 @@ def test_link_fallback_repo_slug_sha(tmp_path: Path) -> None:
     assert entry["matched_by"] == "repo_slug_sha"
 
 
-def test_unmatched_and_conflict_buckets(tmp_path: Path) -> None:
-    idx = build_hydrated_index_with_session(tmp_path, SID, digest=D)
+def test_unmatched_and_conflict_buckets() -> None:
+    idx = build_hydrated_index_with_session(SID, digest=D)
     records = [
         _record("no-such-session"),  # no Hub entry, no fallback hit
         _record(SID, digest="e" * 64),  # conflicting derivative digest
@@ -114,8 +114,8 @@ def test_unmatched_and_conflict_buckets(tmp_path: Path) -> None:
     assert SID in r["identity_conflict"]
 
 
-def test_conflicting_digest_never_links(tmp_path: Path) -> None:
-    idx = build_hydrated_index_with_session(tmp_path, SID, digest=D)
+def test_conflicting_digest_never_links() -> None:
+    idx = build_hydrated_index_with_session(SID, digest=D)
     r = link_session_identity(
         [_record(SID, digest="e" * 64)], hydrated_index=idx, repo_slug_sha_lookup={}
     )

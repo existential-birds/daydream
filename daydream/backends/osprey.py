@@ -12,7 +12,6 @@ import json
 import logging
 import math
 import os
-import tempfile
 from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field
 from functools import partial
@@ -42,6 +41,7 @@ from daydream.backends._transport import (
     raise_for_exit,
     reap,
     teardown,
+    write_temp_json_schema,
 )
 from daydream.trajectory import redact_text
 
@@ -471,26 +471,6 @@ class OspreyBackend:
         args.append(prompt)
         return args
 
-    @staticmethod
-    def _write_temp_schema(schema: dict[str, Any]) -> str:
-        handle = tempfile.NamedTemporaryFile(
-            mode="w", encoding="utf-8", suffix=".json", prefix="daydream-osprey-schema-", delete=False
-        )
-        completed = False
-        try:
-            json.dump(schema, handle, separators=(",", ":"))
-            handle.write("\n")
-            completed = True
-            return handle.name
-        finally:
-            try:
-                handle.close()
-            finally:
-                if not completed:
-                    # delete=False lets Osprey reopen this path, so remove the file
-                    # ourselves if serialization or writing does not complete.
-                    Path(handle.name).unlink(missing_ok=True)
-
     async def execute(
         self,
         cwd: Path,
@@ -509,7 +489,7 @@ class OspreyBackend:
             )
         schema_path: str | None = None
         if output_schema is not None:
-            schema_path = self._write_temp_schema(output_schema)
+            schema_path = write_temp_json_schema(output_schema, prefix="daydream-osprey-schema-")
 
         session_id: str | None = None
         session_model: str | None = None
