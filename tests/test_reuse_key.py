@@ -15,7 +15,6 @@ from typing import Any
 from daydream.deep import reuse_key
 
 _UNSET = object()
-_SHARD_INPUTS: dict[int, dict[str, Any]] = {}
 
 
 def _flip(value: Any) -> Any:
@@ -119,17 +118,7 @@ def _shard_payload(
         intent_text=None,
         alternatives_text=None,
     )
-    _SHARD_INPUTS[id(payload)] = {
-        "tmp_path": tmp_path,
-        "files": files,
-        "frontier": frontier,
-        "blob": blob,
-    }
     return payload
-
-
-def _rekeyed(payload: dict[str, Any], *, run_id: str) -> dict[str, Any]:
-    return _shard_payload(run_id=run_id, **_SHARD_INPUTS[id(payload)])
 
 
 def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> None:
@@ -153,7 +142,9 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
     # Absence of the pre-scan is a CONTRACT flag, not a missing component.
     assert reuse_key.unit_key(_mutate(base, "components.exploration_present", value=False)) != key
     # Run-scoped identifiers are normalized out of every digest input (A9).
-    assert reuse_key.unit_key(_rekeyed(base, run_id="other-run")) == key
+    assert reuse_key.unit_key(
+        _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n", run_id="other-run")
+    ) == key
     # Identical inputs from two independent builds agree.
     assert reuse_key.unit_key(_shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")) == key
 
