@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 from functools import lru_cache
@@ -45,6 +46,20 @@ from daydream.deep.latency import (
 )
 from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
+from daydream.deep.reuse_key import (
+    PhaseIdentity,
+    absent_components,
+    digest_or_absent,
+    digest_text,
+    exploration_digest,
+    grounding_digests,
+    intent_key_payload,
+    phase_identity_for,
+    sweep_key_payload,
+    unit_key,
+    wonder_key_payload,
+)
+from daydream.deep.reuse_store import ReuseHit, reuse_cache_for, review_cache_enabled
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
@@ -82,7 +97,13 @@ from daydream.ui import (
 )
 
 if TYPE_CHECKING:
+    from daydream.deep.reuse_store import ReuseCache
     from daydream.trajectory import PhaseScopeHandle, TrajectoryRecorder
+
+logger = logging.getLogger(__name__)
+
+#: Outcomes that mean the store served the unit's result (never a recompute).
+_REUSE_HIT_OUTCOMES = frozenset({"hit", "reused"})
 
 try:
     from daydream.exploration import ExplorationContext, safe_explore
@@ -95,6 +116,114 @@ try:
     EXPLORATION_AVAILABLE = True
 except ImportError:  # pragma: no cover -- optional exploration dependency
     EXPLORATION_AVAILABLE = False
+
+
+def _restore_entry_payload(hit: ReuseHit, dest_dir: Path) -> str | None:
+    """Copy a verified entry's payload files into ``dest_dir``.
+
+    Returns ``None`` on success or a reason string when the restore could not
+    complete; a partial restore is a miss, so the unit then does its own real
+    work rather than shipping half of an entry.
+    """
+    recorded = hit.manifest.get("payload")
+    if not isinstance(recorded, dict):
+        return "manifest payload unreadable"
+    try:
+        for name in recorded:
+            (dest_dir / str(name)).write_bytes((hit.payload_dir / str(name)).read_bytes())
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
+def _reuse_grounding_status(reuse: "ReuseCache", unit: str) -> str:
+    """Whether a grounding unit was restored this iteration or regenerated.
+
+    Read from the run's own provenance, which records each grounding unit
+    before the consumers that need its status (exploration before intent,
+    intent before wonder). An absent record is ``regenerated``: the run did the
+    work, it just did not record it.
+    """
+    units = reuse.provenance().get("units")
+    entry = units.get(unit) if isinstance(units, dict) else None
+    outcome = entry.get("outcome") if isinstance(entry, dict) else None
+    return "reused" if outcome in _REUSE_HIT_OUTCOMES else "regenerated"
+
+
+def _grounding_moved(entry: object) -> bool:
+    """Whether any recorded grounding input moved for a reused unit (MH16)."""
+    if not isinstance(entry, dict):
+        return False
+    grounding = entry.get("grounding")
+    if not isinstance(grounding, dict):
+        return False
+    return any(
+        isinstance(row, dict) and row.get("moved") is True
+        for row in grounding.values()
+    )
+
+
+def _reuse_summary_line(record: dict[str, Any]) -> str:
+    """Format one run's reuse outcome from its provenance record (SH1/MH16).
+
+    Carries the total unit count, hits, misses, the shard-unit count, the
+    reused unit names, the store's entry/byte counts (SH2), and -- the MH16
+    consumer -- how many reused units ran under moved grounding, omitted when
+    none moved. Pure: the caller owns reading the record.
+    """
+    units = record.get("units")
+    units = units if isinstance(units, dict) else {}
+    store = record.get("store")
+    store = store if isinstance(store, dict) else {}
+    reused = sorted(
+        name
+        for name, entry in units.items()
+        if isinstance(entry, dict) and entry.get("outcome") in _REUSE_HIT_OUTCOMES
+    )
+    misses = sum(
+        1
+        for entry in units.values()
+        if isinstance(entry, dict) and entry.get("outcome") == "miss"
+    )
+    shard_count = sum(1 for name in units if str(name).startswith("shard:"))
+    moved = sum(1 for name in reused if _grounding_moved(units[name]))
+    line = (
+        f"Review reuse: {len(units)} units ({len(reused)} hit, {misses} miss); "
+        f"shard: {shard_count}; "
+        f"reused: {', '.join(reused) if reused else 'none'}; "
+        f"store: {store.get('entries', 0)} entries, {store.get('bytes', 0)} bytes"
+    )
+    if moved:
+        line += f"; grounding moved in {moved} reused"
+    return line
+
+
+def _log_reuse_summary(ctx: FlowContext) -> None:
+    """Emit the run's one-line reuse outcome (SH1), including moved grounding.
+
+    Observability only: a store that cannot be read degrades to an
+    ``unavailable`` line and never raises. Emitted once per run from the review
+    surface's last step, so an operator reading logs alone can tell a warm run
+    from a forensic one (MH13/MH16).
+    """
+    reuse = DeepState(ctx.data).reuse_cache
+    if reuse is None:
+        return
+    if not review_cache_enabled(ctx.config):
+        logger.info("Review reuse: disabled (--no-review-cache)")
+        return
+    try:
+        logger.info(_reuse_summary_line(reuse.provenance()))
+    except Exception as exc:  # noqa: BLE001 -- observability, never correctness
+        logger.info("Review reuse: unavailable (%s: %s)", type(exc).__name__, exc)
+
+
+def _whole_change_diff_text(ctx: FlowContext) -> str:
+    """The whole-change diff text a TTT unit keys on (the full on-disk diff)."""
+    try:
+        return _read_full_diff(ctx)
+    except OSError:
+        return str(DeepState(ctx.data).diff)
 
 
 def _uncovered_sweep_max_files(ctx: FlowContext) -> int:
@@ -150,6 +279,25 @@ async def _step_exploration(ctx: FlowContext) -> None:
     tier = deep_state.tier
     exploration_path = daydream_dir / "exploration"
 
+    # Issue #733 — exploration reuse stays on its own existing cache contract
+    # (A2), but its outcome is the exploration grounding status of every other
+    # unit in the run, so it is recorded as run provenance (MH5/MH16) even when
+    # the review cache itself is disabled.
+    reuse = deep_state.reuse_cache
+    reuse_enabled = reuse is not None and review_cache_enabled(ctx.config)
+
+    def _record_exploration(outcome: str, reason: str) -> None:
+        if reuse is None or not reuse_enabled:
+            return
+        reuse.record("exploration", outcome=outcome, reason=reason)
+
+    if reuse is not None and not reuse_enabled:
+        reuse.record(
+            "exploration",
+            outcome="disabled",
+            reason="review cache disabled for this run (--no-review-cache)",
+        )
+
     exploration_dir: Path | None = None
     if not EXPLORATION_AVAILABLE:
         print_warning(
@@ -157,9 +305,13 @@ async def _step_exploration(ctx: FlowContext) -> None:
             "Exploration infrastructure not installed; running deep pipeline "
             "without pre-scan grounding",
         )
+        _record_exploration("regenerated", "exploration pre-scan unavailable")
     elif config.exploration_context is None:
         # The in-process context short-circuits first; the disk cache is only
-        # consulted when there is no in-memory context to reuse.
+        # consulted when there is no in-memory context to reuse. Issue #733
+        # (MH13): ``--no-review-cache`` bypasses BOTH the pre-scan cache read and
+        # its write, so a forensic run genuinely recomputes the pre-scan rather
+        # than restoring an earlier run's grounding.
         cache_key = exploration_cache_key(
             ctx.work.head_sha or "", diff, tier,
             strategies={name: ctx.strategy(name) for name in (
@@ -167,13 +319,16 @@ async def _step_exploration(ctx: FlowContext) -> None:
             )},
         )
         if (
-            exploration_path.is_dir()
+            reuse_enabled
+            and exploration_path.is_dir()
             and read_cache_key(exploration_path) == cache_key
         ):
             # Early return BEFORE the pre_scan/write_to_dir block below: routing
             # a hit through it with an empty in-memory context would overwrite
-            # the cached files with "No data collected" stubs.
+            # the cached files with "No data collected" stubs. Its outcome is
+            # recorded as provenance before the return.
             print_dim(console, f"Reusing exploration pre-scan from {exploration_path}")
+            _record_exploration("reused", "exploration pre-scan cache hit")
             deep_state.exploration_dir = exploration_path
             return
 
@@ -211,12 +366,14 @@ async def _step_exploration(ctx: FlowContext) -> None:
             console.print(render_exploration_summary(config.exploration_context))
         if config.exploration_context is not None:
             exploration_dir = config.exploration_context.write_to_dir(exploration_path)
-            if config.exploration_context.completed:
+            if reuse_enabled and config.exploration_context.completed:
                 cache_key_path(exploration_path).write_text(cache_key, encoding="utf-8")
+            _record_exploration("regenerated", "exploration pre-scan regenerated")
             deep_state.exploration_dir = exploration_dir
             return
     if EXPLORATION_AVAILABLE and config.exploration_context is not None:
         exploration_dir = config.exploration_context.write_to_dir(exploration_path)
+        _record_exploration("regenerated", "exploration context supplied in-process")
     deep_state.exploration_dir = exploration_dir
 
 
@@ -281,6 +438,66 @@ async def _step_intent(ctx: FlowContext) -> None:
     # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
     deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
     review_budget_path(deep_state.dd).unlink(missing_ok=True)
+    intent_p = _intent_path(deep_state.dd)
+    # Issue #733 — intent is a whole-change unit: its subject is the diff plus
+    # the commit log, branch name and PR description that reach its prompt. Its
+    # exploration pre-scan is recorded grounding only (MH2/MH16), so a moved
+    # pre-scan can never move the key; the hit path restores the recorded
+    # ``intent.md`` byte-for-byte rather than re-rendering it.
+    reuse = reuse_cache_for(ctx)
+    intent_payload: dict[str, Any] | None = None
+    intent_reuse_key: str | None = None
+    intent_identity = phase_identity_for(ctx, "intent")
+    if reuse is not None:
+        intent_payload = intent_key_payload(
+            diff_text=_whole_change_diff_text(ctx),
+            commit_log=deep_state.log,
+            exploration_dir=deep_state.exploration_dir,
+            pr_description=pr_description,
+            branch_name=deep_state.branch,
+            worktree_root=work.repo,
+            identity=intent_identity,
+        )
+        intent_reuse_key = unit_key(intent_payload)
+        if intent_reuse_key is None:
+            reuse.record(
+                "intent",
+                outcome="miss",
+                reason="absent components: " + ", ".join(absent_components(intent_payload)),
+            )
+        else:
+            hit = reuse.lookup(intent_reuse_key)
+            if isinstance(hit, ReuseHit):
+                restore_reason = _restore_entry_payload(hit, deep_state.dd)
+                if restore_reason is None:
+                    reuse.record(
+                        "intent",
+                        outcome="hit",
+                        reason="complete entry",
+                        key=intent_reuse_key,
+                        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                        detail={
+                            "grounding": reuse.grounding_delta(
+                                hit, grounding_digests(intent_payload)
+                            ),
+                            "grounding_status": {
+                                "exploration": _reuse_grounding_status(reuse, "exploration"),
+                            },
+                        },
+                    )
+                    deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
+                    deep_state.intent_path = intent_p
+                    return
+                print_warning(console, f"Reuse restore failed for intent: {restore_reason}")
+                reuse.record(
+                    "intent",
+                    outcome="miss",
+                    reason=f"restore failed: {restore_reason}",
+                    key=intent_reuse_key,
+                )
+            else:
+                reuse.record("intent", outcome="miss", reason=hit.reason, key=intent_reuse_key)
+    intent_complete = True
     async with phase_scope(DaydreamPhase.INTENT) as phase:
         try:
             backend = ctx.backend_for("intent")
@@ -329,6 +546,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         except ReviewBudgetExceeded as exc:
             phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
             record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
+            intent_complete = False
             print_warning(console, f"{exc}; continuing with incomplete intent context.")
             deep_state.intent_summary = (
                 "Intent analysis did not finish within its budget. Infer intent from the diff.\n"
@@ -338,9 +556,25 @@ async def _step_intent(ctx: FlowContext) -> None:
             )
     # Each TTT step persists its own half, so a later step's failure cannot
     # discard an artifact this one already produced.
-    intent_p = _intent_path(deep_state.dd)
     intent_p.write_text(deep_state.intent_summary)
     deep_state.intent_path = intent_p
+    # Store only a completed intent: a budget-exceeded partial is a degraded
+    # result and must never be served to a later run as this unit's output.
+    if (
+        intent_complete
+        and reuse is not None
+        and intent_payload is not None
+        and intent_reuse_key is not None
+    ):
+        reuse.store(
+            intent_reuse_key,
+            unit="intent",
+            payload={intent_p.name: intent_p.read_bytes()},
+            components=intent_payload["components"],
+            identity=intent_identity,
+            grounding=grounding_digests(intent_payload),
+            grounding_status={"exploration": _reuse_grounding_status(reuse, "exploration")},
+        )
 
 
 def _fold_default_alternatives(ctx: FlowContext) -> bool:
@@ -363,42 +597,133 @@ async def _wonder(ctx: FlowContext) -> None:
     intent_summary = deep_state.intent_summary
     route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
     summary = deep_state.risk_summary or summarize_risk(diff_signals(diff="", changed_files=0, stack_count=0))
-    decision = wonder_decision(
-        route, summary, folded=_fold_default_alternatives(ctx), tier=deep_state.tier
-    )
+    folded = _fold_default_alternatives(ctx)
+    decision = wonder_decision(route, summary, folded=folded, tier=deep_state.tier)
 
     print_stage_progress(console, 2, 5, _PIPELINE_STAGE_NAMES[1])
+    # Issue #733 — alternatives is a whole-change unit: its subject is the diff
+    # and whether it runs as its own pass. The intent artifact and the pre-scan
+    # are recorded grounding (MH2/MH16), so neither moves the key; the hit path
+    # restores the recorded ``alternatives.json`` rather than re-rendering it.
+    reuse = reuse_cache_for(ctx)
+    alt_issues: list[dict[str, Any]] = []
+    wonder_reused = False
+    wonder_complete = True
+    wonder_payload: dict[str, Any] | None = None
+    wonder_reuse_key: str | None = None
+    wonder_identity: PhaseIdentity | None = None
     if decision.outcome == "folded":
-        alt_issues: list[dict[str, Any]] = []
         print_dim(console, "Design alternatives are included in the structural review")
     elif decision.outcome == "skip":
-        alt_issues = []
         if decision.reason == "trivial diff (<=1 changed file)":
             print_dim(console, "Skipping alternatives -- trivial diff")
         else:
             print_dim(console, f"Skipping alternatives -- {decision.reason}")
     else:
-        async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
-            try:
-                alt_issues = await phase_alternative_review(
-                    ctx.backend_for("wonder"),
-                    ctx.work,
-                    deep_state.diff_path,
-                    intent_summary,
-                    exploration_dir=deep_state.exploration_dir,
-                    diff_text=_ttt_diff_text(ctx),
-                    strategy=ctx.strategy("alternatives"),
-                    run_context=ctx.run_context,
+        if reuse is not None:
+            wonder_identity = phase_identity_for(ctx, "wonder")
+            wonder_payload = wonder_key_payload(
+                diff_text=_whole_change_diff_text(ctx),
+                horse_mode=not folded,
+                identity=wonder_identity,
+                grounding={
+                    "intent": {"digest": digest_text(intent_summary)},
+                    "exploration": {"digest": exploration_digest(deep_state.exploration_dir)},
+                },
+            )
+            wonder_reuse_key = unit_key(wonder_payload)
+            if wonder_reuse_key is None:
+                reuse.record(
+                    "alternatives",
+                    outcome="miss",
+                    reason="absent components: " + ", ".join(absent_components(wonder_payload)),
                 )
-            except ReviewBudgetExceeded as exc:
-                phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
-                record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
-                print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
-                alt_issues = exc.partial_result.get("issues", []) if isinstance(exc.partial_result, dict) else []
+            else:
+                hit = reuse.lookup(wonder_reuse_key)
+                if isinstance(hit, ReuseHit):
+                    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+                    if restore_reason is None:
+                        reuse.record(
+                            "alternatives",
+                            outcome="hit",
+                            reason="complete entry",
+                            key=wonder_reuse_key,
+                            origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                            detail={
+                                "grounding": reuse.grounding_delta(
+                                    hit, grounding_digests(wonder_payload)
+                                ),
+                                "grounding_status": {
+                                    "intent": _reuse_grounding_status(reuse, "intent"),
+                                    "exploration": _reuse_grounding_status(
+                                        reuse, "exploration"
+                                    ),
+                                },
+                            },
+                        )
+                        wonder_reused = True
+                    else:
+                        print_warning(
+                            console, f"Reuse restore failed for alternatives: {restore_reason}"
+                        )
+                        reuse.record(
+                            "alternatives",
+                            outcome="miss",
+                            reason=f"restore failed: {restore_reason}",
+                            key=wonder_reuse_key,
+                        )
+                else:
+                    reuse.record(
+                        "alternatives", outcome="miss", reason=hit.reason, key=wonder_reuse_key
+                    )
+        if not wonder_reused:
+            async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
+                try:
+                    alt_issues = await phase_alternative_review(
+                        ctx.backend_for("wonder"),
+                        ctx.work,
+                        deep_state.diff_path,
+                        intent_summary,
+                        exploration_dir=deep_state.exploration_dir,
+                        diff_text=_ttt_diff_text(ctx),
+                        strategy=ctx.strategy("alternatives"),
+                        run_context=ctx.run_context,
+                    )
+                except ReviewBudgetExceeded as exc:
+                    phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
+                    record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
+                    wonder_complete = False
+                    print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
+                    alt_issues = exc.partial_result.get("issues", []) if isinstance(exc.partial_result, dict) else []
 
     alts_p = _alternatives_path(deep_state.dd)
-    alts_p.write_text(json.dumps(alt_issues, indent=2))
+    # A hit restores the recorded bytes verbatim; re-serializing the parsed
+    # findings would re-render the JSON and break the byte-equality claim (MH10).
+    if not wonder_reused:
+        alts_p.write_text(json.dumps(alt_issues, indent=2))
     deep_state.alts_path = alts_p
+    # Store only a completed pass: a budget-exceeded partial is never served to
+    # a later run as this unit's output.
+    if (
+        wonder_complete
+        and not wonder_reused
+        and reuse is not None
+        and wonder_payload is not None
+        and wonder_reuse_key is not None
+        and wonder_identity is not None
+    ):
+        reuse.store(
+            wonder_reuse_key,
+            unit="alternatives",
+            payload={alts_p.name: alts_p.read_bytes()},
+            components=wonder_payload["components"],
+            identity=wonder_identity,
+            grounding=grounding_digests(wonder_payload),
+            grounding_status={
+                "intent": _reuse_grounding_status(reuse, "intent"),
+                "exploration": _reuse_grounding_status(reuse, "exploration"),
+            },
+        )
     write_routing_record(
         deep_state.dd,
         {
@@ -463,6 +788,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     stacks = deep_state.stacks
 
     failed_stacks: dict[str, str] = deep_state.failed_stacks
+    reuse_cache = reuse_cache_for(ctx)
+    phase_identity = (
+        phase_identity_for(ctx, "per_stack_review") if reuse_cache is not None else None
+    )
     if config.start_at not in ("merge", "fix"):
         structural_strategy = ctx.strategy("discovery.structural")
         if _fold_default_alternatives(ctx):
@@ -472,6 +801,10 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 structural_strategy += "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION
         print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
         async with phase_scope(DaydreamPhase.DEEP, stage="review"):
+            # Issue #733 (MH6): a freshly reviewed stack's store entry is
+            # committed by ``_step_per_stack_parse`` after verdict
+            # reconciliation, so the cached bytes match the final artifact.
+            reuse_pending: dict[str, Any] = {}
             _, failed_stacks = await phase_per_stack_reviews(
                 ctx.backend_for("per_stack_review"),
                 ctx.work,
@@ -496,7 +829,14 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
+                reuse_cache=reuse_cache,
+                phase_identity=phase_identity,
+                reuse_pending=reuse_pending,
             )
+            if reuse_pending:
+                ctx.data["reuse_pending_shards"] = reuse_pending
+            else:
+                ctx.data.pop("reuse_pending_shards", None)
         # Persist so a later `--start-at merge` resume can still surface
         # uncovered stacks (the in-memory failure map otherwise dies here).
         failures_p = per_stack_failures_path(dd)
@@ -528,6 +868,69 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     deep_state.failed_stacks = failed_stacks
 
 
+def _commit_pending_shard_store(
+    deep_state: DeepState, ctx: FlowContext, stack_name: str
+) -> None:
+    """Persist a freshly reviewed stack's reuse entry from its pending inputs.
+
+    The fan-out hands the store inputs to ``_step_per_stack_parse`` through
+    ``ctx.data["reuse_pending_shards"]`` rather than committing them itself,
+    because verdict reconciliation (which rewrites the records file) happens
+    here. Unknown names are ignored, so a resume with no fan-out is a no-op.
+    """
+    pending = ctx.data.get("reuse_pending_shards")
+    entry = pending.get(stack_name) if isinstance(pending, dict) else None
+    if not isinstance(entry, dict):
+        return
+    reuse_cache = deep_state.reuse_cache
+    if reuse_cache is None:
+        return
+    payload_names = entry.get("payload_names")
+    if not isinstance(payload_names, dict):
+        return
+    reuse_cache.store(
+        entry["key"],
+        unit=entry["unit"],
+        payload={
+            str(name): Path(str(path)).read_bytes()
+            for name, path in payload_names.items()
+        },
+        components=entry["components"],
+        identity=entry["identity"],
+        grounding=entry["grounding"],
+        grounding_status=entry["grounding_status"],
+    )
+
+
+def _reused_stack_names(deep_state: DeepState) -> set[str]:
+    """Stacks this run restored from the reuse store, per its own provenance.
+
+    A reused stack ran no ``deep-<stack>`` review fork, so this run's
+    trajectory-derived read set is empty; re-reconciling the restored records
+    against it would downgrade the origin run's evidence-gated verdicts to
+    ``not_reviewed`` and rewrite bytes that must stay identical to what the
+    origin run left (MH6). The provenance record is the host-assigned fact of
+    which stacks were hits, so it -- never a heuristic over absent forks --
+    decides which stacks skip reconciliation.
+    """
+    reuse_cache = deep_state.reuse_cache
+    if reuse_cache is None:
+        return set()
+    units = reuse_cache.provenance().get("units")
+    if not isinstance(units, dict):
+        return set()
+    return {
+        unit.removeprefix("shard:")
+        for unit, entry in units.items()
+        if (
+            isinstance(unit, str)
+            and unit.startswith("shard:")
+            and isinstance(entry, dict)
+            and entry.get("outcome") == "hit"
+        )
+    }
+
+
 async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     """Load per-stack records (written by the reviewers) + structural partition.
 
@@ -541,6 +944,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     dd = deep_state.dd
     stacks = deep_state.stacks
     failed_stacks: dict[str, str] = deep_state.failed_stacks
+    reused_stacks = _reused_stack_names(deep_state)
 
     print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
     # Issue #745 (AC4): the per-stack reviewers emit PER_STACK_RECORD_SCHEMA
@@ -613,7 +1017,17 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         # rewrite them to disk. The on-disk verdicts are already finalized;
         # reconcile (and rewrite) only when this session actually ran the
         # per-stack review fan-out above.
-        if ctx.config.start_at not in ("merge", "fix") and not delegated_structure:
+        #
+        # Issue #733 (MH6): a reused stack took the same shape -- its restored
+        # records already carry the origin run's evidence-gated verdicts and
+        # this session ran no review fork for it -- so reconciliation is
+        # skipped for it too, leaving the restored bytes exactly as the origin
+        # run wrote them.
+        if (
+            ctx.config.start_at not in ("merge", "fix")
+            and not delegated_structure
+            and stack.stack_name not in reused_stacks
+        ):
             verdicts = _reconcile_stack_verdicts(
                 dd.parent,
                 recorder,
@@ -627,6 +1041,11 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
                 **({"source_evidence": loaded["source_evidence"]}
                    if isinstance(loaded, dict) and isinstance(loaded.get("source_evidence"), list)
                    else {})}, indent=2))
+        # Issue #733 (MH6): commit the deferred store entry now that the records
+        # file is final. The bytes are read back here, after reconciliation and
+        # after the delegation carve-out, so a cached shard restores exactly the
+        # artifact this run leaves -- and a reused shard is never re-stored.
+        _commit_pending_shard_store(deep_state, ctx, stack.stack_name)
         expected_paths.append(records_path)
     if missing_stacks:
         print_error(
@@ -779,6 +1198,10 @@ async def _step_uncovered_sweep(ctx: FlowContext) -> None:
                 console,
                 f"Uncovered-file sweep failed (fail-open): {type(exc).__name__}: {exc}",
             )
+    # Issue #733 (SH1/MH16): the review surface's last step reports the run's
+    # reuse outcome once, after every review_steps unit has recorded its
+    # provenance (the sweep's early reuse return still reaches this line).
+    _log_reuse_summary(ctx)
 
 
 def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
@@ -796,6 +1219,67 @@ def _load_coverage_receipts(ctx: FlowContext) -> dict[str, Any] | None:
         return loaded if isinstance(loaded, dict) else None
     except (OSError, ValueError):
         return None
+
+
+def _sweep_contributing_records(deep_state: DeepState) -> dict[str, bytes] | None:
+    """The project-stack record bytes the sweep's key covers.
+
+    ``records_paths`` carries the primary-scope stacks (the structural records
+    are partitioned out by ``_step_per_stack_parse``). The sweep's own prior
+    records file is never a prompt input and is excluded. An unreadable record
+    makes the whole component absent -- ``None`` becomes a named miss, never a
+    key built over a file that could not be read.
+    """
+    uncovered_name = per_stack_records_path(deep_state.dd, "uncovered").name
+    records: dict[str, bytes] = {}
+    for path in deep_state.records_paths:
+        if path.name == uncovered_name:
+            continue
+        try:
+            records[path.name] = path.read_bytes()
+        except OSError:
+            return None
+    return records
+
+
+def _sweep_store_payload(dd: Path) -> dict[str, bytes] | None:
+    """The sweep's owned artifacts as a payload map, or ``None`` when incomplete.
+
+    ``stack-uncovered-records.json`` and ``coverage-stats.json`` are mandatory
+    outputs of a completed sweep; the per-file Markdown sidecars are optional.
+    An incomplete set must never be stored, so a later lookup cannot serve a
+    half-result.
+    """
+    mandatory = (per_stack_records_path(dd, "uncovered").name, "coverage-stats.json")
+    payload: dict[str, bytes] = {}
+    for name in mandatory:
+        path = dd / name
+        if not path.is_file():
+            return None
+        payload[name] = path.read_bytes()
+    for sidecar in sorted(dd.glob("uncovered-*-review.md")):
+        payload[sidecar.name] = sidecar.read_bytes()
+    return payload
+
+
+def _restore_swept_records(deep_state: DeepState) -> None:
+    """Append a restored sweep's records to the live pool (MH6).
+
+    Mirrors exactly where the real sweep appends its records, so the arbiter
+    and merge consume a reused sweep's findings as ordinary per-stack records.
+    A missing or unreadable restored file leaves the pool untouched (fail-open,
+    like the sweep itself).
+    """
+    records_path = per_stack_records_path(deep_state.dd, "uncovered")
+    try:
+        loaded = json.loads(records_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    records = _records_issues_or_empty(loaded)
+    stamp_record_uids(records, "uncovered")
+    deep_state.records_paths.append(records_path)
+    deep_state.records.extend(records)
+    deep_state.record_sources.extend("uncovered" for _ in records)
 
 
 async def _run_uncovered_sweep(
@@ -818,12 +1302,100 @@ async def _run_uncovered_sweep(
     # from the short display diff. Discovery receives the actual live path.
     diff_path = deep_state.diff_path
 
+    hunk_index = load_hunk_index(dd.parent)
     swept_files, skipped_small_files, skipped_capacity_files = filter_sweepable_files(
         uncovered_files,
-        load_hunk_index(dd.parent),
+        hunk_index,
         min_hunk_lines=_uncovered_sweep_min_hunk_lines(ctx),
         max_files=_uncovered_sweep_max_files(ctx),
     )
+
+    # Issue #733 — the sweep is keyed on its own prompt inputs (contributing
+    # records, the uncovered set, those files' hunks, the resolved
+    # profile/model/effort and the sweep budget). The uncovered set is
+    # itself derived by ``compute_uncovered_files`` from the durable hunk
+    # index, this session's completed reviewer reads and the coverage
+    # receipts/records, so reads the reuse path does not replay (a hit
+    # restores a shard's artifacts and returns before any fork) move this
+    # key and recompute the sweep on an unchanged diff (A8/MH9; issue #733
+    # review). Intent and the pre-scan are recorded
+    # grounding: a moved pre-scan can never move the key (MH2/MH16). Reuse runs
+    # only when there is a sweep to reuse; the no-eligible-work return below is
+    # already free of a model call.
+    reuse = reuse_cache_for(ctx)
+    sweep_payload: dict[str, Any] | None = None
+    sweep_reuse_key: str | None = None
+    sweep_identity: PhaseIdentity | None = None
+    if reuse is not None and swept_files:
+        contributing_records = _sweep_contributing_records(deep_state)
+        if contributing_records is None:
+            reuse.record(
+                "sweep", outcome="miss", reason="contributing record unreadable"
+            )
+        else:
+            sweep_identity = phase_identity_for(ctx, "parse")
+            sweep_payload = sweep_key_payload(
+                contributing_records=contributing_records,
+                uncovered_files=uncovered_files,
+                hunk_index=hunk_index,
+                bounds={
+                    "min_hunk_lines": _uncovered_sweep_min_hunk_lines(ctx),
+                    "max_files": _uncovered_sweep_max_files(ctx),
+                },
+                identity=sweep_identity,
+                grounding={
+                    "intent": digest_or_absent(deep_state.intent_summary_or_none),
+                    "exploration": {
+                        "digest": exploration_digest(deep_state.exploration_dir_or_none)
+                    },
+                },
+            )
+            sweep_reuse_key = unit_key(sweep_payload)
+            if sweep_reuse_key is None:
+                reuse.record(
+                    "sweep",
+                    outcome="miss",
+                    reason="absent components: "
+                    + ", ".join(absent_components(sweep_payload)),
+                )
+            else:
+                hit = reuse.lookup(sweep_reuse_key)
+                if isinstance(hit, ReuseHit):
+                    restore_reason = _restore_entry_payload(hit, dd)
+                    if restore_reason is None:
+                        _restore_swept_records(deep_state)
+                        reuse.record(
+                            "sweep",
+                            outcome="hit",
+                            reason="complete entry",
+                            key=sweep_reuse_key,
+                            origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+                            detail={
+                                "grounding": reuse.grounding_delta(
+                                    hit, grounding_digests(sweep_payload)
+                                ),
+                                "grounding_status": {
+                                    "intent": _reuse_grounding_status(reuse, "intent"),
+                                    "exploration": _reuse_grounding_status(
+                                        reuse, "exploration"
+                                    ),
+                                },
+                            },
+                        )
+                        return
+                    print_warning(
+                        console, f"Reuse restore failed for uncovered sweep: {restore_reason}"
+                    )
+                    reuse.record(
+                        "sweep",
+                        outcome="miss",
+                        reason=f"restore failed: {restore_reason}",
+                        key=sweep_reuse_key,
+                    )
+                else:
+                    reuse.record(
+                        "sweep", outcome="miss", reason=hit.reason, key=sweep_reuse_key
+                    )
 
     stats: dict[str, Any] = {
         "pre_sweep": {
@@ -1054,6 +1626,30 @@ async def _run_uncovered_sweep(
         if config.start_at == "per-stack":
             per_stack_records_path(dd, "uncovered").write_text(json.dumps([]))
     stats_p.write_text(json.dumps(stats, indent=2))
+    # Issue #733 — store only a completed sweep, after the same artifacts a
+    # fresh run leaves are final on disk (records + coverage accounting +
+    # sidecars). A sweep with any failure is not a result a later run may serve.
+    if (
+        not sweep_failures
+        and reuse is not None
+        and sweep_payload is not None
+        and sweep_reuse_key is not None
+        and sweep_identity is not None
+    ):
+        store_payload = _sweep_store_payload(dd)
+        if store_payload is not None:
+            reuse.store(
+                sweep_reuse_key,
+                unit="sweep",
+                payload=store_payload,
+                components=sweep_payload["components"],
+                identity=sweep_identity,
+                grounding=grounding_digests(sweep_payload),
+                grounding_status={
+                    "intent": _reuse_grounding_status(reuse, "intent"),
+                    "exploration": _reuse_grounding_status(reuse, "exploration"),
+                },
+            )
     if sweep_failures and phase is not None:
         phase.finish(*partial_or_failed_terminal(completed_reviews))
 

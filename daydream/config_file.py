@@ -162,6 +162,28 @@ class DaydreamFileConfig:
             host-side test-command run (the whole process group is killed on
             expiry). A value overrides the orchestrator default
             (``config.TEST_WALL_BUDGET_S``); ``None`` falls through to it.
+        review_cache_enabled: Issue #733. Toggle the deep review's
+            content-addressed reuse store (MH13). ``None`` falls through to the
+            RunConfig field and then the built-in default
+            (``config.DEFAULT_REVIEW_CACHE_ENABLED``, ``True``); CLI
+            ``--no-review-cache`` sets ``False`` for one forensic run. An
+            explicit ``False`` at either tier wins, and a disabled run neither
+            reads nor writes a cache entry (it still records its own
+            ``disabled`` reuse provenance).
+        review_cache_max_entries: Issue #733. Retention bound: the maximum
+            number of entries retained, oldest-last-used evicted first (MH12).
+            Coerced non-negative; an absent, negative, or non-integer value
+            degrades to ``config.DEFAULT_REVIEW_CACHE_MAX_ENTRIES`` (1024). The
+            enable flag never affects the bounds.
+        review_cache_max_bytes: Issue #733. Retention bound: total store bytes,
+            same coercion and degrade-to-default rule as
+            ``review_cache_max_entries`` (``config.DEFAULT_REVIEW_CACHE_MAX_BYTES``,
+            1 GiB).
+        review_cache_max_age_days: Issue #733. Retention bound: days since an
+            entry's last use, converted to seconds by the store, same coercion
+            and degrade-to-default rule
+            (``config.DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS``, 30). An entry past
+            the bound is a plain miss, never a truncated hit.
     """
 
     model: str | None = None
@@ -181,6 +203,10 @@ class DaydreamFileConfig:
     deep_shard_max_bytes: int | None = None
     deep_shard_fanout_cap: int | None = None
     deep_shard_frontier_max: int | None = None
+    review_cache_enabled: bool | None = None
+    review_cache_max_entries: int | None = None
+    review_cache_max_bytes: int | None = None
+    review_cache_max_age_days: int | None = None
     quality_gate_enabled: bool | None = None
     quality_gate_erosion_delta: float | None = None
     quality_gate_verbosity_delta: float | None = None
@@ -472,11 +498,12 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     reasoning_effort = merged.get("reasoning_effort")
     threshold = _coerce_int(merged.get("shallow_fanout_threshold"))
     # Optional bool flags (precision_mode, approve_on_clean, scope_issue_filing,
-    # deep_shard_enabled, quality_gate_enabled) accept a real bool only; any
-    # other value degrades to None rather than crashing the loader, so an
-    # accidental ``precision_mode = 1`` is treated as unset, not enabled. The
-    # shard bounds beside deep_shard_enabled are non-negative ints; the
-    # quality-gate delta and absolute thresholds are finite non-negative floats.
+    # deep_shard_enabled, review_cache_enabled, quality_gate_enabled) accept a
+    # real bool only; any other value degrades to None rather than crashing the
+    # loader, so an accidental ``review_cache_enabled = 1`` is treated as unset,
+    # not enabled. The shard and reuse-cache bounds beside them are non-negative
+    # ints; the quality-gate delta and absolute thresholds are finite
+    # non-negative floats.
     # Grounded diagrams (#1113): the sub-table degrades to empty on junk, so
     # every key falls through to its config.py default rather than raising.
     diagram = merged.get("diagram")
@@ -519,6 +546,10 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         deep_shard_max_bytes=_coerce_non_negative_int(merged.get("deep_shard_max_bytes")),
         deep_shard_fanout_cap=_coerce_non_negative_int(merged.get("deep_shard_fanout_cap")),
         deep_shard_frontier_max=_coerce_non_negative_int(merged.get("deep_shard_frontier_max")),
+        review_cache_enabled=_coerce_optional_bool(merged.get("review_cache_enabled")),
+        review_cache_max_entries=_coerce_non_negative_int(merged.get("review_cache_max_entries")),
+        review_cache_max_bytes=_coerce_non_negative_int(merged.get("review_cache_max_bytes")),
+        review_cache_max_age_days=_coerce_non_negative_int(merged.get("review_cache_max_age_days")),
         quality_gate_enabled=_coerce_optional_bool(merged.get("quality_gate_enabled")),
         quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
         quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),

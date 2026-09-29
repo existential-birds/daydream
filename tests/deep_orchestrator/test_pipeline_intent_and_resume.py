@@ -346,7 +346,7 @@ async def test_non_open_pr_state_suppresses_pr_body(
         )
         stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
-        rc = await run(make_config(multi_stack_target, pr_number=7))
+        rc = await run(make_config(multi_stack_target, pr_number=7, review_cache_enabled=False))
         assert rc == 0
         intent = _intent_prompt(stub)
         assert PR_SENTINEL not in intent, f"PR body must be suppressed when state={state!r}"

@@ -141,6 +141,11 @@ OPT_IN_GUARD_EXEMPTIONS: dict[str, str] = {
         "sentinel tiers with an explicit False authoritative and a diff-driven default; "
         "pinned by test_deep_shard_enabled_default_off"
     ),
+    "review_cache_enabled": (
+        "sentinel tiers with an explicit False authoritative (--no-review-cache) and a "
+        "built-in default of on; uses _resolve_config_value, not _resolve_opt_in; "
+        "pinned by test_review_cache_enablement_and_budget_resolve_cli_then_file_then_default"
+    ),
 }
 
 

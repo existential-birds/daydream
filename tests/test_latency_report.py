@@ -74,3 +74,32 @@ def test_arbiter_phase_latency_reads_the_deep_bucket_real_runs_write() -> None:
     assert _phase_timings(legacy) == {"wonder": None, "arbiter": 30.0}
 
     assert _phase_timings({"timing": {"phase_timings": {}}}) == {"wonder": None, "arbiter": None}
+
+
+def test_report_separates_cold_and_warm_samples_and_names_its_corpus(tmp_path: Path) -> None:
+    """MH14: a cold run and a warm loop are reported separately, against the target.
+
+    The sample group is a property of the case, not of the profile: two cases that
+    declare ``sample_group`` are aggregated apart so a warm rerun's lower wall
+    clock cannot be averaged into the cold baseline. The header names the corpus,
+    the sample size actually observed per group, and the stated target, so the
+    report is self-describing without the docs.
+    """
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "corpus": "review-runtime-sample",
+        "cases": [
+            {"name": "c1", "sample_group": "cold", "profiles": {"per_stack_review": [600, 620, 700]}},
+            {"name": "c2", "sample_group": "warm", "profiles": {"per_stack_review": [1, 1, 1]}},
+        ],
+    }))
+    report = build_report(json.loads(manifest.read_text()), corpus_dir=tmp_path)
+    runtime = report["review_runtime"]
+    assert runtime["corpus"] == "review-runtime-sample"
+    assert runtime["groups"]["cold"]["n"] == 1
+    assert runtime["groups"]["warm"]["n"] == 1
+    header = runtime["header"]
+    assert "review-runtime-sample" in header and "n=1" in header
+    assert "cold" in header and "warm" in header
+    assert "p50=620" in header and "p50=1" in header
+    assert "Target: 5-15 min for a small follow-up fix" in header

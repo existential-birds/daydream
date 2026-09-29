@@ -40,7 +40,14 @@ if TYPE_CHECKING:
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
-_LEGACY_DIRECTORY_ANCHORS = frozenset(("runs", "deep", "exploration", "partial-fixes", "improve", "intents"))
+#: Static ``.daydream`` directory anchors the artifact layer recognizes by
+#: name. ``review-cache`` is the deep review reuse store's owner (issue #733);
+#: it must be a static anchor so a published store directory is accepted by
+#: ``_validate_legacy_public`` on the next run's open, and so the whole live
+#: ``.daydream`` publish carries it across runs without a per-run route.
+_LEGACY_DIRECTORY_ANCHORS = frozenset(
+    ("runs", "deep", "exploration", "partial-fixes", "improve", "intents", "review-cache")
+)
 _LEGACY_FILE_ANCHORS = frozenset(("diff.patch", "hunk-index.json", "recommended.patch", ".DS_Store"))
 _LEGACY_ANCHORS = _LEGACY_DIRECTORY_ANCHORS | _LEGACY_FILE_ANCHORS
 _OPERATIONAL_NAMES = frozenset(("worktrees", "audit"))

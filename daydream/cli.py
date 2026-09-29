@@ -744,6 +744,7 @@ def _parse_improve_args(argv: list[str]) -> RunConfig:
             args, "improve_plan_description", None
         ),
         improve_prune_name=getattr(args, "improve_prune_name", None),
+        review_cache_enabled=getattr(args, "review_cache_enabled", None),
         log_mode=args.log_mode,
     )
 
@@ -996,6 +997,14 @@ def _build_main_parser(*, full_help: bool = False) -> argparse.ArgumentParser:
         help="Keep review output after completion" if full_help else argparse.SUPPRESS,
     )
     parser.add_argument(
+        "--no-review-cache",
+        action="store_false",
+        default=None,
+        dest="review_cache_enabled",
+        help="Ignore and write no review-result cache (forensic run)"
+        if full_help else argparse.SUPPRESS,
+    )
+    parser.add_argument(
         "--start-at",
         choices=["review", "parse", "fix", "test", "ttt", "per-stack", "merge"],
         default="review",
@@ -1195,6 +1204,7 @@ def _parse_args(argv: list[str] | None = None) -> RunConfig:
         precision_mode=args.precision,
         approve_on_clean=args.approve_on_clean,
         scope_issue_filing=args.file_scope_issues,
+        review_cache_enabled=args.review_cache_enabled,
         extra_copy=list(args.extra_copy),
         non_interactive=args.non_interactive,
         assume=args.assume,

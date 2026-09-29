@@ -11,6 +11,7 @@ if TYPE_CHECKING:
     from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
     from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
     from daydream.deep.prompts import DeepDiffBoundInfo
+    from daydream.deep.reuse_store import ReuseCache
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
 
@@ -207,6 +208,18 @@ class DeepState:
         )
 
     @property
+    def reuse_cache(self) -> ReuseCache | None:
+        value: object | None = self._data.get("reuse_cache")
+        if value is None:
+            return None
+        from daydream.deep.reuse_store import ReuseCache
+
+        return cast(
+            ReuseCache,
+            self._check("reuse_cache", value, ReuseCache, "ReuseCache or None"),
+        )
+
+    @property
     def risk_summary(self) -> RiskSummary | None:
         value: object | None = self._data.get("risk_summary")
         if value is None:
@@ -267,6 +280,10 @@ class DeepState:
     @intent_summary.setter
     def intent_summary(self, value: str) -> None:
         self._data["intent_summary"] = value
+
+    @property
+    def intent_summary_or_none(self) -> str | None:
+        return cast(str | None, self._optional("intent_summary", str, "str or None"))
 
     @property
     def records_paths(self) -> list[Path]:

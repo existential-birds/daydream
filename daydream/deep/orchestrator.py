@@ -58,6 +58,7 @@ from daydream.deep.merge_steps import (
 )
 from daydream.deep.prompts import bound_deep_diff
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
+from daydream.deep.reuse_store import build_reuse_cache
 from daydream.deep.review_steps import (
     _clear_sweep_artifacts,
     _step_exploration,
@@ -960,6 +961,13 @@ async def _run_review_spine(
             },
             allow_standalone_artifacts=allow_standalone,
         )
+
+        # Issue #733: publish the run's content-addressed reuse store handle
+        # beside the latency route, before ``run_flow``. Every review unit
+        # reaches the store through ``reuse_cache_for`` -- this one handle --
+        # and the store root is published back into the tree so the next run
+        # can read it.
+        ctx.data["reuse_cache"] = build_reuse_cache(ctx)
 
         # Nothing is torn down after the flow. .daydream/exploration/ is a
         # content-keyed cache (see ``exploration_cache_key``) the next run reuses

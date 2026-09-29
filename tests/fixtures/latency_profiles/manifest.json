@@ -1,6 +1,6 @@
 {
   "corpus": "latency-profiles",
-  "note": "Small fixed hand-built corpus for the per-profile comparison report (issue #732). The security and contested cases omit the fast profile because their risk floors escalate above it by construction (MH5), so only profiles actually taken are recorded.",
+  "note": "Small fixed hand-built corpus for the per-profile comparison report (issue #732). The security and contested cases omit the fast profile because their risk floors escalate above it by construction (MH5), so only profiles actually taken are recorded. The two review-runtime cases carry an explicit sample_group so the cold fix and the warm reuse loop are reported apart (MH14).",
   "corpus_dir": "tests/fixtures/latency_profiles",
   "cases": [
     {
@@ -41,6 +41,20 @@
           "db.py",
           4
         ]
+      ]
+    },
+    {
+      "name": "review-runtime-cold",
+      "sample_group": "cold",
+      "profiles": [
+        "forensic"
+      ]
+    },
+    {
+      "name": "review-runtime-warm",
+      "sample_group": "warm",
+      "profiles": [
+        "forensic"
       ]
     }
   ]
