@@ -53,6 +53,7 @@ from daydream.config import (
     TEST_WALL_BUDGET_S,
 )
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.artifacts import (
     arbiter_input_path,
     deep_dir,
@@ -93,6 +94,11 @@ from daydream.deep.reuse_key import (
     unit_key,
 )
 from daydream.deep.reuse_store import ReuseCache, ReuseHit, restore_entry_payload
+from daydream.deep.verify_selection import (
+    SELECTION_RULE_VERSION,
+    SelectionConfig,
+    select_items,
+)
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -1829,28 +1835,54 @@ async def phase_verify_recommendations(
     merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
+    selection: SelectionConfig | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Verify proposed recommendations against author intent and concrete evidence."""
+    """Verify proposed recommendations against author intent and concrete evidence.
+
+    Every canonical item is classified once by :func:`select_items` -- the
+    decision list is persisted as a sibling ``selection`` block of the verdicts
+    list, so an exempt or skipped item is recorded, never silently dropped. Only
+    the selected items are rendered into the prompt; a run with nothing selected
+    makes no backend call at all and still writes a schema-valid artifact.
+
+    ``selection=None`` is conservative: it reproduces today's "verify every
+    non-structural item" behaviour (``verify_all``), so an un-updated caller can
+    never skip a finding.
+    """
     run_context = resolve_run_context(run_context)
     output_path = verdicts_path(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
-    # DELIBERATE: structural items get no verifier verdict (plan Assumption 2 --
-    # structural is validated at review time by review-structure's G3 evidence
-    # gates and protected at fix time by the contract-wins guard, so the
-    # interface-conformance verifier does not apply to it).
-    verifiable = [i for i in items if i.get("lens") in ("per-stack", "cross-stack")]
+    config = selection if selection is not None else SelectionConfig(verify_all=True)
+    decisions = select_items(
+        items,
+        provenance=load_provenance(deep_dir),
+        hunk_index=load_hunk_index(deep_dir.parent),
+        diff_text=_read_diff_text(deep_dir),
+        config=config,
+    )
+    selection_block: dict[str, Any] = {
+        "rule_version": SELECTION_RULE_VERSION,
+        "mode": "verify_all" if config.verify_all else "selective",
+        "extra_categories": list(config.extra_categories),
+        "decisions": [decision.as_dict() for decision in decisions],
+        "selected": sum(1 for decision in decisions if decision.selected),
+        "skipped": sum(1 for decision in decisions if not decision.selected),
+    }
+    selected_items = [
+        item for item, decision in zip(items, decisions, strict=True) if decision.selected
+    ]
 
-    if not verifiable:
-        empty_payload: dict[str, Any] = {"verdicts": []}
+    if not selected_items:
+        empty_payload: dict[str, Any] = {"verdicts": [], "selection": selection_block}
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output_path.write_text(json.dumps(empty_payload, indent=2))
         return output_path, empty_payload
 
     prompt = get_registry().prompt("verify")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
-        items=verifiable,
+        items=selected_items,
         cwd=work.repo,
         output_path=output_path,
     )
@@ -1859,10 +1891,26 @@ async def phase_verify_recommendations(
         backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
     )
     payload = _coerce_verdicts_payload(candidate)
+    payload["selection"] = selection_block
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
     return output_path, payload
+
+
+def _read_diff_text(deep_dir: Path) -> str:
+    """Return the run's ``diff.patch`` text, or ``""`` when absent (Pattern B).
+
+    The production layout writes ``diff.patch`` beside the hunk index at the
+    artifact root (``deep_dir.parent``); a ``deep_dir``-local copy is accepted
+    first so a caller that stages the patch next to the deep artifacts works too.
+    """
+    for candidate in (deep_dir / "diff.patch", deep_dir.parent / "diff.patch"):
+        try:
+            return candidate.read_text()
+        except OSError:
+            continue
+    return ""
 
 
 @bind_resolved_run_context

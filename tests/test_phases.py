@@ -33,6 +33,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import deep_dir, merged_items_path, verdicts_path
 from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import build_per_stack_prompt
+from daydream.deep.verify_selection import SelectionConfig
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.hunk_index import write_hunk_index
@@ -5019,6 +5020,67 @@ async def test_verifier_excludes_structural_lens(
     # The single backend call in this phase is the verifier diagnostic —
     # it must run with the non-mutating read-only profile.
     assert backend.read_only_calls == [True]
+
+
+async def test_phase_verify_writes_one_decision_per_item_and_prompts_only_the_selected(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """MH10 + MH15: every canonical item gets one decision; only selected items are rendered."""
+    silence_console("daydream.phases")
+    work = make_work(tmp_path)
+    dd = deep_dir(work.repo, allow_standalone=True)
+    dd.mkdir(parents=True, exist_ok=True)
+    # routine-but-unadjudicated item (selected) beside a skip-eligible one (confirmed) and a structural item
+    items = {"items": [
+        {"id": 1, "item_uid": "item:1", "lens": "per-stack", "file": "a.py", "line": 9, "severity": "low",
+         "confidence": "HIGH", "description": "routine rename", "rationale": "r", "evidence": "a.py:9 renamed"},
+        {"id": 2, "item_uid": "item:2", "lens": "structural", "file": "big.py", "line": 0, "severity": "high",
+         "confidence": "HIGH", "description": "1k-line file", "rationale": "r", "evidence": "big.py"},
+    ]}
+    merged_items_path(dd).write_text(json.dumps(items))
+    # No provenance ledger written: item:1 is unadjudicated, so MH7 selects it.
+    backend = ScriptedBackend(events=_structured_turn({"verdicts": [
+        {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []},
+    ]}))
+    _path, payload = await phase_verify_recommendations(
+        backend, work, merged_items_path=merged_items_path(dd), deep_dir=dd,
+        selection=SelectionConfig(verify_all=False, extra_categories=()),
+    )
+    decisions = {d["item_uid"]: d for d in payload["selection"]["decisions"]}
+    assert set(decisions) == {"item:1", "item:2"}                     # 1:1 with the canonical list
+    assert decisions["item:2"]["reason_code"] == "exempt:structural"
+    assert payload["verdicts"] == [
+        {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}
+    ]
+    assert "1k-line file" not in backend.last_prompt                  # exempt item never rendered
+    assert "Gate-0 anti-confabulation" in backend.last_prompt         # MH15: protocol preserved
+
+
+async def test_zero_selection_makes_no_backend_call_and_still_writes_a_valid_artifact(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    silence_console: Callable[..., None],
+) -> None:
+    """MH11: nothing selected -> no verifier turn, artifact still schema-valid."""
+    silence_console("daydream.phases")
+    work = make_work(tmp_path)
+    dd = deep_dir(work.repo, allow_standalone=True)
+    dd.mkdir(parents=True, exist_ok=True)
+    merged_items_path(dd).write_text(json.dumps({"items": [
+        {"id": 1, "item_uid": "item:1", "lens": "structural", "file": "big.py", "line": 0,
+         "severity": "high", "confidence": "HIGH", "description": "big", "rationale": "r", "evidence": "big.py"},
+    ]}))
+    backend = ScriptedBackend(events=())
+    _path, payload = await phase_verify_recommendations(
+        backend, work, merged_items_path=merged_items_path(dd), deep_dir=dd,
+        selection=SelectionConfig(verify_all=False, extra_categories=()),
+    )
+    assert backend.calls == []
+    assert payload["verdicts"] == []
+    assert json.loads(verdicts_path(dd).read_text())["verdicts"] == []
+    assert len(payload["selection"]["decisions"]) == 1
 
 
 async def test_verifier_prompt_carries_gate_zero_protocol(
