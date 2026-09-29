@@ -290,6 +290,20 @@ def verdicts_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "recommendation-verdicts.json"
 
 
+def adjudication_provenance_path(deep_dir_path: Path) -> Path:
+    """Path to the host-stamped adjudication provenance ledger (issue #735).
+
+    Written by the arbiter/suppression verdict-application seam, this sidecar
+    records what each adjudication pass did to each canonical record: whether
+    the record was targeted, whether a verdict bound to it, whether it survived,
+    and which revisable fields were materially rewritten. The verify-selection
+    predicate consumes it to tell a strongly-evidenced, confirmed-adjudicated
+    routine finding from one that needs an independent second pass. It is a
+    sibling of, not a replacement for, ``recommendation-verdicts.json``.
+    """
+    return deep_dir_path / "adjudication-provenance.json"
+
+
 def test_verdict_path(deep_dir_path: Path) -> Path:
     """Post-fix test-suite verdict (``{"passed": bool, "retries": int}``).
 
