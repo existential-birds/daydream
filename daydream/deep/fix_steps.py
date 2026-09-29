@@ -151,6 +151,15 @@ def _record_fix_preflight_rejection(dd: Path, items: list[dict[str, Any]]) -> No
         print_error(console, "Fix preflight failure audit failed", str(exc))
 
 
+def _artifact_dir(ctx: FlowContext) -> Path:
+    """Resolve the active private artifact directory for this run."""
+    return artifact_dir_for(
+        ctx.work.repo,
+        session=ctx.artifacts,
+        allow_standalone=ctx.allow_standalone_artifacts,
+    )
+
+
 async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     """Fix-apply gate; on accept, load and severity-sort the canonical items."""
     deep_state = DeepState(ctx.data)
@@ -187,11 +196,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         fix_failures_path(dd),
         fix_leftover_untracked_path(dd),
         stabilization_failed_path(dd),
-        artifact_dir_for(
-            ctx.work.repo,
-            session=ctx.artifacts,
-            allow_standalone=ctx.allow_standalone_artifacts,
-        ) / "recommended.patch",
+        _artifact_dir(ctx) / "recommended.patch",
     )
     try:
         for stale in stale_paths:
@@ -1077,11 +1082,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     }
     if quality_enabled:
         quality_before, quality_unavailable = await _capture_quality_before(
-            artifact_dir_for(
-                ctx.work.repo,
-                session=ctx.artifacts,
-                allow_standalone=ctx.allow_standalone_artifacts,
-            ),
+            _artifact_dir(ctx),
             ctx.work.repo,
             reviewed_python,
         )
@@ -1184,11 +1185,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         await _evaluate_quality_gate(
             enabled=quality_enabled,
             thresholds=QualityGateThresholds.from_config(config),
-            daydream_dir=artifact_dir_for(
-                ctx.work.repo,
-                session=ctx.artifacts,
-                allow_standalone=ctx.allow_standalone_artifacts,
-            ),
+            daydream_dir=_artifact_dir(ctx),
             code_workspace=ctx.work.repo,
             dd=deep_state.dd,
             candidates={path for path in snapshot.paths if path.endswith(".py")}
@@ -1507,11 +1504,7 @@ async def finalize_retained_tree_after_test(
             return _stop("post-test tree did not stabilize")
 
         try:
-            patch_path = artifact_dir_for(
-                ctx.work.repo,
-                session=ctx.artifacts,
-                allow_standalone=ctx.allow_standalone_artifacts,
-            ) / "recommended.patch"
+            patch_path = _artifact_dir(ctx) / "recommended.patch"
             patch_path.parent.mkdir(parents=True, exist_ok=True)
             patch_path.write_bytes(snapshot.recommended_patch)
             atomic_write_json(

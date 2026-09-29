@@ -280,9 +280,6 @@ class ReuseCache:
         identity: PhaseIdentity,
         grounding: Mapping[str, str],
         grounding_status: Mapping[str, str],
-        key_format: int = REUSE_KEY_FORMAT,
-        run_id: str | None = None,
-        session_id: str | None = None,
         now: float | None = None,
     ) -> None:
         """Write a completed entry: payload, then manifest, then marker.
@@ -304,7 +301,7 @@ class ReuseCache:
         manifest: dict[str, Any] = {
             "key": key,
             "unit": unit,
-            "format": key_format,
+            "format": REUSE_KEY_FORMAT,
             "components": dict(components),
             "payload": payload_digests,
             "grounding": dict(grounding),
@@ -314,8 +311,8 @@ class ReuseCache:
             "model": identity.model,
             "effort": identity.effort,
             "origin": {
-                "run_id": self.run_id if run_id is None else run_id,
-                "session_id": self.session_id if session_id is None else session_id,
+                "run_id": self.run_id,
+                "session_id": self.session_id,
                 "recorded_at": recorded_at,
             },
             "created_at": recorded_at,

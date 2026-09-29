@@ -54,7 +54,6 @@ from daydream.deep.records import (
 from daydream.deep.render import _PIPELINE_STAGE_NAMES, render_held_section, render_report
 from daydream.deep.reuse_key import (
     PhaseIdentity,
-    absent_components,
     arbiter_key_payload,
     digest_or_absent,
     exploration_digest,
@@ -69,7 +68,11 @@ from daydream.deep.reuse_store import (
     restore_entry_payload,
     reuse_cache_for,
 )
-from daydream.deep.review_steps import _record_reuse_hit, _reuse_grounding_statuses
+from daydream.deep.review_steps import (
+    _record_absent_components,
+    _record_reuse_hit,
+    _reuse_grounding_statuses,
+)
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
@@ -1071,11 +1074,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 )
                 arbiter_key = unit_key(arbiter_payload)
                 if arbiter_key is None:
-                    reuse.record(
-                        "arbiter",
-                        outcome="miss",
-                        reason="absent components: " + ", ".join(absent_components(arbiter_payload)),
-                    )
+                    _record_absent_components(reuse, "arbiter", arbiter_payload)
                 elif _try_reuse_arbiter(reuse, deep_state, plan, arbiter_key, arbiter_payload):
                     return
             if plan.sharded:
@@ -1383,11 +1382,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             )
             merge_reuse_key = unit_key(merge_payload)
             if merge_reuse_key is None:
-                reuse.record(
-                    "merge",
-                    outcome="miss",
-                    reason="absent components: " + ", ".join(absent_components(merge_payload)),
-                )
+                _record_absent_components(reuse, "merge", merge_payload)
             elif _try_reuse_merge(reuse, deep_state, merge_reuse_key, merge_payload):
                 _clear_merge_failure(dd)
                 clear_review_budget_stop(dd, "Cross-stack merge")

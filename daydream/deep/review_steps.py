@@ -164,6 +164,15 @@ def _record_reuse_hit(
     )
 
 
+def _record_absent_components(reuse: "ReuseCache", unit: str, payload: Mapping[str, Any]) -> None:
+    """Record the named miss for a payload with a None required component."""
+    reuse.record(
+        unit,
+        outcome="miss",
+        reason="absent components: " + ", ".join(absent_components(payload)),
+    )
+
+
 def _grounding_moved(entry: object) -> bool:
     """Whether any recorded grounding input moved for a reused unit (MH16)."""
     if not isinstance(entry, dict):
@@ -474,11 +483,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         )
         intent_reuse_key = unit_key(intent_payload)
         if intent_reuse_key is None:
-            reuse.record(
-                "intent",
-                outcome="miss",
-                reason="absent components: " + ", ".join(absent_components(intent_payload)),
-            )
+            _record_absent_components(reuse, "intent", intent_payload)
         else:
             hit = reuse.lookup(intent_reuse_key)
             if isinstance(hit, ReuseHit):
@@ -633,11 +638,7 @@ async def _wonder(ctx: FlowContext) -> None:
             )
             wonder_reuse_key = unit_key(wonder_payload)
             if wonder_reuse_key is None:
-                reuse.record(
-                    "alternatives",
-                    outcome="miss",
-                    reason="absent components: " + ", ".join(absent_components(wonder_payload)),
-                )
+                _record_absent_components(reuse, "alternatives", wonder_payload)
             else:
                 hit = reuse.lookup(wonder_reuse_key)
                 if isinstance(hit, ReuseHit):
@@ -1334,12 +1335,7 @@ async def _run_uncovered_sweep(
             )
             sweep_reuse_key = unit_key(sweep_payload)
             if sweep_reuse_key is None:
-                reuse.record(
-                    "sweep",
-                    outcome="miss",
-                    reason="absent components: "
-                    + ", ".join(absent_components(sweep_payload)),
-                )
+                _record_absent_components(reuse, "sweep", sweep_payload)
             else:
                 hit = reuse.lookup(sweep_reuse_key)
                 if isinstance(hit, ReuseHit):
