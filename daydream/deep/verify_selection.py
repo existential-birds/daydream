@@ -1,27 +1,85 @@
 """Host-side, pure inputs for the recommendation-verifier selection decision.
 
-This module is the single home of the deterministic, fail-open reader the
-verify-selection predicate consumes: :func:`changed_text_at` answers "what text
-did the diff add at (or around) the line this finding cites?" from the run's own
-``diff.patch`` text. It walks the unified diff once, tracks the current
-post-state file (the ``+++ b/`` header, unquoted exactly as
-``daydream/hunk_index.py`` unquotes it) and the new-side line counter, and
-returns the newline-joined text of the ``+`` content lines in the hunk covering
-``line`` for ``file``. A cited line that is not itself an added line yields the
-empty string, as does a missing file, a malformed or empty diff, or a
-non-positive line number — the classifier reads ``""`` as "no changed-line
-signal", never as a skip signal (Pattern B, fail-open).
+Two responsibilities live here, both deterministic, total, and free of I/O,
+randomness, and time:
 
-The reader is deliberately range-free: a cited line the hunk index snapped is
-already reflected in ``item["line"]`` before this runs, so importing the index
-for ranges would double-apply the snap. No other artifact is read, no
-randomness or time is consulted, and the function is total: the only failure
-mode is unparseable input, which is the documented ``""`` answer.
+* :func:`changed_text_at` is the reader. It answers "what text did the diff add
+  at (or around) the line this finding cites?" from the run's own ``diff.patch``
+  text. It walks the unified diff once, tracks the current post-state file (the
+  ``+++ b/`` header, unquoted exactly as ``daydream/hunk_index.py`` unquotes it)
+  and the new-side line counter, and returns the newline-joined text of the
+  ``+`` content lines in the hunk covering ``line`` for ``file``. A cited line
+  that is not itself an added line yields the empty string, as does a missing
+  file, a malformed or empty diff, or a non-positive line number -- the
+  classifier reads ``""`` as "no changed-line signal", never as a skip signal
+  (Pattern B, fail-open). The reader is deliberately range-free: a cited line
+  the hunk index snapped is already reflected in ``item["line"]`` before this
+  runs, so importing the index for ranges would double-apply the snap.
+* :func:`select_items` is the predicate. It classifies every canonical merged
+  item into select/skip from four persisted inputs -- the item's own text, the
+  changed lines it cites, the host-stamped adjudication provenance ledger, and
+  (on resume) the prior verify artifact -- with the first matching branch in a
+  fixed order winning. It returns exactly one :class:`SelectionDecision` per
+  input item, in input order, including exempt items, so the decisions
+  reconcile 1:1 with the canonical item list (MH10). Structural and wonder-lens
+  items are marked exempt rather than silently omitted; ``verify_all``
+  reproduces today's "verify every non-exempt item" behaviour and configuration
+  can only widen selection (MH13).
+
+Failure direction is uniform: every unreadable or absent input selects, never
+skips. The only exception is :class:`UnknownRiskCategoryError`, which is a
+configuration error surfaced to the operator, not a data error. The predicate
+never raises for a malformed item, a missing ledger, a missing diff, or a
+missing hunk index.
 """
 
 from __future__ import annotations
 
+import hashlib
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
+from typing import Any
+
+from daydream.deep.adjudication_provenance import RecordProvenance
+from daydream.deep.records import item_source_uids, item_uid
+from daydream.deep.risk_categories import (
+    UnknownRiskCategoryError,
+    categories_in,
+    resolve_mandatory_categories,
+)
 from daydream.hunk_index import _HUNK_HEADER, _header_path
+from daydream.json_utils import canonical_json
+
+#: On-disk selection-rule version. Bump whenever the predicate's semantics
+#: change; a prior verify artifact carrying another value is never reused (SH3).
+SELECTION_RULE_VERSION: int = 1
+
+#: The verifier-relevant components of one canonical item, and only those.
+#: Renumbering ``id`` or attaching a verdict must never invalidate a reuse.
+_DIGEST_FIELDS: tuple[str, ...] = (
+    "item_uid",
+    "lens",
+    "file",
+    "line",
+    "severity",
+    "confidence",
+    "description",
+    "rationale",
+    "evidence",
+)
+
+#: Lenses the verifier never adjudicates, with the exemption reason each records.
+_EXEMPT_LENSES: dict[str, str] = {
+    "structural": "exempt:structural",
+    "wonder": "exempt:wonder",
+}
+
+#: The single skip reason: reached only for a strongly evidenced, confirmed,
+#: unrevised, non-cross-stack, non-risk item.
+SKIP_REASON_CODE = "strongly_evidenced_adjudicated_routine"
+
+#: Verdict values that always force re-verification on resume (MH9).
+_UNRESOLVED_VERDICTS: frozenset[str] = frozenset({"contradicts", "uncertain"})
 
 
 def changed_text_at(diff_text: str, file: str, line: object) -> str:
@@ -93,3 +151,285 @@ def changed_text_at(diff_text: str, file: str, line: object) -> str:
         for added_line, (hunk, text) in sorted(added_by_line.items())
         if hunk == wanted_hunk
     )
+
+
+@dataclass(frozen=True)
+class SelectionConfig:
+    """Resolved verify-selection policy.
+
+    ``verify_all`` is the conservative toggle: ``True`` reproduces today's
+    "verify every non-exempt item" behaviour. ``extra_categories`` names
+    additive risk categories and is always validated against the declared
+    vocabulary by :meth:`categories`; it can never remove a built-in category.
+    """
+
+    verify_all: bool = True
+    extra_categories: tuple[str, ...] = ()
+
+    @property
+    def categories(self) -> tuple[str, ...]:
+        """The built-in mandatory categories followed by the validated extras."""
+        return resolve_mandatory_categories(self.extra_categories)
+
+
+@dataclass(frozen=True)
+class SelectionDecision:
+    """One canonical item's selection verdict, with the evidence that produced it."""
+
+    item_uid: str
+    item_id: int | None
+    selected: bool
+    reason_code: str
+    reason: str
+    provenance: dict[str, Any]
+    content_digest: str
+    verdict_reused: bool = False
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return the JSON-safe artifact body for this decision (Pattern A)."""
+        return {
+            "item_uid": self.item_uid,
+            "item_id": self.item_id,
+            "selected": self.selected,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+            "provenance": self.provenance,
+            "content_digest": self.content_digest,
+            "verdict_reused": self.verdict_reused,
+        }
+
+
+def resolve_selection_config(
+    *, verify_all: bool | None, extra_categories: Iterable[str] | None
+) -> SelectionConfig:
+    """Resolve the config-file knobs into a frozen :class:`SelectionConfig`.
+
+    An absent ``verify_all`` degrades to the conservative built-in default; a
+    non-bool is treated as absent. Every extra category is validated here so an
+    unrecognised name fails loudly (:class:`UnknownRiskCategoryError`) before
+    any backend call rather than silently widening or narrowing selection.
+    """
+    categories = tuple(extra_categories or ())
+    resolve_mandatory_categories(categories)
+    return SelectionConfig(
+        verify_all=True if verify_all is None else bool(verify_all),
+        extra_categories=categories,
+    )
+
+
+def item_content_digest(item: Mapping[str, Any]) -> str:
+    """Return a sha256 over the verifier-relevant components of *item*.
+
+    Only :data:`_DIGEST_FIELDS` participate, so renumbering ``id`` or attaching
+    a verdict cannot invalidate a reuse while a text change can (MH14). Missing
+    fields are digested as ``None`` so absence is a stable value, not an error.
+    """
+    payload = {field: item.get(field) for field in _DIGEST_FIELDS}
+    return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def select_items(
+    items: Sequence[Mapping[str, Any]],
+    *,
+    provenance: Mapping[str, RecordProvenance] | None,
+    hunk_index: Mapping[str, Any],
+    diff_text: str,
+    config: SelectionConfig,
+) -> list[SelectionDecision]:
+    """Classify every canonical item into select/skip, in input order (MH2).
+
+    Returns exactly one decision per input item, including exempt structural and
+    wonder-lens items. ``hunk_index`` is accepted for symmetry with the run's
+    persisted inputs but is intentionally unread: the classifier grounds on the
+    diff text, never on index ranges (see :func:`changed_text_at`).
+    """
+    ledger = provenance if isinstance(provenance, Mapping) else None
+    return [
+        _decide(
+            dict(item) if isinstance(item, Mapping) else {},
+            ledger=ledger,
+            diff_text=diff_text,
+            config=config,
+        )
+        for item in items
+    ]
+
+
+def _decide(
+    data: Mapping[str, Any],
+    *,
+    ledger: Mapping[str, RecordProvenance] | None,
+    diff_text: str,
+    config: SelectionConfig,
+) -> SelectionDecision:
+    """Apply the fixed branch order to one item; first match wins."""
+    uid = item_uid(dict(data))
+    item_id = data.get("id")
+    lens = str(data.get("lens", ""))
+    evidence, present, unadjudicated = _item_provenance(_attributed_uids(data), ledger)
+
+    def decision(selected: bool, reason_code: str, reason: str) -> SelectionDecision:
+        return SelectionDecision(
+            item_uid=uid,
+            item_id=item_id if isinstance(item_id, int) and not isinstance(item_id, bool) else None,
+            selected=selected,
+            reason_code=reason_code,
+            reason=reason,
+            provenance=evidence,
+            content_digest=item_content_digest(data),
+        )
+
+    exempt = _EXEMPT_LENSES.get(lens)
+    if exempt:
+        return decision(False, exempt, f"lens {lens!r} is verdict-exempt")
+    if config.verify_all:
+        return decision(True, "verify_all", "verify_all is enabled")
+    if lens == "cross-stack":
+        return decision(True, "cross_stack", "cross-stack finding")
+    category = _risk_category(data, diff_text, config)
+    if category:
+        return decision(
+            True, f"risk_category:{category}", f"changed text matches mandatory category {category!r}"
+        )
+    weak = _weak_evidence_reason(data)
+    if weak:
+        return decision(True, weak, _weak_reason_text(weak))
+    if any(record.materially_revised for record in present):
+        return decision(True, "materially_revised", "adjudication materially rewrote the finding")
+    if unadjudicated:
+        return decision(True, unadjudicated, _unadjudicated_reason_text(unadjudicated))
+    prior = _prior_verdict(data)
+    if prior in _UNRESOLVED_VERDICTS:
+        return decision(True, f"prior_verdict:{prior}", f"prior verifier verdict {prior!r}")
+    return decision(False, SKIP_REASON_CODE, "strongly evidenced, confirmed, unrevised routine finding")
+
+
+def _attributed_uids(item: Mapping[str, Any]) -> list[str]:
+    """Return the record uids whose provenance adjudicates *item*.
+
+    The merge agent's ``source_uids`` lead; an item that never went through the
+    merge agent falls back to its own ``item_uid``. An item with neither has no
+    usable attribution and is unadjudicated (MH7).
+    """
+    data = dict(item)
+    attributed = item_source_uids(data)
+    if attributed:
+        return attributed
+    own = item_uid(data)
+    return [own] if own else []
+
+
+def _item_provenance(
+    uids: Sequence[str], ledger: Mapping[str, RecordProvenance] | None
+) -> tuple[dict[str, Any], list[RecordProvenance], str | None]:
+    """Return ``(evidence, present, unadjudicated_reason)`` for one item.
+
+    ``evidence`` is the JSON-safe per-uid ledger body; ``present`` the parsed
+    records, for the revision test; ``unadjudicated_reason`` is ``None`` only
+    when every attributed uid is present and confirmed. Any missing, untargeted,
+    unbound, or unkept record selects the item (the fail direction).
+    """
+    evidence: dict[str, Any] = {}
+    present: list[RecordProvenance] = []
+    if not uids or not ledger:
+        return evidence, present, "unadjudicated:no_provenance"
+    for uid in uids:
+        record = ledger.get(uid)
+        if record is None:
+            continue
+        evidence[uid] = record.as_dict()
+    if len(evidence) != len(uids):
+        return evidence, present, "unadjudicated:missing_provenance"
+    present = [ledger[uid] for uid in uids]
+    if any(not record.targeted for record in present):
+        return evidence, present, "unadjudicated:not_targeted"
+    if any(not record.verdict_bound for record in present):
+        return evidence, present, "unadjudicated:verdict_unbound"
+    if any(not record.kept for record in present):
+        return evidence, present, "unadjudicated:not_kept"
+    return evidence, present, None
+
+
+def _risk_category(
+    data: Mapping[str, Any], diff_text: str, config: SelectionConfig
+) -> str | None:
+    """Return the first mandatory category whose triggers occur, or ``None``.
+
+    Reads only the item's own text, its cited file, and the added text of the
+    covered hunk -- never the whole diff (Decision 4).
+    """
+    file = data.get("file")
+    file_text = file if isinstance(file, str) else ""
+    text = "\n".join(str(data.get(key, "")) for key in ("description", "rationale", "evidence"))
+    text = f"{text}\n{file_text}\n{changed_text_at(diff_text, file_text, data.get('line'))}"
+    matched = set(categories_in(text))
+    for category in config.categories:
+        if category in matched:
+            return category
+    return None
+
+
+def _weak_evidence_reason(data: Mapping[str, Any]) -> str | None:
+    """Return the weak-evidence reason code for *data*, or ``None``.
+
+    Exactly three conditions, checked in order; severity is never consulted
+    (MH5).
+    """
+    if str(data.get("confidence", "")).upper() != "HIGH":
+        return "weak_evidence:confidence"
+    evidence = str(data.get("evidence", "")).strip()
+    if not evidence or evidence.lower() in _placeholder_evidence():
+        return "weak_evidence:placeholder_evidence"
+    if data.get("location_distrust") or "location_cited_line" in data:
+        return "weak_evidence:located_beyond_tolerance"
+    return None
+
+
+def _prior_verdict(data: Mapping[str, Any]) -> str:
+    """Return a prior verifier verdict attached to *data*, or ``""``."""
+    value = data.get("verifier_verdict")
+    return value if isinstance(value, str) else ""
+
+
+def _placeholder_evidence() -> frozenset[str]:
+    """The placeholder-evidence vocabulary, shared with the approval gate.
+
+    Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    import would be a cycle.
+    """
+    from daydream.phases import _PLACEHOLDER_EVIDENCE
+
+    return _PLACEHOLDER_EVIDENCE
+
+
+def _weak_reason_text(reason_code: str) -> str:
+    suffix = reason_code.partition(":")[2]
+    return {
+        "confidence": "confidence is not HIGH",
+        "placeholder_evidence": "evidence is blank or placeholder text",
+        "located_beyond_tolerance": "location validation relocated or distrusted the citation",
+    }.get(suffix, "weak evidence")
+
+
+def _unadjudicated_reason_text(reason_code: str) -> str:
+    suffix = reason_code.partition(":")[2]
+    return {
+        "no_provenance": "no adjudication provenance for the item's records",
+        "missing_provenance": "an attributed record is missing from the provenance ledger",
+        "not_targeted": "no adjudication pass targeted the item's records",
+        "verdict_unbound": "an adjudication verdict could not be bound to the record",
+        "not_kept": "adjudication did not keep the record",
+    }.get(suffix, "no confirmed independent adjudication")
+
+
+__all__ = [
+    "SELECTION_RULE_VERSION",
+    "SKIP_REASON_CODE",
+    "SelectionConfig",
+    "SelectionDecision",
+    "UnknownRiskCategoryError",
+    "changed_text_at",
+    "item_content_digest",
+    "resolve_selection_config",
+    "select_items",
+]

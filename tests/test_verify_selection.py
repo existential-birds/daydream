@@ -1,4 +1,14 @@
-from daydream.deep.verify_selection import changed_text_at
+import pytest
+
+from daydream.deep.adjudication_provenance import RecordProvenance
+from daydream.deep.verify_selection import (
+    SelectionConfig,
+    UnknownRiskCategoryError,
+    changed_text_at,
+    item_content_digest,
+    resolve_selection_config,
+    select_items,
+)
 
 _DIFF = """diff --git a/auth.py b/auth.py
 --- a/auth.py
@@ -15,3 +25,74 @@ def test_cited_changed_lines_are_the_added_text_of_the_covering_hunk() -> None:
     assert changed_text_at(_DIFF, "auth.py", 3).strip() == ""  # unchanged line
     assert changed_text_at(_DIFF, "other.py", 2) == ""  # file not in the diff
     assert changed_text_at("", "auth.py", 1) == ""  # no diff at all
+
+
+def _item(item_uid: str, **over: object) -> dict[str, object]:
+    base = {
+        "item_uid": item_uid, "id": 1, "lens": "per-stack", "file": "a.py", "line": 1,
+        "severity": "low", "confidence": "HIGH", "description": "routine cleanup",
+        "rationale": "pure rename", "evidence": "a.py:1 renamed helper",
+    }
+    return {**base, **over}
+
+
+def _provenance(
+    uid: str, *, verdict_bound: bool = True, revised_fields: tuple[str, ...] = ()
+) -> RecordProvenance:
+    return RecordProvenance(uid, ("arbiter",), verdict_bound, True, revised_fields)
+
+
+@pytest.mark.parametrize(
+    ("item_over", "prov", "expected_reason"),
+    [
+        ({"lens": "cross-stack"}, _provenance("item:1"), "cross_stack"),
+        ({"description": "auth token check missing"}, _provenance("item:1"), "risk_category:security"),
+        ({"confidence": "MEDIUM"}, _provenance("item:1"), "weak_evidence:confidence"),
+        ({"evidence": "n/a"}, _provenance("item:1"), "weak_evidence:placeholder_evidence"),
+        ({"location_distrust": True}, _provenance("item:1"), "weak_evidence:located_beyond_tolerance"),
+        ({}, None, "unadjudicated:no_provenance"),
+        ({}, _provenance("item:1", verdict_bound=False), "unadjudicated:verdict_unbound"),
+        ({}, _provenance("item:1", revised_fields=("severity",)), "materially_revised"),
+    ],
+)
+def test_every_mandatory_select_branch_is_reachable(
+    item_over: dict[str, object], prov: RecordProvenance | None, expected_reason: str
+) -> None:
+    decisions = select_items(
+        [_item("item:1", **item_over)],
+        provenance={} if prov is None else {"item:1": prov},
+        hunk_index={}, diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
+    )
+    assert decisions[0].selected is True
+    assert decisions[0].reason_code == expected_reason
+
+
+def test_only_a_strong_adjudicated_routine_item_skips() -> None:
+    decisions = select_items(
+        [_item("item:1")], provenance={"item:1": _provenance("item:1")},
+        hunk_index={}, diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
+    )
+    assert decisions[0].selected is False
+    assert decisions[0].reason_code == "strongly_evidenced_adjudicated_routine"
+
+
+def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> None:
+    items = [_item("item:1"), _item("item:2", lens="structural")]
+    decisions = select_items(
+        items,
+        provenance=None,
+        hunk_index={},
+        diff_text="",
+        config=SelectionConfig(verify_all=True, extra_categories=()),
+    )
+    assert [(d.item_uid, d.selected, d.reason_code) for d in decisions] == [
+        ("item:1", True, "verify_all"), ("item:2", False, "exempt:structural"),
+    ]
+
+
+def test_unknown_extra_category_fails_loudly_and_digest_is_content_only() -> None:
+    with pytest.raises(UnknownRiskCategoryError):
+        resolve_selection_config(verify_all=False, extra_categories=["nope"])
+    a = _item("item:1")
+    assert item_content_digest(a) == item_content_digest({**a, "id": 7, "verifier_verdict": "consistent"})
+    assert item_content_digest(a) != item_content_digest({**a, "evidence": "a.py:1 rewritten"})
