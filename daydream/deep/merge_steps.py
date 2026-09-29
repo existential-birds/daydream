@@ -63,8 +63,13 @@ from daydream.deep.reuse_key import (
     phase_identity_for,
     unit_key,
 )
-from daydream.deep.reuse_store import ReuseCache, ReuseHit, reuse_cache_for
-from daydream.deep.review_steps import _restore_entry_payload, _reuse_grounding_status
+from daydream.deep.reuse_store import (
+    ReuseCache,
+    ReuseHit,
+    restore_entry_payload,
+    reuse_cache_for,
+)
+from daydream.deep.review_steps import _reuse_grounding_status
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
@@ -821,7 +826,7 @@ def _try_reuse_arbiter(
     if not isinstance(hit, ReuseHit):
         reuse.record("arbiter", outcome="miss", reason=hit.reason, key=key)
         return False
-    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+    restore_reason = restore_entry_payload(hit, deep_state.dd)
     if restore_reason is not None or not _reload_adjudicated_records(deep_state):
         reuse.record(
             "arbiter",
@@ -929,7 +934,7 @@ def _try_reuse_merge(
     if not isinstance(hit, ReuseHit):
         reuse.record("merge", outcome="miss", reason=hit.reason, key=key)
         return False
-    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+    restore_reason = restore_entry_payload(hit, deep_state.dd)
     if restore_reason is not None:
         reuse.record(
             "merge",

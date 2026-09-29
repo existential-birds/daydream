@@ -749,6 +749,26 @@ def _manifest_license_evidence(data: dict[str, Any]) -> dict[str, str] | None:
     return evidence
 
 
+def _repo_license_decision(
+    data: dict[str, Any], policy: Any, allow_copyleft: frozenset[str] | set[str]
+) -> Any:
+    """Resolve one manifest's repo decision from its slug/evidence + gate policy.
+
+    The deferred import keeps ``daydream.training.corpus_projection.license``
+    (which imports this package) from loading at module import time.
+    """
+    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
+        resolve_repo_decision,
+    )
+
+    return resolve_repo_decision(
+        _manifest_repo_slug(data) or "",
+        _manifest_license_evidence(data),
+        policy,
+        allow_copyleft,
+    )
+
+
 def _session_identity(stage: Path, sid: str, revision: str, *, root: str, collision: bool) -> \
         tuple[str | None, dict[str, str] | None]:
     """Read ``repo_slug`` + ``license_evidence`` for a session from its manifest.
@@ -846,7 +866,6 @@ def apply_license_gate(
         )
     from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle at module load
         load_license_policy,
-        resolve_repo_decision,
     )
 
     policy, _digest = load_license_policy(license_policy_path)
@@ -863,12 +882,7 @@ def apply_license_gate(
                 raise HydrationError(
                     redact_text(f"admitted derivative {derivative.name} has an unsafe session id {sid!r}")
                 )
-            decision = resolve_repo_decision(
-                _manifest_repo_slug(data) or "",
-                _manifest_license_evidence(data),
-                policy,
-                allow_copyleft,
-            )
+            decision = _repo_license_decision(data, policy, allow_copyleft)
             if decision.status != "rejected" or decision.reason_code is None:
                 continue
             reason_code = decision.reason_code
@@ -1109,21 +1123,12 @@ def _policy_binding(
     The binding carries the policy digest/version and the exact copyleft
     opt-ins so ``derive_curation_id`` can bind all of them.
     """
-    from daydream.training.corpus_projection.license import (  # noqa: PLC0415  # local: avoid import cycle
-        resolve_repo_decision,
-    )
-
     decisions: dict[str, tuple[str, str | None, str | None]] = {}
     runs_dir = stage / RUNS_DIRNAME
     if runs_dir.is_dir():
         for derivative in sorted(p for p in runs_dir.iterdir() if p.is_dir()):
             data = _require_manifest_dict(derivative, label=f"admitted derivative {derivative.name}")
-            decision = resolve_repo_decision(
-                _manifest_repo_slug(data) or "",
-                _manifest_license_evidence(data),
-                policy,
-                allow_copyleft,
-            )
+            decision = _repo_license_decision(data, policy, allow_copyleft)
             decisions[str(decision.repo_slug)] = (
                 str(decision.status), decision.reason_code, decision.spdx_id,
             )
@@ -1149,12 +1154,7 @@ def _policy_binding(
             code = entry.get("reason_code")
             if code not in _LICENSE_REASON_CODES:
                 continue  # never a license-gate decision, never in the digest
-            decision = resolve_repo_decision(
-                _manifest_repo_slug(data) or "",
-                _manifest_license_evidence(data),
-                policy,
-                allow_copyleft,
-            )
+            decision = _repo_license_decision(data, policy, allow_copyleft)
             decisions[str(decision.repo_slug)] = (
                 "rejected", str(code), decision.spdx_id,
             )

@@ -61,6 +61,12 @@ def _repo_with_origin(tmp_path: Path) -> tuple[Path, Path]:
     return repo, bare
 
 
+def _topic_repo(tmp_path: Path) -> Path:
+    repo = _make_repo_with_main(tmp_path)
+    _git(repo, "checkout", "-b", "topic")
+    return repo
+
+
 def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     base = _git(repo, "rev-parse", "HEAD")
@@ -1249,8 +1255,7 @@ def test_resolve_pr_merge_base_rejects_invalid_base_ref(tmp_path: Path, local_re
 
 
 def test_diff_returns_changes(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "added.txt").write_text("hello\n")
     _git(repo, "add", "added.txt")
     _commit(repo, "topic commit")
@@ -1260,8 +1265,7 @@ def test_diff_returns_changes(tmp_path: Path) -> None:
 
 
 def test_diff_includes_staged_and_unstaged_worktree_changes(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "staged.txt").write_text("staged\n")
     _git(repo, "add", "staged.txt")
     (repo / "base.txt").write_text("unstaged\n")
@@ -1274,8 +1278,7 @@ def test_diff_includes_staged_and_unstaged_worktree_changes(tmp_path: Path) -> N
 
 
 def test_diff_excludes_paths(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "keep.txt").write_text("keep\n")
     (repo / "drop.txt").write_text("drop\n")
     _git(repo, "add", "keep.txt", "drop.txt")
@@ -1307,8 +1310,7 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path) -> None:
 
 
 def test_diff_name_only_returns_changed_files(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "added.txt").write_text("hello\n")
     _git(repo, "add", "added.txt")
     _commit(repo, "add file")
@@ -1317,8 +1319,7 @@ def test_diff_name_only_returns_changed_files(tmp_path: Path) -> None:
 
 
 def test_diff_name_only_returns_multiple_files_in_order(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "alpha.txt").write_text("a\n")
     (repo / "beta.txt").write_text("b\n")
     _git(repo, "add", "alpha.txt", "beta.txt")
@@ -1357,8 +1358,7 @@ def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> No
 
 
 def test_log_returns_oneline_commits(tmp_path: Path) -> None:
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "a.txt").write_text("a\n")
     _git(repo, "add", "a.txt")
     _commit(repo, "topic-msg")
@@ -3156,16 +3156,14 @@ def test_log_shas_returns_none_when_ref_is_gone(tmp_path: Path, caplog: pytest.L
 
 def test_log_shas_returns_empty_list_when_range_is_genuinely_empty(tmp_path: Path) -> None:
     """A resolvable ref with no commits ahead yields [] — distinct from None."""
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
 
     assert git_ops.log_shas(repo, "topic", since="main") == []
 
 
 def test_log_shas_returns_commits_ahead_of_since(tmp_path: Path) -> None:
     """The success path still returns SHAs, newest first."""
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "a.txt").write_text("a\n")
     _git(repo, "add", "a.txt")
     _commit(repo, "topic-1")
@@ -3177,8 +3175,7 @@ def test_log_shas_returns_commits_ahead_of_since(tmp_path: Path) -> None:
 
 def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
     """log_shas_since returns SHAs for commits in head..base range."""
-    repo = _make_repo_with_main(tmp_path)
-    _git(repo, "checkout", "-b", "topic")
+    repo = _topic_repo(tmp_path)
     (repo / "a.txt").write_text("a\n")
     _git(repo, "add", "a.txt")
     _commit(repo, "topic-1")

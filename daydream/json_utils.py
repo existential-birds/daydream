@@ -193,6 +193,13 @@ def canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def string_list(value: object) -> list[str]:
+    """Return the non-empty strings in *value*, or ``[]`` when it is not a list."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
 def extract_json(text: str) -> Any:
     """Extract a JSON object or array from possibly prose-wrapped model text.
 

@@ -78,6 +78,24 @@ class ReuseHit:
     manifest: dict[str, Any]
 
 
+def restore_entry_payload(hit: ReuseHit, dest_dir: Path) -> str | None:
+    """Copy a verified entry's payload files into ``dest_dir``.
+
+    Returns ``None`` on success or a reason string when the restore could not
+    complete; a partial restore is a miss, so the unit then does its own real
+    work rather than shipping half of an entry.
+    """
+    recorded = hit.manifest.get("payload")
+    if not isinstance(recorded, dict):
+        return "manifest payload unreadable"
+    try:
+        for name in recorded:
+            (dest_dir / str(name)).write_bytes((hit.payload_dir / str(name)).read_bytes())
+    except OSError as exc:
+        return f"{type(exc).__name__}: {exc}"
+    return None
+
+
 @dataclass(frozen=True)
 class ReuseMiss:
     """A lookup that did not verify, with the failing element named."""

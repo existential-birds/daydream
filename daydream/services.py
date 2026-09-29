@@ -23,6 +23,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from daydream.config_file import DaydreamFileConfig, load_toml_or_empty
+from daydream.json_utils import string_list
 
 _CONVENTIONAL_ROOTS = ("apps", "services", "packages", "crates", "cmd")
 # Pre-PEP-621 Python services pin deps in requirements files and configure tooling
@@ -233,7 +234,7 @@ def _package_workspace_patterns(repo_root: Path) -> list[str]:
     workspaces = data.get("workspaces")
     if isinstance(workspaces, dict):
         workspaces = workspaces.get("packages")
-    return _string_list(workspaces)
+    return string_list(workspaces)
 
 
 def _pnpm_workspace_patterns(repo_root: Path) -> list[str]:
@@ -260,7 +261,7 @@ def _cargo_workspace_patterns(repo_root: Path) -> list[str]:
     workspace = data.get("workspace")
     if not isinstance(workspace, dict):
         return []
-    return _string_list(workspace.get("members"))
+    return string_list(workspace.get("members"))
 
 
 def _go_work_patterns(repo_root: Path) -> list[str]:
@@ -317,12 +318,6 @@ def _read_text_or_empty(path: Path) -> str:
         return path.read_text()
     except (OSError, UnicodeError):
         return ""
-
-
-def _string_list(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str) and item]
 
 
 def _unquote(value: str) -> str:
