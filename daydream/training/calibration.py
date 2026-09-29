@@ -571,9 +571,7 @@ def _candidate_grid(config: CalibrationConfig) -> dict[str, list[float]]:
     }
 
 
-def _render_report(
-    artifact: dict[str, Any], record_count: int, class_balance: dict[str, int]
-) -> str:
+def _render_report(artifact: dict[str, Any]) -> str:
     """Human summary derived from the same in-memory numbers as the artifact."""
     metrics = artifact["metrics"]
     lines = [
@@ -582,7 +580,8 @@ def _render_report(
         f"- Run: `{artifact['run_id']}`",
         f"- Artifact schema: `{artifact['schema_version']}` (tool {artifact['tool_version']})",
         f"- Resampling seed: {artifact['resampling_seed']}",
-        f"- Records: {record_count} (accepted {class_balance['accepted']}, rejected {class_balance['rejected']})",
+        f"- Records: {artifact['record_count']} (accepted {metrics['class_balance']['accepted']}, "
+        f"rejected {metrics['class_balance']['rejected']})",
         f"- Corpus digest: `{artifact['corpus_digest']}`",
         f"- Split digest: `{artifact['split_digest']}`",
         "",
@@ -666,7 +665,7 @@ def _write_outputs(
     }
     rounded: dict[str, Any] = _round4(artifact)
     artifact_payload = json.dumps(rounded, sort_keys=True, indent=2) + "\n"
-    report_payload = _render_report(rounded, record_count, metrics["class_balance"])
+    report_payload = _render_report(rounded)
 
     atomic_write_pair(
         (config.out_dir / "report.md", report_payload.encode("utf-8")),
