@@ -19,7 +19,12 @@ from typing import Any
 import pytest
 
 from daydream import cli
+from daydream.training.adjudication import cli as adjudication_cli
+from daydream.training.adjudication.publish import publish_final_annotation_bundle
+from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 from tests.harness.scripts import cli_main
+from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
+from tests.test_training_adjudication_publish import _final_bundle
 
 
 @pytest.mark.parametrize("summary, expected", [
@@ -82,11 +87,6 @@ def test_adjudicate_publication_commands_run_through_main(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daydream.training.adjudication import cli as adjudication_cli
-    from daydream.training.adjudication.publish import publish_final_annotation_bundle
-    from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-    from tests.test_training_adjudication_publish import _final_bundle
-
     state = tmp_path / "state"
     state.mkdir()
     (state / "queue.json").write_text("[]\n", encoding="utf-8")
@@ -146,8 +146,6 @@ def _run_build_v2(
     """Drive ``daydream corpus build`` through ``cli.main`` over the
     standard fixture bundle pair (from tests.test_corpus_projection) and return
     (exit code, captured stdout+stderr)."""
-    from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
-
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
     out_dir = tmp_path / "corpus-out"

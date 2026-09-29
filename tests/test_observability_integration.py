@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from importlib.metadata import version as package_version
 from pathlib import Path
 from typing import Any
 
@@ -421,8 +422,6 @@ async def test_all_destinations_receive_same_sanitized_resource(
     install_backend: Callable[[object], object],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from importlib.metadata import version as package_version
-
     monkeypatch.setenv(
         "OTEL_RESOURCE_ATTRIBUTES",
         "deployment.environment.name=offline-audit,"

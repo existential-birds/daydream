@@ -611,7 +611,6 @@ class OspreyBackend:
                     # values never cross this boundary — presence booleans
                     # only; the header's native timestamp distinguishes via
                     # ``timestamp_source="native"``.
-                    max_turns_applied = command[command.index("--max-turns") + 1] if "--max-turns" in command else None
                     yield RequestEvent(
                         prompt=prompt,
                         model_name=session_model,
@@ -638,7 +637,7 @@ class OspreyBackend:
                             immutable_surface=self.immutable_runtime_surface,
                             compress_context=self.compress_context,
                             ultracode=self.ultracode,
-                            max_turns=(int(max_turns_applied) if max_turns_applied is not None else max_turns),
+                            max_turns=max_turns,
                             turn_timeout=self.turn_timeout,
                             stream_idle_timeout_secs=self.stream_idle_timeout_secs,
                             streaming_timeout_secs=self.streaming_timeout_secs,

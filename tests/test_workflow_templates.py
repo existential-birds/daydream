@@ -791,10 +791,3 @@ def test_single_setup_preserves_privilege_split() -> None:
         "DAYDREAM_APP_ID",
         "DAYDREAM_APP_PRIVATE_KEY",
     }
-
-
-# Repo dogfood workflow (Codex). The full rationale — the `codex exec` auth
-# gap, the `codex login --with-api-key` persistence, and the README's naming of
-# the live credential — lives in the module docstring and is exercised by
-# test_repo_workflow_readme_documents_codex_credential; this test asserts the
-# login-persistence ordering that rationale requires.

@@ -180,8 +180,6 @@ def verify(seal: SealResult, paths: list[Path], candidate_diff: bytes) -> bool:
         }
         if hashlib.sha256(candidate_diff).hexdigest() != seal.candidate_diff_digest:
             return False
-        if set(digests) != set(seal.artifact_digests):
-            return False
-        return all(digests[rel] == digest for rel, digest in seal.artifact_digests.items())
+        return digests == seal.artifact_digests
     except OSError:
         return False
