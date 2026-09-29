@@ -69,7 +69,7 @@ from daydream.deep.reuse_store import (
     restore_entry_payload,
     reuse_cache_for,
 )
-from daydream.deep.review_steps import _reuse_grounding_status
+from daydream.deep.review_steps import _record_reuse_hit, _reuse_grounding_statuses
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
@@ -839,21 +839,7 @@ def _try_reuse_arbiter(
             key=key,
         )
         return False
-    reuse.record(
-        "arbiter",
-        outcome="hit",
-        reason="complete entry",
-        key=key,
-        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-        detail={
-            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
-            "grounding_status": {
-                "intent": _reuse_grounding_status(reuse, "intent"),
-                "alternatives": _reuse_grounding_status(reuse, "alternatives"),
-                "exploration": _reuse_grounding_status(reuse, "exploration"),
-            },
-        },
-    )
+    _record_reuse_hit(reuse, "arbiter", key, hit, payload)
     write_routing_record(
         deep_state.dd,
         {
@@ -943,21 +929,7 @@ def _try_reuse_merge(
             key=key,
         )
         return False
-    reuse.record(
-        "merge",
-        outcome="hit",
-        reason="complete entry",
-        key=key,
-        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-        detail={
-            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
-            "grounding_status": {
-                "intent": _reuse_grounding_status(reuse, "intent"),
-                "alternatives": _reuse_grounding_status(reuse, "alternatives"),
-                "exploration": _reuse_grounding_status(reuse, "exploration"),
-            },
-        },
-    )
+    _record_reuse_hit(reuse, "merge", key, hit, payload)
     return True
 
 
@@ -1226,11 +1198,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         components=arbiter_payload["components"],
                         identity=arbiter_identity,
                         grounding=grounding_digests(arbiter_payload),
-                        grounding_status={
-                            "intent": _reuse_grounding_status(reuse, "intent"),
-                            "alternatives": _reuse_grounding_status(reuse, "alternatives"),
-                            "exploration": _reuse_grounding_status(reuse, "exploration"),
-                        },
+                        grounding_status=_reuse_grounding_statuses(reuse, arbiter_payload),
                     )
         all_records, record_sources, structural_records, structural_sources = (
             _split_structural_records(adjudicated, adjudicated_sources, structural_ids)
@@ -1477,11 +1445,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                     components=merge_payload["components"],
                     identity=merge_identity,
                     grounding=grounding_digests(merge_payload),
-                    grounding_status={
-                        "intent": _reuse_grounding_status(reuse, "intent"),
-                        "alternatives": _reuse_grounding_status(reuse, "alternatives"),
-                        "exploration": _reuse_grounding_status(reuse, "exploration"),
-                    },
+                    grounding_status=_reuse_grounding_statuses(reuse, merge_payload),
                 )
     return None
 

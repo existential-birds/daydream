@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import shutil
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -135,6 +136,32 @@ def _reuse_grounding_status(reuse: "ReuseCache", unit: str) -> str:
     entry = units.get(unit) if isinstance(units, dict) else None
     outcome = entry.get("outcome") if isinstance(entry, dict) else None
     return "reused" if outcome in _REUSE_HIT_OUTCOMES else "regenerated"
+
+
+def _reuse_grounding_statuses(reuse: "ReuseCache", payload: Mapping[str, Any]) -> dict[str, str]:
+    """Per-unit reuse status for every grounding row a payload records (MH16)."""
+    return {unit: _reuse_grounding_status(reuse, unit) for unit in grounding_digests(payload)}
+
+
+def _record_reuse_hit(
+    reuse: "ReuseCache",
+    unit: str,
+    key: str,
+    hit: ReuseHit,
+    payload: Mapping[str, Any],
+) -> None:
+    """Record a complete reuse hit with its grounding delta and per-unit statuses."""
+    reuse.record(
+        unit,
+        outcome="hit",
+        reason="complete entry",
+        key=key,
+        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+        detail={
+            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
+            "grounding_status": _reuse_grounding_statuses(reuse, payload),
+        },
+    )
 
 
 def _grounding_moved(entry: object) -> bool:
@@ -457,21 +484,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             if isinstance(hit, ReuseHit):
                 restore_reason = restore_entry_payload(hit, deep_state.dd)
                 if restore_reason is None:
-                    reuse.record(
-                        "intent",
-                        outcome="hit",
-                        reason="complete entry",
-                        key=intent_reuse_key,
-                        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-                        detail={
-                            "grounding": reuse.grounding_delta(
-                                hit, grounding_digests(intent_payload)
-                            ),
-                            "grounding_status": {
-                                "exploration": _reuse_grounding_status(reuse, "exploration"),
-                            },
-                        },
-                    )
+                    _record_reuse_hit(reuse, "intent", intent_reuse_key, hit, intent_payload)
                     deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
                     deep_state.intent_path = intent_p
                     return
@@ -560,7 +573,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             components=intent_payload["components"],
             identity=intent_identity,
             grounding=grounding_digests(intent_payload),
-            grounding_status={"exploration": _reuse_grounding_status(reuse, "exploration")},
+            grounding_status=_reuse_grounding_statuses(reuse, intent_payload),
         )
 
 
@@ -630,23 +643,8 @@ async def _wonder(ctx: FlowContext) -> None:
                 if isinstance(hit, ReuseHit):
                     restore_reason = restore_entry_payload(hit, deep_state.dd)
                     if restore_reason is None:
-                        reuse.record(
-                            "alternatives",
-                            outcome="hit",
-                            reason="complete entry",
-                            key=wonder_reuse_key,
-                            origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-                            detail={
-                                "grounding": reuse.grounding_delta(
-                                    hit, grounding_digests(wonder_payload)
-                                ),
-                                "grounding_status": {
-                                    "intent": _reuse_grounding_status(reuse, "intent"),
-                                    "exploration": _reuse_grounding_status(
-                                        reuse, "exploration"
-                                    ),
-                                },
-                            },
+                        _record_reuse_hit(
+                            reuse, "alternatives", wonder_reuse_key, hit, wonder_payload
                         )
                         wonder_reused = True
                     else:
@@ -706,10 +704,7 @@ async def _wonder(ctx: FlowContext) -> None:
             components=wonder_payload["components"],
             identity=wonder_identity,
             grounding=grounding_digests(wonder_payload),
-            grounding_status={
-                "intent": _reuse_grounding_status(reuse, "intent"),
-                "exploration": _reuse_grounding_status(reuse, "exploration"),
-            },
+            grounding_status=_reuse_grounding_statuses(reuse, wonder_payload),
         )
     write_routing_record(
         deep_state.dd,
@@ -1351,24 +1346,7 @@ async def _run_uncovered_sweep(
                     restore_reason = restore_entry_payload(hit, dd)
                     if restore_reason is None:
                         _restore_swept_records(deep_state)
-                        reuse.record(
-                            "sweep",
-                            outcome="hit",
-                            reason="complete entry",
-                            key=sweep_reuse_key,
-                            origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-                            detail={
-                                "grounding": reuse.grounding_delta(
-                                    hit, grounding_digests(sweep_payload)
-                                ),
-                                "grounding_status": {
-                                    "intent": _reuse_grounding_status(reuse, "intent"),
-                                    "exploration": _reuse_grounding_status(
-                                        reuse, "exploration"
-                                    ),
-                                },
-                            },
-                        )
+                        _record_reuse_hit(reuse, "sweep", sweep_reuse_key, hit, sweep_payload)
                         return
                     print_warning(
                         console, f"Reuse restore failed for uncovered sweep: {restore_reason}"
@@ -1632,10 +1610,7 @@ async def _run_uncovered_sweep(
                 components=sweep_payload["components"],
                 identity=sweep_identity,
                 grounding=grounding_digests(sweep_payload),
-                grounding_status={
-                    "intent": _reuse_grounding_status(reuse, "intent"),
-                    "exploration": _reuse_grounding_status(reuse, "exploration"),
-                },
+                grounding_status=_reuse_grounding_statuses(reuse, sweep_payload),
             )
     if sweep_failures and phase is not None:
         phase.finish(*partial_or_failed_terminal(completed_reviews))
