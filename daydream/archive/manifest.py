@@ -443,13 +443,7 @@ def build_manifest_from_snapshot(
     frozen_root = frozen.get("main")
     raw_final_metrics = frozen_root.get("final_metrics") if isinstance(frozen_root, dict) else None
     final_metrics: dict[str, Any] = raw_final_metrics if isinstance(raw_final_metrics, dict) else {}
-    totals: dict[str, Any] = {
-        "prompt": final_metrics.get("total_prompt_tokens") or 0,
-        "completion": final_metrics.get("total_completion_tokens") or 0,
-        "cached": final_metrics.get("total_cached_tokens") or 0,
-        "cost": final_metrics.get("total_cost_usd") or 0.0,
-        "any_cost_seen": final_metrics.get("total_cost_usd") is not None,
-    }
+    raw_cost = final_metrics.get("total_cost_usd")
     timing_summary = compute_timing_summary(write_snapshot)
     runs_fix = identity.phases.fix
     profile = identity.profile
@@ -500,10 +494,10 @@ def build_manifest_from_snapshot(
         changed_files=list(git_ctx.changed_files),
         pr_number=recorder_provenance.pr_number,
         pr_repo=recorder_provenance.pr_repo,
-        total_cost_usd=totals["cost"] if totals.get("any_cost_seen") else None,
-        total_prompt_tokens=totals["prompt"] or None,
-        total_completion_tokens=totals["completion"] or None,
-        total_cached_tokens=totals["cached"] or None,
+        total_cost_usd=(raw_cost or 0.0) if raw_cost is not None else None,
+        total_prompt_tokens=final_metrics.get("total_prompt_tokens") or None,
+        total_completion_tokens=final_metrics.get("total_completion_tokens") or None,
+        total_cached_tokens=final_metrics.get("total_cached_tokens") or None,
         archive_path=str(archive_path),
     )
 

@@ -183,34 +183,16 @@ class SuiteEntry:
 
 
 def identity_to_dict(identity: CompatibilityIdentity) -> dict[str, object]:
-    """Canonical 18-field compatibility/identity projection.
+    """Canonical compatibility/identity projection.
 
     Single source of truth for the identity mapping reused by
     ``objective_to_json``, the suite aggregate identity, and the CLI's
-    ``_suite_objective_to_json`` (issue #888 anti-slop: adding/renaming a field
-    in one place must not silently desynchronize the others). Repository/
-    benchmark ids are deliberately not part of the identity.
+    ``_suite_objective_to_json`` (issue #888 anti-slop): the frozen
+    ``CompatibilityIdentity`` dataclass is itself the schema, so adding or
+    renaming a field cannot silently desynchronize the projections.
+    Repository/benchmark ids are deliberately not part of the identity.
     """
-    return {
-        "objective_schema_version": identity.objective_schema_version,
-        "profile_schema_version": identity.profile_schema_version,
-        "profile_name": identity.profile_name,
-        "profile_digest": identity.profile_digest,
-        "daydream_version": identity.daydream_version,
-        "daydream_wheel_sha256": identity.daydream_wheel_sha256,
-        "compiled_lock_sha256": identity.compiled_lock_sha256,
-        "harbor_version": identity.harbor_version,
-        "reviewer_backend": identity.reviewer_backend,
-        "reviewer_model": identity.reviewer_model,
-        "reviewer_base_url": identity.reviewer_base_url,
-        "reviewer_effort": identity.reviewer_effort,
-        "judge_provider": identity.judge_provider,
-        "judge_model": identity.judge_model,
-        "judge_host": identity.judge_host,
-        "verifier_template_sha256": identity.verifier_template_sha256,
-        "threshold": identity.threshold,
-        "attempts": identity.attempts,
-    }
+    return asdict(identity)
 
 
 @dataclass(frozen=True)
