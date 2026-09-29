@@ -645,6 +645,13 @@ def test_recon_applicability_directory_scopes_fail_closed(
     ]
 
 
+def _criterion(
+    kind: str, description: str, verification: Any = None
+) -> dict[str, Any]:
+    """One ``done_criteria`` entry; ``verification`` defaults to a null ref."""
+    return {"kind": kind, "description": description, "verification": verification}
+
+
 def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
     focused = "tests/test_catalog.py -q"
     return {
@@ -747,11 +754,11 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
             ],
         },
         "done_criteria": [
-            {
-                "kind": "behavior",
-                "description": "list_catalog performs one batch load for multiple items.",
-                "verification": _ref(appended_args=focused),
-            },
+            _criterion(
+                "behavior",
+                "list_catalog performs one batch load for multiple items.",
+                _ref(appended_args=focused),
+            ),
         ],
         "false_assumption": {
             "condition": "The load_item interface cannot accept multiple catalog identifiers.",
@@ -3428,11 +3435,7 @@ def test_deletion_only_plan_can_omit_test_code_when_non_behavioral(
         "cases": [],
     }
     plan["done_criteria"] = [
-        {
-            "kind": "static-invariant",
-            "description": "The repository no longer contains the README.md path.",
-            "verification": None,
-        }
+        _criterion("static-invariant", "The repository no longer contains the README.md path."),
     ]
     plan["false_assumption"]["related_paths"] = ["README.md"]
 
@@ -3469,11 +3472,7 @@ def test_not_applicable_rejects_behavior_bearing_production_deletion(
         "cases": [],
     }
     plan["done_criteria"] = [
-        {
-            "kind": "static-invariant",
-            "description": "apps/catalog/api.py is absent from the repository.",
-            "verification": None,
-        }
+        _criterion("static-invariant", "apps/catalog/api.py is absent from the repository."),
     ]
 
     issues = _issues(repo, plan)
@@ -3500,11 +3499,7 @@ def _comment_cleanup_plan(
         "cases": [],
     }
     plan["done_criteria"] = [
-        {
-            "kind": "static-invariant",
-            "description": target_state,
-            "verification": None,
-        }
+        _criterion("static-invariant", target_state),
     ]
     return plan
 
@@ -3515,11 +3510,7 @@ def test_not_applicable_requires_an_explicit_non_test_done_gate(repo: Path) -> N
         target_state=("The self-evident comment is absent and list_catalog is unchanged."),
     )
     plan["done_criteria"] = [
-        {
-            "kind": "behavior",
-            "description": "The list_catalog function body remains byte-for-byte unchanged.",
-            "verification": None,
-        }
+        _criterion("behavior", "The list_catalog function body remains byte-for-byte unchanged."),
     ]
 
     issues = _issues(repo, plan)
@@ -3658,11 +3649,7 @@ def test_assemble_synthesizes_behavior_done_criterion_from_intended_outcome(
 ) -> None:
     plan = _authored_plan()
     plan["done_criteria"] = [
-        {
-            "kind": "static-invariant",
-            "description": "No call to load_item remains inside list_catalog.",
-            "verification": None,
-        }
+        _criterion("static-invariant", "No call to load_item remains inside list_catalog."),
     ]
 
     assembled = _assembled(repo, plan)
