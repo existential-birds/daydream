@@ -1489,6 +1489,19 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     return result
 
 
+def _license_bucket(code: str | None) -> str:
+    """Map a license-gate decision to its human admission bucket."""
+    if code is None:
+        return "admitted"
+    try:
+        return _LICENSE_BUCKET_BY_CODE[code]
+    except KeyError:
+        raise ValueError(
+            f"license admission summary: {code!r} is not a license-gate "
+            "reason code — the summary buckets only partition license decisions"
+        ) from None
+
+
 def admission_summary_buckets(
     entries: Iterable[tuple[str, str | None]],
 ) -> dict[str, int]:
@@ -1505,15 +1518,7 @@ def admission_summary_buckets(
     """
     buckets: dict[str, int] = dict.fromkeys(_LICENSE_BUCKETS, 0)
     for _sid, code in entries:
-        if code is None:
-            buckets["admitted"] += 1
-        elif code in _LICENSE_BUCKET_BY_CODE:
-            buckets[_LICENSE_BUCKET_BY_CODE[code]] += 1
-        else:
-            raise ValueError(
-                f"license admission summary: {code!r} is not a license-gate "
-                "reason code — the summary buckets only partition license decisions"
-            )
+        buckets[_license_bucket(code)] += 1
     return buckets
 
 
@@ -1565,10 +1570,7 @@ def license_admission_by_repo(
             stage, sid, revision, root="excluded", collision=False
         )
         buckets = by_repo.setdefault(slug or "unresolved", dict.fromkeys(_LICENSE_BUCKETS, 0))
-        if code is None:
-            buckets["admitted"] += 1
-        else:
-            buckets[_LICENSE_BUCKET_BY_CODE[code]] += 1
+        buckets[_license_bucket(code)] += 1
     return by_repo
 
 

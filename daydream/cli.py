@@ -452,14 +452,12 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         "lineage.json, annotations.jsonl); self-verified and linked to "
         "--bundle-root before the projection runs",
     )
-    parser.add_argument(
-        "--license-policy",
-        type=Path,
-        default=None,
-        dest="license_policy",
-        metavar="PATH",
-        help="Digest-pinned license policy JSON; every record's per-repo license "
+    _add_license_arguments(
+        parser,
+        policy_help="Digest-pinned license policy JSON; every record's per-repo license "
         "decision is resolved from it (required)",
+        copyleft_help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        "owner/repo slug (case-insensitive)",
     )
     parser.add_argument(
         "--annotations-snapshot",
@@ -476,15 +474,6 @@ def _build_build_corpus_parser() -> argparse.ArgumentParser:
         dest="repo_slug",
         metavar="SLUG",
         help=argparse.SUPPRESS,  # URL-identity smuggling: refused in the handler
-    )
-    parser.add_argument(
-        "--allow-copyleft",
-        action="append",
-        default=[],
-        dest="allow_copyleft",
-        metavar="OWNER/REPO",
-        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
-        "owner/repo slug (case-insensitive)",
     )
     parser.add_argument(
         "--out",
@@ -1224,6 +1213,20 @@ def _add_dry_run_argument(parser: argparse.ArgumentParser, help_text: str) -> No
     )
 
 
+def _add_license_arguments(
+    parser: argparse.ArgumentParser, *, policy_help: str, copyleft_help: str
+) -> None:
+    """Add the shared ``--license-policy``/``--allow-copyleft`` options."""
+    parser.add_argument(
+        "--license-policy", type=Path, default=None, dest="license_policy",
+        metavar="PATH", help=policy_help,
+    )
+    parser.add_argument(
+        "--allow-copyleft", action="append", default=[], dest="allow_copyleft",
+        metavar="OWNER/REPO", help=copyleft_help,
+    )
+
+
 def _build_harvest_parser() -> argparse.ArgumentParser:
     """Build the parser for ``daydream corpus harvest [...]``.
 
@@ -1382,25 +1385,14 @@ def _build_hydrate_hub_parser() -> argparse.ArgumentParser:
         dest="exploratory",
         help="Opt in to a moving branch/tag source revision (output is non-canonical).",
     )
-    parser.add_argument(
-        "--license-policy",
-        type=Path,
-        default=None,
-        dest="license_policy",
-        metavar="PATH",
-        help="Digest-pinned license policy JSON; REQUIRED for publication "
+    _add_license_arguments(
+        parser,
+        policy_help="Digest-pinned license policy JSON; REQUIRED for publication "
         "(omitting it on a non-dry run refuses before any Hub access); the "
         "per-repo license admission gate runs at hydration and rejected "
         "sessions are excluded before publication; optional for --dry-run "
         "planning (issue #1094, previously #1080)",
-    )
-    parser.add_argument(
-        "--allow-copyleft",
-        action="append",
-        default=[],
-        dest="allow_copyleft",
-        metavar="OWNER/REPO",
-        help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
+        copyleft_help="Repeatable; permit a specific copyleft (GPL/AGPL) repo by exact "
         "owner/repo slug (case-insensitive); only meaningful with --license-policy",
     )
     _add_dry_run_argument(

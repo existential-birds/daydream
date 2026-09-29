@@ -54,7 +54,7 @@ def _primed_mirror(
 ) -> Path:
     """Bring up the shared mirror and prime it with the base tip and PR head(s)."""
 
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.ensure_mirror(tmp_path)
     sn.fetch_base_tip(tmp_path, "o/r", base_tip, origin)
     sn.fetch_head_refs(tmp_path, "o/r", pr_number, explicit_shas, origin)
     return sn.mirror(tmp_path)
@@ -138,7 +138,7 @@ def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) ->
     """
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.ensure_mirror(tmp_path)
     sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     m = sn.mirror(tmp_path)
     assert sn.rev_parse(m, "refs/pull/1/head") == head_sha
@@ -205,7 +205,7 @@ def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
     (and no ``mapped_sha`` consultation) is needed."""
 
     origin, authoring_sha, head_sha = _seed_anchor_origin(tmp_path)
-    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.ensure_mirror(tmp_path)
     snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     m = snapshot.mirror(tmp_path)
     assert snapshot.derive_authoring_path(m, authoring_sha, "a.py", head_sha) == "a.py"
@@ -216,7 +216,7 @@ def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
     of a mirror rename trace resolves to the authoring-time (old) name."""
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
-    snapshot.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    snapshot.ensure_mirror(tmp_path)
     snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     m = snapshot.mirror(tmp_path)
     assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
@@ -254,7 +254,7 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     mirror = tmp_path / "cache" / "repository.git"
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.ensure_mirror(tmp_path)
     assert mirror.is_dir()
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
@@ -472,7 +472,7 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
 def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.ensure_mirror(tmp_path)
     sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     assert sn.changed_paths(sn.mirror(tmp_path), authoring_sha, head_sha) == {
         "old.py",
@@ -584,7 +584,7 @@ def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
     base tips both freeze ready in one shared mirror (regression for defect 3)."""
 
     origin, dev_tip, pr2_head = _seed_two_pr_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.ensure_mirror(tmp_path)
     m = sn.mirror(tmp_path)
     ready1, b1 = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
                                policy="final_pr_head", requested_head="final",
@@ -804,7 +804,7 @@ def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path)
     design must be revised before Task 1."""
 
     origin, authoring_sha, unrelated_sha, head_sha = _seed_facts_origin(tmp_path)
-    sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    sn.ensure_mirror(tmp_path)
     sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     m = sn.mirror(tmp_path)
 
@@ -905,7 +905,7 @@ def _anchor(path: str | None, start: int | None, end: int | None,
 def _delta_mirror(tmp_path: Path) -> tuple[Path, str, str, dict[str, str]]:
 
     origin, base, orphan, heads = _seed_delta_origin(tmp_path)
-    m = sn.ensure_mirror(tmp_path, "o/r", origin_url=origin)
+    m = sn.ensure_mirror(tmp_path)
     sn._git_fetch(m, origin, [
         f"{sha}:refs/heads/fact-{i}"
         for i, sha in enumerate((base, orphan, *heads.values()))
