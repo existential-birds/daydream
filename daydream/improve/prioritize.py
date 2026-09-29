@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any
 
 from daydream.deep.dedup import bigrams, jaccard, normalize_title
+from daydream.json_utils import string_list
 from daydream.severity import normalize_severity
 
 _IMPACT = {"HIGH": 3.0, "MED": 2.0, "LOW": 1.0}
@@ -193,13 +194,6 @@ def _without_package_fields(finding: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _string_list(value: object) -> list[str]:
-    """Return the non-empty strings in *value*, or ``[]`` when it is not a list."""
-    if not isinstance(value, list):
-        return []
-    return [item for item in value if isinstance(item, str) and item]
-
-
 def _finding_aliases(finding: dict[str, Any]) -> set[str]:
     aliases = {
         value
@@ -209,7 +203,7 @@ def _finding_aliases(finding: dict[str, Any]) -> set[str]:
         )
         if isinstance(value, str) and value
     }
-    aliases.update(_string_list(finding.get("member_fingerprints")))
+    aliases.update(string_list(finding.get("member_fingerprints")))
     return aliases
 
 
@@ -274,7 +268,7 @@ def _reuse_target_key(finding: dict[str, Any]) -> str:
 
 
 def _maintenance_signals(finding: dict[str, Any]) -> set[str]:
-    return set(_string_list(finding.get("maintenance_signals")))
+    return set(string_list(finding.get("maintenance_signals")))
 
 
 def _finding_path(finding: dict[str, Any]) -> str:
@@ -304,13 +298,13 @@ def _merge_work_package(findings: list[dict[str, Any]]) -> dict[str, Any]:
         {category for member in members if isinstance((category := member.get("category")), str) and category}
     )
     merged["services"] = sorted(
-        {service for member in members for service in _string_list(member.get("services"))}
+        {service for member in members for service in string_list(member.get("services"))}
     )
     merged["partitions"] = sorted(
         {partition for member in members if isinstance((partition := member.get("partition")), str) and partition}
     )
     merged["evidence"] = sorted(
-        {entry for member in members for entry in _string_list(member.get("evidence"))}
+        {entry for member in members for entry in string_list(member.get("evidence"))}
     )
     merged["locations"] = sorted({_finding_location(member) for member in members if _finding_path(member)})
     merged["maintenance_signals"] = sorted({signal for member in members for signal in _maintenance_signals(member)})
@@ -482,7 +476,7 @@ def _finding_services(finding: dict[str, Any]) -> set[str]:
     A finding in an uncovered tree has no service, so the partition is what
     makes it comparable to the same pattern found elsewhere.
     """
-    keys = set(_string_list(finding.get("services")))
+    keys = set(string_list(finding.get("services")))
     partition = finding.get("partition")
     if isinstance(partition, str) and partition:
         keys.add(partition)
