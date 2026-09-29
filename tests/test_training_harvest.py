@@ -185,6 +185,13 @@ def _fake_gh(
     return responder
 
 
+def _applied_finding_gh() -> Callable[..., Any]:
+    return _fake_gh(
+        merged_at="2026-08-10T00:00:00Z",
+        comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
+    )
+
+
 def _unused_gh(repo: str, endpoint: str, **kwargs: Any) -> Any:
     """A ``gh_api`` responder the local-branch path must never call."""
     raise AssertionError(f"gh_api should not be called for a local row (endpoint={endpoint})")
@@ -1438,10 +1445,7 @@ def test_valid_at_is_decisive_evidence_time(tmp_path: Path) -> None:
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
-        gh_api=_fake_gh(
-            merged_at="2026-08-10T00:00:00Z",
-            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
-        ),
+        gh_api=_applied_finding_gh(),
         repo_clone=tmp_path,
     )
     assert ann.valid_at == "2026-08-02T10:00:00Z"
@@ -1456,10 +1460,7 @@ def test_valid_at_override_respected(tmp_path: Path) -> None:
         row,
         run_dir=run_dir,
         archive_dir=tmp_path,
-        gh_api=_fake_gh(
-            merged_at="2026-08-10T00:00:00Z",
-            comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
-        ),
+        gh_api=_applied_finding_gh(),
         repo_clone=tmp_path,
         valid_at_override="2026-09-01T00:00:00Z",
     )
@@ -1488,10 +1489,7 @@ async def test_labeler_version_is_not_reward_version(
         config,
         services=HarvestTestServices(
             make_harvest_services(config),
-            github=_fake_gh(
-                merged_at="2026-08-10T00:00:00Z",
-                comments=_finding_comments(_FP_A, reply="applied", reply_created_at="2026-08-02T10:00:00Z"),
-            ),
+            github=_applied_finding_gh(),
             append_annotation=_capture,
         ),
     )
