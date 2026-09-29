@@ -110,6 +110,20 @@ _MERGED_REPORT = (
     "   The current name is ambiguous.\n"
 )
 
+# Canned structured-output finding shared by the per-stack parse, cross-stack
+# merge, and per-stack reviewer canned responses; the three consumers differ
+# only in shape (merge adds ``lens``) and assert on the rendered report.
+_REVIEW_FINDING = {
+    "id": 1,
+    "description": "Use a more descriptive function name",
+    "file": "foo.py",
+    "line": 1,
+    "severity": "medium",
+    "confidence": "MEDIUM",
+    "rationale": "The current name is ambiguous.",
+    "evidence": "foo.py:1",
+}
+
 
 class _FakeSDKClient:
     """Per-call canned response + simulated tool-use side effects."""
@@ -266,18 +280,7 @@ class _FakeSDKClient:
             # empty, so the per-stack record drives the assertions below.
             is_structural_parse = "stack-structure-review.md" in prompt
             if not is_structural_parse:  # PER_STACK_RECORD_SCHEMA (per-stack parse)
-                issues = [
-                    {
-                        "id": 1,
-                        "description": "Use a more descriptive function name",
-                        "file": "foo.py",
-                        "line": 1,
-                        "severity": "medium",
-                        "confidence": "MEDIUM",
-                        "rationale": "The current name is ambiguous.",
-                        "evidence": "foo.py:1",
-                    }
-                ]
+                issues = [dict(_REVIEW_FINDING)]
             else:  # structural parse
                 issues = []
             return [
@@ -329,19 +332,7 @@ class _FakeSDKClient:
                 ),
                 MockResultMessage(
                     structured_output={
-                        "items": [
-                            {
-                                "id": 1,
-                                "lens": "per-stack",
-                                "file": "foo.py",
-                                "line": 1,
-                                "severity": "medium",
-                                "description": "Use a more descriptive function name",
-                                "confidence": "MEDIUM",
-                                "rationale": "The current name is ambiguous.",
-                                "evidence": "foo.py:1",
-                            }
-                        ]
+                        "items": [{**_REVIEW_FINDING, "lens": "per-stack"}]
                     },
                     total_cost_usd=0.20,
                     usage={
@@ -359,18 +350,7 @@ class _FakeSDKClient:
         if "structural reviewer" in pl:
             review_issues: list[Any] = []
         else:
-            review_issues = [
-                {
-                    "id": 1,
-                    "description": "Use a more descriptive function name",
-                    "file": "foo.py",
-                    "line": 1,
-                    "severity": "medium",
-                    "confidence": "MEDIUM",
-                    "rationale": "The current name is ambiguous.",
-                    "evidence": "foo.py:1",
-                }
-            ]
+            review_issues = [dict(_REVIEW_FINDING)]
         return [
             MockAssistantMessage(
                 content=[MockTextBlock(text="ok, wrote the review")],

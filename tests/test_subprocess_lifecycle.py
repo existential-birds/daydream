@@ -9,27 +9,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from daydream.backends._subprocess import cancel_processes, terminate_process
-from tests.harness.processes import wait_for_process_group_gone
+from tests.harness.processes import GROUP_HOLDER_CLI, wait_for_process_group_gone
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
 
 MakeConfig = Callable[..., "RunConfig"]
-
-_HOLDER_SCRIPT = (
-    # The `sleep 30` grandchild inherits the stdout pipe write end, so an
-    # aborted run keeps the pipe open even after the CLI dies (the Errno 24
-    # leak). The `print("UP", flush=True)` runs only after the grandchild is
-    # forked, so awaiting the first stdout line makes these tests deterministic
-    # — the terminating code is always exercised against a live process group,
-    # never racy against the CLI's fork. A python CLI is used because bash
-    # defers SIGTERM while a child runs on macOS, which would stall every test
-    # on the TERMINATE_GRACE_S window.
-    "import subprocess, time; "
-    "subprocess.Popen(['sleep', '30']); "
-    "print('UP', flush=True); "
-    "time.sleep(1000)"
-)
 
 
 def _fd_count() -> int:
@@ -41,7 +26,7 @@ async def _spawn_holder() -> asyncio.subprocess.Process:
     proc = await asyncio.create_subprocess_exec(
         "python3",
         "-c",
-        _HOLDER_SCRIPT,
+        GROUP_HOLDER_CLI,
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
@@ -168,7 +153,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     # grandchild (which holds the piped stdout open after the CLI dies), writes
     # its own pid to the readiness marker, then blocks forever. A python CLI is
     # used because bash defers SIGTERM while a child runs on macOS, which would
-    # stall on the TERMINATE_GRACE_S window (same rationale as _HOLDER_SCRIPT).
+    # stall on the TERMINATE_GRACE_S window (same rationale as GROUP_HOLDER_CLI).
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     marker = tmp_path / "codex-ready"

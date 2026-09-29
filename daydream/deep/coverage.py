@@ -344,21 +344,17 @@ def resolve_per_stack_verdicts(
         declared = declared_by_path.get(path, {})
         lines_read = declared.get("lines_read", 0)
         n_findings = 1 if path in finding_files else 0
-        if source_packet_paths is not None and (
-            path not in source_packet_paths
-            or declared.get("verdict") not in {"clean", "has_findings"}
-        ):
+        finite_covered = (
+            source_packet_paths is not None
+            and path in source_packet_paths
+            and declared.get("verdict") in {"clean", "has_findings"}
+        )
+        if source_packet_paths is not None and not finite_covered:
             out.append(_verdict(path, lines_read, "not_reviewed", n_findings))
         elif n_findings:
             # A finding beats a read and beats a declared clean.
             out.append(_verdict(path, lines_read, "has_findings", n_findings))
-        elif (
-            source_packet_paths is not None
-            and path in source_packet_paths
-            and declared.get("verdict") in {"clean", "has_findings"}
-        ):
-            out.append(_verdict(path, lines_read, "clean", 0))
-        elif any(_path_component_matches(r, path) for r in completed_read_paths):
+        elif finite_covered or any(_path_component_matches(r, path) for r in completed_read_paths):
             # A completed read that matches the file yields clean.
             out.append(_verdict(path, lines_read, "clean", 0))
         else:

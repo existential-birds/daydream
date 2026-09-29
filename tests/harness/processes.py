@@ -15,6 +15,19 @@ from __future__ import annotations
 import asyncio
 import os
 
+# A CLI that forks a `sleep` grandchild (which inherits the stdout pipe),
+# reports readiness by printing "UP" after the fork, then hangs. A python CLI is
+# used because bash defers SIGTERM while a child runs on macOS, which would
+# stall every test on the TERMINATE_GRACE_S window. The print-after-fork makes
+# these tests deterministic: the code under test is always exercised against a
+# live process group, never racy against the CLI's fork.
+GROUP_HOLDER_CLI = (
+    "import subprocess, time; "
+    "subprocess.Popen(['sleep', '30']); "
+    "print('UP', flush=True); "
+    "time.sleep(1000)"
+)
+
 
 async def wait_for_process_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
     """Await *pgid*'s disappearance (a readiness wait, not a fixed sleep).

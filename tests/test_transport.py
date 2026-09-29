@@ -19,7 +19,7 @@ from daydream.backends._transport import (
     StdinMode,
     TransportExitError,
 )
-from tests.harness.processes import wait_for_process_group_gone
+from tests.harness.processes import GROUP_HOLDER_CLI, wait_for_process_group_gone
 
 LIMIT = 2**16
 
@@ -96,17 +96,6 @@ async def test_transport_stderr_drain_task_feeds_sink() -> None:
 
 _HANGING_CLI = "import time\ntime.sleep(60)\n"
 
-# Mirrors _HOLDER_SCRIPT in tests/test_subprocess_lifecycle.py: the CLI forks a
-# `sleep` grandchild (which inherits the stdout pipe), reports readiness by
-# printing "UP", then hangs. A python CLI is used because bash defers SIGTERM
-# while a child runs, which would stall every test on TERMINATE_GRACE_S.
-_GROUP_HOLDER_CLI = (
-    "import subprocess, sys, time; "
-    "subprocess.Popen(['sleep', '60']); "
-    "print('UP', flush=True); "
-    "time.sleep(1000)"
-)
-
 
 async def test_transport_idle_timeout_fires_on_silent_stream(monkeypatch: pytest.MonkeyPatch) -> None:
     """A stream that goes silent for the window raises StreamStalledError.
@@ -127,7 +116,7 @@ async def test_transport_idle_timeout_fires_on_silent_stream(monkeypatch: pytest
 async def test_transport_teardown_is_idempotent_and_group_signalling() -> None:
     """Double terminate() must not raise, and the grandchild dies with the group."""
 
-    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _GROUP_HOLDER_CLI])
+    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", GROUP_HOLDER_CLI])
     await t.start()
     proc = t.processes[0]
     pgid = os.getpgid(proc.pid)
@@ -150,7 +139,7 @@ async def test_transport_cancel_all_is_shielded() -> None:
     """
 
 
-    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", _GROUP_HOLDER_CLI])
+    t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", GROUP_HOLDER_CLI])
     await t.start()
     pgid = os.getpgid(t.processes[0].pid)
 

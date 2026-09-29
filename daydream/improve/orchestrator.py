@@ -2644,27 +2644,22 @@ async def _step_report(ctx: FlowContext) -> Stop | None:
             ),
             encoding="utf-8",
         )
-        if ctx.data["plan_exit_code"]:
-            heading, detail = _improve_failure_message(ctx)
-            print_error(console, heading, detail)
-            return Stop(ctx.data["plan_exit_code"])
-        print_success(console, "Description plan complete.")
-        return None
-
-    report_path(ctx.data["improve_dir"]).write_text(
-        _report_with_provenance(_render_report(ctx))
-    )
+        success_message = "Description plan complete."
+    else:
+        report_path(ctx.data["improve_dir"]).write_text(
+            _report_with_provenance(_render_report(ctx))
+        )
+        success_message = (
+            "Improve audit complete: "
+            f"{len(ctx.data['services'])} services, "
+            f"{len(ctx.data['stacks'])} stacks, "
+            f"{len(ctx.data['vetted']['findings'])} vetted findings."
+        )
     if ctx.data["plan_exit_code"]:
         heading, detail = _improve_failure_message(ctx)
         print_error(console, heading, detail)
         return Stop(ctx.data["plan_exit_code"])
-    print_success(
-        console,
-        "Improve audit complete: "
-        f"{len(ctx.data['services'])} services, "
-        f"{len(ctx.data['stacks'])} stacks, "
-        f"{len(ctx.data['vetted']['findings'])} vetted findings.",
-    )
+    print_success(console, success_message)
     return None
 
 
