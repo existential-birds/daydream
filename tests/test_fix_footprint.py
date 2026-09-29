@@ -28,7 +28,13 @@ from daydream.repository_paths import (
     git_observed_path_is_confined,
 )
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo, work_context
+from tests.harness.git_helpers import (
+    commit as _commit,
+    git as _git,
+    init_repo,
+    work_context,
+    write_and_stage,
+)
 
 
 def _seed(repo: Path, files: dict[str, bytes]) -> None:
@@ -532,8 +538,7 @@ def test_group_worktree_rollback_preserves_sibling_index_entry(git_repo: Path) -
         untracked={},
     )
     (git_repo / "a.py").write_bytes(b"A = partial\n")
-    (git_repo / "b.py").write_bytes(b"B = sibling\n")
-    _git(git_repo, "add", "b.py")
+    write_and_stage(git_repo, "b.py", b"B = sibling\n")
     sibling_index = git_ops.snapshot_index(git_repo)
 
     git_ops.restore_group_worktree_from_snapshot(git_repo, snapshot, ["a.py"])
@@ -670,8 +675,7 @@ async def test_parallel_group_fallback_never_restores_index_while_sibling_is_liv
         async def _gen() -> AsyncGenerator[AgentEvent, None]:
             nonlocal a_fallback_calls, b_cached_while_live
             if prompt.startswith("Fix these 2 issues") and "b one" in prompt:
-                (cwd / "b.py").write_bytes(b"B = sibling\n")
-                _git(cwd, "add", "b.py")
+                write_and_stage(cwd, "b.py", b"B = sibling\n")
                 b_staged.set()
                 await a_fallback_started.wait()
                 b_cached_while_live = _git(cwd, "diff", "--cached", "--name-only")
@@ -736,8 +740,7 @@ async def test_parallel_fix_cancellation_closes_backend_before_restoring_round_i
     def responder(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
         async def _gen() -> AsyncGenerator[AgentEvent, None]:
             try:
-                (cwd / "a.py").write_bytes(b"A = staged by live fixer\n")
-                _git(cwd, "add", "a.py")
+                write_and_stage(cwd, "a.py", b"A = staged by live fixer\n")
                 staged.set()
                 await never.wait()
                 yield ResultEvent(structured_output=None, continuation=None)
@@ -948,8 +951,7 @@ def test_gitlink_group_rollback_refuses_dirty_nested_tree_without_mutating_it(
     snapshot = _gitlink_rollback_snapshot(git_repo)
     original_head = _git(nested, "rev-parse", "HEAD")
     (nested / "source.py").write_bytes(b"owner dirty bytes\n")
-    (git_repo / "agent-staged.txt").write_bytes(b"agent index mutation\n")
-    _git(git_repo, "add", "agent-staged.txt")
+    write_and_stage(git_repo, "agent-staged.txt", b"agent index mutation\n")
 
     with pytest.raises(GitError, match="dirty gitlink"):
         git_ops.restore_group_from_snapshot(git_repo, snapshot, ["dependency"])

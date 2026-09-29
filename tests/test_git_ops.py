@@ -38,6 +38,7 @@ from tests.harness.git_helpers import (
     configure_identity as _configure_identity,
     git as _git,
     init_repo as _init_repo,
+    write_and_stage,
 )
 
 
@@ -71,15 +72,13 @@ def _topic_repo(tmp_path: Path) -> Path:
 def test_resolve_diff_merge_base_prefers_present_origin_ref(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     base = _git(repo, "rev-parse", "HEAD")
-    (repo / "upstream.py").write_text("UPSTREAM = 1\n")
-    _git(repo, "add", "upstream.py")
+    write_and_stage(repo, "upstream.py", "UPSTREAM = 1\n")
     remote_tip = _commit(repo, "remote advancement")
     _git(repo, "branch", "feature", remote_tip)
     _git(repo, "reset", "--hard", base)
     _git(repo, "update-ref", "refs/remotes/origin/main", remote_tip)
     _git(repo, "checkout", "feature")
-    (repo / "feature.py").write_text("FEATURE = 1\n")
-    _git(repo, "add", "feature.py")
+    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
     head = _commit(repo, "feature")
 
     assert git_ops.merge_base(repo, "main", head) == base
@@ -92,12 +91,10 @@ def test_resolve_diff_merge_base_carries_only_ancestor_of_dangling_base(
     repo = _make_repo_with_main(tmp_path)
     common = _git(repo, "rev-parse", "HEAD")
     _git(repo, "checkout", "-b", "feature")
-    (repo / "feature.py").write_text("FEATURE = 1\n")
-    _git(repo, "add", "feature.py")
+    write_and_stage(repo, "feature.py", "FEATURE = 1\n")
     head = _commit(repo, "feature")
     _git(repo, "checkout", "--detach", common)
-    (repo / "side.py").write_text("SIDE = 1\n")
-    _git(repo, "add", "side.py")
+    write_and_stage(repo, "side.py", "SIDE = 1\n")
     dangling_tip = _commit(repo, "dangling selected base")
     _git(repo, "checkout", "feature")
 
@@ -457,8 +454,7 @@ def test_independent_snapshot_rejects_inherited_git_overrides_before_mutation(
 ) -> None:
     repo = tmp_path / "source"
     _init_repo(repo)
-    (repo / "app.py").write_bytes(b"VALUE = 1\n")
-    _git(repo, "add", "app.py")
+    write_and_stage(repo, "app.py", b"VALUE = 1\n")
     if not unborn:
         _commit(repo, "initial")
     (repo / "app.py").write_bytes(b"VALUE = 2\n")
@@ -828,8 +824,7 @@ def test_clone_no_local_requests_independent_objects(
 @pytest.mark.parametrize("name", [" leading and trailing ", "line\nbreak", "café.py"])
 def test_diff_name_only_strict_preserves_exact_git_paths(tmp_path: Path, name: str) -> None:
     repo = _make_repo_with_main(tmp_path)
-    (repo / name).write_bytes(b"content\n")
-    _git(repo, "add", "--", name)
+    write_and_stage(repo, name, b"content\n")
     _commit(repo, "unusual path")
     assert git_ops.diff_name_only_strict(repo, "HEAD^", "HEAD") == [name]
     assert git_ops.diff_name_only_strict(repo, "HEAD", "HEAD") == []
@@ -919,8 +914,7 @@ def test_default_branch_falls_back_to_main(tmp_path: Path) -> None:
 def test_list_local_branches_maps_names_to_oids(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path, name="list_branches")
     _git(repo, "checkout", "-b", "feat/slash-name")
-    (repo / "feature.txt").write_text("feature\n")
-    _git(repo, "add", "feature.txt")
+    write_and_stage(repo, "feature.txt", "feature\n")
     _commit(repo, "on feature")
     _git(repo, "checkout", "main")
 
@@ -949,8 +943,7 @@ def test_default_branch_fallback(tmp_path: Path, init_branch: str, expected: obj
     repo.mkdir()
     _git(repo, "init", "-b", init_branch)
     _configure_identity(repo)
-    (repo / "f.txt").write_text("hi\n")
-    _git(repo, "add", "f.txt")
+    write_and_stage(repo, "f.txt", "hi\n")
     _commit(repo, "first")
     if isinstance(expected, type) and issubclass(expected, Exception):
         with pytest.raises(expected):
@@ -1001,8 +994,7 @@ def _ref_tag(repo: Path) -> str:
 
 
 def _ref_relative_commit_ish(repo: Path) -> str:
-    (repo / "two.txt").write_text("two\n")
-    _git(repo, "add", "two.txt")
+    write_and_stage(repo, "two.txt", "two\n")
     _commit(repo, "second")
     return "HEAD~1"
 
@@ -1053,8 +1045,7 @@ def test_commit_exists_rejects_origin_only(tmp_path: Path) -> None:
     repo, bare = _repo_with_origin(tmp_path)
     _git(repo, "push", "-u", "origin", "main")
     _git(repo, "checkout", "-b", "remote-only")
-    (repo / "r.txt").write_text("r\n")
-    _git(repo, "add", "r.txt")
+    write_and_stage(repo, "r.txt", "r\n")
     _commit(repo, "remote-only commit")
     _git(repo, "push", "-u", "origin", "remote-only")
     _git(repo, "checkout", "main")
@@ -1088,8 +1079,7 @@ def test_is_ancestor_reports_relationship(
     tmp_path: Path, ancestor: str, descendant: str, expected: bool
 ) -> None:
     repo = _make_repo_with_main(tmp_path)
-    (repo / "second.txt").write_text("second\n")
-    _git(repo, "add", "second.txt")
+    write_and_stage(repo, "second.txt", "second\n")
     _commit(repo, "second")
     assert git_ops.is_ancestor(repo, ancestor, descendant) is expected
 
@@ -1100,13 +1090,11 @@ def test_merge_base_returns_shared_commit(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
 
     _git(repo, "checkout", "-b", "feat")
-    (repo / "feat.txt").write_text("feat\n")
-    _git(repo, "add", "feat.txt")
+    write_and_stage(repo, "feat.txt", "feat\n")
     _commit(repo, "feat commit")
 
     _git(repo, "checkout", "main")
-    (repo / "main2.txt").write_text("more main\n")
-    _git(repo, "add", "main2.txt")
+    write_and_stage(repo, "main2.txt", "more main\n")
     _commit(repo, "main commit")
 
     _git(repo, "checkout", "feat")
@@ -1120,16 +1108,14 @@ def test_merge_base_prefers_upstream_when_remote_ahead(tmp_path: Path) -> None:
     _git(repo, "push", "-u", "origin", "main")
 
     _git(repo, "checkout", "-b", "feature")
-    (repo / "feature.txt").write_text("feature\n")
-    _git(repo, "add", "feature.txt")
+    write_and_stage(repo, "feature.txt", "feature\n")
     _commit(repo, "feature commit")
 
     # Rewrite local main as an unrelated history; track origin/main so the
     # upstream is "ahead" of the rewritten local main.
     _git(repo, "checkout", "--orphan", "rewrite")
     _git(repo, "rm", "-rf", ".")
-    (repo / "new-main.txt").write_text("rewritten\n")
-    _git(repo, "add", "new-main.txt")
+    write_and_stage(repo, "new-main.txt", "rewritten\n")
     _commit(repo, "rewrite main")
     _git(repo, "branch", "-M", "rewrite", "main")
     _git(repo, "branch", "--set-upstream-to=origin/main", "main")
@@ -1189,8 +1175,7 @@ def test_resolve_pr_merge_base_uses_local_branch_without_remotes(tmp_path: Path)
     repo = _make_repo_with_main(tmp_path)
     base = git_ops.head_sha(repo)
     _git(repo, "checkout", "-b", "feature")
-    (repo / "feature.txt").write_text("feature\n")
-    _git(repo, "add", "feature.txt")
+    write_and_stage(repo, "feature.txt", "feature\n")
     head = _commit(repo, "feature")
 
     assert git_ops.resolve_pr_merge_base(repo, [], "refs/heads/main", head) == base
@@ -1200,13 +1185,11 @@ def test_resolve_pr_merge_base_prefers_present_remote_over_stale_local(tmp_path:
     repo, remote = _repo_with_origin(tmp_path)
     stale_local = git_ops.head_sha(repo)
     _git(repo, "push", "-u", "origin", "main")
-    (repo / "base-update.txt").write_text("new base\n")
-    _git(repo, "add", "base-update.txt")
+    write_and_stage(repo, "base-update.txt", "new base\n")
     remote_base = _commit(repo, "base update")
     _git(repo, "push", "origin", "main")
     _git(repo, "checkout", "-b", "feature")
-    (repo / "feature.txt").write_text("feature\n")
-    _git(repo, "add", "feature.txt")
+    write_and_stage(repo, "feature.txt", "feature\n")
     head = _commit(repo, "feature")
     _git(repo, "branch", "-f", "main", stale_local)
 
@@ -1218,12 +1201,10 @@ def test_resolve_pr_merge_base_prefers_present_remote_over_stale_local(tmp_path:
 def test_resolve_pr_merge_base_rejects_divergent_matching_remotes(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     oldest = git_ops.head_sha(repo)
-    (repo / "base-update.txt").write_text("new base\n")
-    _git(repo, "add", "base-update.txt")
+    write_and_stage(repo, "base-update.txt", "new base\n")
     newer = _commit(repo, "base update")
     _git(repo, "checkout", "-b", "feature")
-    (repo / "feature.txt").write_text("feature\n")
-    _git(repo, "add", "feature.txt")
+    write_and_stage(repo, "feature.txt", "feature\n")
     head = _commit(repo, "feature")
     _git(repo, "update-ref", "refs/remotes/one/main", newer)
     _git(repo, "update-ref", "refs/remotes/two/main", oldest)
@@ -1255,8 +1236,7 @@ def test_resolve_pr_merge_base_rejects_invalid_base_ref(tmp_path: Path, local_re
 
 def test_diff_returns_changes(tmp_path: Path) -> None:
     repo = _topic_repo(tmp_path)
-    (repo / "added.txt").write_text("hello\n")
-    _git(repo, "add", "added.txt")
+    write_and_stage(repo, "added.txt", "hello\n")
     _commit(repo, "topic commit")
     out = git_ops.diff(repo, "main")
     assert "added.txt" in out
@@ -1265,8 +1245,7 @@ def test_diff_returns_changes(tmp_path: Path) -> None:
 
 def test_diff_includes_staged_and_unstaged_worktree_changes(tmp_path: Path) -> None:
     repo = _topic_repo(tmp_path)
-    (repo / "staged.txt").write_text("staged\n")
-    _git(repo, "add", "staged.txt")
+    write_and_stage(repo, "staged.txt", "staged\n")
     (repo / "base.txt").write_text("unstaged\n")
 
     out = git_ops.diff(repo, "main")
@@ -1298,8 +1277,7 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path) -> None:
     _git(repo, "push", "-u", "origin", "main")
 
     # Local commit on main — not pushed.
-    (repo / "local.txt").write_text("local change\n")
-    _git(repo, "add", "local.txt")
+    write_and_stage(repo, "local.txt", "local change\n")
     _commit(repo, "local only")
 
     out = git_ops.diff(repo, "main")
@@ -1310,8 +1288,7 @@ def test_diff_prefers_origin_when_on_default_branch(tmp_path: Path) -> None:
 
 def test_diff_name_only_returns_changed_files(tmp_path: Path) -> None:
     repo = _topic_repo(tmp_path)
-    (repo / "added.txt").write_text("hello\n")
-    _git(repo, "add", "added.txt")
+    write_and_stage(repo, "added.txt", "hello\n")
     _commit(repo, "add file")
     result = git_ops.diff_name_only(repo, "main", "HEAD")
     assert result == ["added.txt"]
@@ -1358,8 +1335,7 @@ def test_changed_files_against_raises_when_git_query_fails(tmp_path: Path) -> No
 
 def test_log_returns_oneline_commits(tmp_path: Path) -> None:
     repo = _topic_repo(tmp_path)
-    (repo / "a.txt").write_text("a\n")
-    _git(repo, "add", "a.txt")
+    write_and_stage(repo, "a.txt", "a\n")
     _commit(repo, "topic-msg")
     out = git_ops.log(repo, "main")
     assert "topic-msg" in out
@@ -1436,8 +1412,7 @@ def test_grep_fixed_matches_raises_on_malformed_record(tmp_path: Path, monkeypat
 def test_grep_fixed_matches_empty_when_no_matches(tmp_path: Path) -> None:
     """Exit code 1 ("no matches") is treated as success: an empty list."""
     repo = _make_repo_with_main(tmp_path)
-    (repo / "widget.py").write_text("widget\n")
-    _git(repo, "add", "widget.py")
+    write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
     assert git_ops.grep_fixed_matches(repo, ("absent_pattern",)) == []
 
@@ -1449,8 +1424,7 @@ def test_grep_fixed_matches_dedups_and_skips_nul_cr_lf_patterns(
     """Duplicate patterns are written once; empty/NUL/CR/LF patterns never
     reach the patterns file handed to git."""
     repo = _make_repo_with_main(tmp_path)
-    (repo / "widget.py").write_text("widget\n")
-    _git(repo, "add", "widget.py")
+    write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
 
     patterns_files: list[bytes] = []
@@ -1478,8 +1452,7 @@ def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(
 ) -> None:
     """An all-unsuitable pattern set short-circuits with no git invocation."""
     repo = _make_repo_with_main(tmp_path)
-    (repo / "widget.py").write_text("widget\n")
-    _git(repo, "add", "widget.py")
+    write_and_stage(repo, "widget.py", "widget\n")
     _commit(repo, "add widget")
 
     def no_git(*args: Any, **kwargs: Any) -> Any:
@@ -1492,8 +1465,7 @@ def test_grep_fixed_matches_empty_when_all_patterns_unsuitable(
 def test_grep_fixed_matches_default_word_false_matches_substrings(tmp_path: Path) -> None:
     """The default word=False mode matches fixed substrings, not whole words."""
     repo = _make_repo_with_main(tmp_path)
-    (repo / "app.py").write_text("application\n")
-    _git(repo, "add", "app.py")
+    write_and_stage(repo, "app.py", "application\n")
     _commit(repo, "add app")
     assert git_ops.grep_fixed_matches(repo, ("app",)) == [("app.py", "app")]
 
@@ -1519,11 +1491,9 @@ def test_upstream_ahead_count_when_remote_ahead(tmp_path: Path) -> None:
     sidecar = tmp_path / "sidecar"
     _git(tmp_path, "clone", str(bare), str(sidecar))
     _configure_identity(sidecar)
-    (sidecar / "x.txt").write_text("x\n")
-    _git(sidecar, "add", "x.txt")
+    write_and_stage(sidecar, "x.txt", "x\n")
     _commit(sidecar, "x")
-    (sidecar / "y.txt").write_text("y\n")
-    _git(sidecar, "add", "y.txt")
+    write_and_stage(sidecar, "y.txt", "y\n")
     _commit(sidecar, "y")
     _git(sidecar, "push", "origin", "main")
 
@@ -1540,8 +1510,7 @@ def test_fetch_pulls_new_commits(tmp_path: Path) -> None:
     sidecar = tmp_path / "sidecar"
     _git(tmp_path, "clone", str(bare), str(sidecar))
     _configure_identity(sidecar)
-    (sidecar / "z.txt").write_text("z\n")
-    _git(sidecar, "add", "z.txt")
+    write_and_stage(sidecar, "z.txt", "z\n")
     new_sha = _commit(sidecar, "z")
     _git(sidecar, "push", "origin", "main")
 
@@ -2134,18 +2103,15 @@ def _make_divergent_history(tmp_path: Path) -> tuple[Path, str, str]:
     three-dot diffs differ in content.
     """
     repo = _make_repo_with_main(tmp_path)
-    (repo / "shared.txt").write_text("line one\nline two\nline three\n")
-    _git(repo, "add", "shared.txt")
+    write_and_stage(repo, "shared.txt", "line one\nline two\nline three\n")
     _commit(repo, "shared baseline")
 
     _git(repo, "checkout", "-b", "feat")
-    (repo / "shared.txt").write_text("line one\nline two FEAT\nline three\n")
-    _git(repo, "add", "shared.txt")
+    write_and_stage(repo, "shared.txt", "line one\nline two FEAT\nline three\n")
     _commit(repo, "feat edit")
 
     _git(repo, "checkout", "main")
-    (repo / "shared.txt").write_text("line one\nline two MAIN\nline three\n")
-    _git(repo, "add", "shared.txt")
+    write_and_stage(repo, "shared.txt", "line one\nline two MAIN\nline three\n")
     _commit(repo, "main edit after branch")
 
     _git(repo, "checkout", "feat")
@@ -2180,15 +2146,13 @@ def test_diff_paths_restricts_to_paths(tmp_path: Path) -> None:
 def test_diff_paths_unified_context_lines(tmp_path: Path) -> None:
     """Larger --unified yields a longer diff for the same change."""
     repo = _make_repo_with_main(tmp_path)
-    (repo / "ctx.txt").write_text("\n".join(f"line {i}" for i in range(1, 31)) + "\n")
-    _git(repo, "add", "ctx.txt")
+    write_and_stage(repo, "ctx.txt", "\n".join(f"line {i}" for i in range(1, 31)) + "\n")
     _commit(repo, "ctx baseline")
 
     _git(repo, "checkout", "-b", "feat")
     lines = [f"line {i}" for i in range(1, 31)]
     lines[14] = "line 15 CHANGED"
-    (repo / "ctx.txt").write_text("\n".join(lines) + "\n")
-    _git(repo, "add", "ctx.txt")
+    write_and_stage(repo, "ctx.txt", "\n".join(lines) + "\n")
     _commit(repo, "ctx edit")
 
     small = git_ops.diff_paths(repo, "main", "feat", ["ctx.txt"], unified=1)
@@ -2514,8 +2478,7 @@ def test_gh_pr_view_pr_arg(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, pr: 
 def test_daydream_commits_returns_tagged_commits(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     _git(repo, "checkout", "-b", "feat/x")
-    (repo / "a.py").write_text("a\n")
-    _git(repo, "add", "a.py")
+    write_and_stage(repo, "a.py", "a\n")
     _git(repo, "commit", "-m", "fix: something\n\nDaydream-Run: test-123\nDaydream-Version: 0.14.0")
     result = git_ops.daydream_commits(repo, "main")
     assert result is not None
@@ -2525,8 +2488,7 @@ def test_daydream_commits_returns_tagged_commits(tmp_path: Path) -> None:
 def test_daydream_commits_excludes_untagged(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     _git(repo, "checkout", "-b", "feat/x")
-    (repo / "b.py").write_text("b\n")
-    _git(repo, "add", "b.py")
+    write_and_stage(repo, "b.py", "b\n")
     _commit(repo, "chore: unrelated change")
     result = git_ops.daydream_commits(repo, "main")
     assert result is None
@@ -2637,8 +2599,7 @@ def test_staged_patch_round_trips_index_state(tmp_path: Path) -> None:
     clone = tmp_path / "clone"
     git_ops.clone(str(source), clone)
     payload = bytes(range(256))  # every byte value, incl. NUL/newline — not text
-    (source / "blob.bin").write_bytes(payload)
-    _git(source, "add", "blob.bin")
+    write_and_stage(source, "blob.bin", payload)
     shutil.copy2(source / "blob.bin", clone / "blob.bin")
 
     patch = git_ops.staged_patch(source)
@@ -3163,8 +3124,7 @@ def test_log_shas_returns_empty_list_when_range_is_genuinely_empty(tmp_path: Pat
 def test_log_shas_returns_commits_ahead_of_since(tmp_path: Path) -> None:
     """The success path still returns SHAs, newest first."""
     repo = _topic_repo(tmp_path)
-    (repo / "a.txt").write_text("a\n")
-    _git(repo, "add", "a.txt")
+    write_and_stage(repo, "a.txt", "a\n")
     _commit(repo, "topic-1")
 
     shas = git_ops.log_shas(repo, "topic", since="main")
@@ -3175,11 +3135,9 @@ def test_log_shas_returns_commits_ahead_of_since(tmp_path: Path) -> None:
 def test_log_shas_since_returns_commits_in_range(tmp_path: Path) -> None:
     """log_shas_since returns SHAs for commits in head..base range."""
     repo = _topic_repo(tmp_path)
-    (repo / "a.txt").write_text("a\n")
-    _git(repo, "add", "a.txt")
+    write_and_stage(repo, "a.txt", "a\n")
     _commit(repo, "topic-1")
-    (repo / "b.txt").write_text("b\n")
-    _git(repo, "add", "b.txt")
+    write_and_stage(repo, "b.txt", "b\n")
     _commit(repo, "topic-2")
     shas = git_ops.log_shas_since(repo, "main", "topic")
     assert len(shas) == 2

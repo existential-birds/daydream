@@ -36,6 +36,9 @@ from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     RUNS_DIRNAME,
+    RunWriteSnapshot,
+    TrajectoryDocumentSnapshot,
+    compute_timing_summary,
     redact_text,
     run_document_path,
     siblings_directory,
@@ -1555,12 +1558,6 @@ def analyze_exploration_utilization(
 
 def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
     """Project the shared lifecycle-first timing reducer into evaluation JSON."""
-    from daydream.trajectory import (  # noqa: PLC0415 - analyzer is a leaf consumer
-        RunWriteSnapshot,
-        TrajectoryDocumentSnapshot,
-        compute_timing_summary,
-    )
-
     all_timestamps: list[datetime] = []
     agent_timings: list[dict[str, Any]] = []
 

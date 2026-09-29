@@ -686,10 +686,8 @@ def reviewer_set_penalty_prior(
     # Canonicalize the bound so the lexical < against the canonical stored
     # column stays chronological regardless of the caller's spelling.
     before_valid_at = canonical_utc_iso(before_valid_at)
-    login_set = set(logins)
-    penalty_map = FP_PENALTY_MAP
 
-    # Build an IN-list so SQLite's json_each() can filter reviewer intersection
+    # Build an IN-list so SQLite's json_each() filters reviewer intersection
     # inside the query, avoiding a full-table fetch followed by Python-side
     # isdisjoint() for every archived row.
     placeholders = ",".join("?" * len(logins))
@@ -737,7 +735,7 @@ def reviewer_set_penalty_prior(
         except (json.JSONDecodeError, TypeError) as exc:
             warnings.warn(f"Invalid reviewer_logins payload {raw_logins!r}: {exc}", stacklevel=2)
             continue
-        if not isinstance(row_logins, list) or login_set.isdisjoint(row_logins):
+        if not isinstance(row_logins, list):
             continue
         try:
             row_labels = json.loads(row["labels"])
@@ -746,7 +744,7 @@ def reviewer_set_penalty_prior(
             continue
         if not isinstance(row_labels, list) or not row_labels:
             continue
-        penalty = penalty_map.get(str(row_labels[0]))
+        penalty = FP_PENALTY_MAP.get(str(row_labels[0]))
         if penalty is None:
             continue
         penalties.append(penalty)

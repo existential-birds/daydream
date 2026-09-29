@@ -191,25 +191,18 @@ def test_use_images_false_leaves_tasks_imageless(
     ] == [FIXTURE_TEST_COMMAND, FIXTURE_TEST_COMMAND, "/opt/repo-venv/bin/python -m pytest -q"]
 
 
-def test_load_rejects_excluded_repo(tmp_path: Path, stage0_gate_report: Path) -> None:
-    """C5 is unconditional: an excluded slug fails the load."""
-    manifest = _write_manifest(tmp_path / "manifest.toml", [("getsentry/sentry", [_pr(7, "a" * 40, "b" * 40)])])
+@pytest.mark.parametrize("slug", ["getsentry/sentry", "GetSentry/Sentry"])
+def test_load_rejects_excluded_repo(
+    tmp_path: Path, stage0_gate_report: Path, slug: str,
+) -> None:
+    """C5 is unconditional and case-insensitive: an excluded slug fails the load."""
+    manifest = _write_manifest(tmp_path / "manifest.toml", [(slug, [_pr(7, "a" * 40, "b" * 40)])])
 
     taskset = _taskset(manifest, stage0_gate_report)
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "C5" in str(excinfo.value)
-    assert "getsentry/sentry" in str(excinfo.value)
-
-
-def test_load_rejects_excluded_repo_case_insensitively(tmp_path: Path, stage0_gate_report: Path) -> None:
-    """GitHub slugs are case-insensitive; `GetSentry/Sentry` is the same repo."""
-    manifest = _write_manifest(tmp_path / "manifest.toml", [("GetSentry/Sentry", [_pr(7, "a" * 40, "b" * 40)])])
-
-    taskset = _taskset(manifest, stage0_gate_report)
-    with pytest.raises(ValueError) as excinfo:
-        list(taskset.load())
-    assert "C5" in str(excinfo.value)
+    assert slug in str(excinfo.value)
 
 
 def test_load_rejects_manifest_without_pr_snapshots(tmp_path: Path) -> None:
