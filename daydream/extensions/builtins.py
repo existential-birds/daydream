@@ -95,8 +95,6 @@ def _register_builtin_flows(registry: Registry) -> None:
     from daydream.flows.engine import LoopGroup
     from daydream.improve import orchestrator as improve
 
-    for step in deep.STEPS:
-        registry.register_phase(step)
     # Issue #744: the fix cycle is a fix -> verify -> re-dispatch loop. The
     # flat ``fix`` step is wrapped together with the post-fix ``fix-verify``
     # step in a LoopGroup (budget 3 rounds); ``fix-verify`` emits BreakLoop when
@@ -105,6 +103,7 @@ def _register_builtin_flows(registry: Registry) -> None:
     # fixed 3 per the issue.
     entries: list[FlowEntry] = []
     for step in deep.STEPS:
+        registry.register_phase(step)
         if step.name == "fix":
             entries.append(
                 LoopGroup(

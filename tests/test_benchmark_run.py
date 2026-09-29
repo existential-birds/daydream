@@ -164,7 +164,6 @@ def test_preflight_claude_cli_judge_needs_no_base_url(tmp_path: Path) -> None:
     """claude-cli resolves its judge host (api.anthropic.com) without a base URL."""
 
     ws = _ws(tmp_path, judge_allowed_hosts=["api.anthropic.com"])
-    _seed_compiled_task(ws, reviewer=["review.example"], judge=["api.anthropic.com"])
     errs = run_mod._preflight(
         ws,
         oracle=True,
@@ -598,7 +597,6 @@ def test_parse_job_results_records_env_when_reward_missing(tmp_path: Path) -> No
 def test_current_state_mapping_includes_effort_and_wheel_digest(tmp_path: Path) -> None:
 
     ws = _ws(tmp_path)
-    _seed_compiled_lock(ws)   # benchmark.lock.json with daydream block
     m = run_mod._current_state_mapping(
         workspace=ws, compiled_lock_sha256="a" * 64, env=_env())
     assert m["daydream_wheel_sha256"] == "c" * 64
