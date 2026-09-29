@@ -184,6 +184,19 @@ class DaydreamFileConfig:
             and degrade-to-default rule
             (``config.DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS``, 30). An entry past
             the bound is a plain miss, never a truncated hit.
+        verify_all: Issue #735. Conservative toggle for selection-gated
+            recommendation verification. A real ``True`` restores today's
+            "verify every non-exempt finding" behaviour exactly; ``None`` leaves
+            the choice to ``RunConfig.verify_all`` and the built-in default
+            (``config.DEFAULT_VERIFY_ALL``). Real bool only, coerced through
+            ``_coerce_optional_bool``: ``verify_all = 1`` degrades to unset,
+            never enabled.
+        extra_risk_categories: Issue #735. Additive risk categories for the
+            verify-selection predicate. Coerced through ``_coerce_string_list``,
+            so a non-list (or a list carrying a non-string) degrades to empty,
+            never to a guess. Entries are validated fail-loud against the
+            mandatory vocabulary before the verify pass; a recognised entry can
+            only widen selection.
     """
 
     model: str | None = None
@@ -207,6 +220,8 @@ class DaydreamFileConfig:
     review_cache_max_entries: int | None = None
     review_cache_max_bytes: int | None = None
     review_cache_max_age_days: int | None = None
+    verify_all: bool | None = None
+    extra_risk_categories: list[str] = field(default_factory=list)
     quality_gate_enabled: bool | None = None
     quality_gate_erosion_delta: float | None = None
     quality_gate_verbosity_delta: float | None = None
@@ -498,12 +513,12 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     reasoning_effort = merged.get("reasoning_effort")
     threshold = _coerce_int(merged.get("shallow_fanout_threshold"))
     # Optional bool flags (precision_mode, approve_on_clean, scope_issue_filing,
-    # deep_shard_enabled, review_cache_enabled, quality_gate_enabled) accept a
-    # real bool only; any other value degrades to None rather than crashing the
-    # loader, so an accidental ``review_cache_enabled = 1`` is treated as unset,
-    # not enabled. The shard and reuse-cache bounds beside them are non-negative
-    # ints; the quality-gate delta and absolute thresholds are finite
-    # non-negative floats.
+    # deep_shard_enabled, review_cache_enabled, verify_all, quality_gate_enabled)
+    # accept a real bool only; any other value degrades to None rather than
+    # crashing the loader, so an accidental ``verify_all = 1`` is treated as
+    # unset, not enabled. The shard and reuse-cache bounds beside them are
+    # non-negative ints; the quality-gate delta and absolute thresholds are
+    # finite non-negative floats.
     # Grounded diagrams (#1113): the sub-table degrades to empty on junk, so
     # every key falls through to its config.py default rather than raising.
     diagram = merged.get("diagram")
@@ -550,6 +565,8 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         review_cache_max_entries=_coerce_non_negative_int(merged.get("review_cache_max_entries")),
         review_cache_max_bytes=_coerce_non_negative_int(merged.get("review_cache_max_bytes")),
         review_cache_max_age_days=_coerce_non_negative_int(merged.get("review_cache_max_age_days")),
+        verify_all=_coerce_optional_bool(merged.get("verify_all")),
+        extra_risk_categories=_coerce_string_list(merged.get("extra_risk_categories")),
         quality_gate_enabled=_coerce_optional_bool(merged.get("quality_gate_enabled")),
         quality_gate_erosion_delta=_coerce_non_negative_float(merged.get("quality_gate_erosion_delta")),
         quality_gate_verbosity_delta=_coerce_non_negative_float(merged.get("quality_gate_verbosity_delta")),

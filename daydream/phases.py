@@ -96,6 +96,7 @@ from daydream.deep.reuse_key import (
 from daydream.deep.reuse_store import ReuseCache, ReuseHit, restore_entry_payload
 from daydream.deep.verify_selection import (
     SELECTION_RULE_VERSION,
+    SKIP_REASON_CODE,
     SelectionConfig,
     select_items,
 )
@@ -1868,7 +1869,11 @@ async def phase_verify_recommendations(
         "extra_categories": list(config.extra_categories),
         "decisions": [decision.as_dict() for decision in decisions],
         "selected": sum(1 for decision in decisions if decision.selected),
-        "skipped": sum(1 for decision in decisions if not decision.selected),
+        # ``skipped`` counts only items the selective rule sent to the skip
+        # branch; a lens exemption (structural / wonder) is recorded in the
+        # decision list but is not a skip the operator chose to make, so a
+        # ``verify_all`` run reports zero skipped (MH13).
+        "skipped": sum(1 for decision in decisions if decision.reason_code == SKIP_REASON_CODE),
     }
     selected_items = [
         item for item, decision in zip(items, decisions, strict=True) if decision.selected

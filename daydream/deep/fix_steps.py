@@ -22,6 +22,7 @@ from daydream.config import (
     DEFAULT_QUALITY_GATE_EROSION_DELTA,
     DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE,
     DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
+    DEFAULT_VERIFY_ALL,
     REVIEW_OUTPUT_FILE,
 )
 from daydream.config_file import _coerce_non_negative_float
@@ -47,6 +48,7 @@ from daydream.deep.scope_issues import (
 )
 from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
 from daydream.deep.state import DeepState
+from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
@@ -283,6 +285,7 @@ async def _step_verify(ctx: FlowContext) -> None:
     # skips both the verify pass and the recommendation-verdicts.json
     # artifact. A --start-at fix resume still produces verdicts whenever
     # fixes are applied (the gate still runs on resume; accept => verify runs).
+    selection = _resolve_verify_selection(ctx.config)
     async with phase_scope(DaydreamPhase.VERIFY):
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
             ctx.backend_for("verify"),
@@ -290,6 +293,7 @@ async def _step_verify(ctx: FlowContext) -> None:
             merged_items_path=deep_state.items_file,
             deep_dir=dd,
             strategy=ctx.strategy("verification"),
+            selection=selection,
             run_context=ctx.run_context,
         )
     print_verification_summary(console, verdicts_file)
@@ -314,6 +318,29 @@ async def _step_verify(ctx: FlowContext) -> None:
             other=other_ids,
             total=len(items),
         )
+    )
+
+
+def _resolve_verify_selection(config: RunConfig) -> SelectionConfig:
+    """Resolve the verify-selection knobs: RunConfig > file config > built-in default.
+
+    ``verify_all`` is a real-bool-only optional; a non-bool at either tier is
+    ignored (the loader already degrades it to ``None``), so an absent value
+    resolves fail-safe to ``DEFAULT_VERIFY_ALL``. ``extra_risk_categories`` is
+    additive, and an unrecognised name raises ``UnknownRiskCategoryError`` here
+    -- before the verify pass -- so the operator gets a failed run naming the
+    value rather than a silently narrowed or widened selection (MH13).
+    """
+    file_config = config.file_config
+    verify_all = config.verify_all
+    if verify_all is None and file_config is not None:
+        verify_all = file_config.verify_all
+    extra = config.verify_extra_risk_categories
+    if extra is None and file_config is not None:
+        extra = file_config.extra_risk_categories
+    return resolve_selection_config(
+        verify_all=verify_all if verify_all is not None else DEFAULT_VERIFY_ALL,
+        extra_categories=extra,
     )
 
 

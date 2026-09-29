@@ -339,6 +339,15 @@ DEFAULT_REVIEW_CACHE_MAX_ENTRIES: int = 1024
 DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
 DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 
+# Issue #735: selection-gated recommendation verification. Conservative by
+# default — today's "verify every non-exempt finding" behaviour — until the
+# verify-selection comparison report's evidence gate flips it. ``verify_all =
+# true`` in either config file restores that behaviour exactly;
+# ``extra_risk_categories`` only adds to the mandatory risk vocabulary, never
+# removes from it. Both are config-file keys with no CLI flag.
+DEFAULT_VERIFY_ALL: bool = True
+DEFAULT_EXTRA_RISK_CATEGORIES: tuple[str, ...] = ()
+
 # Structural-maintainability meta-stack. Deep mode appends a synthetic
 # ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` so the structural
 # reviewer always runs alongside per-language reviewers. It is a scope metadata
