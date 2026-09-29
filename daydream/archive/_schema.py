@@ -25,8 +25,9 @@ centralised here so all callers stay in sync if the precedence rule ever changes
 class Column(NamedTuple):
     """One table column: its SQL name, DDL body text, and run-migration flags.
 
-    ``additive``/``upserted`` default to ``False`` so non-``runs`` tables (e.g.
-    ``label_observations``) declare only a name and definition.
+    ``additive``/``upserted`` default to ``False`` so most non-``runs`` tables
+    declare only a name and definition; ``label_observations`` sets ``additive``
+    on the columns its own ALTER-ADD migration runs.
     """
 
     name: str
@@ -217,11 +218,11 @@ LABEL_OBSERVATION_COLUMNS: tuple[Column, ...] = (
     Column("composite_reward", "REAL"),
     Column("reviewer_logins", "TEXT"),
     Column("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
-    Column("source", "TEXT NOT NULL DEFAULT 'auto'"),
-    Column("labeler_policy_version", "TEXT"),
-    Column("reply_classifier_version", "TEXT"),
-    Column("reply_evidence_digest", "TEXT"),
-    Column("legacy", "TEXT NOT NULL DEFAULT 'auto'"),
+    Column("source", "TEXT NOT NULL DEFAULT 'auto'", True),
+    Column("labeler_policy_version", "TEXT", True),
+    Column("reply_classifier_version", "TEXT", True),
+    Column("reply_evidence_digest", "TEXT", True),
+    Column("legacy", "TEXT NOT NULL DEFAULT 'auto'", True),
 )
 LABEL_OBSERVATION_NAMES: tuple[str, ...] = tuple(col.name for col in LABEL_OBSERVATION_COLUMNS)
 
@@ -264,7 +265,7 @@ def _alter_add_missing(
                     raise
 
 
-def _migration_entries(columns: Iterable[RunColumn]) -> list[tuple[str, str]]:
+def _migration_entries(columns: Iterable[Column]) -> list[tuple[str, str]]:
     """Render the ``(name, type)`` ALTER-ADD entries for the additive *columns*.
 
     Non-additive entries are omitted: they are present in every legacy shape by
@@ -316,13 +317,7 @@ def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
     _alter_add_missing(
         conn,
         "label_observations",
-        [
-            ("source", "TEXT NOT NULL DEFAULT 'auto'"),
-            ("labeler_policy_version", "TEXT"),
-            ("reply_classifier_version", "TEXT"),
-            ("reply_evidence_digest", "TEXT"),
-            ("legacy", "TEXT NOT NULL DEFAULT 'auto'"),
-        ],
+        _migration_entries(LABEL_OBSERVATION_COLUMNS),
     )
     # Stamp history exactly once (M17): rows written before the reply-label
     # columns existed have ``labeler_policy_version IS NULL``. The additional

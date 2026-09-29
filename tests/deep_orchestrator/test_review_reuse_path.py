@@ -25,6 +25,7 @@ from daydream.deep import reuse_store
 from daydream.phases import build_commit_message
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _arbiter_stacks,
     _count_merge_prompts,
     _count_review_prompts,
     _install_uncovered_sweep_stub,
@@ -398,30 +399,6 @@ def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
         for call in calls
         if _ARBITER_DISCRIMINATOR in str(call.get("prompt", "")).lower()
     )
-
-
-def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
-    """Per-stack findings at three distinct ``(file, line)`` locations.
-
-    Three locations make ``partition_arbiter_targets`` return more than one
-    co-located group under a sharding route, which is the real-path
-    precondition for a sharded whole-unit arbiter key.
-    """
-    locations = {
-        "python": ("api.py", "python finding"),
-        "react": ("App.tsx", "react finding"),
-        "generic": ("README.md", "generic finding"),
-    }
-    return {
-        name: {
-            "severity": severities[name],
-            "confidence": "high",
-            "file": file,
-            "line": 1,
-            "description": description,
-        }
-        for name, (file, description) in locations.items()
-    }
 
 
 async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_per_group_when_one_is(

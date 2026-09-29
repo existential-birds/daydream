@@ -61,13 +61,14 @@ def _span(
     span_id: int = _SPAN_ID,
     parent: SpanContext | None = None,
     name: str = "span",
+    sampled: bool = True,
     links: list[Link] | None = None,
     events: list[Event] | None = None,
     attributes: Any = None,
 ) -> ReadableSpan:
     return ReadableSpan(
         name=name,
-        context=_ctx(trace_id, span_id),
+        context=_ctx(trace_id, span_id, sampled=sampled),
         parent=parent,
         resource=Resource({"service.name": "daydream-test"}),
         attributes=attributes or {},
@@ -127,28 +128,12 @@ def test_wire_repairs_span_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     cases = [
         # Remote parent with an unsampled span context: masks only.
         (
-            ReadableSpan(
-                name="span",
-                context=_ctx(_TRACE_ID, _SPAN_ID, sampled=False),
-                parent=remote_parent,
-                resource=Resource({"service.name": "daydream-test"}),
-                attributes={},
-                events=[],
-                links=[],
-            ),
+            _span(sampled=False, parent=remote_parent),
             _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE,
         ),
         # Local root, unsampled span context.
         (
-            ReadableSpan(
-                name="span",
-                context=_ctx(_TRACE_ID, 0x4444444444444444, sampled=False),
-                parent=None,
-                resource=Resource({"service.name": "daydream-test"}),
-                attributes={},
-                events=[],
-                links=[],
-            ),
+            _span(span_id=0x4444444444444444, sampled=False, parent=None),
             _FLAGS_HAS_IS_REMOTE,
         ),
         # Local root, sampled span context: the low sampled bit is restored.

@@ -619,6 +619,18 @@ class TestDownloadSnapshot:
         assert art["sha256"] == expected
         assert (stage / ("a" * 40) / art["relpath"]).read_bytes() == SNAPSHOT[art["relpath"]]
 
+    def test_legacy_manifest_without_discovery_block_returns_empty(self, tmp_path: Path) -> None:
+        # A manifest predating the discovery ledger must not raise: the block
+        # accessor falls back to {} and the candidate accessor to legacy None.
+        stage = tmp_path / "stage"
+        revision = "a" * 40
+        manifest_dir = stage / "downloads" / revision
+        manifest_dir.mkdir(parents=True)
+        (manifest_dir / "_download_manifest.json").write_text(json.dumps({"artifacts": []}))
+
+        assert hydrate._download_discovery_block(stage, revision) == {}
+        assert hydrate._discovered_session_ids(stage, revision) is None
+
     def test_resume_skips_verified_artifacts(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
         hub.commit_revision("a" * 40)

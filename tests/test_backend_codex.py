@@ -69,6 +69,17 @@ from tests.harness.protocol_cli import install_protocol_cli
 FIXTURES_DIR = Path(__file__).parent / "fixtures" / "codex_jsonl"
 
 
+def _completed_command(command: str, output: str) -> dict[str, Any]:
+    """One codex `item.completed` command_execution item."""
+    return {
+        "type": "command_execution",
+        "command": command,
+        "status": "completed",
+        "exit_code": 0,
+        "aggregated_output": output,
+    }
+
+
 def _stage_executable(path: Path) -> Path:
     """Create a real 0o755 shell stub at *path*, creating parent dirs."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -1426,36 +1437,9 @@ class TestUnwrapShellCommand:
             json.dumps({"type": "thread.started", "thread_id": "th_m7"}),
             line("item.started", {"type": "command_execution", "command": "echo one"}),
             line("item.started", {"type": "command_execution", "command": raw}),
-            line(
-                "item.completed",
-                {
-                    "type": "command_execution",
-                    "command": "echo one",
-                    "status": "completed",
-                    "exit_code": 0,
-                    "aggregated_output": "one",
-                },
-            ),
-            line(
-                "item.completed",
-                {
-                    "type": "command_execution",
-                    "command": raw,
-                    "status": "completed",
-                    "exit_code": 0,
-                    "aggregated_output": "ls",
-                },
-            ),
-            line(
-                "item.completed",
-                {
-                    "type": "command_execution",
-                    "command": raw,
-                    "status": "completed",
-                    "exit_code": 0,
-                    "aggregated_output": "ls (dup)",
-                },
-            ),
+            line("item.completed", _completed_command('echo one', "one")),
+            line("item.completed", _completed_command(raw, "ls")),
+            line("item.completed", _completed_command(raw, "ls (dup)")),
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
         ]
 
@@ -1501,18 +1485,7 @@ class TestUnwrapShellCommand:
             json.dumps(
                 {"type": "item.started", "item": {"type": "command_execution", "command": raw}}
             ),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "command_execution",
-                        "command": raw,
-                        "status": "completed",
-                        "exit_code": 0,
-                        "aggregated_output": "ok",
-                    },
-                }
-            ),
+            json.dumps({"type": "item.completed", "item": _completed_command(raw, "ok")}),
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
         ]
 
@@ -1550,18 +1523,7 @@ class TestUnwrapShellCommand:
         lines = [
             json.dumps({"type": "thread.started", "thread_id": "th_sup1227"}),
             json.dumps({"type": "item.started", "item": {"type": "command_execution", "command": raw}}),
-            json.dumps(
-                {
-                    "type": "item.completed",
-                    "item": {
-                        "type": "command_execution",
-                        "command": raw,
-                        "status": "completed",
-                        "exit_code": 0,
-                        "aggregated_output": "ok",
-                    },
-                }
-            ),
+            json.dumps({"type": "item.completed", "item": _completed_command(raw, "ok")}),
             json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 5}}),
         ]
 

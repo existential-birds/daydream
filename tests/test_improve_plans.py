@@ -702,20 +702,16 @@ def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
             {
                 "title": "Batch item loading in list_catalog",
                 "changes": [
-                    {
-                        "path": "apps/catalog/api.py",
-                        "symbol": "list_catalog",
-                        "operation": "modify",
-                        "instruction": "Replace per-item load_item calls with one batched lookup.",
-                        "target_state": "list_catalog performs one batch lookup and preserves order.",
-                    },
-                    {
-                        "path": "tests/test_catalog.py",
-                        "symbol": "test_list_catalog_batches_item_loading",
-                        "operation": "modify",
-                        "instruction": "Add a regression that counts the catalog loader calls.",
-                        "target_state": "test_list_catalog_batches_item_loading proves one batch call.",
-                    },
+                    _change(
+                        'apps/catalog/api.py', 'list_catalog', 'modify',
+                        'Replace per-item load_item calls with one batched lookup.',
+                        'list_catalog performs one batch lookup and preserves order.'
+                    ),
+                    _change(
+                        'tests/test_catalog.py', 'test_list_catalog_batches_item_loading', 'modify',
+                        'Add a regression that counts the catalog loader calls.',
+                        'test_list_catalog_batches_item_loading proves one batch call.'
+                    ),
                 ],
                 "verification": _ref(
                     appended_args=focused,
@@ -791,15 +787,29 @@ def _declare_makefile_out_of_scope(plan: dict[str, Any]) -> None:
     )
 
 
+def _change(
+    path: str,
+    symbol: str,
+    operation: str,
+    instruction: str,
+    target_state: str,
+) -> dict[str, Any]:
+    """One plan change entry; the production assembler validates the five fields."""
+    return {
+        "path": path,
+        "symbol": symbol,
+        "operation": operation,
+        "instruction": instruction,
+        "target_state": target_state,
+    }
+
+
 def _add_readme_change(plan: dict[str, Any]) -> None:
     plan["steps"][0]["changes"].append(
-        {
-            "path": "README.md",
-            "symbol": "Catalog service",
-            "operation": "modify",
-            "instruction": "Document that catalog item loading is now batched.",
-            "target_state": "README.md states catalog loading issues one query.",
-        }
+        _change(
+            'README.md', 'Catalog service', 'modify', 'Document that catalog item loading is now batched.',
+            'README.md states catalog loading issues one query.'
+        )
     )
 
 
@@ -2827,17 +2837,11 @@ def test_assemble_numbers_steps_and_done_criteria_and_injects_mandatory_kinds(re
         {
             "title": "Harden the catalog regression coverage",
             "changes": [
-                {
-                    "path": "tests/test_catalog.py",
-                    "symbol": "test_list_catalog_returns_items",
-                    "operation": "modify",
-                    "instruction": (
-                        "Extend the existing regression to cover an empty catalog."
-                    ),
-                    "target_state": (
-                        "The regression suite also proves empty-catalog behavior."
-                    ),
-                }
+                _change(
+                    'tests/test_catalog.py', 'test_list_catalog_returns_items', 'modify',
+                    'Extend the existing regression to cover an empty catalog.',
+                    'The regression suite also proves empty-catalog behavior.'
+                )
             ],
             "verification": None,
         }
@@ -3406,16 +3410,12 @@ def test_deletion_only_plan_can_omit_test_code_when_non_behavioral(
         {
             "title": "Delete the obsolete catalog documentation",
             "changes": [
-                {
-                    "path": "README.md",
-                    "symbol": "README.md",
-                    "operation": "delete",
-                    "instruction": (
-                        "Delete README.md because its obsolete catalog notes are "
-                        "superseded by the maintained documentation site."
-                    ),
-                    "target_state": ("The repository no longer contains the README.md path."),
-                }
+                _change(
+                    'README.md', 'README.md', 'delete',
+                    'Delete README.md because its obsolete catalog notes are superseded by the '
+                    'maintained documentation site.',
+                    'The repository no longer contains the README.md path.'
+                )
             ],
             "verification": None,
         }
@@ -3455,15 +3455,11 @@ def test_not_applicable_rejects_behavior_bearing_production_deletion(
     plan["scope"]["existing_paths"] = [plan["scope"]["existing_paths"][0]]
     plan["context_excerpts"] = [plan["context_excerpts"][0]]
     plan["steps"][0]["changes"] = [
-        {
-            "path": "apps/catalog/api.py",
-            "symbol": "apps/catalog/api.py",
-            "operation": "delete",
-            "instruction": (
-                "Delete apps/catalog/api.py because the implementation is believed to be unused by supported callers."
-            ),
-            "target_state": ("The repository no longer contains apps/catalog/api.py."),
-        }
+        _change(
+            'apps/catalog/api.py', 'apps/catalog/api.py', 'delete',
+            'Delete apps/catalog/api.py because the implementation is believed to be unused by supported callers.',
+            'The repository no longer contains apps/catalog/api.py.'
+        )
     ]
     plan["test_plan"] = {
         "mode": "not-applicable",
@@ -3494,13 +3490,7 @@ def _comment_cleanup_plan(
     plan["scope"]["existing_paths"] = [plan["scope"]["existing_paths"][0]]
     plan["context_excerpts"] = [plan["context_excerpts"][0]]
     plan["steps"][0]["changes"] = [
-        {
-            "path": "apps/catalog/api.py",
-            "symbol": "comment above list_catalog",
-            "operation": "modify",
-            "instruction": instruction,
-            "target_state": target_state,
-        }
+        _change('apps/catalog/api.py', 'comment above list_catalog', 'modify', instruction, target_state)
     ]
     plan["test_plan"] = {
         "mode": "not-applicable",
@@ -3563,15 +3553,11 @@ def test_deletion_only_production_plan_can_use_existing_coverage(
     plan = _authored_plan(title="Delete obsolete catalog implementation")
     _use_existing_catalog_coverage(plan)
     plan["steps"][0]["changes"] = [
-        {
-            "path": "apps/catalog/api.py",
-            "symbol": "legacy_catalog_loader",
-            "operation": "delete",
-            "instruction": (
-                "Delete legacy_catalog_loader while preserving list_catalog and its existing public return behavior."
-            ),
-            "target_state": ("legacy_catalog_loader is absent and list_catalog remains present."),
-        }
+        _change(
+            'apps/catalog/api.py', 'legacy_catalog_loader', 'delete',
+            'Delete legacy_catalog_loader while preserving list_catalog and its existing public return behavior.',
+            'legacy_catalog_loader is absent and list_catalog remains present.'
+        )
     ]
 
     assembled = _assembled(repo, plan)

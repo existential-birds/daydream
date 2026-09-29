@@ -303,20 +303,14 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path: Path, fake_gh: FakeGh) -> 
         "GET",
         "repos/o/r/pulls/101/reviews",
         [
-            {"id": 1, "node_id": "PRR_1", "user": {"login": "alice", "type": "User"},
-             "body": "approved", "state": "APPROVED", "commit_id": "a" * 40,
-             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"},
+            _review(1, 'approved'),
         ],
     )
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 7, "node_id": "DIFF_7", "user": {"login": "bot[bot]", "type": "Bot"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "original_position": 3, "line": 4, "original_line": 3,
-             "subject_type": "line", "side": "RIGHT", "created_at": "2026-01-01T00:00:00Z",
-             "updated_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#discussion_r7"},
+            _rest_comment(7, original_line=3, original_position=3),
         ],
     )
     fake_gh.set_response(
@@ -360,17 +354,8 @@ def test_graphql_threads_and_replies_normalized(tmp_path: Path, fake_gh: FakeGh)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     # REST comments for db 10 (root) and 11 (reply to 10)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
-        {"id": 10, "node_id": "DIFF_10", "user": {"login": "dave", "type": "User"},
-         "body": "root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-         "path": "a.py", "original_path": "a.py", "line": 4, "original_line": 3,
-         "subject_type": "line", "side": "RIGHT",
-         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r10"},
-        {"id": 11, "node_id": "DIFF_11", "user": {"login": "eve", "type": "User"},
-         "body": "reply", "commit_id": "a" * 40, "path": "a.py", "line": 5,
-         "subject_type": "line", "side": "RIGHT", "in_reply_to_id": 10,
-         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r11"},
+        _rest_comment(10, 'root', login='dave', user_type='User', original_line=3, original_path='a.py'),
+        _rest_comment(11, 'reply', login='eve', user_type='User', original_commit_id=None, line=5, in_reply_to_id=10),
     ])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([
@@ -409,13 +394,10 @@ def test_rest_inline_normalization_retains_original_range(tmp_path: Path, fake_g
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "fix this", "path": "a.py", "line": 5, "start_line": 4,
-             "original_line": 5, "original_start_line": 4,
-             "original_commit_id": "a" * 40, "commit_id": "b" * 40,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(
+                1, 'fix this', login='alice', user_type='User', commit_id='b' * 40, line=5, original_line=5,
+                original_start_line=4, start_line=4
+            ),
         ],
     )
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
@@ -758,33 +740,26 @@ def test_candidate_projection_right_file_body_left(tmp_path: Path, fake_gh: Fake
         "GET",
         "repos/o/r/pulls/101/reviews",
         [
-            {"id": 5, "node_id": "PRR_5", "user": {"login": "alice", "type": "User"},
-             "body": "review body", "state": "COMMENTED", "commit_id": "a" * 40,
-             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-5"},
-            {"id": 6, "node_id": "PRR_6", "user": {"login": "alice", "type": "User"},
-             "body": "looks good", "state": "APPROVED", "commit_id": "a" * 40,
-             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-6"},
+            _review(5, 'review body', state='COMMENTED'),
+            _review(6, 'looks good'),
         ],
     )
     fake_gh.set_response(
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "## note\nfix this", "path": "a.py", "line": 5, "start_line": 4,
-             "original_commit_id": "a" * 40, "original_line": 5, "original_start_line": 4,
-             "subject_type": "line", "side": "RIGHT", "start_side": None,
-             "commit_id": "a" * 40, "created_at": "2026-01-01T00:00:00Z",
-             "updated_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(
+                1, '## note\nfix this', login='alice', user_type='User', line=5, original_line=5,
+                original_start_line=4, start_line=4
+            ),
             {"id": 2, "node_id": "DIFF_2", "user": {"login": "alice", "type": "User"},
              "body": "file-level", "subject_type": "file",
              "commit_id": "a" * 40, "created_at": "2026-01-01T00:00:00Z",
              "updated_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#discussion_r2"},
-            {"id": 3, "node_id": "DIFF_3", "user": {"login": "alice", "type": "User"},
-             "body": "left-side", "path": "a.py", "line": 2, "start_line": 2,
-             "subject_type": "line", "side": "LEFT", "start_side": None,
-             "commit_id": "a" * 40, "created_at": "2026-01-01T00:00:00Z",
-             "updated_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#discussion_r3"},
+            _rest_comment(
+                3, 'left-side', login='alice', user_type='User', original_commit_id=None, line=2, side='LEFT',
+                start_line=2
+            ),
         ],
     )
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
@@ -1165,18 +1140,14 @@ def test_materialization_derives_anchors_per_comment(tmp_path: Path, fake_gh: Fa
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "fix at head", "commit_id": head_sha, "original_commit_id": head_sha,
-             "path": "a.py", "line": 5, "original_line": 5, "original_start_line": 4,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
-            {"id": 2, "node_id": "DIFF_2", "user": {"login": "carol", "type": "User"},
-             "body": "fix old file", "commit_id": head_sha, "original_commit_id": authoring_sha,
-             "path": "new.py", "line": 2, "original_line": 2, "original_start_line": 1,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r2"},
+            _rest_comment(
+                1, 'fix at head', login='alice', user_type='User', original_commit_id=head_sha, commit_id=head_sha,
+                line=5, original_line=5, original_start_line=4
+            ),
+            _rest_comment(
+                2, 'fix old file', login='carol', user_type='User', original_commit_id=authoring_sha,
+                commit_id=head_sha, path='new.py', line=2, original_line=2, original_start_line=1
+            ),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=[], origin_url=origin_url) == 0
@@ -1206,12 +1177,7 @@ def test_materialization_fails_closed_without_mirror(tmp_path: Path, fake_gh: Fa
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "fix this", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 4, "original_line": 4, "original_start_line": 3,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1, 'fix this', login='alice', user_type='User', original_line=4, original_start_line=3),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
@@ -1234,12 +1200,10 @@ def test_materialization_inverted_authoring_range_fails_closed(tmp_path: Path, f
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "inverted range", "commit_id": head_sha, "original_commit_id": authoring_sha,
-             "path": "new.py", "line": 4, "original_line": 4, "original_start_line": 8,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(
+                1, 'inverted range', login='alice', user_type='User', original_commit_id=authoring_sha,
+                commit_id=head_sha, path='new.py', original_line=4, original_start_line=8
+            ),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=origin_url) == 0
@@ -1733,11 +1697,7 @@ def test_refresh_predate_canonical_format_drift_does_not_stale(tmp_path: Path, f
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1, login='alice', user_type='User'),
         ],
     )
     fake_gh._write_threads(
@@ -1811,12 +1771,9 @@ def test_refresh_legacy_without_original_start_line_preserves_curation(tmp_path:
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 5, "start_line": 4, "original_line": 5,
-             "original_start_line": 4, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(
+                1, login='alice', user_type='User', line=5, original_line=5, original_start_line=4, start_line=4
+            ),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
@@ -1847,11 +1804,7 @@ def test_refresh_marks_stale_and_never_overwrites_curation(tmp_path: Path, fake_
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1),
         ],
     )
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None)
@@ -1895,24 +1848,15 @@ def test_e2e_paginated_human_bot_evidence_and_no_comment_pr(tmp_path: Path, fake
     _seed_rest(
         fake_gh, 101,
         reviews=[
-            {"id": 1, "node_id": "PRR_1", "user": {"login": "cr[bot]", "type": "Bot"},
-             "body": "Found a bug.", "state": "COMMENTED", "commit_id": "a" * 40,
-             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"},
-            {"id": 2, "node_id": "PRR_2", "user": {"login": "carol", "type": "User"},
-             "body": "Nice work.", "state": "COMMENTED", "commit_id": "a" * 40,
-             "submitted_at": "2026-01-01T00:00:00Z", "html_url": "https://github.com/o/r/pull/101#pullrequestreview-2"},
+            _review(1, 'Found a bug.', login='cr[bot]', user_type='Bot', state='COMMENTED'),
+            _review(2, 'Nice work.', login='carol', state='COMMENTED'),
         ],
         comments=[
-            {"id": 7, "node_id": "DIFF_7", "user": {"login": "bot[bot]", "type": "Bot"},
-             "body": "please fix the cache", "path": "a.py", "line": 4,
-             "subject_type": "line", "side": "RIGHT", "commit_id": "a" * 40,
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r7"},
-            {"id": 8, "node_id": "DIFF_8", "user": {"login": "dave", "type": "User"},
-             "body": "Order matters here.", "path": "b.py", "line": 2,
-             "subject_type": "line", "side": "RIGHT", "commit_id": "a" * 40,
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r8"},
+            _rest_comment(7, 'please fix the cache', original_commit_id=None),
+            _rest_comment(
+                8, 'Order matters here.', login='dave', user_type='User', original_commit_id=None, path='b.py',
+                line=2
+            ),
         ],
         issue_comments=[
             {"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
@@ -2045,12 +1989,10 @@ def test_refresh_derived_anchor_projection_flip_stales_curated_case(
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "fix at head", "commit_id": head_sha, "original_commit_id": authoring_sha,
-             "path": "a.py", "line": 5, "original_line": 5, "original_start_line": 4,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(
+                1, 'fix at head', login='alice', user_type='User', original_commit_id=authoring_sha,
+                commit_id=head_sha, line=5, original_line=5, original_start_line=4
+            ),
         ],
     )
     # pre-anchor-era import: hermetic (origin_url=None) so there is no freeze
@@ -2120,12 +2062,10 @@ def test_refresh_pre_anchor_projected_location_flip_stales_without_mirror(
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "fix this", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 5, "start_line": 5, "original_line": 5,
-             "original_start_line": 4, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(
+                1, 'fix this', login='alice', user_type='User', line=5, original_line=5, original_start_line=4,
+                start_line=5
+            ),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
@@ -2208,19 +2148,13 @@ def test_reconcile_inline_and_thread_into_one_record(tmp_path: Path, fake_gh: Fa
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     # review id 5 with state DISMISSED (dismissal source for comment 10)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
-        {"id": 5, "node_id": "PRR_5", "user": {"login": "alice", "type": "User"},
-         "body": "", "state": "DISMISSED", "commit_id": "a" * 40,
-         "submitted_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-5"}])
+        _review(5, state='DISMISSED')])
     # REST inline comment 10 is the root of thread_1, belongs to review 5
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
-        {"id": 10, "node_id": "DIFF_10", "user": {"login": "dave", "type": "User"},
-         "body": "root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-         "path": "a.py", "original_path": "a.py", "line": 4, "original_line": 3,
-         "subject_type": "line", "side": "RIGHT",
-         "pull_request_review_id": 5,
-         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r10"}])
+        _rest_comment(
+            10, 'root', login='dave', user_type='User', original_line=3, original_path='a.py',
+            pull_request_review_id=5
+        )])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([{"id": "thread_1", "isResolved": True,
         "isOutdated": True, "subjectType": "LINE",
@@ -2252,21 +2186,13 @@ def test_evidence_order_deterministic_across_page_sizes(tmp_path: Path, fake_gh:
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     # REST-only comments with distinct database ids + timestamps
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
-        {"id": 1, "node_id": "PRR_1", "user": {"login": "alice", "type": "User"},
-         "body": "approved", "state": "APPROVED", "commit_id": "a" * 40,
-         "submitted_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"}])
+        _review(1, 'approved')])
     comments = [
-        {"id": 30, "node_id": "DIFF_30", "user": {"login": "dave", "type": "User"},
-         "body": "first", "commit_id": "a" * 40, "path": "a.py", "line": 1,
-         "subject_type": "line", "side": "RIGHT",
-         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r30"},
-        {"id": 7, "node_id": "DIFF_7", "user": {"login": "carol", "type": "User"},
-         "body": "second", "commit_id": "a" * 40, "path": "b.py", "line": 2,
-         "subject_type": "line", "side": "RIGHT",
-         "created_at": "2026-01-02T00:00:00Z", "updated_at": "2026-01-02T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r7"},
+        _rest_comment(30, 'first', login='dave', user_type='User', original_commit_id=None, line=1),
+        _rest_comment(
+            7, 'second', login='carol', user_type='User', original_commit_id=None, path='b.py', line=2,
+            created_at='2026-01-02T00:00:00Z', updated_at='2026-01-02T00:00:00Z'
+        ),
     ]
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", comments)
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
@@ -2286,12 +2212,9 @@ def test_outdated_root_not_exact_acceptable_via_joined_record(tmp_path: Path, fa
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [])
     # REST copy of comment 40 is OUTDATED via the joined GraphQL thread state
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
-        {"id": 40, "node_id": "DIFF_40", "user": {"login": "dave", "type": "User"},
-         "body": "outdated root", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-         "path": "a.py", "line": 5, "original_line": 5, "original_start_line": 4,
-         "subject_type": "line", "side": "RIGHT",
-         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r40"}])
+        _rest_comment(
+            40, 'outdated root', login='dave', user_type='User', line=5, original_line=5, original_start_line=4
+        )])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [])
     fake_gh._write_threads([{"id": "thread_2", "isResolved": True,
         "isOutdated": True, "subjectType": "LINE",
@@ -2322,22 +2245,12 @@ def test_fixture_matrix_evidence_preserved_and_historical(tmp_path: Path, fake_g
     ws = _fetch_workspace(tmp_path)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", _PR_HEADER)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/reviews", [
-        {"id": 1, "node_id": "PRR_1", "user": {"login": "cr[bot]", "type": "Bot"},
-         "body": "Found a bug.", "state": "COMMENTED", "commit_id": "a" * 40,
-         "submitted_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-1"},   # non-pure review body
-        {"id": 2, "node_id": "PRR_2", "user": {"login": "carol", "type": "User"},
-         "body": "Nice work.", "state": "APPROVED", "commit_id": "a" * 40,
-         "submitted_at": "2026-01-01T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#pullrequestreview-2"},   # pure approval
+        _review(1, 'Found a bug.', login='cr[bot]', user_type='Bot', state='COMMENTED'),   # non-pure review body
+        _review(2, 'Nice work.', login='carol'),   # pure approval
     ])
     # edited comment: updated_at != created_at
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [
-        {"id": 7, "node_id": "DIFF_7", "user": {"login": "bot[bot]", "type": "Bot"},
-         "body": "please fix", "commit_id": "a" * 40, "path": "a.py", "line": 4,
-         "subject_type": "line", "side": "RIGHT",
-         "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-03T00:00:00Z",
-         "html_url": "https://github.com/o/r/pull/101#discussion_r7"}])
+        _rest_comment(7, original_commit_id=None, updated_at='2026-01-03T00:00:00Z')])
     fake_gh.set_response("GET", "repos/o/r/issues/101/comments", [
         {"id": 9, "node_id": "IC_9", "user": {"login": "carol", "type": "User"},
          "body": "question", "created_at": "2026-01-01T00:00:00Z",
@@ -2425,11 +2338,7 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
 def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws = _preflight_workspace(tmp_path, fake_gh)   # seed REST with one evidence comment
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
-        [{"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
-          "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-          "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
-          "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-          "html_url": "https://github.com/o/r/pull/101#discussion_r1"}])
+        [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # ready + attested (with digest, per Task 4)
     # refresh: the referenced evidence disappears -> case flips stale
@@ -2495,13 +2404,72 @@ def test_signature_ignores_format_drift_duplicate_and_kind() -> None:
 # only when its own referenced evidence changed (or the PR-wide task input)
 
 
-def _seed_discussion(db_id: int, body: str = "please fix", line: int = 4) -> dict[str, Any]:
-    """One canonical REST inline-comment dict for the fake router."""
-    return {"id": db_id, "node_id": f"DIFF_{db_id}", "user": {"login": "bot[bot]", "type": "Bot"},
-            "body": body, "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-            "path": "a.py", "line": line, "subject_type": "line", "side": "RIGHT",
-            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-            "html_url": f"https://github.com/o/r/pull/101#discussion_r{db_id}"}
+def _review(
+    db_id: int,
+    body: str = "",
+    *,
+    login: str = "alice",
+    user_type: str = "User",
+    state: str = "APPROVED",
+    commit_id: str = "a" * 40,
+    submitted_at: str = "2026-01-01T00:00:00Z",
+) -> dict[str, Any]:
+    """One canonical REST review dict for the fake router."""
+    return {"id": db_id, "node_id": f"PRR_{db_id}", "user": {"login": login, "type": user_type},
+            "body": body, "state": state, "commit_id": commit_id, "submitted_at": submitted_at,
+            "html_url": f"https://github.com/o/r/pull/101#pullrequestreview-{db_id}"}
+
+
+def _rest_comment(
+    db_id: int,
+    body: str = "please fix",
+    *,
+    login: str = "bot[bot]",
+    user_type: str = "Bot",
+    commit_id: str = "a" * 40,
+    original_commit_id: str | None = "a" * 40,
+    path: str = "a.py",
+    line: int = 4,
+    subject_type: str = "line",
+    side: str = "RIGHT",
+    created_at: str = "2026-01-01T00:00:00Z",
+    updated_at: str = "2026-01-01T00:00:00Z",
+    original_line: int | None = None,
+    original_start_line: int | None = None,
+    start_line: int | None = None,
+    start_side: str | None = None,
+    original_path: str | None = None,
+    original_position: int | None = None,
+    in_reply_to_id: int | None = None,
+    pull_request_review_id: int | None = None,
+) -> dict[str, Any]:
+    """One canonical REST inline-comment dict for the fake router.
+
+    ``original_commit_id`` is omitted entirely when ``None``; the remaining
+    optional keys are emitted only when set, matching the replayed REST payloads.
+    """
+    comment: dict[str, Any] = {
+        "id": db_id, "node_id": f"DIFF_{db_id}", "user": {"login": login, "type": user_type},
+        "body": body, "commit_id": commit_id, "path": path, "line": line,
+    }
+    if original_commit_id is not None:
+        comment["original_commit_id"] = original_commit_id
+    for name, value in (
+        ("original_line", original_line),
+        ("original_start_line", original_start_line),
+        ("start_line", start_line),
+        ("start_side", start_side),
+        ("original_path", original_path),
+        ("original_position", original_position),
+        ("in_reply_to_id", in_reply_to_id),
+        ("pull_request_review_id", pull_request_review_id),
+    ):
+        if value is not None:
+            comment[name] = value
+    comment.update({"subject_type": subject_type, "side": side,
+                    "created_at": created_at, "updated_at": updated_at,
+                    "html_url": f"https://github.com/o/r/pull/101#discussion_r{db_id}"})
+    return comment
 
 
 def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -2509,12 +2477,12 @@ def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: F
     # unrelated comment (db 99) must not stale the referenced case on refresh.
 
     ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
     fake_gh.set_response(
         "GET", "repos/o/r/pulls/101/comments",
-        [_seed_discussion(1), {**_seed_discussion(99), "path": "b.py", "body": "unrelated nit"}],
+        [_rest_comment(1), {**_rest_comment(99), "path": "b.py", "body": "unrelated nit"}],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
@@ -2527,10 +2495,10 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fa
     # while its curated findings stay preserved.
 
     ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1, line=7)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1, line=7)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     assert case["curation"]["state"] == "stale"
@@ -2601,11 +2569,7 @@ def test_refresh_corrupt_prior_anchor_stages_ledger_failure(tmp_path: Path, fake
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
@@ -2677,7 +2641,7 @@ def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path: Path, 
 
 
     ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     case_path = ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
@@ -2706,13 +2670,13 @@ def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path: Path, 
     candidate set and must flip the signature, staling a referencing case."""
 
     ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
 
     # the same comment now carries a reply parent (gains reply status): its
     # projection hash must flip even though body/anchor fields are unchanged.
-    reply = dict(_seed_discussion(1))
+    reply = dict(_rest_comment(1))
     reply["in_reply_to_id"] = 10
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [reply])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
@@ -2732,11 +2696,7 @@ def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: Fa
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 4, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
@@ -2746,11 +2706,7 @@ def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: Fa
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "bot[bot]", "type": "Bot"},
-             "body": "please fix", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 7, "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1, line=7),
         ],
     )
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=False, origin_url=None)
@@ -2775,7 +2731,7 @@ def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path: Pat
 
 
     ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
 
@@ -2800,7 +2756,7 @@ def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path: Pat
     # the fresh REST-derived projection matches a prior projection, so the
     # per-id comparison (order-independent) leaves the curated case ready, and
     # the refreshed file carries exactly one record per id.
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_seed_discussion(1)])
+    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(
         ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None
     ) == 0
@@ -2838,12 +2794,7 @@ def test_imported_status_case_has_no_facts(tmp_path: Path, fake_gh: FakeGh) -> N
         "GET",
         "repos/o/r/pulls/101/comments",
         [
-            {"id": 1, "node_id": "DIFF_1", "user": {"login": "alice", "type": "User"},
-             "body": "fix this", "commit_id": "a" * 40, "original_commit_id": "a" * 40,
-             "path": "a.py", "line": 4, "original_line": 4, "original_start_line": 3,
-             "subject_type": "line", "side": "RIGHT",
-             "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
-             "html_url": "https://github.com/o/r/pull/101#discussion_r1"},
+            _rest_comment(1, 'fix this', login='alice', user_type='User', original_line=4, original_start_line=3),
         ],
     )
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0

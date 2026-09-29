@@ -581,6 +581,24 @@ class IngestResult:
     reason_code: str | None = None
 
 
+def _read_download_manifest(stage: Path, revision: str) -> dict[str, Any] | None:
+    """Read and parse the download manifest, or ``None`` when it is absent.
+
+    Invalid JSON and a non-dict payload both raise ``HydrationError``
+    fail-closed; both manifest consumers share this read/parse layer.
+    """
+    path = stage / "downloads" / str(revision) / "_download_manifest.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
+    if not isinstance(payload, dict):
+        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
+    return payload
+
+
 def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
     """Read the discovery diagnostics block from the download manifest.
 
@@ -588,16 +606,13 @@ def _download_discovery_block(stage: Path, revision: str) -> dict[str, Any]:
     (a manually staged legacy tree). Invalid JSON raises ``HydrationError``
     fail-closed, matching :func:`_discovered_session_ids`.
     """
-    path = stage / "downloads" / str(revision) / "_download_manifest.json"
-    if not path.is_file():
+    payload = _read_download_manifest(stage, revision)
+    if payload is None:
         return {}
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
-    if not isinstance(payload, dict) or not isinstance(payload.get("discovery", {}), dict):
+    discovery = payload.get("discovery", {})
+    if not isinstance(discovery, dict):
+        path = stage / "downloads" / str(revision) / "_download_manifest.json"
         raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
-    discovery: dict[str, Any] = payload["discovery"]
     return discovery
 
 
@@ -609,17 +624,12 @@ def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
     an empty list, so stale normalized directories cannot become candidates on
     a later run.
     """
-    path = stage / "downloads" / str(revision) / "_download_manifest.json"
-    if not path.is_file():
+    payload = _read_download_manifest(stage, revision)
+    if payload is None:
         return None
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}: {exc}")) from exc
-    if not isinstance(payload, dict):
-        raise HydrationError(redact_text(f"invalid download discovery ledger {path}"))
     if "candidate_sessions" not in payload:
         return None
+    path = stage / "downloads" / str(revision) / "_download_manifest.json"
     candidates = payload["candidate_sessions"]
     if not isinstance(candidates, list) or not all(
         isinstance(session_id, str) and _is_bare_segment(session_id) for session_id in candidates
