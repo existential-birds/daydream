@@ -45,6 +45,7 @@ from daydream.deep.latency import (
     _SECURITY_TRIGGERS,
     LATENCY_PROFILES,
 )
+from daydream.json_utils import read_json_object
 from daydream.severity import is_high_severity
 from daydream.trajectory import RUNS_DIRNAME
 
@@ -132,18 +133,9 @@ def _resolve_corpus_dir(manifest: Mapping[str, Any], corpus_dir: Path | None) ->
     return _REPO_ROOT
 
 
-def _load_object(path: Path) -> dict[str, Any]:
-    """Load a JSON object, returning ``{}`` for absent/malformed/non-object files."""
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
 def _load_items(path: Path) -> list[Any]:
     """Load the ``items`` list from a merged-items file, or ``[]`` when unusable."""
-    loaded = _load_object(path)
+    loaded = read_json_object(path)
     items = loaded.get("items")
     return items if isinstance(items, list) else []
 
@@ -239,7 +231,7 @@ def _case_sample_series(
         if not evaluation_path.is_file():
             skipped.append({"case": name, "path": str(evaluation_path), "error": "evaluation.json is missing"})
             continue
-        timings = _phase_timings(_load_object(evaluation_path))
+        timings = _phase_timings(read_json_object(evaluation_path))
         for phase, seconds in timings.items():
             if seconds is not None:
                 series.setdefault(f"{profile}.{phase}", []).append(seconds)
@@ -416,8 +408,8 @@ def build_report(
                 continue
             items = _load_items(run_dir / "merged-items.json")
             attribution = attribute_shipped_lens(items)
-            timings = _phase_timings(_load_object(run_dir / "evaluation.json"))
-            routing = _load_object(run_dir / "latency-routing.json")
+            timings = _phase_timings(read_json_object(run_dir / "evaluation.json"))
+            routing = read_json_object(run_dir / "latency-routing.json")
             for phase, seconds in timings.items():
                 if seconds is not None:
                     samples[str(profile)][phase].append(seconds)

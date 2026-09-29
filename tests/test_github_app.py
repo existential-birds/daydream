@@ -240,24 +240,22 @@ def test_secret_credential_values_are_hidden_from_repr() -> None:
     assert token not in repr(installation)
 
 
-def test_resolve_credentials_raises_on_partial_id_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DAYDREAM_APP_ID", "12345")
-    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    with pytest.raises(ValueError, match="DAYDREAM_APP_PRIVATE_KEY"):
-        resolve_credentials()
-
-
-def test_resolve_credentials_raises_on_partial_key_only(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("env", "match"),
+    [
+        ({"DAYDREAM_APP_ID": "12345"}, "DAYDREAM_APP_PRIVATE_KEY"),
+        ({"DAYDREAM_APP_PRIVATE_KEY": "x"}, "DAYDREAM_APP_ID"),
+        ({"DAYDREAM_APP_ID": "not-an-int", "DAYDREAM_APP_PRIVATE_KEY": "x"}, "DAYDREAM_APP_ID"),
+    ],
+)
+def test_resolve_credentials_raises_on_partial_or_non_integer_config(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], match: str
+) -> None:
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "x")
-    with pytest.raises(ValueError, match="DAYDREAM_APP_ID"):
-        resolve_credentials()
-
-
-def test_resolve_credentials_raises_on_non_integer_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DAYDREAM_APP_ID", "not-an-int")
-    monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "x")
-    with pytest.raises(ValueError, match="DAYDREAM_APP_ID"):
+    monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    with pytest.raises(ValueError, match=match):
         resolve_credentials()
 
 
@@ -548,17 +546,19 @@ def test_exchange_manifest_code_returns_credentials_and_slug() -> None:
     assert creds.app_id == 42 and "BEGIN RSA" in creds.private_key and slug == "acme-bot"
 
 
-def test_exchange_manifest_code_raises_when_id_missing() -> None:
-    """A conversion missing the App id aborts naming the field — no placeholder."""
-    with patch("daydream.git_ops.gh_api", return_value={"pem": "x", "slug": "acme-bot"}):
-        with pytest.raises(GitHubAppError, match="id"):
-            exchange_manifest_code(Path("."), "abc123")
-
-
-def test_exchange_manifest_code_raises_when_id_not_int() -> None:
-    """A non-integer App id aborts naming the field — never coerce a placeholder."""
-    with patch("daydream.git_ops.gh_api", return_value={"id": "not-int", "pem": "x", "slug": "s"}):
-        with pytest.raises(GitHubAppError, match="id"):
+@pytest.mark.parametrize(
+    ("payload", "match"),
+    [
+        ({"pem": "x", "slug": "acme-bot"}, "id"),
+        ({"id": "not-int", "pem": "x", "slug": "s"}, "id"),
+    ],
+)
+def test_exchange_manifest_code_raises_when_id_missing_or_not_int(
+    payload: dict[str, str], match: str
+) -> None:
+    """A missing or non-integer App id aborts naming the field — no placeholder."""
+    with patch("daydream.git_ops.gh_api", return_value=payload):
+        with pytest.raises(GitHubAppError, match=match):
             exchange_manifest_code(Path("."), "abc123")
 
 

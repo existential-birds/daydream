@@ -42,7 +42,6 @@ from daydream.backends import (
     unix_ms_to_ns,
 )
 from daydream.backends._subprocess import StreamStalledError
-from daydream.backends._transport import CliTransport
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     _PI_DEFAULT_RETRY_BASE_DELAY,
@@ -67,6 +66,7 @@ from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import LimitAwareStdout, assert_concurrent_streams_isolated
 from tests.harness.pi_replay import FIXTURES_DIR, make_mock_process, make_mock_process_from_fixture
 from tests.harness.protocol_cli import install_protocol_cli
+from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants, make_cancel_probe
 from tests.harness.stub_backend import force_interactive as _force_interactive, silence as _silence
 from tests.harness.trajectory import make_recorder
 
@@ -156,13 +156,7 @@ async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd
 
     events = [event async for event in backend.execute(target, prompt)]
 
-    observation = fixture.read_observations()[0]
-    assert observation["effective_cwd"] == str(target)
-    assert observation["inherited_cwd"] == str(target)
-    assert observation["stdin_bytes"] == 0
-    assert observation["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
-    assert observation["cwd_canaries"]["SOURCE_CANARY"] is True
-    assert observation["walk_truncated"] is False
+    observation = assert_protocol_cli_invariants(fixture, target, prompt, events, backend)
     argv = observation["argv"]
     assert argv[argv.index("--mode") + 1] == "json"
     assert argv[argv.index("--provider") + 1] == "nous"
@@ -178,9 +172,6 @@ async def test_artifact_visibility_protocol_cli_uses_argv_prompt_devnull_and_cwd
         "bytes": len(_PI_SYSTEM_PREAMBLE.encode()),
         "sha256": hashlib.sha256(_PI_SYSTEM_PREAMBLE.encode()).hexdigest(),
     }]
-    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
-    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
-    assert backend._transports == []
 
 
 @pytest.fixture
@@ -554,17 +545,7 @@ async def test_agent_end_always_finalizes_when_stream_ends_without_it() -> None:
 async def test_cancel_terminates_then_kills() -> None:
     """cancel() sends SIGTERM to all tracked processes, SIGKILL on timeout."""
 
-    backend = PiBackend(model="glm-5.2")
-
-    proc = MagicMock()
-    proc.returncode = None
-    proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    transport = CliTransport("pi", ["pi", "--mode", "json"], limit=1024)
-    transport.processes.append(proc)
-    backend._transports = [transport]
-
+    backend, proc = make_cancel_probe("pi")
     await backend.cancel()
 
     proc.terminate.assert_called_once()

@@ -193,6 +193,19 @@ def canonical_json(payload: Any) -> str:
     return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
+def read_json_object(path: Path) -> dict[str, Any]:
+    """Read a JSON object file, degrading to ``{}`` on absence or corruption.
+
+    Absent, unreadable, undecodable, malformed, and non-object files all return
+    an empty mapping: every caller wants the mapping, never the failure kind.
+    """
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
 def string_list(value: object) -> list[str]:
     """Return the non-empty strings in *value*, or ``[]`` when it is not a list."""
     if not isinstance(value, list):

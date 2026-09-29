@@ -447,12 +447,15 @@ def _schema_digest(schema: Any) -> str:
     return digest_text(_canonical_json(schema))
 
 
-def _sweep_schema_digest() -> str:
-    # Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    # import would be a cycle.
-    from daydream.phases import UNCOVERED_SWEEP_SCHEMA
+def _phases_schema_digest(name: str) -> str:
+    """Digest one of ``daydream.phases``' strict schema contracts by name.
 
-    return _schema_digest(UNCOVERED_SWEEP_SCHEMA)
+    Imported lazily: ``daydream.phases`` imports this module, so a top-level
+    import would be a cycle.
+    """
+    from daydream import phases
+
+    return _schema_digest(getattr(phases, name))
 
 
 def sweep_key_payload(
@@ -489,7 +492,7 @@ def sweep_key_payload(
         "records": _record_digests(contributing_records),
         "uncovered_set": ordered_uncovered,
         "hunk_slice": hunk_slice_digest(hunk_index, ordered_uncovered),
-        "schema": _sweep_schema_digest(),
+        "schema": _phases_schema_digest("UNCOVERED_SWEEP_SCHEMA"),
         **_identity_components(identity),
         "bounds": {
             "min_hunk_lines": bounds.get("min_hunk_lines"),
@@ -497,14 +500,6 @@ def sweep_key_payload(
         },
     }
     return _unit_payload("sweep", components, grounding)
-
-
-def _arbiter_schema_digest() -> str:
-    # Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    # import would be a cycle.
-    from daydream.phases import ARBITER_SCHEMA
-
-    return _schema_digest(ARBITER_SCHEMA)
 
 
 def arbiter_key_payload(
@@ -542,18 +537,10 @@ def arbiter_key_payload(
         ),
         "plan": dict(plan),
         "precision_mode": precision_mode,
-        "schema": _arbiter_schema_digest(),
+        "schema": _phases_schema_digest("ARBITER_SCHEMA"),
         **_identity_components(identity),
     }
     return _unit_payload("arbiter", components, grounding)
-
-
-def _merge_schema_digest() -> str:
-    # Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    # import would be a cycle.
-    from daydream.phases import MERGED_ITEMS_SCHEMA
-
-    return _schema_digest(MERGED_ITEMS_SCHEMA)
 
 
 def merge_key_payload(
@@ -583,7 +570,7 @@ def merge_key_payload(
         "records": _record_digests(contributing_records),
         "structural": structural_records_present,
         "failed_stacks": sorted(failed_stacks),
-        "schema": _merge_schema_digest(),
+        "schema": _phases_schema_digest("MERGED_ITEMS_SCHEMA"),
         **_identity_components(identity),
     }
     return _unit_payload("merge", components, grounding)

@@ -699,11 +699,11 @@ def _unsharded_arbiter_backend(ctx: FlowContext, *, effort_pin: str | None) -> B
     return ctx.backend_for_effort("arbiter", "xhigh")
 
 
-def _arbiter_contributing_records(paths: list[Path]) -> dict[str, bytes | None]:
-    """Every records file the arbiter reads, keyed by basename.
+def _records_bytes_by_basename(paths: list[Path]) -> dict[str, bytes | None]:
+    """Map each records file by basename; an unreadable file maps to ``None``.
 
-    A file that cannot be read maps to ``None`` so :func:`arbiter_key_payload`
-    turns the whole unit into a named miss rather than keying a partial set.
+    A ``None`` entry makes the whole reuse unit a named miss rather than keying
+    a partial set (see :func:`arbiter_key_payload` / :func:`merge_key_payload`).
     """
     records: dict[str, bytes | None] = {}
     for path in paths:
@@ -866,21 +866,14 @@ def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None
     """Every records file the merge reads, keyed by basename.
 
     The primary-scope stacks (including the uncovered sweep's records) plus the
-    structural meta-stack. A file that cannot be read maps to ``None`` so
-    :func:`merge_key_payload` turns the whole unit into a named miss rather than
-    keying a partial record set.
+    structural meta-stack. An unreadable file becomes a named miss (see
+    :func:`_records_bytes_by_basename`).
     """
-    records: dict[str, bytes | None] = {}
     paths = list(deep_state.records_paths)
     structural = deep_state.structural_records_path_or_none
     if structural is not None:
         paths.append(structural)
-    for path in paths:
-        try:
-            records[path.name] = path.read_bytes()
-        except OSError:
-            records[path.name] = None
-    return records
+    return _records_bytes_by_basename(paths)
 
 
 def _merge_store_payload(dd: Path) -> dict[str, bytes] | None:
@@ -1059,7 +1052,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             reuse = reuse_cache_for(ctx)
             arbiter_identity = phase_identity_for(ctx, "arbiter")
             if reuse is not None:
-                contributing = _arbiter_contributing_records(rewrite_paths)
+                contributing = _records_bytes_by_basename(rewrite_paths)
                 arbiter_payload = arbiter_key_payload(
                     contributing_records=contributing,
                     structural_records=(

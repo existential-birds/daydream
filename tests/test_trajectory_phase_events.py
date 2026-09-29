@@ -946,6 +946,13 @@ async def _run_and_read_trajectory(config: RunConfig, traj: Path) -> dict[str, A
     return data
 
 
+async def _run_with_config(tmp_path: Path, target: Path, **config_kwargs: Any) -> dict[str, Any]:
+    """Run ``target`` with the standard trajectory/cleanup scaffold and read it back."""
+    traj = tmp_path / "trajectory.json"
+    config = RunConfig(target=str(target), trajectory_path=traj, cleanup=False, **config_kwargs)
+    return await _run_and_read_trajectory(config, traj)
+
+
 def _read_phase_timings(tmp_path: Path) -> Any:
     manifest_files = list((tmp_path / "archive").rglob("manifest.json"))
     assert manifest_files, "manifest.json not written"
@@ -982,17 +989,14 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     silence_console("daydream.deep.diagram_steps")
     silence_console("daydream.deep.fix_steps")
 
-    traj = tmp_path / "trajectory.json"
-    config = RunConfig(
-        target=str(feature_branch_repo),
+    data = await _run_with_config(
+        tmp_path,
+        feature_branch_repo,
         stack="python",
         shallow=True,
-        cleanup=False,
         non_interactive=True,
         assume="yes",  # accept the fix gate so the fix/test cycle runs
-        trajectory_path=traj,
     )
-    data = await _run_and_read_trajectory(config, traj)
 
     # Phase events: the deep-shallow spine's review and the fix's test must
     # appear (the parse-<stack> stage was removed with issue #745).
@@ -1031,14 +1035,11 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     mute_side_effects()
 
 
-    traj = tmp_path / "trajectory.json"
-    config = RunConfig(
-        target=str(multi_stack_target),
+    data = await _run_with_config(
+        tmp_path,
+        multi_stack_target,
         non_interactive=True,  # decline the apply-fixes gate
-        trajectory_path=traj,
-        cleanup=False,
     )
-    data = await _run_and_read_trajectory(config, traj)
 
     # Phase events: the per-stack review stage (DEEP) must appear.
     events = data["extra"].get("phase_events", [])
@@ -1079,14 +1080,11 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
     mute_side_effects()
 
 
-    traj = tmp_path / "trajectory.json"
-    config = RunConfig(
-        target=str(multi_stack_target),
+    data = await _run_with_config(
+        tmp_path,
+        multi_stack_target,
         assume="yes",  # accept the apply-fixes gate -> verify/fix/test run
-        trajectory_path=traj,
-        cleanup=False,
     )
-    data = await _run_and_read_trajectory(config, traj)
 
     # The longest phases -- fix/test/verify -- only run past an accepted gate.
     events = data["extra"].get("phase_events", [])
@@ -1127,14 +1125,11 @@ async def test_parallel_fix_registers_subtrajectories(
     mute_side_effects()
 
 
-    traj = tmp_path / "trajectory.json"
-    config = RunConfig(
-        target=str(multi_stack_target),
+    data = await _run_with_config(
+        tmp_path,
+        multi_stack_target,
         assume="yes",
-        trajectory_path=traj,
-        cleanup=False,
     )
-    data = await _run_and_read_trajectory(config, traj)
 
     subs = data["extra"].get("subtrajectories", [])
     fix_subs = [s for s in subs if s["phase"] == "fix"]
@@ -1168,18 +1163,14 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
 
 
     findings_out = tmp_path / "findings.json"
-    traj = tmp_path / "trajectory.json"
-    config = RunConfig(
-        target=str(multi_stack_target),
+    data = await _run_with_config(
+        tmp_path,
+        multi_stack_target,
         output_mode="review",
         pr_number=7,
         findings_out=str(findings_out),
-        trajectory_path=traj,
         non_interactive=True,
-        cleanup=False,
     )
-
-    data = await _run_and_read_trajectory(config, traj)
     assert findings_out.is_file(), "review mode must emit the findings artifact"
 
     # Default design review is part of the structural deep phase.
