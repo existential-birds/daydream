@@ -137,14 +137,6 @@ def _canonical_json(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
-def digest_file(path: Path) -> str | None:
-    """SHA-256 of a file's run-scoped-normalized bytes, or ``None`` on failure."""
-    try:
-        return digest_bytes(Path(path).read_bytes())
-    except OSError:
-        return None
-
-
 def blob_map_digest(worktree_root: str | Path, files: Sequence[str]) -> str | None:
     """Digest a canonical ``relative_path -> sha256(path + b"\\0" + bytes)`` map.
 

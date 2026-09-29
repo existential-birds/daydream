@@ -1453,10 +1453,7 @@ async def _step_vet(ctx: FlowContext) -> None:
     findings = aggregate_cross_service(order_by_leverage(kept))
     ordered_defects = order_by_leverage(findings)
     vetted = _with_artifact_provenance(
-        {
-            "findings": ordered_defects,
-            "defects": ordered_defects,
-        },
+        {"findings": ordered_defects},
         phase=DaydreamPhase.VET,
     )
     vetted_findings_path(directory).write_text(json.dumps(vetted, indent=2) + "\n")

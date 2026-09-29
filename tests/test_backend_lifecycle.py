@@ -29,6 +29,7 @@ from daydream.backends.pi import (
     _pi_retry_attempts,
 )
 from tests.harness.fake_cli_process import FakeCliProcess
+from tests.harness.osprey_jsonl import osprey_session
 
 DIAG = [f"diag-{i:02d}" for i in range(1, 26)]  # 25 > every capture window (codex/pi 20, osprey 10)
 
@@ -215,40 +216,9 @@ def _assert_clean_lifecycle(backend: Any, proc: FakeCliProcess) -> None:
     assert backend._transports == [], "the shared teardown must drop the transport from the backend list"
 
 
-_OSPREY_SESSION: list[dict[str, object]] = [
-    {"event": "protocol", "version": 2},
-    {
-        "event": "session_start",
-        "session_id": "s-137",
-        "started_at": "2026-08-15T00:00:00Z",
-        "model": "custom-model",
-        "provider": "openai-compatible",
-    },
-    {
-        "event": "session_end",
-        "total_turns": 1,
-        "session_wallclock_ms": 15,
-        "total_cost_usd": None,
-        "total_prompt_tokens": 0,
-        "total_completion_tokens": 0,
-        "total_cached_tokens": None,
-        "total_cache_write_tokens": None,
-        "total_thinking_tokens": 0,
-        "total_oom_kills": 0,
-        "p50_turn_ms": 15,
-        "p99_turn_ms": 15,
-        "avg_turn_cost_usd": None,
-        "structured_output": None,
-        "outcome": "completed",
-        "verification": None,
-        "exit_code": 0,
-    },
-]
-
-
 def _osprey_stream() -> list[str]:
     """The minimal valid session, as the raw JSON lines ``_drive`` feeds osprey."""
-    return [json.dumps(event) for event in _OSPREY_SESSION]
+    return [json.dumps(event) for event in osprey_session()]
 
 
 async def test_codex_process_exit_message_anchor_and_count() -> None:

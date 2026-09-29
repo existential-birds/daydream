@@ -446,11 +446,6 @@ def _preflight(
             ("judge", calibrate._judge_host_from_env, judge_hosts),
             ("reviewer", _reviewer_host_from_env, reviewer_hosts),
         ):
-            # anthropic and claude-cli resolve their judge host without a base URL
-            if label == "judge" and env.get("DAYDREAM_JUDGE_PROVIDER") == "openai-compatible" \
-                    and not env.get("DAYDREAM_JUDGE_BASE_URL"):
-                failures.append("cannot resolve judge host: missing DAYDREAM_JUDGE_BASE_URL")
-                continue
             try:
                 host = resolve(env)
             except Exception as exc:  # noqa: BLE001 - surfaced as a preflight failure
