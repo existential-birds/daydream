@@ -34,10 +34,8 @@ from tests.test_deep_orchestrator import (
 
 def _prepare_fix_stub(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute) -> StubBackend:
     """Drive fix-cycle tests through the same interactive real-path setup."""
-    _silence(monkeypatch)
     _force_interactive(monkeypatch)
-    mute_side_effects()
-    return _install_stub_backend(monkeypatch, target)
+    return _supervision_stub(target, monkeypatch, mute_side_effects)
 
 
 def _supervision_stub(

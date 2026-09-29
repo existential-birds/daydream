@@ -32,7 +32,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum, StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
@@ -140,56 +140,6 @@ class ParsedIssue:
 
 
 @dataclass(frozen=True)
-class SubmissionFinding:
-    """Immutable finding value consumed by the shared submission operation."""
-
-    path: str
-    line: int | None
-    title: str
-    body: str
-    is_cross_stack: bool
-    confidence: str | None
-    severity: str | None
-    fingerprint: str | None
-    location_distrust: bool
-    severity_before_demotion: str | None
-    severity_off_vocabulary: bool
-
-    @classmethod
-    def from_parsed(cls, issue: ParsedIssue) -> SubmissionFinding:
-        """Snapshot one mutable classification finding."""
-        return cls(
-            path=issue.path,
-            line=issue.line,
-            title=issue.title,
-            body=issue.body,
-            is_cross_stack=issue.is_cross_stack,
-            confidence=issue.confidence,
-            severity=issue.severity,
-            fingerprint=issue.fingerprint,
-            location_distrust=issue.location_distrust,
-            severity_before_demotion=issue.severity_before_demotion,
-            severity_off_vocabulary=issue.severity_off_vocabulary,
-        )
-
-    def to_parsed(self) -> ParsedIssue:
-        """Create the renderer's mutable compatibility value."""
-        return ParsedIssue(
-            path=self.path,
-            line=self.line,
-            title=self.title,
-            body=self.body,
-            is_cross_stack=self.is_cross_stack,
-            confidence=self.confidence,
-            severity=self.severity,
-            fingerprint=self.fingerprint,
-            location_distrust=self.location_distrust,
-            severity_before_demotion=self.severity_before_demotion,
-            severity_off_vocabulary=self.severity_off_vocabulary,
-        )
-
-
-@dataclass(frozen=True)
 class InlineReviewComment:
     """One immutable inline comment in a final GitHub review payload."""
 
@@ -237,8 +187,8 @@ class ClassifiedReviewResult:
 
     status: SubmissionStatus
     review_url: str | None
-    posted_file_level: tuple[SubmissionFinding, ...]
-    folded_file_level: tuple[SubmissionFinding, ...]
+    posted_file_level: tuple[ParsedIssue, ...]
+    folded_file_level: tuple[ParsedIssue, ...]
     final_review_posted: bool
     safe_error: str | None
 
@@ -1345,9 +1295,9 @@ class ClassifiedReviewPlan:
 
     pr: PRInfo
     inline: tuple[InlineReviewComment, ...]
-    inline_issues: tuple[SubmissionFinding, ...]
-    file_level: tuple[SubmissionFinding, ...]
-    body_only: tuple[SubmissionFinding, ...]
+    inline_issues: tuple[ParsedIssue, ...]
+    file_level: tuple[ParsedIssue, ...]
+    body_only: tuple[ParsedIssue, ...]
     event: ReviewEvent
     run_info: str
     renderers: ReviewRenderers
@@ -1370,16 +1320,9 @@ class ClassifiedReviewPlan:
         return cls(
             pr=pr,
             inline=tuple(classified.inline),
-            inline_issues=tuple(
-                SubmissionFinding.from_parsed(issue)
-                for issue in classified.inline_issues
-            ),
-            file_level=tuple(
-                SubmissionFinding.from_parsed(issue) for issue in classified.file_level
-            ),
-            body_only=tuple(
-                SubmissionFinding.from_parsed(issue) for issue in classified.body_only
-            ),
+            inline_issues=tuple(replace(issue) for issue in classified.inline_issues),
+            file_level=tuple(replace(issue) for issue in classified.file_level),
+            body_only=tuple(replace(issue) for issue in classified.body_only),
             event=event,
             run_info=run_info,
             renderers=renderers,
@@ -1753,14 +1696,14 @@ def post_classified_review(
     transport: ReviewTransport,
 ) -> ClassifiedReviewResult:
     """Submit ordered file comments, fold failures, then post one final review."""
-    posted: list[SubmissionFinding] = []
-    folded: list[SubmissionFinding] = []
+    posted: list[ParsedIssue] = []
+    folded: list[ParsedIssue] = []
     for finding in plan.file_level:
         payload = FileCommentPayload(
             commit_id=plan.pr.head_sha,
             path=finding.path,
             subject_type="file",
-            body=_format_comment_body(finding.to_parsed(), "file_level", plan.renderers),
+            body=_format_comment_body(finding, "file_level", plan.renderers),
         )
         if transport.post_file_comment(plan.pr, payload):
             posted.append(finding)
@@ -1769,12 +1712,9 @@ def post_classified_review(
 
     final_classified = _ClassifiedIssues(
         inline=list(plan.inline),
-        inline_issues=[finding.to_parsed() for finding in plan.inline_issues],
-        file_level=[finding.to_parsed() for finding in posted],
-        body_only=[
-            *(finding.to_parsed() for finding in plan.body_only),
-            *(finding.to_parsed() for finding in folded),
-        ],
+        inline_issues=list(plan.inline_issues),
+        file_level=list(posted),
+        body_only=[*plan.body_only, *folded],
     )
     review_payload = _build_payload_for_event(
         plan.pr,

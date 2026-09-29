@@ -7,14 +7,18 @@ from daydream import review_profile as rp, severity
 from tests.test_review_profile_completeness import STAGE_KEYS
 
 
+def _profile(body: str = "", *, source: str = "<string>") -> rp.ReviewProfile:
+    return rp.parse_profile(f'schema_version = 1\nname = "p"\n{body}', source=source)
+
+
 def test_review_deadline_is_profiled_and_validated() -> None:
-    base = rp.parse_profile('schema_version = 1\nname = "p"')
-    bounded = rp.parse_profile('schema_version = 1\nname = "p"\n[pipeline]\nreview_wall_budget_s = 1200')
+    base = _profile()
+    bounded = _profile("[pipeline]\nreview_wall_budget_s = 1200")
     assert bounded.pipeline.review_wall_budget_s == 1200
     assert base.pipeline.review_wall_budget_s == 2700
     assert bounded.digest != base.digest
     with pytest.raises(rp.ProfileError):
-        rp.parse_profile('schema_version = 1\nname = "p"\n[pipeline]\nreview_wall_budget_s = -1')
+        _profile("[pipeline]\nreview_wall_budget_s = -1")
 
 
 def test_pipeline_keeps_existing_positional_constructor_order() -> None:
@@ -71,9 +75,7 @@ def test_default_profile_carries_schema_version_name_and_every_stage() -> None:
 
 # Task 2 (R4): canonical serialization + deterministic digest.
 def test_digest_is_order_whitespace_comment_path_independent(tmp_path: Path) -> None:
-    a = rp.parse_profile('''schema_version = 1
-name = "p"
-[strategies.intent]
+    a = _profile('''[strategies.intent]
 content = "X"
 source = "copied: a"''')
     b = rp.parse_profile('''schema_version=1
@@ -87,28 +89,20 @@ content="X"''')
 
 def test_digest_semantic_change_changes_digest() -> None:
     # A semantic change to a stage's strategy content changes the digest.
-    base = rp.parse_profile('''schema_version = 1
-name = "p"
-[strategies.intent]
+    base = _profile('''[strategies.intent]
 content = "X"
 source = "copied: a"''')
-    changed = rp.parse_profile('''schema_version = 1
-name = "p"
-[strategies.intent]
+    changed = _profile('''[strategies.intent]
 content = "DIFFERENT"
 source = "copied: a"''')
     assert changed.digest != base.digest
 
 
 def test_omitted_defaults_and_explicit_defaults_hash_identically() -> None:
-    implicit = rp.parse_profile('''schema_version = 1
-name = "p"
-[strategies.intent]
+    implicit = _profile('''[strategies.intent]
 content = "X"
 source = "copied: a"''')
-    explicit = rp.parse_profile('''schema_version = 1
-name = "p"
-[strategies.intent]
+    explicit = _profile('''[strategies.intent]
 content = "X"
 source = "copied: a"
 [pipeline]
@@ -118,10 +112,7 @@ structural_enabled = true''')   # default value spelled out
 # Task 3 (R3): fail-closed validation.
 def test_unknown_key_fails_closed_naming_source() -> None:
     with pytest.raises(rp.ProfileError) as e:
-        rp.parse_profile(
-            'schema_version = 1\nname = "p"\nbogus = 1',
-            source="/tmp/profile.toml",
-        )
+        _profile("bogus = 1", source="/tmp/profile.toml")
     assert "/tmp/profile.toml" in str(e.value) and "bogus" in str(e.value)
 
 
@@ -133,16 +124,14 @@ def test_unsupported_schema_version_fails_closed() -> None:
 
 def test_negative_limit_fails_closed() -> None:
     with pytest.raises(rp.ProfileError):
-        rp.parse_profile('''schema_version = 1
-name = "p"
+        _profile("""\
 [pipeline]
-uncovered_sweep_max_files = -5''')
+uncovered_sweep_max_files = -5""")
 
 
 def test_invalid_enum_fails_closed() -> None:
     with pytest.raises(rp.ProfileError):
-        rp.parse_profile('''schema_version = 1
-name = "p"
+        _profile('''\
 [pipeline]
 arbitration_min_severity = "CRITICAL"''')   # not in the allowed severity enum
 
@@ -153,34 +142,31 @@ def test_forbidden_host_fields_rejected() -> None:
                   "harbor_judge_model", "skill_name", "findings_schema",
                   "verifier", "judge", "scoring", "gold"):
         with pytest.raises(rp.ProfileError) as e:
-            rp.parse_profile(f'schema_version = 1\nname = "p"\n{field} = "x"', source="y")
+            _profile(f'{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
 
 
 def test_host_cap_clamps_lower_profile_value_up() -> None:
     # Host caps are the floor: a profile supplying LOWER than the host cap is clamped up.
-    p = rp.parse_profile('''schema_version = 1
-name = "p"
+    p = _profile("""\
 [pipeline]
-uncovered_sweep_min_hunk_lines = 2''')   # below host cap of 5
+uncovered_sweep_min_hunk_lines = 2""")   # below host cap of 5
     assert p.pipeline.uncovered_sweep_min_hunk_lines == 5   # clamped up, never below
 
 
 def test_uncovered_sweep_max_files_is_tunable() -> None:
     # The uncovered-sweep cap is a live profile knob, not a silent no-op locked
     # to the production default: a value inside the host band passes through.
-    p = rp.parse_profile('''schema_version = 1
-name = "p"
+    p = _profile("""\
 [pipeline]
-uncovered_sweep_max_files = 5''')   # within host band (1, 10)
+uncovered_sweep_max_files = 5""")   # within host band (1, 10)
     assert p.pipeline.uncovered_sweep_max_files == 5   # tunable, not forced to 10
 
 
 def test_profile_cannot_raise_host_cap() -> None:
-    p = rp.parse_profile('''schema_version = 1
-name = "p"
+    p = _profile("""\
 [pipeline]
-uncovered_sweep_max_files = 999''')   # above host cap
+uncovered_sweep_max_files = 999""")   # above host cap
     assert p.pipeline.uncovered_sweep_max_files == 10   # capped at host ceiling
 
 
