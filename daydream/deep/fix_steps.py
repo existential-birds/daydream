@@ -39,7 +39,7 @@ from daydream.deep.artifacts import (
     stabilization_failed_path,
     test_verdict_path,
 )
-from daydream.deep.records import stamp_item_uids
+from daydream.deep.records import item_uid, stamp_item_uids
 from daydream.deep.scope_issues import (
     ScopeEnforcementResult,
     _resolve_changed_files,
@@ -297,36 +297,95 @@ async def _step_verify(ctx: FlowContext) -> None:
     # Attach verifier verdicts to items by `id` (advisory; phase_fix reads them).
     items = _attach_verdicts(items, verdicts_payload)
     deep_state.items = items
-    matched_ids = [i["id"] for i in items if i.get("verifier_verdict") is not None]
-    unmatched_ids = [
-        i["id"]
-        for i in items
-        if isinstance(i.get("id"), int)
-        and i.get("verifier_verdict") is None
-        and i.get("lens") != "structural"
-    ]
-    # Structural findings are verdict-exempt (in neither matched nor unmatched)
-    # but still fixed; itemize them so the "X/Y matched" ratio isn't read as a
-    # total that under-counts the items the fix loop iterates.
-    structural_ids = [i.get("id") for i in items if i.get("lens") == "structural"]
-    # Leftovers (no verdict, non-structural, missing/non-int id) so the
-    # buckets always reconcile to len(items); surfaced only when present.
-    other_ids = [
-        i.get("id")
-        for i in items
-        if i.get("verifier_verdict") is None
-        and i.get("lens") != "structural"
-        and not isinstance(i.get("id"), int)
-    ]
+    matched_ids, unmatched_ids, skipped_ids, structural_ids, other_ids = _verdict_buckets(
+        items, verdicts_payload
+    )
+    # Selection skips and structural findings are both verdict-exempt, but they are
+    # distinct: a skip was never rendered to the verifier, while a structural
+    # finding is exempt by lens. Itemize both so the "X/Y matched" ratio isn't read
+    # as a total that under-counts the items the fix loop iterates; the decisions
+    # the verify phase persisted are the single source for the split.
     console.print(
         format_verdict_join(
             matched=matched_ids,
             unmatched=unmatched_ids,
+            skipped=skipped_ids,
             structural=structural_ids,
             other=other_ids,
             total=len(items),
         )
     )
+
+
+def _verdict_buckets(
+    items: list[dict[str, Any]], payload: object
+) -> tuple[list[int | None], list[int | None], list[int | None], list[int | None], list[int | None]]:
+    """Bucket canonical items for the Verdict Join table.
+
+    The verify phase's persisted ``selection`` decisions are the single source
+    for the skip/structural split -- a selection skip is never re-reported as an
+    unmatched verdict. When the artifact predates the selection block or the
+    block is malformed, the field-based accounting this step always used is the
+    fallback (Pattern B), so a distinct summary can never fail a run.
+
+    Returns ``(matched, unmatched, skipped, structural, other)``; every item
+    lands in exactly one bucket, so the four plus ``other`` reconcile to
+    ``len(items)``.
+    """
+    decisions_by_uid = _selection_decisions(payload)
+    matched: list[int | None] = []
+    unmatched: list[int | None] = []
+    skipped: list[int | None] = []
+    structural: list[int | None] = []
+    other: list[int | None] = []
+    for item in items:
+        item_id = item.get("id")
+        verdict = item.get("verifier_verdict")
+        decision = decisions_by_uid.get(item_uid(item))
+        if decision is not None:
+            reason = decision.get("reason_code")
+            if reason == "exempt:structural":
+                structural.append(item_id)
+            elif decision.get("selected") is False:
+                skipped.append(item_id)
+            elif verdict is not None:
+                matched.append(item_id)
+            elif isinstance(item_id, int) and not isinstance(item_id, bool):
+                unmatched.append(item_id)
+            else:
+                other.append(item_id)
+            continue
+        # No decision for this item (pre-change artifact / malformed block):
+        # fall back to today's field-based accounting.
+        if item.get("lens") == "structural":
+            structural.append(item_id)
+        elif verdict is not None:
+            matched.append(item_id)
+        elif isinstance(item_id, int) and not isinstance(item_id, bool):
+            unmatched.append(item_id)
+        else:
+            other.append(item_id)
+    return matched, unmatched, skipped, structural, other
+
+
+def _selection_decisions(payload: object) -> dict[str, dict[str, Any]]:
+    """Return the artifact's selection decisions keyed by ``item_uid``.
+
+    An absent, non-dict, or malformed selection block yields ``{}`` so the
+    caller degrades to today's accounting instead of raising (Pattern B).
+    """
+    block = payload.get("selection") if isinstance(payload, dict) else None
+    decisions = block.get("decisions") if isinstance(block, dict) else None
+    if not isinstance(decisions, list):
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    for decision in decisions:
+        if not isinstance(decision, dict):
+            continue
+        uid = decision.get("item_uid")
+        if isinstance(uid, str) and uid:
+            out[uid] = decision
+    return out
 
 
 async def _capture_quality_before(

@@ -137,19 +137,23 @@ def format_verdict_join(
     *,
     matched: list[int | None],
     unmatched: list[int | None],
+    skipped: list[int | None],
     structural: list[int | None],
     other: list[int | None],
     total: int,
 ) -> Table:
     """Build a table summarizing how merged items joined to verifier verdicts.
 
-    One row per category (Matched / Unmatched / Structural / Other) showing the
-    count and, dimly, the ids; a final Total row. The Other row is omitted when
-    empty. Mirrors the print_summary table style.
+    One row per category (Matched / Unmatched / Skipped / Structural / Other)
+    showing the count and, dimly, the ids; a final Total row. The Unmatched,
+    Skipped, and Other rows are omitted when empty. Mirrors the print_summary
+    table style.
 
     Args:
         matched: Ids of items that matched a verifier verdict.
-        unmatched: Ids of verdict-eligible items with no verifier verdict.
+        unmatched: Ids of selected, verdict-eligible items with no verifier verdict.
+        skipped: Ids of items the selection predicate skipped (never rendered to
+            the verifier); a skip is distinct from an unmatched verdict.
         structural: Ids of structural (verdict-exempt) items.
         other: Leftover ids that fit no other bucket.
         total: Total number of items to fix (len(items)).
@@ -172,12 +176,16 @@ def format_verdict_join(
 
     n_matched = len(matched)
     n_unmatched = len(unmatched)
+    n_skipped = len(skipped)
     n_structural = len(structural)
     n_other = len(other)
-    computed_total = n_matched + n_unmatched + n_structural + n_other
+    computed_total = n_matched + n_unmatched + n_skipped + n_structural + n_other
 
     table.add_row("Matched", str(n_matched), _ids(matched))
-    table.add_row("Unmatched", str(n_unmatched), _ids(unmatched))
+    if unmatched:
+        table.add_row("Unmatched", str(n_unmatched), _ids(unmatched))
+    if skipped:
+        table.add_row("Skipped", str(n_skipped), _ids(skipped))
     table.add_row("Structural", str(n_structural), _ids(structural))
     if other:
         table.add_row("Other", str(n_other), _ids(other))
@@ -282,9 +290,10 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
 
     Reads the verdicts JSON written by ``phase_verify_recommendations`` and
     emits a single dim line of the form ``Recommendation verification: N
-    findings · M flagged (X contradicts, Y uncertain)``. Missing,
-    empty, or malformed files are treated as a no-op so the fix gate is
-    never blocked by verifier output.
+    findings · M flagged (X contradicts, Y uncertain)``, appending
+    ``· S selected / K skipped`` when the artifact carries the sibling
+    ``selection`` block. Missing, empty, or malformed files are treated as a
+    no-op so the fix gate is never blocked by verifier output.
 
     Args:
         verdicts_path: Path to the ``recommendation-verdicts.json`` file.
@@ -300,11 +309,22 @@ def print_verification_summary(console: Console, verdicts_path: Path) -> None:
     contradicts = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "contradicts")
     uncertain = sum(1 for v in verdicts if isinstance(v, dict) and v.get("verdict") == "uncertain")
     flagged = contradicts + uncertain
+    selection = data.get("selection") if isinstance(data, dict) else None
+    selected = selection.get("selected") if isinstance(selection, dict) else None
+    skipped = selection.get("skipped") if isinstance(selection, dict) else None
+    suffix = ""
+    if _is_count(selected) and _is_count(skipped):
+        suffix = f" · {selected} selected / {skipped} skipped"
     print_dim(
         console,
         f"Recommendation verification: {len(verdicts)} findings · {flagged} flagged "
-        f"({contradicts} contradicts, {uncertain} uncertain)",
+        f"({contradicts} contradicts, {uncertain} uncertain){suffix}",
     )
+
+
+def _is_count(value: object) -> bool:
+    """Whether *value* is a real integer count (``bool`` is not)."""
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def print_preflight_notice(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Callable
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,7 @@ from daydream.trajectory import DaydreamPhase
 from daydream.ui import (
     AgentTextRenderer,
     format_verdict_join,
+    print_verification_summary,
     prompt_user,
     render_exploration_summary,
 )
@@ -37,16 +40,77 @@ from daydream.ui.tools import (
 from tests.harness.backend import ScriptedBackend
 
 
+def _render(renderable: object) -> str:
+    """Render one rich renderable to plain text for assertions."""
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
+    console.print(renderable)
+    return console.export_text()
+
+
+def _capture_console(fn: Callable[[Console], None]) -> str:
+    """Run *fn* against a recording console and return the captured text."""
+    console = Console(file=StringIO(), record=True, force_terminal=True, width=200)
+    fn(console)
+    return console.export_text()
+
+
+def _write_verdicts_artifact(
+    directory: Path, *, verdicts: list[dict[str, Any]], selected: int, skipped: int
+) -> Path:
+    """Write a ``recommendation-verdicts.json`` carrying the sibling selection block."""
+    path = directory / "recommendation-verdicts.json"
+    path.write_text(
+        json.dumps(
+            {
+                "verdicts": verdicts,
+                "selection": {
+                    "rule_version": 1,
+                    "mode": "selective",
+                    "extra_categories": [],
+                    "decisions": [],
+                    "selected": selected,
+                    "skipped": skipped,
+                },
+            }
+        )
+    )
+    return path
+
+
 def test_format_verdict_join_renders_table_counts() -> None:
 
 
-    table = format_verdict_join(matched=[1, 2], unmatched=[3], structural=[4, 5], other=[], total=5)
+    table = format_verdict_join(matched=[1, 2], unmatched=[3], skipped=[], structural=[4, 5], other=[], total=5)
     console = Console(file=StringIO(), record=True, force_terminal=True, width=100)
     console.print(table)
     out = console.export_text()
     assert "2" in out and "matched" in out.lower()
     assert "structural" in out.lower()
     assert "{" not in out
+
+
+def test_verdict_join_reports_selection_skips_as_their_own_bucket() -> None:
+    table = format_verdict_join(matched=[1], unmatched=[], skipped=[2, 3], structural=[4], other=[], total=4)
+    rendered = _render(table)
+    assert "2, 3" in rendered
+    assert "Skipped" in rendered
+    assert "Unmatched" not in rendered  # a selection skip is never an unmatched verdict
+
+
+def test_verification_summary_line_names_selected_and_skipped(tmp_path: Path) -> None:
+    _write_verdicts_artifact(tmp_path, verdicts=[], selected=2, skipped=5)
+    out = _capture_console(
+        lambda c: print_verification_summary(c, tmp_path / "recommendation-verdicts.json")
+    )
+    assert "2 selected" in out and "5 skipped" in out
+
+
+def test_verification_summary_omits_selection_when_block_absent(tmp_path: Path) -> None:
+    path = tmp_path / "recommendation-verdicts.json"
+    path.write_text(json.dumps({"verdicts": []}))
+    out = _capture_console(lambda c: print_verification_summary(c, path))
+    assert "selected" not in out
+    assert "Recommendation verification: 0 findings" in out
 
 
 def _run_renderer_and_count_panels(width: int, height: int, text_lines: list[str]) -> tuple[int, object]:
