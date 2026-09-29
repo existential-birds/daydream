@@ -12,6 +12,11 @@ import anyio
 from daydream.agent import console
 from daydream.artifact_visibility import review_output_path_for
 from daydream.backends import Backend, effective_fanout_concurrency
+from daydream.deep.adjudication_provenance import (
+    RecordProvenance,
+    find_revision_delta,
+    record_provenance,
+)
 from daydream.deep.arbiter import (
     ArbiterGroup,
     contested_indices,
@@ -134,7 +139,7 @@ def _apply_adjudication_verdicts(
     pass_name: str,
     id_field: str,
     fail_closed: bool,
-) -> tuple[list[dict[str, Any]], list[str]]:
+) -> tuple[list[dict[str, Any]], list[str], list[RecordProvenance]]:
     """Fold arbiter / suppression verdicts back into the per-stack record set.
 
     The scoped arbiter (``#168``) and the precision-mode suppression pass
@@ -189,11 +194,30 @@ def _apply_adjudication_verdicts(
             (see above).
 
     Returns:
-        New ``(records, sources)`` with the dropped uids' records removed and
-        surviving selected records carrying the verdict's fields. Positional
-        alignment between the two lists is preserved.
+        ``(records, sources, outcomes)``. ``records``/``sources`` are the new
+        lists with the dropped uids' records removed and surviving selected
+        records carrying the verdict's fields, positional alignment preserved.
+        ``outcomes`` holds one :class:`RecordProvenance` per targeted record in
+        ``targets`` order -- ``uid`` snapshotted before mutation,
+        ``passes=(pass_name,)``, ``verdict_bound=True`` only where a verdict was
+        found AND its ``id_field`` matched, ``kept=False`` on an explicit
+        ``keep:false`` (or a fail-closed unconfirmable), and ``revised_fields``
+        from the fields a bound verdict materially rewrote.
     """
     import warnings
+
+    outcomes: list[RecordProvenance] = []
+
+    def _record_outcome(
+        uid: str,
+        *,
+        verdict_bound: bool,
+        kept: bool = True,
+        revised_fields: tuple[str, ...] = (),
+    ) -> None:
+        outcomes.append(
+            RecordProvenance(uid, (pass_name,), verdict_bound, kept, revised_fields)
+        )
 
     polarity_action = (
         "dropping the unconfirmed record"
@@ -236,6 +260,7 @@ def _apply_adjudication_verdicts(
         recorded by uid like every uid-keyed drop in this function.
         """
         warnings.warn(message, stacklevel=3)
+        _record_outcome(uid, verdict_bound=False, kept=not fail_closed)
         if fail_closed:
             if uid:
                 dropped.add(uid)
@@ -280,12 +305,19 @@ def _apply_adjudication_verdicts(
             )
             continue
         if not verdict.get("keep", False):
+            _record_outcome(uid, verdict_bound=True, kept=False)
             dropped.add(uid)
             continue
         # Revise IN PLACE rather than rebuilding the dict: the caller holds this
         # same list and ``_rewrite_stack_records`` persists these very dicts, so
         # a fresh dict would have to be threaded back into both.
+        before = dict(by_uid[uid])
         revise_finding_fields(by_uid[uid], verdict)
+        _record_outcome(
+            uid,
+            verdict_bound=True,
+            revised_fields=find_revision_delta(before, by_uid[uid]),
+        )
 
     new_records: list[dict[str, Any]] = []
     new_sources: list[str] = []
@@ -296,7 +328,7 @@ def _apply_adjudication_verdicts(
             continue
         new_records.append(record)
         new_sources.append(source)
-    return new_records, new_sources
+    return new_records, new_sources, outcomes
 
 
 def _rewrite_stack_records(
@@ -1105,7 +1137,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     # different backend gets the cold path.
                     if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
                         deep_state.arbiter_continuation = arbiter_continuation
-            adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
+            adjudicated, adjudicated_sources, arbiter_outcomes = _apply_adjudication_verdicts(
                 adjudicated, adjudicated_sources, arbiter_targets, verdicts,
                 pass_name="arbiter",
                 id_field="arb_id",
@@ -1114,6 +1146,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
             _rewrite_stack_records(
                 dd, rewrite_paths, adjudicated, adjudicated_sources
             )
+            record_provenance(dd, pass_name="arbiter", outcomes=arbiter_outcomes)
             arbiter_slice = {
                 "sharded": plan.sharded,
                 "reason": plan.reason,
@@ -1157,7 +1190,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         artifact_session=ctx.artifacts,
                         allow_standalone=ctx.allow_standalone_artifacts,
                     )
-                adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
+                adjudicated, adjudicated_sources, suppression_outcomes = _apply_adjudication_verdicts(
                     adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
                     pass_name="suppression",
                     id_field="sup_id",
@@ -1166,6 +1199,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 _rewrite_stack_records(
                     dd, rewrite_paths, adjudicated, adjudicated_sources
                 )
+                record_provenance(dd, pass_name="suppression", outcomes=suppression_outcomes)
         # Whole-block marker: written only when every planned group completed,
         # so an interrupted sharded fan-out forces the block to re-enter and
         # reruns only its incomplete groups (and the opt-in suppression pass).
