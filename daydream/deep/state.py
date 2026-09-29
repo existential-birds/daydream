@@ -75,14 +75,11 @@ class DeepState:
 
     @property
     def diff_truncation(self) -> DeepDiffBoundInfo | None:
-        value: object | None = self._data.get("diff_truncation")
-        if value is None:
-            return None
         from daydream.deep.prompts import DeepDiffBoundInfo
 
         return cast(
-            DeepDiffBoundInfo,
-            self._check("diff_truncation", value, DeepDiffBoundInfo, "DeepDiffBoundInfo or None"),
+            DeepDiffBoundInfo | None,
+            self._optional("diff_truncation", DeepDiffBoundInfo, "DeepDiffBoundInfo or None"),
         )
 
     @property
@@ -197,50 +194,38 @@ class DeepState:
 
     @property
     def latency_route(self) -> LatencyRoute | None:
-        value: object | None = self._data.get("latency_route")
-        if value is None:
-            return None
         from daydream.deep.latency import LatencyRoute
 
         return cast(
-            LatencyRoute,
-            self._check("latency_route", value, LatencyRoute, "LatencyRoute or None"),
+            LatencyRoute | None,
+            self._optional("latency_route", LatencyRoute, "LatencyRoute or None"),
         )
 
     @property
     def reuse_cache(self) -> ReuseCache | None:
-        value: object | None = self._data.get("reuse_cache")
-        if value is None:
-            return None
         from daydream.deep.reuse_store import ReuseCache
 
         return cast(
-            ReuseCache,
-            self._check("reuse_cache", value, ReuseCache, "ReuseCache or None"),
+            ReuseCache | None,
+            self._optional("reuse_cache", ReuseCache, "ReuseCache or None"),
         )
 
     @property
     def risk_summary(self) -> RiskSummary | None:
-        value: object | None = self._data.get("risk_summary")
-        if value is None:
-            return None
         from daydream.deep.latency import RiskSummary
 
         return cast(
-            RiskSummary,
-            self._check("risk_summary", value, RiskSummary, "RiskSummary or None"),
+            RiskSummary | None,
+            self._optional("risk_summary", RiskSummary, "RiskSummary or None"),
         )
 
     @property
     def arbiter_plan(self) -> ArbiterPlan | None:
-        value: object | None = self._data.get("arbiter_plan")
-        if value is None:
-            return None
         from daydream.deep.latency import ArbiterPlan
 
         return cast(
-            ArbiterPlan,
-            self._check("arbiter_plan", value, ArbiterPlan, "ArbiterPlan or None"),
+            ArbiterPlan | None,
+            self._optional("arbiter_plan", ArbiterPlan, "ArbiterPlan or None"),
         )
 
     @arbiter_plan.setter
@@ -353,18 +338,12 @@ class DeepState:
 
     @property
     def arbiter_continuation(self) -> ContinuationToken | None:
-        value: object | None = self._data.get("arbiter_continuation")
-        if value is None:
-            return None
         from daydream.backends import ContinuationToken
 
         return cast(
-            ContinuationToken,
-            self._check(
-                "arbiter_continuation",
-                value,
-                ContinuationToken,
-                "ContinuationToken or None",
+            ContinuationToken | None,
+            self._optional(
+                "arbiter_continuation", ContinuationToken, "ContinuationToken or None"
             ),
         )
 
