@@ -76,6 +76,38 @@ def _neutral_maintenance_fields() -> dict[str, Any]:
     }
 
 
+def _recon_command(
+    *,
+    command_id: str,
+    purpose: str,
+    command: str,
+    line: int,
+    excerpt: str,
+    observable_result: str,
+    rationale: str,
+    scope_kind: str = "whole-repository",
+) -> dict[str, Any]:
+    """One recon-command record in the shared validated shape."""
+    return {
+        "id": command_id,
+        "purpose": purpose,
+        "command": command,
+        "working_directory": ".",
+        "expected_success": {"exit_code": 0, "observable_result": observable_result},
+        "applicability": {
+            "scope": {"kind": scope_kind},
+            "preconditions": [],
+            "rationale": rationale,
+        },
+        "evidence": {
+            "kind": "literal-command",
+            "source_path": "pyproject.toml",
+            "line_anchor": {"start_line": line, "end_line": line},
+            "verbatim_excerpt": excerpt,
+        },
+    }
+
+
 def stub_recon_commands(*, all_invalid: bool = False, start_line: int = 5) -> list[dict[str, Any]]:
     """Two whole-repository verification commands, anchored from ``start_line``.
 
@@ -84,56 +116,26 @@ def stub_recon_commands(*, all_invalid: bool = False, start_line: int = 5) -> li
     """
     scope_kind = "unsupported" if all_invalid else "whole-repository"
     return [
-        {
-            "id": "test-suite",
-            "purpose": "Run the repository Python test suite",
-            "command": "uv run pytest",
-            "working_directory": ".",
-            "expected_success": {
-                "exit_code": 0,
-                "observable_result": (
-                    "exit 0 and the selected pytest tests pass"
-                ),
-            },
-            "applicability": {
-                "scope": {"kind": scope_kind},
-                "preconditions": [],
-                "rationale": (
-                    "The root configuration declares the test command."
-                ),
-            },
-            "evidence": {
-                "kind": "literal-command",
-                "source_path": "pyproject.toml",
-                "line_anchor": {"start_line": start_line, "end_line": start_line},
-                "verbatim_excerpt": 'test-command = "uv run pytest"',
-            },
-        },
-        {
-            "id": "git-diff",
-            "purpose": "Check that unrelated paths remain unchanged",
-            "command": "git diff --exit-code",
-            "working_directory": ".",
-            "expected_success": {
-                "exit_code": 0,
-                "observable_result": (
-                    "exit 0 and no unexpected diff is reported"
-                ),
-            },
-            "applicability": {
-                "scope": {"kind": scope_kind},
-                "preconditions": [],
-                "rationale": (
-                    "The root configuration declares the scope command."
-                ),
-            },
-            "evidence": {
-                "kind": "literal-command",
-                "source_path": "pyproject.toml",
-                "line_anchor": {"start_line": start_line + 1, "end_line": start_line + 1},
-                "verbatim_excerpt": 'scope-command = "git diff --exit-code"',
-            },
-        },
+        _recon_command(
+            command_id="test-suite",
+            purpose="Run the repository Python test suite",
+            command="uv run pytest",
+            line=start_line,
+            excerpt='test-command = "uv run pytest"',
+            observable_result="exit 0 and the selected pytest tests pass",
+            rationale="The root configuration declares the test command.",
+            scope_kind=scope_kind,
+        ),
+        _recon_command(
+            command_id="git-diff",
+            purpose="Check that unrelated paths remain unchanged",
+            command="git diff --exit-code",
+            line=start_line + 1,
+            excerpt='scope-command = "git diff --exit-code"',
+            observable_result="exit 0 and no unexpected diff is reported",
+            rationale="The root configuration declares the scope command.",
+            scope_kind=scope_kind,
+        ),
     ]
 
 
@@ -896,48 +898,25 @@ class ProductionPathBackend(ImproveStubBackend):
         for index in range(42):
             test_command = index % 2 == 0
             commands.append(
-                {
-                    "id": (
+                _recon_command(
+                    command_id=(
                         "test-suite"
                         if index == 0
                         else "git-diff"
                         if index == 1
                         else f"verified-command-{index:02d}"
                     ),
-                    "purpose": f"Run verified repository command {index + 1}",
-                    "command": (
-                        "uv run pytest"
+                    purpose=f"Run verified repository command {index + 1}",
+                    command="uv run pytest" if test_command else "git diff --exit-code",
+                    line=5 if test_command else 6,
+                    excerpt=(
+                        'test-command = "uv run pytest"'
                         if test_command
-                        else "git diff --exit-code"
+                        else 'scope-command = "git diff --exit-code"'
                     ),
-                    "working_directory": ".",
-                    "expected_success": {
-                        "exit_code": 0,
-                        "observable_result": (
-                            "exit 0 and the repository command succeeds"
-                        ),
-                    },
-                    "applicability": {
-                        "scope": {"kind": "whole-repository"},
-                        "preconditions": [],
-                        "rationale": (
-                            "The root configuration declares this command."
-                        ),
-                    },
-                    "evidence": {
-                        "kind": "literal-command",
-                        "source_path": "pyproject.toml",
-                        "line_anchor": {
-                            "start_line": 5 if test_command else 6,
-                            "end_line": 5 if test_command else 6,
-                        },
-                        "verbatim_excerpt": (
-                            'test-command = "uv run pytest"'
-                            if test_command
-                            else 'scope-command = "git diff --exit-code"'
-                        ),
-                    },
-                }
+                    observable_result="exit 0 and the repository command succeeds",
+                    rationale="The root configuration declares this command.",
+                )
             )
         commands.append(
             {

@@ -41,6 +41,23 @@ def _canonical_bytes(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
+def _download_final(
+    hub: AnnotationsHub,
+    curation_id: str,
+    snapshot_id: str,
+    revision: str,
+    destination: Path,
+) -> dict[str, Any]:
+    """Download a final bundle by exact snapshot id and pinned revision."""
+    return download_final_annotation_bundle(
+        hub,
+        curation_id=curation_id,
+        snapshot_id=snapshot_id,
+        revision=revision,
+        destination=destination,
+    )
+
+
 def _observation(
     *, record_id: str, observed_at: str, disposition: str, rationale: str
 ) -> dict[str, Any]:
@@ -875,12 +892,8 @@ def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path:
     curation_id, final_id, revision = _seed_final_envelope(hub, bundle)
 
     with pytest.raises(ValueError, match="lineage.json"):
-        download_final_annotation_bundle(
-            hub,
-            curation_id=curation_id,
-            snapshot_id=final_id,
-            revision=revision,
-            destination=tmp_path / "download",
+        _download_final(
+            hub, curation_id, final_id, revision, tmp_path / "download"
         )
 
     assert not (tmp_path / "download").exists()
@@ -954,12 +967,8 @@ def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement
     assert remote[f"{prefix}annotations.jsonl"] == original
 
     destination = tmp_path / "verified download"
-    download_final_annotation_bundle(
-        hub,
-        curation_id=curation_id,
-        snapshot_id=published["final_snapshot_id"],
-        revision=published["hub_commit_sha"],
-        destination=destination,
+    _download_final(
+        hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
     )
     assert (destination / "annotations.jsonl").read_bytes() == original
 
@@ -1160,12 +1169,8 @@ def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path, hu
     hub.info_revision_log.clear()
 
     with pytest.raises(ValueError, match="must not exist"):
-        download_final_annotation_bundle(
-            hub,
-            curation_id=curation_id,
-            snapshot_id=result["final_snapshot_id"],
-            revision=result["hub_commit_sha"],
-            destination=destination,
+        _download_final(
+            hub, curation_id, result["final_snapshot_id"], result["hub_commit_sha"], destination
         )
     assert hub.info_revision_log == []
 
@@ -1177,12 +1182,8 @@ def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path:
     hub.downloaded_revision_log.clear()
     destination = tmp_path / "download"
 
-    result = download_final_annotation_bundle(
-        hub,
-        curation_id=curation_id,
-        snapshot_id=published["final_snapshot_id"],
-        revision=published["hub_commit_sha"],
-        destination=destination,
+    result = _download_final(
+        hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
     )
 
     assert result["hub_commit_sha"] == published["hub_commit_sha"]
@@ -1201,12 +1202,8 @@ def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_p
     alias = tmp_path / "alias"
     alias.symlink_to(actual, target_is_directory=True)
 
-    download_final_annotation_bundle(
-        hub,
-        curation_id=curation_id,
-        snapshot_id=published["final_snapshot_id"],
-        revision=published["hub_commit_sha"],
-        destination=alias / "download",
+    _download_final(
+        hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], alias / "download"
     )
 
     assert (actual / "download" / "_SUCCESS").is_file()
@@ -1222,12 +1219,8 @@ def test_final_download_parent_fsync_failure_removes_owned_install(
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     _fail_parent_fsync_after_rename(monkeypatch, destination, parent_identity)
     with pytest.raises(HydrationError, match="parent fsync failed"):
-        download_final_annotation_bundle(
-            hub,
-            curation_id=curation_id,
-            snapshot_id=published["final_snapshot_id"],
-            revision=published["hub_commit_sha"],
-            destination=destination,
+        _download_final(
+            hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
         )
 
     assert not destination.exists()
@@ -1290,12 +1283,8 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
     monkeypatch.setattr(os, "fsync", replace_then_fail)
     with pytest.raises(HydrationError, match="parent fsync failed"):
         if operation == "download":
-            download_final_annotation_bundle(
-                hub,
-                curation_id=curation_id,
-                snapshot_id=published["final_snapshot_id"],
-                revision=published["hub_commit_sha"],
-                destination=destination,
+            _download_final(
+                hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
             )
         else:
             resume_annotation_state(hub, curation_id=_CID, destination=destination)
@@ -1322,12 +1311,8 @@ def test_successful_installation_closes_directory_descriptors(
     directory_fds = _record_open_directory_fds(monkeypatch)
 
     if operation == "download":
-        download_final_annotation_bundle(
-            hub,
-            curation_id=curation_id,
-            snapshot_id=published["final_snapshot_id"],
-            revision=published["hub_commit_sha"],
-            destination=destination,
+        _download_final(
+            hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
         )
     else:
         resume_annotation_state(hub, curation_id=_CID, destination=destination)
@@ -1442,12 +1427,8 @@ def test_final_download_last_remote_read_failure_leaves_no_stage(tmp_path: Path)
     destination = tmp_path / "download"
 
     with pytest.raises(HydrationError, match="last final download failed"):
-        download_final_annotation_bundle(
-            hub,
-            curation_id=curation_id,
-            snapshot_id=result["final_snapshot_id"],
-            revision=result["hub_commit_sha"],
-            destination=destination,
+        _download_final(
+            hub, curation_id, result["final_snapshot_id"], result["hub_commit_sha"], destination
         )
     assert not destination.exists()
     assert list(tmp_path.glob(".download.*")) == []
@@ -1466,10 +1447,6 @@ def test_final_publish_and_download_refuse_public_repository(tmp_path: Path) -> 
     with pytest.raises(PublicDestinationError, match="public Hub"):
         publish_final_annotation_bundle(public, bundle)
     with pytest.raises(PublicDestinationError, match="public Hub"):
-        download_final_annotation_bundle(
-            public,
-            curation_id=curation_id,
-            snapshot_id=published["final_snapshot_id"],
-            revision=public.repo_info().sha,
-            destination=tmp_path / "download",
+        _download_final(
+            public, curation_id, published["final_snapshot_id"], public.repo_info().sha, tmp_path / "download"
         )
