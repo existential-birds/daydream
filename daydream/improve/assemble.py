@@ -23,6 +23,7 @@ from jsonschema import Draft202012Validator
 from daydream.improve.command_contract import (
     command_argv as _command_argv,
     has_shell_composition as _has_shell_composition,
+    json_pointer,
     path_is_confined as _path_is_confined,
     valid_directory_scope_lexical as _valid_directory_scope,
     valid_repository_file_path as _valid_repository_file_path,
@@ -639,14 +640,6 @@ def _normalize_authored(
     return normalized
 
 
-def _json_pointer(parts: Sequence[str]) -> str:
-    if not parts:
-        return "/"
-    return "".join(
-        f"/{part.replace('~', '~0').replace('/', '~1')}" for part in parts
-    )
-
-
 _LENGTH_PHRASINGS = {
     "maxLength": "at most {limit} characters (it has {actual})",
     "minLength": "at least {limit} characters (it has {actual})",
@@ -676,7 +669,7 @@ def _schema_issues(normalized: dict[str, Any], add: _AddIssue) -> None:
         if error.validator == "required" and isinstance(error.instance, dict):
             missing = sorted(set(error.validator_value) - set(error.instance))
             for key in missing:
-                add("AUTHOR_SCHEMA_INVALID", _json_pointer([*parts, key]))
+                add("AUTHOR_SCHEMA_INVALID", json_pointer([*parts, key], root="/"))
             continue
         detail = None
         hint = None
@@ -690,7 +683,7 @@ def _schema_issues(normalized: dict[str, Any], add: _AddIssue) -> None:
             hint = "valid values: " + ", ".join(
                 str(value) for value in error.validator_value
             )
-        add("AUTHOR_SCHEMA_INVALID", _json_pointer(parts), detail, hint)
+        add("AUTHOR_SCHEMA_INVALID", json_pointer(parts, root="/"), detail, hint)
 
 
 def _covers(prefix: str, target: str) -> bool:

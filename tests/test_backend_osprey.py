@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,7 +25,6 @@ from daydream.backends import (
     TurnEndEvent,
     create_backend,
 )
-from daydream.backends._transport import CliTransport
 from daydream.backends.osprey import (
     OspreyBackend,
     OspreyError,
@@ -40,6 +38,7 @@ from daydream.backends.osprey import (
 from daydream.trajectory import DaydreamPhase
 from tests.harness.fake_cli_process import FakeCliProcess, FakeCliSpawner
 from tests.harness.protocol_cli import install_protocol_cli
+from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants, make_cancel_probe
 from tests.harness.trajectory import make_recorder
 
 
@@ -61,13 +60,7 @@ async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_term
 
     events = [event async for event in backend.execute(target, prompt)]
 
-    observation = fixture.read_observations()[0]
-    assert observation["effective_cwd"] == str(target)
-    assert observation["inherited_cwd"] == str(target)
-    assert observation["stdin_bytes"] == 0
-    assert observation["prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
-    assert observation["cwd_canaries"]["SOURCE_CANARY"] is True
-    assert observation["walk_truncated"] is False
+    observation = assert_protocol_cli_invariants(fixture, target, prompt, events, backend)
     argv = observation["argv"]
     assert argv[:2] == ["agent", "--events-jsonl"]
     assert ("--sandbox" in argv) is sandbox
@@ -75,9 +68,6 @@ async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_term
         assert argv[argv.index("--allowed-root") + 1] == allowed
     else:
         assert "--allowed-root" not in argv
-    assert any(isinstance(event, TextEvent) and event.text == "CURRENT_REASONING_CANARY" for event in events)
-    assert len([event for event in events if isinstance(event, ResultEvent)]) == 1
-    assert backend._transports == []
 
 
 def _stream(
@@ -916,17 +906,7 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_cancel_delegates_to_shared_transport_lifecycle() -> None:
     """cancel() reaps every tracked transport's process group and pipes."""
-    backend = OspreyBackend(osprey_binary="fake")
-
-    proc = MagicMock()
-    proc.returncode = None
-    proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
-    proc.terminate = MagicMock()
-    proc.kill = MagicMock()
-    transport = CliTransport("osprey", ["osprey", "agent"], limit=1024)
-    transport.processes.append(proc)
-    backend._transports = [transport]
-
+    backend, proc = make_cancel_probe("osprey")
     await backend.cancel()
 
     proc.terminate.assert_called_once()

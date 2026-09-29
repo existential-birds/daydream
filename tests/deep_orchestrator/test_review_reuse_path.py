@@ -60,8 +60,7 @@ def _expected_stack_files(deep: Path) -> list[str]:
     The pre-fan-out coverage receipts are computed from the current run's
     assignments, so they name exactly the stacks a fresh run reviews.
     """
-    receipts = json.loads((deep / "coverage-receipts.json").read_text())
-    return sorted(f"stack-{name}-records.json" for name in receipts)
+    return sorted(f"stack-{name}-records.json" for name in _stack_receipts(deep))
 
 
 def _stack_receipts(deep: Path) -> dict[str, dict[str, list[str]]]:
@@ -155,12 +154,17 @@ def _reused_stacks(deep: Path) -> set[str]:
     }
 
 
-def _latest_provenance(deep: Path) -> dict[str, object]:
+def _newest_provenance_path(deep: Path) -> Path:
     """The most recently written per-run provenance record in the store."""
     provenance = deep.parent / "review-cache" / "provenance"
     records = sorted(provenance.glob("*.json"), key=lambda path: path.stat().st_mtime)
     assert records, "the run must record its reuse provenance inside the store"
-    record: dict[str, object] = json.loads(records[-1].read_text(encoding="utf-8"))
+    return records[-1]
+
+
+def _latest_provenance(deep: Path) -> dict[str, object]:
+    """The most recently written per-run provenance record in the store."""
+    record: dict[str, object] = json.loads(_newest_provenance_path(deep).read_text(encoding="utf-8"))
     return record
 
 
@@ -172,10 +176,7 @@ def _session_id_of(deep: Path) -> str:
     file by mtime. The file stem is what :func:`reuse_store.provenance_path`
     expects.
     """
-    provenance = deep.parent / "review-cache" / "provenance"
-    records = sorted(provenance.glob("*.json"), key=lambda path: path.stat().st_mtime)
-    assert records, "the run must record its reuse provenance inside the store"
-    return records[-1].stem
+    return _newest_provenance_path(deep).stem
 
 
 _MERGE_DISCRIMINATOR = "cross-stack merge agent"
@@ -394,11 +395,7 @@ _ARBITER_DISCRIMINATOR = "you are the arbiter"
 
 def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
     """How many captured calls carried the production arbiter prompt."""
-    return sum(
-        1
-        for call in calls
-        if _ARBITER_DISCRIMINATOR in str(call.get("prompt", "")).lower()
-    )
+    return _count_unit_prompts(calls, _ARBITER_DISCRIMINATOR)
 
 
 async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_per_group_when_one_is(

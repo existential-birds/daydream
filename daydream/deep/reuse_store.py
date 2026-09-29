@@ -37,7 +37,7 @@ from daydream.config import (
 from daydream.config_file import _coerce_non_negative_int
 from daydream.deep.reuse_key import REUSE_KEY_FORMAT, PhaseIdentity
 from daydream.deep.settings import _resolve_config_value
-from daydream.json_utils import atomic_write_bytes
+from daydream.json_utils import atomic_write_bytes, read_json_object
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
@@ -488,7 +488,7 @@ class ReuseCache:
         if detail:
             entry.update(detail)
         try:
-            record = _read_json_object(path)
+            record = read_json_object(path)
             units = record.get("units")
             if not isinstance(units, dict):
                 units = {}
@@ -518,7 +518,7 @@ class ReuseCache:
         The record itself lives inside the store, so it survives the fresh-run
         ``.daydream/deep/`` wipe (MH5).
         """
-        record = _read_json_object(provenance_path(self.store_dir, self._provenance_run_id()))
+        record = read_json_object(provenance_path(self.store_dir, self._provenance_run_id()))
         record["run_id"] = self.run_id
         record["session_id"] = self.session_id
         record["enabled"] = self.enabled
@@ -567,12 +567,3 @@ class ReuseCache:
             "bytes": total_bytes,
             "oldest_last_used_age_s": oldest_age,
         }
-
-
-def _read_json_object(path: Path) -> dict[str, Any]:
-    """Read a JSON object, degrading to ``{}`` on absence or corruption."""
-    try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}

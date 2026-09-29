@@ -16,15 +16,12 @@ from pathlib import Path
 from typing import Any
 
 from daydream.deep.artifacts import latency_routing_path
+from daydream.json_utils import read_json_object
 
 
 def read_routing_record(deep_dir_path: Path) -> dict[str, Any]:
     """Return the routing record, or ``{}`` when absent, non-object, or malformed."""
-    try:
-        loaded = json.loads(latency_routing_path(deep_dir_path).read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+    return read_json_object(latency_routing_path(deep_dir_path))
 
 
 def write_routing_record(deep_dir_path: Path, updates: Mapping[str, Any]) -> Path:

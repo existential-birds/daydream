@@ -13,17 +13,15 @@ from __future__ import annotations
 
 import fnmatch
 import glob
-import json
 import re
 from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
-from typing import Any
 
 from daydream.config_file import DaydreamFileConfig, load_toml_or_empty
-from daydream.json_utils import string_list
+from daydream.json_utils import read_json_object, string_list
 
 _CONVENTIONAL_ROOTS = ("apps", "services", "packages", "crates", "cmd")
 # Pre-PEP-621 Python services pin deps in requirements files and configure tooling
@@ -230,7 +228,7 @@ def _expand_globs(repo_root: Path, patterns: list[str]) -> list[Path]:
 
 
 def _package_workspace_patterns(repo_root: Path) -> list[str]:
-    data = _load_json_or_empty(repo_root / "package.json")
+    data = read_json_object(repo_root / "package.json")
     workspaces = data.get("workspaces")
     if isinstance(workspaces, dict):
         workspaces = workspaces.get("packages")
@@ -300,17 +298,6 @@ def _conventional_manifest_roots(repo_root: Path) -> list[Path]:
             if child.is_dir() and any((child / manifest).is_file() for manifest in _SERVICE_MANIFESTS):
                 roots.append(child.relative_to(repo_root))
     return sorted(roots, key=lambda root: root.as_posix())
-
-
-def _load_json_or_empty(path: Path) -> dict[str, Any]:
-    text = _read_text_or_empty(path)
-    if not text:
-        return {}
-    try:
-        data = json.loads(text)
-    except (json.JSONDecodeError, TypeError):
-        return {}
-    return data if isinstance(data, dict) else {}
 
 
 def _read_text_or_empty(path: Path) -> str:

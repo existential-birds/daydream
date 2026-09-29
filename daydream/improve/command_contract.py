@@ -169,9 +169,10 @@ class ContractRejection:
 
 
 
-def _json_pointer(parts: list[object]) -> str:
+def json_pointer(parts: Sequence[object], *, root: str = "") -> str:
+    """RFC-6901 JSON Pointer; ``root`` is the representation of an empty path."""
     if not parts:
-        return ""
+        return root
     return "".join(
         f"/{str(part).replace('~', '~0').replace('/', '~1')}"
         for part in parts
@@ -200,7 +201,7 @@ def _schema_rejection(
             path.append(missing[0])
     if code_for_path is not None:
         code = code_for_path.get(path[0] if path else "", code)
-    return ContractRejection(code, _json_pointer(path))
+    return ContractRejection(code, json_pointer(path))
 
 
 def _most_specific_schema_error(error: Any) -> Any:
