@@ -141,6 +141,12 @@ def _seed_local_origin(root: Path) -> tuple[str, str, str]:
     return seed_pr_origin(root.parent, feature_body="LINE 1\n")
 
 
+def _assert_corrupt_workspace(root: Path) -> None:
+    """Assert ``validate_workspace`` reports a corrupt workspace."""
+    code, label = validate_workspace(root)
+    assert code == 1 and "corrupt" in label.lower()
+
+
 def _write_case_docs(root: Path, curation_state: str) -> Any:
     """Write a fully-valid ledger + import + bundle + case doc into ``root``.
 
@@ -344,8 +350,7 @@ def test_validate_restamped_tampered_bundle_fails(tmp_path: Path) -> None:
     raw = yaml.safe_load(case_yaml.read_text())
     raw["snapshot"]["bundle_sha256"] = hashlib.sha256(tampered).hexdigest()   # restamp
     case_yaml.write_text(yaml.safe_dump(raw, sort_keys=False))
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()        # checksum alone no longer suffices
+    _assert_corrupt_workspace(root)        # checksum alone no longer suffices
 
     # A genuine real-bundle ready workspace still passes as ready.
     root2 = _write_curated_workspace(tmp_path, "ready")
@@ -366,8 +371,7 @@ def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
     shutil.rmtree(root / "cache")
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
     with pytest.raises(WorkspaceCorrupt):
         workspace_status(root)
 
@@ -689,15 +693,13 @@ def test_checksum_restamped_corrupt_import_is_corruption(tmp_path: Path) -> None
     # Structurally invalid, but its sha is re-stamped to match the ledger.
     raw["pull_request"]["number"] = 999   # wrong PR id; wrong shape vs intent
     _restamp_import_sha(tmp_path, json.dumps(raw).encode())
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_import_missing_on_disk_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     (next((root / "imports").glob("pr-*.json"))).unlink()
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def _mutate_manifest_case(tmp_path: Path, pr_number: Any=None, case_file: Any=None) -> None:
@@ -728,44 +730,38 @@ def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     # manifest cases[] pr_number disagrees with the case doc's pull_request.number
     _mutate_manifest_case(tmp_path, pr_number=999)
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_case_file_not_exact_index_path_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     # manifest case_file is not exactly cases/<case_id>.yaml
     _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_case_pr_absent_from_ledger_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     _drop_ledger_entry(tmp_path)   # remove the pull_requests[] entry for PR 101
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_orphan_import_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     (root / "imports" / "pr-000999.json").write_text('{"unindexed": true}')   # unindexed import
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_orphan_bundle_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     (root / "snapshots" / "pr-000999-abcdef012345.bundle").write_bytes(b"orphan")
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_referenced_bundle_missing_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
     (next((root / "snapshots").glob("*.bundle"))).unlink()
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()
+    _assert_corrupt_workspace(root)
 
 
 def test_duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
@@ -784,8 +780,7 @@ def test_duplicate_inode_indexed_files_is_corruption(tmp_path: Path) -> None:
     case_raw = yaml.safe_load(next((root / "cases").glob("*.yaml")).read_text())
     case_raw["snapshot"]["bundle_sha256"] = hashlib.sha256(imp_bytes).hexdigest()
     next((root / "cases").glob("*.yaml")).write_text(yaml.safe_dump(case_raw, sort_keys=False))
-    code, label = validate_workspace(root)
-    assert code == 1 and "corrupt" in label.lower()   # gated on Task 0 spike 4 verdict
+    _assert_corrupt_workspace(root)   # gated on Task 0 spike 4 verdict
 
 
 def test_status_surfaces_failed_refresh_with_good_linkage(tmp_path: Path, fake_gh: FakeGh) -> None:

@@ -46,10 +46,10 @@ def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
     (repo / "pyproject.toml").write_bytes((root / "pyproject.toml").read_bytes())
     ver = importlib.metadata.version("daydream")
     committed = (root / "daydream/benchmark/harbor/runtime-requirements.lock").read_bytes()
-    regenerated = pkg.generate_runtime_lock(uv_lock, daydream_version=ver)
+    regenerated = "".join(pkg.render_runtime_lock(uv_lock, daydream_version=ver)).encode()
     assert regenerated == committed
     uv_lock.write_bytes(uv_lock.read_bytes() + b"\n# drift\n")
-    regenerated2 = pkg.generate_runtime_lock(uv_lock, daydream_version=ver)
+    regenerated2 = "".join(pkg.render_runtime_lock(uv_lock, daydream_version=ver)).encode()
     assert regenerated2 != committed
 
 

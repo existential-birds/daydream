@@ -226,6 +226,13 @@ def _compile(ws: Path) -> Any:
     return build.compile_workspace(ws)
 
 
+def _truncation_marker_digest(text: str) -> str:
+    """The ``full_body_sha256`` value attested by the truncation marker."""
+    inner = text.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
+    marker = next(line for line in inner.splitlines() if line.startswith("[truncated"))
+    return marker.split("full_body_sha256=", 1)[1].rstrip("]")
+
+
 def _harbor_tree_bytes(ws: Path) -> dict[str, bytes]:
     out: dict[str, bytes] = {}
     base = ws / "harbor"
@@ -333,8 +340,7 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     body_line.encode("utf-8")                            # decodes the whole: boundary is valid
     assert body_line.endswith(emoji)                      # kept the whole emoji, never split one
     assert len(body_line.encode("utf-8")) <= 1021
-    marker = next(line for line in inner.splitlines() if line.startswith("[truncated"))
-    digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
+    digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()   # stored normalized-body digest
 
 
@@ -343,18 +349,14 @@ def test_bounded_pr_context_marker_emits_persisted_body_sha256() -> None:
     stored = hashlib.sha256(body.encode("utf-8")).hexdigest()
     ctx = build.bounded_pr_context(
         {"title": "T", "body": body, "body_sha256": stored}, max_bytes=1021)
-    inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
-    marker = next(line for line in inner.splitlines() if line.startswith("[truncated"))
-    digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
+    digest = _truncation_marker_digest(ctx)
     assert digest == stored                  # persisted normalized-body digest, not re-derived
 
 
 def test_bounded_pr_context_marker_falls_back_deterministically_without_digest() -> None:
     body = "a" * 1000 + "Z" * 500
     ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)
-    inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
-    marker = next(line for line in inner.splitlines() if line.startswith("[truncated"))
-    digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
+    digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # predate: sha256(stored body)
 
 
@@ -374,11 +376,7 @@ def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest() -> No
         )
         assert ctx.count("</historical_pr_context>") == 1
         assert "secret-sentinel-9b2c" not in ctx
-        inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
-        marker = next(
-            line for line in inner.splitlines() if line.startswith("[truncated")
-        )
-        digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
+        digest = _truncation_marker_digest(ctx)
         assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -392,11 +390,7 @@ def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest() -> None
     ctx = build.bounded_pr_context(
         {"title": "T", "body": body, "body_sha256": stale}, max_bytes=1021
     )
-    inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
-    marker = next(
-        line for line in inner.splitlines() if line.startswith("[truncated")
-    )
-    digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
+    digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
 
 
@@ -877,10 +871,7 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, 
     inner = instr.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
     outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
     assert "secret-sentinel-a1b2" not in outside          # raw body stays inside the block
-    marker = next(
-        line for line in inner.splitlines() if line.startswith("[truncated")
-    )
-    digest = marker.split("full_body_sha256=", 1)[1].rstrip("]")
+    digest = _truncation_marker_digest(instr)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # truthful attestation
 
 

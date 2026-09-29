@@ -114,6 +114,13 @@ def _capturing_client(captured: dict[str, Any]) -> type:
     )
 
 
+def _capturing_backend(apply_patch: Any, **kwargs: Any) -> tuple[ClaudeBackend, dict[str, Any]]:
+    """Patch the SDK with a capturing client and build a backend sharing its capture."""
+    captured: dict[str, Any] = {}
+    apply_patch(_capturing_client(captured))
+    return ClaudeBackend(model="opus", **kwargs), captured
+
+
 @pytest.mark.parametrize(
     "version_admission_delay_s",
     [pytest.param(0.0, id="version-completes"), pytest.param(2.1, id="version-times-out")],
@@ -551,9 +558,7 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> N
     denying an unknown/future tool (the fail-closed property a narrow matcher
     would silently lose).
     """
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
 
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=True):
         pass
@@ -609,9 +614,7 @@ async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk:
     was actually built onto the production options: a ``find /`` root scan denies,
     a scoped ``find core/...`` allows.
     """
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
 
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=False):
         pass
@@ -692,9 +695,7 @@ async def test_read_only_guard_deny_reason_uses_shared_guard_wording() -> None:
 async def test_execute_passes_agents_dict_to_options(patch_sdk: Any) -> None:
     """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
 
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
 
     pattern_scanner = AgentDefinition(
         description="pattern scanner",
@@ -731,9 +732,7 @@ async def test_execute_passes_agents_dict_to_options(patch_sdk: Any) -> None:
 @pytest.mark.asyncio
 async def test_execute_passes_none_when_no_agents(patch_sdk: Any) -> None:
     """When agents=None, ClaudeAgentOptions should not carry an agents dict."""
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
 
     events = []
     async for event in backend.execute(Path("/tmp"), "Go"):
@@ -821,10 +820,7 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: An
 @pytest.mark.asyncio
 async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk: Any) -> None:
     """The resolved per-phase effort arrives as ClaudeAgentOptions.effort."""
-    captured: dict[str, Any] = {}
-
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus", reasoning_effort="max")
+    backend, captured = _capturing_backend(patch_sdk, reasoning_effort="max")
     async for _ in backend.execute(Path("/tmp"), "go"):
         pass
 
@@ -833,10 +829,7 @@ async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk: Any) ->
 
 @pytest.mark.asyncio
 async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk: Any) -> None:
-    captured: dict[str, Any] = {}
-
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
     async for _ in backend.execute(Path("/tmp"), "go"):
         pass
 
@@ -1050,9 +1043,7 @@ async def test_audit_execute_rejects_unsafe_invocation_before_client(
     root.mkdir()
     other = tmp_path / "other"
     other.mkdir()
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus", audit_root=root)
+    backend, captured = _capturing_backend(patch_sdk, audit_root=root)
     kwargs: dict[str, Any] = {"read_only": True}
     cwd = root
     if bad_call == "cwd":
@@ -1233,9 +1224,7 @@ async def test_audit_options_reach_real_sdk_subprocess_transport(
     root.mkdir()
     source = tmp_path / "source"
     source.mkdir()
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus", audit_root=root)
+    backend, captured = _capturing_backend(patch_sdk, audit_root=root)
     async for _ in backend.execute(root, "audit", read_only=True):
         pass
     options = captured["options"]
@@ -1418,9 +1407,7 @@ async def test_execute_disables_cli_background_tasks_and_lifts_bash_ceiling(patc
     reason to be backgrounded in the first place.
     """
 
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
 
     async for _ in backend.execute(Path("/tmp"), "Go"):
         pass
@@ -1443,9 +1430,7 @@ async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only
     same command in the foreground is allowed; a non-Bash tool carrying the key
     is not the guard's business.
     """
-    captured: dict[str, Any] = {}
-    patch_sdk(_capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
+    backend, captured = _capturing_backend(patch_sdk)
 
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
         pass
