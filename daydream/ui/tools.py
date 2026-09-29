@@ -383,6 +383,20 @@ def _append_gradient_preview(content: Text, string: str, start_hex: str, end_hex
             content.append(char, style=Style(color=color, bold=bold or None))
 
 
+def _append_arg_field(
+    content: Text,
+    key: str,
+    value: str,
+    style: str,
+    *,
+    indent: str = "",
+) -> None:
+    """Append one ``key=value`` argument row on a fresh indented line."""
+    content.append(f"\n{indent}")
+    content.append(f"{key}=", style=STYLE_PURPLE)
+    content.append(value, style=style)
+
+
 def _build_tool_header(
     name: str,
     args: dict[str, object],
@@ -452,9 +466,7 @@ def _build_tool_header(
         if not quiet_mode:
             skill_args = args.get("args")
             if skill_args:
-                content.append("\n  ")
-                content.append("args=", style=STYLE_PURPLE)
-                content.append(str(skill_args), style=STYLE_ORANGE)
+                _append_arg_field(content, "args", str(skill_args), STYLE_ORANGE, indent="  ")
 
         return content
 
@@ -526,9 +538,7 @@ def _build_tool_header(
         content.append(pattern, style=STYLE_ORANGE)
 
         if search_path:
-            content.append("\n")
-            content.append("path=", style=STYLE_PURPLE)
-            content.append(search_path, style=STYLE_CYAN)
+            _append_arg_field(content, "path", search_path, STYLE_CYAN)
 
         return content
 
@@ -546,19 +556,13 @@ def _build_tool_header(
         content.append(pattern, style=STYLE_ORANGE)
 
         if search_path:
-            content.append("\n")
-            content.append("path=", style=STYLE_PURPLE)
-            content.append(search_path, style=STYLE_CYAN)
+            _append_arg_field(content, "path", search_path, STYLE_CYAN)
 
         if glob_filter:
-            content.append("\n")
-            content.append("glob=", style=STYLE_PURPLE)
-            content.append(glob_filter, style=STYLE_YELLOW)
+            _append_arg_field(content, "glob", glob_filter, STYLE_YELLOW)
 
         if file_type:
-            content.append("\n")
-            content.append("type=", style=STYLE_PURPLE)
-            content.append(file_type, style=STYLE_YELLOW)
+            _append_arg_field(content, "type", file_type, STYLE_YELLOW)
 
         return content
 
@@ -601,9 +605,7 @@ def _build_tool_header(
         content.append(file_path, style=STYLE_CYAN)
 
         if replace_all:
-            content.append("\n")
-            content.append("replace_all=", style=STYLE_PURPLE)
-            content.append("True", style=STYLE_PURPLE)
+            _append_arg_field(content, "replace_all", "True", STYLE_PURPLE)
 
         content.append("\n")
 

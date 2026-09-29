@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 import tomllib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1199,20 +1200,7 @@ def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
 
 
 def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    build.compile_workspace(ws)
-    case = ws / "harbor" / key
-
-    gold_path = case / "tests" / "golden-review.json"
-    oracle_path = case / "solution" / "golden-review.json"
-    out = tmp_path / "out"
-    reward = sr_module.run_verifier(
-        gold_path, oracle_path, out,
-        client=MatchClient(),
-        env=judge_env(),
-    )
-    assert reward.reward == 1.0 and reward.verifier_error == 0
+    _run_oracle(sr_module, tmp_path, fake_gh)
 
 
 def _restamp_gold(case: Path, gold_bytes: bytes) -> None:
@@ -1231,6 +1219,39 @@ def _restamp_gold(case: Path, gold_bytes: bytes) -> None:
     meta_path.write_bytes(json.dumps(meta, sort_keys=True).encode("utf-8"))
 
 
+def _run_oracle(
+    sr_module: Any,
+    tmp_path: Path,
+    fake_gh: FakeGh,
+    make_finding: Callable[[str, list[dict[str, Any]]], dict[str, Any]] | None = None,
+) -> tuple[Path, Path, Any]:
+    """Compile the seeded case, optionally restamp its gold/oracle, then score it."""
+    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
+    key = build.derive_task_key(case_id)
+    build.compile_workspace(ws)
+    case = ws / "harbor" / key
+    if make_finding is not None:
+        gold = json.loads((case / "tests" / "golden-review.json").read_bytes())
+        finding = make_finding(key, gold)
+        _restamp_gold(
+            case,
+            json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8"),
+        )
+        (case / "solution" / "golden-review.json").write_bytes(
+            json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8")
+        )
+    out = tmp_path / "out"
+    reward = sr_module.run_verifier(
+        case / "tests" / "golden-review.json",
+        case / "solution" / "golden-review.json",
+        out,
+        client=MatchClient(),
+        env=judge_env(),
+    )
+    assert reward.reward == 1.0 and reward.verifier_error == 0
+    return case, out, reward
+
+
 def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
     sr_module: Any, tmp_path: Path, fake_gh: FakeGh
 ) -> None:
@@ -1242,32 +1263,16 @@ def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
     axes (R13: oracle still 1.0 with axes perfect).
     """
 
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    build.compile_workspace(ws)
-    case = ws / "harbor" / key
+    def make_finding(_key: str, gold: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"],
+            "severity": "high",
+            "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"],
+                         "end_line": gold[0]["end_line"]},
+            "provenance": {"kind": "authored", "source_ids": []},
+        }
 
-    gold = json.loads((case / "tests" / "golden-review.json").read_bytes())
-    finding = {
-        "finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"],
-        "severity": "high",
-        "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"],
-                     "end_line": gold[0]["end_line"]},
-        "provenance": {"kind": "authored", "source_ids": []},
-    }
-    gold_bytes = json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8")
-    _restamp_gold(case, gold_bytes)
-
-    oracle_path = case / "solution" / "golden-review.json"
-    oracle_path.write_bytes(json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8"))
-
-    out = tmp_path / "out"
-    reward = sr_module.run_verifier(
-        case / "tests" / "golden-review.json", oracle_path, out,
-        client=MatchClient(),
-        env=judge_env(),
-    )
-    assert reward.reward == 1.0 and reward.verifier_error == 0
+    _, out, _ = _run_oracle(sr_module, tmp_path, fake_gh, make_finding)
     rj = json.loads((out / "reward.json").read_bytes())
     assert rj["location_present"] == 1 and rj["location_exact"] == rj["tp"]
     assert rj["severity_present"] == 1
@@ -1283,28 +1288,13 @@ def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
     contributes to no axis count and never counts as a miss.
     """
 
-    ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    key = build.derive_task_key(case_id)
-    build.compile_workspace(ws)
-    case = ws / "harbor" / key
+    def make_finding(_key: str, _gold: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
+            "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
+        }
 
-    finding = {
-        "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
-        "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
-    }
-    gold_bytes = json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8")
-    _restamp_gold(case, gold_bytes)
-
-    oracle_path = case / "solution" / "golden-review.json"
-    oracle_path.write_bytes(json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8"))
-
-    out = tmp_path / "out"
-    reward = sr_module.run_verifier(
-        case / "tests" / "golden-review.json", oracle_path, out,
-        client=MatchClient(),
-        env=judge_env(),
-    )
-    assert reward.reward == 1.0 and reward.verifier_error == 0
+    _, out, _ = _run_oracle(sr_module, tmp_path, fake_gh, make_finding)
     rj = json.loads((out / "reward.json").read_bytes())
     assert rj["location_present"] == 0 and rj["severity_present"] == 0
     assert rj["location_miss"] == 0  # absent, never imputed to a miss

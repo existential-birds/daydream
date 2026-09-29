@@ -54,8 +54,6 @@ class PhaseDispatchBackend:
         parse_calls: Number of parse-feedback phases dispatched (observable
             proof of how many loop iterations reached review/parse).
         call_log: Truncated lowercased prompts, in dispatch order.
-        commit_calls: Iteration-commit prompts seen (one per successful fix
-            iteration in loop mode).
         review_prompts: Full review-phase prompts, in order (lets diff-base
             assertions inspect ``git diff`` targets per iteration).
         last_prompt: The most recent prompt passed to ``execute``.
@@ -95,7 +93,6 @@ class PhaseDispatchBackend:
         self._parse_call = 0
         self._review_call = 0
         self.call_log: list[str] = []
-        self.commit_calls: list[str] = []
         self.review_prompts: list[str] = []
         self.last_prompt: str = ""
         self.call_count = 0
@@ -222,7 +219,6 @@ class PhaseDispatchBackend:
                 yield TextEvent(text="1 test failed.")
             yield ResultEvent(structured_output=None, continuation=None)
         elif "the daydream changes are already staged" in prompt_lower and "do not push" in prompt_lower:
-            self.commit_calls.append(prompt_lower)
             yield TextEvent(text="Committed iteration changes.")
             yield ResultEvent(structured_output=None, continuation=None)
         elif "commit-push" in prompt_lower:

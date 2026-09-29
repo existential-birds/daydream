@@ -319,6 +319,20 @@ def _record_digests(
     }
 
 
+def _unit_payload(
+    unit: str,
+    components: dict[str, Any],
+    grounding: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Wrap ``components``/``grounding`` in the four-key payload envelope."""
+    return {
+        "format": REUSE_KEY_FORMAT,
+        "unit": unit,
+        "components": components,
+        "grounding": dict(grounding),
+    }
+
+
 def shard_key_payload(
     *,
     stack_name: str,
@@ -364,12 +378,7 @@ def shard_key_payload(
         "alternatives": digest_or_absent(alternatives_text),
         "settled_decisions": digest_or_absent(prior_commits),
     }
-    return {
-        "format": REUSE_KEY_FORMAT,
-        "unit": f"shard:{stack_name}",
-        "components": components,
-        "grounding": grounding,
-    }
+    return _unit_payload(f"shard:{stack_name}", components, grounding)
 
 
 def intent_key_payload(
@@ -400,12 +409,11 @@ def intent_key_payload(
         ),
         **_identity_components(identity),
     }
-    return {
-        "format": REUSE_KEY_FORMAT,
-        "unit": "intent",
-        "components": components,
-        "grounding": {"exploration": {"digest": exploration_digest(exploration_dir)}},
-    }
+    return _unit_payload(
+        "intent",
+        components,
+        {"exploration": {"digest": exploration_digest(exploration_dir)}},
+    )
 
 
 def wonder_key_payload(
@@ -427,12 +435,7 @@ def wonder_key_payload(
         "horse_mode": horse_mode,
         **_identity_components(identity),
     }
-    return {
-        "format": REUSE_KEY_FORMAT,
-        "unit": "alternatives",
-        "components": components,
-        "grounding": dict(grounding),
-    }
+    return _unit_payload("alternatives", components, grounding)
 
 
 def _schema_digest(schema: Any) -> str:
@@ -493,12 +496,7 @@ def sweep_key_payload(
             "max_files": bounds.get("max_files"),
         },
     }
-    return {
-        "format": REUSE_KEY_FORMAT,
-        "unit": "sweep",
-        "components": components,
-        "grounding": dict(grounding),
-    }
+    return _unit_payload("sweep", components, grounding)
 
 
 def _arbiter_schema_digest() -> str:
@@ -547,12 +545,7 @@ def arbiter_key_payload(
         "schema": _arbiter_schema_digest(),
         **_identity_components(identity),
     }
-    return {
-        "format": REUSE_KEY_FORMAT,
-        "unit": "arbiter",
-        "components": components,
-        "grounding": dict(grounding),
-    }
+    return _unit_payload("arbiter", components, grounding)
 
 
 def _merge_schema_digest() -> str:
@@ -593,12 +586,7 @@ def merge_key_payload(
         "schema": _merge_schema_digest(),
         **_identity_components(identity),
     }
-    return {
-        "format": REUSE_KEY_FORMAT,
-        "unit": "merge",
-        "components": components,
-        "grounding": dict(grounding),
-    }
+    return _unit_payload("merge", components, grounding)
 
 
 def phase_identity_for(ctx: Any, phase: str) -> PhaseIdentity:

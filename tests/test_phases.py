@@ -690,14 +690,7 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(
 
     remote = tmp_path / "receipt remote.git"
     git(tmp_path, "init", "--bare", str(remote))
-    repo = tmp_path / "receipt checkout"
-    repo.mkdir()
-    git(repo, "init", "-b", "feature")
-    git(repo, "config", "user.email", "t@example.com")
-    git(repo, "config", "user.name", "t")
-    (repo / "app.py").write_text("x = 0\n")
-    git(repo, "add", "app.py")
-    git_commit(repo, "baseline")
+    repo = _init_committed_repo(tmp_path / "receipt checkout", "feature")
     raw_remote = "https://github.com/Fork-User/Widgets.git"
     git(repo, "config", f"url.{remote.resolve().as_uri()}.insteadOf", raw_remote)
     git(repo, "remote", "add", "origin", raw_remote)
@@ -735,14 +728,7 @@ async def test_push_rejects_remote_url_changed_by_real_hook(
 
     remote = tmp_path / "remote-url-race.git"
     git(tmp_path, "init", "--bare", str(remote))
-    repo = tmp_path / "remote-url-race-checkout"
-    repo.mkdir()
-    git(repo, "init", "-b", "feature")
-    git(repo, "config", "user.email", "t@example.com")
-    git(repo, "config", "user.name", "t")
-    (repo / "app.py").write_text("x = 0\n")
-    git(repo, "add", "app.py")
-    git_commit(repo, "baseline")
+    repo = _init_committed_repo(tmp_path / "remote-url-race-checkout", "feature")
     original = "https://github.com/fork-user/widgets.git"
     replacement = "https://github.com/other-user/widgets.git"
     for url in (original, replacement):
@@ -807,14 +793,7 @@ async def test_push_attempt_error_carries_exact_attempted_identity(
 ) -> None:
     """A local transport rejection retains the exact attempted push receipt."""
 
-    repo = tmp_path / "rejected checkout"
-    repo.mkdir()
-    git(repo, "init", "-b", "feature")
-    git(repo, "config", "user.email", "t@example.com")
-    git(repo, "config", "user.name", "t")
-    (repo / "app.py").write_text("x = 0\n")
-    git(repo, "add", "app.py")
-    git_commit(repo, "baseline")
+    repo = _init_committed_repo(tmp_path / "rejected checkout", "feature")
     raw_remote = "https://github.com/fork-user/widgets.git"
     missing = tmp_path / "missing remote.git"
     git(repo, "config", f"url.{missing.resolve().as_uri()}.insteadOf", raw_remote)
@@ -918,19 +897,24 @@ async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
 
 
 
+def _init_committed_repo(path: Path, branch: str) -> Path:
+    """A real repo on ``branch`` with one baseline commit of ``app.py``."""
+    path.mkdir(parents=True, exist_ok=True)
+    git(path, "init", "-b", branch)
+    git(path, "config", "user.email", "t@example.com")
+    git(path, "config", "user.name", "t")
+    (path / "app.py").write_text("x = 0\n")
+    git(path, "add", "app.py")
+    git_commit(path, "baseline")
+    return path
+
+
 def _pushable_repo(tmp_path: Path) -> Path:
     """A real clone of a real bare remote with one baseline commit."""
     remote = tmp_path / "remote.git"
     tmp_path.mkdir(parents=True, exist_ok=True)
     git(tmp_path, "init", "--bare", remote.name)
-    work_repo = tmp_path / "clone"
-    work_repo.mkdir()
-    git(work_repo, "init", "-b", "main")
-    git(work_repo, "config", "user.email", "t@example.com")
-    git(work_repo, "config", "user.name", "t")
-    (work_repo / "app.py").write_text("x = 0\n")
-    git(work_repo, "add", "app.py")
-    git_commit(work_repo, "baseline")
+    work_repo = _init_committed_repo(tmp_path / "clone", "main")
     git(work_repo, "remote", "add", "origin", str(remote))
     return work_repo
 
