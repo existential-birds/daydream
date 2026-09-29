@@ -1311,9 +1311,14 @@ async def _run_uncovered_sweep(
     )
 
     # Issue #733 — the sweep is keyed on its own prompt inputs (contributing
-    # records, the receipt-derived uncovered set, those files' hunks, the
-    # resolved profile/model/effort and the sweep budget), never on this run's
-    # trajectory-derived counters (A8). Intent and the pre-scan are recorded
+    # records, the uncovered set, those files' hunks, the resolved
+    # profile/model/effort and the sweep budget). The uncovered set is
+    # itself derived by ``compute_uncovered_files`` from the durable hunk
+    # index, this session's completed reviewer reads and the coverage
+    # receipts/records, so reads the reuse path does not replay (a hit
+    # restores a shard's artifacts and returns before any fork) move this
+    # key and recompute the sweep on an unchanged diff (A8/MH9; issue #733
+    # review). Intent and the pre-scan are recorded
     # grounding: a moved pre-scan can never move the key (MH2/MH16). Reuse runs
     # only when there is a sweep to reuse; the no-eligible-work return below is
     # already free of a model call.
