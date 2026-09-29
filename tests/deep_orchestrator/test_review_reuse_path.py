@@ -447,6 +447,16 @@ async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_p
     assert await run(config) == 0
     assert _count_arbiter_prompts(stub.calls) == 0                  # whole-unit hit
     assert (deep / "merged-items.json").read_bytes() == merged
+    # MH16: the arbiter's own key payload carries intent + alternatives +
+    # exploration as grounding, so its hit record must name a status for every
+    # one of them -- a two-input subset silently drops the alternatives input.
+    units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
+    assert units["arbiter"]["outcome"] == "hit"
+    assert set(cast(dict[str, object], units["arbiter"]["grounding_status"])) == {
+        "intent",
+        "alternatives",
+        "exploration",
+    }
     # A partially completed earlier adjudication still resumes group-by-group:
     # the group markers are read from the fresh run's own artifacts, not from the store.
     assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))

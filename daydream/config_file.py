@@ -162,6 +162,28 @@ class DaydreamFileConfig:
             host-side test-command run (the whole process group is killed on
             expiry). A value overrides the orchestrator default
             (``config.TEST_WALL_BUDGET_S``); ``None`` falls through to it.
+        review_cache_enabled: Issue #733. Toggle the deep review's
+            content-addressed reuse store (MH13). ``None`` falls through to the
+            RunConfig field and then the built-in default
+            (``config.DEFAULT_REVIEW_CACHE_ENABLED``, ``True``); CLI
+            ``--no-review-cache`` sets ``False`` for one forensic run. An
+            explicit ``False`` at either tier wins, and a disabled run neither
+            reads nor writes a cache entry (it still records its own
+            ``disabled`` reuse provenance).
+        review_cache_max_entries: Issue #733. Retention bound: the maximum
+            number of entries retained, oldest-last-used evicted first (MH12).
+            Coerced non-negative; an absent, negative, or non-integer value
+            degrades to ``config.DEFAULT_REVIEW_CACHE_MAX_ENTRIES`` (1024). The
+            enable flag never affects the bounds.
+        review_cache_max_bytes: Issue #733. Retention bound: total store bytes,
+            same coercion and degrade-to-default rule as
+            ``review_cache_max_entries`` (``config.DEFAULT_REVIEW_CACHE_MAX_BYTES``,
+            1 GiB).
+        review_cache_max_age_days: Issue #733. Retention bound: days since an
+            entry's last use, converted to seconds by the store, same coercion
+            and degrade-to-default rule
+            (``config.DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS``, 30). An entry past
+            the bound is a plain miss, never a truncated hit.
     """
 
     model: str | None = None

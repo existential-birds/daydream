@@ -844,6 +844,7 @@ def _try_reuse_arbiter(
             "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
             "grounding_status": {
                 "intent": _reuse_grounding_status(reuse, "intent"),
+                "alternatives": _reuse_grounding_status(reuse, "alternatives"),
                 "exploration": _reuse_grounding_status(reuse, "exploration"),
             },
         },
@@ -1222,6 +1223,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         grounding=grounding_digests(arbiter_payload),
                         grounding_status={
                             "intent": _reuse_grounding_status(reuse, "intent"),
+                            "alternatives": _reuse_grounding_status(reuse, "alternatives"),
                             "exploration": _reuse_grounding_status(reuse, "exploration"),
                         },
                     )
