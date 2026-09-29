@@ -1056,8 +1056,9 @@ def _stabilization_stop(
     return Stop(1)
 
 
-async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop | None:
+async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Run one policy-bound fix round using its own complete rollback point."""
+    state = _fix_cycle_state(ctx)
     deep_state = DeepState(ctx.data)
     items = _round_dispatch_items(ctx, deep_state.items)
     if not items:
@@ -1207,13 +1208,6 @@ async def _step_fix_authorized(ctx: FlowContext, state: FixCycleState) -> Stop |
     return None
 
 
-async def _step_fix(ctx: FlowContext) -> Stop | None:
-    """Run one policy-bound fix round against the stable fix-cycle baseline."""
-    return await _step_fix_authorized(ctx, _fix_cycle_state(ctx))
-
-
-
-
 async def verify_retained_tree(
     ctx: FlowContext,
     snapshot: RetainedTreeSnapshot,
@@ -1273,9 +1267,8 @@ def _persist_fix_outcomes_current(
     )
 
 
-async def _step_fix_verify_authorized(
-    ctx: FlowContext, state: FixCycleState
-) -> BreakLoop | Stop | None:
+async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
+    state = _fix_cycle_state(ctx)
     deep_state = DeepState(ctx.data)
     snapshot = deep_state.fix_round_snapshot
     if snapshot is None:
@@ -1316,11 +1309,6 @@ async def _step_fix_verify_authorized(
             "continuing to validate the retained changes before commit and push.",
         )
     return BreakLoop()
-
-
-async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
-    """Verify every canonical finding against the complete retained tree."""
-    return await _step_fix_verify_authorized(ctx, _fix_cycle_state(ctx))
 
 
 def _actionable_verdicts(outcomes: dict[Any, dict[str, Any]]) -> list[str]:

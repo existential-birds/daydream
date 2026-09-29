@@ -528,16 +528,15 @@ def append_label_observation(
                 "ORDER BY observed_at DESC LIMIT 1",
                 (session_id,),
             ).fetchone()
-            if (
-                latest_auto is not None
-                and latest_auto["evidence_sha"] == evidence_sha
-                and latest_auto["labeler_policy_version"] == labeler_policy_version
-                and latest_auto["reply_evidence_digest"] == reply_evidence_digest
-                and latest_auto["reward_version"] == reward_version
-                and latest_auto["labels"] == labels_json
-                # Population membership varies independently of the label (a
-                # local_branch outcome is labeled but not posterior evidence).
-                and latest_auto["has_posterior"] == has_posterior_int
+            # Population membership varies independently of the label (a
+            # local_branch outcome is labeled but not posterior evidence).
+            if latest_auto is not None and tuple(latest_auto) == (
+                evidence_sha,
+                labeler_policy_version,
+                reply_evidence_digest,
+                labels_json,
+                has_posterior_int,
+                reward_version,
             ):
                 return False
         # Bump observed_at by a microsecond and retry on a same-microsecond
