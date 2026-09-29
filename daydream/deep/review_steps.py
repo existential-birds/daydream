@@ -59,7 +59,12 @@ from daydream.deep.reuse_key import (
     unit_key,
     wonder_key_payload,
 )
-from daydream.deep.reuse_store import ReuseHit, reuse_cache_for, review_cache_enabled
+from daydream.deep.reuse_store import (
+    ReuseHit,
+    restore_entry_payload,
+    reuse_cache_for,
+    review_cache_enabled,
+)
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
@@ -116,24 +121,6 @@ try:
     EXPLORATION_AVAILABLE = True
 except ImportError:  # pragma: no cover -- optional exploration dependency
     EXPLORATION_AVAILABLE = False
-
-
-def _restore_entry_payload(hit: ReuseHit, dest_dir: Path) -> str | None:
-    """Copy a verified entry's payload files into ``dest_dir``.
-
-    Returns ``None`` on success or a reason string when the restore could not
-    complete; a partial restore is a miss, so the unit then does its own real
-    work rather than shipping half of an entry.
-    """
-    recorded = hit.manifest.get("payload")
-    if not isinstance(recorded, dict):
-        return "manifest payload unreadable"
-    try:
-        for name in recorded:
-            (dest_dir / str(name)).write_bytes((hit.payload_dir / str(name)).read_bytes())
-    except OSError as exc:
-        return f"{type(exc).__name__}: {exc}"
-    return None
 
 
 def _reuse_grounding_status(reuse: "ReuseCache", unit: str) -> str:
@@ -468,7 +455,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         else:
             hit = reuse.lookup(intent_reuse_key)
             if isinstance(hit, ReuseHit):
-                restore_reason = _restore_entry_payload(hit, deep_state.dd)
+                restore_reason = restore_entry_payload(hit, deep_state.dd)
                 if restore_reason is None:
                     reuse.record(
                         "intent",
@@ -641,7 +628,7 @@ async def _wonder(ctx: FlowContext) -> None:
             else:
                 hit = reuse.lookup(wonder_reuse_key)
                 if isinstance(hit, ReuseHit):
-                    restore_reason = _restore_entry_payload(hit, deep_state.dd)
+                    restore_reason = restore_entry_payload(hit, deep_state.dd)
                     if restore_reason is None:
                         reuse.record(
                             "alternatives",
@@ -1361,7 +1348,7 @@ async def _run_uncovered_sweep(
             else:
                 hit = reuse.lookup(sweep_reuse_key)
                 if isinstance(hit, ReuseHit):
-                    restore_reason = _restore_entry_payload(hit, dd)
+                    restore_reason = restore_entry_payload(hit, dd)
                     if restore_reason is None:
                         _restore_swept_records(deep_state)
                         reuse.record(

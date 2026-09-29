@@ -92,7 +92,7 @@ from daydream.deep.reuse_key import (
     shard_key_payload,
     unit_key,
 )
-from daydream.deep.reuse_store import ReuseCache, ReuseHit
+from daydream.deep.reuse_store import ReuseCache, ReuseHit, restore_entry_payload
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -4421,25 +4421,6 @@ async def phase_per_stack_reviews(
     for stale_path in (delegation_path, delegation_temp, structural_records, structural_output):
         stale_path.unlink(missing_ok=True)
 
-    def _restore_shard(hit: ReuseHit) -> str | None:
-        """Copy a verified entry's payload onto this run's artifacts.
-
-        Returns ``None`` on success or a reason string when the restore could
-        not complete; a partial restore is a miss, so the run then performs a
-        real review rather than shipping half of an entry.
-        """
-        recorded = hit.manifest.get("payload")
-        if not isinstance(recorded, dict):
-            return "manifest payload unreadable"
-        try:
-            for name in recorded:
-                (deep_dir_path / str(name)).write_bytes(
-                    (hit.payload_dir / str(name)).read_bytes()
-                )
-        except OSError as exc:
-            return f"{type(exc).__name__}: {exc}"
-        return None
-
     dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
     async with dispatch_scope(
         recorder,
@@ -4491,7 +4472,7 @@ async def phase_per_stack_reviews(
                     stack_reuse_key = candidate_key
                     hit = reuse_cache.lookup(candidate_key)
                     if isinstance(hit, ReuseHit):
-                        restore_reason = _restore_shard(hit)
+                        restore_reason = restore_entry_payload(hit, deep_dir_path)
                         if restore_reason is None:
                             reuse_cache.record(
                                 f"shard:{stack.stack_name}",
