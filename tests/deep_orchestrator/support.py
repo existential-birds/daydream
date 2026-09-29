@@ -681,3 +681,27 @@ def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
     (repo / "a.py").write_text("A = 2\n")
     snapshot = capture_retained_tree(ctx.work, state)
     return ctx, state, snapshot
+
+
+def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
+    """Per-stack findings at three distinct ``(file, line)`` locations.
+
+    Three file components mean three arbiter groups whenever the selection
+    spans more than one co-located target. The descriptions differ so a dedup
+    pass cannot fold the records together.
+    """
+    locations = {
+        "python": ("api.py", "python finding"),
+        "react": ("App.tsx", "react finding"),
+        "generic": ("README.md", "generic finding"),
+    }
+    return {
+        name: {
+            "severity": severities[name],
+            "confidence": "high",
+            "file": file,
+            "line": 1,
+            "description": description,
+        }
+        for name, (file, description) in locations.items()
+    }

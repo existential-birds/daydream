@@ -12,7 +12,7 @@ from daydream.deep.routing_record import read_routing_record, write_routing_reco
 from daydream.eval.analyzer import analyze_routing
 from daydream.review_profile import ResolvedProfile
 from daydream.runner import run
-from tests.deep_orchestrator.support import _merged_items
+from tests.deep_orchestrator.support import _arbiter_stacks, _merged_items
 from tests.harness.review_profile import independent_alternatives_profile
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig, Mute
@@ -82,30 +82,6 @@ _FORENSIC_BASELINE_ARBITER_INPUT: list[dict[str, object]] = [
         "uid": "react:1",
     },
 ]
-
-
-def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
-    """Per-stack findings at three distinct ``(file, line)`` locations.
-
-    Three file components mean three arbiter groups whenever the selection
-    spans more than one co-located target. The descriptions differ so a dedup
-    pass cannot fold the records together.
-    """
-    locations = {
-        "python": ("api.py", "python finding"),
-        "react": ("App.tsx", "react finding"),
-        "generic": ("README.md", "generic finding"),
-    }
-    return {
-        name: {
-            "severity": severities[name],
-            "confidence": "high",
-            "file": file,
-            "line": 1,
-            "description": description,
-        }
-        for name, (file, description) in locations.items()
-    }
 
 
 def _medium_arbitration_profile() -> ResolvedProfile:

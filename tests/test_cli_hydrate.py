@@ -63,6 +63,23 @@ def _hydrate_args(
     return args
 
 
+def _run_dry_hydrate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, hub: FakeHub
+) -> int:
+    """Run the private dry-run hydrate command against a fake hub."""
+    monkeypatch.setenv("HF_TOKEN", "test-token")
+    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
+    return cli._handle_hydrate_hub_command(
+        _hydrate_args(
+            tmp_path,
+            source_repo="org/private-ds",
+            revision=SNAPSHOT_REVISION,
+            destination_repo="org/private-ds",
+            dry_run=True,
+        )
+    )
+
+
 def test_hydrate_hub_requires_explicit_args(capsys: pytest.CaptureFixture[str]) -> None:
     rc = cli._handle_hydrate_hub_command([])
     assert rc == 1
@@ -169,18 +186,7 @@ def test_dry_run_reports_discovery_accounting_without_publication(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     hub = build_snapshot()
-    monkeypatch.setenv("HF_TOKEN", "test-token")
-    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
-
-    rc = cli._handle_hydrate_hub_command(
-        _hydrate_args(
-            tmp_path,
-            source_repo="org/private-ds",
-            revision=SNAPSHOT_REVISION,
-            destination_repo="org/private-ds",
-            dry_run=True,
-        )
-    )
+    rc = _run_dry_hydrate(monkeypatch, tmp_path, hub)
 
     assert rc == 0
     output = " ".join(capsys.readouterr().out.split())
@@ -210,18 +216,7 @@ def test_dry_run_surfaces_incomplete_manifests_with_reduced_yield(
         },
     )
     hub.commit_revision(SNAPSHOT_REVISION)
-    monkeypatch.setenv("HF_TOKEN", "test-token")
-    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
-
-    rc = cli._handle_hydrate_hub_command(
-        _hydrate_args(
-            tmp_path,
-            source_repo="org/private-ds",
-            revision=SNAPSHOT_REVISION,
-            destination_repo="org/private-ds",
-            dry_run=True,
-        )
-    )
+    rc = _run_dry_hydrate(monkeypatch, tmp_path, hub)
 
     assert rc == 0
     output = " ".join(capsys.readouterr().out.split())
@@ -241,18 +236,7 @@ def test_dry_run_fails_closed_on_run_shaped_zero_discovery(
         files={"incomplete/manifest.json": b'{"session_id": "incomplete"}'},
     )
     hub.commit_revision(SNAPSHOT_REVISION)
-    monkeypatch.setenv("HF_TOKEN", "test-token")
-    monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
-
-    rc = cli._handle_hydrate_hub_command(
-        _hydrate_args(
-            tmp_path,
-            source_repo="org/private-ds",
-            revision=SNAPSHOT_REVISION,
-            destination_repo="org/private-ds",
-            dry_run=True,
-        )
-    )
+    rc = _run_dry_hydrate(monkeypatch, tmp_path, hub)
 
     assert rc == 1
     output = capsys.readouterr().out

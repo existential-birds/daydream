@@ -1273,10 +1273,7 @@ def _expanded_entry(
     recon_by_id: dict[str, dict[str, Any]],
 ) -> dict[str, Any]:
     """Copy *entry* with its optional ``verification`` command ref expanded."""
-    return {
-        **{key: entry[key] for key in entry if key != "verification"},
-        "verification": _expand_optional_ref(entry["verification"], recon_by_id=recon_by_id),
-    }
+    return {**entry, "verification": _expand_optional_ref(entry["verification"], recon_by_id=recon_by_id)}
 
 
 def _derived_commands_table(

@@ -41,6 +41,18 @@ from tests.test_deep_orchestrator import (
 )
 
 
+def _install_phase_fix_spy(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
+    """Install a phase_fix spy that records the items it was asked to fix."""
+    fix_calls: list[Any] = []
+
+    async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
+        fix_calls.append(item)
+        return None
+
+    monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
+    return fix_calls
+
+
 async def test_verifier_contradicts_propagates_to_fix_prompt(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -263,13 +275,7 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     # Spy on phase_fix to prove fixes are NOT applied when the gate declines.
-    fix_calls: list[Any] = []
-
-    async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
-        fix_calls.append(item)
-        return None
-
-    monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
+    fix_calls = _install_phase_fix_spy(monkeypatch)
 
     # Any stdin read in non-interactive mode is a bug -- fail loudly.
     monkeypatch.setattr("builtins.input", _forbidden_input)
@@ -311,13 +317,7 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
     mute_side_effects()
     _install_stub_backend(monkeypatch, multi_stack_target)
 
-    fix_calls: list[Any] = []
-
-    async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
-        fix_calls.append(item)
-        return None
-
-    monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
+    fix_calls = _install_phase_fix_spy(monkeypatch)
 
     # Every stdin read raises EOFError (closed stdin without the non_interactive flag).
     def _eof_input(*_a: Any, **_kw: Any) -> str:
