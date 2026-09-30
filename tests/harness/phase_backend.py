@@ -15,7 +15,7 @@ import re
 from collections.abc import AsyncGenerator
 from typing import Any
 
-from daydream.backends import AgentEvent, CostEvent, ResultEvent, TextEvent
+from daydream.backends import AgentEvent, ResultEvent, TextEvent
 
 
 def _shape_issues(
@@ -71,7 +71,6 @@ class PhaseDispatchBackend:
         *,
         events: list[AgentEvent] | None = None,
         tests_pass: bool = True,
-        emit_cost: bool = False,
     ) -> None:
         """Configure the fake.
 
@@ -82,14 +81,10 @@ class PhaseDispatchBackend:
             events: When set, ``execute`` yields this raw event list verbatim
                 and skips dispatch (tool-panel / fixed-fixture mode).
             tests_pass: Controls the test-suite phase's pass/fail text.
-            emit_cost: When True (and not in ``events`` mode), emit a
-                ``CostEvent`` on the non-structured branches (matches the old
-                integration ``MockBackend`` default-event shape).
         """
         self._parse_results = parse_results or []
         self._events = events
         self._tests_pass = tests_pass
-        self._emit_cost = emit_cost
         self._parse_call = 0
         self._review_call = 0
         self.call_log: list[str] = []
@@ -226,8 +221,6 @@ class PhaseDispatchBackend:
             yield ResultEvent(structured_output=None, continuation=None)
         else:
             yield TextEvent(text="OK")
-            if self._emit_cost:
-                yield CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None)
             yield ResultEvent(structured_output=None, continuation=None)
 
     async def cancel(self) -> None:

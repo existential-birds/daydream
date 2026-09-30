@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from typing import TYPE_CHECKING
 
 from daydream.atif import Trajectory
@@ -13,13 +12,6 @@ from daydream.pricing import load_user_prices, resolve_prices
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactSession
     from daydream.trajectory import TrajectoryRecorder
-
-
-class RunInfoStatus(StrEnum):
-    """Whether live run details rendered or degraded to the safe fallback."""
-
-    RENDERED = "rendered"
-    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -35,7 +27,6 @@ class RunInfoResult:
     """Rendered markdown plus an operator-safe acquisition disposition."""
 
     markdown: str
-    status: RunInfoStatus
     diagnostic: str | None = None
 
 
@@ -45,7 +36,6 @@ _FALLBACK_MARKDOWN = render_run_info(())
 def _unavailable(diagnostic: str) -> RunInfoResult:
     return RunInfoResult(
         markdown=_FALLBACK_MARKDOWN,
-        status=RunInfoStatus.UNAVAILABLE,
         diagnostic=diagnostic,
     )
 
@@ -109,7 +99,6 @@ def render_live_run_info(source: LiveRunInfoSource) -> RunInfoResult:
         return _unavailable("run info: rendering unavailable")
     return RunInfoResult(
         markdown=markdown,
-        status=RunInfoStatus.RENDERED,
     )
 
 

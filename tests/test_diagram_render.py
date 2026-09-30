@@ -30,7 +30,7 @@ from daydream.deep.diagram_render import (
     render_sequence_mermaid,
     sanitize_label,
 )
-from daydream.deep.render import render_report
+from daydream.deep.render import insert_diagrams_section, render_report
 
 FIXTURES = Path(__file__).parent / "fixtures" / "deep"
 
@@ -633,7 +633,7 @@ def _items() -> list[dict[str, Any]]:
 
 def test_diagram_section_survives_a_round_trip_through_the_report_and_back() -> None:
     blocks = render_diagram_blocks(_both_rendered())
-    report = render_report(_items(), diagram_blocks=blocks)
+    report = insert_diagrams_section(render_report(_items()), blocks)
     # The blocks are embedded verbatim -- the section body is byte-identical.
     assert f"## Diagrams\n{blocks}\n" in report
     assert render_sequence_mermaid(SEQUENCE_SPEC) in report

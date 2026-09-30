@@ -18,7 +18,6 @@ from daydream.atif import Trajectory
 from daydream.pr_comment_renderer import FALLBACK_NOTE
 from daydream.pr_run_info import (
     LiveRunInfoSource,
-    RunInfoStatus,
     render_live_run_info,
 )
 from daydream.pricing import ModelPrice
@@ -117,7 +116,6 @@ def test_missing_live_source_returns_bounded_unavailable_result(
 ) -> None:
     result = render_live_run_info(source)
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert FALLBACK_NOTE in result.markdown
     assert result.diagnostic == diagnostic
 
@@ -153,7 +151,6 @@ async def test_live_provider_renders_parent_and_real_retained_complete_sibling(
             LiveRunInfoSource(recorder=recorder, artifacts=artifacts)
         )
 
-    assert result.status is RunInfoStatus.RENDERED
     assert result.diagnostic is None
     assert "| Review |" in result.markdown
     assert "| Fix |" in result.markdown
@@ -201,7 +198,6 @@ def test_snapshot_failure_returns_fixed_diagnostic_without_exception_text(
 
     result = render_live_run_info(source)
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: trajectory snapshot unavailable"
     assert secret not in result.markdown
     assert secret not in (result.diagnostic or "")
@@ -212,7 +208,6 @@ def test_non_root_recorder_is_rejected_before_acquisition(tmp_path: Path) -> Non
     recorder._trajectory_id = "child-recorder"
     result = render_live_run_info(_source_with_snapshots(tmp_path, recorder=recorder))
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: trajectory identity invalid"
 
 
@@ -228,7 +223,6 @@ def test_parent_build_failure_returns_unavailable(
     monkeypatch.setattr(recorder, "build_trajectory", fail)
     result = render_live_run_info(_source_with_snapshots(tmp_path, recorder=recorder))
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: parent trajectory unavailable"
 
 
@@ -255,7 +249,6 @@ def test_invalid_sibling_identity_returns_unavailable(
 
     result = render_live_run_info(_source_with_snapshots(tmp_path, (snapshot,)))
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: trajectory identity invalid"
     assert FALLBACK_NOTE in result.markdown
 
@@ -279,9 +272,7 @@ def test_malformed_sibling_and_duplicate_ids_return_unavailable(tmp_path: Path) 
         _source_with_snapshots(tmp_path, (duplicate, duplicate))
     )
 
-    assert malformed_result.status is RunInfoStatus.UNAVAILABLE
     assert malformed_result.diagnostic == "run info: trajectory document invalid"
-    assert duplicate_result.status is RunInfoStatus.UNAVAILABLE
     assert duplicate_result.diagnostic == "run info: trajectory identity invalid"
 
 
@@ -302,7 +293,6 @@ def test_pricing_or_render_failure_returns_unavailable(
 
     result = render_live_run_info(source)
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: rendering unavailable"
     assert FALLBACK_NOTE in result.markdown
 
@@ -320,7 +310,6 @@ def test_price_lookup_failure_returns_unavailable(
 
     result = render_live_run_info(source)
 
-    assert result.status is RunInfoStatus.UNAVAILABLE
     assert result.diagnostic == "run info: rendering unavailable"
     assert FALLBACK_NOTE in result.markdown
 
@@ -351,5 +340,5 @@ def test_live_provider_honors_user_price_overrides(
 
     result = render_live_run_info(source)
 
-    assert result.status is RunInfoStatus.RENDERED
+    assert result.diagnostic is None
     assert "- **Cost:** $2.00" in result.markdown
