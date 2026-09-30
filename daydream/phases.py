@@ -3962,6 +3962,32 @@ class PushAttemptError(GitError):
         self.receipt = receipt
 
 
+def _validate_reuse_offer(
+    evidence: TestAttemptEvidence | None, retained_tree_key: str | None
+) -> None:
+    """Refuse a half-formed evidence offer before any gate consumes it.
+
+    The finalized test evidence and the retained tree key it validated are one
+    fact and must arrive together. A lone half of the pair, or a retained tree
+    key that disagrees with the evidence's own output tree key, is a caller
+    bug that must fail loudly rather than silently degrade to a real run
+    (issue #1408).
+    """
+    if (evidence is None) != (retained_tree_key is None):
+        raise ValueError(
+            "evidence and retained_tree_key must be supplied together; "
+            "a half-formed reuse offer is refused"
+        )
+    if evidence is None or retained_tree_key is None:
+        return
+    identity = evidence.identity
+    if identity is not None and identity.output_tree_key != retained_tree_key:
+        raise ValueError(
+            "retained_tree_key does not match the evidence's output tree key: "
+            f"{retained_tree_key!r} != {identity.output_tree_key!r}"
+        )
+
+
 @bind_resolved_run_context
 async def _do_commit(
     backend: Backend,
@@ -3976,6 +4002,8 @@ async def _do_commit(
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
     recipe: TestRecipe | None = None,
+    evidence: TestAttemptEvidence | None = None,
+    retained_tree_key: str | None = None,
     run_context: RunContext | None = None,
 ) -> CommitPushResult:
     """Stage, commit, and optionally push — all host-side, no agent turn.
@@ -3997,6 +4025,7 @@ async def _do_commit(
     a successful push, its verified receipt.
     """
     del backend  # host-native commit: no agent turn (issue #726)
+    _validate_reuse_offer(evidence, retained_tree_key)
     run_context = resolve_run_context(run_context)
 
     if interactive:
@@ -4206,6 +4235,8 @@ async def phase_commit_push(
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
     recipe: TestRecipe | None = None,
+    evidence: TestAttemptEvidence | None = None,
+    retained_tree_key: str | None = None,
     run_context: RunContext | None = None,
 ) -> PushReceipt | None:
     """Prompt user to commit and push changes.
@@ -4224,6 +4255,9 @@ async def phase_commit_push(
         retained_states: Binary-safe final states matching ``retained_paths``.
         initial_index: Empty pre-dispatch index snapshot. Supplying these three
             selects strict stage-once and post-hook validation.
+        evidence: The finalized test evidence offered for reuse at this gate.
+        retained_tree_key: The retained tree key that evidence validated. Must
+            arrive with ``evidence``; a half-formed pair is refused.
     """
     run_context = resolve_run_context(run_context)
     console.print()
@@ -4237,6 +4271,8 @@ async def phase_commit_push(
         retained_states=retained_states,
         initial_index=initial_index,
         recipe=recipe,
+        evidence=evidence,
+        retained_tree_key=retained_tree_key,
         run_context=run_context,
     )
     if result.push is not None:

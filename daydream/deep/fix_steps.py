@@ -845,6 +845,7 @@ class FixCycleState:
     preexisting_gitlinks: tuple[GitPathState, ...]
     footprint: AuthorizedFixFootprint
     latest_retained: RetainedTreeSnapshot | None = None
+    latest_test_evidence: TestAttemptEvidence | None = None
     verifier_key: EvidenceKey | None = None
     last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
 
@@ -1626,6 +1627,14 @@ async def finalize_retained_tree_after_test(
         except OSError as exc:
             return _stop(f"recommended capture failed: {exc}")
         state.latest_retained = snapshot
+        # The finalized tree and the evidence that validated it are one
+        # fact: only the attempt whose before/after tree key equals the
+        # retained tree key may become the reuse offer (issue #1408).
+        if (
+            evidence.input_tree_key == snapshot.tree_key
+            and evidence.output_tree_key == snapshot.tree_key
+        ):
+            state.latest_test_evidence = evidence
         return None
 
     return _stabilization_stop(
@@ -1744,6 +1753,8 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             retained_states=snapshot.states,
             initial_index=state.initial_index,
             recipe=_published_test_recipe(ctx),
+            evidence=state.latest_test_evidence,
+            retained_tree_key=snapshot.tree_key,
             run_context=ctx.run_context,
         )
     except PushAttemptError as exc:
