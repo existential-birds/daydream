@@ -49,6 +49,7 @@ from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
     TEST_OUTPUT_TAIL_LINES,
     PushAttemptError,
+    TestAttemptEvidence,
     _build_failure_summarizer_prompt,
     _build_fix_prompt,
     _build_minimal_handoff,
@@ -91,7 +92,7 @@ from daydream.prompts.authorial_intent import (
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.test_execution import TestExecutionResult, resolve_test_recipe
+from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe
 from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
@@ -143,6 +144,42 @@ def _record_host_runs(
 
     monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
     return calls
+
+
+def _execution_identity(
+    repo: Path,
+    *,
+    recipe: Any,
+    argv: tuple[str, ...],
+    output_tree_key: str = "t",
+    outcome: str = "passed",
+) -> TestExecutionIdentity:
+    """A host execution identity matching what the gate reconstructs from *recipe*.
+
+    Head/branch are read tolerantly: the decline-path fixtures use an unborn
+    ``HEAD``, where the gate also falls back to empty revision facts.
+    """
+    try:
+        head_sha = git_ops.head_sha(repo)
+        branch = git_ops.current_branch(repo) or ""
+    except GitError:
+        head_sha = ""
+        branch = ""
+    return TestExecutionIdentity(
+        session_id="s",
+        argv=argv,
+        cwd_relative=recipe.package.cwd_relative,
+        runner=recipe.package.runner,
+        interpreter=recipe.package.interpreter,
+        config_digest=recipe.package.config_digest,
+        absent_components=recipe.package.absent_components,
+        input_tree_key="t",
+        output_tree_key=output_tree_key,
+        head_sha=head_sha,
+        branch=branch,
+        kind="host",
+        outcome=cast(Any, outcome),
+    )
 
 
 def _handoff_turn(body: str) -> tuple[AgentEvent, ...]:
@@ -6063,7 +6100,11 @@ async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
 
 @pytest.mark.asyncio
 async def test_repo_root_recipe_keeps_the_worktree_root_cwd(
-    tmp_path: Path, make_work, make_config, monkeypatch, silence_console
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
 ) -> None:
     silence_console("daydream.phases")
     repo = _init_plain_repo(tmp_path)
@@ -6081,7 +6122,11 @@ async def test_repo_root_recipe_keeps_the_worktree_root_cwd(
 
 @pytest.mark.asyncio
 async def test_supplied_recipe_never_triggers_a_second_resolution(
-    tmp_path: Path, make_work, make_config, monkeypatch, silence_console
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
 ) -> None:
     silence_console("daydream.phases")
     repo = _init_plain_repo(tmp_path)
@@ -6096,3 +6141,98 @@ async def test_supplied_recipe_never_triggers_a_second_resolution(
         ScriptedBackend(), make_work(repo), config=config, session_id="s",
         capture_tree_key=lambda: "k", recipe=recipe,
     )
+
+
+# Issue #1408 task 11: a declined commit with matching green evidence does not
+# re-run the suite (MH15).
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_reuses_matching_evidence_without_rerunning(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """MH15: a decline with valid matching green evidence leaves the changes
+    uncommitted and does NOT re-run the same orchestrator test."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    calls = _record_host_runs(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    work = make_work(repo)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+    evidence = TestAttemptEvidence(
+        session_id="s", kind="host", command=("true",), passed=True,
+        input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+        identity=identity,
+    )
+
+    result = await phase_commit_push(
+        ScriptedBackend(), work, config=config, recipe=recipe, evidence=evidence,
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    assert result is None
+    assert calls == [], "matching evidence must not re-run the canonical command"
+    assert git(repo, "diff", "--cached", "--name-only") == ""  # still uncommitted
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_with_stale_evidence_still_validates(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """One mismatched component falls back to the existing real-validation path."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    calls = _record_host_runs(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key="stale")
+
+    await phase_commit_push(
+        ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+        evidence=TestAttemptEvidence(
+            session_id="s", kind="host", command=("true",), passed=True,
+            input_tree_key="stale", output_tree_key="stale", identity=identity,
+        ),
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    assert len(calls) == 1 and calls[0]["cmd"] == ["true"]
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_with_red_evidence_still_raises(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
+    repo = _init_plain_repo(tmp_path)
+    config = make_config(repo, test_command="false")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("false",), outcome="failed")
+
+    with pytest.raises(RuntimeError, match="validation"):
+        await phase_commit_push(
+            ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+            evidence=TestAttemptEvidence(
+                session_id="s", kind="host", command=("false",), passed=False,
+                input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+                identity=identity,
+            ),
+            retained_tree_key=identity.output_tree_key,
+        )

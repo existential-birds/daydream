@@ -73,6 +73,7 @@ from daydream.deep.dedup import (
     normalize_title,
 )
 from daydream.deep.detection import GENERIC_STACK
+from daydream.deep.evidence_reuse import ReuseTarget, decide_reuse
 from daydream.deep.location_validator import validate_records
 from daydream.deep.records import (
     RECORD_SOURCE_UIDS_KEY,
@@ -3301,6 +3302,54 @@ async def _run_host_test_command(
     )
 
 
+def _git_revision_facts(repo: Path) -> tuple[str, str]:
+    """Read the HEAD/branch revision facts, tolerating an unborn ``HEAD``.
+
+    A gate that compares an evidence identity against the live revision must
+    not fail closed merely because the worktree has no commit yet; an empty
+    revision is there compared like any other component (issue #1408).
+    """
+    try:
+        return git_ops.head_sha(repo), git_ops.current_branch(repo) or ""
+    except GitError:
+        return "", ""
+
+
+def reuse_target(
+    work: WorkContext,
+    recipe: TestRecipe | None,
+    *,
+    session_id: str,
+    retained_tree_key: str,
+    post_commit_verified: bool = False,
+) -> ReuseTarget | None:
+    """Build the reuse target from the once-resolved recipe, or ``None``.
+
+    A missing recipe carries no resolved facts to compare against, so the gate
+    must fall back to real validation (the additive feature can never remove
+    one). The target's tree key is always the caller-supplied retained key —
+    never a fresh recomputation — because that value was already proven against
+    the evidence by ``finalize_retained_tree_after_test``.
+    """
+    if recipe is None:
+        return None
+    command = recipe.command.value if recipe.command.resolved else None
+    head_sha, branch = _git_revision_facts(work.repo)
+    return ReuseTarget(
+        session_id=session_id,
+        tree_key=retained_tree_key,
+        argv=tuple(command) if isinstance(command, tuple) else (),
+        cwd_relative=recipe.package.cwd_relative,
+        runner=recipe.package.runner,
+        interpreter=recipe.package.interpreter,
+        config_digest=recipe.package.config_digest,
+        absent_components=recipe.package.absent_components,
+        head_sha=head_sha,
+        branch=branch,
+        post_commit_verified=post_commit_verified,
+    )
+
+
 def _host_test_identity(
     *,
     session_id: str,
@@ -3328,12 +3377,7 @@ def _host_test_identity(
         outcome = "passed"
     else:
         outcome = "failed"
-    try:
-        head_sha = git_ops.head_sha(work.repo)
-        branch = git_ops.current_branch(work.repo) or ""
-    except GitError:
-        head_sha = ""
-        branch = ""
+    head_sha, branch = _git_revision_facts(work.repo)
     return TestExecutionIdentity(
         session_id=session_id,
         argv=argv,
@@ -3897,9 +3941,14 @@ def _verify_commit_scope(
 
 
 async def _validate_declined_fixes(
-    work: WorkContext, config: Any, *, recipe: TestRecipe | None = None
+    work: WorkContext,
+    config: Any,
+    *,
+    recipe: TestRecipe | None = None,
+    evidence: TestAttemptEvidence | None = None,
+    retained_tree_key: str | None = None,
 ) -> None:
-    """Re-run the canonical test command after a declined commit/push gate.
+    """Validate the applied fixes after a declined commit/push gate.
 
     Issue #726: declining to commit must not quietly discard a run whose fixes
     were never validated — but it must also never claim success on a red suite.
@@ -3913,8 +3962,26 @@ async def _validate_declined_fixes(
     (see :func:`_canonical_test_cmd`); the decline then behaves as before
     rather than fabricating a verdict. A supplied recipe is the single source
     of the command and cwd, so no re-resolution happens here (issue #1408).
+    A matching green evidence offer (issue #1408) stands in for that real
+    run: nothing committed, so the revision components are compared and the
+    decision is delegated to :func:`decide_reuse`.
     """
     cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
+    if evidence is not None and evidence.identity is not None and retained_tree_key is not None:
+        target = reuse_target(
+            work,
+            recipe,
+            session_id=evidence.identity.session_id,
+            retained_tree_key=retained_tree_key,
+        )
+        decision = None if target is None else decide_reuse(evidence.identity, target)
+        if decision is not None and decision.reused:
+            print_info(
+                console,
+                "Commit declined; reusing matching green test evidence "
+                "(changes left uncommitted)",
+            )
+            return
     if cmd is None:
         return
     result = await _run_host_test_command(cmd, work, config, recipe=recipe)
@@ -4045,7 +4112,13 @@ async def _do_commit(
             # Issue #726: a decline still validates the applied fixes via the
             # host test runner; a red suite raises (surfaces as Stop(1)) so a
             # run is never reported successful with unvalidated fixes.
-            await _validate_declined_fixes(work, config, recipe=recipe)
+            await _validate_declined_fixes(
+                work,
+                config,
+                recipe=recipe,
+                evidence=evidence,
+                retained_tree_key=retained_tree_key,
+            )
             return CommitPushResult(committed=False, push=None)
 
     strict_commit = any(
