@@ -35,7 +35,12 @@ from daydream.remote_ci import (
     write_remote_ci_verdict,
 )
 from tests.harness.fake_gh import FakeGh
-from tests.harness.processes import wait_for_process_group_exit
+from tests.harness.processes import (
+    fd_count,
+    wait_for_fd_baseline,
+    wait_for_process_group_exit,
+    wait_for_process_ids,
+)
 
 PUSHED_SHA = "1" * 40
 MERGE_SHA = "2" * 40
@@ -1394,27 +1399,6 @@ async def test_github_fetcher_accepts_unpinned_ruleset_requirement(
     assert len(fake_gh.process_calls()) == 6
 
 
-def _fd_count() -> int | None:
-    fd_dir = Path("/dev/fd")
-    return len(list(fd_dir.iterdir())) if fd_dir.is_dir() else None
-
-
-async def _wait_for_pids(path: Path) -> dict[str, int]:
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded.get("direct"), int) and isinstance(loaded.get("grandchild"), int):
-                return {
-                    "direct": loaded["direct"],
-                    "grandchild": loaded["grandchild"],
-                }
-        except (FileNotFoundError, json.JSONDecodeError, AttributeError):
-            pass
-        await asyncio.sleep(0.01)
-    raise AssertionError("blocking fake gh did not publish process ids")
-
-
 @pytest.mark.asyncio
 async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
     fake_gh: FakeGh, git_repo: Path, tmp_path: Path
@@ -1440,7 +1424,7 @@ async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
             completion_deadline=1800,
         )
 
-    baseline = _fd_count()
+    baseline = fd_count()
     task = asyncio.create_task(
         wait_for_remote_ci(
             target,
@@ -1448,7 +1432,7 @@ async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
             on_snapshot=persist,
         )
     )
-    pids = await _wait_for_pids(pid_file)
+    pids = await wait_for_process_ids(pid_file)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -1458,11 +1442,7 @@ async def test_waiter_cancellation_persists_once_after_real_gh_group_is_reaped(
     assert [item.status for item in emitted] == ["cancelled"]
     assert json.loads(verdict_path.read_text(encoding="utf-8"))["status"] == "cancelled"
     assert len(fake_gh.process_calls()) == 1
-    if baseline is not None:
-        deadline = time.monotonic() + 2
-        while _fd_count() != baseline and time.monotonic() < deadline:
-            await asyncio.sleep(0.01)
-        assert _fd_count() == baseline
+    await wait_for_fd_baseline(baseline, timeout_s=2.0)
 
 
 @pytest.mark.asyncio
@@ -1511,7 +1491,7 @@ async def test_later_real_request_timeout_at_discovery_uses_trusted_empty_snapsh
         sleep=asyncio.sleep,
         on_snapshot=emitted.append,
     )
-    pids = await _wait_for_pids(pid_file)
+    pids = await wait_for_process_ids(pid_file)
     await wait_for_process_group_exit(pids["direct"])
 
     assert verdict.status == "no_ci"
