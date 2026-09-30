@@ -319,6 +319,29 @@ def _recipe(tmp_path: Path, *, cli: str | None = None, config: str | None = None
     )
 
 
+def test_required_suites_fall_back_to_the_file_config_and_yield_to_an_explicit_source(
+    tmp_path: Path,
+) -> None:
+    """The recipe declares the file config's suites; an explicit source outranks it.
+
+    ``RunConfig.test_required_suites`` has no producer today, so the file-config
+    fallback is the live path. Both halves are pinned here so the precedence slot
+    cannot silently change which suites a run declares.
+    """
+    config = SimpleNamespace(test_command="uv run pytest", test_required_suites=["python", "rl"])
+
+    recipe = resolve_test_recipe(config, SimpleNamespace(test_command=None), repo_root=tmp_path)
+    assert recipe.required.declared == ("python", "rl")
+    assert recipe.required.source == "config"
+
+    recipe = resolve_test_recipe(
+        config,
+        SimpleNamespace(test_command=None, test_required_suites=["explicit"]),
+        repo_root=tmp_path,
+    )
+    assert recipe.required.declared == ("explicit",)
+
+
 def test_recipe_identity_is_stable_until_a_config_input_changes(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     (tmp_path / "uv.lock").write_text("version = 1\n")

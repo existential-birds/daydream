@@ -16,7 +16,6 @@ from pathlib import Path
 from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
-from daydream.test_execution import TEST_RECIPE_FILENAME
 
 # Structured merge-failure entry reserved in ``per-stack-failures.json`` (issue #361).
 # Distinct from per-stack entries (``{stack_name: reason}`` str->str) so the resume
@@ -316,15 +315,6 @@ def test_verdict_path(deep_dir_path: Path) -> Path:
     the run whose verdict a consumer needs.
     """
     return deep_dir_path / "test-verdict.json"
-
-
-def test_recipe_path(deep_dir_path: Path) -> Path:
-    """The run's once-resolved test recipe (issue #1408).
-
-    Persisted in the deep preamble and read fail-open by prompt consumers and
-    resumed runs; it is the single source of the run's resolved test facts.
-    """
-    return deep_dir_path / TEST_RECIPE_FILENAME
 
 
 def evidence_reuse_path(deep_dir_path: Path) -> Path:
