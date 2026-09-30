@@ -31,7 +31,11 @@ from daydream.archive.hydrate import (
 )
 from daydream.json_utils import canonical_json
 from daydream.training.adjudication.final_bundle import (
+    _PUBLICATION_MANIFEST_FILENAME,
+    _SUCCESS_FILENAME,
+    _SUMS_FILENAME,
     FINAL_IDENTITY_FILES,
+    FULL_BUNDLE_FILES,
     _bundle_input_names,
     _validate_policy_binding,
 )
@@ -59,9 +63,6 @@ _CHECKPOINT_RELPATH = "checkpoints/batch-latest.json"
 _CHECKPOINT_SCHEMA = "annotation-checkpoint/v1"
 _ATOMIC_ATTEMPTS = 6
 _FINAL_SEGMENT = "final"
-_SUCCESS_FILENAME = "_SUCCESS"
-_SUMS_FILENAME = "SHA256SUMS"
-_PUBLICATION_MANIFEST_FILENAME = "publication-manifest.json"
 _PUBLICATION_SCHEMA = "annotation-publication/v1"
 _SUCCESS_SCHEMA = "annotation-success/v1"
 
@@ -719,12 +720,7 @@ def _prefix_names(remote_files: set[str], prefix: str) -> set[str]:
         if not path.startswith(prefix):
             continue
         name = path[len(prefix) :]
-        allowed = {
-            *FINAL_IDENTITY_FILES,
-            _PUBLICATION_MANIFEST_FILENAME,
-            _SUMS_FILENAME,
-            _SUCCESS_FILENAME,
-        }
+        allowed = FULL_BUNDLE_FILES
         _validate_remote_path(name, allowed=allowed, what="final bundle file")
         if name in names:
             raise ValueError(f"duplicate normalized final bundle path {name!r}")
@@ -1061,12 +1057,7 @@ def download_final_annotation_bundle(
     remote_files = _list_remote(client, pinned)
     prefix = _final_prefix(curation_id, final_id)
     names = _prefix_names(remote_files, prefix)
-    expected_names = {
-        *FINAL_IDENTITY_FILES,
-        _PUBLICATION_MANIFEST_FILENAME,
-        _SUMS_FILENAME,
-        _SUCCESS_FILENAME,
-    }
+    expected_names = FULL_BUNDLE_FILES
     if names != expected_names:
         raise HydrationError("final annotation bundle is incomplete or contains foreign files")
     downloaded = {

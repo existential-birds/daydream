@@ -54,6 +54,10 @@ from daydream.config import (
 )
 from daydream.deep.coverage import _path_component_matches
 from daydream.deep.diagram_types import (
+    BLOCK_KINDS,
+    MESSAGE_KINDS,
+    NODE_KINDS,
+    PARTICIPANT_KINDS,
     CandidateRoot,
     as_dict as _as_dict,
     as_int as _norm_line,
@@ -136,11 +140,6 @@ OMIT_REASONS: frozenset[str] = frozenset(
         "NO_END",
     }
 )
-
-_PARTICIPANT_KINDS = frozenset({"internal", "external"})
-_MESSAGE_KINDS = frozenset({"call", "reply", "self"})
-_BLOCK_KINDS = frozenset({"alt", "opt", "loop"})
-_NODE_KINDS = frozenset({"start", "end", "process", "decision", "subroutine", "io"})
 
 # Snap order for ``SYMBOL_NOT_ON_LINE``: nearest line first, the line above
 # before the line below at equal distance. Fixed so a snapped citation is
@@ -668,7 +667,7 @@ def _ground_participants(
         record = _normalize_participant(raw)
         name = record["name"]
         ref = name or f"<unnamed:{len(checks)}>"
-        if not name or record["kind"] not in _PARTICIPANT_KINDS or name in seen:
+        if not name or record["kind"] not in PARTICIPANT_KINDS or name in seen:
             checks.append(
                 ElementCheck("participant", ref, False, "MALFORMED_ELEMENT")
             )
@@ -729,7 +728,7 @@ def _ground_message(
 ) -> ElementCheck:
     """Check one message and rewrite its evidence line on a successful snap."""
     check = ElementCheck("message", str(index), True)
-    if record["kind"] not in _MESSAGE_KINDS:
+    if record["kind"] not in MESSAGE_KINDS:
         check.grounded, check.reason = False, "MALFORMED_ELEMENT"
         return check
     # An unknown or ungrounded endpoint is not a separate reason code: the
@@ -973,7 +972,7 @@ def ground_sequence(
         record = _as_dict(raw_block)
         kind = _norm_str(record.get("kind"))
         raw_branches = _as_list(record.get("branches"))
-        if not isinstance(raw_block, dict) or kind not in _BLOCK_KINDS:
+        if not isinstance(raw_block, dict) or kind not in BLOCK_KINDS:
             block_checks.append(
                 ElementCheck("block", block_ref, False, "MALFORMED_ELEMENT")
             )
@@ -1162,7 +1161,7 @@ def _ground_node(
 ) -> ElementCheck:
     """Check one flowchart node and rewrite its evidence line on a snap."""
     check = ElementCheck("node", record["id"], True)
-    if record["kind"] not in _NODE_KINDS:
+    if record["kind"] not in NODE_KINDS:
         check.grounded, check.reason = False, "MALFORMED_ELEMENT"
         return check
     evidence = record["evidence"]

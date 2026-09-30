@@ -1914,10 +1914,8 @@ def _count_decision_nodes(node: Any) -> int:
     return total
 
 
-def _scoped_python_files(
-    workspace: Path, need_lines: bool = False
-) -> list[tuple[Path, str, list[str]]]:
-    """All ``*.py`` files under *workspace* minus excluded dirs, as ``(path, rel, lines)``.
+def _scoped_python_files(workspace: Path) -> list[tuple[Path, str]]:
+    """All ``*.py`` files under *workspace* minus excluded dirs, as ``(path, rel)``.
 
     Excluded directories are matched on exact path components so a nested
     ``node_modules_extra/`` or a sibling ``.worktrees`` checkout never shadows
@@ -1928,17 +1926,8 @@ def _scoped_python_files(
     generated-file header marker are both applied via ``is_generated_file``,
     so vendor/third_party trees and generated artifacts never reach the
     metric denominators (Finding #8).
-
-    The third element is the file's raw decoded lines, decoded from the same
-    ``content`` bytes already read for ``is_generated_file`` with the same
-    ``utf-8`` + ``errors="replace"`` decode ``_parse_python_file`` uses, so
-    candidate-scoped analysis (issue #457) can index a non-candidate peer's
-    text for cross-file clone attribution without parsing it. It is only
-    populated when *need_lines* is set (candidate-scoped analysis); the default
-    whole-workspace path never consumes it, so the redundant decode+splitlines
-    is skipped there and no dead third element is materialized.
     """
-    files: list[tuple[Path, str, list[str]]] = []
+    files: list[tuple[Path, str]] = []
     for path in workspace.rglob("*.py"):
         try:
             rel = path.relative_to(workspace)
@@ -1952,11 +1941,7 @@ def _scoped_python_files(
             continue
         if is_generated_file(str(rel), content):
             continue
-        if need_lines:
-            raw_lines = content.decode("utf-8", errors="replace").splitlines()
-        else:
-            raw_lines = []
-        files.append((path, str(rel), raw_lines))
+        files.append((path, str(rel)))
     return sorted(files, key=lambda item: item[1])
 
 
@@ -2479,7 +2464,7 @@ def _cross_file_clone_flagged_lines(
 
 
 def _aggregate_per_file(
-    candidates: list[tuple[Path, str, list[str]]],
+    candidates: list[tuple[Path, str]],
     parsed: dict[Path, Any],
     parsed_lines: dict[Path, list[str]],
     cross_file_flagged: dict[Path, set[int]],
@@ -2496,7 +2481,7 @@ def _aggregate_per_file(
     high_mass = 0.0
     total_flagged = 0
     total_loc = 0
-    for path, rel, _raw in candidates:
+    for path, rel in candidates:
         root = parsed.get(path)
         if root is None:
             continue
@@ -2579,7 +2564,7 @@ def analyze_quality(
             "scoped_files": 0,
         }
 
-    scoped_files = _scoped_python_files(workspace, need_lines=candidate_paths is not None)
+    scoped_files = _scoped_python_files(workspace)
     if candidate_paths is None:
         candidates = scoped_files
         candidate_path_set: set[Path] | None = None
@@ -2587,27 +2572,25 @@ def analyze_quality(
         # Exact workspace-relative match: a candidate that fails eligibility is
         # absent from ``scoped_files`` and so is not a candidate (issue #457).
         candidates = [t for t in scoped_files if t[1] in candidate_paths]
-        candidate_path_set = {path for path, _rel, _raw in candidates}
+        candidate_path_set = {path for path, _rel in candidates}
     scoped = len(candidates)
 
     # Parse and validate each candidate ONCE. Only successfully parsed files
     # feed the per-file aggregates; a malformed file stays in ``scoped`` but is
     # omitted from the aggregates (Finding #1). In whole-workspace mode every
     # candidate is a scoped file (byte-identical to today). In candidate mode
-    # non-candidate peers join the clone index via their raw decoded ``lines``
-    # (3rd tuple element) without being parsed, so a candidate's cross-file
+    # non-candidate peers join the clone index via ``_parse_python_file``'s
+    # returned lines without being aggregated, so a candidate's cross-file
     # clone attribution still sees every peer (issue #457). The parse results
     # are reused below, so no file is ever parsed twice.
     parsed: dict[Path, Any] = {}
     parsed_lines: dict[Path, list[str]] = {}
     file_lines: list[tuple[Path, list[str]]] = []
-    for path, _rel, raw_lines in scoped_files:
+    for path, _rel in scoped_files:
         if candidate_path_set is not None and path not in candidate_path_set:
             # Non-candidate peer: index it only if it parses, so a malformed
             # peer never enters the clone index and cannot flag a valid
-            # candidate (Finding #1 holds in candidate mode too). The parsed
-            # lines are byte-identical to the raw lines for a valid file, so
-            # indexing is unchanged for well-formed peers.
+            # candidate (Finding #1 holds in candidate mode too).
             peer = _parse_python_file(path)
             if peer is None:
                 continue

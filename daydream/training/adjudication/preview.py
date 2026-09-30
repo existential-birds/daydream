@@ -25,7 +25,7 @@ from daydream.training.adjudication.queue import build_queue
 
 __all__ = ["preview_ledger_digest", "run_preview"]
 
-_SESSIONS_FILENAME = "sessions.jsonl"
+_SESSIONS_OUT_FILENAME = "sessions.jsonl"
 _REVISION_FILENAME = "index-revision.txt"
 
 _ITEM_KEYS = ("disposition", "evidence_digest", "fingerprint", "record_id", "status")
@@ -68,7 +68,7 @@ def preview_ledger_digest(ledger: dict[str, Any]) -> str:
 
 
 def _load_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
-    sessions_path = index_root / _SESSIONS_FILENAME
+    sessions_path = index_root / _SESSIONS_OUT_FILENAME
     if not sessions_path.is_file():
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {sessions_path}"
