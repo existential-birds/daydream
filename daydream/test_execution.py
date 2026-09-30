@@ -16,7 +16,7 @@ import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from daydream.backends._subprocess import terminate_process
 from daydream.trajectory import DaydreamPhase, host_phase_scope, redact_structured_text
@@ -53,6 +53,39 @@ class MissingTestCommandError(RuntimeError):
     """
 
 
+def _select_raw_test_command(
+    config: object, run_config: object
+) -> tuple[str | None, Literal["cli", "config"]]:
+    """Apply CLI-over-config precedence, returning the raw value and its origin.
+
+    The selection is the existing ``or`` chain: a truthy CLI value wins, else
+    the config-file value (``None``/empty included). Whether the selected value
+    is usable is the caller's concern — see :func:`canonical_test_command`.
+    """
+    cli_value = getattr(run_config, "test_command", None)
+    if cli_value:
+        return cli_value, "cli"
+    return getattr(config, "test_command", None), "config"
+
+
+@dataclass(frozen=True)
+class ResolvedFact:
+    """One resolved run fact together with where it came from.
+
+    ``value`` is ``None`` exactly when the fact could not be resolved, and
+    ``source == "unresolved"`` names that absence (Pattern C: a named miss,
+    never a placeholder). ``resolved`` is the single predicate callers gate on.
+    """
+
+    value: str | tuple[str, ...] | None
+    source: Literal["cli", "config", "admitted", "derived", "unresolved"]
+
+    @property
+    def resolved(self) -> bool:
+        """True only for a non-``None`` value with a real provenance."""
+        return self.value is not None and self.source != "unresolved"
+
+
 def canonical_test_command(config: object, run_config: object) -> list[str]:
     """Resolve the canonical test command as shell-word-split argv.
 
@@ -65,7 +98,7 @@ def canonical_test_command(config: object, run_config: object) -> list[str]:
     sources checked, and exactly what to set — never fall back to an empty or
     unknown command.
     """
-    raw = getattr(run_config, "test_command", None) or getattr(config, "test_command", None)
+    raw, _ = _select_raw_test_command(config, run_config)
     if not raw or not raw.strip():
         raise MissingTestCommandError(
             "No canonical test command is configured; refusing to run tests "
@@ -86,6 +119,24 @@ def canonical_test_command(config: object, run_config: object) -> list[str]:
             f"(unbalanced or unterminated quote): {raw!r}. Set --test-command "
             "or the `test_command` config key to a valid shell command."
         ) from exc
+
+
+def resolve_test_command_fact(config: object, run_config: object) -> ResolvedFact:
+    """Resolve the test command into a provenance-bearing :class:`ResolvedFact`.
+
+    Non-raising counterpart of :func:`canonical_test_command`: it applies the
+    same CLI-over-config precedence but a missing, empty/whitespace, or
+    ``shlex``-unparseable value yields the unresolved fact instead of an
+    exception. The unresolved fact is the named miss — there is no guessed or
+    placeholder command.
+    """
+    raw, source = _select_raw_test_command(config, run_config)
+    if not raw or not raw.strip():
+        return ResolvedFact(value=None, source="unresolved")
+    try:
+        return ResolvedFact(value=tuple(shlex.split(raw)), source=source)
+    except ValueError:
+        return ResolvedFact(value=None, source="unresolved")
 
 
 @dataclass

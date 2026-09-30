@@ -13,6 +13,7 @@ from daydream.test_execution import (
     MissingTestCommandError,
     TestExecutionResult,
     canonical_test_command,
+    resolve_test_command_fact,
     run_test_command,
 )
 from daydream.trajectory import DaydreamPhase
@@ -82,6 +83,33 @@ def test_canonical_command_from_config_when_cli_unset() -> None:
     cfg = SimpleNamespace(test_command="uv run pytest -n auto")
     run = SimpleNamespace(test_command=None)
     assert canonical_test_command(cfg, run) == ["uv", "run", "pytest", "-n", "auto"]
+
+
+def test_command_fact_records_cli_provenance_over_config() -> None:
+    cfg = SimpleNamespace(test_command="pytest -x")
+    run = SimpleNamespace(test_command="/cli/cmd")
+    fact = resolve_test_command_fact(cfg, run)
+    assert fact.value == ("/cli/cmd",)
+    assert fact.source == "cli"
+
+
+def test_command_fact_records_config_provenance_when_cli_unset() -> None:
+    fact = resolve_test_command_fact(
+        SimpleNamespace(test_command="uv run pytest -n auto"),
+        SimpleNamespace(test_command=None),
+    )
+    assert fact.value == ("uv", "run", "pytest", "-n", "auto")
+    assert fact.source == "config"
+
+
+@pytest.mark.parametrize("config", [None, "", "'unbalanced"])
+def test_command_fact_is_unresolved_and_never_guessed(config: str | None) -> None:
+    fact = resolve_test_command_fact(
+        SimpleNamespace(test_command=None), SimpleNamespace(test_command=config)
+    )
+    assert fact.resolved is False
+    assert fact.source == "unresolved"
+    assert fact.value is None
 
 
 def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
