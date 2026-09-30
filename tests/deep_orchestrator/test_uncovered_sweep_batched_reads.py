@@ -55,3 +55,27 @@ async def test_run_deep_credits_a_completed_batched_loop_read(
     post = analyze_coverage(load_trajectories(target / ".daydream"), target / ".daydream")
     assert "loop_one.py" not in post["uncovered_files"]
     assert "loop_two.py" not in post["uncovered_files"]
+
+
+async def test_run_deep_still_sweeps_a_failed_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Requirement 5 at the real seam: failure metadata suppresses no sweep."""
+
+    target = _batched_loop_sweep_target(tmp_path)
+    _silence(monkeypatch)
+    mute_side_effects()
+    stub = _install_uncovered_sweep_stub(monkeypatch, target)
+    stub.per_stack_unread = frozenset({"notes.txt"})
+    stub.read_result_extra = {"is_error": True}   # every emitted read is damaged
+
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
+    assert exit_code == 0
+
+    stats = json.loads((target / ".daydream" / "deep" / "coverage-stats.json").read_text())
+    covered = set(stats["pre_sweep"]["uncovered_files"])
+    assert {"main.py", "loop_one.py", "loop_two.py"} <= covered  # damaged reads credit nothing
+    assert {"main.py", "loop_one.py", "loop_two.py"} <= set(stats["attempted_files"])
