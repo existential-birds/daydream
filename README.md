@@ -510,7 +510,7 @@ the whole typed execution identity still matches — command, package cwd, runne
 interpreter, config-input digest, tree key, and revision. Across a commit the
 tree key alone is not enough: the created commit must have passed the strict
 post-commit verification. Either way the gate prints a line naming the decision
-(`reused matching evidence` or `ran real validation (mismatch: <component>)`)
+(`reused matching evidence` or `ran real validation (<result>: <component>)`)
 and records it in `.daydream/deep/evidence-reuse.json`, keyed by gate. Reuse
 never replaces the pre-push hook, the post-hook strict check, or the push
 receipt check.
