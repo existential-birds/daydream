@@ -153,8 +153,8 @@ def _single_phase_trajectory(
     )
 
 
-def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Path) -> None:
-    """Rendering after the transition uses the archived step's usage date."""
+def _sonnet5_transition_step() -> dict[str, Any]:
+    """Archived claude-sonnet-5 review step at its introductory rate."""
     step = _agent_step(
         step_id=2,
         phase="review",
@@ -164,6 +164,12 @@ def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Pa
         cached=1_000_000,
     )
     step["timestamp"] = "2026-08-31T12:00:00.000000Z"
+    return step
+
+
+def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Path) -> None:
+    """Rendering after the transition uses the archived step's usage date."""
+    step = _sonnet5_transition_step()
     trajectory = _write_trajectory(tmp_path, steps=[_user_step(), step], model="claude-sonnet-5")
     assert "- **Cost:** $12.20" in render_run_info_block([trajectory])
 
@@ -330,20 +336,7 @@ def test_value_renderer_preserves_resolved_price_policy(tmp_path: Path) -> None:
         _write_trajectory(
             tmp_path,
             model="claude-sonnet-5",
-            steps=[
-                _user_step(),
-                {
-                    **_agent_step(
-                        step_id=2,
-                        phase="review",
-                        model="claude-sonnet-5",
-                        prompt=2_000_000,
-                        completion=1_000_000,
-                        cached=1_000_000,
-                    ),
-                    "timestamp": "2026-08-31T12:00:00.000000Z",
-                },
-            ],
+            steps=[_user_step(), _sonnet5_transition_step()],
         ).read_bytes()
     )
     resolved = resolve_prices()
