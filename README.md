@@ -515,7 +515,7 @@ either file restores conservative verification exactly. An unrecognised
 `extra_risk_categories` entry **fails the run loudly** before the verify pass
 rather than silently widening or narrowing selection. The mandatory category
 vocabulary is the one shared with the diff-routing risk floors (`security`,
-`concurrency`, `persistence`, `interface`, `migration`).
+`concurrency`, `persistence`, `public-interface`, `migration`).
 
 The default was flipped only after the evidence gate above went green: the
 report command

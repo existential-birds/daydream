@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 from daydream.deep.adjudication_provenance import (
     PROVENANCE_FORMAT,
@@ -80,7 +81,7 @@ def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None
             "evidence": "e",
         },
     ]
-    verdicts = {
+    verdicts: dict[int, dict[str, Any]] = {
         1: {"arb_id": 1, "keep": True, "severity": "low"},
         2: {"arb_id": 99, "keep": True},  # echoed id mismatch -> unconfirmed
     }

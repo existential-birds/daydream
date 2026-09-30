@@ -17,6 +17,7 @@ from daydream.extensions.api import Stop
 from daydream.git_ops import GitTimeoutError
 from daydream.run_context import current_run_context
 from daydream.runner import run
+from daydream.ui import format_verdict_join
 from tests.deep_orchestrator.support import (
     _forbidden_input,
     _install_accept_gate_pipeline,
@@ -205,7 +206,7 @@ async def test_verdict_join_reconciles_selection_skips_through_the_real_run(
     _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
 
     captured: list[dict[str, Any]] = []
-    real_format = fix_steps.format_verdict_join
+    real_format = format_verdict_join
 
     def _capture(**kwargs: Any) -> Any:
         captured.append(kwargs)

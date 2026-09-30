@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -18,8 +19,9 @@ _MANIFEST = Path(__file__).resolve().parent / "fixtures" / "latency_profiles" / 
 CORPUS = _MANIFEST.parent
 
 
-def load_manifest() -> dict:
-    return json.loads(_MANIFEST.read_text())
+def load_manifest() -> dict[str, Any]:
+    data: dict[str, Any] = json.loads(_MANIFEST.read_text())
+    return data
 
 
 def test_attribution_counts_shipped_items_per_lens_and_reports_coverage() -> None:

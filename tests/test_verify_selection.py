@@ -1,3 +1,5 @@
+from typing import Any, cast
+
 import pytest
 
 from daydream.deep.adjudication_provenance import RecordProvenance
@@ -134,7 +136,7 @@ def test_unresolved_prior_verdicts_are_reverified_and_absent_prior_is_a_miss() -
     reused, to_verify = plan_reuse(prior, [_decision("item:1", digest="d1")])
     assert reused == {} and [d.item_uid for d in to_verify] == ["item:1"]
     assert plan_reuse(None, [_decision("item:1", digest="d1")]) == ({}, [_decision("item:1", digest="d1")])
-    assert plan_reuse([], [_decision("item:1", digest="d1")])[0] == {}
+    assert plan_reuse(cast(Any, []), [_decision("item:1", digest="d1")])[0] == {}
 
 
 def test_unknown_extra_category_fails_loudly_and_digest_is_content_only() -> None:
