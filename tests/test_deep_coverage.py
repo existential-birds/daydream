@@ -14,6 +14,7 @@ import pytest
 
 from daydream import review_profile as rp, severity
 from daydream.deep.coverage import (
+    _completed_read_paths,
     bounded_diff_block_for_file,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
@@ -22,6 +23,7 @@ from daydream.deep.coverage import (
     resolve_per_stack_verdicts,
     write_coverage_receipts,
 )
+from daydream.eval.analyzer import load_trajectories
 from daydream.hunk_index import load_hunk_index, parse_hunks, write_hunk_index
 from daydream.repository_paths import strip_dot_slash
 
@@ -307,6 +309,38 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
     swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept
+
+
+def test_loop_read_covers_through_the_sweep_and_verdict_seams(tmp_path: Path) -> None:
+    # Issue #1397 requirement 2: one loop-resolution semantics for every
+    # consumer that credits reads -- sweep admission and verdict reconciliation.
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-loop")
+    _write_fork_calls(
+        run_dir,
+        "deep-python.json",
+        [{
+            "function_name": "shell",
+            "arguments": {"command": 'for f in api.py notes.txt; do nl -ba "$f"; done'},
+        }],
+    )
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-loop")
+
+    assert uncovered == []                        # both listed files are covered
+    assert stats["files_read_by_reviewers"] == 2
+
+    fork = load_trajectories(daydream_dir, "sess-loop")["forked"][0]
+    verdicts = resolve_per_stack_verdicts(
+        assigned_files=["api.py", "notes.txt"],
+        declared_verdicts=[
+            {"path": "api.py", "lines_read": 10, "verdict": "clean"},
+            {"path": "notes.txt", "lines_read": 10, "verdict": "clean"},
+        ],
+        completed_read_paths=_completed_read_paths(fork),
+        finding_files=set(),
+    )
+
+    assert [v["verdict"] for v in verdicts] == ["clean", "clean"]
 
 
 def test_filter_sweepable_files_from_index_with_patch_unreadable(tmp_path: Path) -> None:
