@@ -72,21 +72,18 @@ def render_segments(source: str, segments: list[tuple[int, int, str, Style]], ba
     segments = sorted(segments, key=lambda x: (x[0], -(x[1] - x[0])))
 
     pos = 0
-    used_ranges: list[tuple[int, int]] = []
 
     for start, end, text, style in segments:
-        overlaps = any(
-            not (end <= used_start or start >= used_end)
-            for used_start, used_end in used_ranges
-        )
-        if overlaps:
+        # Segments are sorted by start and only accepted when they do not overlap
+        # an earlier one, so ``pos`` is the largest end accepted and ``start < pos``
+        # is exactly the overlap test.
+        if start < pos:
             continue
 
         if start > pos:
             result.append(source[pos:start], style=base_style)
 
         result.append(text, style=style)
-        used_ranges.append((start, end))
         pos = end
 
     if pos < len(source):

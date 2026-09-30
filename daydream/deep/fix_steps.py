@@ -25,7 +25,6 @@ from daydream.config import (
     DEFAULT_VERIFY_ALL,
     REVIEW_OUTPUT_FILE,
 )
-from daydream.config_file import _coerce_non_negative_float
 from daydream.deep.artifacts import (
     fix_failures_path,
     fix_footprint_path,
@@ -46,7 +45,7 @@ from daydream.deep.scope_issues import (
     _resolve_changed_files,
     enforce_authorized_fix_footprint,
 )
-from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
+from daydream.deep.settings import _resolve_config_value, _resolve_non_negative_float, _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
@@ -457,16 +456,16 @@ class QualityGateThresholds:
     @classmethod
     def from_config(cls, config: RunConfig) -> "QualityGateThresholds":
         return cls(
-            erosion_delta=_quality_gate_threshold(
+            erosion_delta=_resolve_non_negative_float(
                 config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
             ),
-            verbosity_delta=_quality_gate_threshold(
+            verbosity_delta=_resolve_non_negative_float(
                 config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
             ),
-            erosion_absolute=_quality_gate_threshold(
+            erosion_absolute=_resolve_non_negative_float(
                 config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
             ),
-            verbosity_absolute=_quality_gate_threshold(
+            verbosity_absolute=_resolve_non_negative_float(
                 config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
             ),
         )
@@ -520,23 +519,6 @@ def _quality_flagged(
     if verbosity_before is None and verbosity_after is not None and verbosity_after > thresholds.verbosity_absolute:
         return True
     return False
-
-
-def _quality_gate_threshold(config: RunConfig, attr: str, default: float) -> float:
-    """Resolve a quality-gate threshold (delta or absolute), degrading invalid values to *default*.
-
-    Mirrors ``_uncovered_sweep_max_files``: ``RunConfig`` field > file-config
-    scalar > default, then the same finite non-negative guard the file-config
-    parser applies (#329 / Finding 7). A negative threshold flags every
-    unchanged file (a zero delta exceeds it); a NaN/infinite one disables the
-    metric (every comparison against it is False) and writes a non-standard
-    ``NaN`` to JSON. Both degrade to the named default so a directly-constructed
-    ``RunConfig`` / ``DaydreamFileConfig`` cannot smuggle an invalid floor past
-    the parser.
-    """
-    value = _resolve_config_value(config, attr, default)
-    coerced = _coerce_non_negative_float(value)
-    return coerced if coerced is not None else default
 
 
 def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:

@@ -531,35 +531,26 @@ def _verify_snapshot_source_provenance(
             )
 
 
-def _load_import_document(root: Path, import_file: str) -> ImportDocument:
-    """Model-gate one fetched import through the shared strict loader.
-
-    The single definition of the import load+validate block shared by the
-    checksum and cross-document verifiers (see :func:`_load_authoring_document`):
-    resolution through :func:`resolve_authoring_path` plus
-    ``ImportDocument.model_validate`` on the strict JSON read. A
-    present-but-invalid import raises :class:`WorkspaceCorrupt` naming only
-    the import file -- the diagnostic never embeds the document body (the
-    CLI's no-disclosure contract).
-    """
-    return _load_authoring_document(
-        root,
-        import_file,
-        what="import",
-        loader=load_json_strict,
-        model=ImportDocument,
-    )
-
-
 def _import_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, ImportDocument]:
     """Load every fetched import once through the shared model gate.
 
-    ``_derived_state`` precomputes the validated set so the checksum and
-    cross-document verifiers consume the same models instead of each
+    Each fetched import is resolved through :func:`resolve_authoring_path` and
+    model-validated with ``ImportDocument.model_validate`` on the strict JSON
+    read (see :func:`_load_authoring_document`); a present-but-invalid import
+    raises :class:`WorkspaceCorrupt` naming only the import file -- the
+    diagnostic never embeds the document body (the CLI's no-disclosure
+    contract). ``_derived_state`` precomputes the validated set so the checksum
+    and cross-document verifiers consume the same models instead of each
     re-reading and re-model-validating every fetched import per call.
     """
     return {
-        pr.import_file: _load_import_document(root, pr.import_file)
+        pr.import_file: _load_authoring_document(
+            root,
+            pr.import_file,
+            what="import",
+            loader=load_json_strict,
+            model=ImportDocument,
+        )
         for pr in manifest.pull_requests
         if pr.import_state == "fetched" and pr.import_file
     }

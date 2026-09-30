@@ -12,6 +12,7 @@ from unittest.mock import Mock
 import pytest
 from rich.console import Console
 from rich.panel import Panel
+from rich.style import Style
 from rich.text import Text
 
 import daydream.agent as agent_mod
@@ -28,6 +29,7 @@ from daydream.ui import (
     prompt_user,
     render_exploration_summary,
 )
+from daydream.ui.colorize import render_segments
 from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
 from daydream.ui.tools import (
@@ -715,3 +717,24 @@ async def test_run_agent_command_display_preserves_replayable_input(
     assert "[REDACTED" in displayed
     assert "cd /srv/app" not in displayed
     assert tool_event.input == {"command": command}
+
+
+def test_render_segments_skips_span_contained_in_an_earlier_one() -> None:
+    """Longest-first ordering means a contained span is skipped, not double-styled."""
+    source = "abcdefgh"
+    wide = Style(bold=True)
+    narrow = Style(italic=True)
+    rendered = render_segments(
+        source,
+        [
+            (0, 4, source[0:4], wide),
+            (1, 3, source[1:3], narrow),
+            (4, 8, source[4:8], narrow),
+        ],
+        Style(),
+    )
+    assert rendered.plain == source
+    assert [(span.start, span.end, str(span.style)) for span in rendered.spans] == [
+        (0, 4, "bold"),
+        (4, 8, "italic"),
+    ]
