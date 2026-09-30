@@ -225,9 +225,10 @@ _SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
 
 # Literal-loop resolution (issue #1397). A shell ``for VAR in <words>; do``
 # binding is recognised only when every listed word is a plain literal (no
-# shell metacharacter) and the loop body is straight-line; everything else
-# falls through to the verbatim operand, which never matches a real file and
-# is swept (fail-open).
+# shell metacharacter) and the loop body is straight-line, i.e. its read
+# segments are the body's first or ``;``-separated commands; every ambiguous
+# shape contributes no binding, so no operand is ever credited from it and the
+# affected files stay uncovered and are swept (fail-open).
 _NON_LITERAL_CHARS = frozenset("$`*?[]{}~()|&<>;!\\\"'")
 _BODY_CONTROL_KEYWORDS = frozenset(
     {
@@ -245,8 +246,12 @@ _BODY_CONTROL_KEYWORDS = frozenset(
         "done",
         "select",
         "time",
+        "{",
+        "}",
         "|",
         "||",
+        "&&",
+        "&",
     }
 )
 _LOOP_VAR_RE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
@@ -441,10 +446,14 @@ def _is_literal_word(tok: str) -> bool:
 
 
 def _is_straight_line_body(body: list[str]) -> bool:
-    """Whether a loop body is free of nested control flow and substitutions.
+    """Whether a loop body is free of nested/conditional control flow.
 
-    Nested ``for``/``if``/``case``, command substitution and backticks make
-    the binding ambiguous (issue #1397); such a loop credits nothing.
+    A body qualifies only when every read segment is the body's first command
+    or is preceded by a ``;`` separator. Nested ``for``/``if``/``case``,
+    ``while``/``until``, brace groups, pipelines and the ``&&``/``&``/``||``
+    conditionals make the read conditionally reached, as do command
+    substitution and backticks; such a loop credits nothing (issue #1397,
+    requirement 6, whole-loop-or-nothing).
     """
     for tok in body:
         if tok in _BODY_CONTROL_KEYWORDS:
@@ -459,9 +468,13 @@ def _literal_loop_bindings(tokens: list[str]) -> dict[str, tuple[str, ...]]:
 
     Only a top-level loop (the ``for`` token at index 0 or immediately after a
     segment separator) with an all-literal, non-empty word list, a ``do`` and a
-    ``done``, and a straight-line body contributes a binding. Any deviation —
-    an empty list, a non-literal word, a missing ``do``/``done``, or nested
-    control flow — contributes no binding at all (issue #1397).
+    ``done``, and a straight-line body contributes a binding. Every ambiguous
+    shape credits nothing, per requirement 6: an empty list; a non-literal word
+    (command substitution, backticks, glob, ``$@``/``$*``, variable reference,
+    brace expansion, tilde); a missing ``do``/``done``; a nested ``for``, an
+    ``if``/``case`` body, a ``while``/``until`` loop; or a read reached through
+    ``&&``/``&``/``||``, a pipe, or a brace group. No partial credit is ever
+    granted (issue #1397).
     """
     bindings: dict[str, tuple[str, ...]] = {}
     n = len(tokens)

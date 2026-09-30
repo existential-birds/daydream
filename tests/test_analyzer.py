@@ -1153,6 +1153,27 @@ def test_files_read_resolves_literal_loop_bindings() -> None:
     ) == {"a.py", "b.py", "c.py"}
 
 
+def test_files_read_loop_binding_is_whole_loop_or_nothing() -> None:
+    # Issue #1397 AC2 / requirement 6: every ambiguous shape credits nothing
+    # for that call, so the affected files stay uncovered and reach the sweep.
+    for command in (
+        'for f in $(git ls-files); do nl -ba "$f"; done',            # command substitution
+        'for f in `ls`; do nl -ba "$f"; done',                       # backticks
+        'for f in src/*.py; do nl -ba "$f"; done',                   # glob
+        'for f in "$@"; do nl -ba "$f"; done',                       # "$@"
+        'for f in $FILES; do nl -ba "$f"; done',                     # variable list
+        'for f in {a,b}.py; do nl -ba "$f"; done',                   # brace expansion
+        'for f in ~/a.py; do nl -ba "$f"; done',                     # tilde
+        'for f in a.py b.py; do [ -f "$f" ] && nl -ba "$f"; done',   # && guard
+        'for f in a.py b.py; do if [ -f "$f" ]; then nl -ba "$f"; fi; done',
+        'for d in x y; do for f in a.py; do nl -ba "$f"; done; done',  # nested
+        'while read f; do nl -ba "$f"; done',                        # while
+        'for f in a.py b.py; do nl -ba "$g"; done',                  # unbound operand
+        'for f in a.py b.py; do nl -ba "src/$f/extra"; done',        # suffix after var
+    ):
+        assert _shell_reads(command) == set(), command
+
+
 def test_analyze_coverage_credits_a_completed_loop_read(tmp_path: Path) -> None:
     # The same resolution is visible to eval coverage analysis (shared seam).
     daydream_dir = tmp_path / ".daydream"
