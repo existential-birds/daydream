@@ -425,15 +425,11 @@ def _rollup_tokens(agg: _RunAgg) -> str:
     inp = agg.total_input
     cached = agg.total_cached
     out = agg.total_output
-    if inp <= 0:
-        return f"{_format_int(inp)} in → {_format_int(out)} out"
+    plain = f"{_format_int(inp)} in → {_format_int(out)} out"
+    if inp <= 0 or cached <= 0:
+        return plain
     pct = _format_cache_hit_pct(inp, cached)
-    if cached > 0 and pct is not None:
-        return (
-            f"{_format_int(inp)} in ({_format_int(cached)} cached, {pct} hit) "
-            f"→ {_format_int(out)} out"
-        )
-    return f"{_format_int(inp)} in → {_format_int(out)} out"
+    return f"{_format_int(inp)} in ({_format_int(cached)} cached, {pct} hit) → {_format_int(out)} out"
 
 
 def _render_phase_table(agg: _RunAgg) -> list[str]:

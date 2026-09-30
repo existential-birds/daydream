@@ -354,6 +354,21 @@ class _CountingClient:
         return {"match": True, "confidence": 0.9, "reasoning": "x"}
 
 
+def _run_verifier_case(
+    sr: Any, gold: Path, artifact: Path, tmp_path: Path, *, client: Any = None
+) -> tuple[Path, Any, Any]:
+    """Run the verifier over *gold*/*artifact* with a fresh ``tmp_path/'out'``.
+
+    Defaults to a :class:`_CountingClient`; returns ``(out, reward, client)`` so
+    callers can assert on both the reward and the client's recorded requests.
+    """
+    if client is None:
+        client = _CountingClient()
+    out = tmp_path / "out"
+    reward = sr.run_verifier(gold, artifact, out, client=client, env=judge_env())
+    return out, reward, client
+
+
 def _gold_list(n: int = 2, *, case_id: str = "case-x", locationless: bool = False) -> list[dict[str, Any]]:
     out = []
     for i in range(n):
@@ -561,13 +576,8 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module: Any, 
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(oracle))
 
-    out = tmp_path / "out"
-    reward = sr.run_verifier(
-        gold_path,
-        artifact_path,
-        out,
-        client=MatchClient(),
-        env=judge_env(),
+    _, reward, _ = _run_verifier_case(
+        sr, gold_path, artifact_path, tmp_path, client=MatchClient()
     )
     assert reward.reward == 1.0 and reward.tp == 2 and reward.clean_pass == 0
 
@@ -623,13 +633,8 @@ def test_back_scores_legacy_task_without_source_case_id(sr_module: Any, tmp_path
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="legacy")))
 
-    out = tmp_path / "out"
-    reward = sr.run_verifier(
-        gold_path,
-        artifact_path,
-        out,
-        client=MatchClient(),
-        env=judge_env(),
+    _, reward, _ = _run_verifier_case(
+        sr, gold_path, artifact_path, tmp_path, client=MatchClient()
     )
     assert reward.reward == 1.0 and reward.verifier_error == 0 and reward.tp == 2
 
@@ -840,7 +845,6 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module: Any, tmp_
     sr = sr_module
     gold_path = tmp_path / "g.json"
     art_path = tmp_path / "r.json"
-    out = tmp_path / "out"
     oversized_body = "x" * 12_000  # well over the verifier's 8 KiB body bound
     gold = [{**_finding(title="t" * 500, body=oversized_body, path="p" * 200), "finding_id": "0" * 64}]
     gold_path.write_text(json.dumps(gold))
@@ -852,9 +856,7 @@ def test_oversized_body_fails_whole_task_with_no_judge_call(sr_module: Any, tmp_
         "findings": [cand],
     }))
 
-    client = _CountingClient()
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
+    out, reward, client = _run_verifier_case(sr, gold_path, art_path, tmp_path)
     details = _assert_scored_zero(out, reward)
     assert client.requests == 0  # no judge call
     assert details["request_counts"]["requests"] == 0
@@ -866,7 +868,6 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module: Any
     sr = sr_module
     gold_path = tmp_path / "g.json"
     art_path = tmp_path / "r.json"
-    out = tmp_path / "out"
     # _DENSE_BODY is under the verifier's 8 KiB body byte bound, so the evaluator
     # escapes it -- but the fused rendering must not let that inflate the pair
     # past the cap and fail the whole task. A legal pair is judged, never voided.
@@ -883,9 +884,7 @@ def test_dense_but_verifier_legal_body_is_judged_not_failed_whole(sr_module: Any
         "findings": [cand],
     }))
 
-    client = _CountingClient()
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, art_path, out, client=client, env=env)
+    out, reward, client = _run_verifier_case(sr, gold_path, art_path, tmp_path)
     assert reward.verifier_error == 0  # verifier-legal dense pair is judged
     assert client.requests == 1         # not failed whole
     details = json.loads((out / "reward-details.json").read_text())
@@ -901,10 +900,7 @@ def test_run_verifier_rejects_whitespace_padded_over_one_mib(sr_module: Any, tmp
     compact = json.dumps(_candidate_artifact(sr, n=1)).encode("utf-8")
     # pad ABOVE the 1 MiB cap so the raw byte size is the only signal
     artifact_path.write_bytes(b" " * (sr.verifier_core.MAX_ARTIFACT_BYTES + 1 - len(compact)) + compact)
-    out = tmp_path / "out"
-    client = _CountingClient()
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
+    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
     _assert_scored_zero(out, reward)
 
 
@@ -933,10 +929,7 @@ def test_run_verifier_rejects_cross_case_replay(sr_module: Any, tmp_path: Path) 
     _write_metadata(gold_path, case_id="task-A")
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, case_id="task-B", n=1)))
-    out = tmp_path / "out"
-    client = _CountingClient()
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
+    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
     _assert_scored_zero(out, reward)
 
 
@@ -949,10 +942,7 @@ def test_run_verifier_rejects_ref_mismatch(sr_module: Any, tmp_path: Path) -> No
     art = _candidate_artifact(sr, n=1)
     art["head_ref"] = "feature/x"  # not the bound head ref
     artifact_path.write_text(json.dumps(art))
-    out = tmp_path / "out"
-    client = _CountingClient()
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
+    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
     _assert_scored_zero(out, reward)
 
 
@@ -968,10 +958,7 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module: Any, tmp_pa
     corrupted = bytearray(gold.encode("utf-8"))
     corrupted[-1] ^= 1
     gold_path.write_bytes(bytes(corrupted))
-    out = tmp_path / "out"
-    client = _CountingClient()
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, artifact_path, out, client=client, env=env)
+    out, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path)
     assert reward.verifier_error == 1 and reward.reward == 0.0
     _assert_infra_zero(out)
 
@@ -1174,12 +1161,10 @@ def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module: Any, tm
     _write_metadata(gold_path, case_id="c")
     art_path = tmp_path / "r.json"
     art_path.write_text(json.dumps(_candidate_artifact(sr, case_id="c", n=1)))
-    out = tmp_path / "out"
     class Exploding:
         async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> None:
             raise RuntimeError("sk-ant-leakme123 boom %s" % ("y" * 1000))
-    env = judge_env()
-    reward = sr.run_verifier(gold_path, art_path, out, client=Exploding(), env=env)
+    out, reward, _ = _run_verifier_case(sr, gold_path, art_path, tmp_path, client=Exploding())
     # unexpected runtime exception no longer escapes to a bare exit
     assert reward.verifier_error == 1 and reward.reward == 0.0
     details = _assert_infra_zero(out)

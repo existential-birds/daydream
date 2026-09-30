@@ -105,7 +105,7 @@ class BlockingStdout:
             self._waiting = False
 
 
-def blocking_cli_process(stdout: object) -> MagicMock:
+def cli_process(stdout: object) -> MagicMock:
     """A mocked subprocess with the full write/wait/terminate surface."""
     process = MagicMock()
     process.stdout = stdout
@@ -127,9 +127,9 @@ async def assert_concurrent_streams_isolated(backend: Any, first_lines: list[str
     first ``readline`` must block (:class:`BlockingStdout`) while the first run
     still reaches its TurnEnd/Cost, proving no shared stdout reader.
     """
-    first_proc = blocking_cli_process(ImmediateStdout(first_lines))
+    first_proc = cli_process(ImmediateStdout(first_lines))
     second_stdout = BlockingStdout()
-    second_proc = blocking_cli_process(second_stdout)
+    second_proc = cli_process(second_stdout)
     procs = iter([first_proc, second_proc])
 
     async def fake_exec(*args: object, **kwargs: object) -> MagicMock:

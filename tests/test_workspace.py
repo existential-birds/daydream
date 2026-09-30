@@ -759,11 +759,23 @@ async def test_base_unknown_ref_raises_reworded(tmp_path: Path) -> None:
 
 
 
+def _dest(tmp_path: Path) -> Path:
+    """Create the empty ``ephemeral`` copy destination under *tmp_path*."""
+    dest = tmp_path / "ephemeral"
+    dest.mkdir()
+    return dest
+
+
+def _ignore(repo: Path, *patterns: str, message: str = "ignore env") -> None:
+    """Write *patterns* to the repo's ``.gitignore`` and commit it."""
+    (repo / ".gitignore").write_text("".join(f"{pattern}\n" for pattern in patterns))
+    _git(repo, "add", ".gitignore")
+    _commit(repo, message)
+
+
 def test_copy_default_only_copies_gitignored(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".gitignore").write_text(".env\n.env.local\n")
-    _git(repo, "add", ".gitignore")
-    _commit(repo, "ignore env")
+    _ignore(repo, ".env", ".env.local")
 
     (repo / ".env").write_text("SECRET=1\n")
     # Tracked, non-default-glob name: must not be copied.
@@ -771,8 +783,7 @@ def test_copy_default_only_copies_gitignored(tmp_path: Path) -> None:
     _git(repo, "add", ".env.committed")
     _commit(repo, "tracked env-style")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
     rel = {str(p) for p in copied}
@@ -789,8 +800,7 @@ def test_copy_default_skips_tracked_env(tmp_path: Path) -> None:
     _git(repo, "add", ".env")
     _commit(repo, "track env")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
     assert copied == []
@@ -800,9 +810,7 @@ def test_copy_default_skips_tracked_env(tmp_path: Path) -> None:
 
 def test_copy_pyproject_override(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".gitignore").write_text(".env\nlocal/\n")
-    _git(repo, "add", ".gitignore")
-    _commit(repo, "ignore env+local")
+    _ignore(repo, ".env", "local/", message="ignore env+local")
 
     (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["custom.cfg", "local/secrets.toml"]\n')
     (repo / "custom.cfg").write_text("k=v\n")
@@ -811,8 +819,7 @@ def test_copy_pyproject_override(tmp_path: Path) -> None:
     # And a .env that the override should *not* pull in.
     (repo / ".env").write_text("SHOULD_BE_SKIPPED=1\n")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
     rel = {str(p) for p in copied}
@@ -827,16 +834,13 @@ def test_copy_pyproject_override(tmp_path: Path) -> None:
 def test_copy_pyproject_non_table_tool_falls_back_to_defaults(tmp_path: Path) -> None:
     """A valid TOML with a non-table ``tool`` value must not raise; defaults apply."""
     repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".gitignore").write_text(".env\n")
-    _git(repo, "add", ".gitignore")
-    _commit(repo, "ignore env")
+    _ignore(repo, ".env")
 
     # `tool` is a scalar string here — a chained .get() would raise AttributeError.
     (repo / "pyproject.toml").write_text('tool = "not-a-table"\n')
     (repo / ".env").write_text("SECRET=1\n")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(repo, dest, extra=None, skip=False)
     rel = {str(p) for p in copied}
@@ -853,9 +857,7 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(
     escape_kind: str,
 ) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".gitignore").write_text(".env\n")
-    _git(repo, "add", ".gitignore")
-    _commit(repo, "ignore env")
+    _ignore(repo, ".env")
     (repo / ".env").write_text("E=1\n")
     outside = tmp_path / "outside.txt"
     outside.write_text("KEEP\n")
@@ -868,8 +870,7 @@ def test_copy_rejects_absolute_and_parent_entries_before_copy(
         (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = [".env"]\n')
         extra = [Path(entry)]
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     with pytest.raises(WorkspaceCopyPathError, match="must be relative and must not contain"):
         copy_files_into_ephemeral(repo, dest, extra=extra, skip=False)
@@ -890,8 +891,7 @@ def test_copy_rejects_resolved_symlink_escape(tmp_path: Path, root_kind: str) ->
     (repo / "pyproject.toml").write_text('[tool.daydream.workspace]\ncopy = ["sub/leak.txt"]\n')
     (repo / "sub").mkdir()
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
     (dest / "sub").mkdir()
 
     if root_kind == "source":
@@ -928,8 +928,7 @@ def test_copy_allows_source_symlink_resolving_inside_source(
     # A RELATIVE symlink whose target stays inside the source root.
     (repo / "inside-link.cfg").symlink_to("actual.cfg")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(repo, dest, extra=[Path("inside-link.cfg")], skip=False)
 
@@ -941,15 +940,12 @@ def test_copy_allows_source_symlink_resolving_inside_source(
 
 def test_copy_extra_paths_additive(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".gitignore").write_text(".env\nworkspace.json\n")
-    _git(repo, "add", ".gitignore")
-    _commit(repo, "ignore env+workspace")
+    _ignore(repo, ".env", "workspace.json", message="ignore env+workspace")
 
     (repo / ".env").write_text("E=1\n")
     (repo / "workspace.json").write_text("{}\n")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(
         repo,
@@ -965,13 +961,10 @@ def test_copy_extra_paths_additive(tmp_path: Path) -> None:
 
 def test_copy_skip_returns_empty(tmp_path: Path) -> None:
     repo, _ = _make_repo_with_origin(tmp_path)
-    (repo / ".gitignore").write_text(".env\n")
-    _git(repo, "add", ".gitignore")
-    _commit(repo, "ignore env")
+    _ignore(repo, ".env")
     (repo / ".env").write_text("E=1\n")
 
-    dest = tmp_path / "ephemeral"
-    dest.mkdir()
+    dest = _dest(tmp_path)
 
     copied = copy_files_into_ephemeral(repo, dest, extra=[Path("anything.cfg")], skip=True)
     assert copied == []

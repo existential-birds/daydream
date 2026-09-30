@@ -8,7 +8,9 @@ the Codex and Pi backends drive via
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
+
+from tests.harness.fake_cli_process import ImmediateStdout, cli_process
 
 
 class GapThenBlockingStdout:
@@ -39,30 +41,9 @@ def make_mock_process(lines: list[str], *, writable_stdin: bool) -> MagicMock:
     Returns:
         A ``MagicMock`` mimicking ``asyncio.subprocess.Process``.
     """
-
-    class _MockStdout:
-        def __init__(self) -> None:
-            self._lines = iter(lines)
-
-        async def readline(self) -> bytes:
-            try:
-                line = next(self._lines)
-                return (line + "\n").encode()
-            except StopIteration:
-                return b""
-
-    process = MagicMock()
-    process.stdout = _MockStdout()
-    if writable_stdin:
-        process.stdin = MagicMock()
-        process.stdin.write = MagicMock()
-        process.stdin.close = MagicMock()
-    else:
+    process = cli_process(ImmediateStdout(lines))
+    if not writable_stdin:
         process.stdin = None
-    process.wait = AsyncMock(return_value=0)
-    process.returncode = 0
-    process.terminate = MagicMock()
-    process.kill = MagicMock()
     return process
 
 

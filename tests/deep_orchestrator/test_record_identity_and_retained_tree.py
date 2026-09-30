@@ -18,7 +18,6 @@ from tests.deep_orchestrator.support import (
     _high_record,
     _item_uids,
     _merged_items,
-    _panel_text,
     _prime_source_uid_merge_resume,
     _prime_uid_merge_resume,
     _provenance_item,
@@ -29,6 +28,7 @@ from tests.deep_orchestrator.support import (
     _uid_records,
     _uncovered_sweep_target,
 )
+from tests.harness.console import collapse_panel_text as _panel_text
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
