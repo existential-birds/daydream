@@ -117,7 +117,7 @@ def insert_diagrams_section(report_text: str, blocks: str) -> str:
     return f"{text}\n" if trailing_newline else text
 
 
-def render_report(items: list[dict[str, Any]], *, diagram_blocks: str | None = None) -> str:
+def render_report(items: list[dict[str, Any]]) -> str:
     """Render canonical items into the deep-review markdown report.
 
     Groups items by ``lens`` and emits, in order: ``## Structural Review``
@@ -128,17 +128,9 @@ def render_report(items: list[dict[str, Any]], *, diagram_blocks: str | None = N
     ``N. [FILE:LINE] DESCRIPTION``, unbolded, where ``N`` is the item's
     canonical ``id``.
 
-    When ``diagram_blocks`` is given, a ``## Diagrams`` section carrying the
-    rendered grounded-diagram blocks is inserted directly after ``# Review``,
-    via the same :func:`insert_diagrams_section` the diagram step re-applies to
-    the on-disk report -- one code path, so the two can never drift.
-
     Args:
         items: Canonical merged finding items, each carrying ``id``, ``lens``,
             ``file``, ``line``, and ``description``.
-        diagram_blocks: Rendered diagram blocks, or ``None``/``""`` for no
-            diagram section. Keyword-only with a default so no existing call
-            site changes.
 
     Returns:
         The rendered markdown report as a string.
@@ -161,8 +153,6 @@ def render_report(items: list[dict[str, Any]], *, diagram_blocks: str | None = N
             sections.append(f"{title}\n{body}")
 
     text = "\n\n".join(sections) + "\n"
-    if diagram_blocks is not None:
-        text = insert_diagrams_section(text, diagram_blocks)
     return text
 
 

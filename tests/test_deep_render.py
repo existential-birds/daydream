@@ -19,6 +19,7 @@ def test_render_places_structural_above_issues_and_keeps_all_lenses() -> None:
     assert "[cross-stack]" in md                       # cross-stack prefix preserved
     assert "big.py" in md and "a.py" in md and "b.py" in md   # nothing dropped
     assert "## Wonder Findings" in md and "w.py" in md  # wonder items are shipped (issue #741)
+    assert "## Diagrams" not in md  # no diagrams section unless explicitly inserted
 
 
 # ---------------------------------------------------------------------------
@@ -35,22 +36,12 @@ def _items() -> list[dict[str, Any]]:
             _item(2, "cross-stack", "b.py", 2, "high", "drift")]
 
 
-def test_render_report_is_byte_identical_without_diagram_blocks() -> None:
-    plain = render_report(_items())
-    assert render_report(_items(), diagram_blocks=None) == plain
-    assert render_report(_items(), diagram_blocks="") == plain
-    assert render_report(_items(), diagram_blocks="  \n\n ") == plain
-    assert "## Diagrams" not in plain
-
-
 def test_render_report_puts_the_diagrams_section_between_review_and_issues() -> None:
-    report = render_report(_items(), diagram_blocks=_BLOCKS)
+    report = insert_diagrams_section(render_report(_items()), _BLOCKS)
     assert report.split("\n")[:3] == ["# Review", "", "## Diagrams"]
     assert report.index("## Diagrams") < report.index("## Issues")
     assert f"## Diagrams\n{_BLOCKS}\n\n## Issues" in report
     assert report.endswith("\n")
-    # The kwarg and the textual re-apply are one code path.
-    assert report == insert_diagrams_section(render_report(_items()), _BLOCKS)
 
 
 def test_insert_diagrams_section_is_idempotent_and_replaces_the_existing_section() -> None:

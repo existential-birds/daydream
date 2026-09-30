@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -18,6 +19,7 @@ from tests.deep_orchestrator.support import (
     _single_fix_calls_for,
 )
 from tests.harness.fake_clock import FakeClock
+from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -35,6 +37,44 @@ _STRUCTURAL_FINDING = {
 }
 
 
+def _install_grouped_stub(
+    monkeypatch: pytest.MonkeyPatch,
+    target: Path,
+    *,
+    clock_value: float = 10_000.0,
+    per_event_s: float = 200.0,
+    group_wall_s: float = 600.0,
+) -> StubBackend:
+    """Install the stub backend with a FakeClock-driven group deadline.
+
+    Every test here shares the same clocked-stub setup; the clock value, the
+    per-event advance, and the group deadline are the only knobs.
+    """
+    _silence(monkeypatch)
+    fake = FakeClock(monotonic_value=clock_value).install(monkeypatch)
+    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", group_wall_s)
+    stub = _install_stub_backend(monkeypatch, target)
+    stub.clock_advance = fake.advance
+    stub.clock_advance_per_event_s = per_event_s
+    return stub
+
+
+async def _run_fix_loop(
+    target: Path,
+    tmp_path: Path,
+    make_config: MakeConfig,
+    **config_kwargs: Any,
+) -> Path:
+    """Run the fix loop under a wall-clock guard, asserting a real exit code."""
+    traj = tmp_path / "trajectory.json"
+    with anyio.fail_after(30):
+        exit_code = await run(
+            make_config(target, trajectory_path=traj, assume="yes", output_mode="loop", **config_kwargs)
+        )
+    assert isinstance(exit_code, int)
+    return traj
+
+
 async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
     multi_stack_target: Path,
     tmp_path: Path,
@@ -44,24 +84,15 @@ async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
 ) -> None:
     """(15a) retry backoff + backend time for one invocation cannot exceed the budget."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
-    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target, per_event_s=250.0)
     stub.merge_items = [_merge_item(1, "App.tsx", "high")]
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 250.0
     stub.fix_retryable_failures = 99  # a failing ladder that must be cut, not exhausted
     stub.fix_retryable_error = PiError("429 rate limit", retryable=True)
     mute_side_effects()
 
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
-
-    assert isinstance(exit_code, int)
+    await _run_fix_loop(multi_stack_target, tmp_path, make_config)
     assert len([c for c in stub.calls if c["prompt"].lower().startswith("fix this issue")]) == 3
     recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
     assert recorded["App.tsx"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
@@ -76,20 +107,12 @@ async def test_run_cuts_a_single_item_group_at_the_group_deadline(  # (15b)
 ) -> None:
     """(15b) A one-call group is cut at the GROUP deadline, and the turn is not progress."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
-    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "App.tsx", "high")]  # exactly one finding -> one call
     stub.runaway_single_fix_file = "App.tsx"
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 200.0
     mute_side_effects()
 
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
-    assert isinstance(exit_code, int)
+    traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
 
     singles = _single_fix_calls_for(stub, "App.tsx")
     assert len(singles) == 1  # exactly one call, no fallback loop
@@ -111,20 +134,12 @@ async def test_run_cuts_a_batched_group_at_the_group_deadline(  # (15c/15f)
 ) -> None:
     """(15c/15f) remaining < scaled call budget: the batch dies at the group deadline, zero fallback."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
-    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)]
     stub.runaway_batched_fix_file = "api.py"
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 200.0
     mute_side_effects()
 
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
-    assert isinstance(exit_code, int)
+    traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
 
     assert _single_fix_calls_for(stub, "api.py") == []  # zero fallback fixes
     recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
@@ -146,21 +161,13 @@ async def test_run_serial_fallback_runs_under_the_same_group_deadline(  # (15d)
 ) -> None:
     """A batched failure (not a deadline) falls back per-finding, cut at the SAME deadline."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
-    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(i, "api.py", "high") for i in range(1, 7)]
     stub.fail_batched_fix_file = "api.py"  # batched raises instantly: fallback DOES run
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 200.0  # only the per-finding serial turns burn time
     mute_side_effects()
 
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+    traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
 
-    assert isinstance(exit_code, int)
     api_singles = _single_fix_calls_for(stub, "api.py")
     group_size = _batched_group_size(stub, "api.py")
     assert 0 < len(api_singles) < group_size  # cut mid-group, not all N
@@ -185,18 +192,13 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
 ) -> None:
     """One group's deadline stop leaves the sibling group's work intact."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=10_000.0).install(monkeypatch)
-    monkeypatch.setattr("daydream.deep.fix_steps.DEFAULT_GROUP_MAX_WALL_S", 600.0)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "App.tsx", "high"), _merge_item(2, "api.py", "high")]
     # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
     # otherwise fold into api.py and make it a two-item batched group, which by
     # design does not take the single-turn runaway branch.
     stub.parse_by_stack = {"structure": _STRUCTURAL_FINDING}
     stub.runaway_single_fix_file = "api.py"  # the group that must expire
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 200.0
     # Hold the expiring group's burst until the sibling's fix turn has fully
     # returned, so the shared clock cannot be burned while the healthy group is
     # still working (the fix-footprint guard removes the stub's sentinels, so the
@@ -204,11 +206,8 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
     stub.runaway_gate = lambda: "App.tsx" in stub.completed_fix_files
     mute_side_effects()
 
-    traj = tmp_path / "trajectory.json"
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
+    traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
 
-    assert isinstance(exit_code, int)
     assert "App.tsx" in stub.completed_fix_files  # sibling's fix turn returned
     assert len(_single_fix_calls_for(stub, "App.tsx")) == 1  # and its turn completed
     recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
@@ -226,14 +225,12 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
 ) -> None:
     """The file-config value reaches every run_agent call the fix group owns."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
     (multi_stack_target / ".daydream.toml").write_text(
         "retry_recovery_allowance_s = 25\n", encoding="utf-8"
     )
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target, clock_value=100_000.0, per_event_s=20.0)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
     # otherwise fold into api.py and make it a two-item batched group, whose fix
@@ -245,18 +242,13 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     # ladders before the allowance binds
     stub.fix_retryable_failures = 20
     stub.fix_retryable_error = PiError("503 Service Unavailable", retryable=True, category="SERVER_ERROR")
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 20.0     # each retryable attempt burns 20 s of the allowance
     mute_side_effects()
-    traj = tmp_path / "trajectory.json"
 
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(
-            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
-        ))
+    traj = await _run_fix_loop(
+        multi_stack_target, tmp_path, make_config,
+        file_config=load_file_config(multi_stack_target),
+    )
 
-    assert isinstance(exit_code, int)
     stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
     assert stops, "the ladder stop was not recorded"
     assert any(e["metadata"]["retry_stop_reason"] == "retry_recovery_allowance_exhausted" for e in stops)
@@ -278,11 +270,9 @@ async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_comple
 ) -> None:
     """A run-scoped circuit bounds the fix fan-out's ladders; a completed sibling is not restarted."""
 
-    _silence(monkeypatch)
-    fake = FakeClock(monotonic_value=100_000.0).install(monkeypatch)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub = _install_grouped_stub(monkeypatch, multi_stack_target, clock_value=100_000.0, per_event_s=1.0)
     # api.py's fix ladder always fails retryably; App.tsx's fix succeeds. Distinct
     # file groups, so both reach the fix fan-out.
     stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
@@ -299,16 +289,10 @@ async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_comple
     # the SAME run-scoped circuit and that the circuit bounds the ladder. Task 8's
     # _ending_backend unit test owns the concurrent-share proof.
     stub.fanout_concurrency = 1
-    stub.clock_advance = fake.advance
-    stub.clock_advance_per_event_s = 1.0
-    traj = tmp_path / "trajectory.json"
     mute_side_effects()
 
-    with anyio.fail_after(30):
-        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes",
-                                         output_mode="loop"))
+    traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
 
-    assert isinstance(exit_code, int)
     stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
     # One coordinated ladder, not one per sibling: total dispatches stay at the
     # circuit threshold plus the single probe.

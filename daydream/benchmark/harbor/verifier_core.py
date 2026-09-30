@@ -610,23 +610,17 @@ def _score_axes(
         g_path = _finding_component(g, "path")
         g_start = _finding_component(g, "start_line")
         g_end = _finding_component(g, "end_line")
-        c_path = _finding_component(c, "path")
-        c_start = _finding_component(c, "start_line")
-        c_end = _finding_component(c, "end_line")
-        if g_path is not None and c_path is not None \
-                and g_start is not None and c_start is not None \
-                and g_end is not None and c_end is not None:
+        if g_path is not None and c.path is not None \
+                and g_start is not None and c.start_line is not None \
+                and g_end is not None and c.end_line is not None:
             tier = location_tier(
                 cast("str", g_path), cast("int", g_start), cast("int", g_end),
-                cast("str", c_path), cast("int", c_start), cast("int", c_end),
+                c.path, c.start_line, c.end_line,
                 LOCATION_TOLERANCE,
             )
             loc_tiers[tier] += 1
             loc_credits.append(1.0 if tier in ("exact", "near") else 0.0)
-        distance = severity_distance(
-            cast("str | None", _finding_component(g, "severity")),
-            cast("str | None", _finding_component(c, "severity")),
-        )
+        distance = severity_distance(cast("str | None", _finding_component(g, "severity")), c.severity)
         if distance is not None:
             if distance == 0:
                 sev_exact += 1
