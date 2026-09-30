@@ -1,4 +1,6 @@
 """Tests for daydream.config module."""
+import json
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -11,6 +13,7 @@ from daydream.config import (
     DEFAULT_DIAGRAM_MIN_CODE_FILES,
     DEFAULT_DIAGRAM_MIN_MODULES,
     DEFAULT_PI_MODEL,
+    DEFAULT_VERIFY_ALL,
     DIAGRAM_KINDS,
     DIAGRAM_LABEL_CAP_EDGE,
     DIAGRAM_LABEL_CAP_MESSAGE,
@@ -295,3 +298,35 @@ def test_diagram_phase_is_mid_tier_on_both_model_backends() -> None:
     assert PHASE_DEFAULT_MODELS["claude"]["diagram"] == PHASE_DEFAULT_MODELS["claude"]["intent"]
     assert PHASE_DEFAULT_MODELS["codex"]["diagram"] == PHASE_DEFAULT_MODELS["codex"]["intent"]
     assert DEEP_PHASE_DEFAULT_EFFORT["codex"]["diagram"] == "medium"
+
+
+def _write_pyproject(target: Path, **keys: object) -> None:
+    """Write a ``[tool.daydream]`` pyproject.toml with the supplied keys."""
+    lines = ["[tool.daydream]"]
+    for key, value in keys.items():
+        lines.append(f"{key} = {json.dumps(value)}")
+    (target / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_the_optimised_selection_is_the_default_once_the_evidence_gate_is_green() -> None:
+    """#735: the report's gate turned green, so selective verification is the default.
+
+    ``uv run python -m daydream.eval.latency_report --corpus
+    tests/fixtures/latency_profiles/manifest.json`` emits ``flip_allowed: true``
+    on the contradiction counter and recall-anchor axes; the conservative mode
+    stays reachable via ``verify_all = true``.
+    """
+    assert DEFAULT_VERIFY_ALL is False
+
+
+def test_verify_all_stays_reachable_as_the_conservative_escape_hatch(tmp_path: Path) -> None:
+    """#735: an explicit ``verify_all = true`` in the config file restores today's behavior."""
+    from daydream.config_file import load_file_config
+    from daydream.deep.fix_steps import _resolve_verify_selection
+    from daydream.runner import RunConfig
+
+    _write_pyproject(tmp_path, verify_all=True)
+    resolved = _resolve_verify_selection(
+        RunConfig(target=str(tmp_path), file_config=load_file_config(tmp_path))
+    )
+    assert resolved.verify_all is True

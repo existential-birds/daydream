@@ -148,7 +148,8 @@ OPT_IN_GUARD_EXEMPTIONS: dict[str, str] = {
     ),
     "verify_all": (
         "sentinel tiers with an explicit False authoritative and a built-in default of "
-        "True; uses _resolve_config_value, not _resolve_opt_in; pinned by "
+        "False (flipped once the verify-selection report gate went green); uses "
+        "_resolve_config_value, not _resolve_opt_in; pinned by "
         "test_verify_all_reproduces_the_conservative_item_set"
     ),
 }

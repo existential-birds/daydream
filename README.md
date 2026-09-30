@@ -486,6 +486,43 @@ projection, never a second measurement. `flip_allowed` turns on the
 contradiction counter and the recall anchor alone -- latency is reported, not
 gated.
 
+### Recommendation verifier settings
+
+Selection-gated recommendation verification is the default: the verifier is
+rendered only the findings that genuinely need an independent second pass
+(mandatory risk categories, contested or weakly-evidenced adjudications, and
+unadjudicated findings). The two knobs are config-file-only:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `verify_all` | `false` | `true` restores the conservative mode exactly: every non-exempt finding is verifier-rendered, and no finding is selection-skipped. |
+| `extra_risk_categories` | `[]` | Risk categories appended to the mandatory vocabulary. Additive only -- it can widen selection, never narrow it. |
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+verify_all = false                 # the default; true restores today's conservative verifier
+extra_risk_categories = ["security"]
+
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+verify_all = false
+extra_risk_categories = ["security"]
+```
+
+Precedence is the standard one: **CLI (none for these keys) > config file > built-in
+default**. An absent key uses the built-in default; `verify_all = true` in
+either file restores conservative verification exactly. An unrecognised
+`extra_risk_categories` entry **fails the run loudly** before the verify pass
+rather than silently widening or narrowing selection. The mandatory category
+vocabulary is the one shared with the diff-routing risk floors (`security`,
+`concurrency`, `persistence`, `interface`, `migration`).
+
+The default was flipped only after the evidence gate above went green: the
+report command
+`uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json`
+emits `flip_allowed: true` on the contradiction-counter and recall-anchor axes
+(its latency figures are a labelled projection, reported but not gated).
+
 ### Supervisor settings
 
 Supervisor settings are config-file-only:

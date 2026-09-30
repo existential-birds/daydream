@@ -204,7 +204,8 @@ def resolve_selection_config(
 ) -> SelectionConfig:
     """Resolve the config-file knobs into a frozen :class:`SelectionConfig`.
 
-    An absent ``verify_all`` degrades to the conservative built-in default; a
+    An absent ``verify_all`` degrades to ``True`` here, the fail-safe for a
+    direct caller that has not resolved the run-level ``DEFAULT_VERIFY_ALL``; a
     non-bool is treated as absent. Every extra category is validated here so an
     unrecognised name fails loudly (:class:`UnknownRiskCategoryError`) before
     any backend call rather than silently widening or narrowing selection.

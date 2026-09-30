@@ -339,13 +339,16 @@ DEFAULT_REVIEW_CACHE_MAX_ENTRIES: int = 1024
 DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
 DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 
-# Issue #735: selection-gated recommendation verification. Conservative by
-# default — today's "verify every non-exempt finding" behaviour — until the
-# verify-selection comparison report's evidence gate flips it. ``verify_all =
-# true`` in either config file restores that behaviour exactly;
-# ``extra_risk_categories`` only adds to the mandatory risk vocabulary, never
-# removes from it. Both are config-file keys with no CLI flag.
-DEFAULT_VERIFY_ALL: bool = True
+# Issue #735: selection-gated recommendation verification. The optimised,
+# selection-gated mode is the default as of the evidence gate going green:
+# ``uv run python -m daydream.eval.latency_report --corpus
+# tests/fixtures/latency_profiles/manifest.json`` emits ``flip_allowed: true``
+# on the contradiction-counter and recall-anchor axes (latency is reported, not
+# gated). ``verify_all = true`` in either config file restores the conservative
+# "verify every non-exempt finding" behaviour exactly; ``extra_risk_categories``
+# only adds to the mandatory risk vocabulary, never removes from it. Both are
+# config-file keys with no CLI flag.
+DEFAULT_VERIFY_ALL: bool = False
 DEFAULT_EXTRA_RISK_CATEGORIES: tuple[str, ...] = ()
 
 # Structural-maintainability meta-stack. Deep mode appends a synthetic
