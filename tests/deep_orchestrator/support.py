@@ -341,6 +341,40 @@ def _uncovered_sweep_target(tmp_path: Path) -> Path:
     return project
 
 
+def _batched_loop_sweep_target(tmp_path: Path) -> Path:
+    """Git repo whose diff has four files: three Python and one notes file.
+
+    ``main.py`` is read by an ordinary per-file ``Read``; ``loop_one.py`` and
+    ``loop_two.py`` are read together by one literal-shell-loop command (the
+    batched read of issue #1397); ``notes.txt`` is an ambiguous-extension file
+    routed to the generic stack and left unread by every per-stack reviewer.
+    Every file's hunk changes at least 5 lines, clearing the sweep's
+    ``uncovered_sweep_min_hunk_lines`` floor, so the only dispatch the sweep
+    can make is for ``notes.txt``.
+    """
+    project = tmp_path / "batched_loop_sweep_target"
+    project.mkdir()
+    for name in ("main.py", "loop_one.py", "loop_two.py"):
+        stem = name.replace(".", "_")
+        (project / name).write_text(
+            "".join(f"old_{stem}_{i} = {i}\n" for i in range(6))
+        )
+    (project / "notes.txt").write_text("placeholder\n")
+    _init_repo(project)
+    _git(project, "add", ".")
+    _commit(project, "init")
+    _git(project, "checkout", "-b", "feature")
+    for name in ("main.py", "loop_one.py", "loop_two.py"):
+        stem = name.replace(".", "_")
+        (project / name).write_text(
+            "".join(f"new_{stem}_{i} = {i}\n" for i in range(6))
+        )
+    (project / "notes.txt").write_text("".join(f"note{i}\n" for i in range(1, 7)))
+    _git(project, "add", ".")
+    _commit(project, "change")
+    return project
+
+
 def _install_uncovered_sweep_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> _StubBackend:
     """Leave notes.txt unread by per-stack agents so the sweep can exercise it."""
     stub = _install_stub_backend(monkeypatch, target)

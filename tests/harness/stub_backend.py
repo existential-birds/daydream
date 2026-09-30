@@ -267,6 +267,16 @@ class StubBackend:
         # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
         # leave one diff file unread by every reviewer).
         self.per_stack_unread: frozenset[str] = frozenset()
+        # Issue #1397: when set, a per-stack/generic branch whose scope
+        # contains any file in ``per_stack_loop_reads`` emits exactly one
+        # completed ``Bash`` command (this string) reading the loop-listed
+        # files together, and skips the per-file ``Read`` for those files.
+        # ``None`` (the default) emits no batched command, leaving the event
+        # stream byte-identical to today.
+        self.per_stack_read_command: str | None = None
+        # Files in a stack's scope read by ``per_stack_read_command`` rather
+        # than one ``Read`` each. Empty by default (no batched read).
+        self.per_stack_loop_reads: frozenset[str] = frozenset()
         # Issue #742: when set, the per-stack parse branch emits these as the
         # declared per-file verdicts in its structured_output
         # (``{"issues": issues, "verdicts": self.parse_declared_verdicts}``),
@@ -746,8 +756,27 @@ class StubBackend:
             m = _M()  # type: ignore[assignment]
         if m is not None:
             if self.per_stack_emit_reads:
-                for scope_file in self._stack_scope_files(prompt):
-                    if scope_file in self.per_stack_unread:
+                scope_files = self._stack_scope_files(prompt)
+                if self.per_stack_read_command and any(
+                    scope_file in self.per_stack_loop_reads for scope_file in scope_files
+                ):
+                    # One completed shell read of the loop-listed files (issue
+                    # #1397). The analyzer resolves the literal ``for`` binding
+                    # so the coverage computation credits each listed file.
+                    loop_id = f"loop-{len(scope_files)}"
+                    yield ToolStartEvent(
+                        id=loop_id,
+                        name="Bash",
+                        input={"command": self.per_stack_read_command},
+                    )
+                    yield ToolResultEvent(
+                        id=loop_id, output="loop read returned", is_error=False
+                    )
+                for scope_file in scope_files:
+                    if (
+                        scope_file in self.per_stack_unread
+                        or scope_file in self.per_stack_loop_reads
+                    ):
                         continue
                     yield ToolStartEvent(
                         id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
