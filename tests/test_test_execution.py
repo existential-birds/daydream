@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import time
+from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -361,3 +362,40 @@ def test_targeted_check_cannot_satisfy_the_required_contract() -> None:
 def test_unresolved_required_contract_is_never_satisfied() -> None:
     contract = RequiredContract(declared=("python",), argv=None, source="unresolved")
     assert contract.satisfied_by(cast(Any, RequiredRun(argv=("pytest",), cwd_relative=".", result=_result()))) is False
+
+
+def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) -> None:
+    async def go() -> TestExecutionResult:
+        return await run_test_command(
+            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 600000)"],
+            cwd=tmp_path,
+            wall_budget_s=10.0,
+        )
+
+    res = asyncio.run(go())
+
+    assert res.exit_status == 0
+    assert res.completed is True            # the process ran to its own exit
+    assert res.passed is True               # exit status remains the only pass source
+    assert res.output_truncated is True     # ...but the retained buffer is incomplete
+    assert res.incomplete is True
+    assert len(res.merged_output) <= 512 * 1024
+
+
+def test_timed_out_result_is_incomplete(tmp_path: Path) -> None:
+    async def go() -> TestExecutionResult:
+        return await run_test_command(
+            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path, wall_budget_s=0.2
+        )
+
+    res = asyncio.run(go())
+
+    assert (res.timed_out, res.completed, res.incomplete, res.passed) == (True, False, True, False)
+
+
+def test_result_serialises_completion_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
+    async def go() -> TestExecutionResult:
+        return await run_test_command([sys.executable, "-c", "pass"], cwd=tmp_path, wall_budget_s=10.0)
+
+    payload = asdict(asyncio.run(go()))
+    assert set(payload) >= {"exit_status", "timed_out", "completed", "output_truncated", "incomplete"}

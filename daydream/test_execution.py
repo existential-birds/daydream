@@ -12,6 +12,7 @@ cannot balloon the host process or hang the run.
 """
 
 import asyncio
+import codecs
 import hashlib
 import json
 import os
@@ -39,7 +40,8 @@ _MIN_REDACTED_ENV_VALUE_LENGTH = 8
 # Cap on the merged output buffer retained, in characters. A chatty suite
 # (``pytest -s -v`` with logging) must not balloon the host process or feed an
 # unbounded string into the next agent turn; the prompt-build-time tail
-# truncation runs after this cap, so the capped buffer is the outer bound.
+# truncation runs after this cap, so the capped buffer is the outer bound. A
+# cap hit is recorded explicitly as ``output_truncated`` -- never a silent drop.
 _MERGED_OUTPUT_LIMIT_CHARS = 512 * 1024
 
 #: Bump whenever the recipe payload shape changes so a stale persisted recipe
@@ -325,7 +327,13 @@ def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
 
 @dataclass
 class TestExecutionResult:
-    """Outcome of one host-side test-command run."""
+    """Outcome of one host-side test-command run.
+
+    ``completed`` records that the process reached its own exit (a timeout is
+    the one thing that makes it ``False``), and ``incomplete`` records that the
+    retained evidence is missing something (a timeout or a capped output
+    buffer). Neither flag changes ``passed``.
+    """
 
     # Not a pytest test class despite the name prefix.
     __test__ = False
@@ -333,6 +341,9 @@ class TestExecutionResult:
     exit_status: int
     timed_out: bool
     merged_output: str
+    completed: bool = True
+    output_truncated: bool = False
+    incomplete: bool = False
 
     @property
     def passed(self) -> bool:
@@ -615,23 +626,33 @@ async def _run_test_command_inner(
     )
     chunks: list[str] = []
     buffered = 0
+    truncated = False
 
     async def _pump(stream: asyncio.StreamReader | None) -> None:
-        nonlocal buffered
+        nonlocal buffered, truncated
         if stream is None:
             return
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         while True:
-            line = await stream.readline()
-            if not line:
-                return
-            if buffered >= _MERGED_OUTPUT_LIMIT_CHARS:
+            data = await stream.read(64 * 1024)
+            text = decoder.decode(data, final=not data)
+            if not text:
+                if not data:
+                    return
                 continue
-            text = line.decode(errors="replace")
+            if buffered >= _MERGED_OUTPUT_LIMIT_CHARS:
+                truncated = True
+                if not data:
+                    return
+                continue
             remaining = _MERGED_OUTPUT_LIMIT_CHARS - buffered
             if len(text) > remaining:
                 text = text[:remaining]
+                truncated = True
             buffered += len(text)
             chunks.append(text)
+            if not data:
+                return
 
     pump_stdout = asyncio.ensure_future(_pump(proc.stdout))
     pump_stderr = asyncio.ensure_future(_pump(proc.stderr))
@@ -665,4 +686,7 @@ async def _run_test_command_inner(
         exit_status=exit_status,
         timed_out=timed_out,
         merged_output=_redact_merged("".join(chunks), env),
+        completed=not timed_out,
+        output_truncated=truncated,
+        incomplete=timed_out or truncated,
     )
