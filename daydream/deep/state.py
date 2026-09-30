@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from daydream.deep.reuse_store import ReuseCache
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
+    from daydream.test_execution import TestRecipe
 
 
 class DeepState:
@@ -378,6 +379,19 @@ class DeepState:
     @fix_cycle_state.setter
     def fix_cycle_state(self, value: FixCycleState) -> None:
         self._data["fix_cycle_state"] = value
+
+    @property
+    def test_recipe(self) -> TestRecipe | None:
+        from daydream.test_execution import TestRecipe
+
+        return cast(
+            TestRecipe | None,
+            self._optional("test_recipe", TestRecipe, "TestRecipe or None"),
+        )
+
+    @test_recipe.setter
+    def test_recipe(self, value: TestRecipe | None) -> None:
+        self._data["test_recipe"] = value
 
     @property
     def iteration(self) -> int | None:

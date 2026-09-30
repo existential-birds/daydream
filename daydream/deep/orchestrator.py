@@ -79,6 +79,11 @@ from daydream.phases import PushReceipt
 from daydream.review_budget import review_deadline_scope, review_scale_for_diff
 from daydream.review_profile import Pipeline, build_default_profile, resolve_pipeline
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
+from daydream.test_execution import (
+    RecipeConfinementError,
+    persist_test_recipe,
+    resolve_test_recipe,
+)
 from daydream.trajectory import DaydreamRunFlow
 from daydream.ui import print_error, print_info, print_preflight_notice, print_warning
 from daydream.workspace import WorkContext
@@ -968,6 +973,25 @@ async def _run_review_spine(
         # and the store root is published back into the tree so the next run
         # can read it.
         ctx.data["reuse_cache"] = build_reuse_cache(ctx)
+
+        # Issue #1408: resolve the run's test recipe exactly once here, persist
+        # it under the run's deep dir (a resumed run reconstructs the same
+        # facts), and publish it so every host call site and prompt consumer
+        # reads this one value. Resolution is fail-open: a confinement failure
+        # publishes no recipe and every consumer keeps today's behaviour.
+        try:
+            test_recipe = resolve_test_recipe(
+                getattr(config, "file_config", None), config, repo_root=work.repo
+            )
+        except (RecipeConfinementError, OSError) as exc:
+            test_recipe = None
+            print_warning(console, f"Could not resolve the test recipe: {exc}")
+        if test_recipe is not None:
+            try:
+                persist_test_recipe(dd, test_recipe)
+            except OSError as exc:
+                print_warning(console, f"Could not persist the resolved test recipe: {exc}")
+            ctx.data["test_recipe"] = test_recipe
 
         # Nothing is torn down after the flow. .daydream/exploration/ is a
         # content-keyed cache (see ``exploration_cache_key``) the next run reuses

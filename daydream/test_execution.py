@@ -20,9 +20,10 @@ import shlex
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 from daydream.backends._subprocess import terminate_process
+from daydream.json_utils import atomic_write_json
 from daydream.repository_paths import (
     canonicalize_working_directory,
     path_is_confined,
@@ -47,6 +48,12 @@ _MERGED_OUTPUT_LIMIT_CHARS = 512 * 1024
 #: Bump whenever the recipe payload shape changes so a stale persisted recipe
 #: can never be read as the current contract (mirrors ``REUSE_KEY_FORMAT``).
 RECIPE_FORMAT: int = 1
+
+#: The persisted recipe's filename inside the run's deep directory.
+TEST_RECIPE_FILENAME = "test-recipe.json"
+
+#: The closed provenance domain of a resolved fact.
+FactSource = Literal["cli", "config", "admitted", "derived", "unresolved"]
 
 
 class MissingTestCommandError(RuntimeError):
@@ -91,7 +98,7 @@ class ResolvedFact:
     """
 
     value: str | tuple[str, ...] | None
-    source: Literal["cli", "config", "admitted", "derived", "unresolved"]
+    source: FactSource
 
     @property
     def resolved(self) -> bool:
@@ -544,6 +551,167 @@ def resolve_test_recipe(
 def _command_source(source: str) -> Literal["cli", "config"]:
     """Narrow a resolved command provenance to the required-contract domain."""
     return "config" if source == "config" else "cli"
+
+
+def _tuple_of_str(value: object) -> tuple[str, ...] | None:
+    """Return *value* as a tuple of strings, or ``None`` when it is not one."""
+    if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
+        return tuple(value)
+    return None
+
+
+def recipe_to_payload(recipe: TestRecipe) -> dict[str, Any]:
+    """Serialise a recipe to its persisted, JSON-safe payload.
+
+    Every fact the recipe carries is emitted, so :func:`load_test_recipe`
+    reconstructs the same typed value a resumed run resolves.
+    """
+    command_value = recipe.command.value
+    candidate_payload: dict[str, Any] | None = None
+    if recipe.candidate is not None:
+        candidate_payload = {
+            "argv": list(recipe.candidate.argv),
+            "provenance": recipe.candidate.provenance,
+        }
+    return {
+        "format_version": RECIPE_FORMAT,
+        "command": {
+            "value": list(command_value) if isinstance(command_value, tuple) else command_value,
+            "source": recipe.command.source,
+        },
+        "package": {
+            "cwd_relative": recipe.package.cwd_relative,
+            "runner": recipe.package.runner,
+            "interpreter": recipe.package.interpreter,
+            "config_digest": recipe.package.config_digest,
+            "absent_components": list(recipe.package.absent_components),
+        },
+        "required": {
+            "declared": list(recipe.required.declared),
+            "argv": list(recipe.required.argv) if recipe.required.argv is not None else None,
+            "source": recipe.required.source,
+        },
+        "candidate": candidate_payload,
+        "identity": {
+            "digest": recipe.identity.digest,
+            "absent_components": list(recipe.identity.absent_components),
+        },
+    }
+
+
+def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
+    """Rebuild a recipe from its payload, or ``None`` when it is malformed.
+
+    The persisted artifact is untrusted input (Pattern B): every field is
+    validated before it becomes a typed value, and any missing, mistyped, or
+    out-of-domain field is a named absence, never a partially-built recipe.
+    """
+    try:
+        command_payload = payload["command"]
+        package_payload = payload["package"]
+        required_payload = payload["required"]
+        identity_payload = payload["identity"]
+        if not all(
+            isinstance(part, dict)
+            for part in (command_payload, package_payload, required_payload, identity_payload)
+        ):
+            return None
+        command_source = command_payload["source"]
+        command_values = _tuple_of_str(command_payload["value"])
+        if command_source == "unresolved":
+            command = ResolvedFact(value=None, source="unresolved")
+        elif command_source in ("cli", "config", "admitted", "derived") and command_values is not None:
+            command = ResolvedFact(value=command_values, source=cast(FactSource, command_source))
+        else:
+            return None
+
+        runner = package_payload["runner"]
+        interpreter = package_payload["interpreter"]
+        config_digest = package_payload["config_digest"]
+        if (runner is not None and not isinstance(runner, str)) or (
+            interpreter is not None and not isinstance(interpreter, str)
+        ) or (config_digest is not None and not isinstance(config_digest, str)):
+            return None
+        cwd_relative = package_payload["cwd_relative"]
+        if not isinstance(cwd_relative, str):
+            return None
+        absent_components = _tuple_of_str(package_payload["absent_components"])
+        if absent_components is None:
+            return None
+        package = PackageResolution(
+            cwd_relative=cwd_relative,
+            runner=runner,
+            interpreter=interpreter,
+            config_digest=config_digest,
+            absent_components=absent_components,
+        )
+
+        required_source = required_payload["source"]
+        declared = _tuple_of_str(required_payload["declared"])
+        required_argv = required_payload["argv"]
+        if declared is None or required_source not in ("cli", "config", "unresolved"):
+            return None
+        if required_argv is None:
+            argv: tuple[str, ...] | None = None
+        else:
+            argv = _tuple_of_str(required_argv)
+            if argv is None:
+                return None
+        required = RequiredContract(
+            declared=declared,
+            argv=argv,
+            source=cast(Literal["cli", "config", "unresolved"], required_source),
+        )
+
+        candidate: RecipeCandidate | None = None
+        candidate_payload = payload.get("candidate")
+        if candidate_payload is not None:
+            if not isinstance(candidate_payload, dict):
+                return None
+            candidate_argv = _tuple_of_str(candidate_payload["argv"])
+            if candidate_argv is None or candidate_payload["provenance"] != "manifest":
+                return None
+            candidate = RecipeCandidate(argv=candidate_argv, provenance="manifest")
+
+        digest = identity_payload["digest"]
+        identity_absent = _tuple_of_str(identity_payload["absent_components"])
+        if (digest is not None and not isinstance(digest, str)) or identity_absent is None:
+            return None
+        identity = RecipeIdentity(
+            digest=digest, absent_components=identity_absent, format_version=RECIPE_FORMAT
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    return TestRecipe(
+        command=command,
+        package=package,
+        required=required,
+        candidate=candidate,
+        identity=identity,
+    )
+
+
+def persist_test_recipe(deep_dir: Path, recipe: TestRecipe) -> Path:
+    """Atomically persist *recipe* under *deep_dir*, returning its path."""
+    path = deep_dir / TEST_RECIPE_FILENAME
+    atomic_write_json(path, recipe_to_payload(recipe))
+    return path
+
+
+def load_test_recipe(deep_dir: Path) -> TestRecipe | None:
+    """Read the persisted recipe, fail-open (Pattern B).
+
+    A missing file, an unreadable file, malformed JSON, or a payload whose
+    ``format_version`` is not :data:`RECIPE_FORMAT` all return ``None`` and
+    never raise; a stale-format recipe must not be read as the current one.
+    """
+    try:
+        payload = json.loads((deep_dir / TEST_RECIPE_FILENAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict) or payload.get("format_version") != RECIPE_FORMAT:
+        return None
+    return _recipe_from_payload(payload)
 
 
 def _redact_merged(output: str, env: dict[str, str] | None) -> str:

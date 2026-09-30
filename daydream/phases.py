@@ -134,7 +134,7 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
     PR_DESCRIPTION_UNTRUSTED_FRAMING,
 )
-from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, render_test_recipe_block
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
     path_is_confined,
@@ -153,6 +153,7 @@ from daydream.test_execution import (
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
+    load_test_recipe,
     run_test_command,
 )
 from daydream.trajectory import (
@@ -1921,6 +1922,7 @@ async def phase_verify_recommendations(
         cwd=work.repo,
         output_path=output_path,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(deep_dir))
 
     candidate = await _run_verifier(
         backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
@@ -2053,6 +2055,7 @@ async def phase_fix_verify(
         cwd=work.repo,
         round_number=round_number,
     )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     candidate = await _run_verifier(
         backend, work, prompt, FIX_VERIFY_VERDICTS_SCHEMA, run_context,
@@ -2510,6 +2513,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
     prompt += _build_verifier_suffix(item)
 
     prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     progress_cb = _console_progress_callback(console_lock)
 
@@ -3180,6 +3184,34 @@ _TEST_RUN_INSTRUCTIONS = (
 )
 
 
+def _recipe_for_work(work: WorkContext) -> TestRecipe | None:
+    """Read the run's once-resolved recipe from its routed deep dir, fail-open.
+
+    Prefers the active artifact session's route (the same route the deep
+    preamble persisted to) and falls back to the public ``.daydream/deep``
+    location for standalone callers. A missing, unreadable, malformed, or
+    stale-format recipe is ``None`` (Pattern B) so prompt consumers keep
+    today's behaviour rather than raising.
+    """
+    try:
+        deep = artifact_dir_for(work.repo, allow_standalone=True) / "deep"
+    except ArtifactVisibilityError:
+        return None
+    return load_test_recipe(deep)
+
+
+def append_extended_facts(prompt: str, recipe: TestRecipe | None) -> str:
+    """Append the host-owned resolved-test-recipe block to *prompt*.
+
+    Applied by the host *after* the extension-overridable prompt builder
+    returns, so a fork's prompt override cannot drop the facts. ``None``
+    leaves the prompt byte-identical.
+    """
+    if recipe is None:
+        return prompt
+    return f"{prompt}\n\n{render_test_recipe_block(recipe)}"
+
+
 def _canonical_test_cmd(config: Any) -> list[str] | None:
     """Resolve the canonical host-side test command, or ``None`` for fallback.
 
@@ -3345,6 +3377,7 @@ async def phase_test_once(
         command: tuple[str, ...] | None = tuple(cmd)
     else:
         prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
+        prompt = append_extended_facts(prompt, recipe)
         output, next_continuation, _ = await run_agent(
             backend,
             work.repo,
@@ -3425,6 +3458,7 @@ async def phase_test_and_heal(
             output, feedback_items, repo=work.repo,
             concise_mode=_backend_concise_fix_prompts(backend),
         )
+        fix_prompt = append_extended_facts(fix_prompt, recipe)
         fix_prompt += _build_fix_scope_clause(
             footprint.run_allowed_paths, footprint.run_allowed_paths
         )
@@ -4222,6 +4256,7 @@ async def phase_understand_intent(
         inline_diff=inline_diff,
         inline_exploration_summary=inline_exploration_summary,
     )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     intent_correction = ""
     while True:
@@ -4376,6 +4411,7 @@ async def phase_alternative_review(
         exploration_dir=_pointer_dir(sanctioned_inputs, exploration_dir),
         inline_diff=inline_diff,
     )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
@@ -4488,6 +4524,7 @@ async def phase_per_stack_reviews(
     from daydream.deep.prompts import _diff_blocks_for_files
 
     deep_dir_path = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
+    recipe_for_prompts = load_test_recipe(deep_dir_path)
     recorder = get_current_recorder()
     if strategies is None:
         strategies = {
@@ -4725,6 +4762,7 @@ async def phase_per_stack_reviews(
                         frontier_files=_frontier_files_for_stack(stack),
                     )
 
+            prompt = append_extended_facts(prompt, recipe_for_prompts)
             task_context = FinalizationContext(
                 task=f"Finalize {stack.stack_name} review",
                 input_priority=("diff", "intent"),
@@ -4974,6 +5012,7 @@ async def phase_supervise_review(
         cwd=work.repo,
         exploration_dir=exploration_dir,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {"supervise-input": input_path, "diff": diff_path, "intent": intent_path,
@@ -5100,6 +5139,7 @@ async def phase_arbiter_review(
         exploration_dir=exploration_dir,
         intent_authoritative=intent_authoritative,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {"arbiter-input": input_path, "diff": diff_path, "intent": intent_path,
@@ -5197,6 +5237,7 @@ async def phase_suppression_review(
         cwd=work.repo,
         exploration_dir=exploration_dir,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {"suppression-input": input_path, "diff": diff_path, "intent": intent_path,
@@ -5740,6 +5781,7 @@ async def phase_cross_stack_merge(
         intent_authoritative=intent_authoritative,
         resumed_from_arbiter=continuation is not None,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     merge_inputs: dict[str, Path | None] = {
         "intent": intent_path,
         "alternatives": alternatives_path,

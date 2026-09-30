@@ -3,6 +3,7 @@ import json
 from collections.abc import Callable
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -37,10 +38,15 @@ from daydream.deep.prompts import (
 from daydream.exploration_runner import count_changed_files
 from daydream.extensions import Registry
 from daydream.extensions.builtins import _register_builtin_prompts, register_builtins
-from daydream.phases import build_alternative_review_prompt
+from daydream.phases import append_extended_facts, build_alternative_review_prompt
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
-from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import (
+    CWD_GROUNDING_INSTRUCTION,
+    UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY,
+    render_test_recipe_block,
+)
+from daydream.test_execution import TestRecipe, resolve_test_recipe
 from tests.harness.review_profile import default_strategy as _default_strategy, prompt_paths
 
 _paths = partial(prompt_paths, output_name="stack-python-review.md")
@@ -1389,3 +1395,30 @@ def test_fix_verify_prompt_audits_complete_retained_patch_and_all_findings(tmp_p
     assert "all canonical findings" in prompt
     assert "round's changed hunks ONLY" not in prompt
     assert "findings the round dispatched" not in prompt
+
+
+def _resolved_recipe(tmp_path: Path, *, cli: str | None = None) -> TestRecipe:
+    api = tmp_path / "services" / "api"
+    api.mkdir(parents=True, exist_ok=True)
+    (api / "pyproject.toml").write_text("[project]\nname = 'api'\n")
+    (api / "uv.lock").write_text("version = 1\n")
+    return resolve_test_recipe(
+        SimpleNamespace(test_command=None),
+        SimpleNamespace(test_command=cli),
+        repo_root=tmp_path,
+        cwd=api,
+    )
+
+
+def test_every_review_and_fix_prompt_states_the_resolved_test_recipe(tmp_path: Path) -> None:
+    recipe = _resolved_recipe(tmp_path, cli="uv run pytest")
+    block = render_test_recipe_block(recipe)
+    assert "uv run pytest" in block and "services/api" in block
+
+    prompt = build_per_stack_prompt(
+        strategy="s", stack_name="python", files=["a.py"], diff_path=tmp_path / "d.patch",
+        intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alts.json",
+        output_path=tmp_path / "out.json", cwd=tmp_path,
+    )
+    assert block in append_extended_facts(prompt, recipe)
+    assert append_extended_facts(prompt, None) == prompt

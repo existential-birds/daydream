@@ -4,6 +4,7 @@ import asyncio
 import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,8 @@ from daydream.test_execution import (
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
+    load_test_recipe,
+    persist_test_recipe,
     recipe_identity,
     resolve_package,
     resolve_test_command_fact,
@@ -399,3 +402,35 @@ def test_result_serialises_completion_timeout_and_truncation_explicitly(tmp_path
 
     payload = asdict(asyncio.run(go()))
     assert set(payload) >= {"exit_status", "timed_out", "completed", "output_truncated", "incomplete"}
+
+
+def test_recipe_round_trips_through_its_persisted_payload(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    recipe = _recipe(tmp_path, cli="uv run pytest")
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+
+    persist_test_recipe(deep, recipe)
+    loaded = load_test_recipe(deep)
+
+    assert loaded is not None
+    assert loaded.command.value == recipe.command.value
+    assert loaded.package.cwd_relative == recipe.package.cwd_relative
+    assert recipe_identity(loaded, tmp_path).digest == recipe_identity(recipe, tmp_path).digest
+
+
+@pytest.mark.parametrize(
+    "writer",
+    [
+        lambda d: None,
+        lambda d: (d / "test-recipe.json").write_text("{not json"),
+        lambda d: (d / "test-recipe.json").write_text('{"format_version": 999}'),
+    ],
+)
+def test_load_test_recipe_is_fail_open(tmp_path: Path, writer: Callable[[Path], object]) -> None:
+    deep = tmp_path / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    writer(deep)
+
+    assert load_test_recipe(deep) is None
