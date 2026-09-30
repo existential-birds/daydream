@@ -12,13 +12,20 @@ cannot balloon the host process or hang the run.
 """
 
 import asyncio
+import hashlib
+import json
 import os
 import shlex
+import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from daydream.backends._subprocess import terminate_process
+from daydream.repository_paths import (
+    canonicalize_working_directory,
+    path_is_confined,
+)
 from daydream.trajectory import DaydreamPhase, host_phase_scope, redact_structured_text
 
 _REDACTED_ENV_VAR = "[REDACTED_ENV_VAR]"
@@ -137,6 +144,179 @@ def resolve_test_command_fact(config: object, run_config: object) -> ResolvedFac
         return ResolvedFact(value=tuple(shlex.split(raw)), source=source)
     except ValueError:
         return ResolvedFact(value=None, source="unresolved")
+
+
+class RecipeConfinementError(ValueError):
+    """Raised when a package directory resolves outside the worktree.
+
+    A package cwd is a security boundary: the host test runner will execute in
+    it, so a start path that escapes the worktree (``..`` traversal, an
+    absolute path elsewhere) is rejected rather than silently clamped to the
+    root. Confinement is decided by :func:`path_is_confined`, the single
+    primitive that also settles symlinked components.
+    """
+
+
+#: The closed set of package manifests that make a directory a package root.
+#: The digest inputs and the nearest-package walk both read this one constant.
+_PACKAGE_MANIFESTS: tuple[str, ...] = ("pyproject.toml", "setup.cfg", "setup.py")
+
+#: Interpreter declaration read before ``requires-python``.
+_PYTHON_VERSION_FILE = ".python-version"
+
+#: The closed runner-input set, first match wins: a lockfile names the package
+#: manager that owns the package (``requirements.txt`` is the ``pip`` fallback).
+_RUNNER_LOCKFILES: tuple[tuple[str, str], ...] = (
+    ("uv.lock", "uv"),
+    ("poetry.lock", "poetry"),
+    ("Pipfile.lock", "pipenv"),
+    ("requirements.txt", "pip"),
+)
+
+
+@dataclass(frozen=True)
+class PackageResolution:
+    """Resolved facts about the package a test command will run within.
+
+    ``cwd_relative`` is the repo-relative posix directory (``"."`` for the
+    worktree root) the command runs in. ``runner`` names the package manager
+    discovered from the closed lockfile set, or ``None`` when none is declared.
+    ``interpreter`` is the declared Python version (``.python-version`` first,
+    then the manifest's ``requires-python``), or ``None``. ``config_digest``
+    digests the package's existing config inputs; any input that exists but
+    cannot be read makes the digest ``None`` and names it in
+    ``absent_components`` (Pattern C: a named miss, never a placeholder).
+    """
+
+    cwd_relative: str
+    runner: str | None
+    interpreter: str | None
+    config_digest: str | None
+    absent_components: tuple[str, ...]
+
+
+def _nearest_package_dir(repo_root: Path, cwd_relative: str) -> Path:
+    """Walk up from ``cwd_relative`` to the nearest manifest-bearing directory.
+
+    The walk is bounded by the worktree root: an ancestor above the root is
+    never inspected, so the root remains the floor and maps to the root itself.
+    """
+    current = repo_root if cwd_relative == "." else repo_root / cwd_relative
+    while True:
+        if any((current / name).exists() for name in _PACKAGE_MANIFESTS):
+            return current
+        if current == repo_root:
+            return current
+        current = current.parent
+
+
+def _resolve_runner(package_dir: Path) -> str | None:
+    """Return the first lockfile-named package manager present, else ``None``."""
+    for name, runner in _RUNNER_LOCKFILES:
+        if (package_dir / name).exists():
+            return runner
+    return None
+
+
+def _resolve_interpreter(package_dir: Path) -> str | None:
+    """Read ``.python-version`` first, then the manifest's ``requires-python``."""
+    pinned = package_dir / _PYTHON_VERSION_FILE
+    if pinned.exists():
+        try:
+            value = pinned.read_text(encoding="utf-8").strip()
+        except OSError:
+            return None
+        return value or None
+    manifest = package_dir / "pyproject.toml"
+    if manifest.exists():
+        try:
+            data = tomllib.loads(manifest.read_text(encoding="utf-8"))
+        except (OSError, tomllib.TOMLDecodeError):
+            return None
+        value = data.get("project", {}).get("requires-python")
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _config_input_names(package_dir: Path, runner: str | None) -> tuple[str, ...]:
+    """Name the package's existing config inputs in a deterministic order.
+
+    The set is closed: the present manifests, the resolved runner lockfile,
+    and ``.python-version`` when it exists. Inputs are keyed by existence (not
+    file-ness) so a malformed directory-shaped input still becomes an absent
+    component rather than silently vanishing from the identity.
+    """
+    names = [name for name in _PACKAGE_MANIFESTS if (package_dir / name).exists()]
+    if runner is not None:
+        for name, _ in _RUNNER_LOCKFILES:
+            if (package_dir / name).exists():
+                names.append(name)
+                break
+    if (package_dir / _PYTHON_VERSION_FILE).exists():
+        names.append(_PYTHON_VERSION_FILE)
+    return tuple(sorted(set(names)))
+
+
+def _config_digest(
+    package_dir: Path, names: tuple[str, ...]
+) -> tuple[str | None, tuple[str, ...]]:
+    """Digest the named config inputs, or return a named miss.
+
+    The discipline follows ``blob_map_digest`` (``deep/reuse_key.py``): each
+    input contributes ``sha256(name + b"\\0" + bytes)`` to a canonical map, and
+    any unreadable input makes the whole digest ``None`` with the input named
+    in ``absent_components``. There is no placeholder digest and no empty-string
+    fallback.
+    """
+    entries: dict[str, str] = {}
+    for name in names:
+        try:
+            payload = (package_dir / name).read_bytes()
+        except OSError:
+            return None, (name,)
+        entries[name] = hashlib.sha256(
+            name.encode("utf-8") + b"\0" + payload
+        ).hexdigest()
+    if not entries:
+        # No config inputs at all is a real value, not a miss.
+        return hashlib.sha256(b"{}").hexdigest(), ()
+    canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), ()
+
+
+def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
+    """Resolve the package a test command runs within, bounded by the worktree.
+
+    ``start`` is the directory the command was anchored to (the worktree root
+    for the repo-root case). The nearest manifest-bearing directory at or above
+    it names the package; the worktree root maps to ``cwd_relative == "."``.
+    The resolved cwd is confinement-checked with :func:`path_is_confined` and
+    rejected with :class:`RecipeConfinementError` when it escapes — never
+    silently clamped. Runner, interpreter, and config-input identity are read
+    from the package directory.
+    """
+    start_abs = start if start.is_absolute() else repo_root / start
+    relative = os.path.relpath(str(start_abs), str(repo_root))
+    if not path_is_confined(repo_root, relative):
+        raise RecipeConfinementError(
+            f"Package directory {start!s} resolves outside the worktree "
+            f"{repo_root!s}; refusing to run tests there."
+        )
+    cwd_relative = canonicalize_working_directory(repo_root, relative)
+    package_dir = _nearest_package_dir(repo_root, cwd_relative)
+    runner = _resolve_runner(package_dir)
+    interpreter = _resolve_interpreter(package_dir)
+    config_digest, absent = _config_digest(
+        package_dir, _config_input_names(package_dir, runner)
+    )
+    return PackageResolution(
+        cwd_relative=cwd_relative,
+        runner=runner,
+        interpreter=interpreter,
+        config_digest=config_digest,
+        absent_components=absent,
+    )
 
 
 @dataclass
