@@ -486,6 +486,35 @@ projection, never a second measurement. `flip_allowed` turns on the
 contradiction counter and the recall anchor alone -- latency is reported, not
 gated.
 
+### Test recipe and evidence reuse
+
+A run resolves the project's test command and environment once, in the deep
+preamble, and writes the result to `.daydream/deep/test-recipe.json`. The same
+resolved facts feed the host test run, the pre-push hook run, and every agent
+prompt, so no phase re-discovers them.
+
+`test_required_suites` declares the suite ids the single configured
+`test_command` is the authoritative gate for. It is declaration-only: there is
+no second runner, and a narrowed `-k`/file check can never satisfy the required
+contract.
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+test_command = "uv run pytest"
+test_required_suites = ["python", "integration"]
+```
+
+A green host run may stand in for a fresh validation at a later gate only when
+the whole typed execution identity still matches — command, package cwd, runner,
+interpreter, config-input digest, tree key, and revision. Across a commit the
+tree key alone is not enough: the created commit must have passed the strict
+post-commit verification. Either way the gate prints a line naming the decision
+(`reused matching evidence` or `ran real validation (<result>: <component>)`)
+and records it in `.daydream/deep/evidence-reuse.json`, keyed by gate. Reuse
+never replaces the pre-push hook, the post-hook strict check, or the push
+receipt check.
+
 ### Recommendation verifier settings
 
 Selection-gated recommendation verification is the default: the verifier is
@@ -739,6 +768,7 @@ These paths contain finalized output in the source checkout. Live artifacts stay
 | `.daydream/deep/` | Deep pipeline artifacts |
 | `.daydream/deep/test-verdict.json` | Native local-test result and local host facts |
 | `.daydream/deep/push-verdict.json` | Session-bound ordinary push attempt and exact SHA |
+| `.daydream/deep/evidence-reuse.json` | Per-gate reuse decision: reused or revalidated, with the deciding component |
 | `.daydream/deep/remote-ci-verdict.json` | Bounded GitHub CI evidence for the exact pushed target |
 | `.daydream/deep/remote-ci-handoff.json` | Next action for failed or incomplete remote CI |
 | `.daydream/exploration/` | Cached pre-scan grounding |

@@ -16,6 +16,7 @@ from daydream.deep.fix_steps import (
     RetainedTreeSnapshot,
     _authorize_final_red_override,
     _persist_push_verdict,
+    _persist_test_verdict,
     _render_fix_outcome_summary,
     _resolve_remote_ci_target,
     _round_dispatch_items,
@@ -30,6 +31,7 @@ from daydream.extensions.api import Stop
 from daydream.git_ops import GitError
 from daydream.phases import PushReceipt, TestAndHealResult, TestAttemptEvidence
 from daydream.run_context import InteractionPolicy, RunContext
+from daydream.test_execution import TestExecutionIdentity
 from tests.deep_orchestrator.support import (
     _base_repo,
     _direct_fix_context,
@@ -62,6 +64,25 @@ def _host_test_evidence(
         output_tree_key=output_tree_key,
     )
 
+
+
+def _identity(**overrides: Any) -> TestExecutionIdentity:
+    fields: dict[str, Any] = {
+        "session_id": "s",
+        "argv": ("uv", "run", "pytest"),
+        "cwd_relative": ".",
+        "runner": "uv",
+        "interpreter": None,
+        "config_digest": "d" * 64,
+        "absent_components": (),
+        "input_tree_key": "t",
+        "output_tree_key": "t",
+        "head_sha": "a" * 40,
+        "branch": "feature",
+        "kind": "host",
+        "outcome": "passed",
+    }
+    return TestExecutionIdentity(**{**fields, **overrides})
 
 def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
 
@@ -639,3 +660,27 @@ def test_final_red_override_requires_fresh_interactive_prompt(tmp_path: Path) ->
     ctx.run_context = RunContext(InteractionPolicy(assume="yes"))
     assert _authorize_final_red_override(ctx) is False
     assert len(prompts) == 1
+
+
+def test_persisted_test_verdict_carries_the_execution_identity(tmp_path: Path) -> None:
+    repo = _base_repo(tmp_path, "identity-verdict")
+    ctx = _direct_fix_context(repo, [], changed_files=set())
+    state = _direct_fix_state(ctx, [], set())
+    attempt = TestAttemptEvidence(
+        session_id=state.session_id, kind="host", command=("uv", "run", "pytest"), passed=True,
+        input_tree_key="t", output_tree_key="t", identity=_identity(session_id=state.session_id),
+    )
+
+    _persist_test_verdict(ctx, state, passed=True, ignored=False, attempts=[attempt])
+
+    payload = json.loads((repo / ".daydream" / "deep" / "test-verdict.json").read_text())
+    assert payload["attempts"][0]["identity"]["argv"] == ["uv", "run", "pytest"]
+    assert payload["attempts"][0]["identity"]["outcome"] == "passed"
+
+
+def test_legacy_evidence_without_an_identity_still_constructs(tmp_path: Path) -> None:
+    attempt = TestAttemptEvidence(
+        session_id="s", kind="host", command=("true",), passed=True,
+        input_tree_key="t", output_tree_key="t",
+    )
+    assert attempt.identity is None

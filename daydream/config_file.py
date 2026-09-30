@@ -162,6 +162,13 @@ class DaydreamFileConfig:
             host-side test-command run (the whole process group is killed on
             expiry). A value overrides the orchestrator default
             (``config.TEST_WALL_BUDGET_S``); ``None`` falls through to it.
+        test_required_suites: Issue #1408. Additive declaration of the suite ids
+            the single configured ``test_command`` is the authoritative gate
+            for. Parsed with ``_coerce_string_list`` from the same merged
+            root/``[tool.daydream]`` table as ``test_command``; empty declares
+            nothing beyond the command itself. Declaration only: there is no
+            second runner, and a targeted ``-k``/selector check can never
+            satisfy the required contract (``RequiredContract.satisfied_by``).
         review_cache_enabled: Issue #733. Toggle the deep review's
             content-addressed reuse store (MH13). ``None`` falls through to the
             RunConfig field and then the built-in default
@@ -244,6 +251,7 @@ class DaydreamFileConfig:
     diagram_service_roots: list[str] = field(default_factory=list)
     test_command: str | None = None
     test_command_wall_s: float | None = None
+    test_required_suites: list[str] = field(default_factory=list)
 
     def phase_model(self, phase: str) -> str | None:
         """Return the configured model for a phase."""
@@ -589,4 +597,5 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
         diagram_service_roots=_coerce_string_list(diagram.get("service_roots")),
         test_command=_coerce_string(merged.get("test_command")),
         test_command_wall_s=_coerce_positive_float(merged.get("test_command_wall_s")),
+        test_required_suites=_coerce_string_list(merged.get("test_required_suites")),
     )

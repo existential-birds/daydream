@@ -57,6 +57,7 @@ from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.artifacts import (
     arbiter_input_path,
     deep_dir,
+    evidence_reuse_path,
     merged_items_path,
     merged_report_path,
     per_stack_records_path,
@@ -73,6 +74,13 @@ from daydream.deep.dedup import (
     normalize_title,
 )
 from daydream.deep.detection import GENERIC_STACK
+from daydream.deep.evidence_reuse import (
+    EVIDENCE_REUSE_FORMAT,
+    ReuseDecision,
+    ReuseTarget,
+    audit_payload,
+    decide_reuse,
+)
 from daydream.deep.location_validator import validate_records
 from daydream.deep.records import (
     RECORD_SOURCE_UIDS_KEY,
@@ -116,7 +124,7 @@ from daydream.generated_files import (
 )
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.hunk_index import load_hunk_index
-from daydream.json_utils import read_json_object
+from daydream.json_utils import atomic_write_json, read_json_object
 from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
@@ -134,7 +142,7 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
     PR_DESCRIPTION_UNTRUSTED_FRAMING,
 )
-from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY, render_test_recipe_block
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
     path_is_confined,
@@ -150,8 +158,11 @@ from daydream.run_context import RunContext, bind_resolved_run_context, resolve_
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.test_execution import (
     MissingTestCommandError,
+    TestExecutionIdentity,
     TestExecutionResult,
+    TestRecipe,
     canonical_test_command,
+    load_test_recipe,
     run_test_command,
 )
 from daydream.trajectory import (
@@ -1919,6 +1930,7 @@ async def phase_verify_recommendations(
         cwd=work.repo,
         output_path=output_path,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(deep_dir))
 
     candidate = await _run_verifier(
         backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
@@ -2051,6 +2063,7 @@ async def phase_fix_verify(
         cwd=work.repo,
         round_number=round_number,
     )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     candidate = await _run_verifier(
         backend, work, prompt, FIX_VERIFY_VERDICTS_SCHEMA, run_context,
@@ -2508,6 +2521,7 @@ Make the minimal change needed. {_FIX_GUARDRAILS}"""
     prompt += _build_verifier_suffix(item)
 
     prompt += _build_fix_style_suffix(_backend_concise_fix_prompts(backend))
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     progress_cb = _console_progress_callback(console_lock)
 
@@ -3178,6 +3192,34 @@ _TEST_RUN_INSTRUCTIONS = (
 )
 
 
+def _recipe_for_work(work: WorkContext) -> TestRecipe | None:
+    """Read the run's once-resolved recipe from its routed deep dir, fail-open.
+
+    Prefers the active artifact session's route (the same route the deep
+    preamble persisted to) and falls back to the public ``.daydream/deep``
+    location for standalone callers. A missing, unreadable, malformed, or
+    stale-format recipe is ``None`` (Pattern B) so prompt consumers keep
+    today's behaviour rather than raising.
+    """
+    try:
+        deep = artifact_dir_for(work.repo, allow_standalone=True) / "deep"
+    except ArtifactVisibilityError:
+        return None
+    return load_test_recipe(deep)
+
+
+def append_extended_facts(prompt: str, recipe: TestRecipe | None) -> str:
+    """Append the host-owned resolved-test-recipe block to *prompt*.
+
+    Applied by the host *after* the extension-overridable prompt builder
+    returns, so a fork's prompt override cannot drop the facts. ``None``
+    leaves the prompt byte-identical.
+    """
+    if recipe is None:
+        return prompt
+    return f"{prompt}\n\n{render_test_recipe_block(recipe)}"
+
+
 def _canonical_test_cmd(config: Any) -> list[str] | None:
     """Resolve the canonical host-side test command, or ``None`` for fallback.
 
@@ -3225,8 +3267,26 @@ def _test_command_wall_budget(config: Any) -> float:
     return TEST_WALL_BUDGET_S
 
 
+def _recipe_command(recipe: TestRecipe) -> list[str] | None:
+    """Return the recipe's resolved argv, or ``None`` for its named miss.
+
+    An unresolved command fact (no configured command) is the existing
+    ``None``-command path — the recipe never supplies a guessed argv.
+    """
+    if not recipe.command.resolved:
+        return None
+    value = recipe.command.value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value] if value else None
+
+
 async def _run_host_test_command(
-    cmd: list[str], work: WorkContext, config: Any
+    cmd: list[str],
+    work: WorkContext,
+    config: Any,
+    *,
+    recipe: TestRecipe | None = None,
 ) -> TestExecutionResult:
     """Run *cmd* as a host-side subprocess with the resolved wall budget.
 
@@ -3234,21 +3294,123 @@ async def _run_host_test_command(
     approved-investigator retry, declined-fix validation, and the pre-push
     hook run — share the same three-step glue: resolve the wall budget
     (``_test_command_wall_budget``) and run the command via
-    :func:`run_test_command` with the workspace repo as cwd. Spawn errors
-    propagate unchanged; each caller applies its own failure policy (the
-    TEST-phase sites route them through the failure gate, the validate/hook
-    sites let them fail closed).
+    :func:`run_test_command`. Issue #1408: when a resolved recipe is supplied
+    the command runs in the recipe's package cwd; otherwise the workspace repo
+    root remains the cwd. Spawn errors propagate unchanged; each caller
+    applies its own failure policy (the TEST-phase sites route them through
+    the failure gate, the validate/hook sites let them fail closed).
     """
+    cwd = work.repo if recipe is None else Path(work.repo, recipe.package.cwd_relative)
     return await run_test_command(
         cmd=cmd,
-        cwd=work.repo,
+        cwd=cwd,
         wall_budget_s=_test_command_wall_budget(config),
+    )
+
+
+def _git_revision_facts(repo: Path) -> tuple[str, str]:
+    """Read the HEAD/branch revision facts, tolerating an unborn ``HEAD``.
+
+    A gate that compares an evidence identity against the live revision must
+    not fail closed merely because the worktree has no commit yet; an empty
+    revision is there compared like any other component (issue #1408).
+    """
+    try:
+        return git_ops.head_sha(repo), git_ops.current_branch(repo) or ""
+    except GitError:
+        return "", ""
+
+
+def reuse_target(
+    work: WorkContext,
+    recipe: TestRecipe | None,
+    *,
+    session_id: str,
+    retained_tree_key: str,
+    post_commit_verified: bool = False,
+) -> ReuseTarget | None:
+    """Build the reuse target from the once-resolved recipe, or ``None``.
+
+    A missing recipe carries no resolved facts to compare against, so the gate
+    must fall back to real validation (the additive feature can never remove
+    one). The target's tree key is always the caller-supplied retained key —
+    never a fresh recomputation — because that value was already proven against
+    the evidence by ``finalize_retained_tree_after_test``.
+    """
+    if recipe is None:
+        return None
+    command = recipe.command.value if recipe.command.resolved else None
+    head_sha, branch = _git_revision_facts(work.repo)
+    return ReuseTarget(
+        session_id=session_id,
+        tree_key=retained_tree_key,
+        argv=tuple(command) if isinstance(command, tuple) else (),
+        cwd_relative=recipe.package.cwd_relative,
+        runner=recipe.package.runner,
+        interpreter=recipe.package.interpreter,
+        config_digest=recipe.package.config_digest,
+        absent_components=recipe.package.absent_components,
+        head_sha=head_sha,
+        branch=branch,
+        post_commit_verified=post_commit_verified,
+    )
+
+
+def _host_test_identity(
+    *,
+    session_id: str,
+    argv: tuple[str, ...],
+    work: WorkContext,
+    recipe: TestRecipe | None,
+    input_tree_key: str,
+    output_tree_key: str,
+    result: TestExecutionResult | None,
+    passed: bool,
+) -> TestExecutionIdentity:
+    """Compose a host run's full identity from the recipe facts and revision.
+
+    The package facts come from the once-resolved recipe (there is no
+    re-derivation); a recipe-less legacy call falls back to worktree-root
+    facts. The outcome is explicit: a timeout dominates, then a clipped output
+    buffer, then the exit-status-derived pass/fail.
+    """
+    package = recipe.package if recipe is not None else None
+    if result is not None and result.timed_out:
+        outcome: Literal["passed", "failed", "timed-out", "truncated"] = "timed-out"
+    elif result is not None and result.output_truncated:
+        outcome = "truncated"
+    elif passed:
+        outcome = "passed"
+    else:
+        outcome = "failed"
+    head_sha, branch = _git_revision_facts(work.repo)
+    return TestExecutionIdentity(
+        session_id=session_id,
+        argv=argv,
+        cwd_relative=package.cwd_relative if package is not None else ".",
+        runner=package.runner if package is not None else None,
+        interpreter=package.interpreter if package is not None else None,
+        config_digest=package.config_digest if package is not None else None,
+        absent_components=package.absent_components if package is not None else (),
+        input_tree_key=input_tree_key,
+        output_tree_key=output_tree_key,
+        head_sha=head_sha,
+        branch=branch,
+        kind="host",
+        outcome=outcome,
     )
 
 
 @dataclass(frozen=True)
 class TestAttemptEvidence:
-    """Identity-bound evidence from one real host or TEST-agent execution."""
+    """Identity-bound evidence from one real host or TEST-agent execution.
+
+    ``identity`` carries the full reusable execution identity for a host run;
+    an agent-reported verdict has no identity because it is prose, not an exit
+    status, and is therefore never reusable. The field is keyword-defaulted so
+    every pre-#1408 construction site (and a legacy persisted verdict) keeps
+    compiling.
+    """
 
     session_id: str
     kind: Literal["host", "agent"]
@@ -3256,6 +3418,7 @@ class TestAttemptEvidence:
     passed: bool
     input_tree_key: str
     output_tree_key: str
+    identity: TestExecutionIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -3283,6 +3446,7 @@ async def phase_test_once(
     capture_tree_key: Callable[[], str],
     continuation: ContinuationToken | None = None,
     command_override: list[str] | None = None,
+    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[TestAttemptEvidence, ContinuationToken | None, str]:
     """Execute exactly one canonical test attempt and bind it to tree identity.
@@ -3290,30 +3454,41 @@ async def phase_test_once(
     Configured and explicitly approved commands run host-side. With no command,
     the established TEST-agent/prose path is used. Both paths capture the same
     before/after identity projection supplied by the fix-cycle orchestrator.
+    Issue #1408: a supplied recipe resolves the command and cwd exactly once —
+    ``_canonical_test_cmd`` is never consulted for it.
     """
     run_context = resolve_run_context(run_context)
-    cmd = command_override if command_override is not None else _canonical_test_cmd(config)
+    cmd: list[str] | None
+    if command_override is not None:
+        cmd = command_override
+    elif recipe is not None:
+        cmd = _recipe_command(recipe)
+    else:
+        cmd = _canonical_test_cmd(config)
     input_tree_key = capture_tree_key()
     next_continuation: ContinuationToken | None = None
+    identity: TestExecutionIdentity | None = None
+    host_result: TestExecutionResult | None = None
     if cmd is not None:
         try:
-            result = await _run_host_test_command(cmd, work, config)
+            host_result = await _run_host_test_command(cmd, work, config, recipe=recipe)
         except (OSError, ValueError) as exc:
             output = f"The configured test command failed to run (spawn): {exc}"
             passed = False
         else:
-            if result.timed_out:
+            if host_result.timed_out:
                 print_warning(
                     console,
                     f"Test command hit the {_test_command_wall_budget(config):g}s "
                     "wall budget and was killed.",
                 )
-            output = result.merged_output
-            passed = result.passed
+            output = host_result.merged_output
+            passed = host_result.passed
         kind: Literal["host", "agent"] = "host"
         command: tuple[str, ...] | None = tuple(cmd)
     else:
         prompt = f"Run the project's test suite. {_TEST_RUN_INSTRUCTIONS}"
+        prompt = append_extended_facts(prompt, recipe)
         output, next_continuation, _ = await run_agent(
             backend,
             work.repo,
@@ -3328,6 +3503,17 @@ async def phase_test_once(
         kind = "agent"
         command = None
     output_tree_key = capture_tree_key()
+    if kind == "host" and command is not None:
+        identity = _host_test_identity(
+            session_id=session_id,
+            argv=command,
+            work=work,
+            recipe=recipe,
+            input_tree_key=input_tree_key,
+            output_tree_key=output_tree_key,
+            result=host_result,
+            passed=passed,
+        )
     return (
         TestAttemptEvidence(
             session_id=session_id,
@@ -3336,6 +3522,7 @@ async def phase_test_once(
             passed=passed,
             input_tree_key=input_tree_key,
             output_tree_key=output_tree_key,
+            identity=identity,
         ),
         next_continuation,
         output,
@@ -3354,6 +3541,7 @@ async def phase_test_and_heal(
     footprint: AuthorizedFixFootprint | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
+    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> TestAndHealResult:
     """Run bound test attempts and offer a bounded authorized heal after failure."""
@@ -3393,6 +3581,7 @@ async def phase_test_and_heal(
             output, feedback_items, repo=work.repo,
             concise_mode=_backend_concise_fix_prompts(backend),
         )
+        fix_prompt = append_extended_facts(fix_prompt, recipe)
         fix_prompt += _build_fix_scope_clause(
             footprint.run_allowed_paths, footprint.run_allowed_paths
         )
@@ -3435,6 +3624,7 @@ async def phase_test_and_heal(
                 session_id=session_id,
                 capture_tree_key=capture_tree_key,
                 continuation=continuation,
+                recipe=recipe,
                 run_context=run_context,
             )
             attempts.append(evidence)
@@ -3565,6 +3755,7 @@ async def phase_test_and_heal(
                                 session_id=session_id,
                                 capture_tree_key=capture_tree_key,
                                 command_override=cmd,
+                                recipe=recipe,
                                 run_context=run_context,
                             )
                         except (OSError, ValueError) as exc:
@@ -3755,8 +3946,109 @@ def _verify_commit_scope(
         )
 
 
-async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
-    """Re-run the canonical test command after a declined commit/push gate.
+def _persist_reuse_audit(
+    work: WorkContext, gate: str, record: dict[str, Any]
+) -> None:
+    """Write one gate's reuse record, merging it into any prior gates.
+
+    Fail-soft: an unwritable artifact directory warns and never fails a commit
+    or push. The merge preserves an earlier gate's decision (Pattern B).
+    """
+    try:
+        path = evidence_reuse_path(deep_dir(work.repo, allow_standalone=True))
+        existing = read_json_object(path)
+        gates = existing.get("gates")
+        merged: dict[str, Any] = dict(gates) if isinstance(gates, dict) else {}
+        merged[gate] = record
+        atomic_write_json(
+            path,
+            {"format_version": EVIDENCE_REUSE_FORMAT, "gates": merged},
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
+    except Exception as exc:  # artifact write is never load-bearing
+        print_warning(console, f"Evidence-reuse audit could not be written: {exc}")
+
+
+def _report_reuse_decision(
+    work: WorkContext,
+    gate: str,
+    decision: ReuseDecision,
+    identity: TestExecutionIdentity | None,
+    target: ReuseTarget,
+) -> None:
+    """Name one reuse decision in run output and persist its audit record.
+
+    SH1: the human line states reused-or-revalidated and names the deciding
+    component through the existing UI helpers, so no new console surface is
+    needed. SH2: the persisted record is reconstructible from the run's
+    artifacts alone. Every gate funnels through this one helper.
+    """
+    if decision.reused:
+        print_success(
+            console,
+            f"Evidence reuse ({gate}): reused matching evidence — "
+            "no redundant suite run",
+        )
+    else:
+        named = ", ".join(decision.mismatched_components) or decision.result
+        print_info(
+            console,
+            f"Evidence reuse ({gate}): ran real validation "
+            f"({decision.result}: {named})",
+        )
+    record = audit_payload(decision, identity, target)
+    record["gate"] = gate
+    _persist_reuse_audit(work, gate, record)
+
+
+def _pre_push_reuse_decision(
+    work: WorkContext,
+    recipe: TestRecipe | None,
+    evidence: TestAttemptEvidence | None,
+    retained_tree_key: str | None,
+    *,
+    strict_commit: bool,
+) -> ReuseDecision | None:
+    """Consult the reuse predicate for the pre-push proactive suite run.
+
+    Only a strict commit whose post-commit verification already passed can
+    authorize reuse across the commit: that verification proved the created
+    commit carries exactly the tested retained path/state set, so
+    ``post_commit_verified`` exempts the commit-moved HEAD/branch. With no
+    evidence offer, no resolved recipe, a non-strict commit, or an identity-less
+    offer, the call returns ``None`` and the proactive run proceeds unchanged
+    (the feature is additive and can never remove the one real validation).
+    """
+    if not strict_commit or recipe is None or evidence is None:
+        return None
+    identity = evidence.identity
+    if identity is None or retained_tree_key is None:
+        return None
+    target = reuse_target(
+        work,
+        recipe,
+        session_id=identity.session_id,
+        retained_tree_key=retained_tree_key,
+        post_commit_verified=True,
+    )
+    if target is None:
+        return None
+    decision = decide_reuse(identity, target)
+    _report_reuse_decision(work, "pre-push", decision, identity, target)
+    return decision
+
+
+async def _validate_declined_fixes(
+    work: WorkContext,
+    config: Any,
+    *,
+    recipe: TestRecipe | None = None,
+    evidence: TestAttemptEvidence | None = None,
+    retained_tree_key: str | None = None,
+) -> None:
+    """Validate the applied fixes after a declined commit/push gate.
 
     Issue #726: declining to commit must not quietly discard a run whose fixes
     were never validated — but it must also never claim success on a red suite.
@@ -3768,12 +4060,30 @@ async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
 
     With no canonical command configured there is nothing to validate against
     (see :func:`_canonical_test_cmd`); the decline then behaves as before
-    rather than fabricating a verdict.
+    rather than fabricating a verdict. A supplied recipe is the single source
+    of the command and cwd, so no re-resolution happens here (issue #1408).
+    A matching green evidence offer (issue #1408) stands in for that real
+    run: nothing committed, so the revision components are compared and the
+    decision is delegated to :func:`decide_reuse`.
     """
-    cmd = _canonical_test_cmd(config)
+    cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
+    if evidence is not None and evidence.identity is not None and retained_tree_key is not None:
+        target = reuse_target(
+            work,
+            recipe,
+            session_id=evidence.identity.session_id,
+            retained_tree_key=retained_tree_key,
+        )
+        decision = None if target is None else decide_reuse(evidence.identity, target)
+        if target is not None and decision is not None:
+            _report_reuse_decision(
+                work, "declined-commit", decision, evidence.identity, target
+            )
+        if decision is not None and decision.reused:
+            return
     if cmd is None:
         return
-    result = await _run_host_test_command(cmd, work, config)
+    result = await _run_host_test_command(cmd, work, config, recipe=recipe)
     if result.passed:
         print_success(
             console,
@@ -3818,6 +4128,32 @@ class PushAttemptError(GitError):
         self.receipt = receipt
 
 
+def _validate_reuse_offer(
+    evidence: TestAttemptEvidence | None, retained_tree_key: str | None
+) -> None:
+    """Refuse a half-formed evidence offer before any gate consumes it.
+
+    The finalized test evidence and the retained tree key it validated are one
+    fact and must arrive together. A lone half of the pair, or a retained tree
+    key that disagrees with the evidence's own output tree key, is a caller
+    bug that must fail loudly rather than silently degrade to a real run
+    (issue #1408).
+    """
+    if (evidence is None) != (retained_tree_key is None):
+        raise ValueError(
+            "evidence and retained_tree_key must be supplied together; "
+            "a half-formed reuse offer is refused"
+        )
+    if evidence is None or retained_tree_key is None:
+        return
+    identity = evidence.identity
+    if identity is not None and identity.output_tree_key != retained_tree_key:
+        raise ValueError(
+            "retained_tree_key does not match the evidence's output tree key: "
+            f"{retained_tree_key!r} != {identity.output_tree_key!r}"
+        )
+
+
 @bind_resolved_run_context
 async def _do_commit(
     backend: Backend,
@@ -3831,6 +4167,9 @@ async def _do_commit(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
+    recipe: TestRecipe | None = None,
+    evidence: TestAttemptEvidence | None = None,
+    retained_tree_key: str | None = None,
     run_context: RunContext | None = None,
 ) -> CommitPushResult:
     """Stage, commit, and optionally push — all host-side, no agent turn.
@@ -3852,6 +4191,7 @@ async def _do_commit(
     a successful push, its verified receipt.
     """
     del backend  # host-native commit: no agent turn (issue #726)
+    _validate_reuse_offer(evidence, retained_tree_key)
     run_context = resolve_run_context(run_context)
 
     if interactive:
@@ -3871,7 +4211,13 @@ async def _do_commit(
             # Issue #726: a decline still validates the applied fixes via the
             # host test runner; a red suite raises (surfaces as Stop(1)) so a
             # run is never reported successful with unvalidated fixes.
-            await _validate_declined_fixes(work, config)
+            await _validate_declined_fixes(
+                work,
+                config,
+                recipe=recipe,
+                evidence=evidence,
+                retained_tree_key=retained_tree_key,
+            )
             return CommitPushResult(committed=False, push=None)
 
     strict_commit = any(
@@ -3967,14 +4313,18 @@ async def _do_commit(
         _verify_commit_scope(work, sha_before, stage)
 
     # Hook-aware validation orchestration (issue #726): with an executable
-    # pre-push hook present, the full suite runs via the host runner exactly
-    # once per attempt, here, before the push — the hook itself still fires
-    # during ``push_branch`` (hook bypass flags are forbidden), so the win is that
+    # pre-push hook present, the full suite runs via the host runner once per
+    # attempt, here, before the push — the hook itself still fires during
+    # ``push_branch`` (hook bypass flags are forbidden), so the win is that
     # daydream neither re-runs the suite a second time at push time nor
     # skips validation when the hook makes the push the last gate. A red
-    # suite blocks the push even though the local commit exists.
+    # suite blocks the push even though the local commit exists. Issue #1408:
+    # when a strict commit's post-commit verification already passed and the
+    # finalized test evidence still matches, this proactive run is the one
+    # redundant daydream-owned execution and is skipped — the hook, the
+    # post-hook strict check, and the push receipt check are unaffected.
     if push and git_ops.has_executable_pre_push_hook(work.repo):
-        cmd = _canonical_test_cmd(config)
+        cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
         if cmd is None:
             print_warning(
                 console,
@@ -3983,16 +4333,20 @@ async def _do_commit(
                 "--test-command or the `test_command` config key).",
             )
         else:
-            # The hook-run suite execution is its own trajectory phase, in
-            # addition to the test-execution events the runner itself emits
-            # (issue #726 task 12).
-            async with host_phase_scope(DaydreamPhase.HOOK_RUN):
-                result = await _run_host_test_command(cmd, work, config)
-            if not result.passed:
-                raise RuntimeError(
-                    "Pre-push validation failed: the configured test command "
-                    "exited non-zero, so the commit was not pushed."
-                )
+            reuse = _pre_push_reuse_decision(
+                work, recipe, evidence, retained_tree_key, strict_commit=strict_commit
+            )
+            if reuse is None or not reuse.reused:
+                # The hook-run suite execution is its own trajectory phase, in
+                # addition to the test-execution events the runner itself emits
+                # (issue #726 task 12).
+                async with host_phase_scope(DaydreamPhase.HOOK_RUN):
+                    result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+                if not result.passed:
+                    raise RuntimeError(
+                        "Pre-push validation failed: the configured test command "
+                        "exited non-zero, so the commit was not pushed."
+                    )
 
             if strict_commit:
                 _verify_strict("post-hook")
@@ -4060,6 +4414,9 @@ async def phase_commit_push(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
+    recipe: TestRecipe | None = None,
+    evidence: TestAttemptEvidence | None = None,
+    retained_tree_key: str | None = None,
     run_context: RunContext | None = None,
 ) -> PushReceipt | None:
     """Prompt user to commit and push changes.
@@ -4078,6 +4435,9 @@ async def phase_commit_push(
         retained_states: Binary-safe final states matching ``retained_paths``.
         initial_index: Empty pre-dispatch index snapshot. Supplying these three
             selects strict stage-once and post-hook validation.
+        evidence: The finalized test evidence offered for reuse at this gate.
+        retained_tree_key: The retained tree key that evidence validated. Must
+            arrive with ``evidence``; a half-formed pair is refused.
     """
     run_context = resolve_run_context(run_context)
     console.print()
@@ -4090,6 +4450,9 @@ async def phase_commit_push(
         retained_paths=retained_paths,
         retained_states=retained_states,
         initial_index=initial_index,
+        recipe=recipe,
+        evidence=evidence,
+        retained_tree_key=retained_tree_key,
         run_context=run_context,
     )
     if result.push is not None:
@@ -4182,6 +4545,7 @@ async def phase_understand_intent(
         inline_diff=inline_diff,
         inline_exploration_summary=inline_exploration_summary,
     )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     intent_correction = ""
     while True:
@@ -4336,6 +4700,7 @@ async def phase_alternative_review(
         exploration_dir=_pointer_dir(sanctioned_inputs, exploration_dir),
         inline_diff=inline_diff,
     )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
 
     console.print()
     print_info(console, "Agent is evaluating the implementation...")
@@ -4448,6 +4813,7 @@ async def phase_per_stack_reviews(
     from daydream.deep.prompts import _diff_blocks_for_files
 
     deep_dir_path = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
+    recipe_for_prompts = load_test_recipe(deep_dir_path)
     recorder = get_current_recorder()
     if strategies is None:
         strategies = {
@@ -4685,6 +5051,7 @@ async def phase_per_stack_reviews(
                         frontier_files=_frontier_files_for_stack(stack),
                     )
 
+            prompt = append_extended_facts(prompt, recipe_for_prompts)
             task_context = FinalizationContext(
                 task=f"Finalize {stack.stack_name} review",
                 input_priority=("diff", "intent"),
@@ -4934,6 +5301,7 @@ async def phase_supervise_review(
         cwd=work.repo,
         exploration_dir=exploration_dir,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {"supervise-input": input_path, "diff": diff_path, "intent": intent_path,
@@ -5060,6 +5428,7 @@ async def phase_arbiter_review(
         exploration_dir=exploration_dir,
         intent_authoritative=intent_authoritative,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {"arbiter-input": input_path, "diff": diff_path, "intent": intent_path,
@@ -5157,6 +5526,7 @@ async def phase_suppression_review(
         cwd=work.repo,
         exploration_dir=exploration_dir,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,
         {"suppression-input": input_path, "diff": diff_path, "intent": intent_path,
@@ -5700,6 +6070,7 @@ async def phase_cross_stack_merge(
         intent_authoritative=intent_authoritative,
         resumed_from_arbiter=continuation is not None,
     )
+    prompt = append_extended_facts(prompt, load_test_recipe(dd))
     merge_inputs: dict[str, Path | None] = {
         "intent": intent_path,
         "alternatives": alternatives_path,

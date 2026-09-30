@@ -30,7 +30,12 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import deep_dir, merged_items_path, verdicts_path
+from daydream.deep.artifacts import (
+    deep_dir,
+    evidence_reuse_path,
+    merged_items_path,
+    verdicts_path,
+)
 from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import build_per_stack_prompt
 from daydream.deep.verify_selection import SelectionConfig
@@ -49,6 +54,7 @@ from daydream.phases import (
     PER_STACK_RECORD_SCHEMA,
     TEST_OUTPUT_TAIL_LINES,
     PushAttemptError,
+    TestAttemptEvidence,
     _build_failure_summarizer_prompt,
     _build_fix_prompt,
     _build_minimal_handoff,
@@ -91,7 +97,7 @@ from daydream.prompts.authorial_intent import (
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.test_execution import TestExecutionResult
+from daydream.test_execution import TestExecutionIdentity, TestExecutionResult, resolve_test_recipe
 from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
@@ -143,6 +149,42 @@ def _record_host_runs(
 
     monkeypatch.setattr("daydream.phases.run_test_command", fake_run)
     return calls
+
+
+def _execution_identity(
+    repo: Path,
+    *,
+    recipe: Any,
+    argv: tuple[str, ...],
+    output_tree_key: str = "t",
+    outcome: str = "passed",
+) -> TestExecutionIdentity:
+    """A host execution identity matching what the gate reconstructs from *recipe*.
+
+    Head/branch are read tolerantly: the decline-path fixtures use an unborn
+    ``HEAD``, where the gate also falls back to empty revision facts.
+    """
+    try:
+        head_sha = git_ops.head_sha(repo)
+        branch = git_ops.current_branch(repo) or ""
+    except GitError:
+        head_sha = ""
+        branch = ""
+    return TestExecutionIdentity(
+        session_id="s",
+        argv=argv,
+        cwd_relative=recipe.package.cwd_relative,
+        runner=recipe.package.runner,
+        interpreter=recipe.package.interpreter,
+        config_digest=recipe.package.config_digest,
+        absent_components=recipe.package.absent_components,
+        input_tree_key="t",
+        output_tree_key=output_tree_key,
+        head_sha=head_sha,
+        branch=branch,
+        kind="host",
+        outcome=cast(Any, outcome),
+    )
 
 
 def _handoff_turn(body: str) -> tuple[AgentEvent, ...]:
@@ -6026,3 +6068,405 @@ def test_build_commit_message_deterministic_with_trailers() -> None:
     a = build_commit_message(items=items, run_id="R42", version="1.2.3")
     b = build_commit_message(items=items, run_id="R42", version="1.2.3")
     assert a == b
+
+
+# Issue #1408 task 6: the four host call sites run the recipe's command, in
+# the recipe's package cwd.
+
+
+@pytest.mark.asyncio
+async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """MH8: the FIRST call runs under the right runner and cwd — no failed attempt then a retry."""
+    silence_console("daydream.phases")
+    repo = _init_plain_repo(tmp_path)
+    api = repo / "services" / "api"
+    api.mkdir(parents=True)
+    (api / "pyproject.toml").write_text("[project]\nname = 'api'\n")
+    (api / "uv.lock").write_text("version = 1\n")
+    calls = _record_host_runs(monkeypatch)
+    config = make_config(repo, test_command="uv run pytest")
+    recipe = resolve_test_recipe(config, config, repo_root=repo, cwd=api)
+
+    await phases.phase_test_once(
+        ScriptedBackend(), make_work(repo), config=config, session_id="s",
+        capture_tree_key=lambda: "k", recipe=recipe,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["cwd"] == api
+    assert calls[0]["cmd"] == ["uv", "run", "pytest"]
+
+
+@pytest.mark.asyncio
+async def test_repo_root_recipe_keeps_the_worktree_root_cwd(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    silence_console("daydream.phases")
+    repo = _init_plain_repo(tmp_path)
+    calls = _record_host_runs(monkeypatch)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+
+    await phases.phase_test_once(
+        ScriptedBackend(), make_work(repo), config=config, session_id="s",
+        capture_tree_key=lambda: "k", recipe=recipe,
+    )
+
+    assert calls[0]["cwd"] == repo
+
+
+@pytest.mark.asyncio
+async def test_supplied_recipe_never_triggers_a_second_resolution(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    silence_console("daydream.phases")
+    repo = _init_plain_repo(tmp_path)
+    _record_host_runs(monkeypatch)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    monkeypatch.setattr(
+        phases, "_canonical_test_cmd", lambda *a, **k: pytest.fail("second discovery")
+    )
+
+    await phases.phase_test_once(
+        ScriptedBackend(), make_work(repo), config=config, session_id="s",
+        capture_tree_key=lambda: "k", recipe=recipe,
+    )
+
+
+# Issue #1408 task 11: a declined commit with matching green evidence does not
+# re-run the suite (MH15).
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_reuses_matching_evidence_without_rerunning(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """MH15: a decline with valid matching green evidence leaves the changes
+    uncommitted and does NOT re-run the same orchestrator test."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    calls = _record_host_runs(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    work = make_work(repo)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+    evidence = TestAttemptEvidence(
+        session_id="s", kind="host", command=("true",), passed=True,
+        input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+        identity=identity,
+    )
+
+    result = await phase_commit_push(
+        ScriptedBackend(), work, config=config, recipe=recipe, evidence=evidence,
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    assert result is None
+    assert calls == [], "matching evidence must not re-run the canonical command"
+    assert git(repo, "diff", "--cached", "--name-only") == ""  # still uncommitted
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_with_stale_evidence_still_validates(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """One mismatched component falls back to the existing real-validation path."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    calls = _record_host_runs(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key="stale")
+
+    await phase_commit_push(
+        ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+        evidence=TestAttemptEvidence(
+            session_id="s", kind="host", command=("true",), passed=True,
+            input_tree_key="stale", output_tree_key="stale", identity=identity,
+        ),
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    assert len(calls) == 1 and calls[0]["cmd"] == ["true"]
+
+
+@pytest.mark.asyncio
+async def test_declined_commit_with_red_evidence_still_raises(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
+    repo = _init_plain_repo(tmp_path)
+    config = make_config(repo, test_command="false")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("false",), outcome="failed")
+
+    with pytest.raises(RuntimeError, match="validation"):
+        await phase_commit_push(
+            ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+            evidence=TestAttemptEvidence(
+                session_id="s", kind="host", command=("false",), passed=False,
+                input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+                identity=identity,
+            ),
+            retained_tree_key=identity.output_tree_key,
+        )
+
+
+# Issue #1408 task 12: pre-push reuse removes only the redundant Daydream-owned
+# suite run. The hook, the post-hook strict check, and the receipt check remain.
+
+
+def _retained_strict_kwargs(
+    repo: Path, work: WorkContext, paths: set[str]
+) -> dict[str, Any]:
+    """The three strict stage-once arguments ``_do_commit`` requires together."""
+    return {
+        "retained_paths": frozenset(paths),
+        "retained_states": git_ops.snapshot_worktree_paths(repo, sorted(paths)),
+        "initial_index": phases.require_empty_staged_index(work),
+    }
+
+
+def _reuse_offer(identity: TestExecutionIdentity) -> TestAttemptEvidence:
+    """A matching green host offer bound to *identity*'s output tree key."""
+    return TestAttemptEvidence(
+        session_id="s", kind="host", command=("true",), passed=True,
+        input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+        identity=identity,
+    )
+
+
+@pytest.mark.asyncio
+async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH14 + SH3: reuse removes only the proactive suite run. The hook still
+    executes, the strict post-hook verification still runs, the push still
+    verifies, and the saving is counted honestly — orchestrator suite
+    invocations (0 with reuse vs 1 without) are measured separately from the
+    one mandatory hook execution."""
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    hook_log = repo / "hook-ran"
+    (repo / ".git" / "hooks" / "pre-push").write_text(f"#!/bin/sh\ntouch {hook_log}\nexit 0\n")
+    (repo / ".git" / "hooks" / "pre-push").chmod(0o755)
+    (repo / "fix.py").write_text("fixed\n")
+    work = make_work(repo)
+    runs = _record_host_runs(monkeypatch)
+    config = _hook_run_config()
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    ok = await _do_commit(
+        ScriptedBackend(), work, push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+        config=config, recipe=recipe,
+        evidence=_reuse_offer(identity),
+        retained_tree_key=identity.output_tree_key,
+        **_retained_strict_kwargs(repo, work, {"fix.py"}),
+    )
+
+    assert ok.committed is True and ok.push is not None
+    assert runs == [], "the redundant proactive suite run is the only thing removed"
+    assert hook_log.exists(), "the pre-push hook must still execute"
+    assert git_ops.remote_contains_commit(repo, "main", git_ops.head_sha(repo), remote="origin")
+
+    # SH3 baseline, measured by execution in the same test: without an evidence offer
+    # the same push case pays exactly one orchestrator suite run, and one hook run.
+    repo_two = _pushable_repo(tmp_path / "baseline")
+    _install_pre_push_hook(repo_two)
+    (repo_two / "fix.py").write_text("fixed\n")
+    baseline = _record_host_runs(monkeypatch, output="")
+
+    await _do_commit(
+        ScriptedBackend(), make_work(repo_two), push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+        config=_hook_run_config(),
+    )
+
+    assert len(baseline) == 1, "the no-evidence baseline pays exactly one orchestrator run"
+
+
+@pytest.mark.asyncio
+async def test_hook_failure_still_blocks_the_push_on_a_reuse_hit(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    (repo / ".git" / "hooks" / "pre-push").write_text("#!/bin/sh\nexit 1\n")
+    (repo / ".git" / "hooks" / "pre-push").chmod(0o755)
+    (repo / "fix.py").write_text("fixed\n")
+    work = make_work(repo)
+    runs = _record_host_runs(monkeypatch)
+    config = _hook_run_config()
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    with pytest.raises((GitError, PushAttemptError)):
+        await _do_commit(
+            ScriptedBackend(), work, push=True, interactive=False,
+            items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+            config=config, recipe=recipe,
+            evidence=_reuse_offer(identity),
+            retained_tree_key=identity.output_tree_key,
+            **_retained_strict_kwargs(repo, work, {"fix.py"}),
+        )
+    assert runs == []
+
+
+@pytest.mark.asyncio
+async def test_a_bare_tree_match_after_the_commit_does_not_reuse(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH13: the tree key is content-only; reuse across a commit needs the explicit
+    post-commit verification to have passed."""
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    (repo / "fix.py").write_text("fixed\n")
+    runs = _record_host_runs(monkeypatch, output="")
+    config = _hook_run_config()
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    # No strict stage-once arguments: the post-commit state is never verified,
+    # so the commit-moved HEAD cannot be exempted by ``post_commit_verified``.
+    ok = await _do_commit(
+        ScriptedBackend(), make_work(repo), push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+        config=config, recipe=recipe,
+        evidence=_reuse_offer(identity),
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    assert ok.committed is True
+    assert len(runs) == 1, "an unverified post-commit state requires the real suite run"
+
+
+# Issue #1408 task 13: each gate reports reused-or-revalidated and persists the
+# decision so it is reconstructible from the run's artifacts alone (SH1/SH2).
+
+
+def _capture_gate_report(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the human reuse line(s) the gate prints through the UI helpers."""
+    reported: list[str] = []
+    monkeypatch.setattr(
+        phases, "print_success", lambda _c, msg, *a, **k: reported.append(str(msg))
+    )
+    monkeypatch.setattr(
+        phases, "print_info", lambda _c, msg, *a, **k: reported.append(str(msg))
+    )
+    return reported
+
+
+@pytest.mark.asyncio
+async def test_a_reuse_decision_is_reported_and_persisted(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """SH1/SH2: the gate names the decision and the persisted record is
+    reconstructible from the run's artifacts alone."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    _record_host_runs(monkeypatch)
+    reported = _capture_gate_report(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    deep = repo / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    await phase_commit_push(
+        ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+        evidence=TestAttemptEvidence(
+            session_id="s", kind="host", command=("true",), passed=True,
+            input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+            identity=identity,
+        ),
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    record = json.loads(evidence_reuse_path(deep).read_text())
+    gate = record["gates"]["declined-commit"]
+    assert gate["gate"] == "declined-commit"
+    assert gate["result"] == "reused"
+    assert gate["reused"] is True
+    assert gate["mismatched_components"] == []
+    assert gate["before_head_sha"] == identity.head_sha
+    assert any("reused" in line for line in reported), reported
+
+
+@pytest.mark.asyncio
+async def test_a_mismatch_record_names_the_component(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """A miss records which component required the real validation."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    _record_host_runs(monkeypatch)
+    reported = _capture_gate_report(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    deep = repo / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+
+    await phase_commit_push(
+        ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+        evidence=TestAttemptEvidence(
+            session_id="s", kind="host", command=("true",), passed=True,
+            input_tree_key="stale", output_tree_key="stale",
+            identity=_execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key="stale"),
+        ),
+        retained_tree_key="stale",
+    )
+
+    record = json.loads(evidence_reuse_path(deep).read_text())
+    gate = record["gates"]["declined-commit"]
+    assert gate["result"] == "identity-mismatch"
+    assert gate["mismatched_components"] == ["tree_key"]
+    assert any("tree_key" in line for line in reported), reported

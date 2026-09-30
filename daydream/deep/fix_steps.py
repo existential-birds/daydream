@@ -72,6 +72,7 @@ from daydream.phases import (
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
+from daydream.test_execution import TestRecipe
 from daydream.trajectory import (
     DaydreamPhase,
     current_session_id,
@@ -826,6 +827,7 @@ class FixCycleState:
     preexisting_gitlinks: tuple[GitPathState, ...]
     footprint: AuthorizedFixFootprint
     latest_retained: RetainedTreeSnapshot | None = None
+    latest_test_evidence: TestAttemptEvidence | None = None
     verifier_key: EvidenceKey | None = None
     last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
 
@@ -1433,7 +1435,7 @@ def _render_fix_outcome_summary(
 
 
 def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "session_id": attempt.session_id,
         "kind": attempt.kind,
         "command": list(attempt.command) if attempt.command is not None else "agent-fallback",
@@ -1441,6 +1443,9 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
     }
+    if attempt.identity is not None:
+        payload["identity"] = attempt.identity.payload()
+    return payload
 
 
 def _persist_test_verdict(
@@ -1480,6 +1485,18 @@ def _authorize_final_red_override(ctx: FlowContext) -> bool:
         default="n",
         console=console,
     )
+
+
+def _published_test_recipe(ctx: FlowContext) -> TestRecipe | None:
+    """Read the run's once-resolved test recipe, fail-open (issue #1408).
+
+    The recipe is resolved in the deep preamble and published on the flow data
+    mapping; a missing publication (or a pre-#1408 resume) degrades to the
+    legacy per-call resolution rather than raising. The published value is
+    typed, so a wrong-typed entry is ignored rather than threaded through.
+    """
+    recipe = getattr(DeepState(ctx.data), "test_recipe", None)
+    return recipe if isinstance(recipe, TestRecipe) else None
 
 
 async def finalize_retained_tree_after_test(
@@ -1549,6 +1566,7 @@ async def finalize_retained_tree_after_test(
                     config=ctx.config,
                     session_id=state.session_id,
                     capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
+                    recipe=_published_test_recipe(ctx),
                     run_context=ctx.run_context,
                 )
             except Exception as exc:
@@ -1591,6 +1609,14 @@ async def finalize_retained_tree_after_test(
         except OSError as exc:
             return _stop(f"recommended capture failed: {exc}")
         state.latest_retained = snapshot
+        # The finalized tree and the evidence that validated it are one
+        # fact: only the attempt whose before/after tree key equals the
+        # retained tree key may become the reuse offer (issue #1408).
+        if (
+            evidence.input_tree_key == snapshot.tree_key
+            and evidence.output_tree_key == snapshot.tree_key
+        ):
+            state.latest_test_evidence = evidence
         return None
 
     return _stabilization_stop(
@@ -1619,6 +1645,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
+                recipe=_published_test_recipe(ctx),
             )
             if not isinstance(result, TestAndHealResult):
                 raise TypeError("phase_test_and_heal returned an invalid evidence result")
@@ -1707,6 +1734,9 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,
+            recipe=_published_test_recipe(ctx),
+            evidence=state.latest_test_evidence,
+            retained_tree_key=snapshot.tree_key,
             run_context=ctx.run_context,
         )
     except PushAttemptError as exc:

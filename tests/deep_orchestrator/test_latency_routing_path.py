@@ -48,9 +48,11 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
 #: Artifacts deliberately added to ``.daydream/deep/`` after the pre-#732 baseline
 #: was captured. ``latency-routing.json`` is issue #732's additive routing record
 #: (A12); ``adjudication-provenance.json`` is the host-stamped adjudication ledger
-#: issue #735 adds. The gate subtracts both before comparing against the baseline.
+#: issue #735 adds; ``test-recipe.json`` is the once-resolved test recipe issue
+#: #1408 persists in the preamble. The gate subtracts all three before comparing
+#: against the baseline.
 _FORENSIC_ADDITIVE_DEEP_ARTIFACTS = frozenset(
-    {"latency-routing.json", "adjudication-provenance.json"}
+    {"latency-routing.json", "adjudication-provenance.json", "test-recipe.json"}
 )
 
 #: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the

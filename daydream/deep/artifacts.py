@@ -317,6 +317,17 @@ def test_verdict_path(deep_dir_path: Path) -> Path:
     return deep_dir_path / "test-verdict.json"
 
 
+def evidence_reuse_path(deep_dir_path: Path) -> Path:
+    """Per-gate audit of each evidence-reuse decision (issue #1408).
+
+    One mapping keyed by gate (``declined-commit`` / ``pre-push``), so the
+    decline decision survives a later pre-push decision. Records only identity
+    facts (tree keys, HEAD shas, branch, mismatched component names) — never a
+    command, config-input digest, secret, or prompt text.
+    """
+    return deep_dir_path / "evidence-reuse.json"
+
+
 def push_verdict_path(deep_dir_path: Path) -> Path:
     """Session-bound outcome of the current run's ordinary push attempt."""
     return deep_dir_path / "push-verdict.json"
