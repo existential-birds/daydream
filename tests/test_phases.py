@@ -91,7 +91,7 @@ from daydream.prompts.authorial_intent import (
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.test_execution import TestExecutionResult
+from daydream.test_execution import TestExecutionResult, resolve_test_recipe
 from daydream.trajectory import (
     DaydreamRunFlow,
     TrajectoryRecorder,
@@ -6026,3 +6026,73 @@ def test_build_commit_message_deterministic_with_trailers() -> None:
     a = build_commit_message(items=items, run_id="R42", version="1.2.3")
     b = build_commit_message(items=items, run_id="R42", version="1.2.3")
     assert a == b
+
+
+# Issue #1408 task 6: the four host call sites run the recipe's command, in
+# the recipe's package cwd.
+
+
+@pytest.mark.asyncio
+async def test_first_targeted_call_runs_in_the_resolved_package_cwd(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """MH8: the FIRST call runs under the right runner and cwd — no failed attempt then a retry."""
+    silence_console("daydream.phases")
+    repo = _init_plain_repo(tmp_path)
+    api = repo / "services" / "api"
+    api.mkdir(parents=True)
+    (api / "pyproject.toml").write_text("[project]\nname = 'api'\n")
+    (api / "uv.lock").write_text("version = 1\n")
+    calls = _record_host_runs(monkeypatch)
+    config = make_config(repo, test_command="uv run pytest")
+    recipe = resolve_test_recipe(config, config, repo_root=repo, cwd=api)
+
+    await phases.phase_test_once(
+        ScriptedBackend(), make_work(repo), config=config, session_id="s",
+        capture_tree_key=lambda: "k", recipe=recipe,
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["cwd"] == api
+    assert calls[0]["cmd"] == ["uv", "run", "pytest"]
+
+
+@pytest.mark.asyncio
+async def test_repo_root_recipe_keeps_the_worktree_root_cwd(
+    tmp_path: Path, make_work, make_config, monkeypatch, silence_console
+) -> None:
+    silence_console("daydream.phases")
+    repo = _init_plain_repo(tmp_path)
+    calls = _record_host_runs(monkeypatch)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+
+    await phases.phase_test_once(
+        ScriptedBackend(), make_work(repo), config=config, session_id="s",
+        capture_tree_key=lambda: "k", recipe=recipe,
+    )
+
+    assert calls[0]["cwd"] == repo
+
+
+@pytest.mark.asyncio
+async def test_supplied_recipe_never_triggers_a_second_resolution(
+    tmp_path: Path, make_work, make_config, monkeypatch, silence_console
+) -> None:
+    silence_console("daydream.phases")
+    repo = _init_plain_repo(tmp_path)
+    _record_host_runs(monkeypatch)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    monkeypatch.setattr(
+        phases, "_canonical_test_cmd", lambda *a, **k: pytest.fail("second discovery")
+    )
+
+    await phases.phase_test_once(
+        ScriptedBackend(), make_work(repo), config=config, session_id="s",
+        capture_tree_key=lambda: "k", recipe=recipe,
+    )

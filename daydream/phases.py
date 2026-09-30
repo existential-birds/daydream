@@ -151,6 +151,7 @@ from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity
 from daydream.test_execution import (
     MissingTestCommandError,
     TestExecutionResult,
+    TestRecipe,
     canonical_test_command,
     run_test_command,
 )
@@ -3226,8 +3227,26 @@ def _test_command_wall_budget(config: Any) -> float:
     return TEST_WALL_BUDGET_S
 
 
+def _recipe_command(recipe: TestRecipe) -> list[str] | None:
+    """Return the recipe's resolved argv, or ``None`` for its named miss.
+
+    An unresolved command fact (no configured command) is the existing
+    ``None``-command path — the recipe never supplies a guessed argv.
+    """
+    if not recipe.command.resolved:
+        return None
+    value = recipe.command.value
+    if isinstance(value, tuple):
+        return list(value)
+    return [value] if value else None
+
+
 async def _run_host_test_command(
-    cmd: list[str], work: WorkContext, config: Any
+    cmd: list[str],
+    work: WorkContext,
+    config: Any,
+    *,
+    recipe: TestRecipe | None = None,
 ) -> TestExecutionResult:
     """Run *cmd* as a host-side subprocess with the resolved wall budget.
 
@@ -3235,14 +3254,16 @@ async def _run_host_test_command(
     approved-investigator retry, declined-fix validation, and the pre-push
     hook run — share the same three-step glue: resolve the wall budget
     (``_test_command_wall_budget``) and run the command via
-    :func:`run_test_command` with the workspace repo as cwd. Spawn errors
-    propagate unchanged; each caller applies its own failure policy (the
-    TEST-phase sites route them through the failure gate, the validate/hook
-    sites let them fail closed).
+    :func:`run_test_command`. Issue #1408: when a resolved recipe is supplied
+    the command runs in the recipe's package cwd; otherwise the workspace repo
+    root remains the cwd. Spawn errors propagate unchanged; each caller
+    applies its own failure policy (the TEST-phase sites route them through
+    the failure gate, the validate/hook sites let them fail closed).
     """
+    cwd = work.repo if recipe is None else Path(work.repo, recipe.package.cwd_relative)
     return await run_test_command(
         cmd=cmd,
-        cwd=work.repo,
+        cwd=cwd,
         wall_budget_s=_test_command_wall_budget(config),
     )
 
@@ -3284,6 +3305,7 @@ async def phase_test_once(
     capture_tree_key: Callable[[], str],
     continuation: ContinuationToken | None = None,
     command_override: list[str] | None = None,
+    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[TestAttemptEvidence, ContinuationToken | None, str]:
     """Execute exactly one canonical test attempt and bind it to tree identity.
@@ -3291,14 +3313,22 @@ async def phase_test_once(
     Configured and explicitly approved commands run host-side. With no command,
     the established TEST-agent/prose path is used. Both paths capture the same
     before/after identity projection supplied by the fix-cycle orchestrator.
+    Issue #1408: a supplied recipe resolves the command and cwd exactly once —
+    ``_canonical_test_cmd`` is never consulted for it.
     """
     run_context = resolve_run_context(run_context)
-    cmd = command_override if command_override is not None else _canonical_test_cmd(config)
+    cmd: list[str] | None
+    if command_override is not None:
+        cmd = command_override
+    elif recipe is not None:
+        cmd = _recipe_command(recipe)
+    else:
+        cmd = _canonical_test_cmd(config)
     input_tree_key = capture_tree_key()
     next_continuation: ContinuationToken | None = None
     if cmd is not None:
         try:
-            result = await _run_host_test_command(cmd, work, config)
+            result = await _run_host_test_command(cmd, work, config, recipe=recipe)
         except (OSError, ValueError) as exc:
             output = f"The configured test command failed to run (spawn): {exc}"
             passed = False
@@ -3355,6 +3385,7 @@ async def phase_test_and_heal(
     footprint: AuthorizedFixFootprint | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
+    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> TestAndHealResult:
     """Run bound test attempts and offer a bounded authorized heal after failure."""
@@ -3436,6 +3467,7 @@ async def phase_test_and_heal(
                 session_id=session_id,
                 capture_tree_key=capture_tree_key,
                 continuation=continuation,
+                recipe=recipe,
                 run_context=run_context,
             )
             attempts.append(evidence)
@@ -3566,6 +3598,7 @@ async def phase_test_and_heal(
                                 session_id=session_id,
                                 capture_tree_key=capture_tree_key,
                                 command_override=cmd,
+                                recipe=recipe,
                                 run_context=run_context,
                             )
                         except (OSError, ValueError) as exc:
@@ -3756,7 +3789,9 @@ def _verify_commit_scope(
         )
 
 
-async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
+async def _validate_declined_fixes(
+    work: WorkContext, config: Any, *, recipe: TestRecipe | None = None
+) -> None:
     """Re-run the canonical test command after a declined commit/push gate.
 
     Issue #726: declining to commit must not quietly discard a run whose fixes
@@ -3769,12 +3804,13 @@ async def _validate_declined_fixes(work: WorkContext, config: Any) -> None:
 
     With no canonical command configured there is nothing to validate against
     (see :func:`_canonical_test_cmd`); the decline then behaves as before
-    rather than fabricating a verdict.
+    rather than fabricating a verdict. A supplied recipe is the single source
+    of the command and cwd, so no re-resolution happens here (issue #1408).
     """
-    cmd = _canonical_test_cmd(config)
+    cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
     if cmd is None:
         return
-    result = await _run_host_test_command(cmd, work, config)
+    result = await _run_host_test_command(cmd, work, config, recipe=recipe)
     if result.passed:
         print_success(
             console,
@@ -3832,6 +3868,7 @@ async def _do_commit(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
+    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> CommitPushResult:
     """Stage, commit, and optionally push — all host-side, no agent turn.
@@ -3872,7 +3909,7 @@ async def _do_commit(
             # Issue #726: a decline still validates the applied fixes via the
             # host test runner; a red suite raises (surfaces as Stop(1)) so a
             # run is never reported successful with unvalidated fixes.
-            await _validate_declined_fixes(work, config)
+            await _validate_declined_fixes(work, config, recipe=recipe)
             return CommitPushResult(committed=False, push=None)
 
     strict_commit = any(
@@ -3975,7 +4012,7 @@ async def _do_commit(
     # skips validation when the hook makes the push the last gate. A red
     # suite blocks the push even though the local commit exists.
     if push and git_ops.has_executable_pre_push_hook(work.repo):
-        cmd = _canonical_test_cmd(config)
+        cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
         if cmd is None:
             print_warning(
                 console,
@@ -3988,7 +4025,7 @@ async def _do_commit(
             # addition to the test-execution events the runner itself emits
             # (issue #726 task 12).
             async with host_phase_scope(DaydreamPhase.HOOK_RUN):
-                result = await _run_host_test_command(cmd, work, config)
+                result = await _run_host_test_command(cmd, work, config, recipe=recipe)
             if not result.passed:
                 raise RuntimeError(
                     "Pre-push validation failed: the configured test command "
@@ -4061,6 +4098,7 @@ async def phase_commit_push(
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
+    recipe: TestRecipe | None = None,
     run_context: RunContext | None = None,
 ) -> PushReceipt | None:
     """Prompt user to commit and push changes.
@@ -4091,6 +4129,7 @@ async def phase_commit_push(
         retained_paths=retained_paths,
         retained_states=retained_states,
         initial_index=initial_index,
+        recipe=recipe,
         run_context=run_context,
     )
     if result.push is not None:

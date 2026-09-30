@@ -73,6 +73,7 @@ from daydream.phases import (
 from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
+from daydream.test_execution import TestRecipe
 from daydream.trajectory import (
     DaydreamPhase,
     current_session_id,
@@ -1500,6 +1501,18 @@ def _authorize_final_red_override(ctx: FlowContext) -> bool:
     )
 
 
+def _published_test_recipe(ctx: FlowContext) -> TestRecipe | None:
+    """Read the run's once-resolved test recipe, fail-open (issue #1408).
+
+    The recipe is resolved in the deep preamble and published on the flow data
+    mapping; a missing publication (or a pre-#1408 resume) degrades to the
+    legacy per-call resolution rather than raising. The published value is
+    typed, so a wrong-typed entry is ignored rather than threaded through.
+    """
+    recipe = getattr(DeepState(ctx.data), "test_recipe", None)
+    return recipe if isinstance(recipe, TestRecipe) else None
+
+
 async def finalize_retained_tree_after_test(
     ctx: FlowContext, result: TestAndHealResult
 ) -> Stop | None:
@@ -1567,6 +1580,7 @@ async def finalize_retained_tree_after_test(
                     config=ctx.config,
                     session_id=state.session_id,
                     capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
+                    recipe=_published_test_recipe(ctx),
                     run_context=ctx.run_context,
                 )
             except Exception as exc:
@@ -1637,6 +1651,7 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
+                recipe=_published_test_recipe(ctx),
             )
             if not isinstance(result, TestAndHealResult):
                 raise TypeError("phase_test_and_heal returned an invalid evidence result")
@@ -1725,6 +1740,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,
+            recipe=_published_test_recipe(ctx),
             run_context=ctx.run_context,
         )
     except PushAttemptError as exc:
