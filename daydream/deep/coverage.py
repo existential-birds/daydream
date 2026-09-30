@@ -85,6 +85,33 @@ def write_coverage_receipts(
     )
 
 
+def _result_credits_coverage(result: dict[str, Any]) -> bool:
+    """Whether a paired ``ToolResult`` observation establishes read coverage.
+
+    Reads ``result["extra"]`` when it is a dict and returns ``False`` iff the
+    observation is damaged: ``is_error`` is ``True``, ``cancelled`` is ``True``,
+    ``status`` is ``"interrupted"``, ``truncated`` is ``True``, or ``exit_code``
+    is an ``int`` and non-zero. Any other outcome credits the read. Absent or
+    non-dict ``extra`` is not failure -- Claude/Pi report no structured
+    metadata, and treating absence as failure would zero their read credit.
+    """
+    extra = result.get("extra")
+    if not isinstance(extra, dict):
+        return True
+    if extra.get("is_error") is True:
+        return False
+    if extra.get("cancelled") is True:
+        return False
+    if extra.get("status") == "interrupted":
+        return False
+    if extra.get("truncated") is True:
+        return False
+    exit_code = extra.get("exit_code")
+    if isinstance(exit_code, int) and exit_code != 0:
+        return False
+    return True
+
+
 def _completed_read_paths(
     trajectory: dict[str, Any], phases: set[str] | None = None
 ) -> set[str]:
@@ -93,14 +120,15 @@ def _completed_read_paths(
     A Read only covers a diff file when the read tool call is paired with a
     ToolResult in the SAME step's observation:
     ``observation.results[].source_call_id`` must equal the tool call's
-    ``tool_call_id``. Tool-call IDs are scoped to individual invocations and
-    are NOT required to be trajectory-global, so the completed set is built per
-    step and never leaks across steps: an interrupted read whose ID collides
-    with a completed read in another step stays uncovered (fail-open: the file
-    gets swept, never skipped). An interrupted read (ToolStartEvent with no
-    ToolResultEvent) returns no content, so it must NOT count as coverage.
-    ``phases``, when given, restricts the steps considered to those whose
-    ``extra.daydream_phase`` is in the set.
+    ``tool_call_id``. The paired result must also establish a successful
+    observation (:func:`_result_credits_coverage`): a result marked failed,
+    cancelled, interrupted, truncated, or with a non-zero exit code credits
+    nothing. Tool-call IDs are scoped to individual invocations and are NOT
+    required to be trajectory-global, so the completed set is built per step
+    and never leaks across steps: an interrupted read whose ID collides with a
+    completed read in another step stays uncovered (fail-open: the file gets
+    swept, never skipped). ``phases``, when given, restricts the steps
+    considered to those whose ``extra.daydream_phase`` is in the set.
     """
     paths: set[str] = set()
     for step in trajectory.get("steps", []):
@@ -109,6 +137,8 @@ def _completed_read_paths(
         completed_call_ids: set[str] = set()
         for result in (step.get("observation") or {}).get("results") or []:
             if not isinstance(result, dict):
+                continue
+            if not _result_credits_coverage(result):
                 continue
             call_id = result.get("source_call_id")
             if isinstance(call_id, str):
@@ -387,7 +417,8 @@ def compute_uncovered_files(
 
     Mirrors ``analyzer.analyze_coverage``'s shape but applies the sweep's own
     matching rules: reads are counted only when the tool call is completed
-    (paired ToolResult observation) and a read path covers a diff file only at
+    (paired ToolResult observation that is not marked failed, cancelled,
+    interrupted, truncated, or non-zero-exit) and a read path covers a diff file only at
     a path-component boundary. A read of ``/repo/notapi.py`` therefore never
     covers ``api.py``, and an interrupted read never covers anything. Both
     rules fail open — a genuinely unread file is swept, never skipped.

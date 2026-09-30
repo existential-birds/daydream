@@ -50,14 +50,21 @@ _DIFF = (
 
 
 def _write_fork_calls(
-    run_dir: Path, name: str, calls: list[dict[str, Any]], *, include_results: bool = True
+    run_dir: Path,
+    name: str,
+    calls: list[dict[str, Any]],
+    *,
+    include_results: bool = True,
+    result_extra: dict[str, Any] | None = None,
 ) -> None:
     """Write one sibling step carrying *calls* as its tool calls.
 
     With *include_results* (default) each tool call carries a matching
     ``observation.results[].source_call_id`` so the sweep counts it as coverage;
     without it the step has no ``observation`` (an interrupted call, which does
-    NOT cover the file).
+    NOT cover the file). *result_extra*, when given, is attached as every
+    emitted result's ``extra`` (absent means the result dict is byte-identical
+    to the original shape).
     """
     trajectories_dir = run_dir / "trajectories"
     trajectories_dir.mkdir(parents=True, exist_ok=True)
@@ -72,7 +79,10 @@ def _write_fork_calls(
                 "arguments": call.get("arguments", {}),
             }
         )
-        results.append({"source_call_id": call_id, "content": "file content"})
+        result: dict[str, Any] = {"source_call_id": call_id, "content": "file content"}
+        if result_extra is not None:
+            result["extra"] = result_extra
+        results.append(result)
     step: dict[str, Any] = {"step_id": "s0", "tool_calls": tool_calls}
     if include_results:
         step["observation"] = {"results": results}
@@ -341,6 +351,85 @@ def test_loop_read_covers_through_the_sweep_and_verdict_seams(tmp_path: Path) ->
     )
 
     assert [v["verdict"] for v in verdicts] == ["clean", "clean"]
+
+
+@pytest.mark.parametrize("extra", [
+    {"is_error": True},
+    {"cancelled": True},
+    {"status": "interrupted"},
+    {"truncated": True},
+    {"exit_code": 2},
+])
+def test_damaged_observations_credit_no_coverage(tmp_path: Path, extra: dict[str, Any]) -> None:
+    # Issue #1397 requirement 5: a paired result marked failed/cancelled/
+    # interrupted/truncated/non-zero-exit establishes no coverage.
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-damaged")
+    _write_fork_calls(
+        run_dir,
+        "deep-python.json",
+        [{"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}}],
+        result_extra=extra,
+    )
+    _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
+
+    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-damaged")
+
+    assert "api.py" in uncovered                  # the damaged read is not coverage
+    assert stats["files_read_by_reviewers"] == 1  # only notes.txt
+
+
+def test_zero_exit_code_observation_still_credits(tmp_path: Path) -> None:
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-clean-exit")
+    _write_fork_calls(
+        run_dir,
+        "deep-python.json",
+        [{"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}}],
+        result_extra={"is_error": False, "exit_code": 0, "truncated": False},
+    )
+
+    uncovered, _ = compute_uncovered_files(daydream_dir, "sess-clean-exit")
+
+    assert "api.py" not in uncovered              # a clean result still credits
+
+
+def test_a_damaged_batched_read_credits_none_of_its_files(tmp_path: Path) -> None:
+    # Requirement 5 explicitly spans batched/loop reads, not just single Reads.
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-damaged-loop")
+    _write_fork_calls(
+        run_dir,
+        "deep-python.json",
+        [{
+            "function_name": "shell",
+            "arguments": {"command": 'for f in api.py notes.txt; do nl -ba "$f"; done'},
+        }],
+        result_extra={"truncated": True},
+    )
+
+    uncovered, _ = compute_uncovered_files(daydream_dir, "sess-damaged-loop")
+
+    assert uncovered == ["api.py", "notes.txt"]
+
+
+def test_declared_clean_is_downgraded_when_the_only_read_failed(tmp_path: Path) -> None:
+    # Requirement 5's second consumer: verdict reconciliation must not let a
+    # failed read rubber-stamp a declared clean verdict.
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-failed-verdict")
+    _write_fork_calls(
+        run_dir,
+        "deep-python.json",
+        [{"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}}],
+        result_extra={"is_error": True},
+    )
+    fork = load_trajectories(daydream_dir, "sess-failed-verdict")["forked"][0]
+
+    verdicts = resolve_per_stack_verdicts(
+        assigned_files=["api.py"],
+        declared_verdicts=[{"path": "api.py", "lines_read": 20, "verdict": "clean"}],
+        completed_read_paths=_completed_read_paths(fork),
+        finding_files=set(),
+    )
+
+    assert verdicts[0]["verdict"] == "not_reviewed"
 
 
 def test_filter_sweepable_files_from_index_with_patch_unreadable(tmp_path: Path) -> None:
