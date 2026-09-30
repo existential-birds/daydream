@@ -22,6 +22,7 @@ from daydream import cli
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.publish import publish_final_annotation_bundle
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
+from tests.harness.adjudication import write_checkpoint_inputs
 from tests.harness.scripts import cli_main
 from tests.test_corpus_projection import _write_annotations_snapshot, _write_bundle
 from tests.test_training_adjudication_publish import _final_bundle
@@ -87,16 +88,7 @@ def test_adjudicate_publication_commands_run_through_main(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    state = tmp_path / "state"
-    state.mkdir()
-    (state / "queue.json").write_text("[]\n", encoding="utf-8")
-    (state / "observations.jsonl").write_text("", encoding="utf-8")
-    (state / "preview-ledger.json").write_text("{}\n", encoding="utf-8")
-    manifest = tmp_path / "preview-manifest.json"
-    manifest.write_text(
-        json.dumps({"curation_id": "cur-main", "snapshot_id": "e" * 64}) + "\n",
-        encoding="utf-8",
-    )
+    state, manifest = write_checkpoint_inputs(tmp_path, curation_id="cur-main")
     hub = AnnotationsHub(repo_id="org/private-annotations")
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
 

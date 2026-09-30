@@ -18,7 +18,12 @@ from daydream.training.labeler_versions import (
     RUBRIC_SCHEMA_VERSION,
 )
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
-from tests.harness.adjudication import accepted_observation, write_sessions_index, write_sessions_jsonl
+from tests.harness.adjudication import (
+    accepted_observation,
+    write_checkpoint_inputs,
+    write_sessions_index,
+    write_sessions_jsonl,
+)
 from tests.test_training_adjudication_publish import _final_bundle
 
 
@@ -64,25 +69,11 @@ def _publish_final(
     return handle_adjudicate(argv)
 
 
-def _write_checkpoint_inputs(root: Path) -> tuple[Path, Path]:
-    state = root / "state"
-    state.mkdir()
-    (state / "queue.json").write_text("[]\n", encoding="utf-8")
-    (state / "observations.jsonl").write_text("", encoding="utf-8")
-    (state / "preview-ledger.json").write_text("{}\n", encoding="utf-8")
-    manifest = root / "preview-manifest.json"
-    manifest.write_text(
-        json.dumps({"curation_id": "cur-1", "snapshot_id": "e" * 64}) + "\n",
-        encoding="utf-8",
-    )
-    return state, manifest
-
-
 def _publish_checkpoint(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[Path, Path, "AnnotationsHub"]:
     """Publish the standard ``cur-1`` checkpoint and return the wired hub."""
-    state, manifest = _write_checkpoint_inputs(tmp_path)
+    state, manifest = write_checkpoint_inputs(tmp_path)
     hub = _wired_hub(monkeypatch)
     assert handle_adjudicate([
         "publish-state", "--state-dir", str(state), "--manifest", str(manifest),

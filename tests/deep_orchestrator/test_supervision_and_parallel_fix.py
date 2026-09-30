@@ -14,6 +14,7 @@ from rich.console import Console
 from daydream.config_file import load_file_config
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _only_archived_run,
     _scan_phase_events,
 )
 from tests.harness.review_profile import independent_exploration_profile
@@ -372,9 +373,8 @@ async def test_long_fix_is_not_turn_capped(
     assert any("App.tsx" in call["prompt"] for call in fix_calls)
     assert all(call["max_turns"] is None for call in fix_calls)
 
-    run_dirs = list((archive_dir / "runs").iterdir())
-    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    run_dir = _only_archived_run(archive_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "complete"
     assert not manifest["fix_failures"]
 

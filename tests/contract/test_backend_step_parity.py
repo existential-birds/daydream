@@ -57,23 +57,17 @@ def _compare_steps(left: list[Step], right: list[Step]) -> None:
 
 
 @pytest.mark.asyncio
-async def test_claude_and_codex_produce_identical_steps(tmp_path: Path) -> None:
+@pytest.mark.parametrize("read_only", [False, True], ids=["read-write", "read-only"])
+async def test_claude_and_codex_produce_identical_steps(
+    tmp_path: Path, read_only: bool
+) -> None:
     """The canonical script must produce identical selected Step fields."""
 
-    claude_steps = await _run_backend_against_canonical(claude_loader, tmp_path / "claude")
-    codex_steps = await _run_backend_against_canonical(codex_loader, tmp_path / "codex")
-    _compare_steps(claude_steps, codex_steps)
-
-
-@pytest.mark.asyncio
-async def test_claude_and_codex_produce_identical_steps_read_only(tmp_path: Path) -> None:
-    """Both backends must produce identical selected Step fields in read-only mode."""
-
     claude_steps = await _run_backend_against_canonical(
-        claude_loader, tmp_path / "claude", read_only=True
+        claude_loader, tmp_path / "claude", read_only=read_only
     )
     codex_steps = await _run_backend_against_canonical(
-        codex_loader, tmp_path / "codex", read_only=True
+        codex_loader, tmp_path / "codex", read_only=read_only
     )
     _compare_steps(claude_steps, codex_steps)
 
