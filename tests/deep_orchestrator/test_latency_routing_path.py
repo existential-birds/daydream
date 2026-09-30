@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import anyio
 import pytest
@@ -14,7 +15,7 @@ from daydream.review_profile import ResolvedProfile
 from daydream.runner import run
 from tests.deep_orchestrator.support import _arbiter_stacks, _merged_items
 from tests.harness.review_profile import independent_alternatives_profile
-from tests.harness.stub_backend import install_stub_backend, silence
+from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.test_deep_orchestrator import MakeConfig, Mute
 
 #: The pre-#732 ``.daydream/deep/`` artifact names for a forensic run, captured
@@ -108,6 +109,44 @@ def _medium_arbitration_profile() -> ResolvedProfile:
     return replace(base, profile=replace(base.profile, pipeline=pipeline))
 
 
+async def _run_profile(
+    monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig,
+    mute_side_effects: Mute,
+    target: Path,
+    *,
+    latency_profile: str,
+    timeout: float = 120,
+    review_profile: ResolvedProfile | None = None,
+    parse_severity: str | None = None,
+    parse_by_stack: dict[str, dict[str, Any]] | None = None,
+    merge_echo_records: bool = False,
+) -> tuple[StubBackend, Path]:
+    """Run the stub pipeline for one latency profile; return its stub and deep dir.
+
+    Shared preamble: silence, install the stub, apply the optional stub knobs,
+    mute side effects, and run with the independent-alternatives profile unless
+    *review_profile* overrides it. Callers keep only the flags that distinguish
+    their scenario plus their own assertions. *merge_echo_records* makes the
+    merge agent echo the on-disk per-stack records so arbitration verdicts are
+    observable in the shipped merged items.
+    """
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, target)
+    stub.parse_severity = parse_severity
+    stub.parse_by_stack = parse_by_stack
+    stub.merge_echo_records = merge_echo_records
+    mute_side_effects()
+    config = make_config(
+        target,
+        latency_profile=latency_profile,
+        review_profile=review_profile if review_profile is not None else independent_alternatives_profile(),
+    )
+    with anyio.fail_after(timeout):
+        assert await run(config) in (0, 1)
+    return stub, target / ".daydream" / "deep"
+
+
 def test_routing_record_merges_instead_of_clobbering(tmp_path: Path) -> None:
     dd = tmp_path / "deep"
     dd.mkdir()
@@ -142,18 +181,12 @@ async def test_skipped_wonder_records_profile_signals_and_reason(
     mute_side_effects: Mute,
 ) -> None:
     """MH7: the routing record states why wonder did not run."""
-    silence(monkeypatch)
-    install_stub_backend(monkeypatch, multi_stack_target)
-    mute_side_effects()
-    config = make_config(
-        multi_stack_target,
+    _, deep = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
         latency_profile="fast",
-        review_profile=independent_alternatives_profile(),
+        timeout=90,
     )
-    with anyio.fail_after(90):
-        assert await run(config) in (0, 1)
-
-    record = read_routing_record(multi_stack_target / ".daydream" / "deep")
+    record = read_routing_record(deep)
     assert record["wonder"]["outcome"] == "skip"
     assert record["profile"]["selected"] == "fast"
     assert record["risk"]["floors"] == []
@@ -167,19 +200,11 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
     mute_side_effects: Mute,
 ) -> None:
     """MH2 + A12: same artifacts, same effort values, same marker meaning."""
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    mute_side_effects()
-    config = make_config(
-        multi_stack_target,
+    _, deep = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
         latency_profile="forensic",
-        review_profile=independent_alternatives_profile(),
+        parse_severity="high",
     )
-    with anyio.fail_after(120):
-        assert await run(config) in (0, 1)
-
-    deep = multi_stack_target / ".daydream" / "deep"
     assert (deep / "arbiter-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
     # A12: the profile work adds the routing record, and issue #735 adds the
@@ -210,19 +235,11 @@ async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
     artifacts must therefore equal the forensic baseline's exactly, not merely
     "also exist".
     """
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    mute_side_effects()
-    config = make_config(
-        multi_stack_target,
+    _, deep = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
         latency_profile="balanced",
-        review_profile=independent_alternatives_profile(),
+        parse_severity="high",
     )
-    with anyio.fail_after(120):
-        assert await run(config) in (0, 1)
-
-    deep = multi_stack_target / ".daydream" / "deep"
     assert json.loads((deep / "arbiter-input.json").read_text()) == _FORENSIC_BASELINE_ARBITER_INPUT
     assert (deep / "arbiter-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
@@ -238,13 +255,12 @@ async def test_forensic_resume_from_the_whole_block_marker_runs_no_arbiter_call(
     mute_side_effects: Mute,
 ) -> None:
     """The documented `--start-at merge` contract still trusts arbiter-complete.marker."""
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    mute_side_effects()
+    stub, _ = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
+        latency_profile="forensic",
+        parse_severity="high",
+    )
     base = dict(latency_profile="forensic", review_profile=independent_alternatives_profile())
-    with anyio.fail_after(120):
-        assert await run(make_config(multi_stack_target, **base)) in (0, 1)
     stub.calls.clear()
     with anyio.fail_after(60):
         assert await run(make_config(multi_stack_target, start_at="merge", **base)) in (0, 1)
@@ -259,24 +275,13 @@ async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_e
     mute_side_effects: Mute,
 ) -> None:
     """MH4: one sharded call per group, one merged verdict application."""
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_by_stack = _arbiter_stacks(
-        {"python": "high", "react": "medium", "generic": "medium"}
-    )
-    # The merge agent echoes the per-stack records file contents verbatim, so
-    # every arbitration verdict is observable in the shipped merged items.
-    stub.merge_echo_records = True
-    mute_side_effects()
-    config = make_config(
-        multi_stack_target,
+    _, deep = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
         latency_profile="balanced",
+        parse_by_stack=_arbiter_stacks({"python": "high", "react": "medium", "generic": "medium"}),
+        merge_echo_records=True,
         review_profile=_medium_arbitration_profile(),
     )
-    with anyio.fail_after(120):
-        assert await run(config) in (0, 1)
-
-    deep = multi_stack_target / ".daydream" / "deep"
     record = read_routing_record(deep)
     assert record["arbiter"]["sharded"] is True
     groups = record["arbiter"]["groups"]
@@ -297,21 +302,11 @@ async def test_resumed_run_reruns_only_incomplete_groups(
     mute_side_effects: Mute,
 ) -> None:
     """Re-entering arbitration after an interrupted fan-out reruns only the gap."""
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_by_stack = _arbiter_stacks(
-        {"python": "high", "react": "high", "generic": "high"}
-    )
-    mute_side_effects()
-    config = make_config(
-        multi_stack_target,
+    stub, deep = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
         latency_profile="balanced",
-        review_profile=independent_alternatives_profile(),
+        parse_by_stack=_arbiter_stacks({"python": "high", "react": "high", "generic": "high"}),
     )
-    with anyio.fail_after(120):
-        assert await run(config) in (0, 1)
-
-    deep = multi_stack_target / ".daydream" / "deep"
     first = read_routing_record(deep)
     assert first["arbiter"]["sharded"] is True
     groups = first["arbiter"]["groups"]
@@ -356,21 +351,11 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     mute_side_effects: Mute,
 ) -> None:
     """A raising group is recorded, blocks the marker, and reruns on resume."""
-    silence(monkeypatch)
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_by_stack = _arbiter_stacks(
-        {"python": "high", "react": "high", "generic": "high"}
-    )
-    mute_side_effects()
-    config = make_config(
-        multi_stack_target,
+    stub, deep = await _run_profile(
+        monkeypatch, make_config, mute_side_effects, multi_stack_target,
         latency_profile="balanced",
-        review_profile=independent_alternatives_profile(),
+        parse_by_stack=_arbiter_stacks({"python": "high", "react": "high", "generic": "high"}),
     )
-    with anyio.fail_after(120):
-        assert await run(config) in (0, 1)
-
-    deep = multi_stack_target / ".daydream" / "deep"
     groups = read_routing_record(deep)["arbiter"]["groups"]
     failed = groups[0]["group_id"]
     (deep / "arbiter-complete.marker").unlink()

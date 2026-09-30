@@ -253,7 +253,10 @@ async def open_workspace(
             try:
                 git_ops.worktree_remove(source, worktree_path, force=True)
             except GitError as exc:
-                _warn_removal_failed(worktree_path, exc, kind="ephemeral worktree")
+                from daydream.agent import console
+                from daydream.ui import print_warning
+
+                print_warning(console, f"Failed to remove ephemeral worktree {worktree_path}: {exc}")
 
 
 @dataclass(frozen=True)
@@ -470,22 +473,6 @@ def copy_files_into_ephemeral(
         copied.append(rel_path)
 
     return copied
-
-
-
-
-def _warn_removal_failed(path: Path, exc: GitError, *, kind: str = "worktree") -> None:
-    """Warn that cleanup of *path* failed, without raising.
-
-    Best-effort cleanup contract shared by every worktree-teardown path:
-    a removal failure must never mask the primary outcome of the run.
-    """
-    from daydream.agent import console
-    from daydream.ui import print_warning
-
-    print_warning(console, f"Failed to remove {kind} {path}: {exc}")
-
-
 
 
 def _dedupe_ordered(entries: Iterable[str | Path]) -> list[Path]:

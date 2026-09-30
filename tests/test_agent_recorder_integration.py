@@ -66,6 +66,21 @@ def _scripted(events: list[AgentEvent]) -> ScriptedBackend:
     )
 
 
+def _single_agent_step(traj: dict[str, Any] | None) -> dict[str, Any]:
+    """Validate *traj* and return its sole agent step.
+
+    Every recorder test that inspects one agent step asserts the same two
+    invariants first: the document is schema-valid and exactly one step has
+    ``source == "agent"``.
+    """
+    assert traj is not None
+    assert atif_validate(traj) is True
+    steps: list[dict[str, Any]] = traj["steps"]
+    agent_steps = [s for s in steps if s["source"] == "agent"]
+    assert len(agent_steps) == 1
+    return agent_steps[0]
+
+
 async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     """MAP-01 + Pitfall 4 — Beagle prompt becomes Step(source='user'); no agent-only fields."""
     backend = _scripted([
@@ -90,11 +105,7 @@ async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
         TextEvent(text="hello back"),
     ])
     traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
-    assert traj is not None
-    assert atif_validate(traj) is True
-    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 1
-    assert agent_steps[0]["message"] == "hello back"
+    assert _single_agent_step(traj)["message"] == "hello back"
 
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
@@ -105,11 +116,7 @@ async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) ->
         ToolResultEvent(id="t1", output="OK", is_error=False),
     ])
     traj, _ = await _run_with_recorder(backend, tmp_path)
-    assert traj is not None
-    assert atif_validate(traj) is True
-    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 1
-    step = agent_steps[0]
+    step = _single_agent_step(traj)
     assert step["tool_calls"] is not None
     assert step["tool_calls"][0]["tool_call_id"] == "t1"
     assert step["observation"] is not None
@@ -129,11 +136,7 @@ async def test_metrics_event_lands_on_agent_step(tmp_path: Path) -> None:
         ),
     ])
     traj, _ = await _run_with_recorder(backend, tmp_path)
-    assert traj is not None
-    assert atif_validate(traj) is True
-    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 1
-    metrics = agent_steps[0]["metrics"]
+    metrics = _single_agent_step(traj)["metrics"]
     assert metrics is not None
     assert metrics["prompt_tokens"] == 100  # NOT 110 — D-15 (cached is subset)
     assert metrics["cached_tokens"] == 10
@@ -278,12 +281,9 @@ async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
         TextEvent(text="answer"),
     ])
     traj, _ = await _run_with_recorder(backend, tmp_path)
-    assert traj is not None
-    assert atif_validate(traj) is True
-    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 1
-    assert agent_steps[0]["reasoning_content"] == "let me think..."
-    assert agent_steps[0]["message"] == "answer"
+    step = _single_agent_step(traj)
+    assert step["reasoning_content"] == "let me think..."
+    assert step["message"] == "answer"
 
 
 def _max_turns_backend(pre_events: list[AgentEvent]) -> ScriptedBackend:
@@ -349,16 +349,13 @@ async def test_cost_event_does_not_break_recording(tmp_path: Path) -> None:
         CostEvent(cost_usd=0.005, input_tokens=50, output_tokens=10, cached_tokens=None),
     ])
     traj, _ = await _run_with_recorder(backend, tmp_path)
-    assert traj is not None
-    assert atif_validate(traj) is True
-    agent_steps = [s for s in traj["steps"] if s["source"] == "agent"]
-    assert len(agent_steps) == 1
-    metrics = agent_steps[0]["metrics"]
+    metrics = _single_agent_step(traj)["metrics"]
     assert metrics is not None
     assert metrics["prompt_tokens"] == 50
     assert metrics["completion_tokens"] == 10
     assert metrics["cost_usd"] == pytest.approx(0.005)
 
+    assert traj is not None
     final = traj["final_metrics"]
     assert final["total_prompt_tokens"] == 50
     assert final["total_completion_tokens"] == 10

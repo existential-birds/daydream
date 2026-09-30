@@ -2829,7 +2829,7 @@ def test_gh_api_timeout_redacts_authorization_token(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Timeout must redact the Bearer token in both the retry warning and the error."""
+    """Timeout must redact the Bearer token in the error and keep it out of the retry warning."""
     repo = _make_repo_with_main(tmp_path)
 
     def fake_run(cmd: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
@@ -2851,11 +2851,14 @@ def test_gh_api_timeout_redacts_authorization_token(
     msg = str(excinfo.value)
     assert "jwt-super-secret-xyz" not in msg
     assert "Authorization: ***" in msg
-    # The retry warning fired and must also be redacted.
+    # The retry warning fires, but must not carry any argv-derived text at all:
+    # the shared retry helper logs only the program and counters, keeping the
+    # credential-bearing header out of the log sink entirely.
     warnings = [r.getMessage() for r in caplog.records]
     assert warnings, "expected a retry warning to be logged"
     assert all("jwt-super-secret-xyz" not in w for w in warnings)
-    assert any("Authorization: ***" in w for w in warnings)
+    assert all("Authorization" not in w for w in warnings)
+    assert any(w.startswith("gh timed out after") for w in warnings)
 
 
 @pytest.mark.parametrize(
@@ -2929,7 +2932,8 @@ def test_gh_api_manifest_conversion_failures_redact_code(
         warnings = [r.getMessage() for r in caplog.records]
         assert warnings, "expected a retry warning to be logged"
         assert all(sentinel not in w for w in warnings)
-        assert any("/app-manifests/***/conversions" in w for w in warnings)
+        assert all("/app-manifests" not in w for w in warnings)
+        assert any(w.startswith("gh timed out after") for w in warnings)
 
 
 def test_gh_api_jq_invalid_line_raises_git_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -34,9 +34,8 @@ from daydream.config import (
     DEFAULT_REVIEW_CACHE_MAX_BYTES,
     DEFAULT_REVIEW_CACHE_MAX_ENTRIES,
 )
-from daydream.config_file import _coerce_non_negative_int
 from daydream.deep.reuse_key import REUSE_KEY_FORMAT, PhaseIdentity
-from daydream.deep.settings import _resolve_config_value
+from daydream.deep.settings import _resolve_config_value, _resolve_non_negative_int
 from daydream.json_utils import atomic_write_bytes, read_json_object
 
 if TYPE_CHECKING:
@@ -123,12 +122,6 @@ def review_cache_enabled(config: RunConfig) -> bool:
     return bool(value)
 
 
-def _budget_bound(config: RunConfig, attr: str, default: int) -> int:
-    """Resolve one retention bound, coercing-and-degrading to the default."""
-    coerced = _coerce_non_negative_int(_resolve_config_value(config, attr, default))
-    return coerced if coerced is not None else default
-
-
 def review_cache_budget(config: RunConfig) -> ReuseBudget:
     """Resolve the three retention bounds independently (MH12).
 
@@ -137,14 +130,14 @@ def review_cache_budget(config: RunConfig) -> ReuseBudget:
     Config-file values are days since last use; the returned budget is seconds.
     """
     return ReuseBudget(
-        max_entries=_budget_bound(
+        max_entries=_resolve_non_negative_int(
             config, "review_cache_max_entries", DEFAULT_REVIEW_CACHE_MAX_ENTRIES
         ),
-        max_bytes=_budget_bound(
+        max_bytes=_resolve_non_negative_int(
             config, "review_cache_max_bytes", DEFAULT_REVIEW_CACHE_MAX_BYTES
         ),
         max_age_seconds=86400
-        * _budget_bound(
+        * _resolve_non_negative_int(
             config, "review_cache_max_age_days", DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS
         ),
     )

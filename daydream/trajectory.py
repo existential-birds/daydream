@@ -84,6 +84,13 @@ if TYPE_CHECKING:
     )
 
 _console = create_console()
+
+
+def _warn_partial_write(exc: Exception) -> None:
+    """Warn that a partial trajectory snapshot write failed."""
+    print_warning(_console, f"Partial trajectory write failed: {type(exc).__name__}: {exc}")
+
+
 _INITIAL_TOTALS: dict[str, Any] = {
     "prompt": 0,
     "completion": 0,
@@ -1704,10 +1711,7 @@ class _SignalFlushRegistry:
             except Exception as exc:  # noqa: BLE001 - isolate every recorder write
                 if status == "complete":
                     raise
-                print_warning(
-                    _console,
-                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-                )
+                _warn_partial_write(exc)
         if root.on_write is not None:
             try:
                 root.on_write(root, snapshot)
@@ -1731,10 +1735,7 @@ class _SignalFlushRegistry:
                 if document is not None:
                     prepared.append(document)
             except Exception as exc:  # noqa: BLE001 - isolate each signal write
-                print_warning(
-                    _console,
-                    f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-                )
+                _warn_partial_write(exc)
         child_evidence = bool(prepared or self._completed)
         try:
             root_document = root._prepare_document(
@@ -1745,10 +1746,7 @@ class _SignalFlushRegistry:
             if root_document is not None:
                 prepared.insert(0, root_document)
         except Exception as exc:  # noqa: BLE001 - isolate each signal write
-            print_warning(
-                _console,
-                f"Partial trajectory write failed: {type(exc).__name__}: {exc}",
-            )
+            _warn_partial_write(exc)
             return
         if child_evidence and root_document is None:
             return
