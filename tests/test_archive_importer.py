@@ -50,9 +50,8 @@ from daydream.archive.index import (
     label_observation_history,
     upsert_run,
 )
-from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.scan import scan_run_dir
-from daydream.training.labeler_versions import HUMAN_LABELER_VERSION
+from daydream.training.labeler_versions import HUMAN_LABELER_VERSION, STALE_LEGACY
 from tests.harness.trajectory import make_manifest
 
 SID = "sess-abc123"

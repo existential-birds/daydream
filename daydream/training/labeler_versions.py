@@ -3,7 +3,9 @@
 Independent version axes (M13): rubric schema, labeler policy, reply classifier,
 adjudication labeler, human labeler, annotation snapshot schema, and evidence
 digest format each evolve separately from ``reward.REWARD_VERSION``.
-This module imports nothing from the rest of the training package.
+This module imports nothing from the rest of the training package, so the
+archive import path can depend on it without a cycle into the training
+adjudication package.
 """
 
 from __future__ import annotations
@@ -18,6 +20,25 @@ REPLY_CLASSIFIER_VERSION = "980-classifier-r1"
 ADJUDICATION_LABELER_VERSION = "984-adjudicate-r1"
 HUMAN_LABELER_VERSION = "1055-human-r1"
 ANNOTATION_SNAPSHOT_SCHEMA_VERSION = "1055-snapshot-r1"
+
+# Data-driven allowlist of known labeler-version strings (KD3): a value set
+# that can be extended without touching import logic. Any imported observation
+# whose version axes fall outside this allowlist (or stamped ``STALE_LEGACY``)
+# still imports as evidence but is never gold-eligible (M6): unknown provenance
+# must never be decisive.
+KNOWN_LABELER_VERSIONS: frozenset[str] = frozenset(
+    {
+        RUBRIC_SCHEMA_VERSION,
+        LABELER_POLICY_VERSION,
+        REPLY_CLASSIFIER_VERSION,
+        ADJUDICATION_LABELER_VERSION,
+        HUMAN_LABELER_VERSION,
+    }
+)
+
+# Legacy-schema rows (missing version columns) surface this sentinel string
+# (Assumption 4) and are never gold-eligible.
+STALE_LEGACY = "legacy"
 
 
 def reply_evidence_digest(replies: list[dict[str, Any]]) -> str:
