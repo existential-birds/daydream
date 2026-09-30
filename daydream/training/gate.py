@@ -144,46 +144,6 @@ def _split_digest(held_out_ids: list[str], seed: int) -> str:
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
-
-def write_split_sidecar(
-    labels_path: str | Path,
-    *,
-    digest: str,
-    seed: int,
-    held_out_fraction: float,
-    held_out_ids: list[str],
-    train_ids: list[str],
-) -> str:
-    """Write the canonical ``<labels>.gate-split.json`` digest sidecar.
-
-    Shared by every producer of the M18 resume-guard / stage-manifest split
-    contract (:func:`freeze_split` and the projected-corpus frozen-boundary path in
-    :mod:`daydream.training.coordinator`), so the sidecar shape cannot drift
-    between them. Writes use the shared crash-safe JSON writer.
-
-    Args:
-        labels_path: Path of the labels file the sidecar sits beside.
-        digest: Content-addressed split digest (see :func:`_split_digest`).
-        seed: Seed that froze the split.
-        held_out_fraction: Fraction of admitted rows reserved for the gate.
-        held_out_ids: Held-out row ids (unsorted; stored sorted).
-        train_ids: Train row ids (unsorted; stored sorted).
-
-    Returns:
-        The sidecar filename, relative to the labels file's directory.
-    """
-    sidecar_path = Path(labels_path).parent / (Path(labels_path).name + ".gate-split.json")
-    sidecar = {
-        "digest": digest,
-        "seed": seed,
-        "held_out_fraction": held_out_fraction,
-        "held_out_ids": sorted(held_out_ids),
-        "train_ids": sorted(train_ids),
-    }
-    atomic_write_json(sidecar_path, sidecar, sort_keys=True)
-    return sidecar_path.name
-
-
 def _build_frozen_split(
     labels_path: str | Path,
     *,
@@ -196,22 +156,28 @@ def _build_frozen_split(
 
     Shared by the labels-file :func:`freeze_split` producer and the projected-
     corpus frozen-boundary producer in :mod:`daydream.training.coordinator`, so
-    the two cannot drift on the digest/sidecar/FrozenSplit shape.
+    the two cannot drift on the digest/sidecar/FrozenSplit shape. Writes the
+    canonical ``<labels>.gate-split.json`` sidecar with the shared crash-safe
+    JSON writer.
     """
     held_out_ids = [str(r["comment_id"]) for r in held_out_rows]
     digest = _split_digest(held_out_ids, seed)
-    digest_path = write_split_sidecar(
-        labels_path,
-        digest=digest,
-        seed=seed,
-        held_out_fraction=held_out_fraction,
-        held_out_ids=held_out_ids,
-        train_ids=[str(r["comment_id"]) for r in train_rows],
+    sidecar_path = Path(labels_path).parent / (Path(labels_path).name + ".gate-split.json")
+    atomic_write_json(
+        sidecar_path,
+        {
+            "digest": digest,
+            "seed": seed,
+            "held_out_fraction": held_out_fraction,
+            "held_out_ids": sorted(held_out_ids),
+            "train_ids": sorted(str(r["comment_id"]) for r in train_rows),
+        },
+        sort_keys=True,
     )
     return FrozenSplit(
         digest=digest,
         fingerprint=digest[:8],
-        digest_path=digest_path,
+        digest_path=sidecar_path.name,
         train_rows=train_rows,
         held_out_rows=held_out_rows,
         seed=seed,

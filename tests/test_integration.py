@@ -49,6 +49,12 @@ from tests.test_runner import _fix_item, _seed_fix_resume
 # ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
+#: The byte-identical CostEvent + ResultEvent tail every scripted stream ends with.
+_TERMINAL_EVENTS: tuple[AgentEvent, ...] = (
+    CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
+    ResultEvent(structured_output=None, continuation=None),
+)
+
 _COMMENT_PR = PRInfo(
     number=7,
     head_sha="0" * 40,
@@ -1063,8 +1069,7 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch: pytest.
         TextEvent(text="I'll search for Python files in the project."),
         ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "**/*.py", "path": "/project"}),
         ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     plain_text = strip_ansi(
@@ -1096,8 +1101,7 @@ async def test_glob_tool_panel_singular_file_count(monkeypatch: pytest.MonkeyPat
     events = [
         ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "*.py"}),
         ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     # Normal mode shows the output section.
@@ -1121,8 +1125,7 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch: pytest.Monkey
     events = [
         ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "**/*.py"}),
         ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     # Normal mode shows the output section.
@@ -1141,8 +1144,7 @@ async def test_quiet_mode_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> 
     events = [
         ToolStartEvent(id=tool_use_id, name="Read", input={"file_path": "/project/main.py"}),
         ToolResultEvent(id=tool_use_id, output=read_result, is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     output_text = await render_agent(monkeypatch, events, quiet=True)
@@ -1166,8 +1168,7 @@ async def test_quiet_mode_bash_panel_shows_command(monkeypatch: pytest.MonkeyPat
     events = [
         ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "git diff --stat"}),
         ToolResultEvent(id=tool_use_id, output="", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
     assert "$ git diff --stat" in plain_text
@@ -1182,8 +1183,7 @@ async def test_quiet_mode_bash_panel_renders_more_than_bare_name_without_descrip
     events = [
         ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "ls -la /tmp"}),
         ToolResultEvent(id=tool_use_id, output="", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
     assert "ls -la /tmp" in plain_text or "ls -la /tm" in plain_text
@@ -1197,8 +1197,7 @@ async def test_quiet_mode_bash_panel_redacts_command_secrets(monkeypatch: pytest
     events = [
         ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "DB_PASSWORD=hunter2 make db-up"}),
         ToolResultEvent(id=tool_use_id, output="", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
     assert "hunter2" not in plain_text
@@ -1219,8 +1218,7 @@ async def test_quiet_mode_bash_panel_redacts_before_truncating(monkeypatch: pyte
     events = [
         ToolStartEvent(id=tool_use_id, name="Bash", input={"command": command}),
         ToolResultEvent(id=tool_use_id, output="", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
     assert "opaque-test-12345" not in plain_text, "secret must never reach the panel"
@@ -1237,8 +1235,7 @@ async def test_quiet_mode_empty_result_shows_header_only(monkeypatch: pytest.Mon
     events = [
         ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "true"}),
         ToolResultEvent(id=tool_use_id, output="", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     output_text = await render_agent(monkeypatch, events, quiet=True)
@@ -1256,8 +1253,7 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch: pytest
     events = [
         ToolStartEvent(id=tool_use_id, name="Bash", input={"command": "false"}),
         ToolResultEvent(id=tool_use_id, output="Command failed with exit code 1", is_error=True),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     # Force truecolor for consistent RGB color codes across environments.
@@ -1283,8 +1279,7 @@ async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch
     events = [
         ToolStartEvent(id=tool_use_id, name="Skill", input={"skill": "review-python"}),
         ToolResultEvent(id=tool_use_id, output="Launching skill: review-python", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=True))
@@ -1314,8 +1309,7 @@ async def test_concurrent_tool_panels_display_results(monkeypatch: pytest.Monkey
         ToolResultEvent(id="cmd-1", output="+added line in file1", is_error=False),
         ToolResultEvent(id="cmd-2", output="+added line in file2", is_error=False),
         ToolResultEvent(id="cmd-3", output="+added line in file3", is_error=False),
-        CostEvent(cost_usd=0.001, input_tokens=None, output_tokens=None),
-        ResultEvent(structured_output=None, continuation=None),
+        *_TERMINAL_EVENTS,
     ]
 
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))

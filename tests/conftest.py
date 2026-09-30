@@ -143,16 +143,12 @@ def deep_target(tmp_path: Path) -> Path:
     ``tests/test_deep_pr_comment_integration.py``) so both drive the identical
     single-file deep path (tier ``"skip"``).
     """
-    repo = tmp_path / "deep_repo"
-    _init_repo(repo)
-    (repo / "foo.py").write_text("def foo():\n    return 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "init")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "foo.py").write_text("def foo():\n    return 2\n")
-    _git(repo, "add", ".")
-    _commit(repo, "tweak foo")
-    return repo
+    return _feature_repo(
+        tmp_path,
+        "deep_repo",
+        {"foo.py": "def foo():\n    return 1\n"},
+        {"foo.py": "def foo():\n    return 2\n"},
+    )
 
 
 @pytest.fixture

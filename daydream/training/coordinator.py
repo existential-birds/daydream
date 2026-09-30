@@ -401,7 +401,7 @@ def _frozen_split_from_projection(
     The split digest is the same content address :func:`freeze_split` emits
     (SHA-256 over the sorted held-out comment ids plus the seed), and the
     digest sidecar (``<labels>.gate-split.json``) is written by the shared
-    :func:`daydream.training.gate.write_split_sidecar`, so the resume guard
+    :func:`daydream.training.gate._build_frozen_split`, so the resume guard
     and stage manifest consume the identical contract whichever producer
     froze the boundary. The reported ``held_out_fraction`` is the
     projection's own frozen holdout rate (``lineage.holdout_rate``), never

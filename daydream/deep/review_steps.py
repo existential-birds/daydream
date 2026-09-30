@@ -164,6 +164,34 @@ def _record_reuse_hit(
     )
 
 
+def _restore_reuse_entry(
+    reuse: "ReuseCache",
+    unit: str,
+    key: str,
+    payload: Mapping[str, Any],
+    dd: Path,
+    *,
+    label: str,
+) -> bool:
+    """Look up and restore one reuse entry, recording the hit or miss.
+
+    Returns ``True`` only when the entry restored completely; the caller then
+    performs its own on-hit action. On any miss the reason is recorded and the
+    caller recomputes the unit.
+    """
+    hit = reuse.lookup(key)
+    if not isinstance(hit, ReuseHit):
+        reuse.record(unit, outcome="miss", reason=hit.reason, key=key)
+        return False
+    restore_reason = restore_entry_payload(hit, dd)
+    if restore_reason is None:
+        _record_reuse_hit(reuse, unit, key, hit, payload)
+        return True
+    print_warning(console, f"Reuse restore failed for {label}: {restore_reason}")
+    reuse.record(unit, outcome="miss", reason=f"restore failed: {restore_reason}", key=key)
+    return False
+
+
 def _record_absent_components(reuse: "ReuseCache", unit: str, payload: Mapping[str, Any]) -> None:
     """Record the named miss for a payload with a None required component."""
     reuse.record(
@@ -485,23 +513,12 @@ async def _step_intent(ctx: FlowContext) -> None:
         if intent_reuse_key is None:
             _record_absent_components(reuse, "intent", intent_payload)
         else:
-            hit = reuse.lookup(intent_reuse_key)
-            if isinstance(hit, ReuseHit):
-                restore_reason = restore_entry_payload(hit, deep_state.dd)
-                if restore_reason is None:
-                    _record_reuse_hit(reuse, "intent", intent_reuse_key, hit, intent_payload)
-                    deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
-                    deep_state.intent_path = intent_p
-                    return
-                print_warning(console, f"Reuse restore failed for intent: {restore_reason}")
-                reuse.record(
-                    "intent",
-                    outcome="miss",
-                    reason=f"restore failed: {restore_reason}",
-                    key=intent_reuse_key,
-                )
-            else:
-                reuse.record("intent", outcome="miss", reason=hit.reason, key=intent_reuse_key)
+            if _restore_reuse_entry(
+                reuse, "intent", intent_reuse_key, intent_payload, deep_state.dd, label="intent"
+            ):
+                deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
+                deep_state.intent_path = intent_p
+                return
     intent_complete = True
     async with phase_scope(DaydreamPhase.INTENT) as phase:
         try:
@@ -640,28 +657,14 @@ async def _wonder(ctx: FlowContext) -> None:
             if wonder_reuse_key is None:
                 _record_absent_components(reuse, "alternatives", wonder_payload)
             else:
-                hit = reuse.lookup(wonder_reuse_key)
-                if isinstance(hit, ReuseHit):
-                    restore_reason = restore_entry_payload(hit, deep_state.dd)
-                    if restore_reason is None:
-                        _record_reuse_hit(
-                            reuse, "alternatives", wonder_reuse_key, hit, wonder_payload
-                        )
-                        wonder_reused = True
-                    else:
-                        print_warning(
-                            console, f"Reuse restore failed for alternatives: {restore_reason}"
-                        )
-                        reuse.record(
-                            "alternatives",
-                            outcome="miss",
-                            reason=f"restore failed: {restore_reason}",
-                            key=wonder_reuse_key,
-                        )
-                else:
-                    reuse.record(
-                        "alternatives", outcome="miss", reason=hit.reason, key=wonder_reuse_key
-                    )
+                wonder_reused = _restore_reuse_entry(
+                    reuse,
+                    "alternatives",
+                    wonder_reuse_key,
+                    wonder_payload,
+                    deep_state.dd,
+                    label="alternatives",
+                )
         if not wonder_reused:
             async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
                 try:
@@ -1337,26 +1340,16 @@ async def _run_uncovered_sweep(
             if sweep_reuse_key is None:
                 _record_absent_components(reuse, "sweep", sweep_payload)
             else:
-                hit = reuse.lookup(sweep_reuse_key)
-                if isinstance(hit, ReuseHit):
-                    restore_reason = restore_entry_payload(hit, dd)
-                    if restore_reason is None:
-                        _restore_swept_records(deep_state)
-                        _record_reuse_hit(reuse, "sweep", sweep_reuse_key, hit, sweep_payload)
-                        return
-                    print_warning(
-                        console, f"Reuse restore failed for uncovered sweep: {restore_reason}"
-                    )
-                    reuse.record(
-                        "sweep",
-                        outcome="miss",
-                        reason=f"restore failed: {restore_reason}",
-                        key=sweep_reuse_key,
-                    )
-                else:
-                    reuse.record(
-                        "sweep", outcome="miss", reason=hit.reason, key=sweep_reuse_key
-                    )
+                if _restore_reuse_entry(
+                    reuse,
+                    "sweep",
+                    sweep_reuse_key,
+                    sweep_payload,
+                    dd,
+                    label="uncovered sweep",
+                ):
+                    _restore_swept_records(deep_state)
+                    return
 
     stats: dict[str, Any] = {
         "pre_sweep": {

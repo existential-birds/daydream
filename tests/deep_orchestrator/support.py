@@ -49,6 +49,13 @@ def _forbidden_input(*_a: Any, **_kw: Any) -> str:
     raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
 
 
+def _only_archived_run(archive_dir: Path) -> Path:
+    """Return the single archived run directory, asserting there is exactly one."""
+    run_dirs = list((archive_dir / "runs").iterdir())
+    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
+    return run_dirs[0]
+
+
 def _make_record_issue(issues: list[tuple[Any, ...]]) -> Callable[..., str]:
     def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
         issues.append((repo, title, body))

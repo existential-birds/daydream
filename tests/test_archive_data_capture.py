@@ -47,6 +47,7 @@ from daydream.review_budget import ReviewLimits
 from daydream.runner import RunConfig, run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
 from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
+from tests.deep_orchestrator.support import _only_archived_run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.codex_replay import make_mock_process
 from tests.harness.fake_gh import FakeGh
@@ -100,13 +101,6 @@ class _ArchiveCaptureBackend(StubBackend):
 
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
-
-
-def _only_archived_run(archive_dir: Path) -> Path:
-    """Return the single archived run directory, asserting there is exactly one."""
-    run_dirs = list((archive_dir / "runs").iterdir())
-    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
-    return run_dirs[0]
 
 
 def _deep_python_trajectory(run_dir: Path) -> Path:

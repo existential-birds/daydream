@@ -11,17 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep import reuse_key, reuse_store
+from daydream.deep import reuse_store
 from daydream.runner import RunConfig
-
-
-def _identity() -> reuse_key.PhaseIdentity:
-    return reuse_key.PhaseIdentity(
-        backend="claude",
-        model="claude-sonnet-4-5",
-        effort="high",
-        profile_digest="d" * 64,
-    )
+from tests.test_reuse_key import _identity
 
 
 def _cache(

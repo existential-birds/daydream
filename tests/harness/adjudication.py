@@ -125,6 +125,23 @@ def write_sessions_index(root: Path, *, profiles: list[str] | None = None) -> Pa
     return root
 
 
+def write_checkpoint_inputs(
+    root: Path, *, curation_id: str = "cur-1"
+) -> tuple[Path, Path]:
+    """Create the state dir and preview manifest the adjudicate publish verbs consume."""
+    state = root / "state"
+    state.mkdir()
+    (state / "queue.json").write_text("[]\n", encoding="utf-8")
+    (state / "observations.jsonl").write_text("", encoding="utf-8")
+    (state / "preview-ledger.json").write_text("{}\n", encoding="utf-8")
+    manifest = root / "preview-manifest.json"
+    manifest.write_text(
+        json.dumps({"curation_id": curation_id, "snapshot_id": "e" * 64}) + "\n",
+        encoding="utf-8",
+    )
+    return state, manifest
+
+
 def seed_index_dispositions(root: Path) -> None:
     """Write the accepted/rejected/unanswered finding index both decisive fixtures re-derive."""
     resolutions = [

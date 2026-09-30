@@ -2919,14 +2919,7 @@ async def test_phase_commit_push_writes_daydream_trailers_host_side(
     silence_console("daydream.phases")
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
 
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    git(repo, "init", "-b", "main")
-    git(repo, "config", "user.email", "t@example.com")
-    git(repo, "config", "user.name", "t")
-    (repo / "app.py").write_text("x = 0\n")
-    git(repo, "add", "app.py")
-    git_commit(repo, "baseline")
+    repo = _init_committed_repo(tmp_path / "repo", "main")
     (repo / "app.py").write_text("x = 1\n")
     # A real (bare) remote so the push and its remote-contains verification pass.
     bare = tmp_path / "remote"

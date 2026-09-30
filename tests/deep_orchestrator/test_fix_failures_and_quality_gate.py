@@ -13,6 +13,7 @@ from daydream.eval import analyzer as analyzer_mod
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _merged_items,
+    _only_archived_run,
 )
 from tests.harness.git_helpers import git as _git
 from tests.test_deep_orchestrator import (
@@ -83,9 +84,8 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     assert patches == []
 
     # (a) manifest records the failure and is no longer "complete".
-    run_dirs = list((archive_dir / "runs").iterdir())
-    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    run_dir = _only_archived_run(archive_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "partial"
     assert manifest["fix_failures"], "manifest must record the dropped fix group"
     assert any("App.tsx" in key for key in manifest["fix_failures"])
@@ -135,9 +135,8 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
     assert exit_code == 1  # handled failure => Stop(1), not a raise
 
     # The admitted evidence session records the blocked findings in archive.
-    run_dirs = list((archive_dir / "runs").iterdir())
-    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    run_dir = _only_archived_run(archive_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     assert manifest["status"] == "partial"
     items = _merged_items(multi_stack_target / ".daydream" / "deep")
     assert set(manifest["fix_failures"]) == {item["item_uid"] for item in items}
@@ -194,14 +193,13 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     assert not (multi_stack_target / "store" / "uuid.go").exists()
     assert scratch.read_bytes() == b"\x00owner-original"
 
-    run_dirs = list((archive_dir / "runs").iterdir())
-    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    run_dir = _only_archived_run(archive_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     # The archive is partial, but there is no surviving leftover.  The durable
     # policy audit records both confinement operations.
     assert manifest["status"] == "partial"
     assert manifest["fix_leftover_untracked"] is None
-    run_audit = json.loads((run_dirs[0] / "deep" / "fix-footprint.json").read_text())
+    run_audit = json.loads((run_dir / "deep" / "fix-footprint.json").read_text())
     restored = {event["path"] for event in run_audit["events"] if event["action"] in {"remove", "restore"}}
     assert {"store/uuid.go", "owner-scratch.bin"} <= restored
 
@@ -236,9 +234,8 @@ async def test_fix_quality_gate_carries_to_manifest(
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
 
-    run_dirs = list((archive_dir / "runs").iterdir())
-    assert len(run_dirs) == 1, f"expected exactly one archived run, got {run_dirs}"
-    manifest = json.loads((run_dirs[0] / "manifest.json").read_text(encoding="utf-8"))
+    run_dir = _only_archived_run(archive_dir)
+    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     gate = manifest["fix_quality_gate"]
     assert gate is not None, "manifest must carry the fix-quality-gate verdict"
     assert gate["enabled"] is True

@@ -338,26 +338,23 @@ def score_trajectory(
         composite = FLOOR
     else:
         # Weighted credit mean, renormalized over PRESENT credit axes only.
-        present_weights: dict[str, float] = {}
-        present_values: dict[str, float] = {}
+        present: list[tuple[float, float]] = []
         if correctness is not None:
-            present_weights["correctness"] = weights.w_correctness
-            present_values["correctness"] = correctness
+            present.append((weights.w_correctness, correctness))
         if grounding is not None:
-            present_weights["grounding"] = weights.w_grounding
-            present_values["grounding"] = grounding
+            present.append((weights.w_grounding, grounding))
 
-        if not present_weights:
+        if not present:
             # No present credit axis while format-valid ⇒ uncomputable.
             composite = None
         else:
-            weight_sum = sum(present_weights.values())
+            weight_sum = sum(weight for weight, _ in present)
             if weight_sum <= 0:
                 raise ValueError(
                     "Invalid RewardWeights for present credit axes: "
                     f"sum of present credit weights must be > 0 (got {weight_sum!r})."
                 )
-            credit = sum((w / weight_sum) * present_values[axis] for axis, w in present_weights.items())
+            credit = sum((weight / weight_sum) * value for weight, value in present)
             ramp = length_penalty if length_penalty is not None else 0.0
             composite = round(_clip(credit - weights.w_len * ramp, FLOOR, 1.0), 4)
 
