@@ -24,6 +24,14 @@ A case may additionally declare ``sample_group`` (``cold`` or ``warm``); the
 report then emits a ``review_runtime`` block that keeps a cold fix and a warm
 reuse loop apart, using the same nearest-rank percentiles (MH14). A case with no
 ``sample_group`` reports as ``ungrouped`` and is otherwise rendered as before.
+
+A manifest may also declare ``selection_cases``; the report then emits a
+``verify_selection`` block comparing today's conservative verifier against the
+optimised selective mode over exactly those cases. The block's ``proposed`` arm
+carries a *projected* latency derived from the selected-item ratio, never a
+second measured arm, so the single-arm corpus is labelled rather than passed off
+as a paired measurement. The report still makes no statistical claim beyond the
+corpus: it states the observed subset and its coverage.
 """
 
 from __future__ import annotations
@@ -37,8 +45,11 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.latency import LATENCY_PROFILES
 from daydream.deep.risk_categories import CATEGORY_TRIGGERS
+from daydream.deep.verify_selection import SelectionConfig, select_items
+from daydream.hunk_index import load_hunk_index
 from daydream.json_utils import read_json_object
 from daydream.severity import is_high_severity
 from daydream.trajectory import RUNS_DIRNAME
@@ -55,6 +66,7 @@ _SOURCES_RE = re.compile(r"\(Sources:[^)]*\)")
 _PHASE_TIMING_KEYS: dict[str, tuple[str, ...]] = {
     "wonder": ("alternatives",),
     "arbiter": ("deep", "arbiter"),
+    "verify": ("verify",),
 }
 """Report phase -> the ``timing.phase_timings`` keys that measure it, in order.
 
@@ -67,6 +79,16 @@ uncovered sweep), so the report's ``arbiter`` latency is that shared aggregate.
 The legacy ``arbiter`` key is kept only as a fallback for hand-authored corpora
 that predate the pipeline keying, so the committed fixtures still report their
 arbiter bucket instead of silently collapsing to an empty sample.
+
+The ``verify`` entry reads the archived recommendation-verifier wall-clock for
+the ``verify_selection`` comparison; it is not part of the per-profile block.
+"""
+
+_PROFILE_PHASE_TIMING_KEYS: tuple[str, ...] = ("wonder", "arbiter")
+"""The phases the per-profile ``phase_latency_seconds`` block reports.
+
+Kept apart from :data:`_PHASE_TIMING_KEYS` so adding a verify timing for the
+selection block leaves the existing per-profile output byte-identical.
 """
 
 
@@ -164,8 +186,8 @@ def _phase_timings(evaluation: Mapping[str, Any]) -> dict[str, float | None]:
     timing = evaluation.get("timing")
     phase_timings = timing.get("phase_timings") if isinstance(timing, Mapping) else None
     if not isinstance(phase_timings, Mapping):
-        return {"wonder": None, "arbiter": None}
-    result: dict[str, float | None] = {"wonder": None, "arbiter": None}
+        return dict.fromkeys(_PHASE_TIMING_KEYS)
+    result: dict[str, float | None] = dict.fromkeys(_PHASE_TIMING_KEYS)
     for phase, keys in _PHASE_TIMING_KEYS.items():
         for key in keys:
             bucket = phase_timings.get(key)
@@ -226,7 +248,8 @@ def _case_sample_series(
             skipped.append({"case": name, "path": str(evaluation_path), "error": "evaluation.json is missing"})
             continue
         timings = _phase_timings(read_json_object(evaluation_path))
-        for phase, seconds in timings.items():
+        for phase in _PROFILE_PHASE_TIMING_KEYS:
+            seconds = timings.get(phase)
             if seconds is not None:
                 series.setdefault(f"{profile}.{phase}", []).append(seconds)
     return series, skipped
@@ -352,6 +375,194 @@ def _decision(routing: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+_VERIFY_CONTRADICTIONS: frozenset[str] = frozenset({"contradicts", "uncertain"})
+"""Archived verifier verdicts that mean the verifier would have contradicted the fix."""
+
+_FAILED_FIX_VERDICTS: frozenset[str] = frozenset({"unresolved", "wrong_target", "regressed"})
+"""``fix-outcomes.json`` verdicts that count as a failed fix for the report."""
+
+_PROJECTION_NOTE = (
+    "Single-arm corpus: the proposed mode's latency scales the archived measured verify "
+    "wall-clock samples by the selected-item ratio (proposed items / current items); it is a "
+    "labelled projection, not a second measurement."
+)
+"""The one-line methodology carried beside every projected latency figure (Assumption 6)."""
+
+
+def _read_text(path: Path) -> str:
+    """Read a corpus text file, or ``""`` when it is missing or unreadable (Pattern B)."""
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def _archived_verdicts(run_dir: Path) -> dict[int, str]:
+    """Map archived verifier ``issue_id`` -> verdict string, ignoring malformed entries."""
+    payload = read_json_object(run_dir / "recommendation-verdicts.json")
+    verdicts = payload.get("verdicts")
+    loaded: dict[int, str] = {}
+    if isinstance(verdicts, list):
+        for verdict in verdicts:
+            if not isinstance(verdict, Mapping):
+                continue
+            issue_id = verdict.get("issue_id")
+            value = verdict.get("verdict")
+            if isinstance(issue_id, int) and not isinstance(issue_id, bool) and isinstance(value, str):
+                loaded[issue_id] = value
+    return loaded
+
+
+def _fix_failure_count(run_dir: Path) -> int:
+    """Count the case's reverted or failed fix outcomes from ``fix-outcomes.json``."""
+    payload = read_json_object(run_dir / "fix-outcomes.json")
+    outcomes = payload.get("outcomes")
+    if not isinstance(outcomes, Mapping):
+        return 0
+    count = 0
+    for outcome in outcomes.values():
+        if not isinstance(outcome, Mapping):
+            continue
+        if outcome.get("reverted") is True or outcome.get("verdict") in _FAILED_FIX_VERDICTS:
+            count += 1
+    return count
+
+
+def _selection_case_run_dir(root: Path, case: Mapping[str, Any]) -> Path | None:
+    """Resolve one ``selection_cases`` entry's run directory, or ``None`` when incomplete."""
+    name = case.get("name")
+    profile = case.get("profile")
+    if not isinstance(name, str) or not isinstance(profile, str):
+        return None
+    return root / RUNS_DIRNAME / name / profile
+
+
+def _empty_mode_counts() -> dict[str, int]:
+    return {
+        "items": 0,
+        "skipped": 0,
+        "selected_anchors": 0,
+        "anchor_total": 0,
+        "contradictory_fixes": 0,
+        "reverted_and_failed_fixes": 0,
+    }
+
+
+def _selection_mode_report(
+    counts: Mapping[str, int], samples: Sequence[float], *, projected: bool
+) -> dict[str, Any]:
+    """Render one selection mode's counters plus the nearest-rank latency figures."""
+    anchor_total = counts["anchor_total"]
+    recall = round(counts["selected_anchors"] / anchor_total, 4) if anchor_total else 0.0
+    items = counts["items"]
+    report: dict[str, Any] = {
+        "items": items,
+        "calls": 1 if items > 0 else 0,
+        "skipped": counts["skipped"],
+        "high_severity_recall": recall,
+        "contradictory_fixes": counts["contradictory_fixes"],
+        "reverted_and_failed_fixes": counts["reverted_and_failed_fixes"],
+        "latency_seconds": {
+            "p50": _percentile(samples, 0.5),
+            "p90": _percentile(samples, 0.9),
+        },
+    }
+    report["latency_seconds_projected"] = projected
+    if projected:
+        report["latency_seconds_methodology"] = _PROJECTION_NOTE
+    return report
+
+
+def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str, Any]:
+    """Build the MH16 ``verify_selection`` comparison over the declared cases.
+
+    Two modes run the same predicate over the same archived cases: ``current``
+    is today's conservative ``verify_all`` behaviour, ``proposed`` the selective
+    mode. ``current`` reports the archived measured verify latency; ``proposed``
+    scales those same measured samples by the selected-item ratio and labels the
+    result projected, because the corpus holds one arm only. ``flip_allowed`` is
+    gated on the contradiction counter and the recall anchor alone -- latency is
+    reported, never gated.
+    """
+    current = _empty_mode_counts()
+    proposed = _empty_mode_counts()
+    case_names: list[str] = []
+    samples: list[float] = []
+    skipped: list[dict[str, str]] = []
+
+    for case in cases:
+        run_dir = _selection_case_run_dir(root, case)
+        name = case.get("name")
+        if run_dir is None:
+            skipped.append({"case": str(name), "path": str(root), "error": "case names no profile"})
+            continue
+        case_names.append(str(name))
+        merged_path = run_dir / "merged-items.json"
+        diff_path = run_dir / "diff.patch"
+        verdicts_path = run_dir / "recommendation-verdicts.json"
+        evaluation_path = run_dir / "evaluation.json"
+        required = (merged_path, diff_path, verdicts_path, evaluation_path)
+        if not all(path.is_file() for path in required):
+            missing = ", ".join(path.name for path in required if not path.is_file())
+            skipped.append(
+                {"case": str(name), "path": str(run_dir), "error": f"unreadable case artifact(s): {missing}"}
+            )
+            continue
+        items = _load_items(merged_path)
+        provenance = load_provenance(run_dir)
+        hunk_index = load_hunk_index(run_dir)
+        diff_text = _read_text(diff_path)
+        verdicts = _archived_verdicts(run_dir)
+        golden = _golden_pairs(case)
+        for counts, config in (
+            (current, SelectionConfig(verify_all=True)),
+            (proposed, SelectionConfig(verify_all=False)),
+        ):
+            decisions = select_items(
+                items,
+                provenance=provenance,
+                hunk_index=hunk_index,
+                diff_text=diff_text,
+                config=config,
+            )
+            selected = [decision for decision in decisions if decision.selected]
+            rejected = [decision for decision in decisions if not decision.selected]
+            counts["items"] += len(selected)
+            counts["skipped"] += len(rejected)
+            counts["contradictory_fixes"] += sum(
+                1
+                for decision in rejected
+                if decision.item_id is not None and verdicts.get(decision.item_id) in _VERIFY_CONTRADICTIONS
+            )
+            selected_keys = {
+                (item.get("file"), _line_of(item))
+                for decision, item in zip(decisions, items)
+                if isinstance(item, Mapping) and decision.selected and is_high_severity(item.get("severity"))
+            }
+            counts["anchor_total"] += len(golden)
+            counts["selected_anchors"] += sum(1 for pair in golden if pair in selected_keys)
+        failures = _fix_failure_count(run_dir)
+        current["reverted_and_failed_fixes"] += failures
+        proposed["reverted_and_failed_fixes"] += failures
+        seconds = _phase_timings(read_json_object(evaluation_path)).get("verify")
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
+            samples.append(float(seconds))
+
+    ratio = proposed["items"] / current["items"] if current["items"] else 0.0
+    current_report = _selection_mode_report(current, samples, projected=False)
+    proposed_report = _selection_mode_report(proposed, [sample * ratio for sample in samples], projected=True)
+    return {
+        "cases": case_names,
+        "modes": {"current": current_report, "proposed": proposed_report},
+        "projection": _PROJECTION_NOTE,
+        "flip_allowed": (
+            proposed_report["contradictory_fixes"] == 0
+            and proposed_report["high_severity_recall"] >= current_report["high_severity_recall"]
+        ),
+        "skipped": skipped,
+    }
+
+
 def build_report(
     manifest: Mapping[str, Any], *, corpus_dir: Path | None = None
 ) -> dict[str, Any]:
@@ -370,7 +581,7 @@ def build_report(
     )
 
     samples: dict[str, dict[str, list[float]]] = {
-        profile: {phase: [] for phase in _PHASE_TIMING_KEYS} for profile in LATENCY_PROFILES
+        profile: {phase: [] for phase in _PROFILE_PHASE_TIMING_KEYS} for profile in LATENCY_PROFILES
     }
     golden_total: dict[str, int] = dict.fromkeys(LATENCY_PROFILES, 0)
     golden_found: dict[str, int] = dict.fromkeys(LATENCY_PROFILES, 0)
@@ -404,7 +615,8 @@ def build_report(
             attribution = attribute_shipped_lens(items)
             timings = _phase_timings(read_json_object(run_dir / "evaluation.json"))
             routing = read_json_object(run_dir / "latency-routing.json")
-            for phase, seconds in timings.items():
+            for phase in _PROFILE_PHASE_TIMING_KEYS:
+                seconds = timings.get(phase)
                 if seconds is not None:
                     samples[str(profile)][phase].append(seconds)
             matched_here: set[tuple[Any, Any]] = set()
@@ -436,7 +648,7 @@ def build_report(
         runs = len(decisions[profile])
         phase_latency = {
             phase: {"p50": _percentile(samples[profile][phase], 0.5), "p90": _percentile(samples[profile][phase], 0.9)}
-            for phase in _PHASE_TIMING_KEYS
+            for phase in _PROFILE_PHASE_TIMING_KEYS
         }
         recall = (
             round(golden_found[profile] / golden_total[profile], 4)
@@ -459,7 +671,7 @@ def build_report(
             "decisions": decisions[profile],
         }
 
-    return {
+    report = {
         "corpus": manifest.get("corpus", "latency-profiles"),
         "profiles": profiles_report,
         "review_runtime": _runtime_report(manifest, cases, root),
@@ -484,6 +696,11 @@ def build_report(
             ),
         },
     }
+    raw_selection = manifest.get("selection_cases")
+    if isinstance(raw_selection, list):
+        selection_cases = [case for case in raw_selection if isinstance(case, Mapping)]
+        report["verify_selection"] = _selection_block(selection_cases, root)
+    return report
 
 
 def main(argv: Sequence[str] | None = None) -> int:

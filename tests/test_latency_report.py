@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,10 @@ from daydream.eval.latency_report import (
 
 _MANIFEST = Path(__file__).resolve().parent / "fixtures" / "latency_profiles" / "manifest.json"
 CORPUS = _MANIFEST.parent
+
+
+def load_manifest() -> dict:
+    return json.loads(_MANIFEST.read_text())
 
 
 def test_attribution_counts_shipped_items_per_lens_and_reports_coverage() -> None:
@@ -69,12 +74,16 @@ def test_arbiter_phase_latency_reads_the_deep_bucket_real_runs_write() -> None:
             }
         }
     }
-    assert _phase_timings(real) == {"wonder": 20.0, "arbiter": 90.0}
+    assert _phase_timings(real) == {"wonder": 20.0, "arbiter": 90.0, "verify": None}
 
     legacy = {"timing": {"phase_timings": {"arbiter": {"wall_clock_seconds": 30.0}}}}
-    assert _phase_timings(legacy) == {"wonder": None, "arbiter": 30.0}
+    assert _phase_timings(legacy) == {"wonder": None, "arbiter": 30.0, "verify": None}
 
-    assert _phase_timings({"timing": {"phase_timings": {}}}) == {"wonder": None, "arbiter": None}
+    assert _phase_timings({"timing": {"phase_timings": {}}}) == {
+        "wonder": None,
+        "arbiter": None,
+        "verify": None,
+    }
 
 
 def test_selection_corpus_cases_carry_every_artifact_the_predicate_reads() -> None:
@@ -120,3 +129,65 @@ def test_report_separates_cold_and_warm_samples_and_names_its_corpus(tmp_path: P
     assert "cold" in header and "warm" in header
     assert "p50=620" in header and "p50=1" in header
     assert "Target: 5-15 min for a small follow-up fix" in header
+
+
+def test_selection_report_states_both_modes_and_their_gate() -> None:
+    report = build_report(load_manifest())
+    block = report["verify_selection"]
+    assert set(block["modes"]) == {"current", "proposed"}
+    current, proposed = block["modes"]["current"], block["modes"]["proposed"]
+    assert current["items"] >= proposed["items"]  # the optimised mode verifies no more
+    assert proposed["calls"] in (0, 1) and current["calls"] in (0, 1)
+    assert set(current["latency_seconds"]) == {"p50", "p90"}
+    # single-arm corpus: labelled, never passed off as measured
+    assert proposed["latency_seconds_projected"] is True
+    assert proposed["high_severity_recall"] == 1.0  # the recall anchor is selected in every case
+    assert proposed["contradictory_fixes"] == 0  # no skipped item archived as contradicts/uncertain
+    assert isinstance(proposed["reverted_and_failed_fixes"], int)
+    assert block["flip_allowed"] is (
+        proposed["contradictory_fixes"] == 0
+        and proposed["high_severity_recall"] >= current["high_severity_recall"]
+    )
+
+
+def test_selection_block_is_absent_without_selection_cases() -> None:
+    report = build_report({"corpus": "no-selection", "cases": []}, corpus_dir=Path("/nonexistent"))
+    assert "verify_selection" not in report
+    # adding the verify timing to _PHASE_TIMING_KEYS must not move the per-profile output
+    assert all(
+        set(profile["phase_latency_seconds"]) == {"wonder", "arbiter"}
+        for profile in report["profiles"].values()
+    )
+
+
+def test_selection_report_reports_unreadable_case_instead_of_dropping_it(tmp_path: Path) -> None:
+    manifest = {"corpus": "broken", "selection_cases": [{"name": "gone", "profile": "forensic"}]}
+    report = build_report(manifest, corpus_dir=tmp_path)
+    block = report["verify_selection"]
+    assert block["cases"] == ["gone"]
+    assert block["skipped"] and block["skipped"][0]["path"].endswith("runs/gone/forensic")
+    assert block["modes"]["current"]["items"] == 0
+    assert block["modes"]["current"]["calls"] == 0
+    assert isinstance(block["flip_allowed"], bool)
+
+
+def test_selection_gate_blocks_a_flip_when_a_skipped_item_contradicts(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "counter" / "forensic"
+    shutil.copytree(CORPUS / "runs" / "routine-skip" / "forensic", run_dir)
+    verdicts_path = run_dir / "recommendation-verdicts.json"
+    payload = json.loads(verdicts_path.read_text())
+    payload["verdicts"] = [entry for entry in payload["verdicts"] if entry["issue_id"] == 1]
+    payload["verdicts"][0]["verdict"] = "contradicts"
+    verdicts_path.write_text(json.dumps(payload))
+    manifest = {
+        "corpus": "counter",
+        "selection_cases": [
+            {"name": "counter", "profile": "forensic", "golden_high_severity": [["api.py", 5]]}
+        ],
+    }
+    report = build_report(manifest, corpus_dir=tmp_path)
+    block = report["verify_selection"]
+    assert block["modes"]["proposed"]["skipped"] == 1
+    assert block["modes"]["proposed"]["contradictory_fixes"] == 1
+    assert block["modes"]["proposed"]["high_severity_recall"] == 1.0
+    assert block["flip_allowed"] is False

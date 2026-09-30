@@ -471,6 +471,21 @@ its decision to `.daydream/deep/latency-routing.json`, and the archived
 [review runtime](docs/review-runtime.md#latency-profiles-and-the-per-profile-report)
 for the per-profile report command.
 
+The same corpus declares `selection_cases` for the recommendation-verifier
+comparison, and the documented command
+`uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json`
+then emits a `verify_selection` block contrasting today's conservative verifier
+(`verify_all`) with the selective mode. It reports, per mode: the selected item
+and backend-call counts (a mode with no selected item makes no call), how many
+the mode skips, how many skipped items the archived arm had verdicted
+`contradicts` or `uncertain` (the offline counterfactual), the fraction of each
+case's golden high-severity anchors the mode still verifies, and the reverted or
+failed fix count from `fix-outcomes.json`. The proposed arm's latency scales the
+archived measured verify wall-clock by the selected-item ratio and is labelled a
+projection, never a second measurement. `flip_allowed` turns on the
+contradiction counter and the recall anchor alone -- latency is reported, not
+gated.
+
 ### Supervisor settings
 
 Supervisor settings are config-file-only:
