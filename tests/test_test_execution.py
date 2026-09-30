@@ -6,12 +6,16 @@ import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 from daydream.test_execution import (
     MissingTestCommandError,
     RecipeConfinementError,
+    RequiredContract,
+    RequiredRun,
+    TargetedCheckRun,
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
@@ -329,3 +333,31 @@ def test_recipe_rejects_a_candidate_that_the_repository_text_suggests(tmp_path: 
 
     assert recipe.command.resolved is False
     assert all("make" not in fact.argv for fact in (recipe.candidate,) if fact is not None)
+
+
+def _result(exit_status: int = 0) -> TestExecutionResult:
+    return TestExecutionResult(exit_status=exit_status, timed_out=False, merged_output="ok")
+
+
+def test_required_contract_is_satisfied_only_by_its_own_run() -> None:
+    contract = RequiredContract(declared=("python",), argv=("uv", "run", "pytest"), source="config")
+    required = RequiredRun(argv=("uv", "run", "pytest"), cwd_relative=".", result=_result())
+
+    assert contract.satisfied_by(required) is True
+    failing = RequiredRun(argv=("uv", "run", "pytest"), cwd_relative=".", result=_result(1))
+    assert contract.satisfied_by(failing) is False
+
+
+def test_targeted_check_cannot_satisfy_the_required_contract() -> None:
+    contract = RequiredContract(declared=("python",), argv=("uv", "run", "pytest"), source="config")
+    targeted = TargetedCheckRun(
+        argv=("uv", "run", "pytest", "-k", "one"), selector="one", result=_result()
+    )
+
+    with pytest.raises(TypeError, match="required"):
+        contract.satisfied_by(cast(Any, targeted))
+
+
+def test_unresolved_required_contract_is_never_satisfied() -> None:
+    contract = RequiredContract(declared=("python",), argv=None, source="unresolved")
+    assert contract.satisfied_by(cast(Any, RequiredRun(argv=("pytest",), cwd_relative=".", result=_result()))) is False

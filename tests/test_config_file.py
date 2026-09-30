@@ -453,3 +453,14 @@ def test_verify_selection_keys_round_trip_and_ill_typed_values_degrade(tmp_path:
     degraded = load_file_config(tmp_path)
     assert degraded.verify_all is None            # real bool only
     assert degraded.extra_risk_categories == []   # non-list degrades to unset, never to a guess
+
+
+def test_test_required_suites_is_additive_to_test_command(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        "[tool.daydream]\ntest_command = 'uv run pytest'\ntest_required_suites = ['python', 'rl']\n"
+    )
+    config = load_file_config(tmp_path)
+
+    assert config.test_command == "uv run pytest"
+    assert config.test_required_suites == ["python", "rl"]
+    assert load_file_config(tmp_path / "empty").test_required_suites == []

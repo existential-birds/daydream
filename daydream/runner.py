@@ -269,6 +269,12 @@ class RunConfig:
     # the file. Resolved by the orchestrator's ``_resolved_diagram_mode``.
     diagram: str | None = None
     test_command: str | None = None
+    # Issue #1408: suite ids the single configured ``test_command`` is the
+    # authoritative gate for. Declaration only (no second runner); resolved by
+    # ``resolve_test_recipe`` into the recipe's ``RequiredContract``. Populated
+    # from the file config when set, else empty — the recipe never invents a
+    # suite.
+    test_required_suites: list[str] = field(default_factory=list)
 
 
 class _RunSnapshotCaptureError(RuntimeError):
