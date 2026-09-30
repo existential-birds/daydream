@@ -463,8 +463,15 @@ def _is_straight_line_body(body: list[str]) -> bool:
     return True
 
 
-def _literal_loop_bindings(tokens: list[str]) -> dict[str, tuple[str, ...]]:
-    """Map ``for VAR in <literal words>; do … done`` variables to their words.
+def _literal_loop_bindings(
+    tokens: list[str],
+) -> list[tuple[str, tuple[str, ...], int, int]]:
+    """Loop bindings as ``(var, words, body_start, body_end)`` records.
+
+    Each record carries its own ``do``…``done`` token span so that sequential
+    loops resolve independently — including two loops that reuse the same
+    variable name (issue #1397, Should Have) — and a read operand outside every
+    recognised loop credits nothing.
 
     Only a top-level loop (the ``for`` token at index 0 or immediately after a
     segment separator) with an all-literal, non-empty word list, a ``do`` and a
@@ -476,7 +483,7 @@ def _literal_loop_bindings(tokens: list[str]) -> dict[str, tuple[str, ...]]:
     ``&&``/``&``/``||``, a pipe, or a brace group. No partial credit is ever
     granted (issue #1397).
     """
-    bindings: dict[str, tuple[str, ...]] = {}
+    bindings: list[tuple[str, tuple[str, ...], int, int]] = []
     n = len(tokens)
     i = 0
     while i < n:
@@ -510,48 +517,66 @@ def _literal_loop_bindings(tokens: list[str]) -> dict[str, tuple[str, ...]]:
         if not _is_straight_line_body(tokens[body_start:k]):
             i += 1
             continue
-        bindings[var] = tuple(words)
+        bindings.append((var, tuple(words), body_start, k))
         i = k + 1
     return bindings
 
 
-def _resolve_loop_operand(
-    operand: str, bindings: dict[str, tuple[str, ...]]
-) -> tuple[str, ...] | None:
-    """Resolve a ``$``-bearing operand through the loop bindings, if possible.
+def _enclosing_loop_binding(
+    bindings: list[tuple[str, tuple[str, ...], int, int]], index: int
+) -> tuple[str, tuple[str, ...]] | None:
+    """Binding of the recognised loop whose ``do``…``done`` span holds *index*.
 
-    ``$VAR`` and ``${VAR}`` return the bound words; one literal prefix followed
-    by exactly one variable (``src/$f``) returns each word with the prefix
-    prepended. An unbound variable, a second ``$``, or any trailing suffix
-    returns ``None`` (issue #1397).
+    A read operand credits a loop's words only when the read segment sits inside
+    that loop's own body, so a variable reused by a later loop — or a read
+    outside every loop — never picks up another loop's word list (issue #1397,
+    requirement 6: whole-loop-or-nothing). Nested bodies are rejected up front,
+    and spans never overlap, so at most one span can match.
     """
+    for var, words, body_start, body_end in bindings:
+        if body_start <= index < body_end:
+            return (var, words)
+    return None
+
+
+def _resolve_loop_operand(
+    operand: str, binding: tuple[str, tuple[str, ...]] | None
+) -> tuple[str, ...] | None:
+    """Resolve a ``$``-bearing operand through one loop's binding, if possible.
+
+    ``$VAR`` and ``${VAR}`` return that loop's words; one literal prefix followed
+    by exactly one reference to the same loop variable (``src/$f``) returns each
+    word with the prefix prepended. A reference to a different variable, a
+    second ``$``, any trailing suffix, or no enclosing loop returns ``None``
+    (issue #1397).
+    """
+    if binding is None:
+        return None
+    var, words = binding
     m = _LOOP_VAR_RE.fullmatch(operand)
     if m:
-        return bindings.get(m.group(1) or m.group(2))
+        return words if (m.group(1) or m.group(2)) == var else None
     m = _LOOP_PREFIX_OPERAND_RE.fullmatch(operand)
     if not m:
         return None
     var_match = _LOOP_VAR_RE.fullmatch(m.group(2))
-    if not var_match:
-        return None
-    words = bindings.get(var_match.group(1) or var_match.group(2))
-    if not words:
+    if not var_match or (var_match.group(1) or var_match.group(2)) != var:
         return None
     prefix = m.group(1)
     return tuple(prefix + w for w in words)
 
 
 def _loop_resolved_paths(
-    verb: str, operands: list[str], bindings: dict[str, tuple[str, ...]]
+    verb: str, operands: list[str], binding: tuple[str, tuple[str, ...]] | None
 ) -> set[str]:
-    """Resolved literal-loop paths for one read segment.
+    """Resolved literal-loop paths for one read segment inside a loop body.
 
     Each ``$``-bearing operand is replaced by a unique sentinel literal and
     ``_read_paths_for_segment`` re-run, so the verb's own position rules
     (``rg``/``grep`` pattern skipping, ``sed`` address ranges, redirects,
     option tables) decide which operands are credited. A sentinel the verb
-    credited is resolved through ``bindings``; an unresolvable one contributes
-    nothing.
+    credited is resolved through the enclosing loop's binding; an unresolvable
+    one contributes nothing.
     """
     resolved: set[str] = set()
     sentinels: dict[str, str] = {}
@@ -567,7 +592,7 @@ def _loop_resolved_paths(
     for sentinel, op in sentinels.items():
         if sentinel not in credited:
             continue
-        words = _resolve_loop_operand(op, bindings)
+        words = _resolve_loop_operand(op, binding)
         if words:
             resolved.update(words)
     return resolved
@@ -582,9 +607,9 @@ def _paths_from_command(command: str) -> set[str]:
     ``2>/dev/null``. Tokenization is shell-aware: quoted paths survive,
     redirection targets are consumed with their operator, and option values
     plus the ``rg``/``grep`` search pattern and the ``awk`` program are
-    filtered. A literal ``for … in <words>; do … done`` binding is resolved to
-    its listed words (issue #1397) while everything else falls through
-    verbatim. Extraction is deliberately permissive — ``_path_matches``
+    filtered. A read segment inside a recognised literal ``for … in <words>;
+    do … done`` body is resolved to that loop's listed words (issue #1397)
+    while everything else falls through verbatim. Extraction is deliberately permissive — ``_path_matches``
     matches by ``endswith``, so a stray operand simply never matches a diff
     file — but options, redirect targets, sed address ranges, and the
     ``rg``/``grep`` search patterns are filtered.
@@ -607,6 +632,7 @@ def _paths_from_command(command: str) -> set[str]:
         if verb not in _READ_VERBS:
             i += 1
             continue
+        segment_start = i
         i += 1
         operands: list[str] = []
         while i < n and tokens[i] not in _SEGMENT_SEPARATORS:
@@ -616,7 +642,9 @@ def _paths_from_command(command: str) -> set[str]:
         dynamic = {op for op in operands if "$" in op}
         paths.update(credited - dynamic)
         if dynamic and bindings:
-            paths.update(_loop_resolved_paths(verb, operands, bindings))
+            binding = _enclosing_loop_binding(bindings, segment_start)
+            if binding is not None:
+                paths.update(_loop_resolved_paths(verb, operands, binding))
     return paths
 
 

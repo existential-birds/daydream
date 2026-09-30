@@ -1153,6 +1153,27 @@ def test_files_read_resolves_literal_loop_bindings() -> None:
     ) == {"a.py", "b.py", "c.py"}
 
 
+def test_files_read_sequential_loops_reusing_a_variable_resolve_independently() -> None:
+    # Issue #1397 Should Have: sequential loops resolve each to its OWN literal
+    # list -- including two loops that reuse the same variable name.
+    assert _shell_reads(
+        'for f in a.py b.py; do nl -ba "$f"; done; for f in c.py; do nl -ba "$f"; done'
+    ) == {"a.py", "b.py", "c.py"}
+
+
+def test_files_read_loop_credit_is_scoped_to_the_enclosing_loop_body() -> None:
+    # Issue #1397 requirement 6 (whole-loop-or-nothing): a read operand resolves
+    # only through the loop body that encloses it. A later loop's word list
+    # never attributes credit to a read it did not perform, and an ambiguous
+    # loop's read is not rescued by an unrelated literal loop.
+    assert _shell_reads(
+        'for f in a.py; do nl -ba "$f"; done; for f in b.py; do :; done'
+    ) == {"a.py"}
+    assert _shell_reads(
+        'for f in $(git ls-files); do cat "$f"; done; for f in readme.md; do :; done'
+    ) == set()
+
+
 def test_files_read_loop_binding_is_whole_loop_or_nothing() -> None:
     # Issue #1397 AC2 / requirement 6: every ambiguous shape credits nothing
     # for that call, so the affected files stay uncovered and reach the sweep.
