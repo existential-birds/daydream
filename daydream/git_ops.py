@@ -445,8 +445,8 @@ def _retrying_subprocess(
             last_timeout = exc
             if attempt < retries:
                 _logger.warning(
-                    "%s %s timed out after %ss (attempt %d/%d); retrying",
-                    program, display, timeout, attempt + 1, retries + 1,
+                    "%s timed out after %ss (attempt %d/%d); retrying",
+                    program, timeout, attempt + 1, retries + 1,
                 )
         except (subprocess.SubprocessError, OSError) as exc:
             raise GitError(f"{program} {display} failed: {type(exc).__name__}: {scrub(str(exc))}") from exc
