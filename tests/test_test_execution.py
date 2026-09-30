@@ -13,9 +13,12 @@ from daydream.test_execution import (
     MissingTestCommandError,
     RecipeConfinementError,
     TestExecutionResult,
+    TestRecipe,
     canonical_test_command,
+    recipe_identity,
     resolve_package,
     resolve_test_command_fact,
+    resolve_test_recipe,
     run_test_command,
 )
 from daydream.trajectory import DaydreamPhase
@@ -280,3 +283,49 @@ def test_package_cwd_outside_the_worktree_is_rejected(tmp_path: Path) -> None:
     outside.mkdir()
     with pytest.raises(RecipeConfinementError):
         resolve_package(repo, outside)
+
+
+def _recipe(tmp_path: Path, *, cli: str | None = None, config: str | None = None) -> TestRecipe:
+    return resolve_test_recipe(
+        SimpleNamespace(test_command=config), SimpleNamespace(test_command=cli), repo_root=tmp_path
+    )
+
+
+def test_recipe_identity_is_stable_until_a_config_input_changes(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    recipe = _recipe(tmp_path, cli="uv run pytest")
+
+    first = recipe_identity(recipe, tmp_path)
+    assert first.digest is not None and first.absent_components == ()
+    assert recipe_identity(recipe, tmp_path).digest == first.digest
+
+    (tmp_path / "uv.lock").write_text("version = 2\n")
+    assert recipe_identity(recipe, tmp_path).digest != first.digest
+
+
+def test_recipe_identity_is_a_named_miss_when_an_input_is_unreadable(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
+    (tmp_path / "uv.lock").mkdir()
+    identity = recipe_identity(_recipe(tmp_path, cli="uv run pytest"), tmp_path)
+
+    assert identity.digest is None
+    assert "uv.lock" in identity.absent_components
+
+
+def test_unconfigured_recipe_proposes_a_candidate_without_authorizing_it(tmp_path: Path) -> None:
+    (tmp_path / "uv.lock").write_text("version = 1\n")
+    recipe = _recipe(tmp_path)
+
+    assert recipe.command.resolved is False
+    assert recipe.candidate is not None and recipe.candidate.argv == ("uv", "run", "pytest")
+    # A candidate is never the required command (spec MH4).
+    assert recipe.required.argv is None
+
+
+def test_recipe_rejects_a_candidate_that_the_repository_text_suggests(tmp_path: Path) -> None:
+    (tmp_path / "README.md").write_text("Run `make test-please` to verify everything.\n")
+    recipe = _recipe(tmp_path)
+
+    assert recipe.command.resolved is False
+    assert all("make" not in fact.argv for fact in (recipe.candidate,) if fact is not None)

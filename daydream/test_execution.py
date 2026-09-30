@@ -42,6 +42,10 @@ _MIN_REDACTED_ENV_VALUE_LENGTH = 8
 # truncation runs after this cap, so the capped buffer is the outer bound.
 _MERGED_OUTPUT_LIMIT_CHARS = 512 * 1024
 
+#: Bump whenever the recipe payload shape changes so a stale persisted recipe
+#: can never be read as the current contract (mirrors ``REUSE_KEY_FORMAT``).
+RECIPE_FORMAT: int = 1
+
 
 class MissingTestCommandError(RuntimeError):
     """Raised when no canonical test command is configured.
@@ -334,6 +338,201 @@ class TestExecutionResult:
     def passed(self) -> bool:
         """Single source of truth: exit status (a timeout is never a pass)."""
         return self.exit_status == 0 and not self.timed_out
+
+
+@dataclass(frozen=True)
+class RequiredRun:
+    """A run of the single configured command, eligible to satisfy a contract.
+
+    Only this type may be passed to :meth:`RequiredContract.satisfied_by`;
+    a :class:`TargetedCheckRun` is structurally barred because a narrowed
+    ``-k``/selector check is not the authoritative full-suite gate (MH6).
+    """
+
+    argv: tuple[str, ...]
+    cwd_relative: str
+    result: "TestExecutionResult"
+
+
+@dataclass(frozen=True)
+class TargetedCheckRun:
+    """A narrowed check (``-k``/single file) — never a required-suite gate."""
+
+    argv: tuple[str, ...]
+    selector: str | None
+    result: "TestExecutionResult"
+    cwd_relative: str = "."
+
+
+@dataclass(frozen=True)
+class RequiredContract:
+    """The declared required-suite contract for the configured command.
+
+    ``declared`` names the suite ids the single configured command is the
+    authoritative gate for (declaration only — no second runner executes).
+    ``argv`` is the resolved command, or ``None`` when nothing is configured,
+    in which case the contract is never satisfied. ``satisfied_by`` accepts
+    only a :class:`RequiredRun`; anything else raises ``TypeError`` so a
+    targeted check can never stand in for the required suite.
+    """
+
+    declared: tuple[str, ...]
+    argv: tuple[str, ...] | None
+    source: Literal["cli", "config", "unresolved"]
+
+    def satisfied_by(self, run: RequiredRun) -> bool:
+        """True only for a passing run of exactly this contract's command."""
+        if not isinstance(run, RequiredRun):
+            raise TypeError(
+                "RequiredContract.satisfied_by accepts only a RequiredRun; "
+                "a targeted check cannot satisfy the required contract."
+            )
+        if self.argv is None:
+            return False
+        return run.argv == self.argv and run.result.passed
+
+
+@dataclass(frozen=True)
+class RecipeCandidate:
+    """A manifest-derived suggestion, never the authoritative command.
+
+    Produced only from the closed runner set (:data:`_RUNNER_LOCKFILES`); no
+    arbitrary repository text ever becomes a candidate (spec MH4).
+    """
+
+    argv: tuple[str, ...]
+    provenance: Literal["manifest"]
+
+
+@dataclass(frozen=True)
+class RecipeIdentity:
+    """The versioned identity of one resolved recipe.
+
+    ``digest`` is a content digest over the command/package facts plus the
+    per-package config-input digest, or ``None`` when a config input could not
+    be read — in which case ``absent_components`` names it (Pattern C: a named
+    miss, never a placeholder digest).
+    """
+
+    digest: str | None
+    absent_components: tuple[str, ...]
+    format_version: int = RECIPE_FORMAT
+
+
+@dataclass(frozen=True)
+class TestRecipe:
+    """One resolved test recipe: everything a run needs to run tests.
+
+    Every fact is resolved exactly once in the deep preamble and then consumed
+    from this single value — no consumer re-derives the command, the package,
+    or the identity.
+    """
+
+    command: ResolvedFact
+    package: PackageResolution
+    required: RequiredContract
+    candidate: RecipeCandidate | None
+    identity: RecipeIdentity
+    format_version: int = RECIPE_FORMAT
+
+    # Not a pytest test class despite the name prefix.
+    __test__ = False
+
+
+def _manifest_candidate(runner: str | None) -> RecipeCandidate | None:
+    """Map a resolved runner to the closed manifest candidate, or ``None``.
+
+    The mapping is total over :data:`_RUNNER_LOCKFILES`: ``uv``/``poetry``/
+    ``pipenv`` run pytest through the runner; ``pip`` runs a bare ``pytest``.
+    An unresolved runner produces no candidate at all.
+    """
+    if runner in {"uv", "poetry", "pipenv"}:
+        return RecipeCandidate(argv=(runner, "run", "pytest"), provenance="manifest")
+    if runner == "pip":
+        return RecipeCandidate(argv=("pytest",), provenance="manifest")
+    return None
+
+
+def _compose_identity(
+    command: ResolvedFact, package: PackageResolution, repo_root: Path
+) -> RecipeIdentity:
+    """Recompute the versioned recipe identity from the live config inputs.
+
+    The config-input digest is read from disk on every call so a changed
+    lockfile/manifest moves the identity; an unreadable input is a named miss.
+    """
+    package_dir = _nearest_package_dir(repo_root, package.cwd_relative)
+    config_digest, absent = _config_digest(
+        package_dir, _config_input_names(package_dir, package.runner)
+    )
+    if config_digest is None:
+        return RecipeIdentity(digest=None, absent_components=absent)
+    components = {
+        "format": RECIPE_FORMAT,
+        "command": list(command.value) if command.value is not None else None,
+        "command_source": command.source,
+        "cwd_relative": package.cwd_relative,
+        "runner": package.runner,
+        "interpreter": package.interpreter,
+        "config_digest": config_digest,
+    }
+    canonical = json.dumps(components, sort_keys=True, separators=(",", ":"))
+    return RecipeIdentity(
+        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        absent_components=(),
+    )
+
+
+def recipe_identity(recipe: TestRecipe, repo_root: Path) -> RecipeIdentity:
+    """Recompute a recipe's identity against the current config inputs.
+
+    ``recipe.identity`` is the identity captured at resolution time; this
+    function recomputes it so a decision gate can tell whether the recipe's
+    inputs still hold, returning a named miss rather than raising.
+    """
+    return _compose_identity(recipe.command, recipe.package, repo_root)
+
+
+def resolve_test_recipe(
+    config: object,
+    run_config: object,
+    *,
+    repo_root: Path,
+    cwd: Path | None = None,
+) -> TestRecipe:
+    """Resolve the run's single test recipe, each fact exactly once.
+
+    The command fact applies CLI-over-config precedence; the package is
+    resolved from ``cwd`` (defaulting to the worktree root) and confined to
+    ``repo_root``; the candidate comes only from the closed manifest set; and
+    the identity binds the command/package facts to the per-package config
+    inputs. An unresolved command never authorizes a required argv and never
+    runs anything — the candidate is a suggestion only (spec MH4).
+    """
+    command = resolve_test_command_fact(config, run_config)
+    package = resolve_package(repo_root, cwd if cwd is not None else repo_root)
+    declared = tuple(
+        getattr(run_config, "test_required_suites", None)
+        or getattr(config, "test_required_suites", None)
+        or ()
+    )
+    required = RequiredContract(
+        declared=declared,
+        argv=command.value if isinstance(command.value, tuple) else None,
+        source="unresolved" if not command.resolved else _command_source(command.source),
+    )
+    return TestRecipe(
+        command=command,
+        package=package,
+        required=required,
+        candidate=_manifest_candidate(package.runner),
+        identity=_compose_identity(command, package, repo_root),
+    )
+
+
+def _command_source(source: str) -> Literal["cli", "config"]:
+    """Narrow a resolved command provenance to the required-contract domain."""
+    return "config" if source == "config" else "cli"
 
 
 def _redact_merged(output: str, env: dict[str, str] | None) -> str:
