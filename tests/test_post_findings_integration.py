@@ -24,20 +24,10 @@ import pytest
 
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers, validate_diagram_payload
+from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.scripts import cli_main
-
-
-def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
-    """Captured stdout with Rich panel borders and line wrapping collapsed.
-
-    ``print_warning`` renders a bordered panel, so a message longer than the
-    panel width is broken across lines with box characters between the halves
-    — a substring check against the raw capture fails on the wrap.
-    """
-    out = capsys.readouterr().out
-    return " ".join(out.translate({ord(char): " " for char in "│╭╮╰╯─║╔╗╚╝═"}).split())
 
 
 def _post_argv(

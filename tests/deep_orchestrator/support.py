@@ -20,6 +20,7 @@ from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
 from daydream.runner import RunConfig, run as _run
 from daydream.workspace import WorkContext
+from tests.harness.console import collapse_panel_text as _panel_text  # noqa: F401 - re-export
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     Mute,
@@ -454,18 +455,6 @@ def _source_uids_by_description(deep: Path) -> dict[str, Any]:
     by the time the artifact lands.
     """
     return {str(item.get("description")): item.get("source_uids") for item in _merged_items(deep)}
-
-
-def _panel_text(capsys: pytest.CaptureFixture[str]) -> str:
-    """Return captured console output with rich's panel framing normalized away.
-
-    ``print_warning`` renders inside a bordered panel, so a message long enough
-    to wrap arrives with ``│`` gutters and newlines spliced into the middle of
-    it. Dropping the border glyphs and collapsing whitespace lets a test assert
-    the sentence the operator reads rather than the width it happened to wrap at.
-    """
-    text = capsys.readouterr().out.replace("│", " ").replace("║", " ")
-    return " ".join(text.split())
 
 
 def _prime_source_uid_merge_resume(

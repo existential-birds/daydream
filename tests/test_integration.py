@@ -12,7 +12,7 @@ from typing import Any, cast
 import pytest
 from rich.console import Console
 
-from daydream import git_ops, remote_ci
+from daydream import remote_ci
 from daydream.agent import run_agent
 from daydream.artifact_visibility import ArtifactSession
 from daydream.backends import (
@@ -29,7 +29,7 @@ from daydream.deep import fix_steps
 from daydream.deep.artifacts import deep_dir, per_stack_records_path
 from daydream.exploration import ExplorationContext
 from daydream.phases import phase_alternative_review
-from daydream.pr_review import PRInfo, ReviewRenderers
+from daydream.pr_review import PRInfo
 from daydream.remote_ci import RemoteCITarget, pending_remote_ci_verdict, write_remote_ci_handoff
 from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import RunConfig, run
@@ -1358,15 +1358,8 @@ async def test_run_comment_full_flow(
         target_dir: Any,
         merged_items_path: Path,
         *,
-        console: Any,
-        run_info: str,
-        renderers: ReviewRenderers,
         post: Any,
-        approve_on_clean: Any=False,
-        pr_number: int | None = None,
-        diagram_blocks: Any=None,
-        run_context: RunContext | None = None,
-        auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
+        **_kwargs: Any,
     ) -> None:
         posted.extend(json.loads(merged_items_path.read_text())["items"])
         posted_posts.append(post)

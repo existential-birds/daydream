@@ -118,6 +118,41 @@ def _write_trajectory(
     return p
 
 
+def _single_phase_trajectory(
+    tmp_path: Path,
+    *,
+    name: str = "t.json",
+    model: str | None = "gpt-5.5",
+    phase: str = "review",
+    prompt: int = 1000,
+    completion: int = 100,
+    cached: int = 500,
+    cost_usd: float | None = None,
+) -> Path:
+    """Write the common one-user-step + one-agent-step trajectory.
+
+    The root agent model follows *model* (falling back to ``gpt-5.5``), so a
+    caller passing ``model=None`` exercises the root-model fallback.
+    """
+    return _write_trajectory(
+        tmp_path,
+        name=name,
+        model=model or "gpt-5.5",
+        steps=[
+            _user_step(),
+            _agent_step(
+                step_id=2,
+                phase=phase,
+                model=model,
+                prompt=prompt,
+                completion=completion,
+                cached=cached,
+                cost_usd=cost_usd,
+            ),
+        ],
+    )
+
+
 def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Path) -> None:
     """Rendering after the transition uses the archived step's usage date."""
     step = _agent_step(
@@ -154,21 +189,13 @@ def test_m6b_user_override_synthesizes_cost_for_unknown_model(
     )
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
 
-    p = _write_trajectory(
+    p = _single_phase_trajectory(
         tmp_path,
         model="custom-codex-op",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="custom-codex-op",
-                prompt=1_000_000,
-                completion=0,
-                cached=0,
-                cost_usd=None,
-            ),
-        ],
+        prompt=1_000_000,
+        completion=0,
+        cached=0,
+        cost_usd=None,
     )
     out = render_run_info_block([p])
     # 1M uncached input * $2.00/1M = $2.00 synthesized (no cost_usd from backend).
@@ -212,21 +239,13 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     """Thousand separators on >=1,000; sub-cent cost renders <$0.01; cache-hit
     omitted when input == 0."""
     # Sub-cent cost
-    p = _write_trajectory(
+    p = _single_phase_trajectory(
         tmp_path,
         name="subcent.json",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="gpt-5.5",
-                prompt=500,
-                completion=10,
-                cached=0,
-                cost_usd=0.001,
-            ),
-        ],
+        prompt=500,
+        completion=10,
+        cached=0,
+        cost_usd=0.001,
     )
     out = render_run_info_block([p])
     assert "- **Cost:** <$0.01" in out
@@ -237,21 +256,13 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     assert "cached" not in out.split("**Tokens:**", 1)[1].split("\n", 1)[0]
 
     # Thousand separators in tokens line.
-    p2 = _write_trajectory(
+    p2 = _single_phase_trajectory(
         tmp_path,
         name="big.json",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="gpt-5.5",
-                prompt=33_600,
-                completion=6_900,
-                cached=22_600,
-                cost_usd=0.42,
-            ),
-        ],
+        prompt=33_600,
+        completion=6_900,
+        cached=22_600,
+        cost_usd=0.42,
     )
     out2 = render_run_info_block([p2])
     assert "33,600 in" in out2
@@ -259,21 +270,13 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     assert "6,900 out" in out2
 
     # Zero-input edge: no hit ratio.
-    p3 = _write_trajectory(
+    p3 = _single_phase_trajectory(
         tmp_path,
         name="zero_input.json",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="gpt-5.5",
-                prompt=0,
-                completion=10,
-                cached=0,
-                cost_usd=0.0,
-            ),
-        ],
+        prompt=0,
+        completion=10,
+        cached=0,
+        cost_usd=0.0,
     )
     out3 = render_run_info_block([p3])
     # Tokens line uses the no-cache form when input is 0.
@@ -585,21 +588,7 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     that reports prompt=10, cached=20 (corrupt or racy upstream) must not
     bleed the raw 20 into the rollup or per-phase row.
     """
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="gpt-5.5",
-                prompt=10,
-                completion=5,
-                cached=20,
-                cost_usd=0.0,
-            ),
-        ],
-    )
+    p = _single_phase_trajectory(tmp_path, prompt=10, completion=5, cached=20, cost_usd=0.0)
     out = render_run_info_block([p])
     # Rollup: cached cell shows clamped 10, hit-ratio 100%, never raw 20.
     assert "10 in (10 cached, 100% hit) → 5 out" in out
@@ -618,21 +607,7 @@ def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
     corrupt trajectory. The renderer clamps to 0 at aggregation and the
     rollup falls back to the no-cache form (cached==0 omits hit ratio).
     """
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model="gpt-5.5",
-                prompt=-5,
-                completion=-2,
-                cached=-3,
-                cost_usd=0.0,
-            ),
-        ],
-    )
+    p = _single_phase_trajectory(tmp_path, prompt=-5, completion=-2, cached=-3, cost_usd=0.0)
     out = render_run_info_block([p])
     # No negative numbers anywhere in the rendered markdown. (Hyphens
     # inside model names like ``gpt-5.5`` and the table separator row
@@ -657,24 +632,15 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     daydream's recorder always stamps step.model_name explicitly, so this
     is a defensive/spec-conformant guarantee on the renderer side.
     """
-    p = _write_trajectory(
+    p = _single_phase_trajectory(
         tmp_path,
-        # Use a model that's in MODEL_PRICES so cost synthesis lands.
-        model="gpt-5.5",
-        steps=[
-            _user_step(),
-            # All agent steps omit model_name -> renderer must fall back to
-            # agent.model_name from the root config.
-            _agent_step(
-                step_id=2,
-                phase="review",
-                model=None,
-                prompt=10_000,
-                completion=200,
-                cached=0,
-                cost_usd=None,
-            ),
-        ],
+        # The agent step omits model_name (model=None) and falls back to the
+        # root agent model, which is in MODEL_PRICES so cost synthesis lands.
+        model=None,
+        prompt=10_000,
+        completion=200,
+        cached=0,
+        cost_usd=None,
     )
     out = render_run_info_block([p])
     # Rollup model line uses the root agent's model, not "unknown".
@@ -694,20 +660,8 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
 
 def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
     """The backend name is a fallback, not an actual model identity."""
-    p = _write_trajectory(
-        tmp_path,
-        model="osprey",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase="exploration",
-                model="osprey",
-                prompt=0,
-                completion=0,
-                cached=0,
-            ),
-        ],
+    p = _single_phase_trajectory(
+        tmp_path, model="osprey", phase="exploration", prompt=0, completion=0, cached=0
     )
 
     out = render_run_info_block([p])
