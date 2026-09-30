@@ -322,6 +322,7 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
 
 
 def test_loop_read_covers_through_the_sweep_and_verdict_seams(tmp_path: Path) -> None:
+    """Loop reads count as coverage through both sweep admission and verdict reconciliation."""
     # Issue #1397 requirement 2: one loop-resolution semantics for every
     # consumer that credits reads -- sweep admission and verdict reconciliation.
     daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-loop")
@@ -361,6 +362,7 @@ def test_loop_read_covers_through_the_sweep_and_verdict_seams(tmp_path: Path) ->
     {"exit_code": 2},
 ])
 def test_damaged_observations_credit_no_coverage(tmp_path: Path, extra: dict[str, Any]) -> None:
+    """Damaged observations -- failed, cancelled, interrupted, truncated, or non-zero-exit -- credit no coverage."""
     # Issue #1397 requirement 5: a paired result marked failed/cancelled/
     # interrupted/truncated/non-zero-exit establishes no coverage.
     daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-damaged")
@@ -379,6 +381,7 @@ def test_damaged_observations_credit_no_coverage(tmp_path: Path, extra: dict[str
 
 
 def test_zero_exit_code_observation_still_credits(tmp_path: Path) -> None:
+    """A clean zero-exit-code read still credits coverage."""
     daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-clean-exit")
     _write_fork_calls(
         run_dir,
@@ -393,6 +396,7 @@ def test_zero_exit_code_observation_still_credits(tmp_path: Path) -> None:
 
 
 def test_a_damaged_batched_read_credits_none_of_its_files(tmp_path: Path) -> None:
+    """A damaged batched read credits none of the files it looped over."""
     # Requirement 5 explicitly spans batched/loop reads, not just single Reads.
     daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-damaged-loop")
     _write_fork_calls(
@@ -411,6 +415,7 @@ def test_a_damaged_batched_read_credits_none_of_its_files(tmp_path: Path) -> Non
 
 
 def test_declared_clean_is_downgraded_when_the_only_read_failed(tmp_path: Path) -> None:
+    """A declared clean verdict is downgraded when its only read failed."""
     # Requirement 5's second consumer: verdict reconciliation must not let a
     # failed read rubber-stamp a declared clean verdict.
     daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-failed-verdict")
