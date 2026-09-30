@@ -138,7 +138,8 @@ def test_risk_scores_are_recorded_but_do_not_set_floors() -> None:
     )
     summary = summarize_risk(signals)
     assert (summary.size_score, summary.breadth_score) == (2, 1)
-    assert (summary.floors, summary.wonder_floor, summary.arbiter_floor) == ((), "skip", "medium")
+    assert summary.floors == ()
+    assert route_for("fast", summary).arbiter_effort == "medium"
     assert summarize_risk(_signals("+é", stacks=1)).size_score == 0
     assert summarize_risk(_signals("+x\n" * 201)).size_score == 1
     assert summarize_risk(_signals("+x\n" * 200)).size_score == 0

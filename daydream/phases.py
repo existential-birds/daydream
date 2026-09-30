@@ -1870,7 +1870,6 @@ async def phase_verify_recommendations(
     decisions = select_items(
         items,
         provenance=load_provenance(deep_dir),
-        hunk_index=load_hunk_index(deep_dir.parent),
         diff_text=_read_diff_text(deep_dir),
         config=config,
     )

@@ -68,8 +68,6 @@ class RiskSummary:
     size_score: int
     breadth_score: int
     floors: tuple[str, ...]
-    wonder_floor: WonderRoute
-    arbiter_floor: ArbiterEffort
 
 
 def summarize_risk(signals: DiffSignals, findings: FindingSignals | None = None) -> RiskSummary:
@@ -90,8 +88,6 @@ def summarize_risk(signals: DiffSignals, findings: FindingSignals | None = None)
         size_score=size_score,
         breadth_score=min(1, signals.stack_count // 2),
         floors=tuple(sorted(set(floors))),
-        wonder_floor="high" if floors else "skip",
-        arbiter_floor="high" if floors else "medium",
     )
 
 
@@ -102,10 +98,12 @@ def _ladder_max[T](ladder: tuple[T, ...], left: T, right: T) -> T:
 def route_for(profile: LatencyProfile, summary: RiskSummary) -> LatencyRoute:
     """Raise a profile's route to mandatory risk floors without changing other choices."""
     base = PROFILE_ROUTES[profile]
+    wonder_floor: WonderRoute = "high" if summary.floors else "skip"
+    arbiter_floor: ArbiterEffort = "high" if summary.floors else "medium"
     return replace(
         base,
-        wonder=_ladder_max(WONDER_ROUTES, base.wonder, summary.wonder_floor),
-        arbiter_effort=_ladder_max(ARBITER_EFFORTS, base.arbiter_effort, summary.arbiter_floor),
+        wonder=_ladder_max(WONDER_ROUTES, base.wonder, wonder_floor),
+        arbiter_effort=_ladder_max(ARBITER_EFFORTS, base.arbiter_effort, arbiter_floor),
     )
 
 
@@ -177,16 +175,6 @@ class ArbiterPlan:
     reason: str | None
 
 
-def group_effort(route: LatencyRoute, *, high_severity: bool, contested: bool) -> str:
-    """The effort for one sharded group: ``xhigh`` when a risk signal forces it, else the route.
-
-    Both sides are ranked through the :data:`ARBITER_EFFORTS` ladder, so the
-    result is the max of the route's floor and the group's own forcing signal.
-    """
-    escalation: ArbiterEffort = "xhigh" if (high_severity or contested) else "medium"
-    return _ladder_max(ARBITER_EFFORTS, route.arbiter_effort, escalation)
-
-
 def arbiter_plan(
     route: LatencyRoute,
     groups: Sequence[ArbiterGroup],
@@ -211,7 +199,7 @@ def arbiter_plan(
                 PlannedGroup(
                     "arbiter-group-0",
                     uids,
-                    _ladder_max(ARBITER_EFFORTS, route.arbiter_effort, "xhigh"),
+                    "xhigh",
                     f"unsharded {route.profile} path (single arbiter call at xhigh)",
                 ),
             ),
@@ -223,7 +211,7 @@ def arbiter_plan(
     for group in groups:
         high_severity = any(is_high_severity(records[i].get("severity")) for i in group.target_indices)
         is_contested = any(i in contested_set for i in group.target_indices)
-        effort = group_effort(route, high_severity=high_severity, contested=is_contested)
+        effort = "xhigh" if (high_severity or is_contested) else route.arbiter_effort
         if high_severity:
             forcing = "high severity"
         elif is_contested:

@@ -37,14 +37,21 @@ def _annotation_records(mat: Path) -> list[dict[str, Any]]:
     ]
 
 
-def _index(tmp_path: Path, digest: str = "d" * 32) -> Path:
+def _index(
+    tmp_path: Path,
+    digest: str = "d" * 32,
+    *,
+    session_id: str = "s1",
+    created_at: str = "2026-01-01T00:00:00+00:00",
+) -> Path:
     root = tmp_path / "index"
     sessions = [{
-        "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
+        "session_id": session_id, "trajectory_id": f"{session_id}-t",
+        "segment_id": f"{session_id}-seg",
         "resolutions": [{
             "fingerprint": "fp-1", "disposition": "unanswered",
             "evidence": [{"reply_id": 1, "body_sha256": "abc",
-                          "created_at": "2026-01-01T00:00:00+00:00"}],
+                          "created_at": created_at}],
             "evidence_digest": digest, "profile": "pr_review", "stack": "python",
             "comment_id": 7,
         }],
@@ -52,6 +59,33 @@ def _index(tmp_path: Path, digest: str = "d" * 32) -> Path:
     write_sessions_jsonl(root, sessions)
     (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
     return root
+
+
+def _stored_resolutions(rubric: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read a stored rubric's per-finding resolutions (either key spelling)."""
+    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    return stored if isinstance(stored, list) else []
+
+
+def _write_observation(
+    path: Path,
+    record_id: str,
+    *,
+    labeler: str,
+    role: str,
+    rationale: str,
+    observed_at: str,
+    disposition: str = "accepted",
+    evidence_digest: str = "d" * 32,
+) -> None:
+    """Write a single canonical-pin observation JSONL row."""
+    path.write_text(json.dumps({
+        "record_id": record_id, "disposition": disposition,
+        "evidence_digest": evidence_digest, "evidence": [],
+        "labeler": labeler, "role": role, "rationale": rationale,
+        "valid_at": "2026-01-02T00:00:00+00:00", "observed_at": observed_at,
+        "rubric_version": "v1",
+    }) + "\n", encoding="utf-8")
 
 
 def _seed_archive(archive_dir: Path, session_id: str = "s1") -> None:
@@ -100,7 +134,7 @@ def test_canonical_harvest_appends_label_observation_exactly_once(tmp_path: Path
     row = history[0]
     assert row["labeler_version"] == _PIN["labeler_version"]
     rubric = json.loads(row["rubric_json"])
-    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    stored = _stored_resolutions(rubric)
     assert stored and stored[0]["evidence_digest"] == "d" * 32
     # session-level digest matches the shared serializer's (K5 spike)
     assert row["reply_evidence_digest"] == record_evidence_digest(
@@ -213,17 +247,15 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
     root, archive, mat = _materialized(tmp_path)
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
-    obs.write_text(json.dumps({
-        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
-        "evidence": [], "labeler": "alice", "role": "rater", "rationale": "looked right",
-        "valid_at": "2026-01-02T00:00:00+00:00", "observed_at": "2026-01-02T01:00:00+00:00",
-        "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    _write_observation(
+        obs, rid, labeler="alice", role="rater", rationale="looked right",
+        observed_at="2026-01-02T01:00:00+00:00",
+    )
     out = _harvest(root, archive, mat, obs)
     assert out["human_adjudicated"] == 1
     history = label_observation_history(archive, "s1")
     rubric = json.loads(history[0]["rubric_json"])
-    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    stored = _stored_resolutions(rubric)
     # the human disposition wins the stored resolution (M5 precedence merge)
     assert stored[0]["disposition"] == "accepted"
 
@@ -231,12 +263,10 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
 def test_canonical_harvest_rejects_unknown_observation_record_id(tmp_path: Path) -> None:
     root, archive, mat = _materialized(tmp_path)
     obs = tmp_path / "observations.jsonl"
-    obs.write_text(json.dumps({
-        "record_id": "e" * 64, "disposition": "accepted", "evidence_digest": "d" * 32,
-        "evidence": [], "labeler": "alice", "role": "rater", "rationale": "x",
-        "valid_at": "2026-01-02T00:00:00+00:00", "observed_at": "2026-01-02T01:00:00+00:00",
-        "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    _write_observation(
+        obs, "e" * 64, labeler="alice", role="rater", rationale="x",
+        observed_at="2026-01-02T01:00:00+00:00",
+    )
     with pytest.raises(ValueError, match="e" * 64):
         _harvest(root, archive, mat, obs)
     assert label_observation_history(archive, "s1") == []
@@ -269,17 +299,7 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     _harvest(root, archive, tmp_path / "mat", None)
     # Second index whose evidence carries a created_at after the pin
     # (2026-02-01T00:00:00+00:00).
-    sessions = [{
-        "session_id": "s2", "trajectory_id": "s2-t", "segment_id": "s2-seg",
-        "resolutions": [{
-            "fingerprint": "fp-1", "disposition": "unanswered",
-            "evidence": [{"reply_id": 1, "body_sha256": "abc",
-                          "created_at": "2026-03-01T00:00:00+00:00"}],
-            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
-            "comment_id": 7,
-        }],
-    }]
-    write_sessions_jsonl(root, sessions)
+    _index(tmp_path, session_id="s2", created_at="2026-03-01T00:00:00+00:00")
     run_materialize(root, tmp_path / "mat2", pin=_PIN)
     out = _harvest(root, archive, tmp_path / "mat2", None)
     assert out["evidence_after_as_of"] == [
@@ -305,17 +325,7 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
     _seed_archive(archive)
     # Evidence observed after pin-a's as_of but before pin-b's: only the
     # second, re-pinned harvest may flag evidence_after_as_of.
-    sessions = [{
-        "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
-        "resolutions": [{
-            "fingerprint": "fp-1", "disposition": "unanswered",
-            "evidence": [{"reply_id": 1, "body_sha256": "abc",
-                          "created_at": "2026-02-15T00:00:00+00:00"}],
-            "evidence_digest": "d" * 32, "profile": "pr_review", "stack": "python",
-            "comment_id": 7,
-        }],
-    }]
-    write_sessions_jsonl(root, sessions)
+    _index(tmp_path, created_at="2026-02-15T00:00:00+00:00")
     pin_a = dict(_PIN, as_of="2026-03-01T00:00:00+00:00")  # evidence before as_of
     pin_b = dict(_PIN, as_of="2026-02-01T00:00:00+00:00", rubric_version="v2")  # after
     run_materialize(root, tmp_path / "mat-a", pin=pin_a)
@@ -340,7 +350,7 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
         (manifest["snapshot_id"] + ":" + latest["rubric_json"]).encode("utf-8")
     ).hexdigest()
     rubric = json.loads(latest["rubric_json"])
-    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    stored = _stored_resolutions(rubric)
     assert rubric["rubric_version"] == "v2"
     assert stored[0]["evidence_after_as_of"] is True
     # The archived row and the emitted bundle agree on the new pin's flag.
@@ -364,30 +374,26 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
 
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
-    obs.write_text(json.dumps({
-        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
-        "evidence": [], "labeler": "alice", "role": "rater", "rationale": "first pass",
-        "valid_at": "2026-01-02T00:00:00+00:00",
-        "observed_at": "2026-01-02T01:00:00+00:00", "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    _write_observation(
+        obs, rid, labeler="alice", role="rater", rationale="first pass",
+        observed_at="2026-01-02T01:00:00+00:00",
+    )
     out1 = _harvest(root, archive, mat, obs)
     assert out1["appended_sessions"] == 1
     # Same pin, same materialized snapshot, but a different human labeler
     # re-affirms the same decisive disposition: the archived labels set is
     # unchanged, so only the rubric-content digest can tell the generations
     # apart.
-    obs.write_text(json.dumps({
-        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
-        "evidence": [], "labeler": "bob", "role": "adjudicator", "rationale": "second pass",
-        "valid_at": "2026-01-02T00:00:00+00:00",
-        "observed_at": "2026-01-02T02:00:00+00:00", "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    _write_observation(
+        obs, rid, labeler="bob", role="adjudicator", rationale="second pass",
+        observed_at="2026-01-02T02:00:00+00:00",
+    )
     out2 = _harvest(root, archive, mat, obs)
     assert out2["appended_sessions"] == 1  # fresh generation, never a silent skip
     history = label_observation_history(archive, "s1")
     assert len(history) == 2
     rubric = json.loads(history[-1]["rubric_json"])
-    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    stored = _stored_resolutions(rubric)
     assert stored[0]["human_labeler"] == "bob"
     # The archived rubric matches the emitted bundle's overlay.
     emitted = _annotation_records(tmp_path / "mat")
@@ -520,13 +526,11 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
     _seed_archive(archive)
     rid = record_id("s1", "s1", "s1", "fp-1")
     obs = tmp_path / "observations.jsonl"
-    obs.write_text(json.dumps({
-        "record_id": rid, "disposition": "accepted", "evidence_digest": "d" * 32,
-        "evidence": [], "labeler": "alice", "role": "adjudicator",
-        "rationale": "operator resolved the disagreeing generations",
-        "valid_at": "2026-01-02T00:00:00+00:00",
-        "observed_at": "2026-01-02T01:00:00+00:00", "rubric_version": "v1",
-    }) + "\n", encoding="utf-8")
+    _write_observation(
+        obs, rid, labeler="alice", role="adjudicator",
+        rationale="operator resolved the disagreeing generations",
+        observed_at="2026-01-02T01:00:00+00:00",
+    )
     out = _harvest(root, archive, mat, obs)
     assert out["human_adjudicated"] == 1
     history = label_observation_history(archive, "s1")

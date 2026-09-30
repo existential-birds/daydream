@@ -12,7 +12,6 @@ from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.runner import run
-from daydream.workspace import WorkContext
 from tests.deep_orchestrator.support import (
     _fresh_uid_run,
     _high_record,
@@ -29,7 +28,12 @@ from tests.deep_orchestrator.support import (
     _uncovered_sweep_target,
 )
 from tests.harness.console import collapse_panel_text as _panel_text
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.git_helpers import (
+    commit as _commit,
+    git as _git,
+    init_repo as _init_repo,
+    work_context,
+)
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     MakeConfig,
@@ -610,19 +614,6 @@ async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
     assert isinstance(item["id"], int), item
 
 
-def _retained_work(repo: Path, sha: str) -> WorkContext:
-    return WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha=sha,
-        head_branch="main",
-        head_sha=sha,
-        is_ephemeral=False,
-        run_id="s",
-    )
-
-
 @pytest.mark.parametrize("scratch_is_related", [False, True])
 def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
     tmp_path: Path,
@@ -656,9 +647,9 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
         footprint=footprint,
     )
     (repo / "a.py").write_text("A = 2\n")
-    first = capture_retained_tree(_retained_work(repo, state.stable_head), state)
+    first = capture_retained_tree(work_context(repo, run_id="s"), state)
     (repo / "c.py").write_text("C = 9\n")
-    second = capture_retained_tree(_retained_work(repo, state.stable_head), state)
+    second = capture_retained_tree(work_context(repo, run_id="s"), state)
     assert first.paths == second.paths == frozenset({"a.py"})
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
@@ -696,7 +687,7 @@ def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path
         footprint=footprint,
     )
     (repo / "b.py").write_text("B = 2\n")
-    work = _retained_work(repo, head)
+    work = work_context(repo, run_id="s")
 
     snapshot = capture_retained_tree(work, state)
 
