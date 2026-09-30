@@ -314,10 +314,8 @@ def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, 
                 else:
                     phases[phase_name] = phase_table
             merged["phases"] = phases
-        elif key == "improve" and isinstance(value, dict) and isinstance(merged.get("improve"), dict):
-            merged["improve"] = {**merged["improve"], **value}
-        elif key == "diagram" and isinstance(value, dict) and isinstance(merged.get("diagram"), dict):
-            merged["diagram"] = {**merged["diagram"], **value}
+        elif key in ("improve", "diagram") and isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
         else:
             merged[key] = value
     return merged
