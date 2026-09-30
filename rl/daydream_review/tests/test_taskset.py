@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
@@ -35,23 +36,35 @@ def _pr(number: int, base_sha: str, head_sha: str) -> dict[str, object]:
     return {"pr_number": number, "base_sha": base_sha, "head_sha": head_sha, "base_ref": "main"}
 
 
-def _manifest_entry(slug: str, prs: list[dict[str, object]]) -> str:
+def _manifest_entry(
+    slug: str,
+    prs: list[dict[str, object]],
+    protected_test_paths: Sequence[str] | None = ("tests",),
+) -> str:
     block = (
         f'[repos."{slug}"]\n'
         f'clone_url = "https://github.com/{slug}"\n'
         f'image = "daydream-rl/{slug.split("/")[-1]}"\n'
         f'test_command = "pytest -q"\n'
         "setup_cmds = []\n"
-        f'protected_test_paths = {json.dumps(["tests"])}\n'
     )
+    if protected_test_paths is not None:
+        block += f"protected_test_paths = {json.dumps(list(protected_test_paths))}\n"
     for pr in prs:
         block += f'\n[[repos."{slug}".prs]]\n'
         block += "\n".join(f"{key} = {json.dumps(value)}" for key, value in pr.items()) + "\n"
     return block
 
 
-def _write_manifest(path: Path, entries: list[tuple[str, list[dict[str, object]]]]) -> Path:
-    path.write_text("\n".join(_manifest_entry(slug, prs) for slug, prs in entries), encoding="utf-8")
+def _write_manifest(
+    path: Path,
+    entries: list[tuple[str, list[dict[str, object]]]],
+    protected_test_paths: Sequence[str] | None = ("tests",),
+) -> Path:
+    path.write_text(
+        "\n".join(_manifest_entry(slug, prs, protected_test_paths) for slug, prs in entries),
+        encoding="utf-8",
+    )
     return path
 
 
@@ -237,44 +250,25 @@ def test_load_manifest_rejects_unknown_key(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    "block, error_type",
+    "protected_test_paths, error_type",
     [
-        (  # missing field entirely
-            '[repos."acme/widgets"]\n'
-            'clone_url = "https://github.com/acme/widgets"\n'
-            'image = "daydream-rl/widgets"\n'
-            'test_command = "pytest -q"\n'
-            "setup_cmds = []\n",
-            "missing",
-        ),
-        (  # present but empty
-            '[repos."acme/widgets"]\n'
-            'clone_url = "https://github.com/acme/widgets"\n'
-            'image = "daydream-rl/widgets"\n'
-            'test_command = "pytest -q"\n'
-            "setup_cmds = []\n"
-            "protected_test_paths = []\n",
-            "too_short",
-        ),
+        (None, "missing"),  # missing field entirely
+        ([], "too_short"),  # present but empty
     ],
     ids=["missing", "empty"],
 )
 def test_load_manifest_rejects_missing_or_empty_protected_test_paths(
-    tmp_path: Path, block: str, error_type: str
+    tmp_path: Path, protected_test_paths: list[str] | None, error_type: str
 ) -> None:
     """A missing or empty protected_test_paths inventory is a load error.
 
     The security boundary is structural: an entry that ships without a
     protected-path inventory must never silently load into an unprotected task.
     """
-    manifest = tmp_path / "manifest.toml"
-    manifest.write_text(
-        block
-        + '\n[[repos."acme/widgets".prs]]\n'
-        + "pr_number = 3\n"
-        + f'base_sha = "{A_SHA}"\n'
-        + f'head_sha = "{B_SHA}"\n',
-        encoding="utf-8",
+    manifest = _write_manifest(
+        tmp_path / "manifest.toml",
+        [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
+        protected_test_paths=protected_test_paths,
     )
 
     with pytest.raises(ValidationError) as excinfo:
@@ -327,19 +321,10 @@ def test_load_manifest_rejects_non_literal_protected_test_paths(
     test_command run against an unprotected oracle — so such entries must never
     load, exactly like a missing or empty inventory.
     """
-    manifest = tmp_path / "manifest.toml"
-    manifest.write_text(
-        '[repos."acme/widgets"]\n'
-        'clone_url = "https://github.com/acme/widgets"\n'
-        'image = "daydream-rl/widgets"\n'
-        'test_command = "pytest -q"\n'
-        "setup_cmds = []\n"
-        f"protected_test_paths = {json.dumps([entry])}\n"
-        '\n[[repos."acme/widgets".prs]]\n'
-        "pr_number = 3\n"
-        f'base_sha = "{A_SHA}"\n'
-        f'head_sha = "{B_SHA}"\n',
-        encoding="utf-8",
+    manifest = _write_manifest(
+        tmp_path / "manifest.toml",
+        [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
+        protected_test_paths=[entry],
     )
 
     with pytest.raises(ValidationError) as excinfo:
@@ -351,19 +336,10 @@ def test_load_manifest_rejects_non_literal_protected_test_paths(
 
 def test_load_manifest_accepts_canonical_protected_test_paths(tmp_path: Path) -> None:
     """Canonical nested paths and dotfiles load unchanged through the loader."""
-    manifest = tmp_path / "manifest.toml"
-    manifest.write_text(
-        '[repos."acme/widgets"]\n'
-        'clone_url = "https://github.com/acme/widgets"\n'
-        'image = "daydream-rl/widgets"\n'
-        'test_command = "pytest -q"\n'
-        'setup_cmds = []\n'
-        'protected_test_paths = ["tests/unit", "tests/unit/test_api.py", ".pytest.ini", "tests/.hidden"]\n'
-        '\n[[repos."acme/widgets".prs]]\n'
-        "pr_number = 3\n"
-        f'base_sha = "{A_SHA}"\n'
-        f'head_sha = "{B_SHA}"\n',
-        encoding="utf-8",
+    manifest = _write_manifest(
+        tmp_path / "manifest.toml",
+        [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
+        protected_test_paths=["tests/unit", "tests/unit/test_api.py", ".pytest.ini", "tests/.hidden"],
     )
     loaded = load_manifest(manifest)
     assert loaded["acme/widgets"].protected_test_paths == [

@@ -580,17 +580,8 @@ def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts  # 4 files -> parallel tier
 
-    def responder(
-        cwd: Any,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> Any:
-        if output_schema == PATTERN_SCANNER_SCHEMA:
+    def responder(*args: Any, **kwargs: Any) -> Any:
+        if args[2] == PATTERN_SCANNER_SCHEMA:
             raise RuntimeError("pattern scanner exploded")
         return None
 
@@ -647,17 +638,8 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
         await anyio.sleep_forever()
         yield ResultEvent(structured_output=None, continuation=None)
 
-    def responder(
-        cwd: Any,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
-    ) -> Any:
-        if output_schema != DEPENDENCY_TRACER_SCHEMA:
+    def responder(*args: Any, **kwargs: Any) -> Any:
+        if args[2] != DEPENDENCY_TRACER_SCHEMA:
             return _never_yield()
         return None
 
