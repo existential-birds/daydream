@@ -359,6 +359,61 @@ class TestExecutionResult:
 
 
 @dataclass(frozen=True)
+class TestExecutionIdentity:
+    """The full typed identity of one test execution, outcome included.
+
+    Every component the evidence-reuse predicate compares lives here, so the
+    predicate itself stays pure and can be tested without constructing a
+    ``TestAttemptEvidence``. ``reusable`` is the single authorization
+    predicate: only a host execution that actually passed may ever stand in
+    for a fresh validation. An agent-reported verdict is prose, and a timed-out
+    or output-truncated run did not produce authoritative evidence, so all are
+    ``False``. ``payload`` is the strict-JSON projection persisted with the
+    test verdict (tuple fields become lists).
+    """
+
+    # Not a pytest test class despite the name prefix.
+    __test__ = False
+
+    session_id: str
+    argv: tuple[str, ...]
+    cwd_relative: str
+    runner: str | None
+    interpreter: str | None
+    config_digest: str | None
+    absent_components: tuple[str, ...]
+    input_tree_key: str
+    output_tree_key: str
+    head_sha: str
+    branch: str
+    kind: Literal["host", "agent"]
+    outcome: Literal["passed", "failed", "timed-out", "truncated"]
+
+    @property
+    def reusable(self) -> bool:
+        """True only for a host execution that reached a passing exit."""
+        return self.kind == "host" and self.outcome == "passed"
+
+    def payload(self) -> dict[str, Any]:
+        """Return the strict-JSON projection of every identity component."""
+        return {
+            "session_id": self.session_id,
+            "argv": list(self.argv),
+            "cwd_relative": self.cwd_relative,
+            "runner": self.runner,
+            "interpreter": self.interpreter,
+            "config_digest": self.config_digest,
+            "absent_components": list(self.absent_components),
+            "input_tree_key": self.input_tree_key,
+            "output_tree_key": self.output_tree_key,
+            "head_sha": self.head_sha,
+            "branch": self.branch,
+            "kind": self.kind,
+            "outcome": self.outcome,
+        }
+
+
+@dataclass(frozen=True)
 class RequiredRun:
     """A run of the single configured command, eligible to satisfy a contract.
 

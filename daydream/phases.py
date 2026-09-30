@@ -150,6 +150,7 @@ from daydream.run_context import RunContext, bind_resolved_run_context, resolve_
 from daydream.severity import SEVERITY_RANK, SEVERITY_RUBRIC, normalize_severity, stronger_severity
 from daydream.test_execution import (
     MissingTestCommandError,
+    TestExecutionIdentity,
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
@@ -3300,9 +3301,66 @@ async def _run_host_test_command(
     )
 
 
+def _host_test_identity(
+    *,
+    session_id: str,
+    argv: tuple[str, ...],
+    work: WorkContext,
+    recipe: TestRecipe | None,
+    input_tree_key: str,
+    output_tree_key: str,
+    result: TestExecutionResult | None,
+    passed: bool,
+) -> TestExecutionIdentity:
+    """Compose a host run's full identity from the recipe facts and revision.
+
+    The package facts come from the once-resolved recipe (there is no
+    re-derivation); a recipe-less legacy call falls back to worktree-root
+    facts. The outcome is explicit: a timeout dominates, then a clipped output
+    buffer, then the exit-status-derived pass/fail.
+    """
+    package = recipe.package if recipe is not None else None
+    if result is not None and result.timed_out:
+        outcome: Literal["passed", "failed", "timed-out", "truncated"] = "timed-out"
+    elif result is not None and result.output_truncated:
+        outcome = "truncated"
+    elif passed:
+        outcome = "passed"
+    else:
+        outcome = "failed"
+    try:
+        head_sha = git_ops.head_sha(work.repo)
+        branch = git_ops.current_branch(work.repo) or ""
+    except GitError:
+        head_sha = ""
+        branch = ""
+    return TestExecutionIdentity(
+        session_id=session_id,
+        argv=argv,
+        cwd_relative=package.cwd_relative if package is not None else ".",
+        runner=package.runner if package is not None else None,
+        interpreter=package.interpreter if package is not None else None,
+        config_digest=package.config_digest if package is not None else None,
+        absent_components=package.absent_components if package is not None else (),
+        input_tree_key=input_tree_key,
+        output_tree_key=output_tree_key,
+        head_sha=head_sha,
+        branch=branch,
+        kind="host",
+        outcome=outcome,
+    )
+
+
 @dataclass(frozen=True)
 class TestAttemptEvidence:
-    """Identity-bound evidence from one real host or TEST-agent execution."""
+    """Identity-bound evidence from one real host or TEST-agent execution.
+
+    ``identity`` carries the full reusable execution identity for a host run;
+    an agent-reported verdict has no identity because it is prose, not an exit
+    status, and is therefore never reusable. The field is keyword-defaulted so
+    every pre-#1408 construction site (and a legacy persisted verdict) keeps
+    compiling.
+    """
 
     session_id: str
     kind: Literal["host", "agent"]
@@ -3310,6 +3368,7 @@ class TestAttemptEvidence:
     passed: bool
     input_tree_key: str
     output_tree_key: str
+    identity: TestExecutionIdentity | None = None
 
 
 @dataclass(frozen=True)
@@ -3358,21 +3417,23 @@ async def phase_test_once(
         cmd = _canonical_test_cmd(config)
     input_tree_key = capture_tree_key()
     next_continuation: ContinuationToken | None = None
+    identity: TestExecutionIdentity | None = None
+    host_result: TestExecutionResult | None = None
     if cmd is not None:
         try:
-            result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+            host_result = await _run_host_test_command(cmd, work, config, recipe=recipe)
         except (OSError, ValueError) as exc:
             output = f"The configured test command failed to run (spawn): {exc}"
             passed = False
         else:
-            if result.timed_out:
+            if host_result.timed_out:
                 print_warning(
                     console,
                     f"Test command hit the {_test_command_wall_budget(config):g}s "
                     "wall budget and was killed.",
                 )
-            output = result.merged_output
-            passed = result.passed
+            output = host_result.merged_output
+            passed = host_result.passed
         kind: Literal["host", "agent"] = "host"
         command: tuple[str, ...] | None = tuple(cmd)
     else:
@@ -3392,6 +3453,17 @@ async def phase_test_once(
         kind = "agent"
         command = None
     output_tree_key = capture_tree_key()
+    if kind == "host" and command is not None:
+        identity = _host_test_identity(
+            session_id=session_id,
+            argv=command,
+            work=work,
+            recipe=recipe,
+            input_tree_key=input_tree_key,
+            output_tree_key=output_tree_key,
+            result=host_result,
+            passed=passed,
+        )
     return (
         TestAttemptEvidence(
             session_id=session_id,
@@ -3400,6 +3472,7 @@ async def phase_test_once(
             passed=passed,
             input_tree_key=input_tree_key,
             output_tree_key=output_tree_key,
+            identity=identity,
         ),
         next_continuation,
         output,

@@ -1452,7 +1452,7 @@ def _render_fix_outcome_summary(
 
 
 def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
-    return {
+    payload: dict[str, Any] = {
         "session_id": attempt.session_id,
         "kind": attempt.kind,
         "command": list(attempt.command) if attempt.command is not None else "agent-fallback",
@@ -1460,6 +1460,9 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
         "input_tree_key": attempt.input_tree_key,
         "output_tree_key": attempt.output_tree_key,
     }
+    if attempt.identity is not None:
+        payload["identity"] = attempt.identity.payload()
+    return payload
 
 
 def _persist_test_verdict(

@@ -18,6 +18,7 @@ from daydream.test_execution import (
     RequiredContract,
     RequiredRun,
     TargetedCheckRun,
+    TestExecutionIdentity,
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
@@ -41,6 +42,25 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def _identity(**overrides: Any) -> TestExecutionIdentity:
+    fields: dict[str, Any] = {
+        "session_id": "s",
+        "argv": ("uv", "run", "pytest"),
+        "cwd_relative": ".",
+        "runner": "uv",
+        "interpreter": None,
+        "config_digest": "d" * 64,
+        "absent_components": (),
+        "input_tree_key": "t",
+        "output_tree_key": "t",
+        "head_sha": "a" * 40,
+        "branch": "feature",
+        "kind": "host",
+        "outcome": "passed",
+    }
+    return TestExecutionIdentity(**{**fields, **overrides})
 
 
 
@@ -434,3 +454,25 @@ def test_load_test_recipe_is_fail_open(tmp_path: Path, writer: Callable[[Path], 
     writer(deep)
 
     assert load_test_recipe(deep) is None
+
+
+def test_execution_identity_carries_every_reuse_component() -> None:
+    identity = TestExecutionIdentity(
+        session_id="s", argv=("uv", "run", "pytest"), cwd_relative="services/api",
+        runner="uv", interpreter="3.12", config_digest="d" * 64, absent_components=(),
+        input_tree_key="t", output_tree_key="t", head_sha="a" * 40, branch="feature",
+        kind="host", outcome="passed",
+    )
+
+    assert identity.reusable is True
+    assert identity.payload()["config_digest"] == "d" * 64
+
+
+@pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
+def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:
+    identity = _identity(outcome=outcome)
+    assert identity.reusable is False
+
+
+def test_an_agent_outcome_is_never_reusable() -> None:
+    assert _identity(kind="agent").reusable is False
