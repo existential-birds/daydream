@@ -354,52 +354,36 @@ def test_agent_lifecycle_and_lazy_harbor() -> None:
 def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
 
     pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
-
-
-    class Env:
-        def __init__(self) -> None:
-            self.captured = ""
-        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
-            self.captured = command
-            return ExecResult(return_code=0, stdout="ok", stderr="")
 
     pi_agent = DaydreamReviewAgent(
         logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "pi"}
     )
-    env_pi = Env()
-    asyncio.run(pi_agent.setup(env_pi))
-    assert "shutil.which('pi')" in env_pi.captured
-    assert pi_agent.version() in env_pi.captured
-    assert "claude_agent_sdk" not in env_pi.captured
+    pi_executed = Executed()
+    asyncio.run(pi_agent.setup(_capturing_env(pi_executed)()))
+    assert "shutil.which('pi')" in pi_executed.setup
+    assert pi_agent.version() in pi_executed.setup
+    assert "claude_agent_sdk" not in pi_executed.setup
 
     claude_agent = DaydreamReviewAgent(
         logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "claude"}
     )
-    env_claude = Env()
-    asyncio.run(claude_agent.setup(env_claude))
-    assert "import claude_agent_sdk" in env_claude.captured
-    assert "shutil.which('pi')" not in env_claude.captured
-    assert claude_agent.version() in env_claude.captured          # version assert kept for both
+    claude_executed = Executed()
+    asyncio.run(claude_agent.setup(_capturing_env(claude_executed)()))
+    assert "import claude_agent_sdk" in claude_executed.setup
+    assert "shutil.which('pi')" not in claude_executed.setup
+    assert claude_agent.version() in claude_executed.setup          # version assert kept for both
 
 
 def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
     """A failed setup probe surfaces as a typed failure, never a silent pass."""
 
     pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
-
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path)
-
-    class Env:
-        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
-            self.captured = command
-            return ExecResult(return_code=1, stdout="", stderr="boom")
-
+    executed = Executed(return_code=1)
 
     with pytest.raises(AgentError):
-        asyncio.run(agent.setup(Env()))
+        asyncio.run(agent.setup(_capturing_env(executed)()))
 
 
 
@@ -496,7 +480,6 @@ def test_build_child_env_bans_claude_code_prefix() -> None:
 def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: Path) -> None:
 
     pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
     from harbor.models.agent.context import AgentContext
 
 
@@ -518,19 +501,13 @@ def test_agent_run_refuses_unsupported_backend_and_invokes_entrypoint(tmp_path: 
         },
     )
 
-    class Env:
-        async def exec(self, command: Any, cwd: Any=None, env: Any=None, timeout_sec: Any=None, user: Any=None) -> Any:
-            self.captured = (command, cwd, env)
-            return ExecResult(return_code=0, stdout="", stderr="")
+    executed = Executed()
 
-    env = Env()
-
-    asyncio.run(agent_ok.run("instruction", env, AgentContext()))
-    cmd, cwd, child = env.captured
-    assert "daydream.benchmark.harbor.entrypoint" in cmd
-    assert cwd == "/workspace/repo"
-    assert "ANTHROPIC_API_KEY" not in child and "DAYDREAM_REVIEW_API_KEY" in child
-    assert "--findings-out" not in cmd                     # no live-PR emission path
+    asyncio.run(agent_ok.run("instruction", _capturing_env(executed)(), AgentContext()))
+    assert "daydream.benchmark.harbor.entrypoint" in executed.command
+    assert executed.cwd == "/workspace/repo"
+    assert "ANTHROPIC_API_KEY" not in executed.child and "DAYDREAM_REVIEW_API_KEY" in executed.child
+    assert "--findings-out" not in executed.command         # no live-PR emission path
 
 
 
@@ -707,11 +684,12 @@ def test_end_to_end_findings_and_clean_review(tmp_path: Path, monkeypatch: pytes
 class Executed:
     """Captured results of the real agent lifecycle calls on the fake env."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, return_code: int = 0) -> None:
         self.setup = ""
         self.command = ""
         self.cwd: str | None = None
         self.child: dict[str, str] = {}
+        self.return_code = return_code
 
 
 def _capturing_env(executed: Executed) -> type:
@@ -733,7 +711,7 @@ def _capturing_env(executed: Executed) -> type:
                 executed.child = env or {}
             else:
                 executed.setup = command
-            return ExecResult(return_code=0, stdout="", stderr="")
+            return ExecResult(return_code=executed.return_code, stdout="", stderr="")
 
     return Env
 
@@ -964,28 +942,14 @@ def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) ->
 
 
     pytest.importorskip("harbor")
-    from harbor.environments.base import ExecResult
-
 
     agent = DaydreamReviewAgent(
         logs_dir=tmp_path,
         extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"},
     )
-    probed: list[str] = []
-
-    class Env:
-        async def exec(
-            self,
-            command: Any,
-            cwd: Any=None,
-            env: Any=None,
-            timeout_sec: Any=None,
-            user: Any=None,
-        ) -> ExecResult:
-            probed.append(command)
-            return ExecResult(return_code=0, stdout="", stderr="")
+    executed = Executed()
 
     with pytest.raises(AgentError) as refused:
-        asyncio.run(agent.setup(Env()))
+        asyncio.run(agent.setup(_capturing_env(executed)()))
     assert "pi" in str(refused.value) and "claude" in str(refused.value)
-    assert probed == []  # rejected before any probe exec runs
+    assert executed.setup == "" and executed.command == ""  # rejected before any probe exec runs

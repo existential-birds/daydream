@@ -94,14 +94,19 @@ from daydream.deep.records import (
 from daydream.deep.render import render_report
 from daydream.deep.reuse_key import (
     PhaseIdentity,
-    absent_components,
     blob_map_digest,
     digest_text,
     grounding_digests,
     shard_key_payload,
     unit_key,
 )
-from daydream.deep.reuse_store import ReuseCache, ReuseHit, restore_entry_payload
+from daydream.deep.reuse_store import (
+    ReuseCache,
+    lookup_reuse_entry,
+    record_absent_components,
+    record_reuse_hit,
+    reuse_grounding_statuses,
+)
 from daydream.deep.verify_selection import (
     SELECTION_RULE_VERSION,
     SKIP_REASON_CODE,
@@ -4868,21 +4873,6 @@ async def phase_per_stack_reviews(
         _write_coverage_receipts(deep_dir_path, receipts)
 
     hunk_index = load_hunk_index(deep_dir_path.parent)
-    grounding_statuses: dict[str, str] = {}
-    if reuse_cache is not None:
-        recorded_units = reuse_cache.provenance().get("units", {})
-
-        def _grounding_status(unit: str) -> str:
-            entry = recorded_units.get(unit) if isinstance(recorded_units, dict) else None
-            outcome = entry.get("outcome") if isinstance(entry, dict) else None
-            return "reused" if outcome in {"hit", "reused"} else "regenerated"
-
-        grounding_statuses = {
-            "exploration": _grounding_status("exploration"),
-            "intent": _grounding_status("intent"),
-            "alternatives": _grounding_status("alternatives"),
-            "settled_decisions": "regenerated",
-        }
 
     prepared: dict[str, tuple[str | None, PreparedSanctionedInputs | None]] = {}
     for stack in stacks:
@@ -4944,51 +4934,25 @@ async def phase_per_stack_reviews(
                     components["hunk_slice"] = digest_text("")
                     components["assigned_blobs"] = blob_map_digest(work.repo, [])
                     components["frontier_blobs"] = blob_map_digest(work.repo, [])
+                unit_name = f"shard:{stack.stack_name}"
                 candidate_key = unit_key(stack_payload)
                 if candidate_key is None:
-                    reuse_cache.record(
-                        f"shard:{stack.stack_name}",
-                        outcome="miss",
-                        reason="absent components: " + ", ".join(absent_components(stack_payload)),
-                    )
+                    record_absent_components(reuse_cache, unit_name, stack_payload)
                 else:
                     stack_reuse_key = candidate_key
-                    hit = reuse_cache.lookup(candidate_key)
-                    if isinstance(hit, ReuseHit):
-                        restore_reason = restore_entry_payload(hit, deep_dir_path)
-                        if restore_reason is None:
-                            reuse_cache.record(
-                                f"shard:{stack.stack_name}",
-                                outcome="hit",
-                                reason="complete entry",
-                                key=candidate_key,
-                                origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-                                detail={
-                                    "grounding": reuse_cache.grounding_delta(
-                                        hit, grounding_digests(stack_payload)
-                                    ),
-                                    "grounding_status": grounding_statuses,
-                                },
-                            )
-                            results[stack.stack_name] = output_path
-                            return
-                        print_warning(
-                            console,
-                            f"Reuse restore failed for {stack.stack_name}: {restore_reason}",
-                        )
-                        reuse_cache.record(
-                            f"shard:{stack.stack_name}",
-                            outcome="miss",
-                            reason=f"restore failed: {restore_reason}",
-                            key=candidate_key,
-                        )
-                    else:
-                        reuse_cache.record(
-                            f"shard:{stack.stack_name}",
-                            outcome="miss",
-                            reason=hit.reason,
-                            key=candidate_key,
-                        )
+                    hit = lookup_reuse_entry(
+                        reuse_cache,
+                        unit_name,
+                        candidate_key,
+                        deep_dir_path,
+                        on_restore_failure=lambda reason: print_warning(
+                            console, f"Reuse restore failed for {stack.stack_name}: {reason}"
+                        ),
+                    )
+                    if hit is not None:
+                        record_reuse_hit(reuse_cache, unit_name, candidate_key, hit, stack_payload)
+                        results[stack.stack_name] = output_path
+                        return
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
             pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
             if stack.stack_name == STRUCTURE_STACK_NAME:
@@ -5178,7 +5142,7 @@ async def phase_per_stack_reviews(
                         "components": stack_payload["components"],
                         "identity": phase_identity,
                         "grounding": grounding_digests(stack_payload),
-                        "grounding_status": grounding_statuses,
+                        "grounding_status": reuse_grounding_statuses(reuse_cache, stack_payload),
                     }
                     if reuse_pending is not None:
                         # Defer the store until verdicts are final; the parse step
@@ -5198,7 +5162,7 @@ async def phase_per_stack_reviews(
                             components=stack_payload["components"],
                             identity=phase_identity,
                             grounding=grounding_digests(stack_payload),
-                            grounding_status=grounding_statuses,
+                            grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
                         )
 
         async with anyio.create_task_group() as tg:

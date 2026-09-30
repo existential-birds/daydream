@@ -69,14 +69,11 @@ from daydream.deep.reuse_key import (
 )
 from daydream.deep.reuse_store import (
     ReuseCache,
-    ReuseHit,
-    restore_entry_payload,
+    lookup_reuse_entry,
+    record_absent_components,
+    record_reuse_hit,
     reuse_cache_for,
-)
-from daydream.deep.review_steps import (
-    _record_absent_components,
-    _record_reuse_hit,
-    _reuse_grounding_statuses,
+    reuse_grounding_statuses,
 )
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import _resolve_opt_in
@@ -852,25 +849,6 @@ def _reload_adjudicated_records(deep_state: DeepState) -> bool:
     return True
 
 
-def _restore_reuse_payload(
-    reuse: ReuseCache, deep_state: DeepState, unit: str, key: str
-) -> ReuseHit | None:
-    """Look up and restore one reuse unit, recording a miss on any failure.
-
-    Returns the hit when both the lookup and the payload restore succeed, and
-    ``None`` otherwise (the miss is already recorded).
-    """
-    hit = reuse.lookup(key)
-    if not isinstance(hit, ReuseHit):
-        reuse.record(unit, outcome="miss", reason=hit.reason, key=key)
-        return None
-    restore_reason = restore_entry_payload(hit, deep_state.dd)
-    if restore_reason is not None:
-        reuse.record(unit, outcome="miss", reason=f"restore failed: {restore_reason}", key=key)
-        return None
-    return hit
-
-
 def _try_reuse_arbiter(
     reuse: ReuseCache,
     deep_state: DeepState,
@@ -885,13 +863,13 @@ def _try_reuse_arbiter(
     ``ctx.data`` from those files and records the hit with its grounding delta.
     Any failure is recorded as a miss and the caller runs the real adjudication.
     """
-    hit = _restore_reuse_payload(reuse, deep_state, "arbiter", key)
+    hit = lookup_reuse_entry(reuse, "arbiter", key, deep_state.dd)
     if hit is None:
         return False
     if not _reload_adjudicated_records(deep_state):
         reuse.record("arbiter", outcome="miss", reason="restored records unreadable", key=key)
         return False
-    _record_reuse_hit(reuse, "arbiter", key, hit, payload)
+    record_reuse_hit(reuse, "arbiter", key, hit, payload)
     write_routing_record(
         deep_state.dd,
         {
@@ -961,10 +939,10 @@ def _try_reuse_merge(
     copies the report to the repo and appends the coverage section, an
     idempotent no-op because a restored report already carries it (A7).
     """
-    hit = _restore_reuse_payload(reuse, deep_state, "merge", key)
+    hit = lookup_reuse_entry(reuse, "merge", key, deep_state.dd)
     if hit is None:
         return False
-    _record_reuse_hit(reuse, "merge", key, hit, payload)
+    record_reuse_hit(reuse, "merge", key, hit, payload)
     return True
 
 
@@ -1106,7 +1084,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 )
                 arbiter_key = unit_key(arbiter_payload)
                 if arbiter_key is None:
-                    _record_absent_components(reuse, "arbiter", arbiter_payload)
+                    record_absent_components(reuse, "arbiter", arbiter_payload)
                 elif _try_reuse_arbiter(reuse, deep_state, plan, arbiter_key, arbiter_payload):
                     return
             if plan.sharded:
@@ -1217,7 +1195,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         components=arbiter_payload["components"],
                         identity=arbiter_identity,
                         grounding=grounding_digests(arbiter_payload),
-                        grounding_status=_reuse_grounding_statuses(reuse, arbiter_payload),
+                        grounding_status=reuse_grounding_statuses(reuse, arbiter_payload),
                     )
         all_records, record_sources, structural_records, structural_sources = (
             _split_structural_records(adjudicated, adjudicated_sources, structural_ids)
@@ -1402,7 +1380,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
             )
             merge_reuse_key = unit_key(merge_payload)
             if merge_reuse_key is None:
-                _record_absent_components(reuse, "merge", merge_payload)
+                record_absent_components(reuse, "merge", merge_payload)
             elif _try_reuse_merge(reuse, deep_state, merge_reuse_key, merge_payload):
                 _clear_merge_failure(dd)
                 clear_review_budget_stop(dd, "Cross-stack merge")
@@ -1460,7 +1438,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                     components=merge_payload["components"],
                     identity=merge_identity,
                     grounding=grounding_digests(merge_payload),
-                    grounding_status=_reuse_grounding_statuses(reuse, merge_payload),
+                    grounding_status=reuse_grounding_statuses(reuse, merge_payload),
                 )
     return None
 
