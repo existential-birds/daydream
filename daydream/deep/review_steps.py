@@ -49,7 +49,6 @@ from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
 from daydream.deep.reuse_key import (
     PhaseIdentity,
-    absent_components,
     digest_or_absent,
     digest_text,
     exploration_digest,
@@ -61,9 +60,12 @@ from daydream.deep.reuse_key import (
     wonder_key_payload,
 )
 from daydream.deep.reuse_store import (
-    ReuseHit,
-    restore_entry_payload,
+    REUSE_HIT_OUTCOMES,
+    lookup_reuse_entry,
+    record_absent_components,
+    record_reuse_hit,
     reuse_cache_for,
+    reuse_grounding_statuses,
     review_cache_enabled,
 )
 from daydream.deep.routing_record import write_routing_record
@@ -108,9 +110,6 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-#: Outcomes that mean the store served the unit's result (never a recompute).
-_REUSE_HIT_OUTCOMES = frozenset({"hit", "reused"})
-
 try:
     from daydream.exploration import ExplorationContext, safe_explore
     from daydream.exploration_runner import (
@@ -122,46 +121,6 @@ try:
     EXPLORATION_AVAILABLE = True
 except ImportError:  # pragma: no cover -- optional exploration dependency
     EXPLORATION_AVAILABLE = False
-
-
-def _reuse_grounding_status(reuse: "ReuseCache", unit: str) -> str:
-    """Whether a grounding unit was restored this iteration or regenerated.
-
-    Read from the run's own provenance, which records each grounding unit
-    before the consumers that need its status (exploration before intent,
-    intent before wonder). An absent record is ``regenerated``: the run did the
-    work, it just did not record it.
-    """
-    units = reuse.provenance().get("units")
-    entry = units.get(unit) if isinstance(units, dict) else None
-    outcome = entry.get("outcome") if isinstance(entry, dict) else None
-    return "reused" if outcome in _REUSE_HIT_OUTCOMES else "regenerated"
-
-
-def _reuse_grounding_statuses(reuse: "ReuseCache", payload: Mapping[str, Any]) -> dict[str, str]:
-    """Per-unit reuse status for every grounding row a payload records (MH16)."""
-    return {unit: _reuse_grounding_status(reuse, unit) for unit in grounding_digests(payload)}
-
-
-def _record_reuse_hit(
-    reuse: "ReuseCache",
-    unit: str,
-    key: str,
-    hit: ReuseHit,
-    payload: Mapping[str, Any],
-) -> None:
-    """Record a complete reuse hit with its grounding delta and per-unit statuses."""
-    reuse.record(
-        unit,
-        outcome="hit",
-        reason="complete entry",
-        key=key,
-        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
-        detail={
-            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
-            "grounding_status": _reuse_grounding_statuses(reuse, payload),
-        },
-    )
 
 
 def _restore_reuse_entry(
@@ -176,29 +135,22 @@ def _restore_reuse_entry(
     """Look up and restore one reuse entry, recording the hit or miss.
 
     Returns ``True`` only when the entry restored completely; the caller then
-    performs its own on-hit action. On any miss the reason is recorded and the
-    caller recomputes the unit.
+    performs its own on-hit action. Review surfaces a failed restore with its
+    unit label; on any miss the reason is recorded and the caller recomputes.
     """
-    hit = reuse.lookup(key)
-    if not isinstance(hit, ReuseHit):
-        reuse.record(unit, outcome="miss", reason=hit.reason, key=key)
-        return False
-    restore_reason = restore_entry_payload(hit, dd)
-    if restore_reason is None:
-        _record_reuse_hit(reuse, unit, key, hit, payload)
-        return True
-    print_warning(console, f"Reuse restore failed for {label}: {restore_reason}")
-    reuse.record(unit, outcome="miss", reason=f"restore failed: {restore_reason}", key=key)
-    return False
-
-
-def _record_absent_components(reuse: "ReuseCache", unit: str, payload: Mapping[str, Any]) -> None:
-    """Record the named miss for a payload with a None required component."""
-    reuse.record(
+    hit = lookup_reuse_entry(
+        reuse,
         unit,
-        outcome="miss",
-        reason="absent components: " + ", ".join(absent_components(payload)),
+        key,
+        dd,
+        on_restore_failure=lambda reason: print_warning(
+            console, f"Reuse restore failed for {label}: {reason}"
+        ),
     )
+    if hit is None:
+        return False
+    record_reuse_hit(reuse, unit, key, hit, payload)
+    return True
 
 
 def _grounding_moved(entry: object) -> bool:
@@ -229,7 +181,7 @@ def _reuse_summary_line(record: dict[str, Any]) -> str:
     reused = sorted(
         name
         for name, entry in units.items()
-        if isinstance(entry, dict) and entry.get("outcome") in _REUSE_HIT_OUTCOMES
+        if isinstance(entry, dict) and entry.get("outcome") in REUSE_HIT_OUTCOMES
     )
     misses = sum(
         1
@@ -511,7 +463,7 @@ async def _step_intent(ctx: FlowContext) -> None:
         )
         intent_reuse_key = unit_key(intent_payload)
         if intent_reuse_key is None:
-            _record_absent_components(reuse, "intent", intent_payload)
+            record_absent_components(reuse, "intent", intent_payload)
         else:
             if _restore_reuse_entry(
                 reuse, "intent", intent_reuse_key, intent_payload, deep_state.dd, label="intent"
@@ -595,7 +547,7 @@ async def _step_intent(ctx: FlowContext) -> None:
             components=intent_payload["components"],
             identity=intent_identity,
             grounding=grounding_digests(intent_payload),
-            grounding_status=_reuse_grounding_statuses(reuse, intent_payload),
+            grounding_status=reuse_grounding_statuses(reuse, intent_payload),
         )
 
 
@@ -655,7 +607,7 @@ async def _wonder(ctx: FlowContext) -> None:
             )
             wonder_reuse_key = unit_key(wonder_payload)
             if wonder_reuse_key is None:
-                _record_absent_components(reuse, "alternatives", wonder_payload)
+                record_absent_components(reuse, "alternatives", wonder_payload)
             else:
                 wonder_reused = _restore_reuse_entry(
                     reuse,
@@ -708,7 +660,7 @@ async def _wonder(ctx: FlowContext) -> None:
             components=wonder_payload["components"],
             identity=wonder_identity,
             grounding=grounding_digests(wonder_payload),
-            grounding_status=_reuse_grounding_statuses(reuse, wonder_payload),
+            grounding_status=reuse_grounding_statuses(reuse, wonder_payload),
         )
     write_routing_record(
         deep_state.dd,
@@ -1338,7 +1290,7 @@ async def _run_uncovered_sweep(
             )
             sweep_reuse_key = unit_key(sweep_payload)
             if sweep_reuse_key is None:
-                _record_absent_components(reuse, "sweep", sweep_payload)
+                record_absent_components(reuse, "sweep", sweep_payload)
             else:
                 if _restore_reuse_entry(
                     reuse,
@@ -1599,7 +1551,7 @@ async def _run_uncovered_sweep(
                 components=sweep_payload["components"],
                 identity=sweep_identity,
                 grounding=grounding_digests(sweep_payload),
-                grounding_status=_reuse_grounding_statuses(reuse, sweep_payload),
+                grounding_status=reuse_grounding_statuses(reuse, sweep_payload),
             )
     if sweep_failures and phase is not None:
         phase.finish(*partial_or_failed_terminal(completed_reviews))

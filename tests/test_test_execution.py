@@ -64,21 +64,27 @@ def _identity(**overrides: Any) -> TestExecutionIdentity:
 
 
 
-def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Path) -> None:
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [
-                sys.executable,
-                "-c",
-                "import os,sys; print(os.getcwd()); print('hello-stdout');"
-                " print('sec+REAL_SECRET+', file=sys.stderr)",
-            ],
-            cwd=tmp_path,
-            wall_budget_s=10.0,
-            env={"SOME_ENV": "REAL_SECRET"},
-        )
+def _run(
+    argv: list[str],
+    tmp_path: Path,
+    *,
+    wall_budget_s: float = 10.0,
+    env: dict[str, str] | None = None,
+) -> TestExecutionResult:
+    return asyncio.run(run_test_command(argv, cwd=tmp_path, wall_budget_s=wall_budget_s, env=env))
 
-    res = asyncio.run(go())
+
+def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Path) -> None:
+    res = _run(
+        [
+            sys.executable,
+            "-c",
+            "import os,sys; print(os.getcwd()); print('hello-stdout');"
+            " print('sec+REAL_SECRET+', file=sys.stderr)",
+        ],
+        tmp_path,
+        env={"SOME_ENV": "REAL_SECRET"},
+    )
     assert isinstance(res, TestExecutionResult)
     assert res.exit_status == 0
     assert res.timed_out is False
@@ -90,14 +96,10 @@ def test_runner_returns_exit_status_cwd_and_merged_redacted_output(tmp_path: Pat
 
 
 def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [sys.executable, "-c", "import sys; print('boom'); sys.exit(3)"],
-            cwd=tmp_path,
-            wall_budget_s=10.0,
-        )
-
-    res = asyncio.run(go())
+    res = _run(
+        [sys.executable, "-c", "import sys; print('boom'); sys.exit(3)"],
+        tmp_path,
+    )
     assert res.exit_status == 3
     assert res.timed_out is False
     assert res.passed is False
@@ -160,24 +162,21 @@ def test_canonical_command_missing_fails_safely_with_diagnostic() -> None:
 def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path) -> None:
     marker = tmp_path / "grandkid.pid"
 
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [
-                sys.executable,
-                "-c",
-                "import subprocess,os,sys,time;"
-                f"subprocess.Popen([sys.executable,'-c',"
-                f"'import os,time;open(r\"{marker}\",\"w\").write(str(os.getpid()));time.sleep(30)']);"
-                "time.sleep(30)",
-            ],
-            cwd=tmp_path,
-            # Headroom for two cold interpreter startups + Popen + marker
-            # write: a tighter budget made the marker write lose the race
-            # to the group kill under CI load.
-            wall_budget_s=5.0,
-        )
-
-    res = asyncio.run(go())
+    res = _run(
+        [
+            sys.executable,
+            "-c",
+            "import subprocess,os,sys,time;"
+            f"subprocess.Popen([sys.executable,'-c',"
+            f"'import os,time;open(r\"{marker}\",\"w\").write(str(os.getpid()));time.sleep(30)']);"
+            "time.sleep(30)",
+        ],
+        tmp_path,
+        # Headroom for two cold interpreter startups + Popen + marker
+        # write: a tighter budget made the marker write lose the race
+        # to the group kill under CI load.
+        wall_budget_s=5.0,
+    )
     assert res.timed_out is True
     assert res.passed is False
     # The grandchild writes its pid before sleeping; poll until it lands
@@ -239,15 +238,11 @@ def test_runner_fails_closed_when_env_value_survives_scrub(tmp_path: Path) -> No
     "[REDACTED_ENV_VAR]") can never be scrubbed clean by replace(); the
     fail-closed gate -- keyed off the pre-replacement buffer -- degrades the
     whole field rather than emit a buffer that still shows the secret."""
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [sys.executable, "-c", "print('REDACTED', flush=True)"],
-            cwd=tmp_path,
-            wall_budget_s=10.0,
-            env={"STUCK": "REDACTED"},
-        )
-
-    res = asyncio.run(go())
+    res = _run(
+        [sys.executable, "-c", "print('REDACTED', flush=True)"],
+        tmp_path,
+        env={"STUCK": "REDACTED"},
+    )
     assert res.passed is True
     assert res.merged_output == "[REDACTION_FAILED]"
 
@@ -261,18 +256,14 @@ def test_runner_scrubs_inherited_env_when_env_omitted(
     secret = "ENV-SECRET-8f3a"
     monkeypatch.setenv("DAYDREAM_TEST_SECRET", secret)
 
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [
-                sys.executable,
-                "-c",
-                "import os; print('value=' + os.environ['DAYDREAM_TEST_SECRET'], flush=True)",
-            ],
-            cwd=tmp_path,
-            wall_budget_s=10.0,
-        )
-
-    res = asyncio.run(go())
+    res = _run(
+        [
+            sys.executable,
+            "-c",
+            "import os; print('value=' + os.environ['DAYDREAM_TEST_SECRET'], flush=True)",
+        ],
+        tmp_path,
+    )
     assert res.passed is True
     assert "value=" in res.merged_output
     assert secret not in res.merged_output
@@ -411,14 +402,10 @@ def test_unresolved_required_contract_is_never_satisfied() -> None:
 
 
 def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) -> None:
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [sys.executable, "-c", "import sys; sys.stdout.write('x' * 600000)"],
-            cwd=tmp_path,
-            wall_budget_s=10.0,
-        )
-
-    res = asyncio.run(go())
+    res = _run(
+        [sys.executable, "-c", "import sys; sys.stdout.write('x' * 600000)"],
+        tmp_path,
+    )
 
     assert res.exit_status == 0
     assert res.completed is True            # the process ran to its own exit
@@ -429,21 +416,15 @@ def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) ->
 
 
 def test_timed_out_result_is_incomplete(tmp_path: Path) -> None:
-    async def go() -> TestExecutionResult:
-        return await run_test_command(
-            [sys.executable, "-c", "import time; time.sleep(30)"], cwd=tmp_path, wall_budget_s=0.2
-        )
-
-    res = asyncio.run(go())
+    res = _run(
+        [sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, wall_budget_s=0.2
+    )
 
     assert (res.timed_out, res.completed, res.incomplete, res.passed) == (True, False, True, False)
 
 
 def test_result_serialises_completion_timeout_and_truncation_explicitly(tmp_path: Path) -> None:
-    async def go() -> TestExecutionResult:
-        return await run_test_command([sys.executable, "-c", "pass"], cwd=tmp_path, wall_budget_s=10.0)
-
-    payload = asdict(asyncio.run(go()))
+    payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
     assert set(payload) >= {"exit_status", "timed_out", "completed", "output_truncated", "incomplete"}
 
 

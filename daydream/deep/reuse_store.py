@@ -22,7 +22,7 @@ import logging
 import os
 import shutil
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -34,7 +34,12 @@ from daydream.config import (
     DEFAULT_REVIEW_CACHE_MAX_BYTES,
     DEFAULT_REVIEW_CACHE_MAX_ENTRIES,
 )
-from daydream.deep.reuse_key import REUSE_KEY_FORMAT, PhaseIdentity
+from daydream.deep.reuse_key import (
+    REUSE_KEY_FORMAT,
+    PhaseIdentity,
+    absent_components,
+    grounding_digests,
+)
 from daydream.deep.settings import _resolve_config_value, _resolve_non_negative_int
 from daydream.json_utils import atomic_write_bytes, read_json_object
 
@@ -101,6 +106,92 @@ class ReuseMiss:
 
     key: str
     reason: str
+
+
+# ---------------------------------------------------------------------------
+# Per-unit reuse orchestration (shared by review, merge and the shard fan-out)
+# ---------------------------------------------------------------------------
+
+#: Provenance outcomes that mean the store served the unit, never a recompute.
+REUSE_HIT_OUTCOMES = frozenset({"hit", "reused"})
+
+
+def _reuse_outcome(entry: object) -> object:
+    """The provenance ``outcome`` of one recorded unit, or ``None``."""
+    return entry.get("outcome") if isinstance(entry, dict) else None
+
+
+def record_absent_components(reuse: ReuseCache, unit: str, payload: Mapping[str, Any]) -> None:
+    """Record the named miss for a payload with a ``None`` required component."""
+    reuse.record(
+        unit,
+        outcome="miss",
+        reason="absent components: " + ", ".join(absent_components(payload)),
+    )
+
+
+def reuse_grounding_statuses(reuse: ReuseCache, payload: Mapping[str, Any]) -> dict[str, str]:
+    """Per-unit reuse status for every grounding row a payload records (MH16).
+
+    Reads the run's provenance once and answers every recorded grounding unit:
+    an outcome that served the unit is ``reused``; anything else (including a
+    unit the run never recorded) is ``regenerated``.
+    """
+    units = reuse.provenance().get("units")
+    units = units if isinstance(units, dict) else {}
+    return {
+        unit: "reused" if _reuse_outcome(units.get(unit)) in REUSE_HIT_OUTCOMES else "regenerated"
+        for unit in grounding_digests(payload)
+    }
+
+
+def record_reuse_hit(
+    reuse: ReuseCache,
+    unit: str,
+    key: str,
+    hit: ReuseHit,
+    payload: Mapping[str, Any],
+) -> None:
+    """Record a complete reuse hit with its grounding delta and per-unit statuses."""
+    reuse.record(
+        unit,
+        outcome="hit",
+        reason="complete entry",
+        key=key,
+        origin_run_id=hit.manifest.get("origin", {}).get("run_id"),
+        detail={
+            "grounding": reuse.grounding_delta(hit, grounding_digests(payload)),
+            "grounding_status": reuse_grounding_statuses(reuse, payload),
+        },
+    )
+
+
+def lookup_reuse_entry(
+    reuse: ReuseCache,
+    unit: str,
+    key: str,
+    dest_dir: Path,
+    *,
+    on_restore_failure: Callable[[str], None] | None = None,
+) -> ReuseHit | None:
+    """Look up and restore one reuse entry, recording a miss on any failure.
+
+    Returns the hit when both the lookup and the payload restore succeed, and
+    ``None`` otherwise (the miss is already recorded). ``on_restore_failure``
+    receives the restore reason so the caller can surface it; merge leaves it
+    unset because it is silent on a failed restore.
+    """
+    hit = reuse.lookup(key)
+    if not isinstance(hit, ReuseHit):
+        reuse.record(unit, outcome="miss", reason=hit.reason, key=key)
+        return None
+    restore_reason = restore_entry_payload(hit, dest_dir)
+    if restore_reason is None:
+        return hit
+    if on_restore_failure is not None:
+        on_restore_failure(restore_reason)
+    reuse.record(unit, outcome="miss", reason=f"restore failed: {restore_reason}", key=key)
+    return None
 
 
 # ---------------------------------------------------------------------------
