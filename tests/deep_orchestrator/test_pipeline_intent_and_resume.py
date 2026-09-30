@@ -19,6 +19,7 @@ from daydream.prompts.authorial_intent import (
 from daydream.run_context import current_run_context
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _capture_warnings,
     _forbidden_input,
     _make_record_issue,
     _silence_gate_noise,
@@ -219,11 +220,7 @@ async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
         raise GitError("gh pr view failed: authentication required")
 
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", fail_view)
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.review_steps.print_warning",
-        lambda _console, message: warnings.append(message),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.review_steps.print_warning")
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.parse_severity = "high"
 

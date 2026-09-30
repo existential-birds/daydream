@@ -66,7 +66,7 @@ def test_every_mandatory_select_branch_is_reachable(
     decisions = select_items(
         [_item("item:1", **item_over)],
         provenance={} if prov is None else {"item:1": prov},
-        hunk_index={}, diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
+        diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert decisions[0].selected is True
     assert decisions[0].reason_code == expected_reason
@@ -79,7 +79,7 @@ def test_only_a_strong_adjudicated_routine_item_skips() -> None:
     # and selects instead (see the invariant test below).
     decisions = select_items(
         [_item("item:1")], provenance={"item:1": _provenance("item:1")},
-        hunk_index={}, diff_text=_DIFF, config=SelectionConfig(verify_all=False, extra_categories=()),
+        diff_text=_DIFF, config=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert decisions[0].selected is False
     assert decisions[0].reason_code == "strongly_evidenced_adjudicated_routine"
@@ -92,7 +92,7 @@ def test_absent_diff_selects_even_a_strong_routine_item() -> None:
     # skips, whatever else the item's own evidence says (verify_selection:29-31).
     decisions = select_items(
         [_item("item:1")], provenance={"item:1": _provenance("item:1")},
-        hunk_index={}, diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
+        diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert decisions[0].selected is True
     assert decisions[0].reason_code == "unreadable_diff"
@@ -103,7 +103,6 @@ def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> No
     decisions = select_items(
         items,
         provenance=None,
-        hunk_index={},
         diff_text="",
         config=SelectionConfig(verify_all=True, extra_categories=()),
     )

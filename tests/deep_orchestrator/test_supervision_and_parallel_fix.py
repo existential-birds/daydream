@@ -14,6 +14,7 @@ from rich.console import Console
 from daydream.config_file import load_file_config
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _capture_warnings,
     _only_archived_run,
     _scan_phase_events,
 )
@@ -611,11 +612,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
         _merge_item(2, "bad.py", "high"),
         _merge_item(3, "good2.py", "low"),
     ]
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.fix_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
     commit_calls: list[int] = []
 
     async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:

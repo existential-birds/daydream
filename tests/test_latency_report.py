@@ -93,7 +93,7 @@ def test_selection_corpus_cases_carry_every_artifact_the_predicate_reads() -> No
     cases = manifest["selection_cases"]
     assert cases, "the MH16 corpus must declare at least one selection case"
     required = {"merged-items.json", "recommendation-verdicts.json", "adjudication-provenance.json",
-                "hunk-index.json", "diff.patch", "fix-outcomes.json", "evaluation.json"}
+                "diff.patch", "fix-outcomes.json", "evaluation.json"}
     for case in cases:
         run_dir = CORPUS / "runs" / case["name"] / case["profile"]
         present = {p.name for p in run_dir.iterdir()}

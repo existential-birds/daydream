@@ -49,7 +49,6 @@ from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.latency import LATENCY_PROFILES
 from daydream.deep.risk_categories import CATEGORY_TRIGGERS
 from daydream.deep.verify_selection import SKIP_REASON_CODE, SelectionConfig, select_items
-from daydream.hunk_index import load_hunk_index
 from daydream.json_utils import read_json_object
 from daydream.severity import is_high_severity
 from daydream.trajectory import RUNS_DIRNAME
@@ -510,7 +509,6 @@ def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str
             continue
         items = _load_items(merged_path)
         provenance = load_provenance(run_dir)
-        hunk_index = load_hunk_index(run_dir)
         diff_text = _read_text(diff_path)
         verdicts = _archived_verdicts(run_dir)
         golden = _golden_pairs(case)
@@ -521,7 +519,6 @@ def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str
             decisions = select_items(
                 items,
                 provenance=provenance,
-                hunk_index=hunk_index,
                 diff_text=diff_text,
                 config=config,
             )

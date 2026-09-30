@@ -12,16 +12,17 @@ from daydream import runner
 from daydream.backends import AUDIT_ROOT_ISOLATION
 from daydream.backends._subprocess import cancel_processes, terminate_process
 from daydream.backends.codex import CodexBackend
-from tests.harness.processes import GROUP_HOLDER_CLI, wait_for_process_group_gone
+from tests.harness.processes import (
+    GROUP_HOLDER_CLI,
+    fd_count,
+    wait_for_fd_baseline,
+    wait_for_process_group_gone,
+)
 
 if TYPE_CHECKING:
     from daydream.runner import RunConfig
 
 MakeConfig = Callable[..., "RunConfig"]
-
-
-def _fd_count() -> int:
-    return len(os.listdir("/dev/fd"))
 
 
 async def _spawn_holder() -> asyncio.subprocess.Process:
@@ -54,10 +55,10 @@ async def test_terminate_process_kills_whole_group() -> None:
 
 async def test_terminate_process_releases_fds() -> None:
     """No fd growth after an aborted run, even with a grandchild holding the pipe."""
-    base = _fd_count()
+    base = fd_count()
     proc = await _spawn_holder()
     await terminate_process(proc)
-    await _wait_for_fd_count(base)
+    await wait_for_fd_baseline(base)
 
 
 async def test_terminate_process_is_idempotent() -> None:
@@ -69,7 +70,7 @@ async def test_terminate_process_is_idempotent() -> None:
 
 async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
     """cancel_processes reaps every tracked process group, not just direct children."""
-    base = _fd_count()
+    base = fd_count()
     procs = [await _spawn_holder() for _ in range(2)]
     pgids = [os.getpgid(p.pid) for p in procs]
 
@@ -77,7 +78,7 @@ async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
 
     for pgid in pgids:
         await wait_for_process_group_gone(pgid)
-    await _wait_for_fd_count(base)
+    await wait_for_fd_baseline(base)
 
 
 async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
@@ -96,27 +97,6 @@ async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
     while not path.exists():
         if loop.time() > deadline:
             raise TimeoutError(f"timed out waiting for the backend CLI marker at {path}")
-        await asyncio.sleep(0.01)
-
-
-async def _wait_for_fd_count(base: int, *, timeout_s: float = 30.0) -> None:
-    """Await the fd count's return to *base* (a readiness wait, not a fixed sleep).
-
-    The transport close releases the pipe fds, but the release lands in the
-    event loop's connection_lost processing — asserting equality in the same
-    tick as teardown races the loop on a loaded host (CI runners, parallel
-    suites), the same failure mode ``wait_for_process_group_gone`` documents. Polling
-    until the count returns makes the assertion deterministic; the loop exits
-    the moment the baseline is reached and the timeout is a failure bound, not
-    a synchronization delay.
-    """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout_s
-    while _fd_count() != base:
-        if loop.time() > deadline:
-            raise TimeoutError(
-                f"fd count {_fd_count()} did not return to baseline {base} after {timeout_s}s"
-            )
         await asyncio.sleep(0.01)
 
 
@@ -194,7 +174,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
 
     monkeypatch.setattr("daydream.runner.create_backend", _factory)
 
-    base_fds = _fd_count()
+    base_fds = fd_count()
     run_task = asyncio.create_task(runner.run(make_config(improve_monorepo_target, flow_name="improve")))
     pgid: int | None = None
     try:
@@ -215,4 +195,4 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
 
     assert pgid is not None
     await wait_for_process_group_gone(pgid)
-    await _wait_for_fd_count(base_fds)
+    await wait_for_fd_baseline(base_fds)

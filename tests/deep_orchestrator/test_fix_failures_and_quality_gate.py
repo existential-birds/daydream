@@ -12,6 +12,7 @@ from daydream.config_file import DaydreamFileConfig
 from daydream.eval import analyzer as analyzer_mod
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _capture_warnings,
     _merged_items,
     _only_archived_run,
 )
@@ -117,11 +118,7 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
 
     stub.merge_items = [_merge_item(1, "src/handler.py", "high")]
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.fix_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
 
     exit_code = await run(
         make_config(
@@ -480,11 +477,7 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
         return result
 
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.fix_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
 
@@ -518,11 +511,7 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     mute_side_effects()
     _install_stub_backend(monkeypatch, target)
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.fix_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
     exit_code = await run(make_config(target, start_at="fix", assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
 
@@ -551,11 +540,7 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_edit_line = _FIX_EDIT_VERBOSE
 
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.fix_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
 
     first = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False))
     assert first == 0
@@ -664,11 +649,7 @@ async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.fix_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
 
     exit_code = await run(
         make_config(

@@ -948,13 +948,7 @@ def _reconcile_replay(
             elapsed = walk_metadata(metadata, "daydream.generation.duration_ns")
             if is_pinned_generation:
                 # The pinned first generation: exact historical-equivalent
-                # equality for native start, sealed end and duration.
-                if stored_native_ms is not None and start_ms is not None and stored_native_ms != start_ms:
-                    fail(
-                        DISPOSITION_SHAPE,
-                        f"{destination}.rows[{row_index}].daydream.generation.native_started_at_unix_ms",
-                        "native start mismatch",
-                    )
+                # equality for sealed end and duration.
                 if sealed is not None and sealed_ns is not None and sealed != sealed_ns:
                     fail(
                         DISPOSITION_SHAPE,

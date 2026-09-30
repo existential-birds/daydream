@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import subprocess
 import threading
 import time
@@ -17,7 +16,12 @@ from daydream import git_ops
 from daydream.backends._subprocess import terminate_process
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import refreshing_session
-from tests.harness.processes import wait_for_process_group_exit
+from tests.harness.processes import (
+    fd_count,
+    wait_for_fd_baseline,
+    wait_for_process_group_exit,
+    wait_for_process_ids,
+)
 
 
 def _budget(
@@ -788,42 +792,6 @@ async def test_pr_snapshot_rejects_invalid_json_or_shape(
         )
 
 
-def _fd_count() -> int | None:
-    fd_dir = Path("/dev/fd")
-    if not fd_dir.is_dir():
-        return None
-    return len(list(fd_dir.iterdir()))
-
-
-async def _wait_for_json(path: Path, *, timeout: float = 5.0) -> dict[str, int]:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            value = json.loads(path.read_text())
-            if (
-                isinstance(value, dict)
-                and isinstance(value.get("direct"), int)
-                and isinstance(value.get("grandchild"), int)
-            ):
-                return {
-                    "direct": value["direct"],
-                    "grandchild": value["grandchild"],
-                }
-        except (FileNotFoundError, json.JSONDecodeError):
-            pass
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"blocking fake gh did not publish {path}")
-
-
-async def _wait_for_fd_baseline(baseline: int, *, timeout: float = 2.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        if _fd_count() == baseline:
-            return
-        await asyncio.sleep(0.01)
-    assert _fd_count() == baseline
-
-
 async def _exercise_blocking_request(
     fake_gh: FakeGh,
     git_repo: Path,
@@ -847,7 +815,7 @@ async def _exercise_blocking_request(
         )
     )
     try:
-        pids = await _wait_for_json(pid_file)
+        pids = await wait_for_process_ids(pid_file)
     except BaseException:
         request.cancel()
         await asyncio.gather(request, return_exceptions=True)
@@ -873,15 +841,14 @@ async def test_blocking_process_group_is_killed_reaped_and_fds_closed(
     tmp_path: Path,
     cancel: bool,
 ) -> None:
-    baseline = _fd_count()
+    baseline = fd_count()
 
     pids = await _exercise_blocking_request(
         fake_gh, git_repo, tmp_path, cancel=cancel
     )
 
     assert pids["direct"] != pids["grandchild"]
-    if baseline is not None:
-        await _wait_for_fd_baseline(baseline)
+    await wait_for_fd_baseline(baseline, timeout_s=2.0)
     assert len(fake_gh.process_calls()) == 1
 
 
@@ -907,7 +874,7 @@ async def test_process_cleanup_is_idempotent(
         start_new_session=True,
     )
     try:
-        pids = await _wait_for_json(pid_file)
+        pids = await wait_for_process_ids(pid_file)
         await terminate_process(proc)
         await terminate_process(proc)
     finally:

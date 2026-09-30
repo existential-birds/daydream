@@ -46,6 +46,26 @@ from tests.test_deep_orchestrator import (
 )
 
 
+def _host_test_evidence(
+    state: Any,
+    *,
+    passed: bool,
+    input_tree_key: str,
+    output_tree_key: str,
+    command: tuple[str, ...] = ("pytest",),
+) -> TestAttemptEvidence:
+    """Build a host test-attempt record for the finalization fixtures."""
+    return TestAttemptEvidence(
+        session_id=state.session_id,
+        kind="host",
+        command=command,
+        passed=passed,
+        input_tree_key=input_tree_key,
+        output_tree_key=output_tree_key,
+    )
+
+
+
 def _identity(**overrides: Any) -> TestExecutionIdentity:
     fields: dict[str, Any] = {
         "session_id": "s",
@@ -63,7 +83,6 @@ def _identity(**overrides: Any) -> TestExecutionIdentity:
         "outcome": "passed",
     }
     return TestExecutionIdentity(**{**fields, **overrides})
-
 
 def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
 
@@ -376,13 +395,8 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
         if prior_verdict else {}
     )
     state.verifier_key = EvidenceKey("prior-tree", state.footprint.policy_revision)
-    evidence = TestAttemptEvidence(
-        session_id=state.session_id,
-        kind="host",
-        command=("pytest",),
-        passed=True,
-        input_tree_key=snapshot.tree_key,
-        output_tree_key=snapshot.tree_key,
+    evidence = _host_test_evidence(
+        state, passed=True, input_tree_key=snapshot.tree_key, output_tree_key=snapshot.tree_key
     )
     calls = {"verify": 0, "test": 0}
 
@@ -450,13 +464,8 @@ async def test_terminal_red_after_heal_restores_unrelated_and_protected_state(
         if terminal_mode == "exception":
             raise RuntimeError("healer transport failed after writing")
         key = "red-tree"
-        attempt = TestAttemptEvidence(
-            session_id=state.session_id,
-            kind="host",
-            command=("false",),
-            passed=False,
-            input_tree_key=key,
-            output_tree_key=key,
+        attempt = _host_test_evidence(
+            state, passed=False, input_tree_key=key, output_tree_key=key, command=("false",)
         )
         return TestAndHealResult(False, 1, False, False, (attempt,))
 
@@ -481,13 +490,8 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
     state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
-    stale = TestAttemptEvidence(
-        session_id=state.session_id,
-        kind="host",
-        command=("pytest",),
-        passed=False,
-        input_tree_key="before-heal",
-        output_tree_key="after-heal",
+    stale = _host_test_evidence(
+        state, passed=False, input_tree_key="before-heal", output_tree_key="after-heal"
     )
     guard_calls: list[int] = []
     test_calls = 0
@@ -501,13 +505,8 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
         test_calls += 1
         output_key = "unstable-output" if failure_mode == "unstable_test" else snapshot.tree_key
         return (
-            TestAttemptEvidence(
-                session_id=state.session_id,
-                kind="host",
-                command=("pytest",),
-                passed=True,
-                input_tree_key=snapshot.tree_key,
-                output_tree_key=output_key,
+            _host_test_evidence(
+                state, passed=True, input_tree_key=snapshot.tree_key, output_tree_key=output_key
             ),
             None,
             "test output",
@@ -540,13 +539,8 @@ async def test_stabilization_audit_write_failure_stops_before_retest(
 ) -> None:
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
-    evidence = TestAttemptEvidence(
-        session_id=state.session_id,
-        kind="host",
-        command=("pytest",),
-        passed=True,
-        input_tree_key=snapshot.tree_key,
-        output_tree_key=snapshot.tree_key,
+    evidence = _host_test_evidence(
+        state, passed=True, input_tree_key=snapshot.tree_key, output_tree_key=snapshot.tree_key
     )
     monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
     monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
@@ -596,24 +590,14 @@ async def test_changed_tree_red_retest_requires_new_override(
 
     ctx, state, snapshot = _finalization_fixture(tmp_path)
     state.verifier_key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
-    prior_override = TestAttemptEvidence(
-        session_id=state.session_id,
-        kind="host",
-        command=("pytest",),
-        passed=False,
-        input_tree_key="prior-input",
-        output_tree_key="prior-output",
+    prior_override = _host_test_evidence(
+        state, passed=False, input_tree_key="prior-input", output_tree_key="prior-output"
     )
 
     async def _red_retest(*_a: Any, **_k: Any) -> Any:
         return (
-            TestAttemptEvidence(
-                session_id=state.session_id,
-                kind="host",
-                command=("pytest",),
-                passed=False,
-                input_tree_key=snapshot.tree_key,
-                output_tree_key=snapshot.tree_key,
+            _host_test_evidence(
+                state, passed=False, input_tree_key=snapshot.tree_key, output_tree_key=snapshot.tree_key
             ),
             None,
             "1 failed",
