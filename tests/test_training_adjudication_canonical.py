@@ -28,6 +28,15 @@ _PIN = {
 }
 
 
+def _annotation_records(mat: Path) -> list[dict[str, Any]]:
+    """Parse the materialized ``annotations.jsonl`` records."""
+    return [
+        json.loads(line)
+        for line in (mat / "annotations.jsonl").read_text().splitlines()
+        if line.strip()
+    ]
+
+
 def _index(tmp_path: Path, digest: str = "d" * 32) -> Path:
     root = tmp_path / "index"
     sessions = [{
@@ -238,7 +247,7 @@ def test_canonical_harvest_emits_annotations_jsonl_from_merged_records(tmp_path:
     out = _harvest(root, archive, mat, None)
     assert out["record_count"] == 1
     lines = (tmp_path / "mat" / "annotations.jsonl").read_text().splitlines()
-    records = [json.loads(line) for line in lines]
+    records = _annotation_records(tmp_path / "mat")
     # canonical JSON, sorted by record_id, shared serializer shape
     assert [r["record_id"] for r in records] == sorted(r["record_id"] for r in records)
     assert records[0]["evidence_digest"] == "d" * 32
@@ -273,17 +282,15 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     write_sessions_jsonl(root, sessions)
     run_materialize(root, tmp_path / "mat2", pin=_PIN)
     out = _harvest(root, archive, tmp_path / "mat2", None)
-    assert out["evidence_after_as_of"] == [json.loads(
-        (tmp_path / "mat2" / "annotations.jsonl").read_text().splitlines()[0]
-    )["record_id"]]
-    records = [json.loads(line) for line in
-               (tmp_path / "mat2" / "annotations.jsonl").read_text().splitlines()]
+    assert out["evidence_after_as_of"] == [
+        _annotation_records(tmp_path / "mat2")[0]["record_id"]
+    ]
+    records = _annotation_records(tmp_path / "mat2")
     assert records[0]["evidence_after_as_of"] is True
     # The first (pre-pin) harvest carries a before-pin created_at
     # (2026-01-01T00:00:00+00:00 < as_of 2026-02-01T00:00:00+00:00) and stays
     # unflagged — a real timestamp comparison, not the missing-key guard.
-    first = [json.loads(line) for line in
-             (tmp_path / "mat" / "annotations.jsonl").read_text().splitlines()]
+    first = _annotation_records(tmp_path / "mat")
     assert first[0]["evidence_after_as_of"] is False
 
 
@@ -337,9 +344,7 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
     assert rubric["rubric_version"] == "v2"
     assert stored[0]["evidence_after_as_of"] is True
     # The archived row and the emitted bundle agree on the new pin's flag.
-    emitted = [json.loads(line) for line in
-               (tmp_path / "mat-b" / "annotations.jsonl").read_text().splitlines()
-               if line.strip()]
+    emitted = _annotation_records(tmp_path / "mat-b")
     assert emitted[0]["evidence_after_as_of"] is True
     # Exactly-once still holds for an unchanged re-run under the same pin.
     out_c = _harvest(root, archive, tmp_path / "mat-b", None)
@@ -385,9 +390,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
     assert stored[0]["human_labeler"] == "bob"
     # The archived rubric matches the emitted bundle's overlay.
-    emitted = [json.loads(line) for line in
-               (tmp_path / "mat" / "annotations.jsonl").read_text().splitlines()
-               if line.strip()]
+    emitted = _annotation_records(tmp_path / "mat")
     assert emitted[0]["human_labeler"] == "bob"
     # Unchanged everything (pin + rubric) stays exactly-once.
     out3 = _harvest(root, archive, mat, obs)
@@ -497,11 +500,7 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     # The freshly re-derived conflict suppressed the decisive label even
     # though the materialized snapshot had no conflicting flag.
     assert "finding-accepted" not in history[0]["labels"]
-    rows = [
-        json.loads(line)
-        for line in (mat / "annotations.jsonl").read_text().splitlines()
-        if line
-    ]
+    rows = _annotation_records(mat)
     assert rows[0]["disposition"] == "ambiguous"
     assert rows[0]["conflicting"] is True
 
@@ -536,11 +535,7 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
     assert record.get("conflicting") is not True  # cleared by the human resolution
     assert record["disposition"] == "accepted"
     assert "finding-accepted" in history[0]["labels"]
-    rows = [
-        json.loads(line)
-        for line in (mat / "annotations.jsonl").read_text().splitlines()
-        if line
-    ]
+    rows = _annotation_records(mat)
     assert rows[0]["disposition"] == "accepted"
     assert rows[0].get("conflicting") is not True
 
@@ -559,11 +554,7 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     archive = tmp_path / "archive"
     _seed_archive(archive)
     _harvest(root, archive, mat)
-    rows = [
-        json.loads(line)
-        for line in (mat / "annotations.jsonl").read_text().splitlines()
-        if line
-    ]
+    rows = _annotation_records(mat)
     # the flag rides through the harvest into the projection input verbatim
     assert any(row.get("conflicting") is True for row in rows)
     # build_frozen_corpus's snapshot assembly (session-scoped resolutions) --

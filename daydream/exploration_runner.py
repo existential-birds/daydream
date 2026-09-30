@@ -10,7 +10,6 @@ Provides two exploration entries:
 
 from __future__ import annotations
 
-import re
 import stat
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any, Callable, Literal, TypeAlias
@@ -61,10 +60,6 @@ if TYPE_CHECKING:
 
 
 Tier: TypeAlias = Literal["skip", "single", "parallel"]
-
-# This regex parses git's own diff header output (not source code), so a
-# regex is the right tool here per D-04 (no tree-sitter for non-source text).
-_DIFF_HEADER_RE = re.compile(r"^diff --git a/(.+) b/", re.MULTILINE)
 
 _SPECIALIST_TIMEOUT_SECONDS = 300  # 5 minutes
 
@@ -128,14 +123,8 @@ def _static_guidance(repo_root: Path, modified_files: list[FileInfo]) -> str:
 
 
 def count_changed_files(diff_text: str) -> int:
-    """Count unique file paths in a unified-diff string.
-
-    Returns:
-        Number of unique ``a/<path>`` entries in ``diff --git`` headers.
-    """
-    if not diff_text:
-        return 0
-    return len({m.group(1) for m in _DIFF_HEADER_RE.finditer(diff_text)})
+    """Count unique file paths in a unified-diff string."""
+    return len({entry.path for entry in _parse_diff_name_status(diff_text)})
 
 
 def select_tier(file_count: int) -> Tier:

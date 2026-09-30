@@ -36,6 +36,15 @@ RAW = '{"conventions": [{"name": "OpenAPI First", "description": "x", "source": 
 PAYLOAD = {"conventions": [{"name": "OpenAPI First", "description": "x", "source": "CLAUDE.md"}]}
 
 
+def _scripted(events: list[Any]) -> ScriptedBackend:
+    """ScriptedBackend whose turn ends with an empty structured result."""
+    return ScriptedBackend(
+        events=[*events, ResultEvent(structured_output=None, continuation=None)],
+        model="mock-model",
+    )
+
+
+
 @pytest.fixture
 def rec(monkeypatch: pytest.MonkeyPatch) -> Console:
     """Install a recording console as ``daydream.agent.console`` and return it."""
@@ -59,13 +68,9 @@ async def test_structured_output_text_is_not_rendered(rec: Console, tmp_path: Pa
 
 
 async def test_plain_text_still_renders(rec: Console, tmp_path: Path) -> None:
-    backend = ScriptedBackend(
-        events=[
-            TextEvent(text="narration here"),
-            ResultEvent(structured_output=None, continuation=None),
-        ],
-        model="mock-model",
-    )
+    backend = _scripted([
+        TextEvent(text="narration here"),
+    ])
     await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW)  # no output_schema
     assert "narration here" in rec.export_text()
 
@@ -170,26 +175,18 @@ async def test_structured_fallback_validates_against_output_schema(
     }
 
     # (a) valid-schema raw JSON -> returned as structured output
-    valid_backend = ScriptedBackend(
-        events=[
-            TextEvent(text='{"file": "src/a.py"}'),
-            ResultEvent(structured_output=None, continuation=None),
-        ],
-        model="mock-model",
-    )
+    valid_backend = _scripted([
+        TextEvent(text='{"file": "src/a.py"}'),
+    ])
     result, _, _ = await run_agent(
         valid_backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=schema
     )
     assert result == {"file": "src/a.py"}
 
     # (b) invalid-schema raw JSON (missing required "file") -> plain-text fallthrough
-    invalid_backend = ScriptedBackend(
-        events=[
-            TextEvent(text='{"line": 3}'),
-            ResultEvent(structured_output=None, continuation=None),
-        ],
-        model="mock-model",
-    )
+    invalid_backend = _scripted([
+        TextEvent(text='{"line": 3}'),
+    ])
     result2, _, _ = await run_agent(
         invalid_backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=schema
     )
@@ -220,13 +217,9 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(
             "intent_docs": {"type": "array", "items": {"type": "string"}},
         },
     }
-    backend = ScriptedBackend(
-        events=[
-            TextEvent(text='{"commands": [{"command": "make test"}]}'),
-            ResultEvent(structured_output=None, continuation=None),
-        ],
-        model="mock-model",
-    )
+    backend = _scripted([
+        TextEvent(text='{"commands": [{"command": "make test"}]}'),
+    ])
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.RECON, output_schema=schema,
         validate_structured_output=False,
@@ -267,13 +260,9 @@ async def test_structured_fallback_salvages_partial_dict(
             {"issue_id": 2, "verdict": "bogus"},  # missing required "evidence"
         ]
     }
-    backend = ScriptedBackend(
-        events=[
-            TextEvent(text=json.dumps(partial)),
-            ResultEvent(structured_output=None, continuation=None),
-        ],
-        model="mock-model",
-    )
+    backend = _scripted([
+        TextEvent(text=json.dumps(partial)),
+    ])
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema
     )
@@ -296,13 +285,9 @@ async def test_structured_fallback_bare_array_reaches_merge_shape(
         "properties": {"items": {"type": "array", "items": {"type": "object"}}},
     }
     items = [{"id": 1, "description": "x"}]
-    backend = ScriptedBackend(
-        events=[
-            TextEvent(text=json.dumps(items)),
-            ResultEvent(structured_output=None, continuation=None),
-        ],
-        model="mock-model",
-    )
+    backend = _scripted([
+        TextEvent(text=json.dumps(items)),
+    ])
     result, _, _ = await run_agent(
         backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema
     )

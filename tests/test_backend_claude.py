@@ -1481,19 +1481,21 @@ def test_is_background_bash(payload: Any, background: bool) -> None:
 # --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
 
 
+async def _request_event(
+    apply_patch: Any, prompt: str, **execute_kwargs: Any
+) -> RequestEvent:
+    """Drive execute against a capturing client and return its RequestEvent."""
+    backend, _ = _capturing_backend(apply_patch)
+    events = [event async for event in backend.execute(Path("/tmp"), prompt, **execute_kwargs)]
+    return next(e for e in events if isinstance(e, RequestEvent))
+
+
 @pytest.mark.asyncio
 async def test_request_event_carries_typed_config_from_exact_sdk_options(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_sdk: Any,
 ) -> None:
     """RequestEvent.config mirrors the options the SDK client actually received."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(monkeypatch, _capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), "capture config"):
-        events.append(event)
-
-    request = next(e for e in events if isinstance(e, RequestEvent))
+    request = await _request_event(patch_sdk, "capture config")
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
     # Common subset: max_turns not passed -> None (never an effective claim).
@@ -1523,12 +1525,15 @@ async def test_request_event_carries_typed_config_from_exact_sdk_options(
 
 @pytest.mark.asyncio
 async def test_request_event_requires_multi_or_dynamic_for_nonempty_agents(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_sdk: Any,
 ) -> None:
     """A nonempty agents mapping makes the aggregate multi-model-capable."""
-    events = await _drive_with_agents(monkeypatch)
-
-    request = next(e for e in events if isinstance(e, RequestEvent))
+    specialists: dict[str, AgentDefinition] = {
+        "pattern-scanner": AgentDefinition(
+            description="Scan patterns", prompt="Scan", model="sonnet",
+        ),
+    }
+    request = await _request_event(patch_sdk, "fan out", agents=specialists)
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
     assert config.model_mode == "multi_or_dynamic"
@@ -1541,36 +1546,12 @@ async def test_request_event_requires_multi_or_dynamic_for_nonempty_agents(
     assert request.model_source == "configured"
 
 
-async def _drive_with_agents(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
-    """Drive execute with a nonempty agents mapping and collect the events."""
-
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(monkeypatch, _capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
-    specialists: dict[str, AgentDefinition] = {
-        "pattern-scanner": AgentDefinition(
-            description="Scan patterns", prompt="Scan", model="sonnet",
-        ),
-    }
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), "fan out", agents=specialists):
-        events.append(event)
-    return events
-
-
 @pytest.mark.asyncio
 async def test_request_event_read_only_and_max_turns_are_admitted(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_sdk: Any,
 ) -> None:
     """Actually-passed max_turns/read_only appear; accepted-but-ignored do not exist."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(monkeypatch, _capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), "go", max_turns=7, read_only=True):
-        events.append(event)
-
-    request = next(e for e in events if isinstance(e, RequestEvent))
+    request = await _request_event(patch_sdk, "go", max_turns=7, read_only=True)
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
     assert config.max_turns == 7  # passed -> admitted (never interpreted as max tokens)
@@ -1581,18 +1562,11 @@ async def test_request_event_read_only_and_max_turns_are_admitted(
 
 @pytest.mark.asyncio
 async def test_request_event_resume_provenance_is_host_generated(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_sdk: Any,
 ) -> None:
     """A resumed claude session is continuation_mode=resume with host provenance."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(monkeypatch, _capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
     token = ContinuationToken(backend="claude", data={"session_id": "sess-42"})
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), "again", continuation=token):
-        events.append(event)
-
-    request = next(e for e in events if isinstance(e, RequestEvent))
+    request = await _request_event(patch_sdk, "again", continuation=token)
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
     assert config.continuation_mode == "resume"
@@ -1602,17 +1576,12 @@ async def test_request_event_resume_provenance_is_host_generated(
 
 @pytest.mark.asyncio
 async def test_request_event_output_schema_sets_native_output_format(
-    monkeypatch: pytest.MonkeyPatch,
+    patch_sdk: Any,
 ) -> None:
     """A schema request admits native_output_format=True at the SDK options."""
-    captured: dict[str, Any] = {}
-    patch_claude_sdk(monkeypatch, _capturing_client(captured))
-    backend = ClaudeBackend(model="opus")
-    events: list[Any] = []
-    async for event in backend.execute(Path("/tmp"), "structured", output_schema={"type": "object"}):
-        events.append(event)
-
-    request = next(e for e in events if isinstance(e, RequestEvent))
+    request = await _request_event(
+        patch_sdk, "structured", output_schema={"type": "object"}
+    )
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
     assert config.native_output_format is True

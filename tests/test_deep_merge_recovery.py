@@ -77,6 +77,18 @@ ARCHIVED_MERGE_STR = (
 CROSS_STACK_MERGE_ERR_MSG = "Cross-stack merge returned no item list (got str)"
 
 
+def _salvage_record() -> dict[str, object]:
+    """Minimal per-stack record shape accepted by the merge phase."""
+    return {
+        "id": 1,
+        "file": "api.py",
+        "line": 1,
+        "severity": "high",
+        "confidence": "HIGH",
+        "rationale": "r",
+        "evidence": "api.py:1",
+    }
+
 
 def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     """Write the merged-findings inputs under *tmp_path*'s deep artifact dir.
@@ -99,19 +111,7 @@ def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     inputs["alts"].write_text("{\"alternatives\": []}\n")
     inputs["dedup"].write_text('{"record_alt_pairs": [], "record_duplicate_pairs": []}\n')
     inputs["records"].write_text(
-        json.dumps(
-            [
-                {
-                    "id": 1,
-                    "file": "api.py",
-                    "line": 1,
-                    "severity": "high",
-                    "confidence": "HIGH",
-                    "rationale": "r",
-                    "evidence": "api.py:1",
-                }
-            ]
-        )
+        json.dumps([_salvage_record()])
     )
     return inputs
 
@@ -249,17 +249,7 @@ async def test_merge_accepts_bare_list_result(tmp_path: Path, make_work: Callabl
     await phase_cross_stack_merge(
         cast(Backend, _merge_text_backend(
             "prose",
-            [
-                {
-                    "id": 1,
-                    "file": "api.py",
-                    "line": 1,
-                    "severity": "high",
-                    "confidence": "HIGH",
-                    "rationale": "r",
-                    "evidence": "api.py:1",
-                }
-            ],
+            [_salvage_record()],
         )),
         make_work(tmp_path),
         **args,

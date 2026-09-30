@@ -88,9 +88,7 @@ def _console_text(capsys: pytest.CaptureFixture[str]) -> str:
 
 
 def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
-    write_sessions_index(tmp_path)
-    cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
-                                "--state-dir", str(tmp_path / "adj")])
+    _built_queue(tmp_path)
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
     record_id = str(queue[0]["record_id"])
     rc = cli._handle_corpus_command(
@@ -106,9 +104,7 @@ def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
 
 
 def test_adjudicate_label_unknown_record_id_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    write_sessions_index(tmp_path)
-    cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
-                                "--state-dir", str(tmp_path / "adj")])
+    _built_queue(tmp_path)
     rc = cli._handle_corpus_command(
         ["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
          "--record-id", "a" * 64, "--disposition", "accepted",
@@ -120,9 +116,7 @@ def test_adjudicate_label_unknown_record_id_exits_1(tmp_path: Path, capsys: pyte
 
 
 def test_adjudicate_label_batch_n_processes_unresolved_in_order(tmp_path: Path) -> None:
-    write_sessions_index(tmp_path)
-    cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
-                                "--state-dir", str(tmp_path / "adj")])
+    _built_queue(tmp_path)
     rc = cli._handle_corpus_command(
         ["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
          "--batch", "1", "--disposition", "rejected", "--rationale", "stale finding",
@@ -142,9 +136,7 @@ def test_adjudicate_label_batch_n_processes_unresolved_in_order(tmp_path: Path) 
 
 
 def test_adjudicate_show_lists_queue_and_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    write_sessions_index(tmp_path)
-    cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
-                                "--state-dir", str(tmp_path / "adj")])
+    _built_queue(tmp_path)
     rc = cli._handle_corpus_command(["adjudicate", "show", "--state-dir", str(tmp_path / "adj")])
     assert rc == 0
     out = capsys.readouterr().out
