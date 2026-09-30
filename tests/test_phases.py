@@ -6236,3 +6236,139 @@ async def test_declined_commit_with_red_evidence_still_raises(
             ),
             retained_tree_key=identity.output_tree_key,
         )
+
+
+# Issue #1408 task 12: pre-push reuse removes only the redundant Daydream-owned
+# suite run. The hook, the post-hook strict check, and the receipt check remain.
+
+
+def _retained_strict_kwargs(
+    repo: Path, work: WorkContext, paths: set[str]
+) -> dict[str, Any]:
+    """The three strict stage-once arguments ``_do_commit`` requires together."""
+    return {
+        "retained_paths": frozenset(paths),
+        "retained_states": git_ops.snapshot_worktree_paths(repo, sorted(paths)),
+        "initial_index": phases.require_empty_staged_index(work),
+    }
+
+
+def _reuse_offer(identity: TestExecutionIdentity) -> TestAttemptEvidence:
+    """A matching green host offer bound to *identity*'s output tree key."""
+    return TestAttemptEvidence(
+        session_id="s", kind="host", command=("true",), passed=True,
+        input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+        identity=identity,
+    )
+
+
+@pytest.mark.asyncio
+async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH14 + SH3: reuse removes only the proactive suite run. The hook still
+    executes, the strict post-hook verification still runs, the push still
+    verifies, and the saving is counted honestly — orchestrator suite
+    invocations (0 with reuse vs 1 without) are measured separately from the
+    one mandatory hook execution."""
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    hook_log = repo / "hook-ran"
+    (repo / ".git" / "hooks" / "pre-push").write_text(f"#!/bin/sh\ntouch {hook_log}\nexit 0\n")
+    (repo / ".git" / "hooks" / "pre-push").chmod(0o755)
+    (repo / "fix.py").write_text("fixed\n")
+    work = make_work(repo)
+    runs = _record_host_runs(monkeypatch)
+    config = _hook_run_config()
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    ok = await _do_commit(
+        ScriptedBackend(), work, push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+        config=config, recipe=recipe,
+        evidence=_reuse_offer(identity),
+        retained_tree_key=identity.output_tree_key,
+        **_retained_strict_kwargs(repo, work, {"fix.py"}),
+    )
+
+    assert ok.committed is True and ok.push is not None
+    assert runs == [], "the redundant proactive suite run is the only thing removed"
+    assert hook_log.exists(), "the pre-push hook must still execute"
+    assert git_ops.remote_contains_commit(repo, "main", git_ops.head_sha(repo), remote="origin")
+
+    # SH3 baseline, measured by execution in the same test: without an evidence offer
+    # the same push case pays exactly one orchestrator suite run, and one hook run.
+    repo_two = _pushable_repo(tmp_path / "baseline")
+    _install_pre_push_hook(repo_two)
+    (repo_two / "fix.py").write_text("fixed\n")
+    baseline = _record_host_runs(monkeypatch, output="")
+
+    await _do_commit(
+        ScriptedBackend(), make_work(repo_two), push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+        config=_hook_run_config(),
+    )
+
+    assert len(baseline) == 1, "the no-evidence baseline pays exactly one orchestrator run"
+
+
+@pytest.mark.asyncio
+async def test_hook_failure_still_blocks_the_push_on_a_reuse_hit(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    (repo / ".git" / "hooks" / "pre-push").write_text("#!/bin/sh\nexit 1\n")
+    (repo / ".git" / "hooks" / "pre-push").chmod(0o755)
+    (repo / "fix.py").write_text("fixed\n")
+    work = make_work(repo)
+    runs = _record_host_runs(monkeypatch)
+    config = _hook_run_config()
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    with pytest.raises((GitError, PushAttemptError)):
+        await _do_commit(
+            ScriptedBackend(), work, push=True, interactive=False,
+            items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+            config=config, recipe=recipe,
+            evidence=_reuse_offer(identity),
+            retained_tree_key=identity.output_tree_key,
+            **_retained_strict_kwargs(repo, work, {"fix.py"}),
+        )
+    assert runs == []
+
+
+@pytest.mark.asyncio
+async def test_a_bare_tree_match_after_the_commit_does_not_reuse(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """MH13: the tree key is content-only; reuse across a commit needs the explicit
+    post-commit verification to have passed."""
+    repo = _pushable_repo(tmp_path)
+    _install_pre_push_hook(repo)
+    (repo / "fix.py").write_text("fixed\n")
+    runs = _record_host_runs(monkeypatch, output="")
+    config = _hook_run_config()
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    # No strict stage-once arguments: the post-commit state is never verified,
+    # so the commit-moved HEAD cannot be exempted by ``post_commit_verified``.
+    ok = await _do_commit(
+        ScriptedBackend(), make_work(repo), push=True, interactive=False,
+        items=[{"file": "fix.py", "description": "fix bug"}], preexisting_untracked=set(),
+        config=config, recipe=recipe,
+        evidence=_reuse_offer(identity),
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    assert ok.committed is True
+    assert len(runs) == 1, "an unverified post-commit state requires the real suite run"

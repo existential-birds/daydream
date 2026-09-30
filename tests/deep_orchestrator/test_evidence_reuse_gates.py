@@ -8,6 +8,7 @@ phase receives (issue #1408, tasks 10/12).
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -17,7 +18,12 @@ from daydream.phases import TestAttemptEvidence, phase_commit_push
 from daydream.runner import run
 from daydream.test_execution import TestExecutionIdentity
 from tests.harness.backend import ScriptedBackend
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.git_helpers import (
+    bare_remote as _bare_remote,
+    commit as _commit,
+    git as _git,
+    init_repo as _init_repo,
+)
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import MakeConfig, _silence
 
@@ -124,3 +130,61 @@ async def test_a_tree_key_mismatch_is_refused(
             ScriptedBackend(), work, config=config,
             evidence=evidence, retained_tree_key="other",
         )
+
+
+@pytest.mark.asyncio
+async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+) -> None:
+    """Real flow with an executable pre-push hook: the finalized evidence
+    matches the retained tree, so the proactive hook-run suite execution is
+    skipped, while the hook itself still fires and the real push still lands.
+
+    The host-command counter is the SH3 measurement: exactly one execution
+    (the TEST phase) proves the commit gate removed its redundant run; without
+    reuse the same hook-present flow pays a second one.
+    """
+    repo = tmp_path / "hook-reuse-flow"
+    _init_repo(repo)
+    (repo / "api.py").write_text("A = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "api.py").write_text("A = 2\n")
+    _git(repo, "add", "api.py")
+    _commit(repo, "feature")
+    remote = _bare_remote(tmp_path / "origin.git")
+    _git(repo, "remote", "add", "origin", str(remote))
+
+    hook_log = tmp_path / "hooks.log"
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(f"#!/bin/sh\necho pre-push >> '{hook_log}'\nexit 0\n")
+    hook.chmod(0o755)
+
+    counter = tmp_path / "host-runs"
+    script = tmp_path / "record.py"
+    script.write_text(
+        "import pathlib, sys\n"
+        "path = pathlib.Path(sys.argv[1])\n"
+        "path.write_text(str(int(path.read_text()) + 1) if path.exists() else '1')\n"
+    )
+
+    backend = StubBackend(repo)
+    backend.fix_edit_line = "# repaired\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    _silence(monkeypatch)
+
+    await run(
+        make_config(
+            repo, assume="yes", output_mode="loop",
+            test_command=f"{sys.executable} {script} {counter}",
+        )
+    )
+
+    assert counter.read_text() == "1", (
+        "the TEST phase is the only orchestrator suite run; the commit gate "
+        "reused the matching evidence instead of re-running it"
+    )
+    assert hook_log.read_text().splitlines() == ["pre-push"]
+    assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")

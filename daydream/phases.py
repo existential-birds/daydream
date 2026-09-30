@@ -73,7 +73,7 @@ from daydream.deep.dedup import (
     normalize_title,
 )
 from daydream.deep.detection import GENERIC_STACK
-from daydream.deep.evidence_reuse import ReuseTarget, decide_reuse
+from daydream.deep.evidence_reuse import ReuseDecision, ReuseTarget, decide_reuse
 from daydream.deep.location_validator import validate_records
 from daydream.deep.records import (
     RECORD_SOURCE_UIDS_KEY,
@@ -3940,6 +3940,41 @@ def _verify_commit_scope(
         )
 
 
+def _pre_push_reuse_decision(
+    work: WorkContext,
+    recipe: TestRecipe | None,
+    evidence: TestAttemptEvidence | None,
+    retained_tree_key: str | None,
+    *,
+    strict_commit: bool,
+) -> ReuseDecision | None:
+    """Consult the reuse predicate for the pre-push proactive suite run.
+
+    Only a strict commit whose post-commit verification already passed can
+    authorize reuse across the commit: that verification proved the created
+    commit carries exactly the tested retained path/state set, so
+    ``post_commit_verified`` exempts the commit-moved HEAD/branch. With no
+    evidence offer, no resolved recipe, a non-strict commit, or an identity-less
+    offer, the call returns ``None`` and the proactive run proceeds unchanged
+    (the feature is additive and can never remove the one real validation).
+    """
+    if not strict_commit or recipe is None or evidence is None:
+        return None
+    identity = evidence.identity
+    if identity is None or retained_tree_key is None:
+        return None
+    target = reuse_target(
+        work,
+        recipe,
+        session_id=identity.session_id,
+        retained_tree_key=retained_tree_key,
+        post_commit_verified=True,
+    )
+    if target is None:
+        return None
+    return decide_reuse(identity, target)
+
+
 async def _validate_declined_fixes(
     work: WorkContext,
     config: Any,
@@ -4214,12 +4249,16 @@ async def _do_commit(
         _verify_commit_scope(work, sha_before, stage)
 
     # Hook-aware validation orchestration (issue #726): with an executable
-    # pre-push hook present, the full suite runs via the host runner exactly
-    # once per attempt, here, before the push — the hook itself still fires
-    # during ``push_branch`` (hook bypass flags are forbidden), so the win is that
+    # pre-push hook present, the full suite runs via the host runner once per
+    # attempt, here, before the push — the hook itself still fires during
+    # ``push_branch`` (hook bypass flags are forbidden), so the win is that
     # daydream neither re-runs the suite a second time at push time nor
     # skips validation when the hook makes the push the last gate. A red
-    # suite blocks the push even though the local commit exists.
+    # suite blocks the push even though the local commit exists. Issue #1408:
+    # when a strict commit's post-commit verification already passed and the
+    # finalized test evidence still matches, this proactive run is the one
+    # redundant daydream-owned execution and is skipped — the hook, the
+    # post-hook strict check, and the push receipt check are unaffected.
     if push and git_ops.has_executable_pre_push_hook(work.repo):
         cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
         if cmd is None:
@@ -4230,16 +4269,20 @@ async def _do_commit(
                 "--test-command or the `test_command` config key).",
             )
         else:
-            # The hook-run suite execution is its own trajectory phase, in
-            # addition to the test-execution events the runner itself emits
-            # (issue #726 task 12).
-            async with host_phase_scope(DaydreamPhase.HOOK_RUN):
-                result = await _run_host_test_command(cmd, work, config, recipe=recipe)
-            if not result.passed:
-                raise RuntimeError(
-                    "Pre-push validation failed: the configured test command "
-                    "exited non-zero, so the commit was not pushed."
-                )
+            reuse = _pre_push_reuse_decision(
+                work, recipe, evidence, retained_tree_key, strict_commit=strict_commit
+            )
+            if reuse is None or not reuse.reused:
+                # The hook-run suite execution is its own trajectory phase, in
+                # addition to the test-execution events the runner itself emits
+                # (issue #726 task 12).
+                async with host_phase_scope(DaydreamPhase.HOOK_RUN):
+                    result = await _run_host_test_command(cmd, work, config, recipe=recipe)
+                if not result.passed:
+                    raise RuntimeError(
+                        "Pre-push validation failed: the configured test command "
+                        "exited non-zero, so the commit was not pushed."
+                    )
 
             if strict_commit:
                 _verify_strict("post-hook")
