@@ -37,16 +37,17 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
+from daydream.deep.diagram_types import (
+    BLOCK_KINDS,
+    MESSAGE_KINDS,
+    NODE_KINDS,
+    PARTICIPANT_KINDS,
+)
 from daydream.output_schema import strict_object
 from daydream.repository_paths import (
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
     valid_repository_file_path,
 )
-
-_PARTICIPANT_KINDS = ("internal", "external")
-_MESSAGE_KINDS = ("call", "reply", "self")
-_BLOCK_KINDS = ("alt", "opt", "loop")
-_NODE_KINDS = ("start", "end", "process", "decision", "subroutine", "io")
 
 # 1-based source line. ``minimum`` keeps a nonsense 0 out of the spec before
 # grounding has to spend a LINE_OUT_OF_RANGE on it.
@@ -80,7 +81,7 @@ SEQUENCE_SPEC_SCHEMA: dict[str, Any] = strict_object({
         "type": "array",
         "items": strict_object({
             "name": {"type": "string"},
-            "kind": {"type": "string", "enum": list(_PARTICIPANT_KINDS)},
+            "kind": {"type": "string", "enum": list(PARTICIPANT_KINDS)},
             "files": {"type": "array", "items": _REPOSITORY_FILE_PATH_SCHEMA},
             "service": {"type": ["string", "null"]},
         }),
@@ -91,7 +92,7 @@ SEQUENCE_SPEC_SCHEMA: dict[str, Any] = strict_object({
             "from": {"type": "string"},
             "to": {"type": "string"},
             "label": {"type": "string"},
-            "kind": {"type": "string", "enum": list(_MESSAGE_KINDS)},
+            "kind": {"type": "string", "enum": list(MESSAGE_KINDS)},
             "changed": {"type": "boolean"},
             "evidence": _SYMBOL_EVIDENCE_SCHEMA,
         }),
@@ -99,7 +100,7 @@ SEQUENCE_SPEC_SCHEMA: dict[str, Any] = strict_object({
     "blocks": {
         "type": "array",
         "items": strict_object({
-            "kind": {"type": "string", "enum": list(_BLOCK_KINDS)},
+            "kind": {"type": "string", "enum": list(BLOCK_KINDS)},
             "branches": {
                 "type": "array",
                 "items": strict_object({
@@ -125,7 +126,7 @@ FLOWCHART_SPEC_SCHEMA: dict[str, Any] = strict_object({
         "type": "array",
         "items": strict_object({
             "id": {"type": "string"},
-            "kind": {"type": "string", "enum": list(_NODE_KINDS)},
+            "kind": {"type": "string", "enum": list(NODE_KINDS)},
             "label": {"type": "string"},
             "evidence": _OPTIONAL_SYMBOL_EVIDENCE_SCHEMA,
         }),
@@ -252,7 +253,7 @@ def _coerce_participants(value: Any) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         name = _text(entry.get("name"))
-        kind = _choice(entry.get("kind"), _PARTICIPANT_KINDS)
+        kind = _choice(entry.get("kind"), PARTICIPANT_KINDS)
         if name is None or kind is None or name in seen:
             continue
         seen.add(name)
@@ -285,7 +286,7 @@ def _coerce_messages(value: Any) -> tuple[list[dict[str, Any]], dict[int, int]]:
         source = _text(entry.get("from"))
         target = _text(entry.get("to"))
         label = _text(entry.get("label"))
-        kind = _choice(entry.get("kind"), _MESSAGE_KINDS)
+        kind = _choice(entry.get("kind"), MESSAGE_KINDS)
         evidence = _evidence(entry.get("evidence"), symbol="required")
         if source is None or target is None or label is None or kind is None or evidence is None:
             continue
@@ -338,7 +339,7 @@ def _coerce_blocks(value: Any, *, remap: dict[int, int]) -> list[dict[str, Any]]
     for entry in value:
         if not isinstance(entry, dict):
             continue
-        kind = _choice(entry.get("kind"), _BLOCK_KINDS)
+        kind = _choice(entry.get("kind"), BLOCK_KINDS)
         if kind is None:
             continue
         raw_branches = entry.get("branches")
@@ -401,7 +402,7 @@ def _coerce_nodes(value: Any) -> list[dict[str, Any]]:
         if not isinstance(entry, dict):
             continue
         node_id = _text(entry.get("id"))
-        kind = _choice(entry.get("kind"), _NODE_KINDS)
+        kind = _choice(entry.get("kind"), NODE_KINDS)
         label = _text(entry.get("label"))
         evidence = _evidence(entry.get("evidence"), symbol="optional")
         if node_id is None or kind is None or label is None or evidence is None:

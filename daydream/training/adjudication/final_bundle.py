@@ -76,6 +76,17 @@ _BUNDLE_FILES = (
 )
 FINAL_IDENTITY_FILES = _BUNDLE_FILES
 
+# Envelope files sit outside the semantic identity set: the publication
+# manifest, its checksum list, and the success marker. ``FULL_BUNDLE_FILES`` is
+# the complete on-remote file set an assembled bundle may contain.
+_PUBLICATION_MANIFEST_FILENAME = "publication-manifest.json"
+_SUMS_FILENAME = "SHA256SUMS"
+_SUCCESS_FILENAME = "_SUCCESS"
+ENVELOPE_FILES = frozenset(
+    {_PUBLICATION_MANIFEST_FILENAME, _SUMS_FILENAME, _SUCCESS_FILENAME}
+)
+FULL_BUNDLE_FILES = frozenset(FINAL_IDENTITY_FILES) | ENVELOPE_FILES
+
 # Older publishers left this scratch directory in the bundle root. Continue
 # tolerating it during deterministic reconstruction; current publication uses
 # unique sibling temporary directories and leaves no in-bundle scratch state.
@@ -116,9 +127,8 @@ def final_snapshot_id(bundle_dir: Path) -> tuple[str, dict[str, str]]:
     root = Path(bundle_dir)
     if root.is_symlink() or not root.is_dir():
         raise ValueError("final bundle must be a real directory")
-    allowed_envelope = {"publication-manifest.json", "SHA256SUMS", "_SUCCESS"}
     names = _bundle_input_names(root)
-    foreign = sorted(names - set(FINAL_IDENTITY_FILES) - allowed_envelope)
+    foreign = sorted(names - FULL_BUNDLE_FILES)
     missing = sorted(set(FINAL_IDENTITY_FILES) - names)
     if foreign or missing:
         raise ValueError(

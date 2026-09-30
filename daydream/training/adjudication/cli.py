@@ -89,7 +89,7 @@ from daydream.training.adjudication.observations import (
     prior_adjudications,
 )
 from daydream.training.adjudication.precedence import HUMAN_ROLES, has_rater_conflict
-from daydream.training.adjudication.preview import run_preview
+from daydream.training.adjudication.preview import _SESSIONS_OUT_FILENAME, run_preview
 from daydream.training.adjudication.publish import (
     publish_annotation_state,
     resume_annotation_state,
@@ -122,7 +122,6 @@ _ANNOTATION_HUB_REPO = "existentialbirds/daydream-trajectories"
 
 _QUEUE_FILENAME = "queue.json"
 _OBSERVATIONS_FILENAME = "observations.jsonl"
-_SESSIONS_FILENAME = "sessions.jsonl"
 _PREVIEW_LEDGER_FILENAME = "preview-ledger.json"
 
 
@@ -521,7 +520,7 @@ def handle_label(argv: list[str]) -> int:
 
 def _load_sessions_for_index(index_root: Path) -> list[dict[str, Any]]:
     """Load the hydrated index's sessions.jsonl (fail-closed on missing/invalid)."""
-    sessions_path = index_root / _SESSIONS_FILENAME
+    sessions_path = index_root / _SESSIONS_OUT_FILENAME
     if not sessions_path.is_file():
         raise ValueError(f"hydrated index sessions file not found: {sessions_path}")
     return read_jsonl(sessions_path, missing="", invalid="unreadable hydrated index")
@@ -1098,7 +1097,7 @@ def _load_import_index_sessions(index_root: Path) -> list[dict[str, Any]]:
     fail-closed materialize adapter. Anything else is a derive failure —
     no empty-literal fallback.
     """
-    if not (index_root / _SESSIONS_FILENAME).is_file() and not (index_root / "index.db").is_file():
+    if not (index_root / _SESSIONS_OUT_FILENAME).is_file() and not (index_root / "index.db").is_file():
         raise ValueError(
             f"import index root {index_root} has neither sessions.jsonl nor index.db; "
             "not a hydrated index or materialized snapshot"

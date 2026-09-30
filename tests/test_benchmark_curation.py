@@ -47,17 +47,9 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) -> tu
     origin_url, base_sha, head_sha = seed_pr_origin(
         tmp_path, feature_body="".join(f"LINE {i}\n" for i in range(1, lines + 1))
     )
-    # Seed the preflight identity + repo-access responses (idempotent — this
-    # helper is used directly by this test, which does not call
-    # ``_seed_preflight``), then re-seed the canned PR header so
+    # ``_seed_preflight`` already seeded the identity + repo-access responses
+    # (called immediately before this helper); re-seed the canned PR header so
     # base.sha/head.sha are the real origin SHAs.
-    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE",
-               "defaultBranchRef": {"name": "main"}},
-    )
     header = dict(_PR_HEADER)
     header["base"] = {"ref": "main", "sha": base_sha}
     header["head"] = {"ref": "feature/cache", "sha": head_sha}

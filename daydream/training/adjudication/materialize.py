@@ -22,14 +22,16 @@ from typing import Any
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.archive.index import readonly_connection
 from daydream.json_utils import atomic_write_bytes, canonical_json as _canonical, umask_derived_mode
-from daydream.training.adjudication.preview import _load_sessions
+from daydream.training.adjudication.preview import (
+    _SESSIONS_OUT_FILENAME as _SESSIONS_OUT_FILENAME,
+    _load_sessions,
+)
 from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
 from daydream.training.labeler_signals import resolution_from_dict
 
 __all__ = ["run_materialize"]
 
-_SESSIONS_OUT_FILENAME = "sessions.jsonl"
 _MANIFEST_FILENAME = "preview-manifest.json"
 _ANNOTATIONS_FILENAME = "annotations.jsonl"
 

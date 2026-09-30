@@ -41,7 +41,7 @@ from daydream.config import (
     DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
 )
-from daydream.deep.diagram_types import as_dict, as_int, as_list, as_optional_str
+from daydream.deep.diagram_types import BLOCK_KINDS, as_dict, as_int, as_list, as_optional_str
 
 _mapping, _int, _list, _key = as_dict, as_int, as_list, as_optional_str
 
@@ -168,7 +168,6 @@ def _evidence_location(evidence: Any) -> str:
 
 _REPLY_ARROW = "-->>"
 _CALL_ARROW = "->>"
-_BLOCK_KINDS = ("alt", "opt", "loop")
 
 
 def _message_line(message: dict[str, Any], ids: dict[str, str], indent: str) -> str | None:
@@ -202,7 +201,7 @@ def _block_ownership(
     conditions: dict[tuple[int, int], str] = {}
     for block_index, block in enumerate(blocks):
         kind = block.get("kind")
-        keywords[block_index] = kind if kind in _BLOCK_KINDS else "opt"
+        keywords[block_index] = kind if kind in BLOCK_KINDS else "opt"
         for branch_index, branch in enumerate(_dicts(block.get("branches"))):
             conditions[(block_index, branch_index)] = _label(
                 branch.get("condition"), DIAGRAM_LABEL_CAP_MESSAGE

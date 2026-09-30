@@ -39,6 +39,15 @@ def as_optional_str(value: Any) -> str | None:
     """Return ``value`` when it is a non-empty string, else ``None``."""
     return value if isinstance(value, str) and value else None
 
+
+# Diagram element kind vocabularies, shared by the strict schemas (enum order),
+# grounding (membership) and the renderer. Ordered tuples are the single source
+# of truth; the renderer's ``_BARE_NODE_KINDS`` is a deliberate subset.
+PARTICIPANT_KINDS = ("internal", "external")
+MESSAGE_KINDS = ("call", "reply", "self")
+BLOCK_KINDS = ("alt", "opt", "loop")
+NODE_KINDS = ("start", "end", "process", "decision", "subroutine", "io")
+
 # One kind's diagram outcome, as written to ``diagram.json``,
 # ``ctx.data["diagrams"]`` and the Phase A findings artifact::
 #
@@ -116,4 +125,12 @@ class CandidateRoot:
     branch_points: int
 
 
-__all__ = ["CandidateRoot", "DiagramResult", "DiagramThresholds"]
+__all__ = [
+    "BLOCK_KINDS",
+    "CandidateRoot",
+    "DiagramResult",
+    "DiagramThresholds",
+    "MESSAGE_KINDS",
+    "NODE_KINDS",
+    "PARTICIPANT_KINDS",
+]
