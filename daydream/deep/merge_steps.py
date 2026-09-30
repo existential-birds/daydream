@@ -583,6 +583,20 @@ def _arbiter_groups_record(
     return records
 
 
+def _review_context_kwargs(ctx: FlowContext, deep_state: DeepState, *, strategy: str) -> dict[str, Any]:
+    """Structured-review context shared by the arbiter and suppression calls."""
+    return {
+        "diff_path": deep_state.diff_path,
+        "intent_path": deep_state.intent_path,
+        "alternatives_path": deep_state.alts_path,
+        "exploration_dir": deep_state.exploration_dir,
+        "strategy": strategy,
+        "run_context": ctx.run_context,
+        "artifact_session": ctx.artifacts,
+        "allow_standalone": ctx.allow_standalone_artifacts,
+    }
+
+
 async def _run_sharded_arbiter(
     ctx: FlowContext,
     deep_state: DeepState,
@@ -651,15 +665,10 @@ async def _run_sharded_arbiter(
                                             input_path=arbiter_group_input_path(
                                                 dd, planned.group_id
                                             ),
-                                            diff_path=deep_state.diff_path,
-                                            intent_path=deep_state.intent_path,
-                                            alternatives_path=deep_state.alts_path,
-                                            exploration_dir=deep_state.exploration_dir,
+                                            **_review_context_kwargs(
+                                                ctx, deep_state, strategy=ctx.strategy("arbitration")
+                                            ),
                                             intent_authoritative=deep_state.intent_authoritative,
-                                            strategy=ctx.strategy("arbitration"),
-                                            run_context=ctx.run_context,
-                                            artifact_session=ctx.artifacts,
-                                            allow_standalone=ctx.allow_standalone_artifacts,
                                         )
                                 except Exception as exc:  # noqa: BLE001 -- per-group isolation; fail-open
                                     failed_groups.append(planned.group_id)
@@ -1090,15 +1099,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         arbiter_backend,
                         ctx.work,
                         selected_records=[adjudicated[i] for i in arbiter_targets],
-                        diff_path=deep_state.diff_path,
-                        intent_path=deep_state.intent_path,
-                        alternatives_path=deep_state.alts_path,
-                        exploration_dir=deep_state.exploration_dir,
+                        **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("arbitration")),
                         intent_authoritative=deep_state.intent_authoritative,
-                        strategy=ctx.strategy("arbitration"),
-                        run_context=ctx.run_context,
-                        artifact_session=ctx.artifacts,
-                        allow_standalone=ctx.allow_standalone_artifacts,
                     )
                     # Identity gate: only resume when merge runs on the very same
                     # backend instance. A per-phase override that resolves a
@@ -1148,14 +1150,7 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                         ctx.backend_for("suppression"),
                         ctx.work,
                         selected_records=[adjudicated[i] for i in suppression_targets],
-                        diff_path=deep_state.diff_path,
-                        intent_path=deep_state.intent_path,
-                        alternatives_path=deep_state.alts_path,
-                        exploration_dir=deep_state.exploration_dir,
-                        strategy=ctx.strategy("suppression"),
-                        run_context=ctx.run_context,
-                        artifact_session=ctx.artifacts,
-                        allow_standalone=ctx.allow_standalone_artifacts,
+                        **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
                     )
                 adjudicated, adjudicated_sources = _apply_adjudication_verdicts(
                     adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,

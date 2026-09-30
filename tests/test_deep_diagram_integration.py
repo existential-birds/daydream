@@ -39,7 +39,6 @@ from daydream.deep.diagram_types import DiagramThresholds
 from daydream.deep.prompts import _candidate_roots_block, _diagram_diff_block, _files_by_module_block
 from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 from daydream.extensions import Registry
-from daydream.extensions.registry import Registry as _Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnavailable
 from daydream.runner import RunConfig, run
@@ -47,7 +46,7 @@ from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
 from tests.harness.fake_gh import FakeGh
-from tests.harness.git_helpers import commit, git, git as _git, init_repo
+from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.harness.trajectory import assert_dispatch_children, root_trajectory as _root_trajectory
 from tests.test_deep_orchestrator import _profile_with_pipeline
@@ -1506,7 +1505,7 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
     repo.mkdir()
     init_repo(repo)
     (repo / "base.py").write_text("value = 1\n", encoding="utf-8")
-    _git(repo, "add", ".")
+    git(repo, "add", ".")
     commit(repo, "base")
     work = WorkContext(repo=repo, source=repo, base_branch="main", base_sha="",
                       head_branch=None, head_sha="", is_ephemeral=False, run_id="session-test")
@@ -1654,7 +1653,7 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     """Req 10 × req 4: a fork override written before the inline kwargs keeps its
     documented kwarg set AND must not be handed a private host path to print."""
 
-    registry = _Registry()
+    registry = Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
     ctx = await _session_test_ctx(tmp_path)
