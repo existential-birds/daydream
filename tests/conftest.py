@@ -20,7 +20,6 @@ from tests.harness.fake_gh import FakeGh, install_fake_gh
 from tests.harness.git_helpers import (
     bare_remote as _bare_remote,
     commit as _commit,
-    configure_identity as _configure_identity,  # noqa: F401 - test_git_ops re-import
     git as _git,
     init_repo as _init_repo,
 )
