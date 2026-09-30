@@ -53,6 +53,13 @@ def _forbidden_input(*_a: Any, **_kw: Any) -> str:
     raise AssertionError("input() was called in non-interactive mode -- stdin must not be touched")
 
 
+def _capture_warnings(monkeypatch: pytest.MonkeyPatch, module_attr: str) -> list[str]:
+    """Route ``module_attr``'s ``print_warning`` into a list and return it."""
+    warnings: list[str] = []
+    monkeypatch.setattr(module_attr, lambda console, msg, *a, **k: warnings.append(msg))
+    return warnings
+
+
 def _only_archived_run(archive_dir: Path) -> Path:
     """Return the single archived run directory, asserting there is exactly one."""
     run_dirs = list((archive_dir / "runs").iterdir())

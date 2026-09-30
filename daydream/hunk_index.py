@@ -90,14 +90,17 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
 
     Returns ``{path: {"hunks": [{"old_start", "old_end", "new_start",
     "new_end", "added", "removed"}], "added_total": N,
-    "removed_total": N, "added_lines": set[int]}}``.
+    "removed_total": N, "added_lines": set[int],
+    "added_text": {new_line: (hunk_index, text)}}}``.
 
     ``added_lines`` (the new-side line numbers of ``+`` content lines) is the
-    quote_scrub counter contract and lives only in the in-memory result; it is
-    not persisted to ``hunk-index.json``. A ``+++ `` line counts as a file
-    header only when preceded by its ``--- `` pair. Malformed input with no
-    parseable hunks returns ``{}`` (a caller with no hunks behaves exactly as
-    today, never raising).
+    quote_scrub counter contract and ``added_text`` (each ``+`` line's text
+    keyed by new-side line, with the index of its owning hunk) is the
+    ``verify_selection.changed_text_at`` contract. Both live only in the
+    in-memory result; neither is persisted to ``hunk-index.json``. A ``+++ ``
+    line counts as a file header only when preceded by its ``--- `` pair.
+    Malformed input with no parseable hunks returns ``{}`` (a caller with no
+    hunks behaves exactly as today, never raising).
 
     Args:
         diff_text: Unified-diff text (as written to ``diff.patch``).
@@ -125,7 +128,13 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
                 continue
             current_meta = result.setdefault(
                 path,
-                {"hunks": [], "added_total": 0, "removed_total": 0, "added_lines": set()},
+                {
+                    "hunks": [],
+                    "added_total": 0,
+                    "removed_total": 0,
+                    "added_lines": set(),
+                    "added_text": {},
+                },
             )
             current_hunk = None
             new_line = 0
@@ -158,6 +167,10 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
             current_meta["added_lines"].add(new_line)
             if current_hunk is not None:
                 current_hunk["added"] += 1
+                current_meta["added_text"][new_line] = (
+                    len(current_meta["hunks"]) - 1,
+                    raw[1:],
+                )
             new_line += 1
         elif raw.startswith("-"):
             current_meta["removed_total"] += 1
@@ -239,7 +252,7 @@ def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
     The persisted shape is exactly the issue's: ``{path: {"hunks": [{"new_start",
     "new_end", "old_start", "old_end", "added", "removed"}], "added_total": N,
     "removed_total": N}}`` (JSON, sorted by path for determinism). ``added_lines``
-    is intentionally NOT persisted. Returns the written path.
+    and ``added_text`` are intentionally NOT persisted. Returns the written path.
     """
     parsed = parse_hunks(diff_text)
     persist: dict[str, Any] = {}

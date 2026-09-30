@@ -13,6 +13,7 @@ from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.runner import run
 from tests.deep_orchestrator.support import (
+    _capture_warnings,
     _fresh_uid_run,
     _high_record,
     _item_uids,
@@ -266,11 +267,7 @@ async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: a record that routes outside the rewritten files is named."""
-    warnings: list[str] = []
-    monkeypatch.setattr(
-        "daydream.deep.merge_steps.print_warning",
-        lambda console, msg, *a, **k: warnings.append(msg),
-    )
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.merge_steps.print_warning")
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     deep = _prime_uid_merge_resume(
