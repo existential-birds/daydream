@@ -1133,6 +1133,61 @@ def test_files_read_grep_context_options_do_not_eat_operand() -> None:
     assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
 
 
+def test_files_read_resolves_literal_loop_bindings() -> None:
+    # Issue #1397: the two archived reviewer patterns credit the literal word
+    # list -- never the unexpanded ``$task_file``/``$f`` spelling.
+    assert _shell_reads(
+        'for task_file in .gitignore openapi.yaml; do '
+        'echo "--- $task_file"; nl -ba "$task_file"; done'
+    ) == {".gitignore", "openapi.yaml"}
+    assert _shell_reads(
+        "for f in ios/App/App.entitlements ios/App/App.xcodeproj/project.pbxproj; "
+        'do nl -ba "$f"; done'
+    ) == {"ios/App/App.entitlements", "ios/App/App.xcodeproj/project.pbxproj"}
+    # Braced form and one literal prefix (Should Have): identical resolution.
+    assert _shell_reads('for f in a.py b.py; do nl -ba "${f}"; done') == {"a.py", "b.py"}
+    assert _shell_reads('for f in a.py b.py; do cat "src/$f"; done') == {"src/a.py", "src/b.py"}
+    # Sequential top-level loops resolve independently, each to its own list.
+    assert _shell_reads(
+        'for f in a.py b.py; do nl -ba "$f"; done; for g in c.py; do cat "$g"; done'
+    ) == {"a.py", "b.py", "c.py"}
+
+
+def test_analyze_coverage_credits_a_completed_loop_read(tmp_path: Path) -> None:
+    # The same resolution is visible to eval coverage analysis (shared seam).
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(
+        "diff --git a/.gitignore b/.gitignore\n"
+        "diff --git a/openapi.yaml b/openapi.yaml\n"
+    )
+    trajectories = {
+        "main": None,
+        "forked": [
+            {
+                "_source_file": "deep-generic.json",
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": [
+                            {
+                                "function_name": "shell",
+                                "arguments": {
+                                    "command": 'for task_file in .gitignore openapi.yaml; '
+                                    'do nl -ba "$task_file"; done'
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = analyze_coverage(trajectories, daydream_dir)
+
+    assert result["uncovered_files"] == []
+    assert result["files_read_by_reviewers"] == 2
 
 
 # Only a quote opened and never closed makes shlex raise; the two other
