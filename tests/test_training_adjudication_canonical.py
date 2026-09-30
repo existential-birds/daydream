@@ -63,7 +63,8 @@ def _index(
 
 def _stored_resolutions(rubric: dict[str, Any]) -> list[dict[str, Any]]:
     """Read a stored rubric's per-finding resolutions (either key spelling)."""
-    return rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    stored = rubric.get("per_finding_outcomes") or rubric.get("per_finding_resolutions")
+    return stored if isinstance(stored, list) else []
 
 
 def _write_observation(
