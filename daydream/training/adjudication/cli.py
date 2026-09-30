@@ -75,7 +75,6 @@ from daydream.archive.index import (
     _get_connection,
     readonly_connection,
 )
-from daydream.archive.known_versions import STALE_LEGACY
 from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
 from daydream.training.adjudication.export import validate_export_rows, write_export_rows
@@ -100,6 +99,7 @@ from daydream.training.labeler_versions import (
     ADJUDICATION_LABELER_VERSION,
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
+    STALE_LEGACY,
 )
 from daydream.ui import create_console, print_error, print_success
 

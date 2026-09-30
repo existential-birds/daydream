@@ -1,6 +1,7 @@
 """The committed projection fixture must pass the canonical loader gates and
-drive the CI training dry run (issue #1093, task 9)."""
+drive the training dry run (issue #1093, task 9)."""
 
+import json
 from pathlib import Path
 
 from daydream.training.coordinator import PipelineConfig, run_pipeline
@@ -27,3 +28,9 @@ def test_pipeline_dry_run_over_committed_fixture(tmp_path: Path) -> None:
     )
     assert manifest["stages"]["stage0"]["status"] == "complete"
     assert manifest["stages"]["stage0"]["gate"]["passed"] is True
+    for stage in ("stage1", "stage2"):
+        assert manifest["stages"][stage]["status"] == "skipped_dry"
+    adapter = Path(manifest["adapter_path"])
+    assert (adapter / "adapter_config.json").is_file()
+    assert (adapter / "adapter_state.json").is_file()
+    assert json.loads((tmp_path / "manifest.json").read_text())["dry_run"] is True

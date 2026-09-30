@@ -40,34 +40,6 @@ jobs:
       - name: Install dependencies
         run: uv sync --all-extras
 
-      - name: Training coordinator dry run over the committed projection fixture
-        run: |
-          uv run python - <<'PY'
-          import json
-          from pathlib import Path
-          import tempfile
-
-          from daydream.training.coordinator import PipelineConfig, run_pipeline
-
-          with tempfile.TemporaryDirectory() as out:
-              manifest = run_pipeline(
-                  PipelineConfig(
-                      projection=Path("tests/fixtures/training/projection-50"),
-                      out_dir=Path(out),
-                  ),
-                  dry_run=True,
-              )
-              assert manifest["stages"]["stage0"]["status"] == "complete"
-              assert manifest["stages"]["stage0"]["gate"]["passed"] is True
-              for stage in ("stage1", "stage2"):
-                  assert manifest["stages"][stage]["status"] == "skipped_dry"
-              adapter = Path(manifest["adapter_path"])
-              assert (adapter / "adapter_config.json").is_file()
-              assert (adapter / "adapter_state.json").is_file()
-              assert json.loads((Path(out) / "manifest.json").read_text())["dry_run"] is True
-          print("training dry path OK")
-          PY
-
       - name: Run RL checks
         run: make rl-check
 

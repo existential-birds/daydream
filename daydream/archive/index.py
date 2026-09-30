@@ -82,8 +82,8 @@ from daydream.archive._schema import (
     _recreate_label_observations_if_stale,
 )
 from daydream.archive.git_safe import normalize_remote_url
-from daydream.archive.known_versions import STALE_LEGACY
 from daydream.archive.manifest import Manifest
+from daydream.training.labeler_versions import STALE_LEGACY
 from daydream.training.reward import FP_PENALTY_MAP
 
 # The 16 non-identity columns, in the canonical declaration order: exactly the

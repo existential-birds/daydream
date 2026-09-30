@@ -30,9 +30,9 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_IMPORT_UNREDACTABLE_METADATA,
 )
 from daydream.archive.index import LABEL_OBSERVATION_NAMES, append_label_observation
-from daydream.archive.known_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 from daydream.archive.sanitize import _sanitize_url_string
 from daydream.archive.scan import scan_run_dir
+from daydream.training.labeler_versions import KNOWN_LABELER_VERSIONS, STALE_LEGACY
 from daydream.trajectory import redact_value
 
 __all__ = [
