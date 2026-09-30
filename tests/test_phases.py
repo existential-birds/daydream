@@ -30,7 +30,12 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import deep_dir, merged_items_path, verdicts_path
+from daydream.deep.artifacts import (
+    deep_dir,
+    evidence_reuse_path,
+    merged_items_path,
+    verdicts_path,
+)
 from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import build_per_stack_prompt
 from daydream.deep.verify_selection import SelectionConfig
@@ -6372,3 +6377,96 @@ async def test_a_bare_tree_match_after_the_commit_does_not_reuse(
 
     assert ok.committed is True
     assert len(runs) == 1, "an unverified post-commit state requires the real suite run"
+
+
+# Issue #1408 task 13: each gate reports reused-or-revalidated and persists the
+# decision so it is reconstructible from the run's artifacts alone (SH1/SH2).
+
+
+def _capture_gate_report(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record the human reuse line(s) the gate prints through the UI helpers."""
+    reported: list[str] = []
+    monkeypatch.setattr(
+        phases, "print_success", lambda _c, msg, *a, **k: reported.append(str(msg))
+    )
+    monkeypatch.setattr(
+        phases, "print_info", lambda _c, msg, *a, **k: reported.append(str(msg))
+    )
+    return reported
+
+
+@pytest.mark.asyncio
+async def test_a_reuse_decision_is_reported_and_persisted(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """SH1/SH2: the gate names the decision and the persisted record is
+    reconstructible from the run's artifacts alone."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    _record_host_runs(monkeypatch)
+    reported = _capture_gate_report(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    deep = repo / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+    identity = _execution_identity(repo, recipe=recipe, argv=("true",))
+
+    await phase_commit_push(
+        ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+        evidence=TestAttemptEvidence(
+            session_id="s", kind="host", command=("true",), passed=True,
+            input_tree_key=identity.output_tree_key, output_tree_key=identity.output_tree_key,
+            identity=identity,
+        ),
+        retained_tree_key=identity.output_tree_key,
+    )
+
+    record = json.loads(evidence_reuse_path(deep).read_text())
+    gate = record["gates"]["declined-commit"]
+    assert gate["gate"] == "declined-commit"
+    assert gate["result"] == "reused"
+    assert gate["reused"] is True
+    assert gate["mismatched_components"] == []
+    assert gate["before_head_sha"] == identity.head_sha
+    assert any("reused" in line for line in reported), reported
+
+
+@pytest.mark.asyncio
+async def test_a_mismatch_record_names_the_component(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    make_config: Callable[..., Any],
+    monkeypatch: pytest.MonkeyPatch,
+    silence_console: Callable[..., None],
+) -> None:
+    """A miss records which component required the real validation."""
+    silence_console("daydream.phases")
+    monkeypatch.setattr("daydream.run_context.RunContext.confirm", lambda self, **k: False)
+    _record_host_runs(monkeypatch)
+    reported = _capture_gate_report(monkeypatch)
+    repo = _init_plain_repo(tmp_path)
+    deep = repo / ".daydream" / "deep"
+    deep.mkdir(parents=True)
+    config = make_config(repo, test_command="true")
+    recipe = resolve_test_recipe(config, config, repo_root=repo)
+
+    await phase_commit_push(
+        ScriptedBackend(), make_work(repo), config=config, recipe=recipe,
+        evidence=TestAttemptEvidence(
+            session_id="s", kind="host", command=("true",), passed=True,
+            input_tree_key="stale", output_tree_key="stale",
+            identity=_execution_identity(repo, recipe=recipe, argv=("true",), output_tree_key="stale"),
+        ),
+        retained_tree_key="stale",
+    )
+
+    record = json.loads(evidence_reuse_path(deep).read_text())
+    gate = record["gates"]["declined-commit"]
+    assert gate["result"] == "identity-mismatch"
+    assert gate["mismatched_components"] == ["tree_key"]
+    assert any("tree_key" in line for line in reported), reported

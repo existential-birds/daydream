@@ -8,12 +8,14 @@ phase receives (issue #1408, tasks 10/12).
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from daydream.deep.artifacts import evidence_reuse_path
 from daydream.phases import TestAttemptEvidence, phase_commit_push
 from daydream.runner import run
 from daydream.test_execution import TestExecutionIdentity
@@ -188,3 +190,42 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     )
     assert hook_log.read_text().splitlines() == ["pre-push"]
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
+
+
+@pytest.mark.asyncio
+async def test_the_pre_push_reuse_decision_is_persisted_in_the_real_flow(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
+) -> None:
+    """SH1/SH2: the real flow's pre-push gate writes its reuse decision to the
+    published artifact, naming the gate and that reuse used the post-commit
+    verification."""
+    repo = tmp_path / "reuse-audit-flow"
+    _init_repo(repo)
+    (repo / "api.py").write_text("A = 1\n")
+    _git(repo, "add", ".")
+    _commit(repo, "base")
+    _git(repo, "checkout", "-b", "feature")
+    (repo / "api.py").write_text("A = 2\n")
+    _git(repo, "add", "api.py")
+    _commit(repo, "feature")
+    remote = _bare_remote(tmp_path / "audit-origin.git")
+    _git(repo, "remote", "add", "origin", str(remote))
+
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text("#!/bin/sh\nexit 0\n")
+    hook.chmod(0o755)
+
+    backend = StubBackend(repo)
+    backend.fix_edit_line = "# repaired\n"
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
+    monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
+    _silence(monkeypatch)
+
+    await run(make_config(repo, assume="yes", output_mode="loop", test_command="true"))
+
+    record = json.loads(evidence_reuse_path(repo / ".daydream" / "deep").read_text())
+    gate = record["gates"]["pre-push"]
+    assert gate["gate"] == "pre-push"
+    assert gate["result"] == "reused"
+    assert gate["reused"] is True
+    assert gate["post_commit_verification_used"] is True

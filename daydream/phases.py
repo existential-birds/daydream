@@ -57,6 +57,7 @@ from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.artifacts import (
     arbiter_input_path,
     deep_dir,
+    evidence_reuse_path,
     merged_items_path,
     merged_report_path,
     per_stack_records_path,
@@ -73,7 +74,13 @@ from daydream.deep.dedup import (
     normalize_title,
 )
 from daydream.deep.detection import GENERIC_STACK
-from daydream.deep.evidence_reuse import ReuseDecision, ReuseTarget, decide_reuse
+from daydream.deep.evidence_reuse import (
+    EVIDENCE_REUSE_FORMAT,
+    ReuseDecision,
+    ReuseTarget,
+    audit_payload,
+    decide_reuse,
+)
 from daydream.deep.location_validator import validate_records
 from daydream.deep.records import (
     RECORD_SOURCE_UIDS_KEY,
@@ -117,7 +124,7 @@ from daydream.generated_files import (
 )
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.hunk_index import load_hunk_index
-from daydream.json_utils import read_json_object
+from daydream.json_utils import atomic_write_json, read_json_object
 from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
@@ -3940,6 +3947,63 @@ def _verify_commit_scope(
         )
 
 
+def _persist_reuse_audit(
+    work: WorkContext, gate: str, record: dict[str, Any]
+) -> None:
+    """Write one gate's reuse record, merging it into any prior gates.
+
+    Fail-soft: an unwritable artifact directory warns and never fails a commit
+    or push. The merge preserves an earlier gate's decision (Pattern B).
+    """
+    try:
+        path = evidence_reuse_path(deep_dir(work.repo, allow_standalone=True))
+        existing = read_json_object(path)
+        gates = existing.get("gates")
+        merged: dict[str, Any] = dict(gates) if isinstance(gates, dict) else {}
+        merged[gate] = record
+        atomic_write_json(
+            path,
+            {"format_version": EVIDENCE_REUSE_FORMAT, "gates": merged},
+            indent=2,
+            sort_keys=True,
+            trailing_newline=True,
+        )
+    except Exception as exc:  # artifact write is never load-bearing
+        print_warning(console, f"Evidence-reuse audit could not be written: {exc}")
+
+
+def _report_reuse_decision(
+    work: WorkContext,
+    gate: str,
+    decision: ReuseDecision,
+    identity: TestExecutionIdentity | None,
+    target: ReuseTarget,
+) -> None:
+    """Name one reuse decision in run output and persist its audit record.
+
+    SH1: the human line states reused-or-revalidated and names the deciding
+    component through the existing UI helpers, so no new console surface is
+    needed. SH2: the persisted record is reconstructible from the run's
+    artifacts alone. Every gate funnels through this one helper.
+    """
+    if decision.reused:
+        print_success(
+            console,
+            f"Evidence reuse ({gate}): reused matching evidence — "
+            "no redundant suite run",
+        )
+    else:
+        named = ", ".join(decision.mismatched_components) or decision.result
+        print_info(
+            console,
+            f"Evidence reuse ({gate}): ran real validation "
+            f"({decision.result}: {named})",
+        )
+    record = audit_payload(decision, identity, target)
+    record["gate"] = gate
+    _persist_reuse_audit(work, gate, record)
+
+
 def _pre_push_reuse_decision(
     work: WorkContext,
     recipe: TestRecipe | None,
@@ -3972,7 +4036,9 @@ def _pre_push_reuse_decision(
     )
     if target is None:
         return None
-    return decide_reuse(identity, target)
+    decision = decide_reuse(identity, target)
+    _report_reuse_decision(work, "pre-push", decision, identity, target)
+    return decision
 
 
 async def _validate_declined_fixes(
@@ -4010,12 +4076,11 @@ async def _validate_declined_fixes(
             retained_tree_key=retained_tree_key,
         )
         decision = None if target is None else decide_reuse(evidence.identity, target)
-        if decision is not None and decision.reused:
-            print_info(
-                console,
-                "Commit declined; reusing matching green test evidence "
-                "(changes left uncommitted)",
+        if target is not None and decision is not None:
+            _report_reuse_decision(
+                work, "declined-commit", decision, evidence.identity, target
             )
+        if decision is not None and decision.reused:
             return
     if cmd is None:
         return
