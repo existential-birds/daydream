@@ -314,16 +314,14 @@ def select_items(
     items: Sequence[Mapping[str, Any]],
     *,
     provenance: Mapping[str, RecordProvenance] | None,
-    hunk_index: Mapping[str, Any],
     diff_text: str,
     config: SelectionConfig,
 ) -> list[SelectionDecision]:
     """Classify every canonical item into select/skip, in input order (MH2).
 
     Returns exactly one decision per input item, including exempt structural and
-    wonder-lens items. ``hunk_index`` is accepted for symmetry with the run's
-    persisted inputs but is intentionally unread: the classifier grounds on the
-    diff text, never on index ranges (see :func:`changed_text_at`).
+    wonder-lens items. The classifier grounds on the diff text, never on index
+    ranges (see :func:`changed_text_at`).
     """
     ledger = provenance if isinstance(provenance, Mapping) else None
     return [

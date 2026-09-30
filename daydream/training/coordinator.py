@@ -129,53 +129,38 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_json(path, payload, sort_keys=True)
 
 
-def _outcome_rows(
-    records: list[dict[str, Any]], *, require_finding_text: bool = False
-) -> list[dict[str, Any]]:
-    """Extract gold outcome rows for the Stage-0 labels file from any shape.
+def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Extract gold outcome rows for the Stage-0 labels file from v2 records.
 
-    Accepts the committed fixture shape (``comment_id``/``text``/``label``),
-    v1 records exports (``session_id``/
-    ``review_output``/``outcome_label``), and projection records
-    (``session_id``/``finding_text``/``outcome_label``). Gold-gate evidence
-    fields (``has_posterior``, ``labeler_policy_version``, ``decisive_mix``,
-    ``decisive_only``) are carried through when the record provides them; an
-    absent ``labeler_policy_version`` is left absent so the admission guard in
-    :mod:`daydream.training.reward_model` refuses the legacy row rather than
-    silently admitting it. On v2 records the policy version lives under
-    ``lineage`` and is promoted from there when the record carries no
+    Gold-gate evidence fields (``has_posterior``, ``labeler_policy_version``,
+    ``decisive_mix``, ``decisive_only``) are carried through when the record
+    provides them; an absent ``labeler_policy_version`` is left absent so the
+    admission guard in :mod:`daydream.training.reward_model` refuses the
+    legacy row rather than silently admitting it. The policy version lives
+    under ``lineage`` and is promoted from there when the record carries no
     top-level value.
 
-    Args:
-        records: Corpus records in any of the accepted shapes.
-        require_finding_text: When True (the projection path), a gold-labeled
-            record with no readable text raises instead of being silently
-            skipped — a v2 gold record without its localized finding text is
-            a broken projection, never an empty-row row.
-
     Raises:
-        RuntimeError: When ``require_finding_text`` is set and a gold-labeled
-            record carries no ``finding_text``/``text``/``review_output``.
+        RuntimeError: When a gold-labeled record carries no ``finding_text`` —
+            a v2 gold record without its localized finding text is a broken
+            projection, never an empty row.
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
-        comment_id = rec.get("comment_id") or rec.get("session_id")
-        text = rec.get("finding_text") or rec.get("text") or rec.get("review_output")
-        label = rec.get("label") or rec.get("outcome_label")
+        comment_id = rec.get("session_id")
+        text = rec.get("finding_text")
+        label = rec.get("outcome_label")
         # Only the two gold outcome classes feed the Stage-0 model; contested/
         # null-label rows are not gold outcome rows and are excluded here.
         if label not in ("accepted", "rejected"):
             continue
         if not (comment_id and text):
-            if require_finding_text:
-                raise RuntimeError(
-                    f"stage0 refused: projection gold record "
-                    f"{rec.get('record_id') or comment_id!r} has outcome_label "
-                    f"{label!r} but no finding_text/text/review_output — a gold "
-                    "record without its localized finding text is a broken "
-                    "projection, not an empty row"
-                )
-            continue
+            raise RuntimeError(
+                f"stage0 refused: projection gold record "
+                f"{rec.get('record_id') or comment_id!r} has outcome_label "
+                f"{label!r} but no finding_text — a gold record without its "
+                "localized finding text is a broken projection, not an empty row"
+            )
         row: dict[str, Any] = {
             "comment_id": comment_id,
             "text": text,
@@ -200,11 +185,8 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     on rejected or silver traces. Rows are prompt/completion JSONL — the shape
     the prime-rl ``sft`` loader accepts (``messages`` column or both
     ``prompt``/``completion``). Gold vs silver counts are reported separately
-    (M9), matching the recipe's tier accounting. On projection records the
-    completion is the localized ``finding_text`` of the gold-accepted
-    finding; the completion field chain is
-    ``completion`` → ``finding_text`` → ``text`` → ``review_output``.
-
+    (M9), matching the recipe's tier accounting. The completion is the v2
+    record's localized ``finding_text``.
 
     Returns:
         ``(rows, tier_counts)`` where ``tier_counts`` has ``gold`` and
@@ -214,13 +196,8 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
     silver = 0
     gold: list[dict[str, Any]] = []
     for rec in records:
-        label = rec.get("label") or rec.get("outcome_label")
-        completion = (
-            rec.get("completion")
-            or rec.get("finding_text")
-            or rec.get("text")
-            or rec.get("review_output")
-        )
+        label = rec.get("outcome_label")
+        completion = rec.get("finding_text")
         if not isinstance(completion, str) or not completion:
             continue
         if label == "accepted":
@@ -236,40 +213,34 @@ def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict
 
 def _record_views(
     rec: dict[str, Any],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
-    """Read a record's v2-first ``code_context``/``task_identity``/``lineage`` views."""
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a record's v2 ``task_identity``/``lineage`` views."""
 
     def view(key: str) -> dict[str, Any]:
         value = rec.get(key)
         return value if isinstance(value, dict) else {}
 
-    return view("code_context"), view("task_identity"), view("lineage")
+    return view("task_identity"), view("lineage")
 
 
 def _sft_prompt(rec: dict[str, Any]) -> str:
     """Deterministic SFT prompt built from a record's frozen review context.
 
     On projection records the repo slug and task SHAs live under
-    ``task_identity`` (the repo slug also under ``lineage``); they are read
-    v2-first with the v1 top-level / ``code_context`` fallback (Pattern A, the
-    same order :func:`_rft_rows` uses), so a v2 prompt carries the record's
-    real repo slug and frozen task shas instead of degrading to 'unknown'.
+    ``task_identity`` (the repo slug also under ``lineage``), so the prompt
+    carries the record's real repo slug and frozen task shas instead of
+    degrading to 'unknown'.
     """
-    code_ctx, identity, lineage_obj = _record_views(rec)
-    repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get(
-        "repo_slug", "unknown"
-    )
+    identity, lineage_obj = _record_views(rec)
+    repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or "unknown"
     parts = [f"repo: {repo_slug}"]
     stack = rec.get("stack") or rec.get("detected_stack")
     if stack:
         parts.append(f"stack: {stack}")
     for key in ("base_sha", "head_sha"):
-        value = identity.get(key) or rec.get(key) or code_ctx.get(key)
+        value = identity.get(key)
         if value:
             parts.append(f"{key}: {value}")
-    changed = code_ctx.get("changed_files") or []
-    if changed:
-        parts.append("changed_files: " + ", ".join(str(p) for p in changed))
     return "; ".join(parts)
 
 
@@ -282,17 +253,14 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     validated fail-closed, matching ``run_rft``: a record missing
     repo_slug/base/head/diff raises naming it — the same missing-gate
     ``run_rft._reconstruct_task`` enforces — so Stage 2 is never recorded
-    complete over unrunnable inputs. base/head are read v2-first from
-    ``task_identity`` with the v1 ``code_context`` fallback (Pattern A), and
-    must be full-length hex SHAs — validated through the shared
+    complete over unrunnable inputs. base/head are read from ``task_identity``
+    and must be full-length hex SHAs — validated through the shared
     :func:`daydream.training.rft.validate_full_sha`, so Stage 2 and
     ``run_rft`` enforce the identical full 40-hex contract; a truncated or
     non-hex SHA is refused like a missing one. ``repo_slug`` is likewise read
-    v2-first (``task_identity``, then ``lineage``) with the v1 top-level
-    fallback and is fail-closed like the SHAs, so a v2 row never carries a
-    null repo_slug that the replay's ``_reconstruct_task`` would refuse, and
-    a v1 row without one is refused at Stage 2 exactly where the replay
-    would refuse it.
+    from ``task_identity`` (then ``lineage``) and is fail-closed like the
+    SHAs, so a v2 row never carries a null repo_slug that the replay's
+    ``_reconstruct_task`` would refuse.
 
     On projection records the intrinsic scoring signals are derived from the
     record itself: the frozen projection record is admission/shape/drift-
@@ -311,11 +279,11 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
-        code_ctx, identity, lineage_obj = _record_views(rec)
-        rid = str(rec.get("comment_id") or rec.get("session_id") or "")
-        repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or rec.get("repo_slug")
-        base_sha = identity.get("base_sha") or rec.get("base_sha") or code_ctx.get("base_sha")
-        head_sha = identity.get("head_sha") or rec.get("head_sha") or code_ctx.get("head_sha")
+        identity, lineage_obj = _record_views(rec)
+        rid = str(rec.get("session_id") or "")
+        repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug")
+        base_sha = identity.get("base_sha")
+        head_sha = identity.get("head_sha")
         diff = rec.get("diff")
         missing = [
             name
@@ -338,36 +306,30 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 validate_full_sha(rid, name, value)
             except ValueError as exc:
                 raise RuntimeError(str(exc)) from exc
-        if identity:
-            # Projection records carry no archived verifier-verdicts file; the
-            # record's own adjudicated outcome is its capture-time judgment.
-            # Map it onto the shared verdict vocabulary (the labels
-            # score_trajectory's verdict_map consumes) so the replay reads a
-            # real correctness axis instead of flooring every candidate at a
-            # 0.0 composite. grounding_rate stays absent (unknown, never an
-            # invented zero) and format_valid is True: a frozen v2 record is
-            # admission/shape/drift-validated, so the v1 bronze-parse failure
-            # floor cannot apply here.
-            disposition = rec.get("outcome_label") or rec.get("disposition")
-            verdict = {
-                "accepted": "consistent",
-                "rejected": "contradicts",
-                "ambiguous": "uncertain",
-                "unanswered": "uncertain",
-                "missing": "uncertain",
-            }.get(str(disposition))
-            verifier_verdicts: Any = (
-                [{"verdict": verdict}] if verdict is not None else rec.get("verifier_verdicts")
-            )
-            format_valid = True
-        else:
-            verifier_verdicts = rec.get("verifier_verdicts")
-            format_valid = bool(rec.get("format_valid", False))
+        # Projection records carry no archived verifier-verdicts file; the
+        # record's own adjudicated outcome is its capture-time judgment.
+        # Map it onto the shared verdict vocabulary (the labels
+        # score_trajectory's verdict_map consumes) so the replay reads a
+        # real correctness axis instead of flooring every candidate at a
+        # 0.0 composite. grounding_rate stays absent (unknown, never an
+        # invented zero) and format_valid is True: a frozen v2 record is
+        # admission/shape/drift-validated, so the v1 bronze-parse failure
+        # floor cannot apply here.
+        disposition = rec.get("outcome_label") or rec.get("disposition")
+        verdict = {
+            "accepted": "consistent",
+            "rejected": "contradicts",
+            "ambiguous": "uncertain",
+            "unanswered": "uncertain",
+            "missing": "uncertain",
+        }.get(str(disposition))
+        verifier_verdicts: Any = (
+            [{"verdict": verdict}] if verdict is not None else rec.get("verifier_verdicts")
+        )
+        format_valid = True
         length = rec.get("length")
         if length is None:
-            length = len(
-                str(rec.get("text") or rec.get("review_output") or rec.get("finding_text") or "")
-            )
+            length = len(str(rec.get("finding_text") or ""))
         rows.append(
             {
                 "id": rid,
@@ -413,9 +375,8 @@ def _frozen_split_from_projection(
     """
     train = _outcome_rows(
         [*projection.by_split["train"], *projection.by_split["validation"]],
-        require_finding_text=True,
     )
-    held_out = _outcome_rows(projection.by_split["holdout"], require_finding_text=True)
+    held_out = _outcome_rows(projection.by_split["holdout"])
     if not held_out:
         raise RuntimeError(
             "stage0 refused: the projection frozen split has no gold outcome rows in "
@@ -445,7 +406,7 @@ def _run_stage0(
     On projection input the split is not re-frozen: the projector's frozen
     boundary is consumed via :func:`_frozen_split_from_projection`.
     """
-    rows = _outcome_rows(records, require_finding_text=projection is not None)
+    rows = _outcome_rows(records)
     if not rows:
         raise RuntimeError(
             "stage0 gate evidence missing: corpus carries no gold outcome rows "

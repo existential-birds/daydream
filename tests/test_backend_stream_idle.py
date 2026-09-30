@@ -103,6 +103,26 @@ def assert_stalled_and_reaped(spawner: Any, *, expected_spawns: int = 1) -> Fake
     return cast(FakeCliProcess, proc)
 
 
+async def run_pi_wall_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ignore_sigterm: bool = False
+) -> FakeCliProcess:
+    """Drive the wall-budget abort against a permanently-silent pi fake."""
+    spawner = install_fake_cli_process(
+        monkeypatch, "pi", lines=PI_LINES[:2], hang=True, ignore_sigterm=ignore_sigterm
+    )
+    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "3600")
+    output, _, budget_reason = await run_agent(
+        PiBackend(model="test-model"),
+        tmp_path,
+        "review",
+        phase=DaydreamPhase.REVIEW,
+        wall_budget_s=1.0,
+    )
+    assert budget_reason == "wall_budget_exceeded"
+    assert output == ""
+    return assert_stalled_and_reaped(spawner)
+
+
 async def drain(backend: Any, cwd: Path) -> list[Any]:
     return [event async for event in backend.execute(cwd, "do the thing")]
 
@@ -386,20 +406,7 @@ async def test_wall_budget_still_aborts_while_blocked_in_the_idle_window(
     The wall budget is the only timer that can fire: the fake stream is
     permanently silent and the idle window is far larger.
     """
-    spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
-    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "3600")
-
-    output, _, budget_reason = await run_agent(
-        PiBackend(model="test-model"),
-        tmp_path,
-        "review",
-        phase=DaydreamPhase.REVIEW,
-        wall_budget_s=1.0,
-    )
-
-    assert budget_reason == "wall_budget_exceeded"
-    assert output == ""
-    proc = assert_stalled_and_reaped(spawner)
+    proc = await run_pi_wall_budget(tmp_path, monkeypatch)
     assert proc.returncode == SIGTERM_RC, "a cooperative child needs no SIGKILL"
 
 
@@ -418,22 +425,7 @@ async def test_cancelled_teardown_still_escalates_to_sigkill(
     ``wait_for(..., timeout=0)`` raises without sleeping on an unexited child.
     """
     monkeypatch.setattr("daydream.backends._subprocess.TERMINATE_GRACE_S", 0.0)
-    spawner = install_fake_cli_process(
-        monkeypatch, "pi", lines=PI_LINES[:2], hang=True, ignore_sigterm=True
-    )
-    monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "3600")
-
-    output, _, budget_reason = await run_agent(
-        PiBackend(model="test-model"),
-        tmp_path,
-        "review",
-        phase=DaydreamPhase.REVIEW,
-        wall_budget_s=1.0,
-    )
-
-    assert budget_reason == "wall_budget_exceeded"
-    assert output == ""
-    proc = assert_stalled_and_reaped(spawner)
+    proc = await run_pi_wall_budget(tmp_path, monkeypatch, ignore_sigterm=True)
     assert proc.terminate_calls == 1
     assert proc.kill_calls == 1
     assert proc.returncode == SIGKILL_RC

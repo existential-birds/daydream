@@ -19,8 +19,12 @@ from daydream.extensions import Registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
 from daydream.runner import RunConfig, run as _run
-from daydream.workspace import WorkContext
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.git_helpers import (
+    commit as _commit,
+    git as _git,
+    init_repo as _init_repo,
+    work_context,
+)
 from tests.test_deep_orchestrator import (
     Mute,
     _force_interactive,
@@ -573,19 +577,9 @@ def _direct_fix_context(
     dd.mkdir(parents=True, exist_ok=True)
     items_file = dd / "merged-items.json"
     items_file.write_text(json.dumps({"items": items}))
-    head = git_ops.head_sha(repo)
     return FlowContext(
         config=RunConfig(target=str(repo), assume="yes", cleanup=False, start_at=start_at),
-        work=WorkContext(
-            repo=repo,
-            source=repo,
-            base_branch="main",
-            base_sha=head,
-            head_branch="main",
-            head_sha=head,
-            is_ephemeral=False,
-            run_id="session-current",
-        ),
+        work=work_context(repo, run_id="session-current"),
         registry=Registry(),
         allow_standalone_artifacts=True,
         data={
