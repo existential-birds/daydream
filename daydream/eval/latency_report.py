@@ -48,7 +48,7 @@ from typing import Any
 from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.latency import LATENCY_PROFILES
 from daydream.deep.risk_categories import CATEGORY_TRIGGERS
-from daydream.deep.verify_selection import SelectionConfig, select_items
+from daydream.deep.verify_selection import SKIP_REASON_CODE, SelectionConfig, select_items
 from daydream.hunk_index import load_hunk_index
 from daydream.json_utils import read_json_object
 from daydream.severity import is_high_severity
@@ -528,7 +528,13 @@ def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str
             selected = [decision for decision in decisions if decision.selected]
             rejected = [decision for decision in decisions if not decision.selected]
             counts["items"] += len(selected)
-            counts["skipped"] += len(rejected)
+            # ``skipped`` counts only the selective rule's skip branch; a lens
+            # exemption (structural / wonder) is recorded in the decision list
+            # but is not a skip the mode chose to make, so a ``verify_all`` run
+            # reports zero skipped (mirrors phases.py selection_block).
+            counts["skipped"] += sum(
+                1 for decision in rejected if decision.reason_code == SKIP_REASON_CODE
+            )
             counts["contradictory_fixes"] += sum(
                 1
                 for decision in rejected

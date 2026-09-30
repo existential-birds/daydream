@@ -241,7 +241,9 @@ def plan_reuse(
     reuse and never a raise (Pattern B).
 
     Returns ``(reused, to_verify)`` where ``reused`` maps ``item_uid`` to the
-    verbatim prior verdict body and ``to_verify`` preserves input order.
+    prior verdict body re-keyed to the current decision's ``item_id`` (the
+    matched verdict's own ``issue_id`` is stale whenever a resume renumbers
+    merged ids) and ``to_verify`` preserves input order.
     """
     if not isinstance(prior_payload, Mapping):
         return {}, list(decisions)
@@ -285,7 +287,15 @@ def plan_reuse(
         if verdict is None or verdict.get("verdict") in _UNRESOLVED_VERDICTS:
             to_verify.append(decision)
             continue
-        reused[decision.item_uid] = dict(verdict)
+        body = dict(verdict)
+        # Re-key the reused body to the current decision's id: the verdict was
+        # matched on durable uid plus the id-invariant content digest (MH14), so
+        # its prior ``issue_id`` is stale whenever a resume renumbers merged
+        # item ids. ``_attach_verdicts`` binds verdicts by the current
+        # ``id`` -> ``issue_id`` join; a stale id would misattribute the verdict
+        # to whatever item now holds the old number (or leave it unmatched).
+        body["issue_id"] = decision.item_id
+        reused[decision.item_uid] = body
     return reused, to_verify
 
 
@@ -373,6 +383,12 @@ def _decide(
     prior = _prior_verdict(data)
     if prior in _UNRESOLVED_VERDICTS:
         return decision(True, f"prior_verdict:{prior}", f"prior verifier verdict {prior!r}")
+    if not diff_text:
+        # An unreadable or absent diff.patch is an absent input (``_read_diff_text``
+        # degrades to ""): the changed lines a finding cites cannot be read, so a
+        # mandatory risk category grounded on changed text cannot be ruled out.
+        # Absent inputs select, never skip (uniform failure direction).
+        return decision(True, "unreadable_diff", "diff.patch is missing or unreadable; cannot certify routine strength")
     return decision(False, SKIP_REASON_CODE, "strongly evidenced, confirmed, unrevised routine finding")
 
 

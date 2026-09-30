@@ -357,7 +357,10 @@ def _verdict_buckets(
 
     Returns ``(matched, unmatched, skipped, structural, other)``; every item
     lands in exactly one bucket, so the four plus ``other`` reconcile to
-    ``len(items)``.
+    ``len(items)``. Both lens exemptions (``exempt:structural`` and
+    ``exempt:wonder``) land in the structural bucket -- matching the selection
+    block's ``skipped`` counter, which counts only ``SKIP_REASON_CODE`` -- so a
+    lens exemption is never reported as an operator-chosen skip.
     """
     decisions_by_uid = _selection_decisions(payload)
     matched: list[int | None] = []
@@ -371,7 +374,7 @@ def _verdict_buckets(
         decision = decisions_by_uid.get(item_uid(item))
         if decision is not None:
             reason = decision.get("reason_code")
-            if reason == "exempt:structural":
+            if reason in ("exempt:structural", "exempt:wonder"):
                 structural.append(item_id)
             elif decision.get("selected") is False:
                 skipped.append(item_id)

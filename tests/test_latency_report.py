@@ -173,6 +173,42 @@ def test_selection_report_reports_unreadable_case_instead_of_dropping_it(tmp_pat
     assert isinstance(block["flip_allowed"], bool)
 
 
+def test_selection_report_does_not_count_lens_exemptions_as_skips(tmp_path: Path) -> None:
+    """A lens exemption is never reported as a skip the mode chose to make.
+
+    ``verify_all`` never selection-skips a non-exempt item, so its ``skipped``
+    figure must stay zero even when the corpus carries a structural item (which
+    the selective rule exempts rather than skips), and the selective arm's own
+    skip count must not grow by the exempt count.
+    """
+    case = {"name": "case", "profile": "forensic", "golden_high_severity": [["api.py", 5]]}
+    base_root = tmp_path / "base"
+    exempt_root = tmp_path / "exempt"
+    for root in (base_root, exempt_root):
+        shutil.copytree(
+            CORPUS / "runs" / "routine-skip" / "forensic",
+            root / "runs" / "case" / "forensic",
+        )
+    merged_path = exempt_root / "runs" / "case" / "forensic" / "merged-items.json"
+    merged = json.loads(merged_path.read_text())
+    merged["items"].append(
+        {
+            "id": 3, "item_uid": "structure:9", "lens": "structural", "file": "api.py",
+            "line": 2, "confidence": "HIGH", "severity": "low", "related_files": None,
+            "description": "duplicated helper", "rationale": "why (Sources: structure-records item 9)",
+            "evidence": "api.py:2 duplicated helper", "source_uids": ["structure:9"],
+        }
+    )
+    merged_path.write_text(json.dumps(merged))
+    manifest = {"corpus": "exemptions", "selection_cases": [case]}
+    base = build_report(manifest, corpus_dir=base_root)["verify_selection"]
+    with_exempt = build_report(manifest, corpus_dir=exempt_root)["verify_selection"]
+    assert base["modes"]["current"]["skipped"] == 0
+    assert with_exempt["modes"]["current"]["skipped"] == 0
+    assert with_exempt["modes"]["proposed"]["skipped"] == base["modes"]["proposed"]["skipped"]
+    assert with_exempt["modes"]["proposed"]["items"] == base["modes"]["proposed"]["items"]
+
+
 def test_selection_gate_blocks_a_flip_when_a_skipped_item_contradicts(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "counter" / "forensic"
     shutil.copytree(CORPUS / "runs" / "routine-skip" / "forensic", run_dir)

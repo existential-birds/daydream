@@ -88,7 +88,12 @@ class RecordProvenance:
         if not isinstance(revised, (list, tuple)) or not all(isinstance(r, str) for r in revised):
             return None
         verdict_bound = data.get("verdict_bound", False)
-        kept = data.get("kept", True)
+        # A missing ``kept`` defaults to unkept, the fail-open direction: an
+        # absent input selects, never skips (the verify-selection read path
+        # treats an unkept record as needing verification). The writer always
+        # emits an explicit ``kept``, so this default only fires for a
+        # malformed or foreign record body.
+        kept = data.get("kept", False)
         if not isinstance(verdict_bound, bool) or not isinstance(kept, bool):
             return None
         return cls(resolved_uid, tuple(passes), verdict_bound, kept, tuple(revised))

@@ -73,12 +73,29 @@ def test_every_mandatory_select_branch_is_reachable(
 
 
 def test_only_a_strong_adjudicated_routine_item_skips() -> None:
+    # The diff is present and readable but never covers the cited file (a.py), so
+    # the changed-line signal is absent while the input itself is not: the skip
+    # branch may certify routine strength. An *absent* diff is an absent input
+    # and selects instead (see the invariant test below).
+    decisions = select_items(
+        [_item("item:1")], provenance={"item:1": _provenance("item:1")},
+        hunk_index={}, diff_text=_DIFF, config=SelectionConfig(verify_all=False, extra_categories=()),
+    )
+    assert decisions[0].selected is False
+    assert decisions[0].reason_code == "strongly_evidenced_adjudicated_routine"
+
+
+def test_absent_diff_selects_even_a_strong_routine_item() -> None:
+    # Uniform failure direction: an unreadable or absent diff.patch is an absent
+    # input (``_read_diff_text`` degrades to ""), so mandatory risk categories
+    # grounded on changed text cannot be ruled out and the item selects -- never
+    # skips, whatever else the item's own evidence says (verify_selection:29-31).
     decisions = select_items(
         [_item("item:1")], provenance={"item:1": _provenance("item:1")},
         hunk_index={}, diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
     )
-    assert decisions[0].selected is False
-    assert decisions[0].reason_code == "strongly_evidenced_adjudicated_routine"
+    assert decisions[0].selected is True
+    assert decisions[0].reason_code == "unreadable_diff"
 
 
 def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> None:
@@ -95,9 +112,9 @@ def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> No
     ]
 
 
-def _decision(item_uid: str, *, digest: str) -> SelectionDecision:
+def _decision(item_uid: str, *, digest: str, item_id: int = 1) -> SelectionDecision:
     return SelectionDecision(
-        item_uid=item_uid, item_id=1, selected=True, reason_code="unadjudicated:no_provenance",
+        item_uid=item_uid, item_id=item_id, selected=True, reason_code="unadjudicated:no_provenance",
         reason="no recorded adjudication", provenance={}, content_digest=digest,
     )
 
@@ -115,6 +132,26 @@ def test_reuse_serves_unchanged_selected_items_and_marks_them_reused() -> None:
     reused, to_verify = plan_reuse(prior, decisions)
     assert reused == {"item:1": {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}}
     assert [d.item_uid for d in to_verify] == ["item:2"]
+
+
+def test_reused_verdict_is_rekeyed_to_the_current_item_id() -> None:
+    # A resume that renumbers merged ids keeps the verdict (durable uid plus the
+    # id-invariant content digest) but the prior body's ``issue_id`` is stale.
+    # ``_attach_verdicts`` binds verdicts by the current ``id`` -> ``issue_id``
+    # join, so the reused body must be re-keyed or it binds to whichever item now
+    # holds the old number (or is silently unmatched).
+    decisions = [_decision("item:1", digest="d1", item_id=7)]
+    prior = {
+        "rule_version": SELECTION_RULE_VERSION,
+        "decisions": [{"item_uid": "item:1", "item_id": 2, "content_digest": "d1"}],
+        "verdicts": [
+            {"issue_id": 2, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}
+        ],
+    }
+    reused, to_verify = plan_reuse(prior, decisions)
+    assert reused["item:1"]["issue_id"] == 7
+    assert reused["item:1"]["verdict"] == "consistent"
+    assert to_verify == []
 
 
 def test_a_moved_rule_version_invalidates_every_prior_decision() -> None:

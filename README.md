@@ -496,13 +496,13 @@ unadjudicated findings). The two knobs are config-file-only:
 | Key | Default | Semantics |
 |-----|---------|-----------|
 | `verify_all` | `false` | `true` restores the conservative mode exactly: every non-exempt finding is verifier-rendered, and no finding is selection-skipped. |
-| `extra_risk_categories` | `[]` | Risk categories appended to the mandatory vocabulary. Additive only -- it can widen selection, never narrow it. |
+| `extra_risk_categories` | `[]` | Risk categories appended to the mandatory vocabulary. Additive only -- it can widen selection, never narrow it. Entries are deduplicated against the mandatory vocabulary, so a name that is already mandatory (the whole declared vocabulary today) is a no-op. |
 
 ```toml
 # pyproject.toml  →  [tool.daydream]
 [tool.daydream]
 verify_all = false                 # the default; true restores today's conservative verifier
-extra_risk_categories = ["security"]
+extra_risk_categories = ["security"]   # `security` is already mandatory: deduplicated, no-op
 
 # .daydream.toml  (top-level keys; no [tool.daydream] prefix)
 verify_all = false
