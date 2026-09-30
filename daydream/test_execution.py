@@ -16,7 +16,6 @@ import os
 import shlex
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 from daydream.backends._subprocess import terminate_process
 from daydream.trajectory import DaydreamPhase, host_phase_scope, redact_structured_text
@@ -163,76 +162,64 @@ async def run_test_command(
     """
     effective_env = env if env is not None else dict(os.environ)
     async with host_phase_scope(DaydreamPhase.TEST_EXECUTION) as phase:
-        return await _run_test_command_inner(cmd, cwd=cwd, wall_budget_s=wall_budget_s,
-                                             env=effective_env, phase=phase)
-
-
-async def _run_test_command_inner(
-    cmd: list[str],
-    *,
-    cwd: Path,
-    wall_budget_s: float,
-    env: dict[str, str] | None,
-    phase: Any,
-) -> TestExecutionResult:
-    proc = await asyncio.create_subprocess_exec(
-        *cmd,
-        cwd=str(cwd),
-        env=env,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-        start_new_session=True,
-    )
-    chunks: list[str] = []
-    buffered = 0
-
-    async def _pump(stream: asyncio.StreamReader | None) -> None:
-        nonlocal buffered
-        if stream is None:
-            return
-        while True:
-            line = await stream.readline()
-            if not line:
-                return
-            if buffered >= _MERGED_OUTPUT_LIMIT_CHARS:
-                continue
-            text = line.decode(errors="replace")
-            remaining = _MERGED_OUTPUT_LIMIT_CHARS - buffered
-            if len(text) > remaining:
-                text = text[:remaining]
-            buffered += len(text)
-            chunks.append(text)
-
-    pump_stdout = asyncio.ensure_future(_pump(proc.stdout))
-    pump_stderr = asyncio.ensure_future(_pump(proc.stderr))
-
-    timed_out = False
-    try:
-        exit_status = await asyncio.wait_for(proc.wait(), wall_budget_s)
-    except TimeoutError:
-        timed_out = True
-        await terminate_process(proc)
-        exit_status = proc.returncode if proc.returncode is not None else -1
-
-    # Bound the post-exit drain with a salvage window. After a group kill the
-    # pipes hit EOF; a suite-spawned grandchild that inherited the pipe write
-    # ends can keep them open past a direct child's exit (a live-server
-    # fixture, a daemonizing helper), so the success path needs the same bound.
-    # A CancelledError here is only reachable after a clean exit, so it
-    # propagates; the timed-out path swallows it as before.
-    try:
-        await asyncio.wait_for(
-            asyncio.gather(pump_stdout, pump_stderr), timeout=5.0
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(cwd),
+            env=effective_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            start_new_session=True,
         )
-    except TimeoutError:
-        pass
-    except asyncio.CancelledError:
-        if not timed_out:
-            raise
-    if timed_out:
-        phase.stop_reason = "timed_out"
-    return TestExecutionResult(
-        exit_status=exit_status,
-        timed_out=timed_out,
-        merged_output=_redact_merged("".join(chunks), env),
-    )
+        chunks: list[str] = []
+        buffered = 0
+
+        async def _pump(stream: asyncio.StreamReader | None) -> None:
+            nonlocal buffered
+            if stream is None:
+                return
+            while True:
+                line = await stream.readline()
+                if not line:
+                    return
+                if buffered >= _MERGED_OUTPUT_LIMIT_CHARS:
+                    continue
+                text = line.decode(errors="replace")
+                remaining = _MERGED_OUTPUT_LIMIT_CHARS - buffered
+                if len(text) > remaining:
+                    text = text[:remaining]
+                buffered += len(text)
+                chunks.append(text)
+
+        pump_stdout = asyncio.ensure_future(_pump(proc.stdout))
+        pump_stderr = asyncio.ensure_future(_pump(proc.stderr))
+
+        timed_out = False
+        try:
+            exit_status = await asyncio.wait_for(proc.wait(), wall_budget_s)
+        except TimeoutError:
+            timed_out = True
+            await terminate_process(proc)
+            exit_status = proc.returncode if proc.returncode is not None else -1
+
+        # Bound the post-exit drain with a salvage window. After a group kill the
+        # pipes hit EOF; a suite-spawned grandchild that inherited the pipe write
+        # ends can keep them open past a direct child's exit (a live-server
+        # fixture, a daemonizing helper), so the success path needs the same bound.
+        # A CancelledError here is only reachable after a clean exit, so it
+        # propagates; the timed-out path swallows it as before.
+        try:
+            await asyncio.wait_for(
+                asyncio.gather(pump_stdout, pump_stderr), timeout=5.0
+            )
+        except TimeoutError:
+            pass
+        except asyncio.CancelledError:
+            if not timed_out:
+                raise
+        if timed_out:
+            phase.stop_reason = "timed_out"
+        return TestExecutionResult(
+            exit_status=exit_status,
+            timed_out=timed_out,
+            merged_output=_redact_merged("".join(chunks), effective_env),
+        )

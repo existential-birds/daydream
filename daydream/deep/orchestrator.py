@@ -21,7 +21,6 @@ from daydream.config import (
     REVIEW_OUTPUT_FILE,
     STRUCTURE_STACK_NAME,
 )
-from daydream.config_file import _coerce_non_negative_int
 from daydream.deep import review_steps
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
@@ -68,7 +67,12 @@ from daydream.deep.review_steps import (
     _step_wonder_and_per_stack,
 )
 from daydream.deep.routing_record import write_routing_record
-from daydream.deep.settings import _resolve_config_value, fold_default_alternatives, fresh_ttt
+from daydream.deep.settings import (
+    _resolve_config_value,
+    _resolve_non_negative_int,
+    fold_default_alternatives,
+    fresh_ttt,
+)
 from daydream.deep.sharding import shard_stacks
 from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
@@ -168,23 +172,9 @@ def _deep_shard_enabled(config: RunConfig, *, diff: str = "") -> bool:
     return DEFAULT_DEEP_SHARD_ENABLED or review_scale_for_diff(diff) >= 4
 
 
-def _deep_shard_int(config: RunConfig, attr: str, default: int) -> int:
-    """Resolve an integer sharding bound, coercing-and-degrading (issue #731).
-
-    Integer-only non-negative: ``0`` is preserved where meaningful while a
-    negative value, a float, a bool, or any non-int degrades to the named
-    default -- mirroring ``config_file._coerce_non_negative_int`` (reused,
-    import read-only) so a directly-constructed ``RunConfig`` cannot smuggle an
-    invalid bound into the sharder.
-    """
-    value = _resolve_config_value(config, attr, default)
-    coerced = _coerce_non_negative_int(value)
-    return coerced if coerced is not None else default
-
-
 def _deep_shard_max_files(config: RunConfig) -> int:
     """Resolve the per-shard max file-count bound (issue #731)."""
-    return _deep_shard_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
+    return _resolve_non_negative_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
 
 
 def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
@@ -669,9 +659,11 @@ def _prepare_review_stacks(
             stacks,
             diff,
             max_files=_deep_shard_max_files(config),
-            max_bytes=_deep_shard_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES),
-            fanout_cap=_deep_shard_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP),
-            frontier_max=_deep_shard_int(config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX),
+            max_bytes=_resolve_non_negative_int(config, "deep_shard_max_bytes", DEFAULT_DEEP_SHARD_MAX_BYTES),
+            fanout_cap=_resolve_non_negative_int(config, "deep_shard_fanout_cap", DEFAULT_DEEP_SHARD_FANOUT_CAP),
+            frontier_max=_resolve_non_negative_int(
+                config, "deep_shard_frontier_max", DEFAULT_DEEP_SHARD_FRONTIER_MAX
+            ),
             graph=import_graph,
         )
 

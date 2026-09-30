@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TYPE_CHECKING, cast
 
+from daydream.config_file import _coerce_non_negative_float, _coerce_non_negative_int
+
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
     from daydream.runner import RunConfig
@@ -34,6 +36,18 @@ def _resolve_opt_in(config: RunConfig, attr: str) -> bool:
         return True
     file_config = config.file_config
     return bool(file_config is not None and getattr(file_config, attr, False))
+
+
+def _resolve_non_negative_int(config: RunConfig, attr: str, default: int) -> int:
+    """Resolve an int bound; invalid/negative values (bool, float, non-int) degrade to *default*."""
+    coerced = _coerce_non_negative_int(_resolve_config_value(config, attr, default))
+    return coerced if coerced is not None else default
+
+
+def _resolve_non_negative_float(config: RunConfig, attr: str, default: float) -> float:
+    """Resolve a float threshold; negative/NaN/infinite values degrade to *default*."""
+    coerced = _coerce_non_negative_float(_resolve_config_value(config, attr, default))
+    return coerced if coerced is not None else default
 
 
 def fresh_ttt(config: RunConfig) -> bool:

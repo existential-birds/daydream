@@ -419,6 +419,41 @@ def _gh_retries() -> int:
     )
 
 
+def _retrying_subprocess(
+    argv: list[str],
+    *,
+    display: str,
+    cwd: Path,
+    text: bool,
+    input_data: str | bytes | None,
+    env: Any | None,
+    timeout: int | float,
+    retries: int,
+    scrub: Callable[[str], str] = str,
+    suffix: str = "",
+) -> subprocess.CompletedProcess[Any]:
+    """Run *argv*, retrying only timeouts; *scrub* redacts failure text, *suffix* labels the exhausted error."""
+    program = argv[0]
+    last_timeout: subprocess.TimeoutExpired | None = None
+    for attempt in range(retries + 1):
+        try:
+            return subprocess.run(  # noqa: S603 - arguments are not user-controlled
+                argv, cwd=cwd, capture_output=True, text=text,
+                timeout=timeout, shell=False, check=False, input=input_data, env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+            if attempt < retries:
+                _logger.warning(
+                    "%s %s timed out after %ss (attempt %d/%d); retrying",
+                    program, display, timeout, attempt + 1, retries + 1,
+                )
+        except (subprocess.SubprocessError, OSError) as exc:
+            raise GitError(f"{program} {display} failed: {type(exc).__name__}: {scrub(str(exc))}") from exc
+
+    raise GitTimeoutError(f"{program} {display} timed out after {timeout}s{suffix}") from last_timeout
+
+
 @overload
 def _run_git(
     repo: Path,
@@ -471,45 +506,27 @@ def _run_git(
         raise GitError("git subprocess input must be text or bytes, not both")
     if input_bytes is not None and not capture_bytes:
         raise GitError("binary git subprocess input requires binary capture")
-    last_timeout: subprocess.TimeoutExpired | None = None
-    for attempt in range(retries + 1):
-        try:
-            return subprocess.run(  # noqa: S603 - arguments are not user-controlled
-                ["git", *args],  # noqa: S607 - git is a trusted command
-                cwd=repo,
-                capture_output=True,
-                text=not capture_bytes,
-                timeout=timeout,
-                shell=False,
-                check=False,
-                # capture_bytes=True reads bytes stdout/stderr, so a str
-                # input_text must be encoded: subprocess.run raises a raw
-                # TypeError for str input with text=False.
-                input=(
-                    input_bytes
-                    if input_bytes is not None
-                    else input_text.encode("utf-8")
-                    if capture_bytes and input_text is not None
-                    else input_text
-                ),
-                env=env_cmd,
-            )
-        except subprocess.TimeoutExpired as exc:
-            last_timeout = exc
-            if attempt < retries:
-                _logger.warning(
-                    "git %s timed out after %ss (attempt %d/%d); retrying",
-                    " ".join(args),
-                    timeout,
-                    attempt + 1,
-                    retries + 1,
-                )
-        except (subprocess.SubprocessError, OSError) as exc:
-            raise GitError(f"git {' '.join(args)} failed: {type(exc).__name__}: {exc}") from exc
-
-    raise GitTimeoutError(
-        f"git {' '.join(args)} timed out after {timeout}s ({retries + 1} attempts)",
-    ) from last_timeout
+    display = " ".join(args)
+    return _retrying_subprocess(
+        ["git", *args],
+        display=display,
+        cwd=repo,
+        text=not capture_bytes,
+        # capture_bytes=True reads bytes stdout/stderr, so a str input_text must
+        # be encoded: subprocess.run raises a raw TypeError for str input with
+        # text=False.
+        input_data=(
+            input_bytes
+            if input_bytes is not None
+            else input_text.encode("utf-8")
+            if capture_bytes and input_text is not None
+            else input_text
+        ),
+        env=env_cmd,
+        timeout=timeout,
+        retries=retries,
+        suffix=f" ({retries + 1} attempts)",
+    )
 
 
 def _run_gh(
@@ -532,39 +549,20 @@ def _run_gh(
         timeout = _gh_timeout()
     environment = auth.environment_for_request()
     env = dict(environment) if environment is not None else None
-    last_timeout: subprocess.TimeoutExpired | None = None
-    for attempt in range(retries + 1):
-        try:
-            return subprocess.run(  # noqa: S603 - arguments are not user-controlled
-                ["gh", *args],  # noqa: S607 - gh is a trusted command
-                cwd=repo,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                shell=False,
-                check=False,
-                input=input_text,
-                env=env,
-            )
-        except subprocess.TimeoutExpired as exc:
-            last_timeout = exc
-            if attempt < retries:
-                _logger.warning(
-                    "gh %s timed out after %ss (attempt %d/%d); retrying",
-                    " ".join(_redact_args(args)),
-                    timeout,
-                    attempt + 1,
-                    retries + 1,
-                )
-        except (subprocess.SubprocessError, OSError) as exc:
-            raise GitError(
-                f"gh {' '.join(_redact_args(args))} failed: {type(exc).__name__}: {_redact_sensitive_text(str(exc))}"
-            ) from exc
-
+    display = " ".join(_redact_args(args))
     suffix = f" ({retries + 1} attempts)" if retries else ""
-    raise GitTimeoutError(
-        f"gh {' '.join(_redact_args(args))} timed out after {timeout}s{suffix}"
-    ) from last_timeout
+    return _retrying_subprocess(
+        ["gh", *args],
+        display=display,
+        cwd=repo,
+        text=True,
+        input_data=input_text,
+        env=env,
+        timeout=timeout,
+        retries=retries,
+        scrub=_redact_sensitive_text,
+        suffix=suffix,
+    )
 
 
 # --- Pre-flight --------------------------------------------------------------
