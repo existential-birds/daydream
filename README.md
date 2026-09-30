@@ -471,6 +471,58 @@ its decision to `.daydream/deep/latency-routing.json`, and the archived
 [review runtime](docs/review-runtime.md#latency-profiles-and-the-per-profile-report)
 for the per-profile report command.
 
+The same corpus declares `selection_cases` for the recommendation-verifier
+comparison, and the documented command
+`uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json`
+then emits a `verify_selection` block contrasting today's conservative verifier
+(`verify_all`) with the selective mode. It reports, per mode: the selected item
+and backend-call counts (a mode with no selected item makes no call), how many
+the mode skips, how many skipped items the archived arm had verdicted
+`contradicts` or `uncertain` (the offline counterfactual), the fraction of each
+case's golden high-severity anchors the mode still verifies, and the reverted or
+failed fix count from `fix-outcomes.json`. The proposed arm's latency scales the
+archived measured verify wall-clock by the selected-item ratio and is labelled a
+projection, never a second measurement. `flip_allowed` turns on the
+contradiction counter and the recall anchor alone -- latency is reported, not
+gated.
+
+### Recommendation verifier settings
+
+Selection-gated recommendation verification is the default: the verifier is
+rendered only the findings that genuinely need an independent second pass
+(mandatory risk categories, contested or weakly-evidenced adjudications, and
+unadjudicated findings). The two knobs are config-file-only:
+
+| Key | Default | Semantics |
+|-----|---------|-----------|
+| `verify_all` | `false` | `true` restores the conservative mode exactly: every non-exempt finding is verifier-rendered, and no finding is selection-skipped. |
+| `extra_risk_categories` | `[]` | Risk categories appended to the mandatory vocabulary. Additive only -- it can widen selection, never narrow it. Entries are deduplicated against the mandatory vocabulary, so a name that is already mandatory (the whole declared vocabulary today) is a no-op. |
+
+```toml
+# pyproject.toml  →  [tool.daydream]
+[tool.daydream]
+verify_all = false                 # the default; true restores today's conservative verifier
+extra_risk_categories = ["security"]   # `security` is already mandatory: deduplicated, no-op
+
+# .daydream.toml  (top-level keys; no [tool.daydream] prefix)
+verify_all = false
+extra_risk_categories = ["security"]
+```
+
+Precedence is the standard one: **CLI (none for these keys) > config file > built-in
+default**. An absent key uses the built-in default; `verify_all = true` in
+either file restores conservative verification exactly. An unrecognised
+`extra_risk_categories` entry **fails the run loudly** before the verify pass
+rather than silently widening or narrowing selection. The mandatory category
+vocabulary is the one shared with the diff-routing risk floors (`security`,
+`concurrency`, `persistence`, `public-interface`, `migration`).
+
+The default was flipped only after the evidence gate above went green: the
+report command
+`uv run python -m daydream.eval.latency_report --corpus tests/fixtures/latency_profiles/manifest.json`
+emits `flip_allowed: true` on the contradiction-counter and recall-anchor axes
+(its latency figures are a labelled projection, reported but not gated).
+
 ### Supervisor settings
 
 Supervisor settings are config-file-only:

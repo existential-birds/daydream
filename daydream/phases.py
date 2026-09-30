@@ -53,6 +53,7 @@ from daydream.config import (
     TEST_WALL_BUDGET_S,
 )
 from daydream.config_file import DaydreamFileConfig
+from daydream.deep.adjudication_provenance import load_provenance
 from daydream.deep.artifacts import (
     arbiter_input_path,
     deep_dir,
@@ -93,6 +94,14 @@ from daydream.deep.reuse_key import (
     unit_key,
 )
 from daydream.deep.reuse_store import ReuseCache, ReuseHit, restore_entry_payload
+from daydream.deep.verify_selection import (
+    SELECTION_RULE_VERSION,
+    SKIP_REASON_CODE,
+    SelectionConfig,
+    SelectionDecision,
+    plan_reuse,
+    select_items,
+)
 from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
@@ -107,6 +116,7 @@ from daydream.generated_files import (
 )
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.hunk_index import load_hunk_index
+from daydream.json_utils import read_json_object
 from daydream.output_schema import severity_enum_schema, strict_object
 from daydream.prompt_budget import (
     INLINE_DIFF_BUDGET_BYTES,
@@ -1829,28 +1839,84 @@ async def phase_verify_recommendations(
     merged_items_path: Path,
     deep_dir: Path,
     strategy: str | None = None,
+    selection: SelectionConfig | None = None,
     run_context: RunContext | None = None,
 ) -> tuple[Path, dict[str, Any]]:
-    """Verify proposed recommendations against author intent and concrete evidence."""
+    """Verify proposed recommendations against author intent and concrete evidence.
+
+    Every canonical item is classified once by :func:`select_items` -- the
+    decision list is persisted as a sibling ``selection`` block of the verdicts
+    list, so an exempt or skipped item is recorded, never silently dropped. Only
+    the selected items are rendered into the prompt; a run with nothing selected
+    makes no backend call at all and still writes a schema-valid artifact.
+
+    On a resume the same artifact is read back first and
+    :func:`plan_reuse` serves a prior verdict for every selected item whose
+    durable identity and verifier-relevant content are unchanged -- those
+    decisions are written with ``verdict_reused`` set and only the changed or
+    new items reach the prompt (MH14). A prior ``contradicts``/``uncertain``
+    verdict is always re-verified (MH9), and a rule-version or digest move is a
+    total miss rather than a partial reuse (SH3).
+
+    ``selection=None`` is conservative: it reproduces today's "verify every
+    non-structural item" behaviour (``verify_all``), so an un-updated caller can
+    never skip a finding.
+    """
     run_context = resolve_run_context(run_context)
     output_path = verdicts_path(deep_dir)
 
     items: list[dict[str, Any]] = json.loads(merged_items_path.read_text()).get("items", [])
-    # DELIBERATE: structural items get no verifier verdict (plan Assumption 2 --
-    # structural is validated at review time by review-structure's G3 evidence
-    # gates and protected at fix time by the contract-wins guard, so the
-    # interface-conformance verifier does not apply to it).
-    verifiable = [i for i in items if i.get("lens") in ("per-stack", "cross-stack")]
+    config = selection if selection is not None else SelectionConfig(verify_all=True)
+    decisions = select_items(
+        items,
+        provenance=load_provenance(deep_dir),
+        hunk_index=load_hunk_index(deep_dir.parent),
+        diff_text=_read_diff_text(deep_dir),
+        config=config,
+    )
+    # Read the prior artifact before this run overwrites it. An absent, unreadable
+    # or malformed file degrades to {} -- every item is re-verified, never a
+    # partial reuse and never a raise (Pattern B).
+    reused, to_verify = plan_reuse(_prior_selection_payload(read_json_object(output_path)), decisions)
+    decisions = [
+        replace(decision, verdict_reused=True) if decision.item_uid in reused else decision
+        for decision in decisions
+    ]
+    selection_block: dict[str, Any] = {
+        "rule_version": SELECTION_RULE_VERSION,
+        "mode": "verify_all" if config.verify_all else "selective",
+        "extra_categories": list(config.extra_categories),
+        "decisions": [decision.as_dict() for decision in decisions],
+        "selected": sum(1 for decision in decisions if decision.selected),
+        # ``skipped`` counts only items the selective rule sent to the skip
+        # branch; a lens exemption (structural / wonder) is recorded in the
+        # decision list but is not a skip the operator chose to make, so a
+        # ``verify_all`` run reports zero skipped (MH13).
+        "skipped": sum(1 for decision in decisions if decision.reason_code == SKIP_REASON_CODE),
+        "reused": len(reused),
+    }
+    # ``to_verify`` carries every non-reused decision (including an exempt one,
+    # for which no verdict exists); only a *selected* one may reach the prompt,
+    # so the exemption contract from the non-reuse path is preserved verbatim.
+    pending_uids = {decision.item_uid for decision in to_verify if decision.selected}
+    pending_items = [
+        item
+        for item, decision in zip(items, decisions, strict=True)
+        if decision.selected and decision.item_uid in pending_uids
+    ]
+    reused_verdicts = [reused[decision.item_uid] for decision in decisions if decision.item_uid in reused]
 
-    if not verifiable:
-        empty_payload: dict[str, Any] = {"verdicts": []}
+    if not pending_items:
+        # Nothing new to verify: the reused verdicts (possibly empty) are the
+        # whole artifact, still schema-valid, still written (MH11/MH14).
+        payload: dict[str, Any] = {"verdicts": reused_verdicts, "selection": selection_block}
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_text(json.dumps(empty_payload, indent=2))
-        return output_path, empty_payload
+        output_path.write_text(json.dumps(payload, indent=2))
+        return output_path, payload
 
     prompt = get_registry().prompt("verify")(
         strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["verification"].content,
-        items=verifiable,
+        items=pending_items,
         cwd=work.repo,
         output_path=output_path,
     )
@@ -1859,10 +1925,66 @@ async def phase_verify_recommendations(
         backend, work, prompt, RECOMMENDATION_VERDICTS_SCHEMA, run_context,
     )
     payload = _coerce_verdicts_payload(candidate)
+    payload["verdicts"] = _merge_reused_verdicts(reused_verdicts, payload["verdicts"], decisions, reused)
+    payload["selection"] = selection_block
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(payload, indent=2))
     return output_path, payload
+
+
+def _prior_selection_payload(artifact: dict[str, Any]) -> dict[str, Any] | None:
+    """Flatten a prior verify artifact into the payload :func:`plan_reuse` reads.
+
+    The rule version and per-item decisions live in the artifact's sibling
+    ``selection`` block while the verdicts live at its top level, so the reuse
+    planner gets one merged view. A missing or foreign selection block is
+    ``None`` -- a total miss, never a partial reuse (Pattern B).
+    """
+    selection = artifact.get("selection")
+    if not isinstance(selection, dict):
+        return None
+    verdicts = artifact.get("verdicts")
+    return {**selection, "verdicts": verdicts if isinstance(verdicts, list) else []}
+
+
+def _merge_reused_verdicts(
+    reused_verdicts: list[dict[str, Any]],
+    fresh_verdicts: list[dict[str, Any]],
+    decisions: list[SelectionDecision],
+    reused: dict[str, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Join reused and freshly verified verdicts, preserving today's entry shape.
+
+    Reused verdicts keep the reused item's slot. A fresh verdict whose
+    ``issue_id`` names a reused item is dropped: the model was never asked to
+    verify that item, so keeping the prior verdict is what MH14 requires rather
+    than letting an over-reaching response overwrite it.
+    """
+    reused_ids = {
+        decision.item_id
+        for decision in decisions
+        if decision.item_uid in reused and decision.item_id is not None
+    }
+    kept_fresh = [
+        verdict for verdict in fresh_verdicts if verdict.get("issue_id") not in reused_ids
+    ]
+    return [*reused_verdicts, *kept_fresh]
+
+
+def _read_diff_text(deep_dir: Path) -> str:
+    """Return the run's ``diff.patch`` text, or ``""`` when absent (Pattern B).
+
+    The production layout writes ``diff.patch`` beside the hunk index at the
+    artifact root (``deep_dir.parent``); a ``deep_dir``-local copy is accepted
+    first so a caller that stages the patch next to the deep artifacts works too.
+    """
+    for candidate in (deep_dir / "diff.patch", deep_dir.parent / "diff.patch"):
+        try:
+            return candidate.read_text()
+        except OSError:
+            continue
+    return ""
 
 
 @bind_resolved_run_context

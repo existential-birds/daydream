@@ -1,0 +1,16 @@
+{
+  "session_id": "fixture-risk-contradiction",
+  "evidence_key": {
+    "tree_key": "fixture-tree-risk-contradiction",
+    "policy_revision": "fixture-policy"
+  },
+  "outcomes": {
+    "python:1": {
+      "issue_id": 1,
+      "verdict": "resolved",
+      "path": "auth.py",
+      "reason": "the check now consults the caller identity",
+      "reverted": false
+    }
+  }
+}

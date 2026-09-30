@@ -1,0 +1,12 @@
+{
+  "format": "adjudication-provenance/1",
+  "records": {
+    "python:1": {
+      "uid": "python:1",
+      "passes": ["arbiter"],
+      "verdict_bound": true,
+      "kept": true,
+      "revised_fields": []
+    }
+  }
+}

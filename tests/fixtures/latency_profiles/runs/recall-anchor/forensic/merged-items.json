@@ -1,0 +1,18 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "item_uid": "python:1",
+      "description": "run() drains its caller's list in place",
+      "file": "engine.py",
+      "line": 2,
+      "confidence": "HIGH",
+      "rationale": "the drain mutates the caller's input (Sources: python-records item 1)",
+      "evidence": "engine.py:2 while items: items.pop()",
+      "lens": "per-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": ["python:1"]
+    }
+  ]
+}

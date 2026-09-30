@@ -1,0 +1,16 @@
+{
+  "session_id": "fixture-recall-anchor",
+  "evidence_key": {
+    "tree_key": "fixture-tree-recall-anchor",
+    "policy_revision": "fixture-policy"
+  },
+  "outcomes": {
+    "python:1": {
+      "issue_id": 1,
+      "verdict": "resolved",
+      "path": "engine.py",
+      "reason": "run() now iterates a copy",
+      "reverted": false
+    }
+  }
+}

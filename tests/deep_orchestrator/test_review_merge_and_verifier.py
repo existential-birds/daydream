@@ -708,13 +708,12 @@ async def test_verifier_runs_after_merge_before_fix(
 
 
     payload = json.loads(expected_path.read_text())
-    assert payload == {
-        "verdicts": [
-            {
-                "issue_id": 1,
-                "verdict": "consistent",
-                "evidence": "stub",
-                "unverified_assumptions": [],
-            }
-        ]
-    }
+    assert payload["verdicts"] == [
+        {
+            "issue_id": 1,
+            "verdict": "consistent",
+            "evidence": "stub",
+            "unverified_assumptions": [],
+        }
+    ]
+    assert payload["selection"]["decisions"]

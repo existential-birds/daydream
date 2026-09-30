@@ -1,0 +1,16 @@
+{
+  "auth.py": {
+    "added_total": 3,
+    "hunks": [
+      {
+        "added": 3,
+        "new_end": 4,
+        "new_start": 1,
+        "old_end": 2,
+        "old_start": 1,
+        "removed": 1
+      }
+    ],
+    "removed_total": 1
+  }
+}

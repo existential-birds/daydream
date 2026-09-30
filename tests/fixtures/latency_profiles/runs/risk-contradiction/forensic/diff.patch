@@ -1,0 +1,9 @@
+diff --git a/auth.py b/auth.py
+--- a/auth.py
++++ b/auth.py
+@@ -1,2 +1,4 @@
+ def login(user):
+-    return user
++    if not user.token:
++        raise PermissionError("missing credential")
++    return user

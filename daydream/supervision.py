@@ -9,7 +9,7 @@ from daydream.extensions import ToolDecision
 from daydream.generated_files import match_suffix_glob
 from daydream.trajectory import DaydreamPhase
 
-_REVISABLE_FINDING_FIELDS = (
+REVISABLE_FINDING_FIELDS = (
     "severity",
     "confidence",
     "description",
@@ -22,7 +22,7 @@ FindingVerdictEvent = tuple[int, str, str]
 
 def revise_finding_fields(record: dict[str, Any], verdict: dict[str, Any]) -> None:
     """Apply only verdict fields that may revise a finding in place."""
-    for field in _REVISABLE_FINDING_FIELDS:
+    for field in REVISABLE_FINDING_FIELDS:
         if field in verdict:
             record[field] = verdict[field]
 

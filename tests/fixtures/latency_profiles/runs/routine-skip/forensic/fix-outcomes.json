@@ -1,0 +1,23 @@
+{
+  "session_id": "fixture-routine-skip",
+  "evidence_key": {
+    "tree_key": "fixture-tree-routine-skip",
+    "policy_revision": "fixture-policy"
+  },
+  "outcomes": {
+    "python:1": {
+      "issue_id": 1,
+      "verdict": "unresolved",
+      "path": null,
+      "reason": "the rename was reverted after the post-fix verifier could not confirm it",
+      "reverted": true
+    },
+    "python:2": {
+      "issue_id": 2,
+      "verdict": "resolved",
+      "path": "api.py",
+      "reason": "the helper now reads its value from the caller",
+      "reverted": false
+    }
+  }
+}

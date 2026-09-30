@@ -1,6 +1,6 @@
 {
   "corpus": "latency-profiles",
-  "note": "Small fixed hand-built corpus for the per-profile comparison report (issue #732). The security and contested cases omit the fast profile because their risk floors escalate above it by construction (MH5), so only profiles actually taken are recorded. The two review-runtime cases carry an explicit sample_group so the cold fix and the warm reuse loop are reported apart (MH14).",
+  "note": "Small fixed hand-built corpus for the per-profile comparison report (issue #732). The security and contested cases omit the fast profile because their risk floors escalate above it by construction (MH5), so only profiles actually taken are recorded. The two review-runtime cases carry an explicit sample_group so the cold fix and the warm reuse loop are reported apart (MH14). The top-level selection_cases list declares the MH16 verify-selection cases (issue #735); each names the single archived profile that took it and points at a run directory carrying the predicate's four inputs (merged items, adjudication provenance, hunk index, diff) plus the conservative arm's archived verdicts, fix outcomes, and measured verify wall-clock.",
   "corpus_dir": "tests/fixtures/latency_profiles",
   "cases": [
     {
@@ -55,6 +55,38 @@
       "sample_group": "warm",
       "profiles": [
         "forensic"
+      ]
+    }
+  ],
+  "selection_cases": [
+    {
+      "name": "routine-skip",
+      "profile": "forensic",
+      "golden_high_severity": [
+        [
+          "api.py",
+          5
+        ]
+      ]
+    },
+    {
+      "name": "risk-contradiction",
+      "profile": "forensic",
+      "golden_high_severity": [
+        [
+          "auth.py",
+          2
+        ]
+      ]
+    },
+    {
+      "name": "recall-anchor",
+      "profile": "forensic",
+      "golden_high_severity": [
+        [
+          "engine.py",
+          2
+        ]
       ]
     }
   ]

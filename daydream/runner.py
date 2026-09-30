@@ -248,6 +248,14 @@ class RunConfig:
     review_cache_max_entries: int | None = None
     review_cache_max_bytes: int | None = None
     review_cache_max_age_days: int | None = None
+    # Issue #735: selection-gated recommendation verification. ``verify_all`` is
+    # the conservative toggle (today's "verify every non-exempt finding"
+    # behaviour); ``verify_extra_risk_categories`` additively widens the
+    # mandatory risk vocabulary and is validated fail-loud before the verify
+    # pass. Both are config-file-only keys (no CLI flag); ``None`` falls through
+    # to the file config then the built-in default in ``config.py``.
+    verify_all: bool | None = None
+    verify_extra_risk_categories: list[str] | None = None
     # Issue #885: versioned benchmark-tunable review profile. The path field is
     # the CLI/env-carried explicit source; the profile field is the resolved
     # value (validated object + source kind + digest), set once by

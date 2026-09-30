@@ -1,0 +1,10 @@
+diff --git a/api.py b/api.py
+--- a/api.py
++++ b/api.py
+@@ -1,2 +1,5 @@
+ def handler():
+-    return old_helper()
++    return new_helper()
++
++def new_helper():
++    return 1

@@ -11,11 +11,13 @@ from typing import Any
 import pytest
 
 from daydream.config import REVIEW_OUTPUT_FILE
-from daydream.deep import orchestrator as deep_orchestrator
+from daydream.deep import fix_steps, orchestrator as deep_orchestrator
+from daydream.deep.records import item_uid
 from daydream.extensions.api import Stop
 from daydream.git_ops import GitTimeoutError
 from daydream.run_context import current_run_context
 from daydream.runner import run
+from daydream.ui import format_verdict_join
 from tests.deep_orchestrator.support import (
     _forbidden_input,
     _install_accept_gate_pipeline,
@@ -191,6 +193,75 @@ async def test_structural_finding_reaches_fix_loop(
     )
     sev = [str(i["severity"]) for i in fixed]
     assert sev == sorted(sev, key=_severity_sort_key)
+
+
+async def test_verdict_join_reconciles_selection_skips_through_the_real_run(
+    multi_stack_target: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mute_side_effects: Mute,
+) -> None:
+    """Real-path: the terminal Verdict Join reconciles every canonical item exactly
+    once, and the verify phase's persisted selection decisions are its single source
+    for the skip/structural split (a skip is never re-reported as unmatched)."""
+    _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
+
+    captured: list[dict[str, Any]] = []
+    real_format = format_verdict_join
+
+    def _capture(**kwargs: Any) -> Any:
+        captured.append(kwargs)
+        return real_format(**kwargs)
+
+    # _step_verify resolves format_verdict_join from its own module namespace.
+    monkeypatch.setattr(fix_steps, "format_verdict_join", _capture)
+
+    exit_code = await _run_deep(multi_stack_target)
+    assert exit_code == 0
+    assert captured, "the Verdict Join table was never rendered -- _step_verify did not run"
+    buckets = captured[-1]
+    ids = [
+        *buckets["matched"],
+        *buckets["unmatched"],
+        *buckets["skipped"],
+        *buckets["structural"],
+        *buckets["other"],
+    ]
+    assert len(ids) == buckets["total"], (
+        f"Verdict Join buckets do not reconcile: {len(ids)} ids vs total {buckets['total']}"
+    )
+
+    # The persisted decisions drove the split: every exempt structural item is in
+    # Structural (never Skipped), and every other non-selected item is Skipped.
+    deep = multi_stack_target / ".daydream" / "deep"
+    payload = json.loads((deep / "recommendation-verdicts.json").read_text())
+    decisions = {d["item_uid"]: d for d in payload["selection"]["decisions"]}
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    for item in items:
+        decision = decisions.get(item_uid(item))
+        if decision is None:
+            continue
+        item_id = item.get("id")
+        if decision["reason_code"] == "exempt:structural":
+            assert item_id in buckets["structural"]
+            assert item_id not in buckets["skipped"]
+        elif decision["selected"] is False:
+            assert item_id in buckets["skipped"]
+
+
+@pytest.mark.parametrize("reason", ["exempt:structural", "exempt:wonder"])
+def test_verdict_buckets_route_every_lens_exemption_to_structural(reason: str) -> None:
+    """Both lens exemptions land in the structural bucket, never in Skipped.
+
+    The selection block's own ``skipped`` counter counts only the selective
+    rule's skip branch, so a wonder-lens item reported as an operator-chosen
+    skip in the Verdict Join table would contradict the adjacent summary line.
+    """
+    items: list[dict[str, Any]] = [{"id": 4, "item_uid": "item:4"}]
+    payload = {"selection": {"decisions": [{"item_uid": "item:4", "reason_code": reason, "selected": False}]}}
+    matched, unmatched, skipped, structural, other = fix_steps._verdict_buckets(items, payload)
+    assert structural == [4]
+    assert skipped == []
+    assert (matched, unmatched, other) == ([], [], [])
 
 
 def test_severity_sort_key_names_unknown_value() -> None:

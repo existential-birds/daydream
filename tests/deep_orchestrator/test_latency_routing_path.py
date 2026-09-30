@@ -44,6 +44,14 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
     "stack-structure-review.md",
 })
 
+#: Artifacts deliberately added to ``.daydream/deep/`` after the pre-#732 baseline
+#: was captured. ``latency-routing.json`` is issue #732's additive routing record
+#: (A12); ``adjudication-provenance.json`` is the host-stamped adjudication ledger
+#: issue #735 adds. The gate subtracts both before comparing against the baseline.
+_FORENSIC_ADDITIVE_DEEP_ARTIFACTS = frozenset(
+    {"latency-routing.json", "adjudication-provenance.json"}
+)
+
 #: The pre-#732 ``arbiter-input.json`` for the exact stub records below: the
 #: forensic path must reproduce it byte-for-byte (A12), never a re-ordered or
 #: re-shaped selection.
@@ -174,9 +182,13 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
     deep = multi_stack_target / ".daydream" / "deep"
     assert (deep / "arbiter-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
-    # A12: the only artifact the profile work adds is the routing record.
+    # A12: the profile work adds the routing record, and issue #735 adds the
+    # adjudication provenance ledger; both are deliberate, so the gate subtracts
+    # the post-baseline additions before comparing.
     assert {
-        path.name for path in deep.iterdir() if path.name != "latency-routing.json"
+        path.name
+        for path in deep.iterdir()
+        if path.name not in _FORENSIC_ADDITIVE_DEEP_ARTIFACTS
     } == _FORENSIC_BASELINE_DEEP_ARTIFACTS
     assert json.loads((deep / "arbiter-input.json").read_text()) == _FORENSIC_BASELINE_ARBITER_INPUT
     record = read_routing_record(deep)

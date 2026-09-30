@@ -1,0 +1,32 @@
+{
+  "items": [
+    {
+      "id": 1,
+      "item_uid": "python:1",
+      "description": "rename old_helper to new_helper",
+      "file": "api.py",
+      "line": 2,
+      "confidence": "HIGH",
+      "rationale": "pure rename, no behaviour change (Sources: python-records item 1)",
+      "evidence": "api.py:2 return new_helper()",
+      "lens": "per-stack",
+      "severity": "medium",
+      "related_files": null,
+      "source_uids": ["python:1"]
+    },
+    {
+      "id": 2,
+      "item_uid": "python:2",
+      "description": "new_helper returns a hard-coded constant",
+      "file": "api.py",
+      "line": 5,
+      "confidence": "HIGH",
+      "rationale": "the helper needs a real source (Sources: python-records item 2)",
+      "evidence": "api.py:5 return 1",
+      "lens": "per-stack",
+      "severity": "high",
+      "related_files": null,
+      "source_uids": ["python:2"]
+    }
+  ]
+}
