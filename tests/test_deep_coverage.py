@@ -804,7 +804,7 @@ def test_strip_dot_slash_normalizes_once() -> None:
 def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
     """Issue #740: verdict-path and findings-fallback strips route through the helper.
 
-    Both ``_parsed_covered_files`` (verdict ``path`` entries) and the
+    Both ``_parsed_file_coverage`` (verdict ``path`` entries) and the
     findings fallback (``file`` fields) normalize a leading ``./`` the same
     way, so a ``./x`` spelling credits the same file either way.
     """

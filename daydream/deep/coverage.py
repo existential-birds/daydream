@@ -150,7 +150,7 @@ def _read_coverage_unverifiable(
 def _finding_files_from_records(findings: list[Any]) -> set[str]:
     """Normalized ``file`` fields across parsed finding records (issue #742).
 
-    Shared between the findings-only fallback in :func:`_parsed_covered_files`
+    Shared between the findings-only fallback in :func:`_parsed_file_coverage`
     and the per-stack verdict reconciliation in the orchestrator (in-memory
     parsed records) so the ``./`` strip lives in one place
     (:func:`strip_dot_slash`): a leading ``./`` is a legal path spelling
@@ -167,15 +167,16 @@ def _finding_files_from_records(findings: list[Any]) -> set[str]:
     return files
 
 
-def _parsed_covered_files(records_path: Path, *, require_read_evidence: bool = False) -> set[str] | None:
-    """Set of files a completed shard's evidence-gated verdicts mark covered.
+def _parsed_file_coverage(records_path: Path) -> dict[str, bool] | None:
+    """Covered files mapped to whether their source-read evidence is verifiable.
 
     A diff file is covered when the shard's persisted ``verdicts`` array
-    records it as ``clean`` or ``has_findings`` (the reviewer read it and the
-    verdict is evidence-backed, never raw declared self-report). An unread
-    file records ``not_reviewed`` and never enters the set. Legacy record
+    records it as ``clean`` or ``has_findings``. A retained finding with
+    unverifiable reads maps to False: it may still count against an independently
+    completed source packet, but never establishes inline/frontier coverage.
+    ``not_reviewed`` and ``unknown`` verdicts contribute no entry. Legacy record
     shapes -- a bare findings list, a dict without a ``verdicts`` key, or an
-    empty ``verdicts`` list -- fall back to the findings-only set below.
+    empty ``verdicts`` list -- retain the findings-only fallback.
 
     Returns ``None`` when the records file is absent or unreadable -- an
     incomplete shard contributes ZERO inline/frontier coverage (fail-open: the
@@ -188,21 +189,19 @@ def _parsed_covered_files(records_path: Path, *, require_read_evidence: bool = F
     if isinstance(records, dict):
         verdicts = records.get("verdicts")
         if isinstance(verdicts, list) and verdicts:
-            covered: set[str] = set()
+            covered: dict[str, bool] = {}
             for entry in verdicts:
                 if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
                     continue
                 if entry.get("verdict") not in {"clean", "has_findings"}:
                     continue  # not_reviewed (or any other) never credits
-                if require_read_evidence and entry.get("source_read_status") == "unverifiable":
-                    continue  # retained findings do not prove an opaque source read
                 path = strip_dot_slash(entry["path"])
-                covered.add(path)
+                covered[path] = covered.get(path, False) or entry.get("source_read_status") != "unverifiable"
             return covered
     findings = _records_issues(records)
     if findings is None:
         return None
-    return _finding_files_from_records(findings)
+    return dict.fromkeys(_finding_files_from_records(findings), True)
 
 
 def _receipt_covered_files(
@@ -242,38 +241,35 @@ def _receipt_covered_files(
     # the frontier branch credits a file when its owning (or any) shard actually
     # read it -- else a frontier file never appears in a shard's own records and
     # ``dependency_frontier_read`` can never fire (issue #740 regression).
-    shard_covered: dict[str, set[str]] = {}
+    shard_coverage: dict[str, dict[str, bool]] = {}
     frontier_evidence: set[str] = set()
     for stack_name, _ in receipts.items():
-        loaded = _parsed_covered_files(
-            per_stack_records_path(deep_dir_path, stack_name), require_read_evidence=True
-        )
+        loaded = _parsed_file_coverage(per_stack_records_path(deep_dir_path, stack_name))
         if loaded is not None:
-            shard_covered[stack_name] = loaded
-            frontier_evidence |= loaded
+            shard_coverage[stack_name] = loaded
+            frontier_evidence.update(path for path, verified in loaded.items() if verified)
 
     for stack_name, receipt in receipts.items():
         if not isinstance(receipt, dict):
             continue
-        inline_covered = shard_covered.get(stack_name)
+        file_coverage = shard_coverage.get(stack_name)
         packet_files = receipt.get("source_packet_files", [])
         if isinstance(packet_files, list) and packet_files:
-            packet_verdicts = _parsed_covered_files(per_stack_records_path(deep_dir_path, stack_name))
             packet_covered = covered_by_type.setdefault("source_packet_reviewed", set())
             for path in packet_files:
                 if (
                     isinstance(path, str)
                     and path in diff_set
-                    and packet_verdicts is not None
-                    and path in packet_verdicts
+                    and file_coverage is not None
+                    and path in file_coverage
                 ):
                     covered.add(path)
                     packet_covered.add(path)
         # Inline evidence is gated on THIS shard's own records: a shard without
         # a records file contributes zero inline evidence (fail-open).
-        if inline_covered is not None:
+        if file_coverage is not None:
             for f in receipt.get("inline_files", []) or []:
-                if f in diff_set and f in inline_covered:
+                if f in diff_set and file_coverage.get(f, False):
                     covered.add(f)
                     covered_by_type["inline_hunk_reviewed"].add(f)
         # Frontier evidence is gated on the SIBLING union, NOT this shard's own
