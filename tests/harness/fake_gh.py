@@ -55,7 +55,7 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.pr_review import finding_marker
+from daydream.pr_review import PRInfo, finding_marker
 from tests.harness import github_schema
 
 
@@ -816,6 +816,60 @@ class FakeGh:
         if self._responses_path.exists():
             return cast(dict[str, Any], json.loads(self._responses_path.read_text(encoding="utf-8")))
         return {}
+
+
+@dataclass
+class CapturedPost:
+    """A held-open PR review POST endpoint for a fake ``gh``."""
+
+    gh: FakeGh
+    owner: str
+    repo: str
+    number: int = 123
+
+    @property
+    def payloads(self) -> list[dict[str, Any]]:
+        endpoint = f"repos/{self.owner}/{self.repo}/pulls/{self.number}/reviews"
+        return [call.payload for call in self.gh.calls("POST", endpoint)]
+
+    def body(self) -> str:
+        assert self.payloads, "no review payload was submitted"
+        return str(self.payloads[-1]["body"])
+
+
+def capture_review_post(
+    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: FakeGh,
+    *,
+    owner: str,
+    repo: str,
+    head_sha: str,
+    base_sha: str,
+    number: int = 123,
+) -> CapturedPost:
+    """Patch PR discovery and the fake ``gh`` review POST for one checkout.
+
+    Returns the :class:`CapturedPost` whose ``payloads``/``body`` expose the
+    review the production path actually submitted.
+    """
+    captured = CapturedPost(gh=fake_gh, owner=owner, repo=repo, number=number)
+    fake_pr = PRInfo(
+        number=number,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        base_ref="main",
+        head_ref="feature",
+        owner=owner,
+        repo=repo,
+        url=f"https://example/pr/{number}",
+    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr)
+    fake_gh.set_response(
+        "POST",
+        f"repos/{owner}/{repo}/pulls/{number}/reviews",
+        {"html_url": f"https://example/pr/{number}#review-1"},
+    )
+    return captured
 
 
 def _shim_main(state_dir: Path) -> int:

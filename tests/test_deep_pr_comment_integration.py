@@ -21,13 +21,11 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import pr_review
 from daydream.exploration import ExplorationContext
 from daydream.runner import RunConfig, run
 from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
@@ -41,7 +39,11 @@ from tests.harness.claude_sdk import (
     MockUserMessage,
     patch_claude_sdk,
 )
-from tests.harness.fake_gh import FakeGh
+from tests.harness.fake_gh import (
+    CapturedPost as _CapturedPost,
+    FakeGh,
+    capture_review_post,
+)
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 
 FIXTURE_MODEL_ID = "fixture-model-id"
@@ -421,43 +423,18 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
 # in for the gh-CLI subprocess that would post to GitHub).
 
 
-@dataclass
-class _CapturedPost:
-    gh: FakeGh
-
-    @property
-    def payloads(self) -> list[dict[str, Any]]:
-        return [call.payload for call in self.gh.calls("POST", "repos/test-owner/test-repo/pulls/123/reviews")]
-
-
 @pytest.fixture
 def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
     """Wire PR discovery and fake gh so the complete submission runs and we see
     the rendered markdown without ever touching GitHub."""
-
-    captured = _CapturedPost(fake_gh)
-
-    fake_pr = pr_review.PRInfo(
-        number=123,
-        head_sha="0" * 40,
-        base_sha="1" * 40,
-        base_ref="main",
-        head_ref="feature",
+    return capture_review_post(
+        monkeypatch,
+        fake_gh,
         owner="test-owner",
         repo="test-repo",
-        url="https://example/pr/123",
+        head_sha="0" * 40,
+        base_sha="1" * 40,
     )
-
-    monkeypatch.setattr(
-        "daydream.pr_review.find_open_pr",
-        lambda target_dir, **_kwargs: fake_pr,
-    )
-
-    fake_gh.set_response(
-        "POST", "repos/test-owner/test-repo/pulls/123/reviews",
-        {"html_url": "https://example/pr/123#review-1"},
-    )
-    return captured
 
 
 # Misc: silence Rich UI noise + answer interactive prompts.
