@@ -16,6 +16,7 @@ import pytest
 from daydream import review_profile as rp
 from daydream.config_file import DaydreamFileConfig
 from daydream.runner import RunConfig
+from tests.harness.git_helpers import commit, init_repo, write_and_stage
 
 
 def _write_profile(tmp_path: Path, name: Any, content: Any) -> Any:
@@ -106,12 +107,9 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatc
     # A real git target so the run gets past workspace open and actually
     # reaches dispatch (the profile-resolution seam fires inside the deep
     # flow's composition root, after open_workspace).
-    subprocess.run(["git", "init", "-q", "-b", "main", str(tmp_path)], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "config", "user.email", "t@t"], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "config", "user.name", "t"], check=True)
-    (tmp_path / "seed.txt").write_text("x\n")
-    subprocess.run(["git", "-C", str(tmp_path), "add", "."], check=True)
-    subprocess.run(["git", "-C", str(tmp_path), "commit", "-qm", "init"], check=True)
+    init_repo(tmp_path)
+    write_and_stage(tmp_path, "seed.txt", "x\n")
+    commit(tmp_path, "init")
 
     p = tmp_path / "prof.toml"
     p.write_text('schema_version = 1\nname = "cli-p"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')

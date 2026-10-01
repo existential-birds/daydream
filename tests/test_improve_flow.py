@@ -2,7 +2,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 from collections.abc import AsyncIterator, Callable
 from pathlib import Path
@@ -982,23 +981,11 @@ def _tiers_by_marker(calls: list[dict[str, Any]]) -> dict[str, set[tuple[str, st
 
 
 def _git_status_porcelain(repo: Path) -> str:
-    return subprocess.run(
-        ["git", "status", "--porcelain", "--untracked-files=no"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout
+    return git(repo, "status", "--porcelain", "--untracked-files=no")
 
 
 def _untracked(repo: Path) -> list[str]:
-    return subprocess.run(
-        ["git", "ls-files", "--others", "--exclude-standard"],
-        cwd=repo,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.splitlines()
+    return git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
 
 
 def _dispatch_for_phase(trajectory: dict[str, Any], phase: str) -> dict[str, Any]:
@@ -4233,13 +4220,7 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
         (improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md")
     )
     text = plan_path.read_text(encoding="utf-8")
-    head_sha = subprocess.run(
-        ["git", "rev-parse", "HEAD"],
-        cwd=improve_monorepo_target,
-        check=True,
-        capture_output=True,
-        text=True,
-    ).stdout.strip()
+    head_sha = git(improve_monorepo_target, "rev-parse", "HEAD")
 
     # Preconditions: the executor is told where it must be standing, with the
     # full commit id and an exact expected result per command.
