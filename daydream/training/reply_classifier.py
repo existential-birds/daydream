@@ -10,10 +10,6 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from daydream.training.labeler_versions import (
-    REPLY_CLASSIFIER_VERSION as REPLY_CLASSIFIER_VERSION,
-)
-
 #: Logins that never qualify as reply authors (daydream's own accounts).
 _DAYDREAM_AGENT_LOGINS = frozenset({"daydream-agent", "daydream-bot"})
 

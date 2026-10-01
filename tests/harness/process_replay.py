@@ -7,6 +7,8 @@ the Codex and Pi backends drive via
 """
 
 import asyncio
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -52,3 +54,13 @@ def make_mock_process_from_fixture(fixtures_dir: Path, name: str, *, writable_st
     fixture_path = fixtures_dir / name
     lines = fixture_path.read_text().strip().split("\n")
     return make_mock_process(lines, writable_stdin=writable_stdin)
+
+
+def bind_replay(
+    fixtures_dir: Path, *, writable_stdin: bool
+) -> tuple[Callable[[list[str]], MagicMock], Callable[[str], MagicMock]]:
+    """Bind one backend's fixture dir and stdin mode to the replay builders."""
+    return (
+        partial(make_mock_process, writable_stdin=writable_stdin),
+        partial(make_mock_process_from_fixture, fixtures_dir, writable_stdin=writable_stdin),
+    )

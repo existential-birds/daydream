@@ -22,9 +22,8 @@ from daydream.test_execution import TestExecutionIdentity
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import (
     bare_remote as _bare_remote,
-    commit as _commit,
     git as _git,
-    init_repo as _init_repo,
+    seed_feature_branch as _seed_feature_branch,
 )
 from tests.harness.stub_backend import StubBackend
 from tests.test_deep_orchestrator import MakeConfig, _silence
@@ -45,14 +44,7 @@ async def _run_real_fix_flow(
     phase is observable.
     """
     repo = tmp_path / "evidence-reuse-flow"
-    _init_repo(repo)
-    (repo / "api.py").write_text("A = 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "api.py").write_text("A = 2\n")
-    _git(repo, "add", "api.py")
-    _commit(repo, "feature")
+    _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
 
     backend = StubBackend(repo)
     backend.fix_edit_line = "# repaired\n"
@@ -147,14 +139,7 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     reuse the same hook-present flow pays a second one.
     """
     repo = tmp_path / "hook-reuse-flow"
-    _init_repo(repo)
-    (repo / "api.py").write_text("A = 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "api.py").write_text("A = 2\n")
-    _git(repo, "add", "api.py")
-    _commit(repo, "feature")
+    _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
     remote = _bare_remote(tmp_path / "origin.git")
     _git(repo, "remote", "add", "origin", str(remote))
 
@@ -200,14 +185,7 @@ async def test_the_pre_push_reuse_decision_is_persisted_in_the_real_flow(
     published artifact, naming the gate and that reuse used the post-commit
     verification."""
     repo = tmp_path / "reuse-audit-flow"
-    _init_repo(repo)
-    (repo / "api.py").write_text("A = 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "api.py").write_text("A = 2\n")
-    _git(repo, "add", "api.py")
-    _commit(repo, "feature")
+    _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
     remote = _bare_remote(tmp_path / "audit-origin.git")
     _git(repo, "remote", "add", "origin", str(remote))
 

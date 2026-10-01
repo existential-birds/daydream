@@ -46,7 +46,7 @@ from typing import Any, cast
 
 from daydream.json_utils import atomic_write_json
 from daydream.training import gate as gate_mod
-from daydream.training.gate import FrozenSplit, GateConfig, GateReport, freeze_split
+from daydream.training.gate import FrozenSplit, GateConfig, GateReport
 from daydream.training.lineage import ResumeAborted, RunIdentity, stage_digests, validate_resume
 from daydream.training.reward import DEFAULT_WEIGHTS, REWARD_VERSION
 from daydream.training.reward_model import OutcomeModel, train_outcome_model
@@ -84,7 +84,6 @@ class PipelineConfig:
         optimizer: Optimizer name.
         learning_rate: Learning rate.
         seed: Master seed (split freeze + training determinism).
-        held_out_fraction: Fraction of gold rows reserved for the Stage-0 gate.
         gate_config: Documented Stage-0 gate thresholds.
         allow_copyleft: Explicitly opted-in copyleft slugs (C8).
         profile_policy: Profile policy name carried in the run identity.
@@ -102,7 +101,6 @@ class PipelineConfig:
     optimizer: str = "adamw"
     learning_rate: float = 1e-5
     seed: int = 0
-    held_out_fraction: float = 0.2
     gate_config: GateConfig = field(default_factory=GateConfig)
     allow_copyleft: frozenset[str] = frozenset()
     profile_policy: str = "decisive-only"
@@ -114,10 +112,6 @@ class PipelineConfig:
         unknown = [s for s in self.stages if s not in STAGES]
         if unknown:
             raise ValueError(f"unknown stage name(s) {unknown}; valid stages: {', '.join(STAGES)}")
-        if not (0.0 < self.held_out_fraction < 1.0):
-            raise ValueError(
-                f"held_out_fraction must be in (0, 1) exclusive (got {self.held_out_fraction!r})"
-            )
         if self.projection is None:
             raise ValueError(
                 "no projection input: PipelineConfig requires projection=<frozen projection dir>"
@@ -397,14 +391,14 @@ def _run_stage0(
     records: list[dict[str, Any]],
     stage_dir: Path,
     *,
-    projection: V2Projection | None = None,
+    projection: V2Projection,
 ) -> tuple[dict[str, Any], GateReport, FrozenSplit]:
     """Stage 0: freeze split, train the outcome model, evaluate the gate.
 
     All CPU-bound; runs identically on the dry path (the gate evaluates on
     cached model state — the small classifier is trained in-process, no GPU).
-    On projection input the split is not re-frozen: the projector's frozen
-    boundary is consumed via :func:`_frozen_split_from_projection`.
+    The split is not re-frozen: the projector's frozen boundary is consumed via
+    :func:`_frozen_split_from_projection`.
     """
     rows = _outcome_rows(records)
     if not rows:
@@ -416,16 +410,11 @@ def _run_stage0(
     labels_path = stage_dir / "labels.jsonl"
     labels_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in rows))
 
-    if projection is not None:
-        split = _frozen_split_from_projection(
-            projection,
-            labels_path,
-            seed=config.seed,
-        )
-    else:
-        split = freeze_split(
-            labels_path, held_out_fraction=config.held_out_fraction, seed=config.seed
-        )
+    split = _frozen_split_from_projection(
+        projection,
+        labels_path,
+        seed=config.seed,
+    )
     model: OutcomeModel = train_outcome_model(
         labels_path,
         split=split,
