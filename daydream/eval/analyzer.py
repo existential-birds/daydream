@@ -225,9 +225,10 @@ _SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
 
 # Literal-loop resolution (issue #1397). A shell ``for VAR in <words>; do``
 # binding is recognised only when every listed word is a plain literal (no
-# shell metacharacter) and the loop body is straight-line, i.e. its read
-# segments are the body's first or ``;``-separated commands; every ambiguous
-# shape contributes no binding, so no operand is ever credited from it and the
+# shell metacharacter) and the loop body is straight-line, i.e. it carries no
+# nested/conditional control flow and no flow control (``break``/``continue``/
+# ``return``/``exit``) that could skip a listed read; every ambiguous shape
+# contributes no binding, so no operand is ever credited from it and the
 # affected files stay uncovered and are swept (fail-open).
 _NON_LITERAL_CHARS = frozenset("$`*?[]{}~()|&<>;!\\\"'")
 _BODY_CONTROL_KEYWORDS = frozenset(
@@ -246,6 +247,10 @@ _BODY_CONTROL_KEYWORDS = frozenset(
         "done",
         "select",
         "time",
+        "break",
+        "continue",
+        "return",
+        "exit",
         "{",
         "}",
         "|",
@@ -448,12 +453,13 @@ def _is_literal_word(tok: str) -> bool:
 def _is_straight_line_body(body: list[str]) -> bool:
     """Whether a loop body is free of nested/conditional control flow.
 
-    A body qualifies only when every read segment is the body's first command
-    or is preceded by a ``;`` separator. Nested ``for``/``if``/``case``,
-    ``while``/``until``, brace groups, pipelines and the ``&&``/``&``/``||``
-    conditionals make the read conditionally reached, as do command
-    substitution and backticks; such a loop credits nothing (issue #1397,
-    requirement 6, whole-loop-or-nothing).
+    A body qualifies only when every listed read is unconditionally reached.
+    Nested ``for``/``if``/``case``, ``while``/``until``, brace groups,
+    pipelines and the ``&&``/``&``/``||`` conditionals make the read
+    conditionally reached, as do command substitution, backticks, and flow
+    control (``break``/``continue``/``return``/``exit``) that can skip a later
+    read altogether; such a loop credits nothing (issue #1397, requirement 6,
+    whole-loop-or-nothing).
     """
     for tok in body:
         if tok in _BODY_CONTROL_KEYWORDS:

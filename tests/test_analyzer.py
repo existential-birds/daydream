@@ -1186,6 +1186,10 @@ def test_files_read_loop_binding_is_whole_loop_or_nothing() -> None:
         'for f in {a,b}.py; do nl -ba "$f"; done',                   # brace expansion
         'for f in ~/a.py; do nl -ba "$f"; done',                     # tilde
         'for f in a.py b.py; do [ -f "$f" ] && nl -ba "$f"; done',   # && guard
+        'for f in a.py b.py; do break; nl -ba "$f"; done',            # skipped read
+        'for f in a.py b.py; do continue; nl -ba "$f"; done',         # skipped read
+        'for f in a.py b.py; do exit 0; nl -ba "$f"; done',           # skipped read
+        'for f in a.py b.py; do return 0; nl -ba "$f"; done',         # skipped read
         'for f in a.py b.py; do if [ -f "$f" ]; then nl -ba "$f"; fi; done',
         'for d in x y; do for f in a.py; do nl -ba "$f"; done; done',  # nested
         'while read f; do nl -ba "$f"; done',                        # while
