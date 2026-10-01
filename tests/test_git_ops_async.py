@@ -452,27 +452,59 @@ async def test_enveloped_pagination(
 
 
 @pytest.mark.asyncio
-async def test_enveloped_full_page_stops_at_declared_total(
+@pytest.mark.parametrize(
+    ("response", "expected_result", "expected_error"),
+    [
+        pytest.param(
+            {"total_count": 100, "workflows": [{"id": n} for n in range(100)]},
+            [{"id": n} for n in range(100)],
+            None,
+            id="full-page-stops-at-declared-total",
+        ),
+        pytest.param(
+            {"total_count": 2, "workflows": [{"id": 1}]},
+            None,
+            "incomplete",
+            id="short-page-is-incomplete",
+        ),
+        pytest.param(
+            {"total_count": 1001, "workflows": []},
+            None,
+            "pagination limit",
+            id="over-capacity-rejected-before-second-call",
+        ),
+    ],
+)
+async def test_enveloped_workflows_pagination_fails_at_its_boundaries(
     fake_gh: FakeGh,
     git_repo: Path,
+    response: dict[str, Any],
+    expected_result: list[dict[str, int]] | None,
+    expected_error: str | None,
 ) -> None:
+    """One call skeleton for the success and both bounded-failure envelopes."""
     endpoint = "repos/acme/widgets/actions/workflows"
-    rows = [{"id": n} for n in range(100)]
-    fake_gh.set_response(
-        "GET",
-        _page_endpoint(endpoint, 1),
-        {"total_count": 100, "workflows": rows},
-    )
+    fake_gh.set_response("GET", _page_endpoint(endpoint, 1), response)
 
-    result = await git_ops.gh_actions_workflows(
-        git_repo,
-        "acme",
-        "widgets",
-        limits=git_ops.GitHubPageLimits(),
-        budget=_budget(),
-    )
+    if expected_error is None:
+        result = await git_ops.gh_actions_workflows(
+            git_repo,
+            "acme",
+            "widgets",
+            limits=git_ops.GitHubPageLimits(),
+            budget=_budget(),
+        )
+        assert result == expected_result
+    else:
+        with pytest.raises(git_ops.GitError, match=expected_error):
+            await git_ops.gh_actions_workflows(
+                git_repo,
+                "acme",
+                "widgets",
+                limits=git_ops.GitHubPageLimits(),
+                budget=_budget(),
+            )
 
-    assert result == rows
     assert len(fake_gh.process_calls()) == 1
 
 
@@ -603,30 +635,6 @@ async def test_malformed_envelope_is_rejected(
 
 
 @pytest.mark.asyncio
-async def test_enveloped_pagination_rejects_incomplete_short_page(
-    fake_gh: FakeGh,
-    git_repo: Path,
-) -> None:
-    endpoint = "repos/acme/widgets/actions/workflows"
-    fake_gh.set_response(
-        "GET",
-        _page_endpoint(endpoint, 1),
-        {"total_count": 2, "workflows": [{"id": 1}]},
-    )
-
-    with pytest.raises(git_ops.GitError, match="incomplete"):
-        await git_ops.gh_actions_workflows(
-            git_repo,
-            "acme",
-            "widgets",
-            limits=git_ops.GitHubPageLimits(),
-            budget=_budget(),
-        )
-
-    assert len(fake_gh.process_calls()) == 1
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("max_pages", [1, 2])
 async def test_enveloped_exact_capacity_returns_declared_total(
     fake_gh: FakeGh,
@@ -685,30 +693,6 @@ async def test_envelope_less_full_capacity_remains_ambiguous(
         )
 
     assert len(fake_gh.process_calls()) == max_pages
-
-
-@pytest.mark.asyncio
-async def test_total_count_over_capacity_is_rejected_before_second_call(
-    fake_gh: FakeGh,
-    git_repo: Path,
-) -> None:
-    endpoint = "repos/acme/widgets/actions/workflows"
-    fake_gh.set_response(
-        "GET",
-        _page_endpoint(endpoint, 1),
-        {"total_count": 1001, "workflows": []},
-    )
-
-    with pytest.raises(git_ops.GitError, match="pagination limit"):
-        await git_ops.gh_actions_workflows(
-            git_repo,
-            "acme",
-            "widgets",
-            limits=git_ops.GitHubPageLimits(),
-            budget=_budget(),
-        )
-
-    assert len(fake_gh.process_calls()) == 1
 
 
 @pytest.mark.asyncio

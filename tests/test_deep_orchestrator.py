@@ -21,7 +21,11 @@ from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESC
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
 from daydream.runner import RunConfig, run
 from daydream.workspace import _resolve_base
-from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.git_helpers import (
+    commit as _commit,
+    git as _git,
+    seed_feature_branch,
+)
 from tests.harness.stub_backend import PARTIAL_FIX_MARKER, StubBackend, force_interactive, install_stub_backend, silence
 
 if TYPE_CHECKING:
@@ -180,43 +184,36 @@ def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
 
 def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     """Build a feature-branch fixture with one historical migration."""
-    project = tmp_path / name
-    project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'world'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
-    (project / "README.md").write_text("# Project\n")
-    (project / "migrations").mkdir()
-    migration = project / "migrations" / "0001_init.sql"
-    migration.write_text("SELECT 1;\n")
-    _init_repo(project)
-    _git(project, "add", "api.py", "App.tsx", "README.md", "migrations/0001_init.sql")
-    _commit(project, "test: initialize migration fixture")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
-    (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    migration.write_text("SELECT 1;\nSELECT 2;\n")
-    _git(project, "add", "api.py", "App.tsx", "README.md", "migrations/0001_init.sql")
-    _commit(project, "test: prepare migration change")
-    return project, migration
+    migration_rel = "migrations/0001_init.sql"
+    project = _feature_branch_repo(
+        tmp_path,
+        name,
+        initial={
+            "api.py": "def hello():\n    return 'world'\n",
+            "App.tsx": "export const App = () => <div>hello</div>;\n",
+            "README.md": "# Project\n",
+            migration_rel: "SELECT 1;\n",
+        },
+        changed={
+            "api.py": "def hello():\n    return 'universe'\n",
+            "App.tsx": "export const App = () => <div>universe</div>;\n",
+            "README.md": "# Project\n\nUpdated.\n",
+            migration_rel: "SELECT 1;\nSELECT 2;\n",
+        },
+    )
+    return project, project / migration_rel
 
 
 def _go_quote_project(tmp_path: Path) -> Path:
     """Build a feature-branch fixture whose reviewed diff is a single Go file."""
-    project = tmp_path / "go_quote_repo"
-    project.mkdir()
-    (project / "main.go").write_text("package main\n\n// doc\n")
-    (project / "notes.md").write_text("# Notes\n")
-    _init_repo(project)
-    _git(project, "add", "main.go", "notes.md")
-    _commit(project, "test: initialize go fixture")
-    _git(project, "checkout", "-b", "feature")
     # Only main.go changes in the feature-branch commit: it is the sole
     # reviewed-diff file, so a fix to it is the only edit the run commits.
-    (project / "main.go").write_text("package main\n\n// doc updated\n")
-    _git(project, "add", "main.go")
-    _commit(project, "test: change the go source")
-    return project
+    return _feature_branch_repo(
+        tmp_path,
+        "go_quote_repo",
+        initial={"main.go": "package main\n\n// doc\n", "notes.md": "# Notes\n"},
+        changed={"main.go": "package main\n\n// doc updated\n"},
+    )
 
 
 def _record(**overrides: Any) -> dict[str, Any]:
@@ -382,17 +379,13 @@ def _feature_branch_repo(
 ) -> Path:
     """Commit ``initial`` on the default branch, branch, then commit ``changed``."""
     project = tmp_path / name
-    project.mkdir()
-    for relative, content in initial.items():
-        (project / relative).write_text(content)
-    _init_repo(project)
-    _git(project, "add", *initial)
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    for relative, content in changed.items():
-        (project / relative).write_text(content)
-    _git(project, "add", *changed)
-    _commit(project, "change")
+    seed_feature_branch(
+        project,
+        base=initial,
+        feature=changed,
+        base_message="init",
+        feature_message="change",
+    )
     return project
 
 

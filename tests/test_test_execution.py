@@ -8,16 +8,12 @@ from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any, cast
 
 import pytest
 
 from daydream.test_execution import (
     MissingTestCommandError,
     RecipeConfinementError,
-    RequiredContract,
-    RequiredRun,
-    TargetedCheckRun,
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
@@ -301,15 +297,14 @@ def test_required_suites_fall_back_to_the_file_config_and_yield_to_an_explicit_s
     config = SimpleNamespace(test_command="uv run pytest", test_required_suites=["python", "rl"])
 
     recipe = resolve_test_recipe(config, SimpleNamespace(test_command=None), repo_root=tmp_path)
-    assert recipe.required.declared == ("python", "rl")
-    assert recipe.required.source == "config"
+    assert recipe.declared == ("python", "rl")
 
     recipe = resolve_test_recipe(
         config,
         SimpleNamespace(test_command=None, test_required_suites=["explicit"]),
         repo_root=tmp_path,
     )
-    assert recipe.required.declared == ("explicit",)
+    assert recipe.declared == ("explicit",)
 
 
 def test_recipe_config_digest_is_stable_until_a_config_input_changes(tmp_path: Path) -> None:
@@ -341,7 +336,7 @@ def test_unconfigured_recipe_proposes_a_candidate_without_authorizing_it(tmp_pat
     assert recipe.command.resolved is False
     assert recipe.candidate is not None and recipe.candidate.argv == ("uv", "run", "pytest")
     # A candidate is never the required command (spec MH4).
-    assert recipe.required.argv is None
+    assert recipe.command.value is None
 
 
 def test_recipe_rejects_a_candidate_that_the_repository_text_suggests(tmp_path: Path) -> None:
@@ -350,34 +345,6 @@ def test_recipe_rejects_a_candidate_that_the_repository_text_suggests(tmp_path: 
 
     assert recipe.command.resolved is False
     assert all("make" not in fact.argv for fact in (recipe.candidate,) if fact is not None)
-
-
-def _result(exit_status: int = 0) -> TestExecutionResult:
-    return TestExecutionResult(exit_status=exit_status, timed_out=False, merged_output="ok")
-
-
-def test_required_contract_is_satisfied_only_by_its_own_run() -> None:
-    contract = RequiredContract(declared=("python",), argv=("uv", "run", "pytest"), source="config")
-    required = RequiredRun(argv=("uv", "run", "pytest"), cwd_relative=".", result=_result())
-
-    assert contract.satisfied_by(required) is True
-    failing = RequiredRun(argv=("uv", "run", "pytest"), cwd_relative=".", result=_result(1))
-    assert contract.satisfied_by(failing) is False
-
-
-def test_targeted_check_cannot_satisfy_the_required_contract() -> None:
-    contract = RequiredContract(declared=("python",), argv=("uv", "run", "pytest"), source="config")
-    targeted = TargetedCheckRun(
-        argv=("uv", "run", "pytest", "-k", "one"), selector="one", result=_result()
-    )
-
-    with pytest.raises(TypeError, match="required"):
-        contract.satisfied_by(cast(Any, targeted))
-
-
-def test_unresolved_required_contract_is_never_satisfied() -> None:
-    contract = RequiredContract(declared=("python",), argv=None, source="unresolved")
-    assert contract.satisfied_by(cast(Any, RequiredRun(argv=("pytest",), cwd_relative=".", result=_result()))) is False
 
 
 def test_runner_flags_a_truncated_output_buffer_as_incomplete(tmp_path: Path) -> None:

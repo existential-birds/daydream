@@ -65,7 +65,7 @@ def render_test_recipe_block(recipe: TestRecipe) -> str:
         if isinstance(command_value, tuple) and command_value
         else "unresolved (no test command is configured)"
     )
-    suites = ", ".join(recipe.required.declared) if recipe.required.declared else "none declared"
+    suites = ", ".join(recipe.declared) if recipe.declared else "none declared"
     candidate = ""
     if recipe.candidate is not None:
         candidate = (

@@ -1,5 +1,6 @@
 """Shared helpers for writing target-checkout config files in tests."""
 
+import json
 from pathlib import Path
 
 # A target checkout (attempting to) redirect the trajectory archive upload to
@@ -13,3 +14,11 @@ def write_target_hub_key(target_dir: Path) -> Path:
     path = target_dir / "pyproject.toml"
     path.write_text(TARGET_HUB_KEY_CONFIG, encoding="utf-8")
     return path
+
+
+def write_daydream_pyproject(target_dir: Path, **keys: object) -> None:
+    """Write a ``[tool.daydream]`` pyproject.toml with the supplied keys."""
+    lines = ["[tool.daydream]"]
+    for key, value in keys.items():
+        lines.append(f"{key} = {json.dumps(value)}")
+    (target_dir / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")

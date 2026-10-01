@@ -271,7 +271,7 @@ class RunConfig:
     test_command: str | None = None
     # Issue #1408: suite ids the single configured ``test_command`` is the
     # authoritative gate for. Declaration only (no second runner); resolved by
-    # ``resolve_test_recipe`` into the recipe's ``RequiredContract``. Nothing in
+    # ``resolve_test_recipe`` into the recipe's ``declared`` field. Nothing in
     # the runner populates this field today, so it is always empty and the
     # file-config value arrives through ``resolve_test_recipe``'s ``or``
     # fallback; the field is the precedence slot for an explicit source. The

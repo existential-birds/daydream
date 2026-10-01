@@ -1,20 +1,11 @@
 """Tests for daydream.config_file module (config-file loader)."""
 
-import json
 from pathlib import Path
 
 import pytest
 
 from daydream.config_file import DaydreamFileConfig, _coerce_non_negative_float, load_file_config
-from tests.harness.config import write_target_hub_key
-
-
-def _write_pyproject(target: Path, **keys: object) -> None:
-    """Write a ``[tool.daydream]`` pyproject.toml with the supplied keys."""
-    lines = ["[tool.daydream]"]
-    for key, value in keys.items():
-        lines.append(f"{key} = {json.dumps(value)}")
-    (target / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+from tests.harness.config import write_daydream_pyproject, write_target_hub_key
 
 
 def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
@@ -444,12 +435,12 @@ def test_review_cache_keys_round_trip_and_ill_typed_values_degrade(tmp_path: Pat
 
 
 def test_verify_selection_keys_round_trip_and_ill_typed_values_degrade(tmp_path: Path) -> None:
-    _write_pyproject(tmp_path, verify_all=True, extra_risk_categories=["security", "migration"])
+    write_daydream_pyproject(tmp_path, verify_all=True, extra_risk_categories=["security", "migration"])
     config = load_file_config(tmp_path)
     assert config.verify_all is True
     assert config.extra_risk_categories == ["security", "migration"]
 
-    _write_pyproject(tmp_path, verify_all=1, extra_risk_categories="security")
+    write_daydream_pyproject(tmp_path, verify_all=1, extra_risk_categories="security")
     degraded = load_file_config(tmp_path)
     assert degraded.verify_all is None            # real bool only
     assert degraded.extra_risk_categories == []   # non-list degrades to unset, never to a guess

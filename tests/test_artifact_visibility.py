@@ -48,6 +48,7 @@ from daydream.artifact_visibility import (
     validate_private_workspace_owner,
 )
 from daydream.deep.artifacts import check_deep_artifacts
+from daydream.json_utils import _fsync_directory, _fsync_file
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
@@ -133,19 +134,6 @@ async def open_artifact_session(
         yield session
 
 
-def _fsync_file(path: Path) -> None:
-    with path.open("rb") as handle:
-        os.fsync(handle.fileno())
-
-
-def _fsync_dir(path: Path) -> None:
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        os.fsync(fd)
-    finally:
-        os.close(fd)
-
-
 def _atomic_json(path: Path, payload: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_name(f".{path.name}.tmp-{os.getpid()}")
@@ -159,7 +147,7 @@ def _atomic_json(path: Path, payload: object) -> None:
     finally:
         os.close(fd)
     os.replace(temporary, path)
-    _fsync_dir(path.parent)
+    _fsync_directory(path.parent)
 
 
 def _load_json(path: Path) -> dict[str, Any]:
@@ -237,7 +225,7 @@ def _park(marker: Path, state: str) -> None:
     """Publish the kill-point marker durably, then wait to be SIGKILLed."""
     marker.write_text(state, encoding="ascii")
     _fsync_file(marker)
-    _fsync_dir(marker.parent)
+    _fsync_directory(marker.parent)
     while True:
         signal.pause()
 
@@ -374,11 +362,11 @@ def _external_fifo_observation_child(fifo: Path, entered: Path, completed: Path)
     try:
         entered.write_text("entered", encoding="ascii")
         _fsync_file(entered)
-        _fsync_dir(entered.parent)
+        _fsync_directory(entered.parent)
         observation = artifact_visibility._external_identity(parent_fd, fifo.name)
         completed.write_text(type(observation).__name__, encoding="ascii")
         _fsync_file(completed)
-        _fsync_dir(completed.parent)
+        _fsync_directory(completed.parent)
     finally:
         os.close(parent_fd)
 
