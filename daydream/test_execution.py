@@ -47,7 +47,7 @@ _MERGED_OUTPUT_LIMIT_CHARS = 512 * 1024
 
 #: Bump whenever the recipe payload shape changes so a stale persisted recipe
 #: can never be read as the current contract (mirrors ``REUSE_KEY_FORMAT``).
-RECIPE_FORMAT: int = 1
+RECIPE_FORMAT: int = 2
 
 #: The persisted recipe's filename inside the run's deep directory.
 TEST_RECIPE_FILENAME = "test-recipe.json"
@@ -414,58 +414,6 @@ class TestExecutionIdentity:
 
 
 @dataclass(frozen=True)
-class RequiredRun:
-    """A run of the single configured command, eligible to satisfy a contract.
-
-    Only this type may be passed to :meth:`RequiredContract.satisfied_by`;
-    a :class:`TargetedCheckRun` is structurally barred because a narrowed
-    ``-k``/selector check is not the authoritative full-suite gate (MH6).
-    """
-
-    argv: tuple[str, ...]
-    cwd_relative: str
-    result: "TestExecutionResult"
-
-
-@dataclass(frozen=True)
-class TargetedCheckRun:
-    """A narrowed check (``-k``/single file) — never a required-suite gate."""
-
-    argv: tuple[str, ...]
-    selector: str | None
-    result: "TestExecutionResult"
-    cwd_relative: str = "."
-
-
-@dataclass(frozen=True)
-class RequiredContract:
-    """The declared required-suite contract for the configured command.
-
-    ``declared`` names the suite ids the single configured command is the
-    authoritative gate for (declaration only — no second runner executes).
-    ``argv`` is the resolved command, or ``None`` when nothing is configured,
-    in which case the contract is never satisfied. ``satisfied_by`` accepts
-    only a :class:`RequiredRun`; anything else raises ``TypeError`` so a
-    targeted check can never stand in for the required suite.
-    """
-
-    declared: tuple[str, ...]
-    argv: tuple[str, ...] | None
-    source: Literal["cli", "config", "unresolved"]
-
-    def satisfied_by(self, run: RequiredRun) -> bool:
-        """True only for a passing run of exactly this contract's command."""
-        if not isinstance(run, RequiredRun):
-            raise TypeError(
-                "RequiredContract.satisfied_by accepts only a RequiredRun; "
-                "a targeted check cannot satisfy the required contract."
-            )
-        if self.argv is None:
-            return False
-        return run.argv == self.argv and run.result.passed
-
-
-@dataclass(frozen=True)
 class RecipeCandidate:
     """A manifest-derived suggestion, never the authoritative command.
 
@@ -487,7 +435,7 @@ class TestRecipe:
 
     command: ResolvedFact
     package: PackageResolution
-    required: RequiredContract
+    declared: tuple[str, ...]
     candidate: RecipeCandidate | None
 
     # Not a pytest test class despite the name prefix.
@@ -520,8 +468,8 @@ def resolve_test_recipe(
     The command fact applies CLI-over-config precedence; the package is
     resolved from ``cwd`` (defaulting to the worktree root) and confined to
     ``repo_root``; the candidate comes only from the closed manifest set. An
-    unresolved command never authorizes a required argv and never runs
-    anything — the candidate is a suggestion only (spec MH4).
+    unresolved command never runs anything — the candidate is a suggestion
+    only (spec MH4).
     """
     command = resolve_test_command_fact(config, run_config)
     package = resolve_package(repo_root, cwd if cwd is not None else repo_root)
@@ -530,22 +478,12 @@ def resolve_test_recipe(
         or getattr(config, "test_required_suites", None)
         or ()
     )
-    required = RequiredContract(
-        declared=declared,
-        argv=command.value if isinstance(command.value, tuple) else None,
-        source="unresolved" if not command.resolved else _command_source(command.source),
-    )
     return TestRecipe(
         command=command,
         package=package,
-        required=required,
+        declared=declared,
         candidate=_manifest_candidate(package.runner),
     )
-
-
-def _command_source(source: str) -> Literal["cli", "config"]:
-    """Narrow a resolved command provenance to the required-contract domain."""
-    return "config" if source == "config" else "cli"
 
 
 def _tuple_of_str(value: object) -> tuple[str, ...] | None:
@@ -581,11 +519,7 @@ def recipe_to_payload(recipe: TestRecipe) -> dict[str, Any]:
             "config_digest": recipe.package.config_digest,
             "absent_components": list(recipe.package.absent_components),
         },
-        "required": {
-            "declared": list(recipe.required.declared),
-            "argv": list(recipe.required.argv) if recipe.required.argv is not None else None,
-            "source": recipe.required.source,
-        },
+        "declared": list(recipe.declared),
         "candidate": candidate_payload,
     }
 
@@ -600,11 +534,7 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
     try:
         command_payload = payload["command"]
         package_payload = payload["package"]
-        required_payload = payload["required"]
-        if not all(
-            isinstance(part, dict)
-            for part in (command_payload, package_payload, required_payload)
-        ):
+        if not all(isinstance(part, dict) for part in (command_payload, package_payload)):
             return None
         command_source = command_payload["source"]
         command_values = _tuple_of_str(command_payload["value"])
@@ -636,22 +566,9 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
             absent_components=absent_components,
         )
 
-        required_source = required_payload["source"]
-        declared = _tuple_of_str(required_payload["declared"])
-        required_argv = required_payload["argv"]
-        if declared is None or required_source not in ("cli", "config", "unresolved"):
+        declared = _tuple_of_str(payload["declared"])
+        if declared is None:
             return None
-        if required_argv is None:
-            argv: tuple[str, ...] | None = None
-        else:
-            argv = _tuple_of_str(required_argv)
-            if argv is None:
-                return None
-        required = RequiredContract(
-            declared=declared,
-            argv=argv,
-            source=cast(Literal["cli", "config", "unresolved"], required_source),
-        )
 
         candidate: RecipeCandidate | None = None
         candidate_payload = payload.get("candidate")
@@ -667,7 +584,7 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
     return TestRecipe(
         command=command,
         package=package,
-        required=required,
+        declared=declared,
         candidate=candidate,
     )
 

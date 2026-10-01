@@ -168,7 +168,7 @@ class DaydreamFileConfig:
             root/``[tool.daydream]`` table as ``test_command``; empty declares
             nothing beyond the command itself. Declaration only: there is no
             second runner, and a targeted ``-k``/selector check can never
-            satisfy the required contract (``RequiredContract.satisfied_by``).
+            satisfy the required contract.
         review_cache_enabled: Issue #733. Toggle the deep review's
             content-addressed reuse store (MH13). ``None`` falls through to the
             RunConfig field and then the built-in default
