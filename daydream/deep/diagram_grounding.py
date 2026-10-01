@@ -29,9 +29,8 @@ in one call and return a single :class:`GroundingReport`:
 the keys of the sequence/flowchart schema and no annotations: the privileged
 Phase B poster re-validates it against an ``additionalProperties: false``
 schema before re-rendering, so a single bookkeeping key smuggled into it would
-fail the post. Per-element bookkeeping the renderer needs -- which
-``spec_final`` slot an element ended up in, where its callee is defined, the
-snapped line -- travels on the report's :class:`ElementCheck` list instead.
+fail the post. Failed :class:`ElementCheck` values identify what a repair turn
+must correct.
 
 Pure: no LLM call, no network, no writes. The only I/O is reading files under
 the repository root and one ``git grep`` per symbol fallback.
@@ -171,12 +170,10 @@ class ElementCheck:
         ref: Stable identifier within its kind -- participant name, proposed
             message index, ``"b0"`` / ``"b0.1"`` for a block and its branch,
             root function name, node id, or ``"from->to"`` for an edge. Unique
-            across the elements of one kind, which is what lets the renderer
-            correlate a table row back to its check.
+            across the elements of one kind, so a repair turn can identify it.
         grounded: Whether every check passed. ``False`` means the element was
             pruned as unproven; a grounded element may still be absent from
-            ``spec_final`` (structurally flattened, unused, or cap-trimmed),
-            which is what ``final_index is None`` records.
+            ``spec_final`` (structurally flattened, unused, or cap-trimmed).
         reason: The reason code from :data:`REASON_CODES`, or None when
             grounded.
         strength: ``"definition"`` when a symbol was resolved to a tree-sitter
@@ -191,10 +188,6 @@ class ElementCheck:
             rendered.
         defined_at: ``"path:line"`` of the callee/subroutine definition when one
             was found, else None.
-        final_index: 0-based index of the element in its ``spec_final``
-            collection (for a branch, its index within its own block's
-            ``branches``; for the flowchart root, 0 when accepted), or None when
-            the element is not in ``spec_final``.
     """
 
     element: str
@@ -205,10 +198,9 @@ class ElementCheck:
     snapped_line: int | None = None
     in_changed_hunk: bool = False
     defined_at: str | None = None
-    final_index: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        """Return the JSON-safe form written into ``diagram.json``."""
+        """Return the JSON-safe repair-turn input."""
         return asdict(self)
 
 
@@ -221,15 +213,6 @@ class GroundingReport:
             order within each element type.
         spec_final: The pruned and capped spec, carrying exactly the schema's
             keys so the Phase B poster can re-validate and re-render it.
-        summary: ``{"proposed", "grounded", "pruned"}`` element counts.
-            ``pruned`` counts elements dropped **as ungrounded** only; drops
-            made by a render cap are in :attr:`capped`.
-        capped: Per-collection count of elements dropped by a render cap;
-            ``{}`` when no cap bound.
-        root_range: Flowchart only -- the accepted root's ``(line, end_line)``
-            taken from its :class:`~daydream.deep.diagram_types.CandidateRoot`,
-            not from the model. None for a sequence diagram and for a rejected
-            root.
         omit_reasons: Non-empty when the capped spec is below its floor, in
             which case the caller must not render this kind.
         rejected: ``"ROOT_NOT_CANDIDATE"`` when the whole flowchart spec was
@@ -243,9 +226,6 @@ class GroundingReport:
 
     elements: list[ElementCheck]
     spec_final: dict[str, Any]
-    summary: dict[str, int]
-    capped: dict[str, int]
-    root_range: tuple[int, int] | None
     omit_reasons: list[str]
     rejected: str | None
 
@@ -586,21 +566,6 @@ def _executable_line(sources: _SourceCache, file: str, line: int) -> bool:
     return _language_line(sources, file, line, is_executable_statement_line)
 
 
-def _summary(elements: list[ElementCheck]) -> dict[str, int]:
-    """Return the ``{proposed, grounded, pruned}`` counts for ``elements``."""
-    grounded = sum(1 for check in elements if check.grounded)
-    return {
-        "proposed": len(elements),
-        "grounded": grounded,
-        "pruned": len(elements) - grounded,
-    }
-
-
-def _nonzero(counts: dict[str, int]) -> dict[str, int]:
-    """Drop zero entries so ``capped`` is ``{}`` when no cap bound."""
-    return {key: value for key, value in counts.items() if value}
-
-
 # --- Sequence ----------------------------------------------------------------
 
 
@@ -608,14 +573,6 @@ def _require(record: dict[str, Any] | None) -> dict[str, Any]:
     """Return ``record``, asserting it is present (grounded messages always are)."""
     assert record is not None
     return record
-
-
-def _find(checks: list[ElementCheck], ref: str) -> ElementCheck:
-    """Return the check with ``ref`` (refs are unique within an element kind)."""
-    for check in checks:
-        if check.ref == ref:
-            return check
-    raise KeyError(ref)
 
 
 def _normalize_participant(raw: dict[str, Any]) -> dict[str, Any]:
@@ -846,11 +803,10 @@ def _ground_branch(
 
 @dataclass
 class _KeptBlock:
-    """One surviving block: its proposal index, kind, and surviving branches."""
+    """One surviving block's kind and branches."""
 
-    index: int
     kind: str
-    branches: list[tuple[int, dict[str, Any]]]
+    branches: list[dict[str, Any]]
 
 
 def _assemble_blocks(
@@ -869,8 +825,8 @@ def _assemble_blocks(
     """
     result: list[_KeptBlock] = []
     for block in kept:
-        branches: list[tuple[int, dict[str, Any]]] = []
-        for branch_index, payload in block.branches:
+        branches: list[dict[str, Any]] = []
+        for payload in block.branches:
             remapped = [
                 final_positions[index]
                 for index in payload["messages"]
@@ -878,9 +834,7 @@ def _assemble_blocks(
             ]
             if not remapped:
                 continue
-            branches.append(
-                (branch_index, {**payload, "messages": remapped})
-            )
+            branches.append({**payload, "messages": remapped})
         if block.kind == "alt":
             if len(branches) < 2:
                 continue
@@ -888,7 +842,7 @@ def _assemble_blocks(
             branches = branches[:1]
         if not branches:
             continue
-        result.append(_KeptBlock(block.index, block.kind, branches))
+        result.append(_KeptBlock(block.kind, branches))
     return result
 
 
@@ -986,7 +940,7 @@ def ground_sequence(
                     )
                 )
             continue
-        surviving: list[tuple[int, dict[str, Any]]] = []
+        surviving: list[dict[str, Any]] = []
         for branch_index, raw_branch in enumerate(raw_branches):
             check, payload = _ground_branch(
                 repo_root,
@@ -999,7 +953,7 @@ def ground_sequence(
             )
             branch_checks.append(check)
             if check.grounded:
-                surviving.append((branch_index, payload))
+                surviving.append(payload)
         block_checks.append(
             ElementCheck(
                 "block",
@@ -1009,7 +963,7 @@ def ground_sequence(
             )
         )
         if surviving:
-            kept_blocks.append(_KeptBlock(block_index, kind, surviving))
+            kept_blocks.append(_KeptBlock(kind, surviving))
 
     # --- prune ---------------------------------------------------------------
     kept_messages = [
@@ -1024,34 +978,17 @@ def ground_sequence(
         )
     }
     kept_participants = [name for name in accepted if name in used]
-    pruned_block_count = len(
-        _assemble_blocks(
-            kept_blocks, {index: pos for pos, index in enumerate(kept_messages)}
-        )
-    )
-
     # --- cap -----------------------------------------------------------------
-    capped: dict[str, int] = {"participants": 0, "messages": 0, "blocks": 0}
-    if len(kept_participants) > DIAGRAM_MAX_PARTICIPANTS:
-        capped["participants"] = len(kept_participants) - DIAGRAM_MAX_PARTICIPANTS
-        kept_participants = kept_participants[:DIAGRAM_MAX_PARTICIPANTS]
+    kept_participants = kept_participants[:DIAGRAM_MAX_PARTICIPANTS]
     participant_set = set(kept_participants)
-    orphaned = [
+    kept_messages = [
         index
         for index in kept_messages
-        if _require(normalized_messages[index])["from"] not in participant_set
-        or _require(normalized_messages[index])["to"] not in participant_set
-    ]
-    if orphaned:
-        dropped = set(orphaned)
-        capped["messages"] += len(orphaned)
-        kept_messages = [index for index in kept_messages if index not in dropped]
-    if len(kept_messages) > DIAGRAM_MAX_MESSAGES:
-        capped["messages"] += len(kept_messages) - DIAGRAM_MAX_MESSAGES
-        kept_messages = kept_messages[:DIAGRAM_MAX_MESSAGES]
+        if _require(normalized_messages[index])["from"] in participant_set
+        and _require(normalized_messages[index])["to"] in participant_set
+    ][:DIAGRAM_MAX_MESSAGES]
     final_positions = {index: pos for pos, index in enumerate(kept_messages)}
     final_blocks = _assemble_blocks(kept_blocks[:DIAGRAM_MAX_BLOCKS], final_positions)
-    capped["blocks"] = max(0, pruned_block_count - len(final_blocks))
 
     # --- assemble ------------------------------------------------------------
     spec_final: dict[str, Any] = {
@@ -1060,21 +997,11 @@ def ground_sequence(
         "blocks": [
             {
                 "kind": block.kind,
-                "branches": [payload for _, payload in block.branches],
+                "branches": block.branches,
             }
             for block in final_blocks
         ],
     }
-    for position, name in enumerate(kept_participants):
-        _find(participant_checks, name).final_index = position
-    for index, position in final_positions.items():
-        message_checks[index].final_index = position
-    for position, block in enumerate(final_blocks):
-        _find(block_checks, f"b{block.index}").final_index = position
-        for branch_position, (branch_index, _) in enumerate(block.branches):
-            _find(
-                branch_checks, f"b{block.index}.{branch_index}"
-            ).final_index = branch_position
 
     # --- floor ---------------------------------------------------------------
     omit_reasons: list[str] = []
@@ -1091,9 +1018,6 @@ def ground_sequence(
     return GroundingReport(
         elements=elements,
         spec_final=spec_final,
-        summary=_summary(elements),
-        capped=_nonzero(capped),
-        root_range=None,
         omit_reasons=omit_reasons,
         rejected=None,
     )
@@ -1348,16 +1272,13 @@ def ground_flowchart(
         return GroundingReport(
             elements=[check],
             spec_final={"root": _rejected_root(root), "nodes": [], "edges": []},
-            summary=_summary([check]),
-            capped={},
-            root_range=None,
             omit_reasons=["TOO_FEW_NODES"],
             rejected="ROOT_NOT_CANDIDATE",
         )
     root_range = (candidate.line, candidate.end_line)
     root_file = strip_dot_slash(candidate.file)
     root_check = ElementCheck(
-        "root", root_ref, True, in_changed_hunk=True, final_index=0
+        "root", root_ref, True, in_changed_hunk=True
     )
     root_final = {"file": root_file, "name": candidate.name, "line": candidate.line}
 
@@ -1444,20 +1365,16 @@ def ground_flowchart(
 
     # --- prune ---------------------------------------------------------------
     kept_ids, kept_edges, demoted = _structural_pass(node_order, nodes, edges, start_id)
-    pruned_nodes, pruned_edges = len(kept_ids), len(kept_edges)
     # An edge the *prune* pass dropped is ungrounded per the spec's own wording
     # ("an edge whose node was pruned"), whether its endpoint failed its own
     # check or fell out as unreachable. Edges the cap drops below are a
-    # different story and stay grounded: counting them here as well as in
-    # ``capped`` would report one drop twice, and would tell the repair turn
-    # that a perfectly good edge was unproven.
+    # different story and stay grounded: they do not need a repair turn.
     survived_prune = {ref for ref, _ in kept_edges}
     for check in edge_checks:
         if check.grounded and check.ref not in survived_prune:
             check.grounded, check.reason = False, "EDGE_ENDPOINT_UNGROUNDED"
 
     # --- cap -----------------------------------------------------------------
-    capped: dict[str, int] = {"nodes": 0, "edges": 0}
     if len(kept_ids) > DIAGRAM_MAX_NODES:
         head = kept_ids[:DIAGRAM_MAX_NODES]
         if start_id is not None and start_id not in head:
@@ -1471,8 +1388,6 @@ def ground_flowchart(
     kept_ids, kept_edges, demoted = _structural_pass(
         kept_ids, nodes, kept_edges, start_id
     )
-    capped["nodes"] = max(0, pruned_nodes - len(kept_ids))
-    capped["edges"] = max(0, pruned_edges - len(kept_edges))
 
     # --- assemble ------------------------------------------------------------
     spec_final: dict[str, Any] = {
@@ -1486,10 +1401,6 @@ def ground_flowchart(
         ],
         "edges": [dict(record) for _, record in kept_edges],
     }
-    for position, node_id in enumerate(kept_ids):
-        _find(node_checks, node_id).final_index = position
-    for position, (ref, _) in enumerate(kept_edges):
-        _find(edge_checks, ref).final_index = position
 
     # --- floor ---------------------------------------------------------------
     kinds = [node["kind"] for node in spec_final["nodes"]]
@@ -1505,9 +1416,6 @@ def ground_flowchart(
     return GroundingReport(
         elements=elements,
         spec_final=spec_final,
-        summary=_summary(elements),
-        capped=_nonzero(capped),
-        root_range=root_range,
         omit_reasons=omit_reasons,
         rejected=None,
     )

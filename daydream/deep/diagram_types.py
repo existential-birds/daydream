@@ -42,7 +42,7 @@ def as_optional_str(value: Any) -> str | None:
 
 # Diagram element kind vocabularies, shared by the strict schemas (enum order),
 # grounding (membership) and the renderer. Ordered tuples are the single source
-# of truth; the renderer's ``_BARE_NODE_KINDS`` is a deliberate subset.
+# of truth.
 PARTICIPANT_KINDS = ("internal", "external")
 MESSAGE_KINDS = ("call", "reply", "self")
 BLOCK_KINDS = ("alt", "opt", "loop")
@@ -53,10 +53,7 @@ NODE_KINDS = ("start", "end", "process", "decision", "subroutine", "io")
 #
 #     {"status": "rendered" | "omitted" | "skipped" | "failed",
 #      "reason": str | None,          # why it was skipped or failed
-#      "spec_proposed": dict | None,  # the model's last proposed spec
 #      "spec_final": dict | None,     # pruned + capped; schema-valid
-#      "grounding": {"elements": [...], "summary": {...},
-#                    "capped": {...}, "root_range": [int, int] | None} | None,
 #      "omit_reasons": list[str],
 #      "mermaid": str | None,        # dropped in the findings artifact
 #      "advisory": {                # the kind's input-omission diagnostic, or None

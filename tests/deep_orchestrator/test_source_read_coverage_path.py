@@ -83,6 +83,8 @@ async def test_runner_uses_review_evidence_independently_of_the_sweep_backend(
         assert not (deep / "stack-uncovered-records.json").exists()
         assert readme_verdict["verdict"] == "unknown"
         assert readme_verdict["lines_read"] is None
+        finding_verdict = json.loads((deep / "stack-python-records.json").read_text())["verdicts"][0]
+        assert (finding_verdict["verdict"], finding_verdict["source_read_status"]) == ("has_findings", "unverifiable")
         assert evaluation["coverage_ratio"] is None
         assert "Source-read coverage: unverifiable" in report
         assert "Coverage-targeted catch-up unavailable" in report

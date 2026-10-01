@@ -64,8 +64,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
         # above would otherwise reject every artifact that carries them.
         "kind": {"enum": ["review", "diagram"]},
         # Deliberately permissive. The payload is ``diagram.json`` minus the
-        # rendered mermaid, whose shape is owned by four other modules'
-        # ``to_dict`` methods; declaring it here with
+        # rendered mermaid; declaring its shape here with
         # ``additionalProperties: false`` would break on any field they add.
         # The real check on its model-derived content is the per-kind
         # ``spec_final`` validation in ``pr_review.validate_diagram_payload``,

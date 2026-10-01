@@ -2841,17 +2841,19 @@ def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: s
     assert _agent_label(filename) == label
 
 
-@pytest.mark.parametrize("command", [
-    'for f in a.py b.py; do cat "$f"; done',
-    'for f in missing.py b.py; do cat "$f"; done',
-    "cat a.py",  # command_actions are also inferred shell text, never receipts
+@pytest.mark.parametrize("arguments", [
+    {"command": 'for f in a.py b.py; do cat "$f"; done'},
+    {"command": 'for f in missing.py b.py; do cat "$f"; done',
+     "command_actions": [{"type": "read", "path": "a.py"}]},
 ])
-def test_shell_results_leave_coverage_and_grounding_unverifiable(tmp_path: Path, command: str) -> None:
+def test_shell_results_leave_coverage_and_grounding_unverifiable(
+    tmp_path: Path, arguments: dict[str, Any],
+) -> None:
     dd, _deep = _deep_dirs(tmp_path)
     _seed_diff(dd, "a.py", "b.py")
     traj = _backend_read_trajectory("codex", [])
     call = traj["steps"][0]["tool_calls"][0]
-    call["arguments"] = {"command": command, "command_actions": [{"type": "read", "path": "a.py"}]}
+    call["arguments"] = arguments
     trajectories = _forked(traj)
     result = analyze_coverage(trajectories, dd)
     assert result["coverage_status"] == "unverifiable"
@@ -2902,19 +2904,3 @@ def test_eval_preserves_verified_reads_in_a_mixed_backend_run(tmp_path: Path) ->
     assert result["unverifiable_files"] == ["b.py"]
     grounding = analyze_grounding(trajectories, [{"file": "a.py", "_stack": "python"}], dd)
     assert grounding["grounding_rate"] == 1.0
-
-
-def test_eval_uses_post_sweep_unavailable_scope(tmp_path: Path) -> None:
-    dd, deep = _deep_dirs(tmp_path)
-    _seed_diff(dd, "a.py", "b.py")
-    (deep / "coverage-stats.json").write_text(json.dumps({
-        "pre_sweep": {"unverifiable_files": []},
-        "post_sweep": {"unverifiable_files": ["b.py"]},
-    }))
-    shell = _backend_read_trajectory("codex", ["b.py"])
-    shell["_source_file"] = "deep-uncovered-b-py.json"
-    trajectories = _forked(_read_traj("deep-python.json", "a.py"), shell)
-    result = analyze_coverage(trajectories, dd)
-    assert result["coverage_ratio"] is None
-    assert result["unverifiable_files"] == ["b.py"]
-    assert result["verified_files"] == ["a.py"]

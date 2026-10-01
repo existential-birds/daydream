@@ -2056,196 +2056,6 @@ def render_diagram_comment_body(payload: dict[str, Any]) -> str:
     return "\n\n".join(chunks)
 
 
-def _diagram_grounding_problem(
-    kind: str, spec: dict[str, Any], grounding: Any
-) -> str | None:
-    """Validate the host-produced grounding report attached to a rendered spec."""
-    from daydream.deep.diagram_grounding import REASON_CODES
-
-    if not isinstance(grounding, dict):
-        return f"{kind} rendered result has no grounding attestation"
-    elements = grounding.get("elements")
-    summary = grounding.get("summary")
-    capped = grounding.get("capped")
-    if not isinstance(elements, list):
-        return f"{kind} grounding attestation has no 'elements' array"
-    if not isinstance(summary, dict):
-        return f"{kind} grounding attestation has no 'summary' object"
-    if not isinstance(capped, dict):
-        return f"{kind} grounding attestation has no 'capped' object"
-
-    allowed_elements = (
-        {"participant", "message", "block", "branch"}
-        if kind == "sequence"
-        else {"root", "node", "edge"}
-    )
-    allowed_caps = (
-        {"participants", "messages", "blocks"}
-        if kind == "sequence"
-        else {"nodes", "edges"}
-    )
-    checks: list[dict[str, Any]] = []
-    seen_refs: set[tuple[str, str]] = set()
-    for index, raw in enumerate(elements):
-        if not isinstance(raw, dict):
-            return f"{kind} grounding attestation element {index} is not an object"
-        element = raw.get("element")
-        ref = raw.get("ref")
-        grounded = raw.get("grounded")
-        reason = raw.get("reason")
-        final_index = raw.get("final_index")
-        if element not in allowed_elements or not isinstance(ref, str) or not ref:
-            return f"{kind} grounding attestation element {index} has an invalid identity"
-        identity = (element, ref)
-        if identity in seen_refs:
-            return f"{kind} grounding attestation repeats {element} reference {ref!r}"
-        seen_refs.add(identity)
-        if not isinstance(grounded, bool):
-            return f"{kind} grounding attestation for {element} {ref!r} has no boolean verdict"
-        if grounded and reason is not None:
-            return f"{kind} grounding attestation for {element} {ref!r} is contradictory"
-        if not grounded and reason not in REASON_CODES:
-            return f"{kind} grounding attestation for {element} {ref!r} has an invalid reason"
-        if final_index is not None and (
-            isinstance(final_index, bool) or not isinstance(final_index, int) or final_index < 0
-        ):
-            return f"{kind} grounding attestation for {element} {ref!r} has an invalid final index"
-        if final_index is not None and not grounded:
-            return f"{kind} grounding attestation publishes ungrounded {element} {ref!r}"
-        strength = raw.get("strength")
-        snapped_line = raw.get("snapped_line")
-        if strength not in (None, "definition", "token"):
-            return f"{kind} grounding attestation for {element} {ref!r} has an invalid strength"
-        if snapped_line is not None and (
-            isinstance(snapped_line, bool)
-            or not isinstance(snapped_line, int)
-            or snapped_line < 1
-        ):
-            return f"{kind} grounding attestation for {element} {ref!r} has an invalid snapped line"
-        if not isinstance(raw.get("in_changed_hunk"), bool):
-            return f"{kind} grounding attestation for {element} {ref!r} has an invalid hunk verdict"
-        defined_at = raw.get("defined_at")
-        if defined_at is not None and (not isinstance(defined_at, str) or not defined_at):
-            return f"{kind} grounding attestation for {element} {ref!r} has an invalid definition"
-        checks.append(raw)
-
-    for count_name in ("proposed", "grounded_first_pass", "repaired", "pruned"):
-        value = summary.get(count_name)
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
-            return (
-                f"{kind} grounding attestation summary has an invalid "
-                f"{count_name!r} count"
-            )
-    if summary["proposed"] != len(checks):
-        return f"{kind} grounding attestation summary does not match its elements"
-    if summary["pruned"] != sum(not check["grounded"] for check in checks):
-        return f"{kind} grounding attestation pruned count does not match its verdicts"
-    for collection, count in capped.items():
-        if (
-            collection not in allowed_caps
-            or isinstance(count, bool)
-            or not isinstance(count, int)
-            or count < 1
-        ):
-            return f"{kind} grounding attestation has an invalid {collection!r} cap count"
-
-    claimed: set[int] = set()
-
-    def claim(element: str, final_index: int, ref: str | None = None) -> dict[str, Any] | None:
-        matches = [
-            (index, check)
-            for index, check in enumerate(checks)
-            if check["element"] == element
-            and check["final_index"] == final_index
-            and (ref is None or check["ref"] == ref)
-        ]
-        if len(matches) != 1:
-            return None
-        index, check = matches[0]
-        claimed.add(index)
-        return check
-
-    if kind == "sequence":
-        participants = spec["participants"]
-        messages = spec["messages"]
-        blocks = spec["blocks"]
-        names = {participant["name"] for participant in participants}
-        if len(names) != len(participants):
-            return "sequence spec_final has duplicate participant names"
-        for index, participant in enumerate(participants):
-            if claim("participant", index, participant["name"]) is None:
-                return f"sequence grounding attestation does not cover participant at final index {index}"
-        for index, message in enumerate(messages):
-            if message["from"] not in names or message["to"] not in names:
-                return f"sequence spec_final message {index} has an unknown participant"
-            if claim("message", index) is None:
-                return f"sequence grounding attestation does not cover message at final index {index}"
-        for block_index, block in enumerate(blocks):
-            block_check = claim("block", block_index)
-            if block_check is None:
-                return f"sequence grounding attestation does not cover block at final index {block_index}"
-            prefix = f"{block_check['ref']}."
-            for branch_index, branch in enumerate(block["branches"]):
-                if any(
-                    isinstance(message_index, bool)
-                    or message_index >= len(messages)
-                    for message_index in branch["messages"]
-                ):
-                    return f"sequence spec_final block {block_index} cites an unknown message"
-                matches = [
-                    (index, check)
-                    for index, check in enumerate(checks)
-                    if check["element"] == "branch"
-                    and check["final_index"] == branch_index
-                    and check["ref"].startswith(prefix)
-                ]
-                if len(matches) != 1:
-                    return (
-                        "sequence grounding attestation does not cover branch at "
-                        f"final index {block_index}.{branch_index}"
-                    )
-                claimed.add(matches[0][0])
-        if grounding.get("root_range") is not None:
-            return "sequence grounding attestation has an unexpected root range"
-    else:
-        root = spec["root"]
-        nodes = spec["nodes"]
-        edges = spec["edges"]
-        root_range = grounding.get("root_range")
-        if (
-            not isinstance(root_range, list)
-            or len(root_range) != 2
-            or any(isinstance(line, bool) or not isinstance(line, int) for line in root_range)
-            or root_range[0] != root["line"]
-            or root_range[1] < root_range[0]
-        ):
-            return "flowchart grounding attestation has an invalid root range"
-        if claim("root", 0, root["name"]) is None:
-            return "flowchart grounding attestation does not cover root at final index 0"
-        node_ids = {node["id"] for node in nodes}
-        if len(node_ids) != len(nodes):
-            return "flowchart spec_final has duplicate node ids"
-        for index, node in enumerate(nodes):
-            evidence = node["evidence"]
-            if evidence["file"] != root["file"] or not (
-                root_range[0] <= evidence["line"] <= root_range[1]
-            ):
-                return f"flowchart spec_final node {index} lies outside its root"
-            if claim("node", index, node["id"]) is None:
-                return f"flowchart grounding attestation does not cover node at final index {index}"
-        for index, edge in enumerate(edges):
-            if edge["from"] not in node_ids or edge["to"] not in node_ids:
-                return f"flowchart spec_final edge {index} has an unknown endpoint"
-            if claim("edge", index, f"{edge['from']}->{edge['to']}") is None:
-                return f"flowchart grounding attestation does not cover edge at final index {index}"
-    if any(
-        check["final_index"] is not None and index not in claimed
-        for index, check in enumerate(checks)
-    ):
-        return f"{kind} grounding attestation contains an unmatched published element"
-    return None
-
-
 class _HeadEvidence:
     """Read repository files at the immutable head SHA, checkout or not.
 
@@ -2324,6 +2134,7 @@ def _diagram_head_evidence_problem(
 ) -> str | None:
     """Return a problem when a rendered diagram citation is absent at the head SHA."""
     from daydream.tree_sitter_index import (
+        definitions_in_file,
         is_branch_line,
         is_executable_statement_line,
         is_terminal_line,
@@ -2400,9 +2211,26 @@ def _diagram_head_evidence_problem(
         if report.spec_final != spec:
             return "sequence diagram evidence is not grounded in immutable head"
     else:
-        problem = check(spec["root"])
+        root = spec["root"]
+        problem = check(root)
         if problem is not None:
             return problem
+        with tempfile.TemporaryDirectory() as snapshot_dir:
+            snapshot_root = Path(snapshot_dir)
+            snapshot_path = snapshot_root / root["file"]
+            snapshot_path.parent.mkdir(parents=True, exist_ok=True)
+            snapshot_path.write_bytes(head.read(root["file"]))
+            try:
+                definitions = definitions_in_file(snapshot_root, root["file"])
+            except Exception:
+                definitions = []  # Node checks below keep their parser fallback.
+        root_end = next((
+            definition["end_line"] for definition in definitions
+            if definition["kind"] == "function"
+            and definition["name"] == root["name"] and definition["line"] == root["line"]
+        ), None)
+        if definitions and root_end is None:
+            return "flowchart root is not a function in immutable head"
         for node in spec["nodes"]:
             evidence = node["evidence"]
             problem = check(evidence)
@@ -2411,6 +2239,8 @@ def _diagram_head_evidence_problem(
             source = "\n".join(head.lines(evidence["file"])).encode()
             language = language_for_path(evidence["file"])
             line = evidence["line"]
+            if isinstance(root_end, int) and not root["line"] <= line <= root_end:
+                return "flowchart diagram node lies outside its root in immutable head"
             try:
                 grounded = (
                     is_terminal_line(language, source, line)
@@ -2437,14 +2267,13 @@ def validate_diagram_payload(
     repo_slug: str | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> str | None:
-    """Validate each rendered spec and its grounding attestation before posting.
+    """Validate each rendered spec and its immutable source before posting.
 
     The privileged poster re-renders mermaid from model-derived specs, so those
     specs are re-validated here -- against the same hand-written schema the
     author agent answered -- before a single character reaches GitHub.
-    ``FINDINGS_SCHEMA`` deliberately keeps ``diagrams`` permissive (it must not
-    couple to four modules' ``to_dict`` shapes), and this is the check that
-    makes that safe.
+    ``FINDINGS_SCHEMA`` keeps ``diagrams`` permissive; this check validates
+    the specs before rendering.
 
     Args:
         payload: The artifact's ``diagrams`` payload.
@@ -2499,9 +2328,29 @@ def validate_diagram_payload(
                 return f"{kind} spec_final exceeds {collection} render cap: {size} > {cap}"
         if result.get("reason") is not None or result.get("omit_reasons") not in (None, []):
             return f"{kind} rendered result contradicts its status"
-        problem = _diagram_grounding_problem(kind, spec, result.get("grounding"))
-        if problem is not None:
-            return problem
+        if kind == "sequence":
+            names = {participant["name"] for participant in spec["participants"]}
+            if len(names) != len(spec["participants"]):
+                return "sequence spec_final has duplicate participant names"
+            for index, message in enumerate(spec["messages"]):
+                if message["from"] not in names or message["to"] not in names:
+                    return f"sequence spec_final message {index} has an unknown participant"
+            for index, block in enumerate(spec["blocks"]):
+                if any(
+                    message >= len(spec["messages"])
+                    for branch in block["branches"] for message in branch["messages"]
+                ):
+                    return f"sequence spec_final block {index} cites an unknown message"
+        else:
+            node_ids = {node["id"] for node in spec["nodes"]}
+            if len(node_ids) != len(spec["nodes"]):
+                return "flowchart spec_final has duplicate node ids"
+            for index, node in enumerate(spec["nodes"]):
+                if node["evidence"]["file"] != spec["root"]["file"]:
+                    return f"flowchart spec_final node {index} lies outside its root"
+            for index, edge in enumerate(spec["edges"]):
+                if edge["from"] not in node_ids or edge["to"] not in node_ids:
+                    return f"flowchart spec_final edge {index} has an unknown endpoint"
         if head is not None:
             problem = _diagram_head_evidence_problem(kind, spec, head)
             if problem is not None:

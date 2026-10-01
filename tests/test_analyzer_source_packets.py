@@ -32,6 +32,14 @@ def test_completed_packet_counts_coverage_without_tool_reads(tmp_path: Path) -> 
     assert coverage["artifact_reads_rejected"] == 0
     assert coverage["uncovered_files"] == []
 
+    grounding = analyze_grounding(
+        {"main": None, "forked": []},
+        [{"file": "api.py", "_stack": "python"}, {"file": "api.py", "_stack": "other"}],
+        directory,
+    )
+    assert grounding["grounding_rate"] == 0.5
+    assert grounding["grounded"][0]["stack"] == "python"
+
 
 def test_sharded_stack_packet_counts_coverage(tmp_path: Path) -> None:
     directory = _artifacts(tmp_path, {
@@ -66,15 +74,3 @@ def test_packet_requires_same_stack_assignment_and_final_verdict(
     assert coverage["files_reviewed"] == 0
     assert coverage["source_packet_reviewed"] == 0
     assert coverage["uncovered_files"] == ["api.py"]
-
-
-def test_packet_grounding_requires_the_receiving_stack(tmp_path: Path) -> None:
-    directory = _artifacts(tmp_path, {
-        "python": {"assigned_files": ["api.py"], "source_packet_files": ["api.py"]},
-    }, {"issues": [], "verdicts": [{"path": "api.py", "verdict": "clean"}]})
-    trajectories: dict[str, Any] = {"main": None, "forked": []}
-    findings = [{"file": "api.py", "_stack": "python"}, {"file": "api.py", "_stack": "other"}]
-    grounding = analyze_grounding(trajectories, findings, directory)
-    assert grounding["grounded_count"] == 1
-    assert grounding["grounding_rate"] == 0.5
-    assert grounding["grounded"][0]["stack"] == "python"

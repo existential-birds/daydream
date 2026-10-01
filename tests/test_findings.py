@@ -241,19 +241,7 @@ def _diagram_payload() -> dict[str, Any]:
             "sequence": {
                 "status": "rendered",
                 "reason": None,
-                "spec_proposed": {"participants": [], "messages": [], "blocks": []},
                 "spec_final": {"participants": [], "messages": [], "blocks": []},
-                "grounding": {
-                    "elements": [],
-                    "summary": {
-                        "proposed": 0,
-                        "grounded_first_pass": 0,
-                        "repaired": 0,
-                        "pruned": 0,
-                    },
-                    "capped": {},
-                    "root_range": None,
-                },
                 "omit_reasons": [],
             },
             "flowchart": None,

@@ -15,7 +15,6 @@ import pytest
 from daydream import review_profile as rp, severity
 from daydream.deep.coverage import (
     _completed_read_paths,
-    _read_coverage_unverifiable,
     bounded_diff_block_for_file,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
@@ -320,32 +319,6 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
     assert stats["files_read_by_reviewers"] == 1  # only notes.txt's completed read
     swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
     assert "api.py" in swept
-
-
-@pytest.mark.parametrize("command", [
-    'for f in api.py notes.txt; do nl -ba "$f"; done',
-    'for f in missing.py api.py notes.txt; do cat "$f"; done',
-])
-def test_shell_success_cannot_certify_files(tmp_path: Path, command: str) -> None:
-    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "opaque")
-    _write_fork_calls(run_dir, "deep-python.json", [
-        {"function_name": "shell", "arguments": {"command": command}},
-    ], result_extra={"exit_code": 0})
-    candidates, stats = compute_uncovered_files(daydream_dir, "opaque")
-    assert candidates == []
-    assert stats["coverage_ratio"] is None
-    assert stats["files_read_by_reviewers"] is None
-    assert stats["uncovered_files"] is None
-    assert stats["verified_files"] == []
-    fork = load_trajectories(daydream_dir, "opaque")["forked"][0]
-    verdicts = resolve_per_stack_verdicts(
-        assigned_files=["api.py", "notes.txt"], declared_verdicts=[],
-        completed_read_paths=_completed_read_paths(fork), finding_files={"api.py"},
-        read_coverage_unverifiable=_read_coverage_unverifiable(fork),
-    )
-    assert verdicts[0]["verdict"] == "has_findings"
-    assert verdicts[0]["source_read_status"] == "unverifiable"
-    assert verdicts[1] == {"path": "notes.txt", "lines_read": None, "verdict": "unknown", "n_findings": 0}
 
 
 @pytest.mark.parametrize("extra", [

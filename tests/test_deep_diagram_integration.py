@@ -239,17 +239,6 @@ def _diagram_calls(stub: StubBackend, kind: str) -> list[dict[str, Any]]:
     ]
 
 
-def _reasons(result: dict[str, Any]) -> set[str]:
-    """Every non-None reason code in a result's grounding elements."""
-    grounding = result["grounding"]
-    assert grounding is not None
-    return {
-        check["reason"]
-        for check in grounding["elements"]
-        if check["reason"] is not None
-    }
-
-
 # --- Spec test 1: sequence auto trigger -------------------------------------
 
 
@@ -273,12 +262,6 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     assert sequence["status"] == "rendered"
     assert flowchart["status"] == "skipped"
     assert flowchart["reason"]
-    assert sequence["grounding"]["summary"] == {
-        "proposed": 8,
-        "grounded_first_pass": 8,
-        "repaired": 0,
-        "pruned": 0,
-    }
     # Only the sequence author turn ran; the skipped kind cost nothing.
     calls = _diagram_calls(stub, "sequence")
     assert len(calls) == 1
@@ -303,7 +286,7 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     assert body.index(header) < body.index(SEQUENCE_HEADING)
     assert body[body.index(header) + len(header) :].lstrip().startswith(SEQUENCE_HEADING)
     assert SEQUENCE_GOLDEN in body
-    assert "| # | Interaction | Call site | Callee defined at |" in body
+    assert "| Call site |" not in body
 
     report = (target / ".review-output.md").read_text(encoding="utf-8")
     assert "## Diagrams" in report
@@ -354,7 +337,6 @@ async def test_flowchart_auto_trigger_renders_grounded_diagram(
     flowchart = artifact["results"]["flowchart"]
     assert flowchart["status"] == "rendered"
     assert artifact["results"]["sequence"]["status"] == "skipped"
-    assert flowchart["grounding"]["root_range"] == [1, 9]
     assert flowchart["mermaid"] == FLOWCHART_GOLDEN
     assert len(_diagram_calls(stub, "flowchart")) == 1
     assert _diagram_calls(stub, "sequence") == []
@@ -363,8 +345,6 @@ async def test_flowchart_auto_trigger_renders_grounded_diagram(
     assert FLOWCHART_HEADING in body
     assert SEQUENCE_HEADING not in body
     assert FLOWCHART_GOLDEN in body
-    assert "Control flow of `run` (`app/pipeline.py:1-9`)" in body
-    assert "| Node | Statement | Location |" in body
 
 
 # --- Spec test 3: both kinds -------------------------------------------------
@@ -396,8 +376,6 @@ async def test_both_signals_render_sequence_first(
 
     body = captured_post.body()
     assert body.index(SEQUENCE_HEADING) < body.index(FLOWCHART_HEADING)
-    assert "5 interactions across 3 components, each grounded to a cited call site." in body
-    assert "Control flow of `run` (`pkg_b/client.py:11-19`): 7 nodes" in body
 
 
 # --- Spec test 4: repair then prune -----------------------------------------
@@ -471,13 +449,6 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
 
     sequence = _artifact(target)["results"]["sequence"]
     assert sequence["status"] == "rendered"
-    assert sequence["grounding"]["summary"] == {
-        "proposed": 11,
-        "grounded_first_pass": 8,
-        "repaired": 1,
-        "pruned": 2,
-    }
-    assert _reasons(sequence) == {"SYMBOL_NOT_ON_LINE", "CALLEE_NOT_DEFINED_IN_TARGET"}
 
     mermaid = sequence["mermaid"]
     assert "Ghost call" in mermaid, "the repaired message must be drawn"
@@ -485,9 +456,7 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
     assert "Undefined callee" not in mermaid
 
     body = captured_post.body()
-    assert "2 proposed interactions were dropped as ungrounded." in body
-    # The evidence table lists only the rendered (grounded) rows.
-    assert body.count("| 6 | Client → Core: Ghost call |") == 1
+    assert "Ghost call" in body
     assert "Unsnappable symbol" not in body
     dispatch = _diagram_dispatch(target)
     assert [
@@ -522,16 +491,9 @@ async def test_nonresumable_diagram_prunes_without_losing_grounded_content(
     assert len(_diagram_calls(stub, "sequence")) == 1
     sequence = _artifact(target)["results"]["sequence"]
     assert sequence["status"] == "rendered"
-    assert sequence["grounding"]["summary"] == {
-        "proposed": 11,
-        "grounded_first_pass": 8,
-        "repaired": 0,
-        "pruned": 3,
-    }
     assert sequence["mermaid"] == SEQUENCE_GOLDEN
     body = captured_post.body()
     assert SEQUENCE_GOLDEN in body
-    assert "3 proposed interactions were dropped as ungrounded." in body
     assert all(str(item["label"]) not in body for item in _FABRICATED)
 
 
@@ -628,13 +590,6 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
 
     flowchart = _artifact(target)["results"]["flowchart"]
     assert flowchart["status"] == "rendered"
-    assert _reasons(flowchart) == {
-        "NODE_OUTSIDE_ROOT",
-        "NOT_A_BRANCH_STATEMENT",
-        "SUBROUTINE_NOT_CALLED_HERE",
-        "SUBROUTINE_NOT_DEFINED",
-        "EDGE_ENDPOINT_UNGROUNDED",
-    }
     final_kinds = {node["id"]: node["kind"] for node in flowchart["spec_final"]["nodes"]}
     assert "bad_out" not in final_kinds
     assert "bad_dec" not in final_kinds
@@ -671,58 +626,60 @@ async def test_unread_evidence_file_omits_sequence_when_pairs_break(
     assert exit_code == 0
     sequence = _artifact(target)["results"]["sequence"]
     assert sequence["status"] == "omitted"
-    assert _reasons(sequence) == {
-        "FILE_READ_UNVERIFIED",
-        "REPLY_NOT_PRECEDED_BY_CALL",
-    }
-    assert sequence["grounding"]["summary"]["pruned"] == 4
+    assert len(sequence["spec_final"]["messages"]) == 1
     assert sequence["omit_reasons"] == ["TOO_FEW_MESSAGES", "TOO_FEW_PARTICIPANTS"]
     assert sequence["mermaid"] is None
     assert SEQUENCE_HEADING not in captured_post.body()
 
 
-async def test_unread_root_file_omits_the_flowchart(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+@pytest.mark.parametrize("opaque_reads", [False, True])
+async def test_unverified_diagram_reads_omit_both_kinds_with_one_warning(
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
+    monkeypatch: pytest.MonkeyPatch, opaque_reads: bool,
 ) -> None:
-    """With no read receipts at all the flowchart is omitted, never rendered."""
-    target = dr.build_branch_heavy_repo(tmp_path)
-
-    exit_code, _ = await review_run(
+    warnings = StringIO()
+    monkeypatch.setattr(deep, "console", Console(file=warnings, width=200))
+    monkeypatch.setattr(deep, "print_warning", print_warning)
+    target = dr.build_both_signals_repo(tmp_path)
+    code, _ = await review_run(
         target,
-        specs={"flowchart": [dr.flowchart_spec()]},
-        emit_reads=False,
+        specs={
+            "sequence": [dr.sequence_spec()],
+            "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
+        },
+        emit_reads=opaque_reads, opaque_reads=opaque_reads,
     )
-
-    assert exit_code == 0
-    flowchart = _artifact(target)["results"]["flowchart"]
-    assert flowchart["status"] == "omitted"
-    assert "FILE_READ_UNVERIFIED" in _reasons(flowchart)
-    assert set(flowchart["omit_reasons"]) == {"TOO_FEW_NODES", "NO_END", "NO_DECISION"}
-    assert flowchart["mermaid"] is None
+    assert code == 0
+    for result in _artifact(target)["results"].values():
+        assert result["status"] == "omitted"
+        assert "grounding" not in result
+        assert "spec_proposed" not in result
+        assert result["mermaid"] is None
+    assert SEQUENCE_HEADING not in captured_post.body()
     assert FLOWCHART_HEADING not in captured_post.body()
+    assert warnings.getvalue().count("Diagram source-read coverage is unverifiable") == 1
 
 
-async def test_shell_only_diagram_receipts_are_unverifiable_and_omitted(
+async def test_successful_native_read_repair_clears_unverified_warning(
     tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     warnings = StringIO()
     monkeypatch.setattr(deep, "console", Console(file=warnings, width=200))
     monkeypatch.setattr(deep, "print_warning", print_warning)
-    target = dr.build_branch_heavy_repo(tmp_path)
-    code, _ = await review_run(
-        target, specs={"flowchart": [dr.flowchart_spec()]}, opaque_reads=True,
+    target = dr.build_cross_module_repo(tmp_path)
+    code, backend = await review_run(
+        target, specs={"sequence": [dr.sequence_spec()]}, session_id="diagram-repair",
+        reads={"sequence": ["pkg_a/core.py", "pkg_a/util.py"], "sequence-repair": ["pkg_b/client.py"]},
     )
     assert code == 0
-    result = _artifact(target)["results"]["flowchart"]
-    assert result["status"] == "omitted"
-    assert result["grounding"]["read_coverage_status"] == "unverifiable"
-    assert "FILE_READ_UNVERIFIED" in _reasons(result)
-    assert result["mermaid"] is None
-    assert FLOWCHART_HEADING not in captured_post.body()
-    assert warnings.getvalue().count("Diagram source-read coverage is unverifiable") == 1
+    calls = _diagram_calls(backend, "sequence")
+    assert len(calls) == 2
+    assert "FILE_READ_UNVERIFIED" in calls[1]["prompt"]
+    result = _artifact(target)["results"]["sequence"]
+    assert result["status"] == "rendered" and result["mermaid"] == SEQUENCE_GOLDEN
+    assert SEQUENCE_GOLDEN in captured_post.body()
+    assert "Diagram source-read coverage is unverifiable" not in warnings.getvalue()
 
 
 # --- Spec test 7: omission floors -------------------------------------------
@@ -779,7 +736,7 @@ async def test_flowchart_without_a_decision_is_omitted(
     flowchart = _artifact(target)["results"]["flowchart"]
     assert flowchart["status"] == "omitted"
     assert "NO_DECISION" in flowchart["omit_reasons"]
-    assert "NOT_A_BRANCH_STATEMENT" in _reasons(flowchart)
+    assert all(node["kind"] != "decision" for node in flowchart["spec_final"]["nodes"])
     assert FLOWCHART_HEADING not in captured_post.body()
 
 
@@ -1032,7 +989,7 @@ async def test_injection_payloads_cannot_add_mermaid_statements(
     assert "-->|" not in mermaid
 
     body = captured_post.body()
-    assert "</details>\n</details>" in body
+    assert body.split(SEQUENCE_HEADING, 1)[1].split("```", 2)[2].lstrip().startswith("</details>")
     assert body.count("```mermaid") == 1
     assert body.count(SEQUENCE_HEADING) == 1
 
@@ -1060,16 +1017,9 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     assert exit_code == 0, "a failed diagram kind must not fail the review"
     results = _artifact(target)["results"]
     assert set(results) == {"sequence", "flowchart"}
-    assert results["flowchart"] == {
-        "status": "failed",
-        "reason": "RuntimeError: stub: diagram author for flowchart blew up",
-        "spec_proposed": None,
-        "spec_final": None,
-        "grounding": None,
-        "omit_reasons": [],
-        "mermaid": None,
-        "advisory": None,
-    }
+    assert results["flowchart"]["status"] == "failed"
+    assert results["flowchart"]["reason"] == "RuntimeError: stub: diagram author for flowchart blew up"
+    assert results["flowchart"]["mermaid"] is None
     assert results["sequence"]["status"] == "rendered"
     assert results["sequence"]["reason"] is None
 
@@ -1105,19 +1055,10 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
     assert exit_code == 0
     results = _artifact(target)["results"]
     assert set(results) == {"sequence", "flowchart"}
-    assert results == {
-        kind: {
-            "status": "failed",
-            "reason": f"RuntimeError: stub: diagram author for {kind} blew up",
-            "spec_proposed": None,
-            "spec_final": None,
-            "grounding": None,
-            "omit_reasons": [],
-            "mermaid": None,
-            "advisory": None,
-        }
-        for kind in ("sequence", "flowchart")
-    }
+    for kind, result in results.items():
+        assert result["status"] == "failed"
+        assert result["reason"] == f"RuntimeError: stub: diagram author for {kind} blew up"
+        assert result["mermaid"] is None
     _, end = _diagram_lifecycle(target)
     dispatch = _diagram_dispatch(target)
     assert end["status"] == "failed"

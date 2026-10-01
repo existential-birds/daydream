@@ -615,7 +615,9 @@ class StubBackend:
             else:
                 spec = {"root": None, "nodes": [], "edges": []}
             if self.diagram_emit_reads:
-                read_paths = self.diagram_reads.get(kind) or self._diagram_spec_paths(spec)
+                read_paths = (
+                    self.diagram_reads.get(f"{kind}-repair") if is_repair else None
+                ) or self.diagram_reads.get(kind) or self._diagram_spec_paths(spec)
                 for index, path in enumerate(read_paths):
                     if path in self.diagram_unread:
                         continue

@@ -18,7 +18,6 @@ import pytest
 
 from daydream.config import (
     DIAGRAM_MAX_BLOCKS,
-    DIAGRAM_MAX_EDGES,
     DIAGRAM_MAX_MESSAGES,
     DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
@@ -362,24 +361,19 @@ def test_sequence_happy_path_grounds_every_element(repo: Path, symbols: RepoSymb
 
     assert report.ungrounded() == []
     assert report.omit_reasons == []
-    assert report.capped == {}
-    assert report.root_range is None
     assert report.rejected is None
-    assert report.summary == {"proposed": 6, "grounded": 6, "pruned": 0}
     assert [m["label"] for m in report.spec_final["messages"]] == [
         "request",
         "resolve identity",
         "payload",
     ]
-    # The callee of an internal call is resolved to a real definition, which is
-    # what the evidence table's "Callee defined at" column renders.
+    # Internal calls resolve to real definitions.
     assert check_for(report, "message", "0").strength == "definition"
     assert check_for(report, "message", "0").defined_at == "pkg/api.py:4"
     assert check_for(report, "message", "1").defined_at == "pkg/service.py:1"
     # A reply is proven by a return statement within its enclosing function.
     assert check_for(report, "message", "2").strength == "definition"
     assert check_for(report, "message", "2").defined_at == "pkg/service.py:1"
-    assert [check_for(report, "message", str(i)).final_index for i in range(3)] == [0, 1, 2]
     assert [check_for(report, "message", str(i)).in_changed_hunk for i in range(3)] == [
         True,
         True,
@@ -392,9 +386,7 @@ def test_flowchart_happy_path_grounds_every_element(repo: Path, symbols: RepoSym
 
     assert report.ungrounded() == []
     assert report.omit_reasons == []
-    assert report.capped == {}
     assert report.rejected is None
-    assert report.root_range == (1, 9)
     assert [node["id"] for node in report.spec_final["nodes"]] == [f"N{i}" for i in range(1, 9)]
     assert len(report.spec_final["edges"]) == 7
     assert report.spec_final["root"] == {
@@ -405,7 +397,6 @@ def test_flowchart_happy_path_grounds_every_element(repo: Path, symbols: RepoSym
     # The subroutine's symbol resolves to a real definition in the repo.
     subroutine = check_for(report, "node", "N5")
     assert (subroutine.strength, subroutine.defined_at) == ("definition", "pkg/flow.py:12")
-    assert check_for(report, "edge", "N2->N3").final_index == 1
     # Both decisions keep two distinctly labeled branches, so neither is demoted.
     kinds = {node["id"]: node["kind"] for node in report.spec_final["nodes"]}
     assert kinds["N2"] == "decision" and kinds["N4"] == "decision"
@@ -459,21 +450,6 @@ def test_spec_final_key_sets_match_the_schemas(repo: Path, symbols: RepoSymbols)
         assert set(node["evidence"]) == {"file", "line", "symbol"}
     for edge in flowchart["edges"]:
         assert set(edge) == {"from", "to", "label"}
-
-
-def test_element_check_to_dict_exposes_exactly_nine_keys(repo: Path, symbols: RepoSymbols) -> None:
-    payload = check_for(run_sequence(repo, symbols, base_sequence()), "message", "0").to_dict()
-    assert set(payload) == {
-        "element",
-        "ref",
-        "grounded",
-        "reason",
-        "strength",
-        "snapped_line",
-        "in_changed_hunk",
-        "defined_at",
-        "final_index",
-    }
 
 
 # --- Shared reason codes, sequence side --------------------------------------
@@ -560,12 +536,11 @@ def test_diagram_citations_require_completed_structured_read(
         }],
         "observation": {"results": [{"source_call_id": "read-1", "extra": {"exit_code": 0}}]},
     }]}))
-    paths, unverifiable = _diagram_read_evidence(receipt)
+    paths = _diagram_read_evidence(receipt)
     report = ground_sequence(
         base_sequence(), repo_root=repo, hunk_ranges=HUNKS, read_paths=paths, symbols=symbols,
     )
     assert check_for(report, "message", "0").reason == expected
-    assert unverifiable is not structured
 
 
 def test_read_receipt_matches_on_path_components_only(repo: Path, symbols: RepoSymbols) -> None:
@@ -809,8 +784,6 @@ def test_sequence_prune_flattens_a_block_whose_condition_is_ungrounded(
     assert report.spec_final["blocks"] == []
     assert len(report.spec_final["messages"]) == 3
     assert check_for(report, "block", "b0").grounded
-    assert check_for(report, "block", "b0").final_index is None
-    assert check_for(report, "branch", "b0.0").final_index is None
 
 
 def test_sequence_prune_drops_participants_with_no_remaining_messages(
@@ -822,14 +795,11 @@ def test_sequence_prune_drops_participants_with_no_remaining_messages(
     )
     report = run_sequence(repo, symbols, spec)
 
-    store = check_for(report, "participant", "Store")
-    assert store.grounded and store.final_index is None
+    assert check_for(report, "participant", "Store").grounded
     assert [p["name"] for p in report.spec_final["participants"]] == ["Client", "API", "Service"]
-    # A structural drop is not an ungrounded drop.
-    assert report.summary["pruned"] == 0
 
 
-def test_sequence_final_index_is_dense_after_a_mid_list_prune(
+def test_sequence_preserves_message_order_after_a_mid_list_prune(
     repo: Path, symbols: RepoSymbols
 ) -> None:
     spec = base_sequence()
@@ -847,14 +817,11 @@ def test_sequence_final_index_is_dense_after_a_mid_list_prune(
     report = run_sequence(repo, symbols, spec)
 
     assert check_for(report, "message", "1").reason == "LINE_OUT_OF_RANGE"
-    assert check_for(report, "message", "1").final_index is None
-    assert [check_for(report, "message", str(i)).final_index for i in range(4)] == [0, None, 1, 2]
     assert [m["label"] for m in report.spec_final["messages"]] == [
         "request",
         "resolve identity",
         "payload",
     ]
-    assert report.summary["pruned"] == 1
 
 
 def test_sequence_block_message_indices_are_remapped_after_a_prune(
@@ -891,8 +858,6 @@ def test_sequence_block_message_indices_are_remapped_after_a_prune(
     assert check_for(report, "message", "1").reason == "FILE_MISSING"
     # Proposed indices 2 and 3 became final positions 1 and 2; index 1 is gone.
     assert report.spec_final["blocks"][0]["branches"][0]["messages"] == [1, 2]
-    assert check_for(report, "branch", "b0.0").final_index == 0
-    assert check_for(report, "block", "b0").final_index == 0
 
 
 def test_sequence_opt_block_keeps_only_its_first_branch(
@@ -921,8 +886,6 @@ def test_sequence_opt_block_keeps_only_its_first_branch(
     assert [b["condition"] for b in report.spec_final["blocks"][0]["branches"]] == ["first"]
     # The surplus branch was grounded; it is normalized away, not pruned.
     assert check_for(report, "branch", "b0.1").grounded
-    assert check_for(report, "branch", "b0.1").final_index is None
-    assert report.summary["pruned"] == 0
 
 
 # --- Sequence floors ---------------------------------------------------------
@@ -1012,13 +975,11 @@ def test_sequence_participant_cap_drops_orphaned_messages(
 
     assert report.ungrounded() == []
     assert len(report.spec_final["participants"]) == DIAGRAM_MAX_PARTICIPANTS
-    assert report.capped == {"participants": 2, "messages": 2}
     assert len(report.spec_final["messages"]) == 9
+    participants = {p["name"] for p in report.spec_final["participants"]}
+    assert all(m["from"] in participants and m["to"] in participants for m in report.spec_final["messages"])
     assert report.omit_reasons == []
     # Cap drops are not ungrounded drops.
-    assert report.summary["pruned"] == 0
-    assert check_for(report, "participant", "P11").final_index is None
-    assert check_for(report, "message", "10").final_index is None
     assert check_for(report, "message", "10").grounded
 
 
@@ -1031,7 +992,6 @@ def test_sequence_message_cap_truncates_the_tail(repo: Path, symbols: RepoSymbol
     ]
     report = run_sequence(repo, symbols, spec)
 
-    assert report.capped == {"messages": 5}
     assert len(report.spec_final["messages"]) == DIAGRAM_MAX_MESSAGES
     assert report.spec_final["messages"][-1]["label"] == f"step {DIAGRAM_MAX_MESSAGES - 1}"
     assert report.omit_reasons == []
@@ -1059,18 +1019,14 @@ def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols)
     ]
     report = run_sequence(repo, symbols, spec)
 
-    assert report.capped == {"blocks": 2}
     assert len(report.spec_final["blocks"]) == DIAGRAM_MAX_BLOCKS
-    assert check_for(report, "block", f"b{DIAGRAM_MAX_BLOCKS}").final_index is None
 
 
 def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
     """The floor is evaluated on the capped spec, so a cap drop cannot hide.
 
     The only two interactions inside a changed hunk sit past the message cap.
-    Trimming them in the renderer would have drawn a diagram whose ``<sub>``
-    line claims a changed interaction it no longer shows; trimming them here
-    omits the kind instead.
+    Trimming them must omit the kind, since no changed interaction survives.
     """
     spec = _wide_sequence(3)
     unchanged, changed = spec["messages"][0], spec["messages"][1]
@@ -1089,7 +1045,6 @@ def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoS
         symbols=symbols,
     )
 
-    assert report.capped == {"messages": 2}
     assert len(report.spec_final["messages"]) == DIAGRAM_MAX_MESSAGES
     assert not any(m["label"].startswith("changed") for m in report.spec_final["messages"])
     assert report.omit_reasons == ["NO_CHANGED_INTERACTION"]
@@ -1109,7 +1064,6 @@ def test_flowchart_root_not_candidate_rejects_the_whole_spec(
     assert check_for(report, "root", "verify_jwt").reason == "ROOT_NOT_CANDIDATE"
     assert report.spec_final["nodes"] == [] and report.spec_final["edges"] == []
     assert report.spec_final["root"] == {"file": "pkg/flow.py", "name": "verify_jwt", "line": 12}
-    assert report.root_range is None
     # No node was even adjudicated, so the omission is not silent.
     assert report.omit_reasons == ["TOO_FEW_NODES"]
     assert len(report.elements) == 1
@@ -1127,14 +1081,6 @@ def test_flowchart_root_must_still_overlap_a_changed_hunk(
         symbols=symbols,
     )
     assert report.rejected == "ROOT_NOT_CANDIDATE"
-
-
-def test_flowchart_root_range_comes_from_the_candidate_not_the_model(
-    repo: Path, symbols: RepoSymbols
-) -> None:
-    report = run_flowchart(repo, symbols, base_flowchart())
-    assert report.root_range == (FLOW_ROOT.line, FLOW_ROOT.end_line)
-    assert check_for(report, "root", "resolve_identity").final_index == 0
 
 
 # --- Flowchart node reason codes ---------------------------------------------
@@ -1191,6 +1137,7 @@ def test_flowchart_node_symbol_snap_stays_inside_the_root(
 
 def test_flowchart_node_outside_root(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
+    spec["root"]["end_line"] = 999  # A model-supplied range cannot extend the candidate.
     # Line 13 is inside verify_jwt, not inside the root function.
     spec["nodes"][6]["evidence"]["line"] = 13
     report = run_flowchart(repo, symbols, spec)
@@ -1369,7 +1316,6 @@ def test_flowchart_decision_with_one_branch_is_demoted_not_dropped(
     # N3 was only reachable through the removed edge.
     assert "N3" not in kinds
     assert check_for(report, "node", "N3").grounded
-    assert check_for(report, "node", "N3").final_index is None
     assert kinds["N4"] == "decision"
 
 
@@ -1386,12 +1332,10 @@ def test_flowchart_unreachable_nodes_are_removed(repo: Path, symbols: RepoSymbol
     report = run_flowchart(repo, symbols, spec)
 
     assert [node["id"] for node in report.spec_final["nodes"]] == [f"N{i}" for i in range(1, 9)]
-    orphan = check_for(report, "node", "N9")
-    assert orphan.grounded and orphan.final_index is None
-    assert report.summary["pruned"] == 0
+    assert check_for(report, "node", "N9").grounded
 
 
-def test_flowchart_final_index_is_dense_after_a_mid_list_prune(
+def test_flowchart_preserves_live_nodes_and_edges_after_a_mid_list_prune(
     repo: Path, symbols: RepoSymbols
 ) -> None:
     spec = base_flowchart()
@@ -1407,10 +1351,9 @@ def test_flowchart_final_index_is_dense_after_a_mid_list_prune(
     spec["edges"].insert(1, {"from": "N2", "to": "NX", "label": "bogus"})
     report = run_flowchart(repo, symbols, spec)
 
-    assert check_for(report, "node", "NX").final_index is None
-    assert [check_for(report, "node", f"N{i}").final_index for i in range(1, 9)] == list(range(8))
     assert check_for(report, "edge", "N2->NX").reason == "EDGE_ENDPOINT_UNGROUNDED"
-    assert check_for(report, "edge", "N2->N3").final_index == 1
+    assert report.spec_final["nodes"] == base_flowchart()["nodes"]
+    assert report.spec_final["edges"] == base_flowchart()["edges"]
 
 
 # --- Flowchart floors --------------------------------------------------------
@@ -1533,11 +1476,9 @@ def test_flowchart_node_cap_trims_the_tail_and_keeps_rendering(
 
     assert report.ungrounded() == []
     assert len(report.spec_final["nodes"]) == DIAGRAM_MAX_NODES
-    assert report.capped["nodes"] == 4
-    assert report.capped["edges"] == 4
     assert report.omit_reasons == []
     assert report.spec_final["nodes"][0]["id"] == "NSTART"
-    assert len(report.spec_final["edges"]) <= DIAGRAM_MAX_EDGES
+    assert len(report.spec_final["edges"]) == DIAGRAM_MAX_NODES - 1
 
 
 def test_flowchart_cap_can_push_a_kind_below_its_floor(
@@ -1545,14 +1486,12 @@ def test_flowchart_cap_can_push_a_kind_below_its_floor(
 ) -> None:
     report = run_flowchart(repo, symbols, _tall_flowchart(end_last=True))
 
-    assert report.capped["nodes"] == 4
     # Losing the terminal node also strips the decision's second branch, so the
     # demotion pass runs again on the capped graph.
     assert report.omit_reasons == ["NO_END", "NO_DECISION"]
     # The trimmed end node was grounded; it was cap-dropped, not pruned.
     assert check_for(report, "node", "NEND").grounded
-    assert check_for(report, "node", "NEND").final_index is None
-    assert report.summary["pruned"] == 0
+    assert "NEND" not in {n["id"] for n in report.spec_final["nodes"]}
 
 
 def test_flowchart_node_cap_never_trims_the_start_node(

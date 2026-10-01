@@ -24,7 +24,7 @@ from daydream.config import (
     DIAGRAM_MODES,
 )
 from daydream.deep.artifacts import diagram_markdown_path, diagram_path, merged_report_path
-from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
+from daydream.deep.coverage import _completed_read_paths
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -164,7 +164,7 @@ def _diagram_result(
     """A no-spec result for a kind that never produced one.
 
     ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
-    this shape: no spec, no grounding, no mermaid, and a reason the omission
+    this shape: no spec, no mermaid, and a reason the omission
     notice and ``diagram.json`` can both render. ``advisory`` is the kind's
     resolved input-omission diagnostic (or ``None`` when no capture ran), so a
     budget/authoring failure keeps both facts.
@@ -172,9 +172,7 @@ def _diagram_result(
     return {
         "status": status,
         "reason": reason,
-        "spec_proposed": None,
         "spec_final": None,
-        "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
         "advisory": advisory,
@@ -190,8 +188,8 @@ def _failed_kind_result(exc: BaseException, advisory: dict[str, Any] | None = No
     )
 
 
-def _diagram_read_evidence(fork_path: Path | None) -> tuple[set[str], bool]:
-    """Successful structured reads and unavailable coverage in this diagram fork.
+def _diagram_read_evidence(fork_path: Path | None) -> set[str]:
+    """Successful structured reads in this diagram fork.
 
     Missing or malformed receipts never certify a citation. Successful reads
     survive retries even when their enclosing attempt later fails.
@@ -201,9 +199,8 @@ def _diagram_read_evidence(fork_path: Path | None) -> tuple[set[str], bool]:
     except (OSError, json.JSONDecodeError):
         trajectory = None
     if not isinstance(trajectory, dict):
-        return set(), True
-    phases = {DaydreamPhase.DIAGRAM.value}
-    return _completed_read_paths(trajectory, phases), _read_coverage_unverifiable(trajectory, phases)
+        return set()
+    return _completed_read_paths(trajectory, {DaydreamPhase.DIAGRAM.value})
 
 
 def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
@@ -502,6 +499,7 @@ async def _run_diagram_kind(
     recorder: "TrajectoryRecorder | None",
     backend: Any,
     dispatch: "DispatchHandle | None" = None,
+    unread_kinds: set[str] | None = None,
 ) -> DiagramResult:
     """Author, ground, repair once, prune and render one diagram kind.
 
@@ -521,21 +519,28 @@ async def _run_diagram_kind(
 
     def _ground(spec: dict[str, Any], read_paths: set[str]) -> Any:
         if kind == "sequence":
-            return ground_sequence(
+            report = ground_sequence(
                 spec,
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
                 read_paths=read_paths,
                 symbols=symbols,
             )
-        return ground_flowchart(
-            spec,
-            repo_root=ctx.work.repo,
-            hunk_ranges=hunk_ranges,
-            read_paths=read_paths,
-            candidate_roots=eligibility.candidate_roots,
-            symbols=symbols,
-        )
+        else:
+            report = ground_flowchart(
+                spec,
+                repo_root=ctx.work.repo,
+                hunk_ranges=hunk_ranges,
+                read_paths=read_paths,
+                candidate_roots=eligibility.candidate_roots,
+                symbols=symbols,
+            )
+        if unread_kinds is not None:
+            if any(check.reason == "FILE_READ_UNVERIFIED" for check in report.ungrounded()):
+                unread_kinds.add(kind)
+            else:
+                unread_kinds.discard(kind)
+        return report
 
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
     read_paths: set[str] = set()
@@ -622,7 +627,7 @@ async def _run_diagram_kind(
         # advisory inputs all fit has nothing to report beyond its reason, and
         # ``None`` is the documented "no omission diagnostic" value.
         return _failed_kind_result(exc, advisory)
-    read_paths, unverifiable = _diagram_read_evidence(fork_path)
+    read_paths = _diagram_read_evidence(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
@@ -632,8 +637,6 @@ async def _run_diagram_kind(
 
     spec = coerce(structured)
     report = _ground(spec, read_paths)
-    grounded_first_pass = int(report.summary["grounded"])
-    repaired = 0
 
     # Exactly one repair turn, and only when the session can be resumed: a
     # fresh session would have to re-derive the whole spec from scratch, which
@@ -664,13 +667,10 @@ async def _run_diagram_kind(
         if not isinstance(turn, tuple):
             return turn
         repaired_output, _, repair_budget, repair_fork_path = turn
-        repair_paths, repair_unverifiable = _diagram_read_evidence(repair_fork_path)
-        read_paths |= repair_paths
-        unverifiable |= repair_unverifiable
+        read_paths |= _diagram_read_evidence(repair_fork_path)
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
             report = _ground(spec, read_paths)
-            repaired = max(int(report.summary["grounded"]) - grounded_first_pass, 0)
 
     omit_reasons = list(report.omit_reasons)
     mermaid: str | None = None
@@ -686,20 +686,7 @@ async def _run_diagram_kind(
     return {
         "status": status,
         "reason": report.rejected,
-        "spec_proposed": spec,
         "spec_final": report.spec_final,
-        "grounding": {
-            "read_coverage_status": "unverifiable" if unverifiable else "verified",
-            "elements": [check.to_dict() for check in report.elements],
-            "summary": {
-                "proposed": int(report.summary["proposed"]),
-                "grounded_first_pass": grounded_first_pass,
-                "repaired": repaired,
-                "pruned": int(report.summary["pruned"]),
-            },
-            "capped": dict(report.capped),
-            "root_range": list(report.root_range) if report.root_range is not None else None,
-        },
         "omit_reasons": omit_reasons,
         "mermaid": mermaid,
         "advisory": advisory,
@@ -814,6 +801,7 @@ async def _run_diagram_step(
         results[kind] = _diagram_result("skipped", decision.reason)
 
     failures: dict[str, str] = {}
+    unread_kinds: set[str] = set()
     if kinds:
         print_info(console, f"Grounded diagrams: authoring {', '.join(kinds)}")
         backend = ctx.backend_for("diagram")
@@ -842,6 +830,7 @@ async def _run_diagram_step(
                                     recorder=recorder,
                                     backend=backend,
                                     dispatch=dispatch,
+                                    unread_kinds=unread_kinds,
                                 )
                             except Exception as exc:  # noqa: BLE001 -- parallel isolation
                                 detail = f"{type(exc).__name__}: {exc}"
@@ -860,10 +849,7 @@ async def _run_diagram_step(
         if result is not None and result.get("status") == "failed":
             failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
 
-    if any(
-        result is not None and (result.get("grounding") or {}).get("read_coverage_status") == "unverifiable"
-        for result in results.values()
-    ):
+    if unread_kinds:
         print_warning(console, "Diagram source-read coverage is unverifiable; unsupported citations are omitted.")
 
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}

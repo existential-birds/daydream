@@ -275,9 +275,9 @@ exploration pre-scan (cached across runs)
   (dependents go with their element), the render caps, and finally the omission floors — caps run **before**
   the floor so a cap-induced drop cannot leave a thin diagram rendered, and `spec_final` is rebuilt
   key-by-key so it re-validates against the `additionalProperties: false` spec schema in the privileged
-  poster. The step always writes `.daydream/deep/diagram.json` (eligibility signals + per-element verdicts —
-  the audit trail for "why did this PR get no diagram?", zero agent calls when nothing is eligible) and
-  `diagram.md`. Eligibility re-runs `detect_stacks()` itself rather than reading `ctx.data["stacks"]`, which
+  poster. The step writes `.daydream/deep/diagram.json` (eligibility, final specs, omission reasons;
+  zero agent calls when nothing is eligible) and `diagram.md`. Eligibility re-runs `detect_stacks()` itself
+  rather than reading `ctx.data["stacks"]`, which
   is post-tiny-diff-collapse and would read a two-language diff as non-code. Per-kind failure is **fail-open
   in every review mode** (warn, record `status="failed"`, review continues) and **exit 1** under
   `--diagram-only`, after the artifact is written. The author prompt follows the turn's **resolved

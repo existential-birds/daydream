@@ -178,18 +178,6 @@ def _write_artifact(
     return path
 
 
-def _grounded_element(element: str, ref: str, final_index: int) -> dict[str, Any]:
-    return {
-        "element": element,
-        "ref": ref,
-        "grounded": True,
-        "reason": None,
-        "strength": "definition",
-        "snapped_line": None,
-        "in_changed_hunk": True,
-        "defined_at": "a.py:1",
-        "final_index": final_index,
-    }
 
 
 def _flowchart_payload() -> dict[str, Any]:
@@ -224,22 +212,6 @@ def _flowchart_payload() -> dict[str, Any]:
                         },
                     ],
                     "edges": [{"from": "start", "to": "end", "label": None}],
-                },
-                "grounding": {
-                    "elements": [
-                        _grounded_element("root", "run", 0),
-                        _grounded_element("node", "start", 0),
-                        _grounded_element("node", "end", 1),
-                        _grounded_element("edge", "start->end", 0),
-                    ],
-                    "summary": {
-                        "proposed": 4,
-                        "grounded_first_pass": 4,
-                        "repaired": 0,
-                        "pruned": 0,
-                    },
-                    "capped": {},
-                    "root_range": [1, 2],
                 },
             }
         }
@@ -318,24 +290,6 @@ def _sequence_payload() -> dict[str, Any]:
                             ],
                         }
                     ],
-                },
-                "grounding": {
-                    "elements": [
-                        _grounded_element("participant", "api", 0),
-                        _grounded_element("participant", "worker", 1),
-                        _grounded_element("message", "0", 0),
-                        _grounded_element("message", "1", 1),
-                        _grounded_element("message", "2", 2),
-                        _grounded_element("block", "b0", 0),
-                        _grounded_element("branch", "b0.0", 0),
-                    ],
-                    "summary": {
-                        "proposed": 7,
-                        "grounded_first_pass": 7,
-                        "repaired": 0,
-                        "pruned": 0,
-                    },
-                    "capped": {},
                 },
             }
         }
@@ -613,7 +567,7 @@ def test_post_findings_all_matched_no_approve_without_flag(
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_drops_forged_diagram_grounding_attestation(
+def test_post_findings_drops_flowchart_nodes_absent_from_source(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     (git_repo / "a.py").write_text("def run():\n    return 1\n")
@@ -621,56 +575,7 @@ def test_post_findings_drops_forged_diagram_grounding_attestation(
     head_sha = commit(git_repo, "add flowchart source")
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
-    flowchart["spec_final"]["nodes"] = [
-        {
-            "id": "start",
-            "kind": "start",
-            "label": "run",
-            "evidence": {"file": "a.py", "line": 1, "symbol": "run"},
-        },
-        {
-            "id": "decision",
-            "kind": "decision",
-            "label": "invented branch",
-            "evidence": {"file": "a.py", "line": 1, "symbol": None},
-        },
-        {
-            "id": "process",
-            "kind": "process",
-            "label": "invented process",
-            "evidence": {"file": "a.py", "line": 1, "symbol": None},
-        },
-        {
-            "id": "end",
-            "kind": "end",
-            "label": "return",
-            "evidence": {"file": "a.py", "line": 2, "symbol": None},
-        },
-    ]
-    flowchart["spec_final"]["edges"] = [
-        {"from": "start", "to": "decision", "label": None},
-        {"from": "decision", "to": "process", "label": "yes"},
-        {"from": "process", "to": "end", "label": None},
-    ]
-    flowchart["grounding"]["elements"] = [
-        _grounded_element(element, ref, index)
-        for element, ref, index in (
-            ("root", "run", 0),
-            ("node", "start", 0),
-            ("node", "decision", 1),
-            ("node", "process", 2),
-            ("node", "end", 3),
-            ("edge", "start->decision", 0),
-            ("edge", "decision->process", 1),
-            ("edge", "process->end", 2),
-        )
-    ]
-    flowchart["grounding"]["summary"] = {
-        "proposed": 8,
-        "grounded_first_pass": 8,
-        "repaired": 0,
-        "pruned": 0,
-    }
+    flowchart["spec_final"]["nodes"][0]["kind"] = "decision"
     artifact = _write_artifact(
         git_repo / "f.json",
         [
@@ -695,7 +600,7 @@ def test_post_findings_drops_forged_diagram_grounding_attestation(
     assert fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews") == []
 
 
-def test_post_findings_drops_forged_sequence_grounding_attestation(
+def test_post_findings_drops_sequence_calls_absent_from_source(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     (git_repo / "api.py").write_text(
@@ -743,7 +648,6 @@ def test_post_findings_drops_diagram_evidence_absent_from_immutable_head(
     flowchart["spec_final"]["root"]["line"] = 100
     flowchart["spec_final"]["nodes"][0]["evidence"]["line"] = 100
     flowchart["spec_final"]["nodes"][1]["evidence"]["line"] = 100
-    flowchart["grounding"]["root_range"] = [100, 100]
     artifact = _write_artifact(
         git_repo / "findings.json",
         [],
@@ -1023,8 +927,6 @@ def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
     flowchart["spec_final"]["root"]["file"] = "a.py\n"
     for node in flowchart["spec_final"]["nodes"]:
         node["evidence"]["file"] = "a.py\n"
-    for element in flowchart["grounding"]["elements"]:
-        element["defined_at"] = "a.py\n:1"
     artifact = _api_head_artifact(
         tmp_path,
         [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
