@@ -30,6 +30,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.coverage import (
     _completed_read_paths,
     _finding_files_from_records,
+    _read_coverage_unverifiable,
     bounded_diff_block_for_file,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
@@ -1236,6 +1237,10 @@ async def _run_uncovered_sweep(
         dd.parent, session_id, receipts=_load_coverage_receipts(ctx)
     )
 
+    for source_phase in {"deep", "alternatives"} & set(coverage_stats["unverifiable_agents"]):
+        print_warning(console, f"Source-read coverage unverifiable for {source_phase}; "
+                      "opaque shell results cannot verify per-file reads.")
+
     # Eligibility comes from the durable hunk index, including files omitted
     # from the short display diff. Discovery receives the actual live path.
     diff_path = deep_state.diff_path
@@ -1304,21 +1309,7 @@ async def _run_uncovered_sweep(
                     return
 
     stats: dict[str, Any] = {
-        "pre_sweep": {
-            "files_in_diff": coverage_stats["files_in_diff"],
-            "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
-            "coverage_ratio": coverage_stats["coverage_ratio"],
-            # Issue #336: propagate the missing-index gap into the persisted
-            # stats so the report renders it instead of a false full-coverage
-            # pass (``load_hunk_index`` still fails open -- reporting only).
-            "hunk_index_missing": coverage_stats.get("hunk_index_missing", False),
-            "uncovered_files": uncovered_files,
-            # Issue #731: per-evidence-type coverage counts (source_read /
-            # inline_hunk_reviewed / dependency_frontier_read); receipts are
-            # written and loaded on every deep run (decoupled from sharding,
-            # #740), so the counts surface whenever the run produced them.
-            "coverage_by_evidence": coverage_stats.get("coverage_by_evidence", {}),
-        },
+        "pre_sweep": coverage_stats,
         "attempted_files": swept_files,
         "completed_files": [],
         # Issue #309 finding 6: ``covered_files`` is filled from the POST-sweep
@@ -1329,11 +1320,9 @@ async def _run_uncovered_sweep(
         "covered_files": [],
         # POST-sweep ratio is recomputed below after the sweep forks land; this
         # pre-sweep snapshot is the fallback when the sweep produces no reads.
-        "post_sweep": {
-            "files_read_by_reviewers": coverage_stats["files_read_by_reviewers"],
-            "coverage_ratio": coverage_stats["coverage_ratio"],
-        },
+        "post_sweep": dict(coverage_stats),
         "sweep_finding_count": 0,
+        "sweep_unavailable": bool(coverage_stats["unverifiable_files"]),
         # The integer skip counts are derived from the filename lists so the
         # two views cannot diverge (issue #309 finding 10).
         "sweep_skipped_capacity": len(skipped_capacity_files),
@@ -1486,14 +1475,15 @@ async def _run_uncovered_sweep(
     # i.e. a verified completed read of the file happened. A successful review
     # output WITHOUT a read leaves the file in the uncovered list, so it is
     # never claimed as covered.
-    post_uncovered: list[str] | None = None
     try:
-        post_uncovered, post_coverage = compute_uncovered_files(dd.parent, session_id)
-        stats["post_sweep"] = {
-            "files_read_by_reviewers": post_coverage["files_read_by_reviewers"],
-            "coverage_ratio": post_coverage["coverage_ratio"],
-        }
-        stats["covered_files"] = sorted(f for f in completed_reviews if f not in post_uncovered)
+        post_receipts = dict(_load_coverage_receipts(ctx) or {})
+        post_receipts.update({f"uncovered-{n}": {"assigned_files": [file]} for n, file in enumerate(swept_files)})
+        _, post_coverage = compute_uncovered_files(dd.parent, session_id, receipts=post_receipts)
+        stats["post_sweep"] = post_coverage
+        if any(label.startswith("deep-uncovered-") for label in post_coverage["unverifiable_agents"]):
+            print_warning(console, "Source-read coverage unverifiable for uncovered sweep; "
+                          "opaque shell results cannot verify per-file reads.")
+        stats["covered_files"] = sorted(set(completed_reviews) & set(post_coverage["verified_files"]))
     except Exception:  # noqa: BLE001 -- fail-open: keep the pre-sweep fallback
         pass
 
@@ -1647,15 +1637,24 @@ def _reconcile_stack_verdicts(
         from daydream.deep.coverage import load_source_packet_paths
 
         stack_reads = _stack_review_reads(daydream_dir, recorder, stack_name)
+        lookup = _safe_descriptor(f"deep-{stack_name}")
+        unknown = recorder is not None and any(
+            _read_coverage_unverifiable(fork)
+            for fork in _loaded_review_forks(daydream_dir, recorder.session_id)
+            if (label := _agent_label(fork["_source_file"])) == lookup or label.startswith(f"{lookup}--")
+        )
+        packets = load_source_packet_paths(daydream_dir / "deep", stack_name, assigned_files)
+        if unknown and packets is None:
+            print_warning(console, f"Source-read coverage unverifiable for deep-{stack_name}; "
+                          "coverage-targeted catch-up unavailable for files without verified evidence.")
         finding_files = _finding_files_from_records(parsed_records)
         return resolve_per_stack_verdicts(
             assigned_files=assigned_files,
             declared_verdicts=declared_verdicts,
             completed_read_paths=stack_reads,
             finding_files=finding_files,
-            source_packet_paths=load_source_packet_paths(
-                daydream_dir / "deep", stack_name, assigned_files,
-            ),
+            source_packet_paths=packets,
+            read_coverage_unverifiable=unknown,
         )
     except Exception:  # noqa: BLE001 -- fail-open: never fail the run on a missing fork
         return []

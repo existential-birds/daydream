@@ -24,7 +24,7 @@ from daydream.config import (
     DIAGRAM_MODES,
 )
 from daydream.deep.artifacts import diagram_markdown_path, diagram_path, merged_report_path
-from daydream.deep.coverage import _completed_read_paths
+from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -190,33 +190,20 @@ def _failed_kind_result(exc: BaseException, advisory: dict[str, Any] | None = No
     )
 
 
-def _diagram_read_paths(fork_path: Path | None) -> set[str]:
-    """Completed diagram-phase read paths recorded in one fork's trajectory.
+def _diagram_read_evidence(fork_path: Path | None) -> tuple[set[str], bool]:
+    """Successful structured reads and unavailable coverage in this diagram fork.
 
-    Fail-CLOSED: a missing, unreadable, or malformed fork file yields the empty
-    set, which makes every citation fail ``FILE_NOT_READ_BY_MODEL``. The
-    alternative -- treating "no receipts" as "all reads happened" -- would turn
-    a recording failure into an unverified diagram.
-
-    The fork file is written by ``_ForkCM.__aexit__`` even when the body
-    raised, but ``_write`` short-circuits on a fork with no steps, so absence
-    is a real and expected case.
-
-    Note that the receipts are the UNION across ``run_agent``'s retry attempts:
-    a failed retryable attempt's invocation is still flushed into the fork, so
-    a file read during an attempt that later errored still counts. That is
-    fail-open in the model's favour and is deliberate -- the read did happen,
-    and the file content it returned is what grounding cares about.
+    Missing or malformed receipts never certify a citation. Successful reads
+    survive retries even when their enclosing attempt later fails.
     """
-    if fork_path is None:
-        return set()
     try:
-        trajectory = json.loads(fork_path.read_text(encoding="utf-8"))
+        trajectory = json.loads(fork_path.read_text(encoding="utf-8")) if fork_path else None
     except (OSError, json.JSONDecodeError):
-        return set()
+        trajectory = None
     if not isinstance(trajectory, dict):
-        return set()
-    return _completed_read_paths(trajectory, phases={DaydreamPhase.DIAGRAM.value})
+        return set(), True
+    phases = {DaydreamPhase.DIAGRAM.value}
+    return _completed_read_paths(trajectory, phases), _read_coverage_unverifiable(trajectory, phases)
 
 
 def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
@@ -521,7 +508,7 @@ async def _run_diagram_kind(
     Each turn runs in its own fork (``diagram-<kind>`` then
     ``diagram-<kind>-repair``) and the forks are strictly sequential: the first
     must EXIT before grounding runs, because the read receipts that decide
-    ``FILE_NOT_READ_BY_MODEL`` only reach disk on exit, and the repair decision
+    ``FILE_READ_UNVERIFIED`` only reach disk on exit, and the repair decision
     depends on that grounding. Nested forks would also be illegal -- the
     recorder ContextVar is reset LIFO.
 
@@ -635,7 +622,7 @@ async def _run_diagram_kind(
         # advisory inputs all fit has nothing to report beyond its reason, and
         # ``None`` is the documented "no omission diagnostic" value.
         return _failed_kind_result(exc, advisory)
-    read_paths |= _diagram_read_paths(fork_path)
+    read_paths, unverifiable = _diagram_read_evidence(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
@@ -677,7 +664,9 @@ async def _run_diagram_kind(
         if not isinstance(turn, tuple):
             return turn
         repaired_output, _, repair_budget, repair_fork_path = turn
-        read_paths |= _diagram_read_paths(repair_fork_path)
+        repair_paths, repair_unverifiable = _diagram_read_evidence(repair_fork_path)
+        read_paths |= repair_paths
+        unverifiable |= repair_unverifiable
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
             report = _ground(spec, read_paths)
@@ -700,6 +689,7 @@ async def _run_diagram_kind(
         "spec_proposed": spec,
         "spec_final": report.spec_final,
         "grounding": {
+            "read_coverage_status": "unverifiable" if unverifiable else "verified",
             "elements": [check.to_dict() for check in report.elements],
             "summary": {
                 "proposed": int(report.summary["proposed"]),
@@ -869,6 +859,12 @@ async def _run_diagram_step(
     for kind, result in results.items():
         if result is not None and result.get("status") == "failed":
             failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
+
+    if any(
+        result is not None and (result.get("grounding") or {}).get("read_coverage_status") == "unverifiable"
+        for result in results.values()
+    ):
+        print_warning(console, "Diagram source-read coverage is unverifiable; unsupported citations are omitted.")
 
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     blocks = render_diagram_blocks(ordered)

@@ -41,12 +41,10 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend
-from daydream.eval.analyzer import analyze_session
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.review_budget import ReviewLimits
 from daydream.runner import RunConfig, run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
-from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
 from tests.deep_orchestrator.support import _only_archived_run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.codex_replay import make_mock_process
@@ -421,91 +419,6 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     assert "notes.txt" not in committed
     # notes.txt still untracked in the working tree.
     assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
-
-
-async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-) -> None:
-    """A shell command ``shlex`` cannot tokenize must not lose the archive's
-    evaluation.json (issue #327).
-
-    The offending call contributes no read paths while sibling calls in the
-    same trajectory are still analyzed; the eval completes (archive never
-    blocks) and the run keeps non-null manifest eval metrics.
-    """
-    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    stub.fix_edit_line = "# daydream recommended change\n"
-
-    exit_code = await run(
-        _deep_run_config(multi_stack_target)
-    )
-    assert exit_code == 0
-
-    run_dir = _only_archived_run(archive_dir)
-    session_id = run_dir.name
-
-    # Inject an unbalanced-quote shell command into the SOURCE trajectory (the
-    # tree analyze_session reads) and re-run the production archive eval seam
-    # against it. Drop the stale evaluation.json from the clean run first so
-    # the assertions below observe the eval of the INJECTED trajectory.
-    source_traj = multi_stack_target / ".daydream" / "runs" / session_id / "trajectory.json"
-    traj = json.loads(source_traj.read_text())
-    traj["steps"].append(
-        {
-            "step_id": len(traj["steps"]) + 1,
-            "extra": {"daydream_phase": "deep"},
-            "tool_calls": [
-                {
-                    "function_name": "shell",
-                    "arguments": {"command": "rg -l '\"unclosed"},
-                },
-                {"function_name": "shell", "arguments": {"command": "cat api.py"}},
-            ],
-        }
-    )
-    source_traj.write_text(json.dumps(traj))
-
-    eval_path = run_dir / "evaluation.json"
-    eval_path.unlink(missing_ok=True)
-
-
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at=str((traj.get("extra") or {}).get("run_ended_at", "")),
-        root_trajectory_id=str(traj["trajectory_id"]),
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id=str(traj["trajectory_id"]),
-                path=source_traj,
-                json_bytes=json.dumps(traj).encode(),
-            ),
-        ),
-    )
-    # The same evaluation seam the strict archive finalizer drives, over the
-    # injected trajectory bytes.
-    result = analyze_session(
-        multi_stack_target / ".daydream",
-        session_id=session_id,
-        frozen_trajectories=snapshot_trajectories(snapshot),
-    )
-    assert "error" not in result
-    eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-
-    # Coverage degrades gracefully for the offending call only: the clean
-    # sibling call still contributes its read, so api.py stays covered.
-    evaluation = json.loads(eval_path.read_text())
-    assert evaluation["coverage"]["files_read_by_reviewers"] >= 1
-    assert "api.py" not in evaluation["coverage"]["uncovered_files"]
-
-    # The archive as a whole keeps non-null eval metrics.
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    metrics = manifest["metrics"]
-    assert metrics["grounding_rate"] is not None
-    assert metrics["total_findings"] is not None
-    assert metrics["coverage_ratio"] is not None
-    assert metrics["cost_per_finding_usd"] is not None
 
 
 async def test_dump_artifacts_copies_full_bundle_to_target_dir(

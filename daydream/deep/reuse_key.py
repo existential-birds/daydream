@@ -363,6 +363,7 @@ def shard_key_payload(
         "include_alternatives": include_alternatives,
         "exploration_present": exploration_present,
         "docs_only": docs_only,
+        "schema": _phases_schema_digest("PER_STACK_RECORD_SCHEMA"),
     }
     grounding = {
         "exploration": {"digest": exploration_digest(exploration_dir)},

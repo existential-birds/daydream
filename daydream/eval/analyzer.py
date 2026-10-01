@@ -16,7 +16,6 @@ from __future__ import annotations
 import json
 import math
 import re
-import shlex
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
@@ -182,8 +181,6 @@ def _files_from_diff(diff_path: Path) -> list[str]:
     return sorted(files)
 
 
-_READ_VERBS = ("sed", "nl", "cat", "rg", "grep", "head", "tail", "awk", "wc")
-_IMPORT_ONLY_ALTERNATIVE_RE = re.compile(r"^\^?(?:from\b|import\b)")
 _WRITE_TOOL_ALIASES = frozenset(
     {"write", "edit", "multiedit", "notebookedit", "patch", "apply_patch"}
 )
@@ -201,495 +198,13 @@ def _semantic_tool_kind(
     return "other"
 
 
-def _is_import_only_pattern(pattern: str) -> bool:
-    """Whether a ``Grep`` pattern references only module imports, no content.
-
-    Returns ``False`` for an empty/absent pattern (an import-only rule must
-    never gate a pathless Grep call). Otherwise ``True`` iff every ``|``-
-    separated alternative, stripped, matches the anchor-or-bare ``from`` /
-    ``import`` predicate — so ``^from|^import`` and ``from |import `` qualify,
-    while any alternative naming content (a ``class ``/``def `` body or a
-    symbol) makes it ``False``.
-    """
-    if not pattern:
-        return False
-    return all(
-        _IMPORT_ONLY_ALTERNATIVE_RE.match(alt.strip())
-        for alt in pattern.split("|")
-    )
-
-
-_SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
-_REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
-_SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
-
-# Literal-loop resolution (issue #1397). A shell ``for VAR in <words>; do``
-# binding is recognised only when every listed word is a plain literal (no
-# shell metacharacter) and the loop body is straight-line, i.e. it carries no
-# nested/conditional control flow and no flow control (``break``/``continue``/
-# ``return``/``exit``) that could skip a listed read; every ambiguous shape
-# contributes no binding, so no operand is ever credited from it and the
-# affected files stay uncovered and are swept (fail-open).
-_NON_LITERAL_CHARS = frozenset("$`*?[]{}~()|&<>;!\\\"'")
-_BODY_CONTROL_KEYWORDS = frozenset(
-    {
-        "for",
-        "while",
-        "until",
-        "if",
-        "then",
-        "else",
-        "elif",
-        "fi",
-        "case",
-        "esac",
-        "do",
-        "done",
-        "select",
-        "time",
-        "break",
-        "continue",
-        "return",
-        "exit",
-        "{",
-        "}",
-        "|",
-        "||",
-        "&&",
-        "&",
-    }
-)
-_LOOP_VAR_RE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
-_LOOP_PREFIX_OPERAND_RE = re.compile(r"([^$]*)(\$(?:\{\w+\}|\w+))")
-_RG_LONG_VALUE_OPTS = frozenset(
-    {
-        "context",
-        "context-before",
-        "context-after",
-        "glob",
-        "ignore-file",
-        "engine",
-        "regexp",
-        "file",
-        "type",
-        "type-not",
-        "type-add",
-        "max-columns",
-        "max-count",
-        "max-filesize",
-        "threads",
-        "pre",
-        "pre-glob",
-        "replace",
-        "sort",
-        "sortr",
-    }
-)
-_RG_SHORT_VALUE_OPTS = frozenset("ABCefgMmtTr")
-_GREP_LONG_VALUE_OPTS = frozenset(
-    {
-        "context",
-        "before-context",
-        "after-context",
-        "max-count",
-        "regexp",
-        "file",
-        "include",
-        "exclude",
-    }
-)
-_GREP_SHORT_VALUE_OPTS = frozenset("efABC")
-
-
-def _tokenize_command(command: str) -> list[str]:
-    """Split a shell command into tokens, honoring quotes and separators.
-
-    ``shlex`` preserves quoted operands as single tokens (``'my file.py'``
-    stays intact) while punctuation mode keeps ``&&``/``;``/``&`` as distinct
-    separator tokens even without surrounding whitespace.
-
-    Malformed tool-call data (unbalanced quotes) must never crash the
-    eval/archive pipeline; on ``ValueError`` we fall back to a whitespace
-    split so recoverable path operands still surface, except recoverable
-    operands adjacent to a separator, which the whitespace split glues to
-    the separator and are lost (issue #327).
-    """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        return list(lexer)
-    except ValueError:
-        return command.split()
-
-
-def _option_info(
-    tok: str,
-    long_value_opts: frozenset[str],
-    short_value_opts: frozenset[str],
-) -> tuple[int, bool]:
-    """How many tokens a ``rg``/``grep``-family option occupies, and whether it supplies the pattern.
-
-    ``-C 3`` → (2, False); ``--glob=*.py`` → (1, False) (value attached);
-    ``-n`` → (1, False); ``-e PAT``/``--regexp=PAT`` → (…, True) because an
-    explicit pattern leaves the next positional operand as a path, not a
-    pattern. Combined short flags (``-ni``) skip only their own token; a
-    value-taking short flag with an attached value (``-C3``) also consumes one.
-
-    The value sets are the verb's own — ``_RG_{LONG,SHORT}_VALUE_OPTS`` for
-    ``rg`` and ``_GREP_{LONG,SHORT}_VALUE_OPTS`` for ``grep`` — so each verb
-    consumes exactly the options that take a value in its own table. Which
-    options supply the search pattern is shared across both: ``--regexp`` and
-    ``--file`` long, ``-e`` and ``-f`` short.
-    """
-    if tok.startswith("--"):
-        if "=" in tok:
-            name = tok[2:].split("=", 1)[0]
-            return 1, name in ("regexp", "file")
-        name = tok[2:]
-        return (2 if name in long_value_opts else 1), name in ("regexp", "file")
-    body = tok[1:]
-    if body and body[0] in short_value_opts:
-        return (1 if len(body) > 1 else 2), body[0] in ("e", "f")
-    return 1, False
-
-
-def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
-    """File-path operands of one command segment for a given read verb.
-
-    Redirection operators are consumed together with their targets (separated
-    ``> target`` or attached ``2>/dev/null``) so a redirect target is never
-    recorded as a read. Sed address ranges and flags are filtered, ``rg``
-    skips option values plus the search pattern, and the inspection verbs
-    behave likewise: ``grep`` skips option values and its first positional
-    (the pattern) and credits no operand when that pattern is import-only
-    (issue #739), ``awk`` skips options and its first positional (the
-    program), ``head``/``tail`` skip options and their ``-n``/``-c`` values,
-    and ``wc`` skips options. ``cat`` operands pass through verbatim.
-    """
-    paths: set[str] = set()
-    i = 0
-    n = len(operands)
-    seen_pattern = False
-    seen_program = False
-    after_ddash = False
-    while i < n:
-        tok = operands[i]
-        m = _REDIRECT_RE.match(tok)
-        if m:
-            i += 1 if m.group(3) else 2
-            continue
-        # ``rg`` and ``grep`` share the same shape: ``--`` flips to literal
-        # operand parsing, a leading ``-`` (unless ``-`` itself) is an option
-        # whose consumed tokens + pattern-supplying status come from the verb's
-        # own option table, and the first remaining positional is the pattern.
-        if verb in ("rg", "grep"):
-            long_opts, short_opts = (
-                (_RG_LONG_VALUE_OPTS, _RG_SHORT_VALUE_OPTS)
-                if verb == "rg"
-                else (_GREP_LONG_VALUE_OPTS, _GREP_SHORT_VALUE_OPTS)
-            )
-            if tok == "--":
-                after_ddash = True
-                i += 1
-                continue
-            if not after_ddash and tok.startswith("-") and tok != "-":
-                skip, supplies_pattern = _option_info(tok, long_opts, short_opts)
-                i += skip
-                if supplies_pattern:
-                    seen_pattern = True
-                continue
-            if not seen_pattern:
-                seen_pattern = True
-                if verb == "grep" and _is_import_only_pattern(tok):
-                    # A grep whose pattern is only an import anchor is a
-                    # module-import scan, not a content read (issue #739):
-                    # crediting its operands as read paths would mis-credit
-                    # AC2/AC3 import coverage, exactly like the Grep-tool
-                    # branch's carve-out on the same shared seam.
-                    return paths
-                i += 1
-                continue
-        elif verb in ("head", "tail"):
-            if tok.startswith("-"):
-                body = tok[1:]
-                if body and body[0] in ("n", "c"):
-                    i += 1 if len(body) > 1 else 2
-                else:
-                    i += 1
-                continue
-        elif verb in ("awk", "wc"):
-            if tok.startswith("-"):
-                i += 1
-                continue
-            if verb == "awk" and not seen_program:
-                seen_program = True
-                i += 1
-                continue
-        elif verb in ("sed", "nl", "cat"):
-            if tok.startswith("-"):
-                i += 1
-                continue
-            if verb == "sed" and _SED_RANGE_RE.fullmatch(tok):
-                i += 1
-                continue
-        paths.add(tok)
-        i += 1
-    return paths
-
-
-def _is_literal_word(tok: str) -> bool:
-    """Whether ``tok`` is a plain literal with no shell metacharacter.
-
-    Used for the ``for VAR in <words>`` word list (issue #1397): a word
-    carrying any expansion, glob, quote, separator or redirection character
-    makes the whole loop unrecognised, so no partial credit is ever granted.
-    """
-    if not tok:
-        return False
-    return not any(ch in _NON_LITERAL_CHARS for ch in tok)
-
-
-def _is_straight_line_body(body: list[str]) -> bool:
-    """Whether a loop body is free of nested/conditional control flow.
-
-    A body qualifies only when every listed read is unconditionally reached.
-    Nested ``for``/``if``/``case``, ``while``/``until``, brace groups,
-    pipelines and the ``&&``/``&``/``||`` conditionals make the read
-    conditionally reached, as do command substitution, backticks, and flow
-    control (``break``/``continue``/``return``/``exit``) that can skip a later
-    read altogether; such a loop credits nothing (issue #1397, requirement 6,
-    whole-loop-or-nothing).
-    """
-    for tok in body:
-        if tok in _BODY_CONTROL_KEYWORDS:
-            return False
-        if "$(" in tok or "`" in tok:
-            return False
-    return True
-
-
-def _literal_loop_bindings(
-    tokens: list[str],
-) -> list[tuple[str, tuple[str, ...], int, int]]:
-    """Loop bindings as ``(var, words, body_start, body_end)`` records.
-
-    Each record carries its own ``do``…``done`` token span so that sequential
-    loops resolve independently — including two loops that reuse the same
-    variable name (issue #1397, Should Have) — and a read operand outside every
-    recognised loop credits nothing.
-
-    Only a top-level loop (the ``for`` token at index 0 or immediately after a
-    segment separator) with an all-literal, non-empty word list, a ``do`` and a
-    ``done``, and a straight-line body contributes a binding. Every ambiguous
-    shape credits nothing, per requirement 6: an empty list; a non-literal word
-    (command substitution, backticks, glob, ``$@``/``$*``, variable reference,
-    brace expansion, tilde); a missing ``do``/``done``; a nested ``for``, an
-    ``if``/``case`` body, a ``while``/``until`` loop; or a read reached through
-    ``&&``/``&``/``||``, a pipe, or a brace group. No partial credit is ever
-    granted (issue #1397).
-    """
-    bindings: list[tuple[str, tuple[str, ...], int, int]] = []
-    n = len(tokens)
-    i = 0
-    while i < n:
-        if tokens[i] != "for" or not (i == 0 or tokens[i - 1] in _SEGMENT_SEPARATORS):
-            i += 1
-            continue
-        if i + 2 >= n or not _is_literal_word(tokens[i + 1]) or tokens[i + 2] != "in":
-            i += 1
-            continue
-        var = tokens[i + 1]
-        j = i + 3
-        words: list[str] = []
-        while j < n and tokens[j] not in (";", "do"):
-            words.append(tokens[j])
-            j += 1
-        if j >= n or not words or any(not _is_literal_word(w) for w in words):
-            i += 1
-            continue
-        if tokens[j] == ";":
-            j += 1
-        if j >= n or tokens[j] != "do":
-            i += 1
-            continue
-        body_start = j + 1
-        k = body_start
-        while k < n and tokens[k] != "done":
-            k += 1
-        if k >= n:
-            i += 1
-            continue
-        if not _is_straight_line_body(tokens[body_start:k]):
-            i += 1
-            continue
-        bindings.append((var, tuple(words), body_start, k))
-        i = k + 1
-    return bindings
-
-
-def _enclosing_loop_binding(
-    bindings: list[tuple[str, tuple[str, ...], int, int]], index: int
-) -> tuple[str, tuple[str, ...]] | None:
-    """Binding of the recognised loop whose ``do``…``done`` span holds *index*.
-
-    A read operand credits a loop's words only when the read segment sits inside
-    that loop's own body, so a variable reused by a later loop — or a read
-    outside every loop — never picks up another loop's word list (issue #1397,
-    requirement 6: whole-loop-or-nothing). Nested bodies are rejected up front,
-    and spans never overlap, so at most one span can match.
-    """
-    for var, words, body_start, body_end in bindings:
-        if body_start <= index < body_end:
-            return (var, words)
-    return None
-
-
-def _resolve_loop_operand(
-    operand: str, binding: tuple[str, tuple[str, ...]] | None
-) -> tuple[str, ...] | None:
-    """Resolve a ``$``-bearing operand through one loop's binding, if possible.
-
-    ``$VAR`` and ``${VAR}`` return that loop's words; one literal prefix followed
-    by exactly one reference to the same loop variable (``src/$f``) returns each
-    word with the prefix prepended. A reference to a different variable, a
-    second ``$``, any trailing suffix, or no enclosing loop returns ``None``
-    (issue #1397).
-    """
-    if binding is None:
-        return None
-    var, words = binding
-    m = _LOOP_VAR_RE.fullmatch(operand)
-    if m:
-        return words if (m.group(1) or m.group(2)) == var else None
-    m = _LOOP_PREFIX_OPERAND_RE.fullmatch(operand)
-    if not m:
-        return None
-    var_match = _LOOP_VAR_RE.fullmatch(m.group(2))
-    if not var_match or (var_match.group(1) or var_match.group(2)) != var:
-        return None
-    prefix = m.group(1)
-    return tuple(prefix + w for w in words)
-
-
-def _loop_resolved_paths(
-    verb: str, operands: list[str], binding: tuple[str, tuple[str, ...]] | None
-) -> set[str]:
-    """Resolved literal-loop paths for one read segment inside a loop body.
-
-    Each ``$``-bearing operand is replaced by a unique sentinel literal and
-    ``_read_paths_for_segment`` re-run, so the verb's own position rules
-    (``rg``/``grep`` pattern skipping, ``sed`` address ranges, redirects,
-    option tables) decide which operands are credited. A sentinel the verb
-    credited is resolved through the enclosing loop's binding; an unresolvable
-    one contributes nothing.
-    """
-    resolved: set[str] = set()
-    sentinels: dict[str, str] = {}
-    substituted: list[str] = []
-    for idx, op in enumerate(operands):
-        if "$" in op:
-            sentinel = f"\x00loop{idx}\x00"
-            sentinels[sentinel] = op
-            substituted.append(sentinel)
-        else:
-            substituted.append(op)
-    credited = _read_paths_for_segment(verb, substituted)
-    for sentinel, op in sentinels.items():
-        if sentinel not in credited:
-            continue
-        words = _resolve_loop_operand(op, binding)
-        if words:
-            resolved.update(words)
-    return resolved
-
-
-def _paths_from_command(command: str) -> set[str]:
-    """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
-
-    Reviewers read files through these verbs: ``sed -n '1,240p'``, ``nl -ba``,
-    ``cat``, ``rg``, ``grep``, ``head``, ``tail``, ``awk``, and ``wc``.
-    Commands may chain segments with ``&&``/``;`` and redirect with
-    ``2>/dev/null``. Tokenization is shell-aware: quoted paths survive,
-    redirection targets are consumed with their operator, and option values
-    plus the ``rg``/``grep`` search pattern and the ``awk`` program are
-    filtered. A read segment inside a recognised literal ``for … in <words>;
-    do … done`` body is resolved to that loop's listed words (issue #1397)
-    while everything else falls through verbatim. Extraction is deliberately permissive — ``_path_matches``
-    matches by ``endswith``, so a stray operand simply never matches a diff
-    file — but options, redirect targets, sed address ranges, and the
-    ``rg``/``grep`` search patterns are filtered.
-    """
-    paths: set[str] = set()
-    tokens = _tokenize_command(command)
-    bindings = _literal_loop_bindings(tokens)
-    i = 0
-    n = len(tokens)
-    while i < n:
-        tok = tokens[i]
-        if tok in _SEGMENT_SEPARATORS:
-            i += 1
-            continue
-        m = _REDIRECT_RE.match(tok)
-        if m:
-            i += 1 if m.group(3) else 2
-            continue
-        verb = tok.split("/")[-1]
-        if verb not in _READ_VERBS:
-            i += 1
-            continue
-        segment_start = i
-        i += 1
-        operands: list[str] = []
-        while i < n and tokens[i] not in _SEGMENT_SEPARATORS:
-            operands.append(tokens[i])
-            i += 1
-        credited = _read_paths_for_segment(verb, operands)
-        dynamic = {op for op in operands if "$" in op}
-        paths.update(credited - dynamic)
-        if dynamic and bindings:
-            binding = _enclosing_loop_binding(bindings, segment_start)
-            if binding is not None:
-                paths.update(_loop_resolved_paths(verb, operands, binding))
-    return paths
-
-
 def _read_paths_for_call(tc: dict[str, Any]) -> list[str]:
-    """All file paths a single tool call reads, across backends.
-
-    ``function_name`` is case-folded so ``Bash`` (Claude) / ``bash`` (pi) /
-    ``shell`` (codex) all route to the shell-command parser, and Claude's
-    ``Read`` / pi's ``read`` collapse into one branch that accepts either the
-    ``file_path`` or ``path`` argument key.
-
-    - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
-      (credited only when the pattern is not import-only)
-    - pi:     lowercase ``read`` → ``arguments.path``
-    - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
-    """
-    fn = tc["function_name"].casefold()
-    args = tc["arguments"]
-    if _semantic_tool_kind(tc["function_name"]) == "read":
-        p = args.get("file_path") or args.get("path", "")
-        return [p] if p else []
-    if fn == "grep":
-        p = args.get("path", "")
-        if not p:
-            return []
-        pattern = args.get("pattern", "")
-        if pattern and _is_import_only_pattern(pattern):
-            return []
-        return [p]
-    if fn in ("shell", "bash"):
-        return sorted(_paths_from_command(args.get("command", "")))
-    return []
-
-
-def _files_read(tool_calls: list[dict[str, Any]]) -> set[str]:
-    paths: set[str] = set()
-    for tc in tool_calls:
-        paths.update(_read_paths_for_call(tc))
-    return paths
+    """Native structured read operands; shell text and search paths prove no read."""
+    if _semantic_tool_kind(tc["function_name"]) != "read":
+        return []
+    args = tc.get("arguments") or {}
+    path = args.get("file_path") or args.get("path")
+    return [path] if isinstance(path, str) and path else []
 
 
 _ArtifactPathKind = Literal["repository", "artifact", "exploration_artifact", "rejected"]
@@ -767,14 +282,14 @@ def _artifact_path_kind(path: str, *, roots: _ArtifactPathRoots) -> _ArtifactPat
 
 
 def _partition_repository_reads(
-    tool_calls: list[dict[str, Any]],
+    read_paths: set[str],
     *,
     roots: _ArtifactPathRoots,
 ) -> tuple[set[str], set[str]]:
     """Partition source reads from artifact-shaped or unsafe evidence paths."""
     repository: set[str] = set()
     rejected: set[str] = set()
-    for path in _files_read(tool_calls):
+    for path in read_paths:
         if _artifact_path_kind(path, roots=roots) == "repository":
             repository.add(path)
         else:
@@ -784,7 +299,7 @@ def _partition_repository_reads(
 
 def _path_matches(absolute: str, relative: str) -> bool:
     """Check if an absolute tool-call path corresponds to a relative diff path."""
-    return absolute.endswith(relative) or absolute.endswith("/" + relative)
+    return absolute == relative or absolute.endswith("/" + relative)
 
 
 # Analysis functions
@@ -876,10 +391,12 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
     total_counts: Counter[str] = Counter()
     by_agent: dict[str, dict[str, Any]] = {}
     redundant_reads: list[dict[str, Any]] = []
+    opaque_reads = False
 
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
         calls = _extract_tool_calls(traj)
+        opaque_reads |= any(tc["function_name"].casefold() in {"shell", "bash", "exec_command"} for tc in calls)
         counts = Counter(tc["function_name"] for tc in calls)
         by_agent[label] = dict(counts)
         total_counts.update(counts)
@@ -906,11 +423,11 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
         "by_type": dict(total_counts.most_common()),
         "by_agent": by_agent,
         "write_ratio": round(write_count / total, 4) if total > 0 else 0,
-        "redundant_reads": redundant_reads,
+        "redundant_reads": None if opaque_reads else redundant_reads,
     }
 
 
-def _completed_source_packet_files(daydream_dir: Path) -> set[str]:
+def _completed_source_packet_files(daydream_dir: Path, stack: str | None = None) -> set[str]:
     """Credit host source only with the same stack's assigned, final verdict."""
     # Deep coverage imports this module for legacy artifact normalization.
     from daydream.deep.artifacts import per_stack_records_path
@@ -924,15 +441,17 @@ def _completed_source_packet_files(daydream_dir: Path) -> set[str]:
     if not isinstance(receipts, dict):
         return set()
     covered: set[str] = set()
-    for stack, receipt in receipts.items():
-        if not re.fullmatch(r"[\w-]+(?:#\d+)?", stack) or not isinstance(receipt, dict):
+    for name, receipt in receipts.items():
+        if stack is not None and name != stack:
+            continue
+        if not re.fullmatch(r"[\w-]+(?:#\d+)?", name) or not isinstance(receipt, dict):
             continue
         assigned = receipt.get("assigned_files")
         packet = receipt.get("source_packet_files")
         if not isinstance(assigned, list) or not isinstance(packet, list):
             continue
         try:
-            records = json.loads(per_stack_records_path(deep_dir, stack).read_text())
+            records = json.loads(per_stack_records_path(deep_dir, name).read_text())
         except (OSError, ValueError):
             continue
         if not isinstance(records, dict) or not isinstance(records.get("verdicts"), list):
@@ -943,7 +462,7 @@ def _completed_source_packet_files(daydream_dir: Path) -> set[str]:
             completed_read_paths=set(), finding_files=set(),
             source_packet_paths={path for path in packet if isinstance(path, str)},
         )
-        covered.update(v["path"] for v in verdicts if v["verdict"] != "not_reviewed")
+        covered.update(v["path"] for v in verdicts if v["verdict"] in {"clean", "has_findings"})
     return covered
 
 
@@ -962,34 +481,49 @@ def analyze_coverage(
     """
     diff_files = _files_from_diff(daydream_dir / "diff.patch")
 
-    review_calls: list[dict[str, Any]] = []
-    for traj in trajectories["forked"]:
+    from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
+
+    review_reads: set[str] = set()
+    unverifiable_agents: list[str] = []
+    for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
-        if label.startswith("deep-"):
-            review_calls.extend(_extract_tool_calls(traj))
-
-    if trajectories["main"]:
-        for tc in _extract_tool_calls(trajectories["main"]):
-            if tc["phase"] in ("deep", "alternatives"):
-                review_calls.append(tc)
-
+        phases = None if label.startswith("deep-") else {"deep", "alternatives"}
+        review_reads.update(_completed_read_paths(traj, phases))
+        if _read_coverage_unverifiable(traj, phases):
+            unverifiable_agents.append(label)
     review_reads, rejected_reads = _partition_repository_reads(
-        review_calls,
-        roots=_artifact_path_roots(daydream_dir, artifact_provenance),
+        review_reads, roots=_artifact_path_roots(daydream_dir, artifact_provenance),
     )
 
     tool_covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
     packet_covered = set(diff_files) & _completed_source_packet_files(daydream_dir)
     covered = tool_covered | packet_covered
     uncovered = sorted(set(diff_files) - covered)
+    unknown_files = uncovered if unverifiable_agents else []
+    # Production knows phase assignments, including resumed shards without a
+    # live fork. Keep its unavailable scope while crediting later verified reads.
+    try:
+        stats = json.loads((daydream_dir / "deep" / "coverage-stats.json").read_text())
+        unavailable = stats.get("post_sweep", stats.get("pre_sweep", {}))["unverifiable_files"]
+        if isinstance(unavailable, list):
+            unknown_files = sorted(set(unavailable) & set(uncovered))
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
+        pass
+    unverifiable = bool(unknown_files)
 
     return {
         "files_in_diff": len(diff_files),
-        "files_read_by_reviewers": len(tool_covered),
-        "files_reviewed": len(covered),
+        "coverage_status": "unverifiable" if unverifiable else "verified",
+        "files_read_by_reviewers": None if unverifiable else len(tool_covered),
+        "verified_files_read_by_reviewers": len(tool_covered),
+        "verified_files": sorted(covered),
+        "unverifiable_agents": sorted(unverifiable_agents),
+        "unverifiable_files": unknown_files,
+        "files_reviewed": None if unverifiable else len(covered),
+        "verified_files_reviewed": len(covered),
         "source_packet_reviewed": len(packet_covered),
-        "coverage_ratio": (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
-        "uncovered_files": uncovered,
+        "coverage_ratio": None if unverifiable else (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
+        "uncovered_files": None if unverifiable else uncovered,
         "artifact_reads_rejected": len(rejected_reads),
     }
 
@@ -1618,24 +1152,32 @@ def analyze_grounding(
     An artifact-owned primary file or rationale reference forces the finding
     ungrounded and is kept in redacted ``artifact_*`` fields.
     """
+    from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
+
     roots = _artifact_path_roots(daydream_dir, artifact_provenance)
     agent_reads: dict[str, set[str]] = {}
+    unverifiable_agents: set[str] = set()
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
-        agent_reads[label] = _partition_repository_reads(_extract_tool_calls(traj), roots=roots)[0]
+        agent_reads[label] = _partition_repository_reads(_completed_read_paths(traj), roots=roots)[0]
+        if _read_coverage_unverifiable(traj):
+            unverifiable_agents.add(label)
 
     ranges, hunk_source = _hunk_ranges(daydream_dir)
 
     grounded: list[dict[str, Any]] = []
     ungrounded: list[dict[str, Any]] = []
+    unverifiable_findings: list[dict[str, Any]] = []
     tiers = dict.fromkeys((*_LOCATION_TIERS, *_GROUNDING_EXEMPT_TIERS), 0)
     file_grounded_count = 0
     line_grounded_count = 0
     artifact_evidence_rejections = 0
+    file_unknown_count = 0
 
     for finding in findings:
         stack = finding.get("_stack", "")
-        reads = agent_reads.get(f"deep-{stack}", set())
+        label = "deep-" + stack.replace("#", "-")
+        reads = agent_reads.get(label, set()) | _completed_source_packet_files(daydream_dir, stack)
 
         cited_file = finding.get("file", "")
         rationale_value = finding.get("rationale", "")
@@ -1663,6 +1205,12 @@ def analyze_grounding(
         artifact_rationale_refs = sorted(set(artifact_rationale_refs))
         artifact_rejected = bool(artifact_file_ref or artifact_rationale_refs)
         artifact_evidence_rejections += int(artifact_rejected)
+        file_unknown = (
+            label in unverifiable_agents
+            and (not file_was_read or bool(unread_refs))
+            and cited_kind == "repository" and not artifact_rejected
+        )
+        file_unknown_count += int(file_unknown)
         file_grounded = file_was_read and not unread_refs and not artifact_rejected
 
         cited = _cited_line(finding)
@@ -1692,26 +1240,34 @@ def analyze_grounding(
             "stack": stack,
             "file": artifact_file_ref if artifact_file_ref is not None else cited_file,
             "confidence": finding.get("confidence", "UNKNOWN"),
-            "file_was_read": file_was_read,
-            "unread_rationale_refs": unread_refs,
+            "file_was_read": None if file_unknown and not file_was_read else file_was_read,
+            "unread_rationale_refs": None if file_unknown else unread_refs,
+            "unverifiable_rationale_refs": unread_refs if file_unknown else [],
             "artifact_file_ref": artifact_file_ref,
             "artifact_rationale_refs": artifact_rationale_refs,
             "location_tier": tier,
             "line_grounded": line_grounded,
-            "grounded": file_grounded and line_grounded,
+            "grounded": None if file_unknown and line_grounded else file_grounded and line_grounded,
         }
-        (grounded if entry["grounded"] else ungrounded).append(entry)
+        if entry["grounded"] is None:
+            unverifiable_findings.append(entry)
+        else:
+            (grounded if entry["grounded"] else ungrounded).append(entry)
 
     total = len(findings)
     return {
         "total_findings": total,
         "grounded_count": len(grounded),
         "ungrounded_count": len(ungrounded),
-        "grounding_rate": round(len(grounded) / total, 4) if total > 0 else None,
+        "unverifiable_count": len(unverifiable_findings),
+        "unverifiable": unverifiable_findings,
+        "grounding_rate": round(len(grounded) / total, 4) if total > 0 and not unverifiable_findings else None,
         "hunk_source": hunk_source,
         "file_grounded_count": file_grounded_count,
         "line_grounded_count": line_grounded_count,
-        "file_grounding_rate": (round(file_grounded_count / total, 4) if total > 0 else None),
+        "file_grounding_rate": (
+            round(file_grounded_count / total, 4) if total > 0 and not file_unknown_count else None
+        ),
         "line_grounding_rate": (round(line_grounded_count / total, 4) if total > 0 else None),
         "artifact_evidence_rejections": artifact_evidence_rejections,
         "tiers": tiers,
@@ -1732,41 +1288,37 @@ def analyze_exploration_utilization(
     directory of a root this run owns count; a directory merely named
     ``exploration``, another owner's, and parent traversals do not.
     """
+    from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
+
     roots = _artifact_path_roots(daydream_dir, artifact_provenance)
     results: list[dict[str, Any]] = []
-
     for traj in trajectories["forked"]:
         label = _agent_label(traj["_source_file"])
         if not label.startswith("deep-"):
             continue
-
-        calls = _extract_tool_calls(traj)
-        exploration_refs: list[str] = []
-        total_reads = 0
-
-        for tc in calls:
-            read_paths = _read_paths_for_call(tc)
-            if not read_paths:
-                continue
-            total_reads += 1
-            for path in read_paths:
-                if _artifact_path_kind(path, roots=roots) == "exploration_artifact":
-                    exploration_refs.append(path)
-
+        reads = _completed_read_paths(traj)
+        exploration_refs = [path for path in reads if _artifact_path_kind(path, roots=roots) == "exploration_artifact"]
+        unknown = not exploration_refs and _read_coverage_unverifiable(traj)
         results.append({
             "agent": label,
-            "total_reads": total_reads,
-            "exploration_reads": len(exploration_refs),
-            "utilized": len(exploration_refs) > 0,
+            "total_reads": None if unknown else len(reads),
+            "verified_structured_reads": len(reads),
+            "exploration_reads": None if unknown else len(exploration_refs),
+            "utilized": None if unknown else bool(exploration_refs),
         })
 
     utilized = sum(1 for r in results if r["utilized"])
     total_reviewers = len(results)
+    unknown = any(r["utilized"] is None for r in results)
 
     return {
-        "reviewers_utilizing_exploration": utilized,
+        "reviewers_utilizing_exploration": None if unknown else utilized,
+        "verified_reviewers_utilizing_exploration": utilized,
         "total_reviewers": total_reviewers,
-        "utilization_rate": (round(utilized / total_reviewers, 4) if total_reviewers > 0 else 0),
+        "utilization_rate": (
+            None if unknown
+            else round(utilized / total_reviewers, 4) if total_reviewers > 0 else 0
+        ),
         "by_agent": results,
     }
 
@@ -1970,6 +1522,8 @@ def analyze_training_signals(
         ]
         if agent_ungrounded:
             noise_flags.append(f"ungrounded_findings:{len(agent_ungrounded)}")
+        if any(g.get("stack") == agent_stack for g in grounding.get("unverifiable", [])):
+            noise_flags.append("unverifiable_grounding")
 
         # Keep the documented category order while ensuring repeated evidence
         # never repeats a training-review flag.

@@ -57,10 +57,6 @@ class StubBackend:
     orchestrator can progress through every stage. Records every call so
     tests can assert ordering, agents-kwarg absence, and per-stack isolation.
 
-    Every knob declared on ``__init__`` defaults to the pre-existing behaviour;
-    in particular ``per_stack_read_command``, ``per_stack_loop_reads``, and
-    ``read_result_extra`` are ``None``/empty/``None`` by default, so emitted
-    read events stay byte-identical unless a test opts in.
     """
 
     model = "mock-model"
@@ -272,22 +268,6 @@ class StubBackend:
         # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
         # leave one diff file unread by every reviewer).
         self.per_stack_unread: frozenset[str] = frozenset()
-        # Issue #1397: when set, a per-stack/generic branch whose scope
-        # contains any file in ``per_stack_loop_reads`` emits exactly one
-        # completed ``Bash`` command (this string) reading the loop-listed
-        # files together, and skips the per-file ``Read`` for those files.
-        # ``None`` (the default) emits no batched command, leaving the event
-        # stream byte-identical to today.
-        self.per_stack_read_command: str | None = None
-        # Files in a stack's scope read by ``per_stack_read_command`` rather
-        # than one ``Read`` each. Empty by default (no batched read).
-        self.per_stack_loop_reads: frozenset[str] = frozenset()
-        # Issue #1397 (requirement 5): when set, every read ToolResultEvent the
-        # stub emits -- per-file ``Read``, the batched shell command, and the
-        # sweep read alike -- carries these metadata fields, so a test can
-        # simulate a damaged observation (e.g. ``{"is_error": True}``) and prove
-        # the coverage outcome gate refuses it credit. ``None`` (the default)
-        # emits byte-identical successful reads.
         self.read_result_extra: dict[str, Any] | None = None
         # Issue #742: when set, the per-stack parse branch emits these as the
         # declared per-file verdicts in its structured_output
@@ -328,13 +308,14 @@ class StubBackend:
         # When True, the diagram branch emits a COMPLETED Read (paired start +
         # result) for every file its returned spec cites, so the grounding
         # pass's read receipts are satisfied. Off by default, which is the
-        # fail-closed case: every citation fails FILE_NOT_READ_BY_MODEL.
+        # fail-closed case: every citation fails FILE_READ_UNVERIFIED.
         self.diagram_emit_reads: bool = False
+        self.diagram_shell_reads: bool = False
         # Explicit per-kind read paths, replacing the spec-derived list above
         # (for tests that need a read of a file the spec does not cite).
         self.diagram_reads: dict[str, list[str]] = {}
         # Files to withhold a read for even when diagram_emit_reads is on --
-        # the FILE_NOT_READ_BY_MODEL knob.
+        # the FILE_READ_UNVERIFIED knob.
         self.diagram_unread: frozenset[str] = frozenset()
         # When set, the diagram author branch mints a ContinuationToken with
         # this session id, so the repair turn can resume the session. Without
@@ -639,7 +620,11 @@ class StubBackend:
                     if path in self.diagram_unread:
                         continue
                     call_id = f"diagram-{kind}-{turn}-read-{index}"
-                    yield ToolStartEvent(id=call_id, name="Read", input={"file_path": path})
+                    yield ToolStartEvent(
+                        id=call_id, name="Bash" if self.diagram_shell_reads else "Read",
+                        input={"command": f"for f in missing.py {path}; do cat \"$f\"; done"}
+                        if self.diagram_shell_reads else {"file_path": path},
+                    )
                     # Paired result: a bare start is an INTERRUPTED read and
                     # yields no coverage, so grounding would reject the citation.
                     yield self._read_result(id=call_id, output="file content")
@@ -780,25 +765,8 @@ class StubBackend:
         if m is not None:
             if self.per_stack_emit_reads:
                 scope_files = self._stack_scope_files(prompt)
-                if self.per_stack_read_command and any(
-                    scope_file in self.per_stack_loop_reads for scope_file in scope_files
-                ):
-                    # One shell read of the loop-listed files (issue #1397). The
-                    # analyzer resolves the literal ``for`` binding so the
-                    # coverage computation credits each listed file when the
-                    # paired observation is undamaged.
-                    loop_id = f"loop-{len(scope_files)}"
-                    yield ToolStartEvent(
-                        id=loop_id,
-                        name="Bash",
-                        input={"command": self.per_stack_read_command},
-                    )
-                    yield self._read_result(id=loop_id, output="loop read returned")
                 for scope_file in scope_files:
-                    if (
-                        scope_file in self.per_stack_unread
-                        or scope_file in self.per_stack_loop_reads
-                    ):
+                    if scope_file in self.per_stack_unread:
                         continue
                     yield ToolStartEvent(
                         id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}

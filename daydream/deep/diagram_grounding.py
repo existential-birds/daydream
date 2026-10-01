@@ -86,7 +86,7 @@ _SHARED_REASON_CODES = frozenset(
         "LINE_OUT_OF_RANGE",
         "SYMBOL_NOT_ON_LINE",
         "NOT_A_BRANCH_STATEMENT",
-        "FILE_NOT_READ_BY_MODEL",
+        "FILE_READ_UNVERIFIED",
         # Not in the spec's table: the one code for an element whose *shape* is
         # wrong (non-object entry, missing/blank/duplicate identifier, kind
         # outside its enum). Those cases have no evidence to adjudicate, and
@@ -459,7 +459,7 @@ def _token_on_line(text: str, symbol: str) -> bool:
 def _was_read(read_paths: set[str], relative: str) -> bool:
     """Whether any recorded read receipt names ``relative``.
 
-    ``read_paths`` are raw tool-call paths, usually absolute, so matching is by
+    ``read_paths`` are successful structured-read paths; matching is by
     path component (``/repo/pkg/api.py`` covers ``pkg/api.py`` but
     ``/repo/notapi.py`` does not cover ``api.py``).
     """
@@ -509,7 +509,7 @@ def _check_location(
     if cited < 1 or cited > sources.line_count(normalized):
         return normalized, cited, "LINE_OUT_OF_RANGE"
     if not _was_read(read_paths, normalized):
-        return normalized, cited, "FILE_NOT_READ_BY_MODEL"
+        return normalized, cited, "FILE_READ_UNVERIFIED"
     return normalized, cited, None
 
 
@@ -909,9 +909,9 @@ def ground_sequence(
         hunk_ranges: Head-side changed line ranges per repo-relative path, used
             for ``in_changed_hunk`` and the "at least one changed interaction"
             floor.
-        read_paths: Raw completed-read tool-call paths from the diagram phase's
+        read_paths: Successful structured-read paths from the diagram phase's
             trajectory. An empty set means every citation fails
-            ``FILE_NOT_READ_BY_MODEL``, which is the intended fail-closed
+            ``FILE_READ_UNVERIFIED``, which is the intended fail-closed
             behavior when the fork's trajectory is missing.
         symbols: Shared definition index for callee resolution.
 
@@ -1326,7 +1326,7 @@ def ground_flowchart(
         hunk_ranges: Head-side changed line ranges per repo-relative path. The
             root's range must still overlap one of them, re-checked here so a
             repair turn cannot re-root the diagram onto unchanged code.
-        read_paths: Raw completed-read tool-call paths from the diagram phase's
+        read_paths: Successful structured-read paths from the diagram phase's
             trajectory; an empty set fails every citation closed.
         candidate_roots: The run's eligible roots. A root outside this list is
             rejected outright -- it has no verified range, so no node inside it

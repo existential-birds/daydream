@@ -6,7 +6,7 @@ from typing import Any
 
 import pytest
 
-from daydream.eval.analyzer import analyze_coverage
+from daydream.eval.analyzer import analyze_coverage, analyze_grounding
 
 
 def _artifacts(tmp_path: Path, receipts: Any, records: Any) -> Path:
@@ -66,3 +66,15 @@ def test_packet_requires_same_stack_assignment_and_final_verdict(
     assert coverage["files_reviewed"] == 0
     assert coverage["source_packet_reviewed"] == 0
     assert coverage["uncovered_files"] == ["api.py"]
+
+
+def test_packet_grounding_requires_the_receiving_stack(tmp_path: Path) -> None:
+    directory = _artifacts(tmp_path, {
+        "python": {"assigned_files": ["api.py"], "source_packet_files": ["api.py"]},
+    }, {"issues": [], "verdicts": [{"path": "api.py", "verdict": "clean"}]})
+    trajectories: dict[str, Any] = {"main": None, "forked": []}
+    findings = [{"file": "api.py", "_stack": "python"}, {"file": "api.py", "_stack": "other"}]
+    grounding = analyze_grounding(trajectories, findings, directory)
+    assert grounding["grounded_count"] == 1
+    assert grounding["grounding_rate"] == 0.5
+    assert grounding["grounded"][0]["stack"] == "python"

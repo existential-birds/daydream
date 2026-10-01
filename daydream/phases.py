@@ -1131,8 +1131,8 @@ PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
     "type": "array",
     "items": strict_object({
         "path": _REPOSITORY_FILE_PATH_SCHEMA,
-        "lines_read": {"type": "integer"},
-        "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed"]},
+        "lines_read": {"type": ["integer", "null"]},
+        "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed", "unknown"]},
         "n_findings": {"type": "integer"},
     }),
 }

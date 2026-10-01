@@ -1611,18 +1611,10 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
         pre_sweep = stats.get("pre_sweep")
         if not isinstance(pre_sweep, dict):
             return
-        # Issue #336: a missing hunk index leaves the changed-file set
-        # unenumerated. Surface that gap instead of rendering an empty diff as
-        # a full-coverage pass (the coverage ratio is ``None`` when the index
-        # was absent, so no ratio line is emitted). ``load_hunk_index`` still
-        # fails open -- this is reporting only.
         if pre_sweep.get("hunk_index_missing"):
-            lines = [
-                "## Coverage",
-                "- Coverage not available: hunk index is missing.",
-            ]
-            section = "\n".join(lines) + "\n"
-            _emit_coverage_section(report, deep_copy, section)
+            _emit_coverage_section(
+                report, deep_copy, "## Coverage\n- Coverage not available: hunk index is missing.\n"
+            )
             return
         files_in_diff = pre_sweep.get("files_in_diff")
         if not isinstance(files_in_diff, int):
@@ -1635,16 +1627,24 @@ def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
         # fall back to the pre-sweep snapshot when the sweep did not recompute.
         post_sweep = stats.get("post_sweep")
         read_source = post_sweep if isinstance(post_sweep, dict) else pre_sweep
-        files_read = read_source.get("files_read_by_reviewers")
-        if isinstance(files_read, int):
-            lines.append(f"- Files read by reviewers: {files_read}")
-        ratio = read_source.get("coverage_ratio")
-        if isinstance(ratio, (int, float)):
-            lines.append(f"- Coverage ratio: {ratio}")
-        # Issue #309 finding 6: only files with a verified completed read are
-        # labeled covered. A completed review output WITHOUT a read is a
-        # completed attempt -- rendered as "completed without verified source read" -- and never
-        # appears on the covered line nor moves the ratio above.
+        if read_source.get("coverage_status") == "unverifiable":
+            lines.append("- Source-read coverage: unverifiable (opaque shell reads).")
+            verified = read_source.get("verified_files")
+            if isinstance(verified, list) and verified:
+                lines.append(f"- Files with verified source evidence: {len(verified)}")
+        else:
+            files_read = read_source.get("files_read_by_reviewers")
+            if isinstance(files_read, int):
+                lines.append(f"- Files read by reviewers: {files_read}")
+            ratio = read_source.get("coverage_ratio")
+            if isinstance(ratio, (int, float)):
+                lines.append(f"- Coverage ratio: {ratio}")
+        if stats.get("sweep_unavailable"):
+            unavailable = pre_sweep.get("unverifiable_files")
+            if isinstance(unavailable, list) and unavailable:
+                lines.append(f"- Coverage-targeted catch-up unavailable: {', '.join(map(str, unavailable))}")
+            else:
+                lines.append("- Coverage-targeted catch-up unavailable; first-pass omissions may remain missed.")
         covered = stats.get("covered_files")
         if isinstance(covered, list) and covered:
             lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in covered)}")

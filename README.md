@@ -367,6 +367,13 @@ Daydream supports four backends. Each implements the same `Backend` protocol and
 
 All four remain available to review flows. Repository-wide `improve` is intentionally stricter and currently accepts only Claude, whose SDK hook provides the required snapshot-root tool boundary.
 
+Source-read coverage requires successful structured `Read`/`read` results or completed host source packets.
+Shell/Bash commands and Codex `command_actions` cannot verify which files were delivered. Affected phases
+report unverifiable coverage and warn once; their coverage-targeted catch-up sweep is unavailable, so
+first-pass omissions may remain missed. Findings and supported mixed-backend coverage are preserved.
+Diagram citations without verified reads are omitted. The `redundant_reads` metric is `null` for any
+trajectory containing shell calls; shell-path estimates are no longer inferred.
+
 Select a backend with `--backend`. The selection order, highest first, is:
 
 **CLI `--backend` > config-file phase override > config-file global > built-in default.**

@@ -10,6 +10,7 @@ ever shifts, that test fails first and explains every other failure.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +32,7 @@ from daydream.deep.diagram_grounding import (
     ground_flowchart,
     ground_sequence,
 )
+from daydream.deep.diagram_steps import _diagram_read_evidence
 from daydream.deep.diagram_types import CandidateRoot
 from daydream.tree_sitter_index import definitions_in_file
 from tests.harness.git_helpers import commit, git, init_repo
@@ -531,7 +533,7 @@ def test_sequence_symbol_snap_rewrites_the_citation(repo: Path, symbols: RepoSym
 
 def test_sequence_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> None:
     report = run_sequence(repo, symbols, base_sequence(), read=("pkg/api.py",))
-    assert check_for(report, "message", "2").reason == "FILE_NOT_READ_BY_MODEL"
+    assert check_for(report, "message", "2").reason == "FILE_READ_UNVERIFIED"
     # Fail-closed with no receipts at all: the missing-trajectory case.
     blind = ground_sequence(
         base_sequence(),
@@ -540,7 +542,30 @@ def test_sequence_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> No
         read_paths=set(),
         symbols=symbols,
     )
-    assert {c.reason for c in blind.ungrounded()} == {"FILE_NOT_READ_BY_MODEL"}
+    assert {c.reason for c in blind.ungrounded()} == {"FILE_READ_UNVERIFIED"}
+
+
+@pytest.mark.parametrize("structured, expected", [(False, "FILE_READ_UNVERIFIED"), (True, None)])
+def test_diagram_citations_require_completed_structured_read(
+    repo: Path, symbols: RepoSymbols, tmp_path: Path, structured: bool, expected: str | None,
+) -> None:
+    receipt = tmp_path / "diagram-fork.json"
+    receipt.write_text(json.dumps({"steps": [{
+        "extra": {"daydream_phase": "diagram"},
+        "tool_calls": [{
+            "tool_call_id": "read-1", "function_name": "Read" if structured else "Bash",
+            "arguments": {"file_path": "pkg/api.py"} if structured else {
+                "command": "for f in missing.py pkg/api.py; do cat $f; done",
+            },
+        }],
+        "observation": {"results": [{"source_call_id": "read-1", "extra": {"exit_code": 0}}]},
+    }]}))
+    paths, unverifiable = _diagram_read_evidence(receipt)
+    report = ground_sequence(
+        base_sequence(), repo_root=repo, hunk_ranges=HUNKS, read_paths=paths, symbols=symbols,
+    )
+    assert check_for(report, "message", "0").reason == expected
+    assert unverifiable is not structured
 
 
 def test_read_receipt_matches_on_path_components_only(repo: Path, symbols: RepoSymbols) -> None:
@@ -553,7 +578,7 @@ def test_read_receipt_matches_on_path_components_only(repo: Path, symbols: RepoS
         read_paths={str(repo / "pkg/notapi.py"), str(repo / "pkg/service.py")},
         symbols=symbols,
     )
-    assert check_for(report, "message", "0").reason == "FILE_NOT_READ_BY_MODEL"
+    assert check_for(report, "message", "0").reason == "FILE_READ_UNVERIFIED"
     assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
 
 
@@ -1139,7 +1164,7 @@ def test_flowchart_node_line_out_of_range(repo: Path, symbols: RepoSymbols) -> N
 def test_flowchart_node_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, base_flowchart(), read=("pkg/api.py",))
     assert {c.reason for c in report.elements if c.element == "node"} == {
-        "FILE_NOT_READ_BY_MODEL"
+        "FILE_READ_UNVERIFIED"
     }
     assert report.spec_final["nodes"] == []
 

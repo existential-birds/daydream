@@ -1,19 +1,4 @@
-"""Uncovered-diff-file sweep helpers (issue #309).
-
-After per-stack reviews + parse, the deep flow computes which diff files NO
-reviewer read (``analyze_coverage``), then dispatches a cheap second-pass
-reviewer per uncovered file above a small budget threshold. This module holds
-the pure, deterministic pieces: coverage computation, budget filtering
-(hunk-size + capacity cap), and the sweep prompt builder.
-
-The sweep's coverage set is computed HERE, not via ``analyzer.analyze_coverage``:
-a read covers a diff file only at a path-component boundary (a read of
-``notapi.py`` never covers ``api.py``) and only when the read tool call
-carries a completed observation (an interrupted read never covers anything).
-``daydream.eval.analyzer`` is imported read-only -- issue #316 owns that
-module. The sweep prompt builder lives here, NOT in ``daydream.deep.prompts``
-(issue #314 owns that module).
-"""
+"""Structured source-read evidence, verdict reconciliation, and sweep targeting."""
 
 from __future__ import annotations
 
@@ -150,6 +135,18 @@ def _completed_read_paths(
     return paths
 
 
+def _read_coverage_unverifiable(
+    trajectory: dict[str, Any], phases: set[str] | None = None
+) -> bool:
+    """Opaque shell calls cannot establish per-file read outcomes."""
+    return any(
+        str(call.get("function_name", "")).casefold() in {"shell", "bash", "exec_command"}
+        for step in trajectory.get("steps", [])
+        if phases is None or (step.get("extra") or {}).get("daydream_phase") in phases
+        for call in step.get("tool_calls") or []
+    )
+
+
 def _finding_files_from_records(findings: list[Any]) -> set[str]:
     """Normalized ``file`` fields across parsed finding records (issue #742).
 
@@ -170,7 +167,7 @@ def _finding_files_from_records(findings: list[Any]) -> set[str]:
     return files
 
 
-def _parsed_covered_files(records_path: Path) -> set[str] | None:
+def _parsed_covered_files(records_path: Path, *, require_read_evidence: bool = False) -> set[str] | None:
     """Set of files a completed shard's evidence-gated verdicts mark covered.
 
     A diff file is covered when the shard's persisted ``verdicts`` array
@@ -197,6 +194,8 @@ def _parsed_covered_files(records_path: Path) -> set[str] | None:
                     continue
                 if entry.get("verdict") not in {"clean", "has_findings"}:
                     continue  # not_reviewed (or any other) never credits
+                if require_read_evidence and entry.get("source_read_status") == "unverifiable":
+                    continue  # retained findings do not prove an opaque source read
                 path = strip_dot_slash(entry["path"])
                 covered.add(path)
             return covered
@@ -246,7 +245,9 @@ def _receipt_covered_files(
     shard_covered: dict[str, set[str]] = {}
     frontier_evidence: set[str] = set()
     for stack_name, _ in receipts.items():
-        loaded = _parsed_covered_files(per_stack_records_path(deep_dir_path, stack_name))
+        loaded = _parsed_covered_files(
+            per_stack_records_path(deep_dir_path, stack_name), require_read_evidence=True
+        )
         if loaded is not None:
             shard_covered[stack_name] = loaded
             frontier_evidence |= loaded
@@ -257,13 +258,14 @@ def _receipt_covered_files(
         inline_covered = shard_covered.get(stack_name)
         packet_files = receipt.get("source_packet_files", [])
         if isinstance(packet_files, list) and packet_files:
+            packet_verdicts = _parsed_covered_files(per_stack_records_path(deep_dir_path, stack_name))
             packet_covered = covered_by_type.setdefault("source_packet_reviewed", set())
             for path in packet_files:
                 if (
                     isinstance(path, str)
                     and path in diff_set
-                    and inline_covered is not None
-                    and path in inline_covered
+                    and packet_verdicts is not None
+                    and path in packet_verdicts
                 ):
                     covered.add(path)
                     packet_covered.add(path)
@@ -289,7 +291,7 @@ def _receipt_covered_files(
     return covered, counts
 
 
-def _verdict(path: str, lines_read: int, verdict: str, n_findings: int) -> dict[str, Any]:
+def _verdict(path: str, lines_read: int | None, verdict: str, n_findings: int) -> dict[str, Any]:
     """Build one conformant per-file verdict dict (issue #742).
 
     Collapses the three near-identical ``out.append({...})`` blocks in
@@ -312,53 +314,12 @@ def resolve_per_stack_verdicts(
     completed_read_paths: set[str],
     finding_files: set[str],
     source_packet_paths: set[str] | None = None,
+    read_coverage_unverifiable: bool = False,
 ) -> list[dict[str, Any]]:
-    """Reconcile verdicts against completed reads or host-supplied full sources.
+    """Retain findings and credit successful reads or completed host source packets.
 
-    A per-stack reviewer's declared verdict is NOT the recorded truth: a
-    ``clean`` verdict for an assigned file with no completed read of that file
-    in the same review is downgraded to ``not_reviewed`` (routing the file to
-    the uncovered sweep), never recorded as a pass. The gate reads evidence
-    (``_completed_read_paths`` output + parsed finding files), never reviewer
-    self-report.
-
-    A finite review receipt first gates completion: a file excluded from the
-    receipt or without a completed declared verdict stays ``not_reviewed``,
-    even if an independent finding was established before evidence ran out.
-    Otherwise the final verdict is resolved by evidence, in order:
-    a parsed finding that exactly matches the file (exact equality) wins (``has_findings``
-    beats a read, beats ``clean``); otherwise a completed read that
-    path-component-matches the file yields ``clean``; otherwise the file is
-    ``not_reviewed``. This mirrors the read-detection the sweep already uses
-    (``_path_component_matches``), so a clean shard that read its file is
-    covered regardless of findings and an unread file is never recorded clean.
-
-    Args:
-        assigned_files: The stack's assigned files, in order.
-        declared_verdicts: The reviewer-declared per-file verdict entries
-            (``path`` / ``lines_read`` / ``verdict``), surfaced through the
-            per-stack parse; evidence, not authority.
-        completed_read_paths: Completed-read paths from the stack's own fork
-            trajectory (``_completed_read_paths``).
-        finding_files: ``file`` fields from the stack's parsed issues.
-        source_packet_paths: Assigned paths whose complete source the host supplied
-            to a completed finite review. Unlike tool reads, packet presence also
-            requires a final ``clean`` or ``has_findings`` verdict; an unresolved
-            evidence request must remain ``not_reviewed``. ``None`` identifies
-            a legacy tool-based review; an empty set identifies a finite review
-            that completed no files.
-
-    Returns:
-        Exactly one verdict dict per ``assigned_files`` path, in the given
-        order: ``{"path", "lines_read", "verdict", "n_findings"}``. ``n_findings``
-        is the count of parsed finding files matching the path, including any
-        independent finding retained for a finite ``not_reviewed`` file, so every recorded verdict conforms to
-        ``PER_STACK_RECORD_SCHEMA``'s required ``n_findings`` key. The declared
-        ``lines_read`` is preserved even when the verdict is downgraded to
-        ``not_reviewed`` (the reviewer said it did read N lines; the gate
-        records it was not read). Pure and total: a declared verdict whose path
-        is not in ``assigned_files`` is ignored (never fabricated), and missing
-        keys default safely.
+    Opaque reads leave missing tool evidence unknown, rather than unread or clean.
+    A finite receipt still requires a completed declared verdict.
     """
     declared_by_path: dict[str, dict[str, Any]] = {}
     for entry in declared_verdicts:
@@ -374,6 +335,10 @@ def resolve_per_stack_verdicts(
         declared = declared_by_path.get(path, {})
         lines_read = declared.get("lines_read", 0)
         n_findings = 1 if path in finding_files else 0
+        if read_coverage_unverifiable and source_packet_paths is None and not any(
+            _path_component_matches(read, path) for read in completed_read_paths
+        ):
+            lines_read = None
         finite_covered = (
             source_packet_paths is not None
             and path in source_packet_paths
@@ -383,12 +348,18 @@ def resolve_per_stack_verdicts(
             out.append(_verdict(path, lines_read, "not_reviewed", n_findings))
         elif n_findings:
             # A finding beats a read and beats a declared clean.
-            out.append(_verdict(path, lines_read, "has_findings", n_findings))
+            entry = _verdict(path, lines_read, "has_findings", n_findings)
+            if read_coverage_unverifiable and source_packet_paths is None and not any(
+                _path_component_matches(read, path) for read in completed_read_paths
+            ):
+                entry["source_read_status"] = "unverifiable"
+            out.append(entry)
         elif finite_covered or any(_path_component_matches(r, path) for r in completed_read_paths):
             # A completed read that matches the file yields clean.
             out.append(_verdict(path, lines_read, "clean", 0))
+        elif read_coverage_unverifiable:
+            out.append(_verdict(path, None, "unknown", 0))
         else:
-            # No finding and no completed read: never recorded as a pass.
             out.append(_verdict(path, lines_read, "not_reviewed", 0))
     return out
 
@@ -413,37 +384,11 @@ def compute_uncovered_files(
     *,
     receipts: dict[str, Any] | None = None,
 ) -> tuple[list[str], dict[str, Any]]:
-    """Return the diff files no reviewer read, plus the coverage stats.
+    """Return sweep candidates and honest coverage accounting.
 
-    Mirrors ``analyzer.analyze_coverage``'s shape but applies the sweep's own
-    matching rules: reads are counted only when the tool call is completed
-    (paired ToolResult observation that is not marked failed, cancelled,
-    interrupted, truncated, or non-zero-exit) and a read path covers a diff file only at
-    a path-component boundary. A read of ``/repo/notapi.py`` therefore never
-    covers ``api.py``, and an interrupted read never covers anything. Both
-    rules fail open — a genuinely unread file is swept, never skipped.
-
-    Issue #731: when ``receipts`` (the structured coverage receipts written at
-    prompt-build time on every deep run, decoupled from sharding) is provided,
-    a diff file is
-    additionally covered by ``inline_hunk_reviewed`` / ``dependency_frontier_read``
-    evidence per ``_receipt_covered_files``. When ``receipts`` is ``None`` (or
-    the file is absent) behavior is byte-identical to today (Reads only).
-
-    Args:
-        daydream_dir: The run's ``.daydream`` directory (parent of the
-            ``deep/`` artifact dir).
-        session_id: The run's recorder session id, or ``None`` to resolve the
-            most recent trajectory.
-        receipts: Optional structured coverage receipts (issue #731); ``None``
-            keeps the forensic (Reads-only) path byte-identical.
-
-    Returns:
-        ``(uncovered_files, stats)`` where ``stats`` is the coverage dict
-        (``files_in_diff`` / ``files_read_by_reviewers`` / ``coverage_ratio`` /
-        ``uncovered_files``) plus ``coverage_by_evidence`` only when ``receipts``
-        is provided, and ``uncovered_files`` is its sorted list of diff files
-        no review agent covered.
+    Verified reads and independently completed receipts credit coverage. Opaque
+    review phases leave their remaining assigned files unknown and unavailable
+    for targeting; other phases' observed gaps can still be swept.
     """
     trajectories = load_trajectories(daydream_dir, session_id=session_id)
     # The changed-file set comes from the persisted hunk index (written at
@@ -457,13 +402,35 @@ def compute_uncovered_files(
     diff_files = files_in_index(load_hunk_index(daydream_dir))
 
     review_reads: set[str] = set()
+    unknown_files: set[str] = set()
+    unknown_agents: list[str] = []
     for traj in trajectories["forked"]:
         if _agent_label(traj["_source_file"]).startswith("deep-"):
             review_reads.update(_completed_read_paths(traj))
+            if _read_coverage_unverifiable(traj):
+                label = _agent_label(traj["_source_file"])
+                unknown_agents.append(label)
+                assigned = set(diff_files)
+                if receipts:
+                    for stack, receipt in receipts.items():
+                        slug = "deep-" + stack.replace("#", "-")
+                        if label == slug or label.startswith(slug + "--"):
+                            assigned = set(receipt.get("assigned_files", diff_files))
+                            break
+                unknown_files.update(assigned)
     if trajectories["main"]:
-        review_reads.update(
-            _completed_read_paths(trajectories["main"], phases={"deep", "alternatives"})
+        main = trajectories["main"]
+        review_reads.update(_completed_read_paths(main, phases={"deep", "alternatives"}))
+        primary_forks = any(
+            (label := _agent_label(traj["_source_file"])).startswith("deep-")
+            and not label.startswith("deep-uncovered-")
+            for traj in trajectories["forked"]
         )
+        for source_phase in ("deep", "alternatives"):
+            if _read_coverage_unverifiable(main, phases={source_phase}):
+                unknown_agents.append(source_phase)
+                if not primary_forks:
+                    unknown_files.update(diff_files)
 
     covered = {df for df in diff_files if any(_path_component_matches(r, df) for r in review_reads)}
     source_covered = len(covered)
@@ -472,14 +439,38 @@ def compute_uncovered_files(
             diff_files, receipts, daydream_dir / "deep"
         )
         covered |= receipt_covered
-    uncovered = sorted(set(diff_files) - covered)
+    unknown_files &= set(diff_files) - covered
+    if receipts:
+        # Restored records retain their unavailable evidence state without a new fork.
+        for stack, receipt in receipts.items():
+            try:
+                records = json.loads(per_stack_records_path(daydream_dir / "deep", stack).read_text())
+            except (OSError, ValueError):
+                continue
+            if isinstance(records, dict) and any(
+                isinstance(entry, dict)
+                and (entry.get("verdict") == "unknown"
+                     or entry.get("source_read_status") == "unverifiable")
+                and entry.get("path") in diff_files and entry["path"] not in covered
+                for entry in records.get("verdicts", [])
+            ):
+                unknown_files.update(set(receipt.get("assigned_files", diff_files)) & set(diff_files) - covered)
+    uncovered = sorted(set(diff_files) - covered - unknown_files)
 
     stats: dict[str, Any] = {
         "files_in_diff": len(diff_files),
         "files_read_by_reviewers": len(covered),
         "coverage_ratio": round(len(covered) / len(diff_files), 4) if diff_files else 1.0,
-        "uncovered_files": uncovered,
+        "uncovered_files": None if unknown_files else uncovered,
+        "coverage_status": "unverifiable" if unknown_files else "verified",
+        "verified_files": sorted(covered),
+        "verified_files_read_by_reviewers": len(covered),
+        "unverifiable_files": sorted(unknown_files),
+        "unverifiable_agents": sorted(set(unknown_agents)),
     }
+    if unknown_files:
+        stats["files_read_by_reviewers"] = None
+        stats["coverage_ratio"] = None
     if hunk_index_missing:
         # Issue #336: a missing index is NOT a clean empty diff. Fail-open is
         # preserved (``load_hunk_index`` still never raises); only the

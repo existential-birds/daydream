@@ -12,6 +12,9 @@ import copy
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from daydream import phases
 from daydream.deep import reuse_key
 
 _UNSET = object()
@@ -127,7 +130,7 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
     assert key is not None and len(key) == 64
     for name in ("format", "hunk_slice", "assigned_files", "assigned_blobs", "frontier_files",
                  "frontier_blobs", "profile", "model", "effort", "intent_authoritative",
-                 "include_alternatives", "exploration_present", "docs_only"):
+                 "include_alternatives", "exploration_present", "docs_only", "schema"):
         assert reuse_key.unit_key(_mutate(base, f"components.{name}")) != key, name
     # MH2/MH16, both directions: every re-derived input is grounding, never a key input.
     for name in ("exploration", "intent", "alternatives", "settled_decisions"):
@@ -147,6 +150,18 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
     ) == key
     # Identical inputs from two independent builds agree.
     assert reuse_key.unit_key(_shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")) == key
+
+
+def test_shard_key_invalidates_the_old_shell_coverage_contract(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    current = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
+    legacy = copy.deepcopy(current)
+    del legacy["components"]["schema"]
+    assert reuse_key.unit_key(legacy) != reuse_key.unit_key(current)
+    old_schema = copy.deepcopy(phases.PER_STACK_RECORD_SCHEMA)
+    old_schema["properties"]["verdicts"]["items"]["properties"]["verdict"]["enum"].remove("unknown")
+    monkeypatch.setattr(phases, "PER_STACK_RECORD_SCHEMA", old_schema)
+    rebuilt = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
+    assert reuse_key.unit_key(rebuilt) != reuse_key.unit_key(current)
 
 
 def test_run_scoped_identifiers_are_normalized_out_of_text() -> None:

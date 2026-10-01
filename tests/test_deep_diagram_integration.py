@@ -17,11 +17,13 @@ import copy
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+from rich.console import Console
 
 from daydream import pr_review
 from daydream.artifact_visibility import (
@@ -42,6 +44,7 @@ from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnavailable
 from daydream.runner import RunConfig, run
+from daydream.ui import print_warning
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
@@ -175,6 +178,7 @@ def review_run(
         *,
         specs: dict[str, list[dict[str, Any]]] | None = None,
         emit_reads: bool = True,
+        opaque_reads: bool = False,
         unread: frozenset[str] = frozenset(),
         reads: dict[str, list[str]] | None = None,
         session_id: str | None = None,
@@ -184,6 +188,7 @@ def review_run(
         stub = install_stub_backend(monkeypatch, target)
         stub.diagram_specs = specs or {}
         stub.diagram_emit_reads = emit_reads
+        stub.diagram_shell_reads = opaque_reads
         stub.diagram_unread = unread
         stub.diagram_reads = reads or {}
         stub.diagram_session_id = session_id
@@ -667,7 +672,7 @@ async def test_unread_evidence_file_omits_sequence_when_pairs_break(
     sequence = _artifact(target)["results"]["sequence"]
     assert sequence["status"] == "omitted"
     assert _reasons(sequence) == {
-        "FILE_NOT_READ_BY_MODEL",
+        "FILE_READ_UNVERIFIED",
         "REPLY_NOT_PRECEDED_BY_CALL",
     }
     assert sequence["grounding"]["summary"]["pruned"] == 4
@@ -693,10 +698,31 @@ async def test_unread_root_file_omits_the_flowchart(
     assert exit_code == 0
     flowchart = _artifact(target)["results"]["flowchart"]
     assert flowchart["status"] == "omitted"
-    assert "FILE_NOT_READ_BY_MODEL" in _reasons(flowchart)
+    assert "FILE_READ_UNVERIFIED" in _reasons(flowchart)
     assert set(flowchart["omit_reasons"]) == {"TOO_FEW_NODES", "NO_END", "NO_DECISION"}
     assert flowchart["mermaid"] is None
     assert FLOWCHART_HEADING not in captured_post.body()
+
+
+async def test_shell_only_diagram_receipts_are_unverifiable_and_omitted(
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    warnings = StringIO()
+    monkeypatch.setattr(deep, "console", Console(file=warnings, width=200))
+    monkeypatch.setattr(deep, "print_warning", print_warning)
+    target = dr.build_branch_heavy_repo(tmp_path)
+    code, _ = await review_run(
+        target, specs={"flowchart": [dr.flowchart_spec()]}, opaque_reads=True,
+    )
+    assert code == 0
+    result = _artifact(target)["results"]["flowchart"]
+    assert result["status"] == "omitted"
+    assert result["grounding"]["read_coverage_status"] == "unverifiable"
+    assert "FILE_READ_UNVERIFIED" in _reasons(result)
+    assert result["mermaid"] is None
+    assert FLOWCHART_HEADING not in captured_post.body()
+    assert warnings.getvalue().count("Diagram source-read coverage is unverifiable") == 1
 
 
 # --- Spec test 7: omission floors -------------------------------------------

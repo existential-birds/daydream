@@ -15,6 +15,7 @@ import pytest
 from daydream import review_profile as rp, severity
 from daydream.deep.coverage import (
     _completed_read_paths,
+    _read_coverage_unverifiable,
     bounded_diff_block_for_file,
     build_uncovered_sweep_prompt,
     compute_uncovered_files,
@@ -321,37 +322,30 @@ def test_compute_uncovered_files_scopes_completed_ids_to_step(tmp_path: Path) ->
     assert "api.py" in swept
 
 
-def test_loop_read_covers_through_the_sweep_and_verdict_seams(tmp_path: Path) -> None:
-    """Loop reads count as coverage through both sweep admission and verdict reconciliation."""
-    # Issue #1397 requirement 2: one loop-resolution semantics for every
-    # consumer that credits reads -- sweep admission and verdict reconciliation.
-    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-loop")
-    _write_fork_calls(
-        run_dir,
-        "deep-python.json",
-        [{
-            "function_name": "shell",
-            "arguments": {"command": 'for f in api.py notes.txt; do nl -ba "$f"; done'},
-        }],
-    )
-
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-loop")
-
-    assert uncovered == []                        # both listed files are covered
-    assert stats["files_read_by_reviewers"] == 2
-
-    fork = load_trajectories(daydream_dir, "sess-loop")["forked"][0]
+@pytest.mark.parametrize("command", [
+    'for f in api.py notes.txt; do nl -ba "$f"; done',
+    'for f in missing.py api.py notes.txt; do cat "$f"; done',
+])
+def test_shell_success_cannot_certify_files(tmp_path: Path, command: str) -> None:
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "opaque")
+    _write_fork_calls(run_dir, "deep-python.json", [
+        {"function_name": "shell", "arguments": {"command": command}},
+    ], result_extra={"exit_code": 0})
+    candidates, stats = compute_uncovered_files(daydream_dir, "opaque")
+    assert candidates == []
+    assert stats["coverage_ratio"] is None
+    assert stats["files_read_by_reviewers"] is None
+    assert stats["uncovered_files"] is None
+    assert stats["verified_files"] == []
+    fork = load_trajectories(daydream_dir, "opaque")["forked"][0]
     verdicts = resolve_per_stack_verdicts(
-        assigned_files=["api.py", "notes.txt"],
-        declared_verdicts=[
-            {"path": "api.py", "lines_read": 10, "verdict": "clean"},
-            {"path": "notes.txt", "lines_read": 10, "verdict": "clean"},
-        ],
-        completed_read_paths=_completed_read_paths(fork),
-        finding_files=set(),
+        assigned_files=["api.py", "notes.txt"], declared_verdicts=[],
+        completed_read_paths=_completed_read_paths(fork), finding_files={"api.py"},
+        read_coverage_unverifiable=_read_coverage_unverifiable(fork),
     )
-
-    assert [v["verdict"] for v in verdicts] == ["clean", "clean"]
+    assert verdicts[0]["verdict"] == "has_findings"
+    assert verdicts[0]["source_read_status"] == "unverifiable"
+    assert verdicts[1] == {"path": "notes.txt", "lines_read": None, "verdict": "unknown", "n_findings": 0}
 
 
 @pytest.mark.parametrize("extra", [
@@ -393,25 +387,6 @@ def test_zero_exit_code_observation_still_credits(tmp_path: Path) -> None:
     uncovered, _ = compute_uncovered_files(daydream_dir, "sess-clean-exit")
 
     assert "api.py" not in uncovered              # a clean result still credits
-
-
-def test_a_damaged_batched_read_credits_none_of_its_files(tmp_path: Path) -> None:
-    """A damaged batched read credits none of the files it looped over."""
-    # Requirement 5 explicitly spans batched/loop reads, not just single Reads.
-    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-damaged-loop")
-    _write_fork_calls(
-        run_dir,
-        "deep-python.json",
-        [{
-            "function_name": "shell",
-            "arguments": {"command": 'for f in api.py notes.txt; do nl -ba "$f"; done'},
-        }],
-        result_extra={"truncated": True},
-    )
-
-    uncovered, _ = compute_uncovered_files(daydream_dir, "sess-damaged-loop")
-
-    assert uncovered == ["api.py", "notes.txt"]
 
 
 def test_declared_clean_is_downgraded_when_the_only_read_failed(tmp_path: Path) -> None:
@@ -704,25 +679,22 @@ def test_omitted_assigned_file_is_still_swept(tmp_path: Path) -> None:
     assert "api.py" not in uncovered   # reviewed inline -> not swept
 
 
-@pytest.mark.parametrize("tool", [
-    {"function_name": "Bash", "arguments": {
-        "command": "grep -n '^from|^import' /repo/api.py"}},
-    {"function_name": "Grep", "arguments": {"pattern": "^from|^import", "path": "/repo/api.py"}},
-])
-def test_compute_uncovered_files_import_only_grep_does_not_cover(tmp_path: Path, tool: Any) -> None:
-    """An import-only grep (Bash or Grep tool) covers nothing (issue #739 / AC2/AC3)."""
-    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "sess-grep")
-    # Bash/Grep spellings (Issue #739) can't go through _write_fork, which is
-    # hardcoded to Read/file_path; emit the raw calls for the live sweep.
-    _write_fork_calls(run_dir, "deep-python.json", [tool])
-    _write_fork(run_dir, "deep-generic.json", ["/repo/notes.txt"])
-
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-grep")
-
-    assert "api.py" in uncovered  # the import-only grep covers nothing
-    assert stats["files_read_by_reviewers"] == 1  # only notes.txt via Read
-    swept, _, _ = filter_sweepable_files(uncovered, parse_hunks(_DIFF), min_hunk_lines=1, max_files=10)
-    assert "api.py" in swept  # the file is swept, never silently skipped
+def test_mixed_opaque_and_structured_phases_keep_sweep_candidates(tmp_path: Path) -> None:
+    daydream_dir, run_dir = _seed_coverage_run(tmp_path, "mixed", deep=True)
+    _write_fork_calls(run_dir, "deep-python.json", [
+        {"function_name": "Bash", "arguments": {"command": "cat api.py"}},
+    ])
+    _write_fork_calls(run_dir, "deep-generic.json", [
+        {"function_name": "Read", "arguments": {"file_path": "notes.txt"}},
+    ], result_extra={"is_error": True})
+    receipts = {
+        "python": {"assigned_files": ["api.py"]},
+        "generic": {"assigned_files": ["notes.txt"]},
+    }
+    candidates, stats = compute_uncovered_files(daydream_dir, "mixed", receipts=receipts)
+    assert candidates == ["notes.txt"]  # supported phase can still be swept
+    assert stats["unverifiable_files"] == ["api.py"]
+    assert stats["coverage_ratio"] is None
 
 
 def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
@@ -910,3 +882,71 @@ def test_non_pi_sweep_excerpt_streams_past_large_lines(tmp_path: Path) -> None:
     assert "diff excerpt truncated" in large
     assert len(large.encode()) <= 12_288
     assert "unavailable" in bounded_diff_block_for_file(path, "absent.txt")
+
+
+@pytest.mark.parametrize("phase", ["deep", "alternatives"])
+def test_shell_only_main_phase_reports_unavailable_evidence(tmp_path: Path, phase: str) -> None:
+    dd, run_dir = _seed_coverage_run(tmp_path, "main-shell")
+    (run_dir / "trajectory.json").write_text(json.dumps({"steps": [{
+        "step_id": "s0", "extra": {"daydream_phase": phase},
+        "tool_calls": [{"function_name": "shell", "arguments": {"command": "cat api.py notes.txt"}}],
+    }]}))
+    candidates, stats = compute_uncovered_files(dd, "main-shell")
+    assert phase in stats["unverifiable_agents"]
+    assert candidates == []
+    assert stats["coverage_ratio"] is None
+    assert stats["verified_files"] == []
+    assert stats["uncovered_files"] is None
+    _write_fork(run_dir, "deep-python.json", ["api.py"])
+    candidates, stats = compute_uncovered_files(dd, "main-shell")
+    assert candidates == ["notes.txt"]  # the primary phase can still target its observed gap
+    assert stats["coverage_ratio"] == 0.5
+
+
+@pytest.mark.parametrize("packet", [False, True])
+def test_opaque_finding_receipt_requires_independent_source_evidence(tmp_path: Path, packet: bool) -> None:
+    dd, run_dir = _seed_coverage_run(tmp_path, "opaque-finding", deep=True)
+    deep = dd / "deep"
+    _write_fork_calls(run_dir, "deep-python.json", [{
+        "function_name": "shell", "arguments": {"command": "cat api.py notes.txt"},
+    }])
+    receipts = {"python": {
+        "assigned_files": ["api.py", "notes.txt"], "inline_files": ["api.py"], "frontier_files": ["api.py"],
+        **({"source_packet_files": ["api.py"]} if packet else {}),
+    }}
+    _write_records(deep, "python", {"issues": [_ONE_ISSUE], "verdicts": [{
+        "path": "api.py", "verdict": "has_findings", "n_findings": 1, "lines_read": None,
+        "source_read_status": "unverifiable",
+    }, {"path": "notes.txt", "verdict": "unknown", "n_findings": 0, "lines_read": None}]})
+    candidates, stats = compute_uncovered_files(dd, "opaque-finding", receipts=receipts)
+    assert candidates == []
+    assert stats["coverage_ratio"] is None
+    assert stats["verified_files"] == (["api.py"] if packet else [])
+    assert stats["unverifiable_files"] == (["notes.txt"] if packet else ["api.py", "notes.txt"])
+    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 0
+    assert stats["coverage_by_evidence"]["dependency_frontier_read"] == 0
+    assert json.loads((deep / "stack-python-records.json").read_text())["issues"] == [_ONE_ISSUE]
+    (run_dir / "trajectories" / "deep-python.json").unlink()  # reused records have no new review fork
+    cached_candidates, cached_stats = compute_uncovered_files(dd, "opaque-finding", receipts=receipts)
+    assert cached_candidates == candidates
+    assert cached_stats["coverage_ratio"] is None
+    assert cached_stats["unverifiable_files"] == stats["unverifiable_files"]
+    assert cached_stats["verified_files"] == stats["verified_files"]
+
+
+@pytest.mark.parametrize("finding", [False, True])
+def test_verified_reads_survive_nullable_line_counts_and_cache(tmp_path: Path, finding: bool) -> None:
+    dd, _ = _seed_coverage_run(tmp_path, "nullable", deep=True)
+    verdicts = resolve_per_stack_verdicts(
+        assigned_files=["api.py"], completed_read_paths={"api.py"},
+        declared_verdicts=[{"path": "api.py", "lines_read": None, "verdict": "clean"}],
+        finding_files={"api.py"} if finding else set(),
+    )
+    assert verdicts[0]["lines_read"] is None  # unknown line count does not erase successful file evidence
+    _write_records(dd / "deep", "python", {"issues": [_ONE_ISSUE] if finding else [], "verdicts": verdicts})
+    candidates, stats = compute_uncovered_files(dd, "nullable", receipts={
+        "python": {"assigned_files": ["api.py"], "inline_files": ["api.py"]},
+    })
+    assert candidates == ["notes.txt"]
+    assert stats["verified_files"] == ["api.py"]
+    assert stats["coverage_status"] == "verified"

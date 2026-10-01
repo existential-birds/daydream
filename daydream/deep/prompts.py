@@ -1338,7 +1338,7 @@ DIAGRAM_GROUNDING_INSTRUCTION = (
     "branch, a call, or a component from the branch name, cwd, or memory. An "
     "element whose evidence you did not read in THIS turn is INVALID.\n"
     "  Every file you cite in any `evidence` object must be read in this turn "
-    "(a Read of the file, or a Grep whose matches come from it). The host checks "
+    "(a successful structured Read/read result for the file). The host checks "
     "this phase's trajectory for a completed read of each cited file; a file you "
     "never opened is not evidence, however plausible the line looks.\n"
     "  The host verifies every file:line you emit deterministically, with no "

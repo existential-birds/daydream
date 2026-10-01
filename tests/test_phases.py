@@ -6010,7 +6010,8 @@ async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched()
     assert "verdicts" in props
     v_items = props["verdicts"]["items"]["properties"]
     assert {"path", "lines_read", "verdict"}.issubset(v_items)
-    assert v_items["verdict"]["enum"] == ["clean", "has_findings", "not_reviewed"]
+    assert v_items["verdict"]["enum"] == ["clean", "has_findings", "not_reviewed", "unknown"]
+    assert v_items["lines_read"]["type"] == ["integer", "null"]
     assert "verdicts" not in FEEDBACK_SCHEMA["properties"]  # base schema untouched
     assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved
 

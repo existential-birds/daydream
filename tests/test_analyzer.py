@@ -23,11 +23,9 @@ from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
 from daydream.eval import analyzer as analyzer_mod
 from daydream.eval.analyzer import (
     _agent_label,
-    _files_read,
     _latest_main_trajectory,
     _quality_python_parser,
     _semantic_tool_kind,
-    _tokenize_command,
     analyze_costs,
     analyze_coverage,
     analyze_exploration_utilization,
@@ -248,6 +246,7 @@ def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
     assert result["by_type"] == {"shell": 311, "patch": 15}
     assert result["by_agent"] == {"deep-python": {"shell": 311, "patch": 15}}
     assert result["write_ratio"] == 0.046
+    assert result["redundant_reads"] is None
 
 
 def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
@@ -471,7 +470,7 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
     """Forked-trajectory fixture whose agent Read each of ``read_paths``.
 
     Shaped for ``_extract_tool_calls``: every step needs a ``step_id`` and its
-    ``tool_calls`` need ``function_name``/``arguments``. ``_files_read`` keeps
+    ``tool_calls`` need ``function_name``/``arguments``. ``_completed_read_paths`` keeps
     only the ``file_path`` of ``Read`` calls, and ``_agent_label`` derives the
     ``deep-<stack>`` key from ``_source_file``. With ``pi_style=True`` the
     calls use the pi style ``read``/``arguments.path`` shape.
@@ -482,7 +481,11 @@ def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> di
             tc = {"function_name": "read", "arguments": {"path": path}}
         else:
             tc = {"function_name": "Read", "arguments": {"file_path": path}}
-        steps.append({"step_id": f"s{i}", "tool_calls": [tc]})
+        tc["tool_call_id"] = f"read-{i}"
+        steps.append({
+            "step_id": f"s{i}", "tool_calls": [tc],
+            "observation": {"results": [{"source_call_id": f"read-{i}", "content": "source"}]},
+        })
     return {"_source_file": source_file, "steps": steps}
 
 
@@ -568,7 +571,7 @@ def _root_trajectory(session_id: str) -> dict[str, Any]:
     }
 
 
-_READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "osprey": ("read", "path")}
+_READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "pi": ("read", "path"), "osprey": ("read", "path")}
 
 
 def _backend_read_trajectory(backend: str, paths: list[str]) -> dict[str, Any]:
@@ -576,7 +579,7 @@ def _backend_read_trajectory(backend: str, paths: list[str]) -> dict[str, Any]:
     if backend in _READ_TOOL_SHAPES:
         name, argument = _READ_TOOL_SHAPES[backend]
         calls = [{"function_name": name, "arguments": {argument: path}} for path in paths]
-    else:  # codex/pi read through their shell tool
+    else:  # Codex provides aggregate shell results, never per-file receipts
         calls = [
             {
                 "function_name": "shell" if backend == "codex" else "bash",
@@ -585,11 +588,17 @@ def _backend_read_trajectory(backend: str, paths: list[str]) -> dict[str, Any]:
         ]
     return {
         "_source_file": "deep-python.json",
-        "steps": [{"step_id": "s0", "tool_calls": calls}],
+        "steps": [{
+            "step_id": "s0",
+            "tool_calls": [dict(call, tool_call_id=f"call-{i}") for i, call in enumerate(calls)],
+            "observation": {"results": [
+                {"source_call_id": f"call-{i}", "content": "source"} for i in range(len(calls))
+            ]},
+        }],
     }
 
 
-@pytest.mark.parametrize("backend", ["claude", "codex", "pi", "osprey"])
+@pytest.mark.parametrize("backend", ["claude", "pi", "osprey"])
 def test_artifact_evidence_never_earns_backend_coverage_or_grounding(
     tmp_path: Path,
     backend: str,
@@ -922,9 +931,13 @@ def test_exploration_utilization_counts_bash_mediated_reads() -> None:
     result = analyze_exploration_utilization(trajectories)
 
     entry = result["by_agent"][0]
-    assert entry["exploration_reads"] == 1
-    assert entry["utilized"] is True
-    assert result["reviewers_utilizing_exploration"] == 1
+    assert entry["exploration_reads"] is None
+    assert entry["utilized"] is None
+    assert result["utilization_rate"] is None
+    assert result["reviewers_utilizing_exploration"] is None
+    assert result["verified_reviewers_utilizing_exploration"] == 0
+    assert entry["total_reads"] is None
+    assert entry["verified_structured_reads"] == 0
 
 
 def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
@@ -946,410 +959,6 @@ def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
     assert result["grounded_count"] == 0
     assert result["ungrounded_count"] == 0
     assert result["grounding_rate"] is None
-
-
-
-
-CODEX_READ_COMMAND = (
-    "sed -n '1,240p' .daydream/exploration/summary.md && "
-    "sed -n '1,280p' .daydream/diff.patch; "
-    "rg -n -C 3 'cache_write_tokens|total_cache_write_tokens' "
-    "core/osprey-cli docs README.md 2>/dev/null && "
-    "cat some/file.rb; nl -ba pkg/services/cleanup.go"
-)
-
-
-def test_files_read_extracts_codex_shell_paths() -> None:
-    calls = [{"function_name": "shell", "arguments": {"command": CODEX_READ_COMMAND}}]
-
-    paths = _files_read(calls)
-
-    assert ".daydream/exploration/summary.md" in paths
-    assert ".daydream/diff.patch" in paths
-    assert "core/osprey-cli" in paths
-    assert "docs" in paths
-    assert "README.md" in paths
-    assert "some/file.rb" in paths
-    assert "pkg/services/cleanup.go" in paths
-    assert "1,240p" not in paths
-    assert "1,280p" not in paths
-    assert "cache_write_tokens|total_cache_write_tokens" not in paths
-    assert "2>/dev/null" not in paths
-
-
-def test_files_read_extracts_pi_read_and_bash_paths() -> None:
-    calls = [
-        {
-            "function_name": "read",
-            "arguments": {"path": "/repo/pkg/services/cleanup.go"},
-        },
-        {
-            "function_name": "bash",
-            "arguments": {"command": "cat README.md && nl -ba core/osprey-cli"},
-        },
-    ]
-
-    paths = _files_read(calls)
-
-    assert "/repo/pkg/services/cleanup.go" in paths
-    assert "README.md" in paths
-    assert "core/osprey-cli" in paths
-
-
-def test_files_read_counts_claude_bash_shell_reads() -> None:
-    calls = [
-        {
-            "function_name": "Bash",
-            "arguments": {"command": "sed -n '1,60p' daydream/config.py"},
-        }
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == {"daydream/config.py"}
-    assert "1,60p" not in paths
-
-
-def _shell_reads(command: str) -> set[str]:
-    """Extract read paths from a single codex ``shell`` call."""
-    return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
-
-
-def test_files_read_skips_separated_redirect_target() -> None:
-    paths = _shell_reads("cat source.txt > target.py")
-
-    assert "source.txt" in paths
-    assert "target.py" not in paths
-
-
-def test_files_read_skips_redirect_and_pattern_for_rg() -> None:
-    paths = _shell_reads("rg -n 'pat' a.py b.py 2>/dev/null")
-
-    assert "a.py" in paths
-    assert "b.py" in paths
-    assert "/dev/null" not in paths
-    assert "pat" not in paths
-
-
-def test_files_read_preserves_quoted_paths_with_spaces() -> None:
-    assert "my file.py" in _shell_reads("cat 'my file.py'")
-    assert "my file.py" in _shell_reads('cat "my file.py"')
-
-
-def test_files_read_skips_rg_option_values() -> None:
-    paths = _shell_reads("rg -C 3 --glob '*.py' 'needle' src/app.py")
-
-    assert paths == {"src/app.py"}
-    assert "3" not in paths
-    assert "*.py" not in paths
-    assert "needle" not in paths
-
-
-def test_files_read_extracts_claude_inspection_verbs() -> None:
-    calls = [{"function_name": "Bash", "arguments": {"command": (
-        "grep -n 'def validate' daydream/config.py && "
-        "head -n 20 tests/test_config.py; "
-        "tail -n 5 README.md; "
-        "wc -l daydream/timeutil.py; "
-        "awk '{print $1}' docs/guide.md"
-    )}}]
-
-    paths = _files_read(calls)
-
-    assert "daydream/config.py" in paths
-    assert "tests/test_config.py" in paths
-    assert "README.md" in paths
-    assert "daydream/timeutil.py" in paths
-    assert "docs/guide.md" in paths
-    assert "def validate" not in paths    # grep pattern is not a path
-    assert "20" not in paths              # head -n value is not a path
-    assert "5" not in paths               # tail -n value is not a path
-    assert "{print $1}" not in paths      # awk program is not a path
-    assert "1" not in paths               # wc -l flag not a path
-
-
-def test_files_read_bash_import_only_grep_does_not_credit() -> None:
-    # The import-only carve-out spans the shared seam: a Bash/shell ``grep``
-    # whose pattern references only module imports credits no read path,
-    # matching the Grep-tool branch (issue #739).
-    assert _shell_reads("grep -n '^from|^import' daydream/config.py") == set()
-    assert _shell_reads("grep 'import ' a.py b.py") == set()
-    # A content grep still credits its file operands.
-    assert _shell_reads("grep -n 'def validate' daydream/config.py") == {"daydream/config.py"}
-
-
-def test_files_read_claude_read_and_grep_unchanged() -> None:
-    calls = [
-        {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
-        {"function_name": "Grep", "arguments": {"path": "src/"}},
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == {"/repo/api.py", "src/"}
-
-
-def test_files_read_grep_import_only_pattern_does_not_credit() -> None:
-    calls = [
-        {
-            "function_name": "Grep",
-            "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"},
-        }
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == set()
-
-
-def test_files_read_grep_content_pattern_credits_path() -> None:
-    calls = [
-        {
-            "function_name": "Grep",
-            "arguments": {"pattern": "def validate", "path": "daydream/config.py"},
-        }
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == {"daydream/config.py"}
-
-
-def test_files_read_grep_pattern_flag_keeps_file_operand() -> None:
-    # -e/-f/--regexp/--file are pattern-supplying options: the following token
-    # is the pattern, so the trailing file operand must still be credited as a
-    # read path (issue #739). Before the fix these dropped the operand entirely.
-    assert _shell_reads("grep -e 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --regexp 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --regexp='def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep -f /tmp/patterns.txt daydream/config.py") == {"daydream/config.py"}
-
-
-def test_files_read_grep_context_options_do_not_eat_operand() -> None:
-    # --before-context/--after-context/--max-count take a value; their numeric
-    # value must not be misread as the pattern (issue #739).
-    assert _shell_reads("grep --before-context 3 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --after-context 5 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
-
-
-def test_files_read_resolves_literal_loop_bindings() -> None:
-    # Issue #1397: the two archived reviewer patterns credit the literal word
-    # list -- never the unexpanded ``$task_file``/``$f`` spelling.
-    assert _shell_reads(
-        'for task_file in .gitignore openapi.yaml; do '
-        'echo "--- $task_file"; nl -ba "$task_file"; done'
-    ) == {".gitignore", "openapi.yaml"}
-    assert _shell_reads(
-        "for f in ios/App/App.entitlements ios/App/App.xcodeproj/project.pbxproj; "
-        'do nl -ba "$f"; done'
-    ) == {"ios/App/App.entitlements", "ios/App/App.xcodeproj/project.pbxproj"}
-    # Braced form and one literal prefix (Should Have): identical resolution.
-    assert _shell_reads('for f in a.py b.py; do nl -ba "${f}"; done') == {"a.py", "b.py"}
-    assert _shell_reads('for f in a.py b.py; do cat "src/$f"; done') == {"src/a.py", "src/b.py"}
-    # Sequential top-level loops resolve independently, each to its own list.
-    assert _shell_reads(
-        'for f in a.py b.py; do nl -ba "$f"; done; for g in c.py; do cat "$g"; done'
-    ) == {"a.py", "b.py", "c.py"}
-
-
-def test_files_read_sequential_loops_reusing_a_variable_resolve_independently() -> None:
-    # Issue #1397 Should Have: sequential loops resolve each to its OWN literal
-    # list -- including two loops that reuse the same variable name.
-    assert _shell_reads(
-        'for f in a.py b.py; do nl -ba "$f"; done; for f in c.py; do nl -ba "$f"; done'
-    ) == {"a.py", "b.py", "c.py"}
-
-
-def test_files_read_loop_credit_is_scoped_to_the_enclosing_loop_body() -> None:
-    # Issue #1397 requirement 6 (whole-loop-or-nothing): a read operand resolves
-    # only through the loop body that encloses it. A later loop's word list
-    # never attributes credit to a read it did not perform, and an ambiguous
-    # loop's read is not rescued by an unrelated literal loop.
-    assert _shell_reads(
-        'for f in a.py; do nl -ba "$f"; done; for f in b.py; do :; done'
-    ) == {"a.py"}
-    assert _shell_reads(
-        'for f in $(git ls-files); do cat "$f"; done; for f in readme.md; do :; done'
-    ) == set()
-
-
-def test_files_read_loop_binding_is_whole_loop_or_nothing() -> None:
-    # Issue #1397 AC2 / requirement 6: every ambiguous shape credits nothing
-    # for that call, so the affected files stay uncovered and reach the sweep.
-    for command in (
-        'for f in $(git ls-files); do nl -ba "$f"; done',            # command substitution
-        'for f in `ls`; do nl -ba "$f"; done',                       # backticks
-        'for f in src/*.py; do nl -ba "$f"; done',                   # glob
-        'for f in "$@"; do nl -ba "$f"; done',                       # "$@"
-        'for f in $FILES; do nl -ba "$f"; done',                     # variable list
-        'for f in {a,b}.py; do nl -ba "$f"; done',                   # brace expansion
-        'for f in ~/a.py; do nl -ba "$f"; done',                     # tilde
-        'for f in a.py b.py; do [ -f "$f" ] && nl -ba "$f"; done',   # && guard
-        'for f in a.py b.py; do break; nl -ba "$f"; done',            # skipped read
-        'for f in a.py b.py; do continue; nl -ba "$f"; done',         # skipped read
-        'for f in a.py b.py; do exit 0; nl -ba "$f"; done',           # skipped read
-        'for f in a.py b.py; do return 0; nl -ba "$f"; done',         # skipped read
-        'for f in a.py b.py; do if [ -f "$f" ]; then nl -ba "$f"; fi; done',
-        'for d in x y; do for f in a.py; do nl -ba "$f"; done; done',  # nested
-        'while read f; do nl -ba "$f"; done',                        # while
-        'for f in a.py b.py; do nl -ba "$g"; done',                  # unbound operand
-        'for f in a.py b.py; do nl -ba "src/$f/extra"; done',        # suffix after var
-    ):
-        assert _shell_reads(command) == set(), command
-
-
-def test_analyze_coverage_credits_a_completed_loop_read(tmp_path: Path) -> None:
-    # The same resolution is visible to eval coverage analysis (shared seam).
-    daydream_dir = tmp_path / ".daydream"
-    daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(
-        "diff --git a/.gitignore b/.gitignore\n"
-        "diff --git a/openapi.yaml b/openapi.yaml\n"
-    )
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-generic.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "shell",
-                                "arguments": {
-                                    "command": 'for task_file in .gitignore openapi.yaml; '
-                                    'do nl -ba "$task_file"; done'
-                                },
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-
-    result = analyze_coverage(trajectories, daydream_dir)
-
-    assert result["uncovered_files"] == []
-    assert result["files_read_by_reviewers"] == 2
-
-
-# Only a quote opened and never closed makes shlex raise; the two other
-# former candidates had balanced/escaped quotes and tokenize cleanly.
-
-
-def test_tokenize_command_never_raises_on_unbalanced_quotes() -> None:
-    # must not raise
-    tokens = _tokenize_command("rg -l '\"unclosed")
-    assert isinstance(tokens, list)
-
-
-def test_tokenize_command_whitespace_fallback_keeps_recoverable_paths() -> None:
-    # the unclosed quote makes shlex raise mid-token; the whitespace-split
-    # fallback still surfaces the ``a.py`` operand preceding it
-    paths = _shell_reads("rg -n 'pat' a.py '\"unclosed")
-    assert "a.py" in paths
-
-
-def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path) -> None:
-    daydream_dir = tmp_path / ".daydream"
-    daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(
-        "diff --git a/pkg/services/cleanup.go b/pkg/services/cleanup.go\n"
-        "diff --git a/core/osprey-cli b/core/osprey-cli\n"
-    )
-    trajectories = {
-        "main": {
-            "_source_file": "trajectory.json",
-            "steps": [
-                {
-                    "step_id": "m0",
-                    "extra": {"daydream_phase": "deep"},
-                    "tool_calls": [
-                        {
-                            "function_name": "shell",
-                            "arguments": {"command": "sed -n '1,240p' .daydream/diff.patch"},
-                        }
-                    ],
-                }
-            ],
-        },
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "read",
-                                "arguments": {"path": "/repo/pkg/services/cleanup.go"},
-                            },
-                            {
-                                "function_name": "bash",
-                                "arguments": {"command": "cat core/osprey-cli"},
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-
-    result = analyze_coverage(trajectories, daydream_dir)
-
-    assert result["coverage_ratio"] == 1.0
-    assert result["files_read_by_reviewers"] == 2
-    assert result["uncovered_files"] == []
-
-
-def test_analyze_grounding_counts_codex_and_pi_reads(tmp_path: Path) -> None:
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "shell",
-                                "arguments": {"command": "cat /repo/api.py"},
-                            },
-                            {
-                                "function_name": "read",
-                                "arguments": {"path": "/repo/api.py"},
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-    findings = [
-        {
-            "id": "py-1",
-            "_stack": "python",
-            "file": "api.py",
-            "rationale": "Read api.py; flag the missing validation.",
-            "confidence": "HIGH",
-        }
-    ]
-
-    # No hunk artifacts under this .daydream -> hunk_source "none", so the
-    # predicate is the file-only one and the read extraction is what is measured.
-    result = analyze_grounding(trajectories, findings, tmp_path / ".daydream")
-
-    entry = result["grounded"][0]
-    assert entry["file_was_read"] is True
-    assert entry["location_tier"] == "unchecked"
-    assert result["hunk_source"] == "none"
-    assert result["grounded_count"] == 1
-    assert result["ungrounded_count"] == 0
-    assert result["grounding_rate"] == 1.0
 
 
 
@@ -3230,3 +2839,82 @@ def test_analyze_session_reports_location_and_shipped_duplication(
 def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: str) -> None:
     """The legacy shapes are retained deliberately — pin them instead of guessing they are dead."""
     assert _agent_label(filename) == label
+
+
+@pytest.mark.parametrize("command", [
+    'for f in a.py b.py; do cat "$f"; done',
+    'for f in missing.py b.py; do cat "$f"; done',
+    "cat a.py",  # command_actions are also inferred shell text, never receipts
+])
+def test_shell_results_leave_coverage_and_grounding_unverifiable(tmp_path: Path, command: str) -> None:
+    dd, _deep = _deep_dirs(tmp_path)
+    _seed_diff(dd, "a.py", "b.py")
+    traj = _backend_read_trajectory("codex", [])
+    call = traj["steps"][0]["tool_calls"][0]
+    call["arguments"] = {"command": command, "command_actions": [{"type": "read", "path": "a.py"}]}
+    trajectories = _forked(traj)
+    result = analyze_coverage(trajectories, dd)
+    assert result["coverage_status"] == "unverifiable"
+    assert result["coverage_ratio"] is None
+    assert result["uncovered_files"] is None
+    assert result["files_read_by_reviewers"] is None
+    assert result["files_reviewed"] is None
+    assert result["verified_files_reviewed"] == 0
+    assert result["verified_files"] == []
+    assert result["unverifiable_files"] == ["a.py", "b.py"]
+    finding = {"id": 1, "_stack": "python", "file": "a.py", "rationale": "a.py needs a guard"}
+    grounding = analyze_grounding(trajectories, [finding], dd)
+    assert grounding["grounding_rate"] is None
+    assert grounding["ungrounded"] == []
+    assert grounding["unverifiable_count"] == 1
+    assert grounding["unverifiable"][0]["file_was_read"] is None
+    assert grounding["unverifiable"][0]["unread_rationale_refs"] is None
+    signals = analyze_training_signals(trajectories, grounding)
+    assert "unverifiable_grounding" in signals["trajectories"][0]["noise_flags"]
+
+
+@pytest.mark.parametrize("extra", [{"is_error": True}, {"truncated": True}, {"status": "interrupted"}])
+def test_eval_rejects_damaged_and_unpaired_structured_reads(tmp_path: Path, extra: dict[str, Any]) -> None:
+    dd, _deep = _deep_dirs(tmp_path)
+    _seed_diff(dd, "a.py", "b.py")
+    traj = _read_traj("deep-python.json", "a.py", "b.py")
+    traj["steps"][0]["observation"]["results"][0]["extra"] = extra
+    traj["steps"][1].pop("observation")
+    trajectories = _forked(traj)
+    result = analyze_coverage(trajectories, dd)
+    assert result["coverage_ratio"] == 0.0
+    assert result["uncovered_files"] == ["a.py", "b.py"]
+    grounding = analyze_grounding(trajectories, [{"file": "a.py", "_stack": "python"}], dd)
+    assert grounding["grounding_rate"] == 0.0
+    assert grounding["ungrounded"][0]["file_was_read"] is False
+
+
+def test_eval_preserves_verified_reads_in_a_mixed_backend_run(tmp_path: Path) -> None:
+    dd, _deep = _deep_dirs(tmp_path)
+    _seed_diff(dd, "a.py", "b.py")
+    shell = _backend_read_trajectory("codex", ["b.py"])
+    shell["_source_file"] = "deep-generic.json"
+    trajectories = _forked(_read_traj("deep-python.json", "a.py", pi_style=True), shell)
+    result = analyze_coverage(trajectories, dd)
+    assert result["coverage_ratio"] is None
+    assert result["verified_files"] == ["a.py"]
+    assert result["verified_files_read_by_reviewers"] == 1
+    assert result["unverifiable_files"] == ["b.py"]
+    grounding = analyze_grounding(trajectories, [{"file": "a.py", "_stack": "python"}], dd)
+    assert grounding["grounding_rate"] == 1.0
+
+
+def test_eval_uses_post_sweep_unavailable_scope(tmp_path: Path) -> None:
+    dd, deep = _deep_dirs(tmp_path)
+    _seed_diff(dd, "a.py", "b.py")
+    (deep / "coverage-stats.json").write_text(json.dumps({
+        "pre_sweep": {"unverifiable_files": []},
+        "post_sweep": {"unverifiable_files": ["b.py"]},
+    }))
+    shell = _backend_read_trajectory("codex", ["b.py"])
+    shell["_source_file"] = "deep-uncovered-b-py.json"
+    trajectories = _forked(_read_traj("deep-python.json", "a.py"), shell)
+    result = analyze_coverage(trajectories, dd)
+    assert result["coverage_ratio"] is None
+    assert result["unverifiable_files"] == ["b.py"]
+    assert result["verified_files"] == ["a.py"]
