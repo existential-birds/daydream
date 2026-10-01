@@ -15,9 +15,6 @@
         "traceloop.association.properties.session_id"
     ],
     "honeyhive": {
-        "search_path": "/v1/events/search",
-        "page_limit_low": 1,
-        "page_limit_high": 1000,
         "required_event_keys": {
             "session_id": "string",
             "event_name": "string",
@@ -31,16 +28,9 @@
             "feedback": "array",
             "inputs": "object",
             "outputs": "object"
-        },
-        "conditional_metadata_keys": {
-            "agent_name": "string",
-            "agent_description": "string",
-            "agent_id": "string",
-            "span_kind": "string"
         }
     },
     "langsmith": {
-        "query_path": "/runs/query",
         "identity_metadata_key": "daydream_run_id",
         "required_run_keys": {
             "id": "string",
@@ -57,9 +47,7 @@
             "invocation_params": "object",
             "usage_metadata": "object",
             "ls_agent_type": "string"
-        },
-        "root_required": true,
-        "single_trace_required": true
+        }
     },
     "expected_shape": {
         "representative_real_run": {

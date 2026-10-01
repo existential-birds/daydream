@@ -478,35 +478,17 @@ class RecipeCandidate:
 
 
 @dataclass(frozen=True)
-class RecipeIdentity:
-    """The versioned identity of one resolved recipe.
-
-    ``digest`` is a content digest over the command/package facts plus the
-    per-package config-input digest, or ``None`` when a config input could not
-    be read — in which case ``absent_components`` names it (Pattern C: a named
-    miss, never a placeholder digest).
-    """
-
-    digest: str | None
-    absent_components: tuple[str, ...]
-    format_version: int = RECIPE_FORMAT
-
-
-@dataclass(frozen=True)
 class TestRecipe:
     """One resolved test recipe: everything a run needs to run tests.
 
     Every fact is resolved exactly once in the deep preamble and then consumed
-    from this single value — no consumer re-derives the command, the package,
-    or the identity.
+    from this single value — no consumer re-derives the command or the package.
     """
 
     command: ResolvedFact
     package: PackageResolution
     required: RequiredContract
     candidate: RecipeCandidate | None
-    identity: RecipeIdentity
-    format_version: int = RECIPE_FORMAT
 
     # Not a pytest test class despite the name prefix.
     __test__ = False
@@ -526,46 +508,6 @@ def _manifest_candidate(runner: str | None) -> RecipeCandidate | None:
     return None
 
 
-def _compose_identity(
-    command: ResolvedFact, package: PackageResolution, repo_root: Path
-) -> RecipeIdentity:
-    """Recompute the versioned recipe identity from the live config inputs.
-
-    The config-input digest is read from disk on every call so a changed
-    lockfile/manifest moves the identity; an unreadable input is a named miss.
-    """
-    package_dir = _nearest_package_dir(repo_root, package.cwd_relative)
-    config_digest, absent = _config_digest(
-        package_dir, _config_input_names(package_dir, package.runner)
-    )
-    if config_digest is None:
-        return RecipeIdentity(digest=None, absent_components=absent)
-    components = {
-        "format": RECIPE_FORMAT,
-        "command": list(command.value) if command.value is not None else None,
-        "command_source": command.source,
-        "cwd_relative": package.cwd_relative,
-        "runner": package.runner,
-        "interpreter": package.interpreter,
-        "config_digest": config_digest,
-    }
-    canonical = json.dumps(components, sort_keys=True, separators=(",", ":"))
-    return RecipeIdentity(
-        digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
-        absent_components=(),
-    )
-
-
-def recipe_identity(recipe: TestRecipe, repo_root: Path) -> RecipeIdentity:
-    """Recompute a recipe's identity against the current config inputs.
-
-    ``recipe.identity`` is the identity captured at resolution time; this
-    function recomputes it so a decision gate can tell whether the recipe's
-    inputs still hold, returning a named miss rather than raising.
-    """
-    return _compose_identity(recipe.command, recipe.package, repo_root)
-
-
 def resolve_test_recipe(
     config: object,
     run_config: object,
@@ -577,10 +519,9 @@ def resolve_test_recipe(
 
     The command fact applies CLI-over-config precedence; the package is
     resolved from ``cwd`` (defaulting to the worktree root) and confined to
-    ``repo_root``; the candidate comes only from the closed manifest set; and
-    the identity binds the command/package facts to the per-package config
-    inputs. An unresolved command never authorizes a required argv and never
-    runs anything — the candidate is a suggestion only (spec MH4).
+    ``repo_root``; the candidate comes only from the closed manifest set. An
+    unresolved command never authorizes a required argv and never runs
+    anything — the candidate is a suggestion only (spec MH4).
     """
     command = resolve_test_command_fact(config, run_config)
     package = resolve_package(repo_root, cwd if cwd is not None else repo_root)
@@ -599,7 +540,6 @@ def resolve_test_recipe(
         package=package,
         required=required,
         candidate=_manifest_candidate(package.runner),
-        identity=_compose_identity(command, package, repo_root),
     )
 
 
@@ -647,10 +587,6 @@ def recipe_to_payload(recipe: TestRecipe) -> dict[str, Any]:
             "source": recipe.required.source,
         },
         "candidate": candidate_payload,
-        "identity": {
-            "digest": recipe.identity.digest,
-            "absent_components": list(recipe.identity.absent_components),
-        },
     }
 
 
@@ -665,10 +601,9 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
         command_payload = payload["command"]
         package_payload = payload["package"]
         required_payload = payload["required"]
-        identity_payload = payload["identity"]
         if not all(
             isinstance(part, dict)
-            for part in (command_payload, package_payload, required_payload, identity_payload)
+            for part in (command_payload, package_payload, required_payload)
         ):
             return None
         command_source = command_payload["source"]
@@ -727,14 +662,6 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
             if candidate_argv is None or candidate_payload["provenance"] != "manifest":
                 return None
             candidate = RecipeCandidate(argv=candidate_argv, provenance="manifest")
-
-        digest = identity_payload["digest"]
-        identity_absent = _tuple_of_str(identity_payload["absent_components"])
-        if (digest is not None and not isinstance(digest, str)) or identity_absent is None:
-            return None
-        identity = RecipeIdentity(
-            digest=digest, absent_components=identity_absent, format_version=RECIPE_FORMAT
-        )
     except (KeyError, TypeError, ValueError):
         return None
     return TestRecipe(
@@ -742,7 +669,6 @@ def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
         package=package,
         required=required,
         candidate=candidate,
-        identity=identity,
     )
 
 

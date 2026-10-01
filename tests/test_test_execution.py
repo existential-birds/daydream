@@ -23,7 +23,6 @@ from daydream.test_execution import (
     canonical_test_command,
     load_test_recipe,
     persist_test_recipe,
-    recipe_identity,
     resolve_package,
     resolve_test_command_fact,
     resolve_test_recipe,
@@ -313,26 +312,26 @@ def test_required_suites_fall_back_to_the_file_config_and_yield_to_an_explicit_s
     assert recipe.required.declared == ("explicit",)
 
 
-def test_recipe_identity_is_stable_until_a_config_input_changes(tmp_path: Path) -> None:
+def test_recipe_config_digest_is_stable_until_a_config_input_changes(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     (tmp_path / "uv.lock").write_text("version = 1\n")
     recipe = _recipe(tmp_path, cli="uv run pytest")
 
-    first = recipe_identity(recipe, tmp_path)
-    assert first.digest is not None and first.absent_components == ()
-    assert recipe_identity(recipe, tmp_path).digest == first.digest
+    assert recipe.package.config_digest is not None
+    assert recipe.package.absent_components == ()
+    assert _recipe(tmp_path, cli="uv run pytest").package.config_digest == recipe.package.config_digest
 
     (tmp_path / "uv.lock").write_text("version = 2\n")
-    assert recipe_identity(recipe, tmp_path).digest != first.digest
+    assert _recipe(tmp_path, cli="uv run pytest").package.config_digest != recipe.package.config_digest
 
 
-def test_recipe_identity_is_a_named_miss_when_an_input_is_unreadable(tmp_path: Path) -> None:
+def test_recipe_config_digest_is_a_named_miss_when_an_input_is_unreadable(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
     (tmp_path / "uv.lock").mkdir()
-    identity = recipe_identity(_recipe(tmp_path, cli="uv run pytest"), tmp_path)
+    recipe = _recipe(tmp_path, cli="uv run pytest")
 
-    assert identity.digest is None
-    assert "uv.lock" in identity.absent_components
+    assert recipe.package.config_digest is None
+    assert "uv.lock" in recipe.package.absent_components
 
 
 def test_unconfigured_recipe_proposes_a_candidate_without_authorizing_it(tmp_path: Path) -> None:
@@ -421,7 +420,7 @@ def test_recipe_round_trips_through_its_persisted_payload(tmp_path: Path) -> Non
     assert loaded is not None
     assert loaded.command.value == recipe.command.value
     assert loaded.package.cwd_relative == recipe.package.cwd_relative
-    assert recipe_identity(loaded, tmp_path).digest == recipe_identity(recipe, tmp_path).digest
+    assert loaded.package.config_digest == recipe.package.config_digest
 
 
 @pytest.mark.parametrize(

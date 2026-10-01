@@ -134,6 +134,30 @@ def init_repo(repo: Path) -> None:
     configure_identity(repo)
 
 
+def seed_feature_branch(
+    repo: Path,
+    *,
+    base: dict[str, str],
+    feature: dict[str, str],
+    base_message: str = "base",
+    feature_message: str = "feature",
+) -> str:
+    """Seed *repo* with a base commit on ``main`` then a feature commit on ``feature``.
+
+    *base* and *feature* map repo-relative paths to the exact content each commit
+    stages; the branch is created from the base commit. Returns the feature HEAD
+    SHA. Part of the deterministic seed family (see module docstring).
+    """
+    init_repo(repo)
+    for name, content in base.items():
+        write_and_stage(repo, name, content)
+    commit(repo, base_message)
+    git(repo, "checkout", "-b", "feature")
+    for name, content in feature.items():
+        write_and_stage(repo, name, content)
+    return commit(repo, feature_message)
+
+
 def refreshing_session(name: str, refresh_calls: dict[str, int]) -> git_ops.RefreshingGitHubAuth:
     """An expired-token session that mints ``ghs_<name>_fresh_token_...`` on refresh.
 

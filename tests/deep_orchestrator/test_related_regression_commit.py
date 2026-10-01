@@ -17,9 +17,8 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.runner import run
 from tests.harness.git_helpers import (
     bare_remote as _bare_remote,
-    commit as _commit,
     git as _git,
-    init_repo as _init_repo,
+    seed_feature_branch as _seed_feature_branch,
 )
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.stub_backend import StubBackend
@@ -37,14 +36,7 @@ async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
 ) -> None:
     """Remaining findings cannot strand a tested fix; new regressions still block."""
     repo = tmp_path / "partial-fixes"
-    _init_repo(repo)
-    (repo / "api.py").write_text("A = 1\n")
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "api.py").write_text("A = 2\n")
-    _git(repo, "add", "api.py")
-    _commit(repo, "feature")
+    _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
     initial_head = _git(repo, "rev-parse", "HEAD")
     remote = _bare_remote(tmp_path / "origin.git")
     _git(repo, "remote", "add", "origin", str(remote))
@@ -121,15 +113,11 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
 ) -> None:
     """Real host-test/Git path retains A/B/T and restores C + user scratch."""
     repo = tmp_path / "footprint-run"
-    _init_repo(repo)
-    for name, value in (("api.py", "A = 1\n"), ("sibling.py", "B = 1\n"), ("other.py", "C = 1\n")):
-        (repo / name).write_text(value)
-    _git(repo, "add", ".")
-    _commit(repo, "base")
-    _git(repo, "checkout", "-b", "feature")
-    (repo / "api.py").write_text("A = 10\n")
-    _git(repo, "add", "api.py")
-    _commit(repo, "feature")
+    _seed_feature_branch(
+        repo,
+        base={"api.py": "A = 1\n", "sibling.py": "B = 1\n", "other.py": "C = 1\n"},
+        feature={"api.py": "A = 10\n"},
+    )
     remote = _bare_remote(tmp_path / "origin.git")
     _git(repo, "remote", "add", "origin", str(remote))
 
