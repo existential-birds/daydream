@@ -16,12 +16,14 @@ from __future__ import annotations
 import copy
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
 
+from daydream import pr_review
 from daydream.artifact_visibility import (
     artifact_dir_for,
     open_artifact_session,
@@ -43,11 +45,7 @@ from daydream.runner import RunConfig, run
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
-from tests.harness.fake_gh import (
-    CapturedPost as _CapturedPost,
-    FakeGh,
-    capture_review_post,
-)
+from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.harness.trajectory import assert_dispatch_children, root_trajectory as _root_trajectory
@@ -104,6 +102,18 @@ def _legacy_sequence_builder(
 # --- Harness -----------------------------------------------------------------
 
 
+@dataclass
+class _CapturedPost:
+    gh: FakeGh
+
+    @property
+    def payloads(self) -> list[dict[str, Any]]:
+        return [call.payload for call in self.gh.calls("POST", "repos/acme/widgets/pulls/123/reviews")]
+
+    def body(self) -> str:
+        assert self.payloads, "no review payload was submitted"
+        return str(self.payloads[-1]["body"])
+
 @pytest.fixture
 def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
     """Let the real ``build_payload`` run and capture the review it would POST.
@@ -112,14 +122,27 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
     renderer, the diagram slot, and every marker are produced by production
     code exactly as they would be on a live PR.
     """
-    return capture_review_post(
-        monkeypatch,
-        fake_gh,
-        owner="acme",
-        repo="widgets",
+
+    captured = _CapturedPost(fake_gh)
+    fake_pr = pr_review.PRInfo(
+        number=123,
         head_sha="a" * 40,
         base_sha="b" * 40,
+        base_ref="main",
+        head_ref="feature",
+        owner="acme",
+        repo="widgets",
+        url="https://example/pr/123",
     )
+    monkeypatch.setattr(
+        "daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr
+    )
+
+    fake_gh.set_response(
+        "POST", "repos/acme/widgets/pulls/123/reviews",
+        {"html_url": "https://example/pr/123#review-1"},
+    )
+    return captured
 
 
 @pytest.fixture
