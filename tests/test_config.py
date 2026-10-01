@@ -1,5 +1,4 @@
 """Tests for daydream.config module."""
-import json
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +30,7 @@ from daydream.config import (
     PHASE_DEFAULT_MODELS,
     STRUCTURE_STACK_NAME,
 )
+from tests.harness.config import write_daydream_pyproject
 
 PHASE_NAMES = {
     "review",
@@ -300,14 +300,6 @@ def test_diagram_phase_is_mid_tier_on_both_model_backends() -> None:
     assert DEEP_PHASE_DEFAULT_EFFORT["codex"]["diagram"] == "medium"
 
 
-def _write_pyproject(target: Path, **keys: object) -> None:
-    """Write a ``[tool.daydream]`` pyproject.toml with the supplied keys."""
-    lines = ["[tool.daydream]"]
-    for key, value in keys.items():
-        lines.append(f"{key} = {json.dumps(value)}")
-    (target / "pyproject.toml").write_text("\n".join(lines) + "\n", encoding="utf-8")
-
-
 def test_the_optimised_selection_is_the_default_once_the_evidence_gate_is_green() -> None:
     """#735: the report's gate turned green, so selective verification is the default.
 
@@ -325,7 +317,7 @@ def test_verify_all_stays_reachable_as_the_conservative_escape_hatch(tmp_path: P
     from daydream.deep.fix_steps import _resolve_verify_selection
     from daydream.runner import RunConfig
 
-    _write_pyproject(tmp_path, verify_all=True)
+    write_daydream_pyproject(tmp_path, verify_all=True)
     resolved = _resolve_verify_selection(
         RunConfig(target=str(tmp_path), file_config=load_file_config(tmp_path))
     )
