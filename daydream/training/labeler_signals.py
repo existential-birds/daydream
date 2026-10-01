@@ -25,12 +25,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal, Mapping, cast, get_args
 
+from daydream.hunk_index import parse_hunks
 from daydream.pr_review import parse_finding_markers
 from daydream.training._immutable_json import thaw_json
 from daydream.training.labeler_versions import reply_evidence_digest
@@ -281,48 +281,21 @@ class _Hunk:
     added_lines: tuple[str, ...]
 
 
-_DIFF_FILE_HEADER = re.compile(r"^diff --git a/(?P<old>.+) b/(?P<new>.+)$")
-
-
 def _parse_diff_hunks(patch_text: str) -> list[_Hunk]:
     """Parse a unified-diff text into a flat list of hunks.
 
-    Each ``@@`` block becomes one :class:`_Hunk` carrying the added lines
-    (without the leading ``+``). Lines that begin with ``+++`` are
-    treated as file headers, not additions.
+    Thin adapter over the shared :func:`daydream.hunk_index.parse_hunks`
+    parser: each file's added lines are grouped back into their owning hunk
+    (in new-line order), so every ``@@`` block with additions becomes one
+    :class:`_Hunk` carrying its added lines without the leading ``+``.
     """
     hunks: list[_Hunk] = []
-    current_file: str | None = None
-    in_hunk = False
-    added: list[str] = []
-
-    def _flush() -> None:
-        nonlocal added
-        if current_file is not None and added:
-            hunks.append(_Hunk(file=current_file, added_lines=tuple(added)))
-        added = []
-
-    for line in patch_text.splitlines():
-        header = _DIFF_FILE_HEADER.match(line)
-        if header:
-            _flush()
-            current_file = header.group("new")
-            in_hunk = False
-            continue
-        if line.startswith("+++ "):
-            # File header inside a diff block — already captured via "diff --git".
-            in_hunk = False
-            continue
-        if line.startswith("--- "):
-            in_hunk = False
-            continue
-        if line.startswith("@@"):
-            _flush()
-            in_hunk = True
-            continue
-        if in_hunk and line.startswith("+"):
-            added.append(line[1:])
-    _flush()
+    for path, meta in parse_hunks(patch_text).items():
+        grouped: dict[int, list[str]] = {}
+        for hunk_index, text in meta["added_text"].values():
+            grouped.setdefault(hunk_index, []).append(text)
+        for added in grouped.values():
+            hunks.append(_Hunk(file=path, added_lines=tuple(added)))
     return hunks
 
 

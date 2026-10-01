@@ -7,17 +7,7 @@ from typing import Any
 import pytest
 
 from daydream.deep.evidence_reuse import EVIDENCE_REUSE_FORMAT, ReuseTarget, decide_reuse
-from daydream.test_execution import TestExecutionIdentity
-
-
-def _identity(**overrides: Any) -> TestExecutionIdentity:
-    fields: dict[str, Any] = {
-        "session_id": "s", "argv": ("uv", "run", "pytest"), "cwd_relative": ".",
-        "runner": "uv", "interpreter": None, "config_digest": "d" * 64, "absent_components": (),
-        "input_tree_key": "t", "output_tree_key": "t", "head_sha": "a" * 40,
-        "branch": "feature", "kind": "host", "outcome": "passed",
-    }
-    return TestExecutionIdentity(**{**fields, **overrides})
+from tests.harness.execution import test_execution_identity as _identity
 
 
 def _target(**overrides: Any) -> ReuseTarget:

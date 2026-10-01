@@ -151,12 +151,13 @@ def _record_sort_key(rec: Mapping[str, Any]) -> str:
     return str(rec.get("id", ""))
 
 
-def _reconstruct_task(rec: Mapping[str, Any]) -> tuple[str, str, str]:
-    """Return (record_id, base_sha, diff), failing closed on malformed identity.
+def _reconstruct_task(rec: Mapping[str, Any]) -> str:
+    """Return the record id, failing closed on malformed task identity.
 
-    ``repo_slug``, ``base_sha``, and ``head_sha`` are validated (including the
-    full 40-hex contract via :func:`validate_full_sha`) *before* any task or
-    image work — a truncated or non-hex SHA raises like a missing one.
+    ``repo_slug``, ``base_sha``, ``head_sha``, and ``diff`` are validated
+    (including the full 40-hex contract via :func:`validate_full_sha`) *before*
+    any task or image work — a truncated or non-hex SHA raises like a missing
+    one.
     """
     rid = str(rec.get("id", ""))
     repo_slug = rec.get("repo_slug")
@@ -176,8 +177,7 @@ def _reconstruct_task(rec: Mapping[str, Any]) -> tuple[str, str, str]:
         )
     for sha_field in ("base_sha", "head_sha"):
         validate_full_sha(rid, sha_field, rec.get(sha_field))
-    assert isinstance(base_sha, str) and isinstance(diff, str)
-    return rid, base_sha, diff
+    return rid
 
 
 def _sample_candidates(rec: Mapping[str, Any], rid: str, cfg: RftConfig) -> list[dict[str, Any]]:
@@ -279,7 +279,7 @@ def run_rft(config: RftConfig) -> RftResult:
 
     winners: list[RftWinner] = []
     for rec in sorted(records, key=_record_sort_key):
-        rid, _base_sha, _diff = _reconstruct_task(rec)
+        rid = _reconstruct_task(rec)
         for index, candidate in enumerate(_sample_candidates(rec, rid, config)):
             breakdown = _score_candidate(candidate)
             if _passes(config.min_breakdown, breakdown):
