@@ -1,11 +1,11 @@
-"""Tests for daydream.eval.analyzer trajectory loading and grounding.
+"""Tests for daydream.eval.analyzer trajectory loading and finding analysis.
 
 Focused on session-id resolution semantics inside ``load_trajectories``:
 ambiguous prefixes must raise instead of silently picking one, exact
 matches must take precedence over prefix matches, and unique prefixes
 must still resolve.
 
-Also covers ``analyze_grounding``'s rate arithmetic, including the
+Also covers finding and location arithmetic, including the
 undefined (zero-findings) case, which must not report a perfect score.
 """
 import json
@@ -25,12 +25,8 @@ from daydream.eval.analyzer import (
     _agent_label,
     _latest_main_trajectory,
     _quality_python_parser,
-    _semantic_tool_kind,
     analyze_costs,
-    analyze_coverage,
-    analyze_exploration_utilization,
     analyze_findings,
-    analyze_grounding,
     analyze_location,
     analyze_quality,
     analyze_session,
@@ -44,7 +40,6 @@ from daydream.eval.analyzer import (
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
-    redact_text,
     run_directory,
     run_document_path,
     sibling_document_path,
@@ -217,8 +212,15 @@ def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
         ("custom", "other"),
     ],
 )
-def test_semantic_tool_kind_is_backend_neutral(name: str, expected: str) -> None:
-    assert _semantic_tool_kind(name) == expected
+def test_write_tool_counts_are_backend_neutral(name: str, expected: str) -> None:
+    result = analyze_tools({
+        "main": None,
+        "forked": [{"_source_file": "deep-python.json", "steps": [{
+            "step_id": 1, "tool_calls": [{"function_name": name, "arguments": {}}],
+        }]}],
+    })
+    assert result["by_type"] == {name: 1}
+    assert result["write_ratio"] == (1.0 if expected == "write" else 0.0)
 
 
 def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
@@ -246,7 +248,6 @@ def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
     assert result["by_type"] == {"shell": 311, "patch": 15}
     assert result["by_agent"] == {"deep-python": {"shell": 311, "patch": 15}}
     assert result["write_ratio"] == 0.046
-    assert result["redundant_reads"] is None
 
 
 def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
@@ -255,7 +256,6 @@ def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
             "main": None,
             "forked": [{"_source_file": "deep-python.json", "steps": steps}],
         },
-        {"ungrounded": []},
     )
     return cast(list[str], result["trajectories"][0]["noise_flags"])
 
@@ -464,14 +464,10 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(
     assert sum(agent["steps"] for agent in result["by_agent"]) == 3
 
 
-
-
 def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict[str, Any]:
     """Forked-trajectory fixture whose agent Read each of ``read_paths``.
 
-    Shaped for ``_extract_tool_calls``: every step needs a ``step_id`` and its
-    ``tool_calls`` need ``function_name``/``arguments``. ``_completed_read_paths`` keeps
-    only the ``file_path`` of ``Read`` calls, and ``_agent_label`` derives the
+    Tool calls retain ``function_name``/``arguments``. ``_agent_label`` derives the
     ``deep-<stack>`` key from ``_source_file``. With ``pi_style=True`` the
     calls use the pi style ``read``/``arguments.path`` shape.
     """
@@ -535,13 +531,6 @@ def _seed_diff(daydream_dir: Path, *files: str) -> None:
 # Owner-scoped artifact paths that belong to a DIFFERENT owner than the current
 # run's provenance: a different workspace key, and a different session under the
 # same key. Both must stay eligible repository reads.
-_OTHER_WORKSPACE_ARTIFACT = "{base}/other-workspace/runs/session-id/live/.daydream/deep/src/api.py"
-_OTHER_SESSION_ARTIFACT = "{base}/workspace-key/runs/other-session/live/.daydream/deep/src/api.py"
-
-
-def _forked(*trajectories: dict[str, Any]) -> dict[str, Any]:
-    """A trajectory bundle with no root and the given forked children."""
-    return {"main": None, "forked": list(trajectories)}
 
 
 def _write_records(deep: Path, **overrides: Any) -> None:
@@ -574,220 +563,10 @@ def _root_trajectory(session_id: str) -> dict[str, Any]:
 _READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "pi": ("read", "path"), "osprey": ("read", "path")}
 
 
-def _backend_read_trajectory(backend: str, paths: list[str]) -> dict[str, Any]:
-    """One deep-python trajectory using a real supported backend read shape."""
-    if backend in _READ_TOOL_SHAPES:
-        name, argument = _READ_TOOL_SHAPES[backend]
-        calls = [{"function_name": name, "arguments": {argument: path}} for path in paths]
-    else:  # Codex provides aggregate shell results, never per-file receipts
-        calls = [
-            {
-                "function_name": "shell" if backend == "codex" else "bash",
-                "arguments": {"command": "cat " + " ".join(paths)},
-            }
-        ]
-    return {
-        "_source_file": "deep-python.json",
-        "steps": [{
-            "step_id": "s0",
-            "tool_calls": [dict(call, tool_call_id=f"call-{i}") for i, call in enumerate(calls)],
-            "observation": {"results": [
-                {"source_call_id": f"call-{i}", "content": "source"} for i in range(len(calls))
-            ]},
-        }],
-    }
-
-
-@pytest.mark.parametrize("backend", ["claude", "pi", "osprey"])
-def test_artifact_evidence_never_earns_backend_coverage_or_grounding(
-    tmp_path: Path,
-    backend: str,
-) -> None:
-    """Every supported read shape credits source while excluding run artifacts."""
-    public_source, daydream_dir, provenance = _owned_source(tmp_path)
-    _seed_diff(daydream_dir, "src/api.py")
-    private_live = provenance.live_root
-    paths = [
-        str(public_source / "src/api.py"),
-        ".daydream/deep/stack-python-review.md",
-        ".review-output.md",
-        str(public_source / ".daydream/deep/src/api.py"),
-        str(private_live / ".daydream/deep/src/api.py"),
-    ]
-    trajectories = _forked(_backend_read_trajectory(backend, paths))
-    findings = [
-        {
-            "id": "py-1",
-            "_stack": "python",
-            "file": "src/api.py",
-            "rationale": "The implementation in src/api.py lacks a guard.",
-            "confidence": "HIGH",
-        }
-    ]
-
-    coverage = analyze_coverage(trajectories, daydream_dir, artifact_provenance=provenance)
-    grounding = analyze_grounding(
-        trajectories, findings, daydream_dir, artifact_provenance=provenance
-    )
-
-    assert coverage["coverage_ratio"] == 1.0
-    assert coverage["artifact_reads_rejected"] == 4
-    assert grounding["grounded_count"] == 1
-    assert grounding["artifact_evidence_rejections"] == 0
-
-
-def test_artifact_evidence_in_primary_and_redacted_rationale_is_rejected() -> None:
-    """Exact raw/redacted owner paths stay visible but cannot earn grounding."""
-
-    public_source = Path("/Users/alice/project")
-    daydream_dir = public_source / ".daydream"
-    provenance = _artifact_provenance(
-        public_source=public_source, private_base=Path("/Users/alice/private")
-    )
-    private_live = provenance.live_root
-    artifact_primary = str(private_live / ".daydream/deep/src/api.py")
-    artifact_rationale = redact_text(
-        str(private_live / ".daydream/deep/stack-python-review.md")
-    )
-    trajectories = _forked(
-        _read_traj(
-            "deep-python.json",
-            str(public_source / "src/api.py"),
-            artifact_primary,
-            artifact_rationale,
-        )
-    )
-    findings = [
-        {
-            "id": "py-primary",
-            "_stack": "python",
-            "file": artifact_primary,
-            "rationale": "Artifact-backed claim",
-            "confidence": "HIGH",
-        },
-        {
-            "id": "py-rationale",
-            "_stack": "python",
-            "file": "src/api.py",
-            "rationale": f"Source claim derived from {artifact_rationale}",
-            "confidence": "HIGH",
-        },
-    ]
-
-    result = analyze_grounding(
-        trajectories, findings, daydream_dir, artifact_provenance=provenance
-    )
-
-    assert result["grounded_count"] == 0
-    assert result["artifact_evidence_rejections"] == 2
-    entries = {entry["id"]: entry for entry in result["ungrounded"]}
-    assert entries["py-primary"]["file_was_read"] is False
-    assert entries["py-primary"]["artifact_file_ref"] == redact_text(artifact_primary)
-    assert entries["py-rationale"]["file_was_read"] is True
-    assert entries["py-rationale"]["file"] == "src/api.py"
-    assert entries["py-rationale"]["artifact_rationale_refs"] == [artifact_rationale]
-    assert entries["py-rationale"]["unread_rationale_refs"] == []
-
-
-def test_external_exploration_counts_only_current_owner_and_safe_relative_paths(
+def test_analyze_session_preserves_source_quality_without_read_metrics(
     tmp_path: Path,
 ) -> None:
-    """Exploration utilization shares the exact owner-bound path classifier."""
-
-    public_source, daydream_dir, provenance = _owned_source(tmp_path)
-    private_live = provenance.live_root
-    other_live = private_live.parents[2] / "other-key/runs/other-session/live"
-    trajectories = _forked(
-        _read_traj(
-            "deep-python.json",
-            str(private_live / ".daydream/exploration/summary.md"),
-            ".daydream/exploration/affected_files.md",
-            str(other_live / ".daydream/exploration/summary.md"),
-            "src/exploration/parser.py",
-            "../.daydream/exploration/escape.md",
-        )
-    )
-
-    result = analyze_exploration_utilization(
-        trajectories, daydream_dir=daydream_dir, artifact_provenance=provenance
-    )
-
-    assert result["by_agent"][0]["total_reads"] == 5
-    assert result["by_agent"][0]["exploration_reads"] == 2
-    assert result["by_agent"][0]["utilized"] is True
-
-
-def test_artifact_evidence_lexical_negatives_remain_repository_reads(
-    tmp_path: Path,
-) -> None:
-    """Names resembling private storage do not trigger broad substring rejection."""
-    _, daydream_dir, provenance = _owned_source(tmp_path)
-    _seed_diff(
-        daydream_dir,
-        ".daydream.toml",
-        ".daydream_helper.py",
-        "runtime/src/api.py",
-        "exploration/src/parser.py",
-        "src/api.py",
-    )
-    private_base = provenance.live_root.parents[3]
-    other_workspace = _OTHER_WORKSPACE_ARTIFACT.format(base=private_base)
-    other_session = _OTHER_SESSION_ARTIFACT.format(base=private_base)
-    trajectories = _forked(
-        _read_traj(
-            "deep-python.json",
-            "./.daydream.toml",
-            "./.daydream_helper.py",
-            "./runtime/src/api.py",
-            "./exploration/src/parser.py",
-            other_workspace,
-            other_session,
-            "./src/api.py",
-            "./.daydream/deep/report.md",
-            "../.daydream/deep/src/api.py",
-            ".daydream/../src/api.py",
-            "src/../src/api.py",
-        )
-    )
-
-    result = analyze_coverage(trajectories, daydream_dir, artifact_provenance=provenance)
-
-    assert result["coverage_ratio"] == 1.0
-    assert result["uncovered_files"] == []
-    assert result["artifact_reads_rejected"] == 4
-
-
-def test_artifact_evidence_other_owner_and_similar_names_stay_eligible(
-    tmp_path: Path,
-) -> None:
-    """Each false-positive control independently earns repository coverage."""
-    _, daydream_dir, provenance = _owned_source(tmp_path)
-    private_base = provenance.live_root.parents[3]
-    cases = [
-        (_OTHER_WORKSPACE_ARTIFACT.format(base=private_base), "src/api.py"),
-        (_OTHER_SESSION_ARTIFACT.format(base=private_base), "src/api.py"),
-        ("/repo/runtime/src/api.py", "src/api.py"),
-        ("/repo/exploration/src/api.py", "src/api.py"),
-        (".daydream.toml", ".daydream.toml"),
-        (".daydream_helper.py", ".daydream_helper.py"),
-    ]
-
-    for read_path, diff_path in cases:
-        _seed_diff(daydream_dir, diff_path)
-        result = analyze_coverage(
-            _forked(_read_traj("deep-python.json", read_path)),
-            daydream_dir,
-            artifact_provenance=provenance,
-        )
-
-        assert result["coverage_ratio"] == 1.0, read_path
-        assert result["artifact_reads_rejected"] == 0, read_path
-
-
-def test_artifact_evidence_analyze_session_threads_one_classifier_to_all_consumers(
-    tmp_path: Path,
-) -> None:
-    """Coverage, grounding, exploration, and training share frozen provenance."""
+    """Source quality and trajectory data remain available without read metrics."""
     public_source, _, provenance = _owned_source(tmp_path, session_id="session")
     (public_source / "src").mkdir(parents=True)
     (public_source / "src/api.py").write_text(
@@ -822,145 +601,8 @@ def test_artifact_evidence_analyze_session_threads_one_classifier_to_all_consume
         code_workspace=public_source,
     )
 
-    assert result["coverage"]["coverage_ratio"] == 1.0
-    assert result["coverage"]["artifact_reads_rejected"] == 2
-    assert result["grounding"]["artifact_evidence_rejections"] == 1
-    assert result["grounding"]["grounded_count"] == 0
-    assert result["exploration_utilization"]["by_agent"][0]["exploration_reads"] == 1
-    assert "ungrounded_findings:1" in result["training_signals"]["trajectories"][0][
-        "noise_flags"
-    ]
+    assert not {"coverage", "grounding", "exploration_utilization"} & result.keys()
     assert result["tools"]["total_calls"] == 3
-
-
-def test_analyze_session_redacts_artifact_primary_from_entire_result(
-    tmp_path: Path,
-) -> None:
-    """A private primary citation never survives in serialized evaluation."""
-
-    public_source = tmp_path / "source"
-    public_source.mkdir()
-    daydream_dir = tmp_path / "frozen" / ".daydream"
-    deep = daydream_dir / "deep"
-    deep.mkdir(parents=True)
-    provenance = _artifact_provenance(
-        public_source=public_source,
-        private_base=Path("/Users/alice/private"),
-        session_id="session",
-    )
-    artifact_primary = str(provenance.live_root / ".daydream/deep/stack-python-review.md")
-    _write_records(
-        deep,
-        id="py-private-primary",
-        file=artifact_primary,
-        rationale="The private review artifact supports this claim.",
-    )
-    trajectories = {
-        "main": _root_trajectory("session"),
-        "forked": [_read_traj("deep-python.json")],
-    }
-
-    result = analyze_session(
-        daydream_dir,
-        session_id="session",
-        frozen_trajectories=trajectories,
-        artifact_provenance=provenance,
-        code_workspace=public_source,
-    )
-
-    entry = result["grounding"]["ungrounded"][0]
-    redacted_primary = redact_text(artifact_primary)
-    assert entry["artifact_file_ref"] == redacted_primary
-    assert entry["file"] == redacted_primary
-    serialized = json.dumps(result, sort_keys=True)
-    assert artifact_primary not in serialized
-    assert "/Users/alice/private" not in serialized
-
-
-def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
-
-    trajectories = {
-        "main": None,
-        "forked": [
-            _read_traj("deep-python.json", "/repo/.daydream/exploration/summary.md"),
-            _read_traj("deep-ts.json", "/repo/.daydream/exploration/affected_files.md"),
-            _read_traj("deep-rust.json", "/repo/.daydream/exploration/conventions.md"),
-            _read_traj(
-                "deep-c.json",
-                "/repo/.daydream/exploration/affected_files.md",
-                pi_style=True,
-            ),
-            _read_traj("deep-go.json", "/repo/src/main.go"),
-        ],
-    }
-    result = analyze_exploration_utilization(
-        trajectories,
-        daydream_dir=Path("/repo/.daydream"),
-    )
-    by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
-    assert by_agent["deep-python"]["utilized"] is True
-    assert by_agent["deep-ts"]["utilized"] is True
-    assert by_agent["deep-rust"]["utilized"] is True
-    assert by_agent["deep-c"]["utilized"] is True
-    assert by_agent["deep-go"]["utilized"] is False  # outside exploration/ -> not counted
-    assert result["reviewers_utilizing_exploration"] == 4
-
-
-def test_exploration_utilization_counts_bash_mediated_reads() -> None:
-
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "Bash",
-                                "arguments": {"command": "cat .daydream/exploration/summary.md"},
-                            },
-                        ],
-                    },
-                ],
-            }
-        ],
-    }
-
-    result = analyze_exploration_utilization(trajectories)
-
-    entry = result["by_agent"][0]
-    assert entry["exploration_reads"] is None
-    assert entry["utilized"] is None
-    assert result["utilization_rate"] is None
-    assert result["reviewers_utilizing_exploration"] is None
-    assert result["verified_reviewers_utilizing_exploration"] == 0
-    assert entry["total_reads"] is None
-    assert entry["verified_structured_reads"] == 0
-
-
-def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
-    """A review that produced NO findings has an undefined grounding rate.
-
-    Reporting 1.0 here would hand a review that found nothing a perfect
-    grounding score, which flows into the manifest and becomes a top RL
-    reward. ``None`` is the only honest value for 0/0. Unchanged by the
-    line-tightening in issue #1106.
-    """
-    trajectories = {
-        "main": None,
-        "forked": [_read_traj("deep-python.json", "/repo/api.py")],
-    }
-
-    result = analyze_grounding(trajectories, [], tmp_path / ".daydream")
-
-    assert result["total_findings"] == 0
-    assert result["grounded_count"] == 0
-    assert result["ungrounded_count"] == 0
-    assert result["grounding_rate"] is None
-
-
 
 
 def _quality_workspace(tmp_path: Path, files: dict[str, str], name: str = "workspace") -> Path:
@@ -1218,8 +860,6 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(
     assert result["daydream_dir"] == str(public_source / ".daydream")
 
 
-
-
 def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
     tmp_path: Path,
 ) -> None:
@@ -1290,8 +930,6 @@ def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> No
 def test_quality_verbosity_wrapper_cases(tmp_path: Path, source: str, verbosity: float) -> None:
     result = _quality(tmp_path, {"app.py": source})
     assert result["per_file"]["app.py"]["verbosity"] == verbosity
-
-
 
 
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
@@ -1491,8 +1129,6 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> N
     assert result["scoped_files"] == 2
     assert list(result["per_file"]) == ["good.py"]
     assert result["verbosity"] == 0.0
-
-
 
 
 def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(
@@ -1804,10 +1440,10 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(
     seed_stack_records(deep, "uncovered", n=1)
     seed_stack_records(deep, "structure", n=2)
     out = analyze_findings(dd)
+    assert all(stack["name"] != "uncovered" for stack in out["stacks"])
     assert out["per_lens"] == {
         "wonder": 2,
         "per-stack": 3,
-        "uncovered": 1,
         "structure": 2,
     }
 
@@ -1870,8 +1506,6 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
 
 
-
-
 def test_analyze_quality_refuses_known_bad_tree_sitter(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1931,7 +1565,6 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     # Rest of the evaluation is intact -- the run is archived, not dropped.
     assert result["session_id"] == "quality-bad"
     assert result["trajectory_count"] == 1
-
 
 
 # Pattern B: real temp artifact dirs. These seed helpers write the REAL
@@ -2630,8 +2263,6 @@ def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(
     assert dedup["avg_overlap_similarity"] == 0.65
 
 
-
-
 def _grounding_finding(**extra: Any) -> dict[str, Any]:
     """A pre-merge per-stack record tagged for the ``deep-python`` reader."""
     finding: dict[str, Any] = {
@@ -2644,157 +2275,6 @@ def _grounding_finding(**extra: Any) -> dict[str, Any]:
     }
     finding.update(extra)
     return finding
-
-
-def _loader_trajectories() -> dict[str, Any]:
-    return {
-        "main": None,
-        "forked": [_read_traj("deep-python.json", "/repo/svc/loader.py")],
-    }
-
-
-def test_grounding_requires_the_cited_line_not_just_the_cited_file(
-    tmp_path: Path,
-) -> None:
-    """The reward-bearing change: a read file with a bad anchor is NOT grounded.
-
-    Both findings cite a file the reviewer read, so the old file-only predicate
-    scored both ``grounded`` -- ``grounding_rate: 1.0``. Only the in-hunk one
-    is grounded now, and the components are reported separately so the
-    composite change is observable.
-    """
-    dd, _deep = _worked_example_dirs(tmp_path)
-    findings = [
-        _grounding_finding(id="py-1", line=88),
-        _grounding_finding(id="py-2", line=4),
-    ]
-
-    result = analyze_grounding(_loader_trajectories(), findings, dd)
-
-    assert result["hunk_source"] == "diff.patch"
-    assert result["total_findings"] == 2
-    assert result["grounded_count"] == 1
-    assert result["grounding_rate"] == 0.5
-    # Components: the file half is still perfect; only the line half moved.
-    assert result["file_grounded_count"] == 2
-    assert result["file_grounding_rate"] == 1.0
-    assert result["line_grounded_count"] == 1
-    assert result["line_grounding_rate"] == 0.5
-    assert result["tiers"]["in_hunk"] == 1
-    assert result["tiers"]["beyond_tolerance"] == 1
-    assert [entry["id"] for entry in result["ungrounded"]] == ["py-2"]
-    assert result["ungrounded"][0]["location_tier"] == "beyond_tolerance"
-    assert result["ungrounded"][0]["line_grounded"] is False
-    assert result["ungrounded"][0]["file_was_read"] is True
-    assert result["grounded"][0]["location_tier"] == "in_hunk"
-    assert result["grounded"][0]["line_grounded"] is True
-
-
-def test_grounding_accepts_a_within_tolerance_line(tmp_path: Path) -> None:
-    """``within_tolerance`` is grounded -- the validator snaps it, not demotes it."""
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    result = analyze_grounding(
-        _loader_trajectories(), [_grounding_finding(line=94)], dd
-    )
-
-    assert result["tiers"]["within_tolerance"] == 1
-    assert result["grounding_rate"] == 1.0
-
-
-def test_grounding_treats_a_non_string_rationale_as_empty(tmp_path: Path) -> None:
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    result = analyze_grounding(
-        _loader_trajectories(), [_grounding_finding(rationale=None)], dd
-    )
-
-    assert result["total_findings"] == 1
-    assert result["grounding_rate"] == 1.0
-
-
-@pytest.mark.parametrize(
-    ("finding", "expected_tier"),
-    [
-        pytest.param({"line": 0, "lens": "structural"}, "whole_file", id="structural-lens-line-0"),
-        pytest.param(
-            {"line": 0, "_stack": "structure"},
-            "whole_file",
-            id="structure-stack-line-0",
-        ),
-        pytest.param({"line": None}, "no_line", id="missing-line"),
-        pytest.param({"line": "top of file"}, "no_line", id="non-int-line"),
-        pytest.param({"line": True}, "no_line", id="bool-line"),
-    ],
-)
-def test_grounding_exemptions_are_counted_not_swallowed(
-    tmp_path: Path, finding: dict[str, Any], expected_tier: str
-) -> None:
-    """Each exemption keeps the finding grounded AND shows up in ``tiers``.
-
-    Structural records loaded from ``stack-structure-records.json`` carry no
-    ``lens`` key -- ``analyze_findings`` tags them ``_stack == "structure"`` --
-    so both spellings must be recognised.
-    """
-    dd, _deep = _worked_example_dirs(tmp_path)
-    record = _grounding_finding(**finding)
-    if record.get("_stack") == "structure":
-        # The structure reader is the ``deep-structure`` trajectory.
-        trajectories = {
-            "main": None,
-            "forked": [_read_traj("deep-structure.json", "/repo/svc/loader.py")],
-        }
-    else:
-        trajectories = _loader_trajectories()
-
-    result = analyze_grounding(trajectories, [record], dd)
-
-    assert result["tiers"][expected_tier] == 1
-    assert result["line_grounded_count"] == 1
-    assert result["grounding_rate"] == 1.0
-    assert result["grounded"][0]["location_tier"] == expected_tier
-
-
-def test_grounding_is_not_penalized_when_hunks_are_unreadable(tmp_path: Path) -> None:
-    """No hunk artifact -> fall back to the file-only predicate, tier "unchecked".
-
-    A run is never penalized for an artifact the analyzer could not read, and
-    the rate must equal the old file-only rate exactly.
-    """
-    dd = tmp_path / ".daydream"
-    dd.mkdir(parents=True)
-    findings = [
-        _grounding_finding(id="py-1", line=88),
-        _grounding_finding(id="py-2", line=4),        # would be beyond_tolerance
-        _grounding_finding(id="py-3", file="ghost.py", line=1),  # file never read
-    ]
-
-    result = analyze_grounding(_loader_trajectories(), findings, dd)
-
-    assert result["hunk_source"] == "none"
-    assert result["tiers"]["unchecked"] == 3
-    assert result["line_grounded_count"] == 3
-    # Identical to the pre-#1106 file-only outcome: 2 of 3 files were read.
-    assert result["file_grounded_count"] == 2
-    assert result["grounded_count"] == 2
-    assert result["grounding_rate"] == 0.6667
-    assert result["file_grounding_rate"] == result["grounding_rate"]
-
-
-def test_grounding_scores_the_cited_line_when_the_record_was_relocated(
-    tmp_path: Path,
-) -> None:
-    """``location_cited_line`` is honoured here too, for the same reason."""
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    result = analyze_grounding(
-        _loader_trajectories(),
-        [_grounding_finding(line=92, location_cited_line=4)],
-        dd,
-    )
-
-    assert result["tiers"]["beyond_tolerance"] == 1
-    assert result["grounding_rate"] == 0.0
 
 
 def test_analyze_session_reports_location_and_shipped_duplication(
@@ -2822,9 +2302,6 @@ def test_analyze_session_reports_location_and_shipped_duplication(
     assert result["location"]["tiers"]["beyond_tolerance"] == 1
     assert result["findings"]["shipped_duplication"]["same_file_pairs"] == 1
     assert result["findings"]["shipped_duplication"]["near_duplicate_pairs"] == 0
-    assert result["grounding"]["hunk_source"] == "hunk-index.json"
-
-
 
 
 @pytest.mark.parametrize(
@@ -2839,68 +2316,3 @@ def test_analyze_session_reports_location_and_shipped_duplication(
 def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: str) -> None:
     """The legacy shapes are retained deliberately — pin them instead of guessing they are dead."""
     assert _agent_label(filename) == label
-
-
-@pytest.mark.parametrize("arguments", [
-    {"command": 'for f in a.py b.py; do cat "$f"; done'},
-    {"command": 'for f in missing.py b.py; do cat "$f"; done',
-     "command_actions": [{"type": "read", "path": "a.py"}]},
-])
-def test_shell_results_leave_coverage_and_grounding_unverifiable(
-    tmp_path: Path, arguments: dict[str, Any],
-) -> None:
-    dd, _deep = _deep_dirs(tmp_path)
-    _seed_diff(dd, "a.py", "b.py")
-    traj = _backend_read_trajectory("codex", [])
-    call = traj["steps"][0]["tool_calls"][0]
-    call["arguments"] = arguments
-    trajectories = _forked(traj)
-    result = analyze_coverage(trajectories, dd)
-    assert result["coverage_status"] == "unverifiable"
-    assert result["coverage_ratio"] is None
-    assert result["uncovered_files"] is None
-    assert result["files_read_by_reviewers"] is None
-    assert result["files_reviewed"] is None
-    assert result["verified_files_reviewed"] == 0
-    assert result["verified_files"] == []
-    assert result["unverifiable_files"] == ["a.py", "b.py"]
-    finding = {"id": 1, "_stack": "python", "file": "a.py", "rationale": "a.py needs a guard"}
-    grounding = analyze_grounding(trajectories, [finding], dd)
-    assert grounding["grounding_rate"] is None
-    assert grounding["ungrounded"] == []
-    assert grounding["unverifiable_count"] == 1
-    assert grounding["unverifiable"][0]["file_was_read"] is None
-    assert grounding["unverifiable"][0]["unread_rationale_refs"] is None
-    signals = analyze_training_signals(trajectories, grounding)
-    assert "unverifiable_grounding" in signals["trajectories"][0]["noise_flags"]
-
-
-@pytest.mark.parametrize("extra", [{"is_error": True}, {"truncated": True}, {"status": "interrupted"}])
-def test_eval_rejects_damaged_and_unpaired_structured_reads(tmp_path: Path, extra: dict[str, Any]) -> None:
-    dd, _deep = _deep_dirs(tmp_path)
-    _seed_diff(dd, "a.py", "b.py")
-    traj = _read_traj("deep-python.json", "a.py", "b.py")
-    traj["steps"][0]["observation"]["results"][0]["extra"] = extra
-    traj["steps"][1].pop("observation")
-    trajectories = _forked(traj)
-    result = analyze_coverage(trajectories, dd)
-    assert result["coverage_ratio"] == 0.0
-    assert result["uncovered_files"] == ["a.py", "b.py"]
-    grounding = analyze_grounding(trajectories, [{"file": "a.py", "_stack": "python"}], dd)
-    assert grounding["grounding_rate"] == 0.0
-    assert grounding["ungrounded"][0]["file_was_read"] is False
-
-
-def test_eval_preserves_verified_reads_in_a_mixed_backend_run(tmp_path: Path) -> None:
-    dd, _deep = _deep_dirs(tmp_path)
-    _seed_diff(dd, "a.py", "b.py")
-    shell = _backend_read_trajectory("codex", ["b.py"])
-    shell["_source_file"] = "deep-generic.json"
-    trajectories = _forked(_read_traj("deep-python.json", "a.py", pi_style=True), shell)
-    result = analyze_coverage(trajectories, dd)
-    assert result["coverage_ratio"] is None
-    assert result["verified_files"] == ["a.py"]
-    assert result["verified_files_read_by_reviewers"] == 1
-    assert result["unverifiable_files"] == ["b.py"]
-    grounding = analyze_grounding(trajectories, [{"file": "a.py", "_stack": "python"}], dd)
-    assert grounding["grounding_rate"] == 1.0

@@ -46,7 +46,7 @@ def test_corpus_harvest_archive_and_resume_journey(
         branch="main",
         base_branch="main",
         head_sha=head,
-        grounding_rate=1.0,
+
         pr_number=None,
         pr_repo=None,
     )

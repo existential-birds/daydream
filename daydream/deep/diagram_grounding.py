@@ -10,7 +10,7 @@ in one call and return a single :class:`GroundingReport`:
 
 1. **check** -- every element is verified against the head tree (path
    confinement, file existence, line range, symbol tokens, tree-sitter node
-   kinds, definition lookup) and against the phase's trajectory read receipts.
+   kinds, definition lookup).
    One reason code per failing element.
 2. **prune** -- ungrounded elements are removed, together with the structure
    that depended on them (a block whose branch condition failed is flattened,
@@ -51,7 +51,6 @@ from daydream.config import (
     DIAGRAM_MAX_NODES,
     DIAGRAM_MAX_PARTICIPANTS,
 )
-from daydream.deep.coverage import _path_component_matches
 from daydream.deep.diagram_types import (
     BLOCK_KINDS,
     MESSAGE_KINDS,
@@ -85,7 +84,6 @@ _SHARED_REASON_CODES = frozenset(
         "LINE_OUT_OF_RANGE",
         "SYMBOL_NOT_ON_LINE",
         "NOT_A_BRANCH_STATEMENT",
-        "FILE_READ_UNVERIFIED",
         # Not in the spec's table: the one code for an element whose *shape* is
         # wrong (non-object entry, missing/blank/duplicate identifier, kind
         # outside its enum). Those cases have no evidence to adjudicate, and
@@ -436,19 +434,6 @@ def _token_on_line(text: str, symbol: str) -> bool:
     )
 
 
-def _was_read(read_paths: set[str], relative: str) -> bool:
-    """Whether any recorded read receipt names ``relative``.
-
-    ``read_paths`` are successful structured-read paths; matching is by
-    path component (``/repo/pkg/api.py`` covers ``pkg/api.py`` but
-    ``/repo/notapi.py`` does not cover ``api.py``).
-    """
-    return any(
-        _path_component_matches(strip_dot_slash(path), relative)
-        for path in read_paths
-    )
-
-
 def _in_ranges(ranges: list[tuple[int, int]], line: int) -> bool:
     """Whether ``line`` falls inside any inclusive ``(start, end)`` range."""
     return any(start <= line <= end for start, end in ranges)
@@ -469,16 +454,13 @@ def _check_path(repo_root: Path, file: Any) -> tuple[str, str | None]:
 def _check_location(
     repo_root: Path,
     sources: _SourceCache,
-    read_paths: set[str],
     file: Any,
     line: Any,
 ) -> tuple[str, int, str | None]:
-    """Verify a ``file:line`` citation exists at head and was read.
+    """Verify a ``file:line`` citation exists at head.
 
     Returns ``(normalized_path, line, reason)``. Check order is fixed: path
-    grammar and confinement, then existence, then line range, then the
-    trajectory read receipt -- each later check would be meaningless if an
-    earlier one failed.
+    grammar and confinement, then existence, then line range.
     """
     normalized, reason = _check_path(repo_root, file)
     if reason is not None:
@@ -488,8 +470,6 @@ def _check_location(
     cited = _norm_line(line)
     if cited < 1 or cited > sources.line_count(normalized):
         return normalized, cited, "LINE_OUT_OF_RANGE"
-    if not _was_read(read_paths, normalized):
-        return normalized, cited, "FILE_READ_UNVERIFIED"
     return normalized, cited, None
 
 
@@ -675,7 +655,6 @@ def _ground_message(
     repo_root: Path,
     sources: _SourceCache,
     symbols: RepoSymbols,
-    read_paths: set[str],
     hunk_ranges: dict[str, list[tuple[int, int]]],
     index: int,
     record: dict[str, Any],
@@ -700,7 +679,7 @@ def _ground_message(
 
     evidence = record["evidence"]
     file, line, reason = _check_location(
-        repo_root, sources, read_paths, evidence["file"], evidence["line"]
+        repo_root, sources, evidence["file"], evidence["line"]
     )
     evidence["file"], evidence["line"] = file, line
     if reason is not None:
@@ -765,7 +744,6 @@ def _ground_message(
 def _ground_branch(
     repo_root: Path,
     sources: _SourceCache,
-    read_paths: set[str],
     hunk_ranges: dict[str, list[tuple[int, int]]],
     ref: str,
     raw: Any,
@@ -783,7 +761,7 @@ def _ground_branch(
         and 0 <= index < message_count
     ]
     file, line, reason = _check_location(
-        repo_root, sources, read_paths, evidence.get("file"), evidence.get("line")
+        repo_root, sources, evidence.get("file"), evidence.get("line")
     )
     if reason is None and not condition:
         # A branch with no condition text names no branch: there is nothing for
@@ -851,7 +829,6 @@ def ground_sequence(
     *,
     repo_root: Path,
     hunk_ranges: dict[str, list[tuple[int, int]]],
-    read_paths: set[str],
     symbols: RepoSymbols,
 ) -> GroundingReport:
     """Check, prune, cap and floor-test a proposed sequence-diagram spec.
@@ -863,10 +840,6 @@ def ground_sequence(
         hunk_ranges: Head-side changed line ranges per repo-relative path, used
             for ``in_changed_hunk`` and the "at least one changed interaction"
             floor.
-        read_paths: Successful structured-read paths from the diagram phase's
-            trajectory. An empty set means every citation fails
-            ``FILE_READ_UNVERIFIED``, which is the intended fail-closed
-            behavior when the fork's trajectory is missing.
         symbols: Shared definition index for callee resolution.
 
     Returns:
@@ -908,7 +881,6 @@ def ground_sequence(
                 repo_root,
                 sources,
                 symbols,
-                read_paths,
                 hunk_ranges,
                 index,
                 record,
@@ -945,7 +917,6 @@ def ground_sequence(
             check, payload = _ground_branch(
                 repo_root,
                 sources,
-                read_paths,
                 hunk_ranges,
                 f"{block_ref}.{branch_index}",
                 raw_branch,
@@ -1077,7 +1048,6 @@ def _ground_node(
     repo_root: Path,
     sources: _SourceCache,
     symbols: RepoSymbols,
-    read_paths: set[str],
     hunk_ranges: dict[str, list[tuple[int, int]]],
     record: dict[str, Any],
     root_file: str,
@@ -1090,7 +1060,7 @@ def _ground_node(
         return check
     evidence = record["evidence"]
     file, line, reason = _check_location(
-        repo_root, sources, read_paths, evidence["file"], evidence["line"]
+        repo_root, sources, evidence["file"], evidence["line"]
     )
     evidence["file"], evidence["line"] = file, line
     if reason is not None:
@@ -1238,7 +1208,6 @@ def ground_flowchart(
     *,
     repo_root: Path,
     hunk_ranges: dict[str, list[tuple[int, int]]],
-    read_paths: set[str],
     candidate_roots: list[CandidateRoot],
     symbols: RepoSymbols,
 ) -> GroundingReport:
@@ -1250,8 +1219,6 @@ def ground_flowchart(
         hunk_ranges: Head-side changed line ranges per repo-relative path. The
             root's range must still overlap one of them, re-checked here so a
             repair turn cannot re-root the diagram onto unchanged code.
-        read_paths: Successful structured-read paths from the diagram phase's
-            trajectory; an empty set fails every citation closed.
         candidate_roots: The run's eligible roots. A root outside this list is
             rejected outright -- it has no verified range, so no node inside it
             could be checked.
@@ -1308,7 +1275,6 @@ def ground_flowchart(
             repo_root,
             sources,
             symbols,
-            read_paths,
             hunk_ranges,
             record,
             root_file,

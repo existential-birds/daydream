@@ -67,13 +67,14 @@ def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Pat
         seed=11,
         rubric_version="2026.08.29-1",
         output_dir=tmp_path / "c",
-        min_breakdown={"composite": 0.6, "grounding": 0.5},
+        min_breakdown={"composite": 0.6, "correctness_per_finding": 0.5},
     )
     winners = run_rft(cfg)
     assert winners.records
     for w in winners.records:
         assert w.breakdown.composite is not None  # every winner went through score_trajectory's breakdown
-        assert w.breakdown.grounding is not None and w.breakdown.grounding >= 0.5
+        assert w.breakdown.correctness_per_finding
+        assert sum(w.breakdown.correctness_per_finding) / len(w.breakdown.correctness_per_finding) >= 0.5
 
 
 def test_spec_axes_match_score_trajectory_breakdown_fields(
@@ -151,7 +152,7 @@ def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
     out_b = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b"))
     # Byte-identical on rerun (M11) while the per-candidate breakdowns vary.
     assert out_a.winners_path.read_bytes() == out_b.winners_path.read_bytes()
-    breakpoints = {(w.candidate_index, w.breakdown.grounding, tuple(w.breakdown.correctness_per_finding or []))
+    breakpoints = {(w.candidate_index, w.breakdown.composite, tuple(w.breakdown.correctness_per_finding or []))
                    for w in out_a.records}
     # With mixed finding signals, sampled subsets yield distinct breakdowns, not
     # byte-identical duplicates differing only in candidate_index.

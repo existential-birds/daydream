@@ -63,7 +63,7 @@ DEFAULT_TASKSET_ID = "daydream-review"
 #: is this rollout contract, and ``intrinsic_reward_version`` is the offline
 #: scorer it was evaluated against. Archives scored before this boundary was
 #: introduced carry only the intrinsic version and need no migration tag.
-ROLLOUT_REWARD_VERSION = "2026.08.15-1"
+ROLLOUT_REWARD_VERSION = "2026.10.01-1"
 
 
 class _OutcomeScorer:
@@ -129,8 +129,7 @@ def stage0_composite_terms(outcome_model_path: Path, run_dir: Path) -> dict[str,
 
     Rollout-time limitations, stamped into the returned provenance rather than
     hidden: there is no live false-positive judge, so ``fp_count`` is 0 (the
-    FP-penalty term is telemetry-neutral here), and ``grounded`` is derived
-    from the manifest's ``grounding_rate``.
+    FP-penalty term is telemetry-neutral here).
     """
     if outcome_model_path == Path(""):
         return None
@@ -148,14 +147,11 @@ def stage0_composite_terms(outcome_model_path: Path, run_dir: Path) -> dict[str,
         for item in checked
     ]
     total = len(findings)
-    grounding_rate = _manifest_row(run_dir).get("grounding_rate")
-    grounded = int(round(float(grounding_rate) * total)) if grounding_rate is not None else 0
     result = _score_rubric_review(
         _load_outcome_model(outcome_model_path),
         findings=findings,
         fp_count=0,
         total_findings=total,
-        grounded=max(0, min(grounded, total)),
         breakdown=True,
     )
     assert isinstance(result, RubricV2Breakdown)
@@ -179,21 +175,6 @@ def _read_json(path: Path, *, default: Any) -> Any:
         return default
 
 
-def _manifest_row(run_dir: Path) -> dict[str, Any]:
-    """Flatten ``manifest.json`` into the flat row shape the scorer expects.
-
-    ``assemble_scoring_inputs(run_dir, row)`` reads ``row["grounding_rate"]``
-    (``daydream/training/harvest.py:223``). In the archive that value is nested
-    under ``metrics`` (``daydream/archive/manifest.py:213``); it only becomes a
-    top-level column when the run is indexed into SQLite
-    (``daydream/archive/_schema.py:128``). Reading the manifest verbatim would
-    silently null the grounding axis on every rollout.
-    """
-    manifest = _read_json(run_dir / "manifest.json", default={})
-    if not isinstance(manifest, dict):
-        return {}
-    metrics = manifest.get("metrics") or {}
-    return {**manifest, **metrics}
 
 
 #: Extra pathspecs the oracle probes treat as part of the oracle itself.
@@ -616,7 +597,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     Important: ``verifier_verdicts`` exist only when the fix gate was accepted
     (``deep/recommendation-verdicts.json`` is written at
     ``daydream/deep/orchestrator.py:1213-1229``). A review-only rollout therefore
-    scores on grounding and format alone. That is the designed behaviour, and
+    has no intrinsic correctness credit until verification produces verdicts. That is the designed behaviour, and
     ``trace.info["reward_breakdown"]["axes_present"]`` records it per rollout.
 
     The Stage-0 preference rubric (``daydream.training.rubric``) composes into
@@ -629,13 +610,9 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
     golden overlap is telemetry, never a composite substitute (M6).
 
     A rollout that reports ZERO findings scores ``intrinsic_composite`` 0.0, not
-    1.0. ``analyze_grounding`` returns ``grounding_rate = None`` over an empty
-    finding set (undefined, not perfect), so no credit axis is present and
-    ``score_trajectory`` returns ``composite = None``, mapped to 0.0 below. This
-    was a live defect — a codex rollout with 27 captured turns and 0 findings
-    scored 1.0 — fixed at the write chokepoint in ``daydream/eval/analyzer.py``
-    so the offline corpus and this reward agree. Archived runs scored before that
-    fix keep their 1.0 and were not migrated.
+    1.0. A review with no verifier verdicts has no correctness credit, so
+    ``score_trajectory`` returns ``composite = None``, mapped to 0.0 below.
+    Historical reward blobs remain unchanged.
 
     A correct "nothing wrong here" therefore scores the same as a broken run.
     Any positive floor for a genuinely clean review is reward design and belongs
@@ -708,7 +685,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         if run_dir is None:
             trace.info["reward_breakdown"] = {"error": "no archived run dir"}
             return 0.0
-        breakdown = score_trajectory(assemble_scoring_inputs(run_dir, _manifest_row(run_dir)))
+        breakdown = score_trajectory(assemble_scoring_inputs(run_dir))
 
         # M13: when a validated Stage-0 outcome model is configured, the reward
         # becomes the rubric composite (which itself carries the intrinsic
@@ -717,7 +694,6 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
 
         reward_breakdown: dict[str, Any] = {
             "correctness_per_finding": breakdown.correctness_per_finding,
-            "grounding": breakdown.grounding,
             "format_valid": breakdown.format_valid,
             "length_penalty": breakdown.length_penalty,
             "composite": breakdown.composite,

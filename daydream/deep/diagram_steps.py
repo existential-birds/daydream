@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -24,7 +23,6 @@ from daydream.config import (
     DIAGRAM_MODES,
 )
 from daydream.deep.artifacts import diagram_markdown_path, diagram_path, merged_report_path
-from daydream.deep.coverage import _completed_read_paths
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -152,8 +150,8 @@ def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
 #
 # Two agent turns at most per kind, and no mermaid from either of them: the
 # model proposes a JSON spec whose every element carries file:line evidence,
-# ``ground_*`` verifies each element against the head tree and the turn's own
-# read receipts, one repair turn fixes or removes what failed, survivors are
+# ``ground_*`` verifies each element against the head tree, one repair turn
+# fixes or removes what failed, survivors are
 # pruned/capped, and a pure renderer emits the diagram. What the checker could
 # not confirm is never drawn.
 
@@ -186,21 +184,6 @@ def _failed_kind_result(exc: BaseException, advisory: dict[str, Any] | None = No
         f"{type(exc).__name__}: {exc}",
         advisory=advisory if advisory and advisory["omitted"] else None,
     )
-
-
-def _diagram_read_evidence(fork_path: Path | None) -> set[str]:
-    """Successful structured reads in this diagram fork.
-
-    Missing or malformed receipts never certify a citation. Successful reads
-    survive retries even when their enclosing attempt later fails.
-    """
-    try:
-        trajectory = json.loads(fork_path.read_text(encoding="utf-8")) if fork_path else None
-    except (OSError, json.JSONDecodeError):
-        trajectory = None
-    if not isinstance(trajectory, dict):
-        return set()
-    return _completed_read_paths(trajectory, {DaydreamPhase.DIAGRAM.value})
 
 
 def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
@@ -454,7 +437,7 @@ async def _diagram_turn(
     continuation: Any = None,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     advisory: dict[str, Any] | None = None,
-) -> tuple[Any, Any, str | None, Path | None] | DiagramResult:
+) -> tuple[Any, Any, str | None] | DiagramResult:
     """Run one diagram turn, mapping its failure modes to a kind result.
 
     Shared by the author and repair turns so the two cannot drift. A
@@ -463,11 +446,11 @@ async def _diagram_turn(
     advisory degradation, so ``SanctionedInputUnavailable`` propagates. Every
     other exception fails the kind while keeping both facts -- the reason and
     the advisory omission diagnostic (or ``None`` when every advisory input
-    fit). On success the turn's output, continuation, budget reason, and fork
-    path are returned.
+    fit). On success the turn's output, continuation, and budget reason are
+    returned.
     """
     try:
-        async with maybe_fork(recorder, descriptor, dispatch=dispatch) as fork:
+        async with maybe_fork(recorder, descriptor, dispatch=dispatch):
             output, token, budget_reason = await run_agent(
                 backend,
                 ctx.work.repo,
@@ -486,7 +469,7 @@ async def _diagram_turn(
         raise
     except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
         return _failed_kind_result(exc, advisory)
-    return output, token, budget_reason, getattr(fork, "path", None)
+    return output, token, budget_reason
 
 
 async def _run_diagram_kind(
@@ -499,15 +482,12 @@ async def _run_diagram_kind(
     recorder: "TrajectoryRecorder | None",
     backend: Any,
     dispatch: "DispatchHandle | None" = None,
-    unread_kinds: set[str] | None = None,
 ) -> DiagramResult:
     """Author, ground, repair once, prune and render one diagram kind.
 
     Each turn runs in its own fork (``diagram-<kind>`` then
     ``diagram-<kind>-repair``) and the forks are strictly sequential: the first
-    must EXIT before grounding runs, because the read receipts that decide
-    ``FILE_READ_UNVERIFIED`` only reach disk on exit, and the repair decision
-    depends on that grounding. Nested forks would also be illegal -- the
+    completes before its spec is validated and a repair is considered. The
     recorder ContextVar is reset LIFO.
 
     Returns:
@@ -517,13 +497,12 @@ async def _run_diagram_kind(
     deep_state = DeepState(ctx.data)
     schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
 
-    def _ground(spec: dict[str, Any], read_paths: set[str]) -> Any:
+    def _ground(spec: dict[str, Any]) -> Any:
         if kind == "sequence":
             report = ground_sequence(
                 spec,
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
-                read_paths=read_paths,
                 symbols=symbols,
             )
         else:
@@ -531,19 +510,12 @@ async def _run_diagram_kind(
                 spec,
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
-                read_paths=read_paths,
                 candidate_roots=eligibility.candidate_roots,
                 symbols=symbols,
             )
-        if unread_kinds is not None:
-            if any(check.reason == "FILE_READ_UNVERIFIED" for check in report.ungrounded()):
-                unread_kinds.add(kind)
-            else:
-                unread_kinds.discard(kind)
         return report
 
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
-    read_paths: set[str] = set()
 
     diff_path: Path = deep_state.diff_path
     exploration_dir = deep_state.exploration_dir_or_none
@@ -616,7 +588,7 @@ async def _run_diagram_kind(
         )
         if not isinstance(turn, tuple):
             return turn
-        structured, continuation, budget_reason, fork_path = turn
+        structured, continuation, budget_reason = turn
     except SanctionedInputUnavailable:
         # A capture/revalidation failure is not an authoring outcome: it must
         # reach the caller's failure path unchanged, without being relabelled
@@ -627,7 +599,6 @@ async def _run_diagram_kind(
         # advisory inputs all fit has nothing to report beyond its reason, and
         # ``None`` is the documented "no omission diagnostic" value.
         return _failed_kind_result(exc, advisory)
-    read_paths = _diagram_read_evidence(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
@@ -636,7 +607,7 @@ async def _run_diagram_kind(
         return _diagram_result("failed", "no structured output produced", advisory=advisory)
 
     spec = coerce(structured)
-    report = _ground(spec, read_paths)
+    report = _ground(spec)
 
     # Exactly one repair turn, and only when the session can be resumed: a
     # fresh session would have to re-derive the whole spec from scratch, which
@@ -666,11 +637,10 @@ async def _run_diagram_kind(
         )
         if not isinstance(turn, tuple):
             return turn
-        repaired_output, _, repair_budget, repair_fork_path = turn
-        read_paths |= _diagram_read_evidence(repair_fork_path)
+        repaired_output, _, repair_budget = turn
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
-            report = _ground(spec, read_paths)
+            report = _ground(spec)
 
     omit_reasons = list(report.omit_reasons)
     mermaid: str | None = None
@@ -801,7 +771,6 @@ async def _run_diagram_step(
         results[kind] = _diagram_result("skipped", decision.reason)
 
     failures: dict[str, str] = {}
-    unread_kinds: set[str] = set()
     if kinds:
         print_info(console, f"Grounded diagrams: authoring {', '.join(kinds)}")
         backend = ctx.backend_for("diagram")
@@ -830,7 +799,6 @@ async def _run_diagram_step(
                                     recorder=recorder,
                                     backend=backend,
                                     dispatch=dispatch,
-                                    unread_kinds=unread_kinds,
                                 )
                             except Exception as exc:  # noqa: BLE001 -- parallel isolation
                                 detail = f"{type(exc).__name__}: {exc}"
@@ -849,8 +817,6 @@ async def _run_diagram_step(
         if result is not None and result.get("status") == "failed":
             failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
 
-    if unread_kinds:
-        print_warning(console, "Diagram source-read coverage is unverifiable; unsupported citations are omitted.")
 
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     blocks = render_diagram_blocks(ordered)

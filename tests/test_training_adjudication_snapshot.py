@@ -69,7 +69,7 @@ def _mutable_and_frozen_resolution() -> tuple[
     harvest_evidence = HarvestEvidence(
         scoring_inputs=ScoringInputs(
             verifier_verdicts=None,
-            grounding_rate=None,
+
             format_valid=True,
             length=None,
         ),

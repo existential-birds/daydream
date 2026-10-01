@@ -326,9 +326,8 @@ def sibling_frontier_target(tmp_path: Path) -> Path:
     The issue #763 canary fixture: 13 changed python files (one ``core.py`` plus
     12 ``mod{i}.py`` spokes each importing ``core_helper``), so the deep
     sharder splits the python stack into multiple shards and the sibling
-    frontier (``dependency_frontier_read``) coverage path is exercised. Every
-    file carries a real tree-sitter-parseable cross-file import edge, and
-    ``mod5.py`` gets 7 lines changed so the fail-open sweep can fire on it.
+    frontier supplies cross-shard context. Every file carries a real
+    tree-sitter-parseable cross-file import edge.
     """
     before = {
         f"mod{i}.py": f"from core import core_helper\ndef mod{i}_fn(): return core_helper() + {i}\n"

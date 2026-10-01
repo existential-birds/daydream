@@ -2,7 +2,6 @@
 from pathlib import Path
 
 from daydream import review_profile as rp
-from daydream.deep.coverage import build_uncovered_sweep_prompt
 from daydream.deep.prompts import (
     build_arbiter_prompt,
     build_generic_fallback_prompt,
@@ -99,14 +98,6 @@ def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None
         cwd=Path("/review-repo"),
         output_path=Path("/verification.json"),
     )
-    unc = build_uncovered_sweep_prompt(
-        strategy="uncovered-strategy-sentinel {file}",
-        file="uncovered.py",
-        diff_path=Path("/diff.patch"),
-        intent_path=Path("/intent.md"),
-        cwd=Path("/review-repo"),
-        output_path=Path("/uncovered-review.md"),
-    )
     intent = build_intent_prompt(
         strategy="intent-strategy-sentinel {diff_path}",
         diff_path="/review.diff",
@@ -124,13 +115,11 @@ def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None
     assert "/suppression-input.json" in sup and "/review.diff" in sup
     assert "verification-strategy-sentinel" in ver
     assert "changed.py" in ver and "verification-candidate-sentinel" in ver
-    assert "uncovered-strategy-sentinel" in unc
-    assert "uncovered.py" in unc and "/diff.patch" in unc
     assert "intent-strategy-sentinel" in intent
     assert "/review.diff" in intent and "+new behavior" in intent
     assert "alternative-strategy-sentinel" in alt
     assert "intent-summary-sentinel" in alt and "/alternative.diff" in alt
 
     # Native builders must not reintroduce the removed skill-invocation framing.
-    for text in (sv, sup, ver, unc, intent, alt):
+    for text in (sv, sup, ver, intent, alt):
         assert "/beagle-" not in text and "beagle" not in text.lower()

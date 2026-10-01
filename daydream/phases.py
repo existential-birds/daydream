@@ -1102,45 +1102,14 @@ FEEDBACK_SCHEMA: dict[str, Any] = strict_object({
     },
 })
 
-# Per-stack parse schema (issue #168). Identical to FEEDBACK_SCHEMA but carries a
-# required ``severity`` so the scoped Opus arbiter can select high-severity /
-# contested findings *before* the merge, plus a per-file ``verdicts`` array
-# (issue #742) so a file marked ``clean`` in the review is distinguishable from
-# one never reviewed (``not_reviewed``). The shared FEEDBACK_SCHEMA stays
-# severity-free (the shallow parse path never needs it);
-# only deep-mode's pre-merge per-stack parse opts into this richer record shape.
-#
-# Derived from FEEDBACK_SCHEMA to avoid silent drift: we deep-copy the base
-# schema and inject the extra ``severity`` field into the items sub-schema and
-# the top-level ``verdicts`` array.
+# Deep reviewers add severity to the shared findings shape so the scoped
+# arbiter can select high-severity or contested findings before merge. The
+# shallow feedback schema remains severity-free.
 PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(FEEDBACK_SCHEMA)
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = severity_enum_schema()
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
-# Per-file verdicts (issue #742). ``verdicts`` sits in ``required`` (like
-# every property of every Codex-routed output schema -- the strict-mode
-# validator rejects optional properties, see test_output_schema_strict.py), so
-# the deep per-stack parse model must emit a (possibly empty) verdicts array.
-# The uncovered sweep parses with UNCOVERED_SWEEP_SCHEMA instead (it never
-# teaches the verdicts shape, so it must not ask for that field), and records
-# written before this field existed remain parseable on resume (loading is
-# schema-free).
-PER_STACK_RECORD_SCHEMA["required"] = ["issues", "verdicts"]
-PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
-    "type": "array",
-    "items": strict_object({
-        "path": _REPOSITORY_FILE_PATH_SCHEMA,
-        "lines_read": {"type": ["integer", "null"]},
-        "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed", "unknown"]},
-        "n_findings": {"type": "integer"},
-    }),
-}
-
-UNCOVERED_SWEEP_SCHEMA: dict[str, Any] = copy.deepcopy(PER_STACK_RECORD_SCHEMA)
-UNCOVERED_SWEEP_SCHEMA["required"] = ["issues"]
-UNCOVERED_SWEEP_SCHEMA["properties"].pop("verdicts", None)
-
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = strict_object({
     "issues": {
         "type": "array",
@@ -4770,8 +4739,8 @@ def _read_text_or_none(path: Path | None) -> str | None:
 def _frontier_files_for_stack(stack: "StackAssignment") -> list[str]:
     """The recorded cross-shard frontier a shard's review is grounded with.
 
-    Single-sourced and read-only: this is the exact list the coverage receipt
-    records, the prompt's ``Cross-shard interface file(s)`` block names, and the
+    Single-sourced and read-only: this is the exact list the prompt's
+    ``Cross-shard interface file(s)`` block names, and the
     reuse key hashes (MH7). Never recompute a frontier from the import graph
     here -- a fresh graph could name a file no prompt ever carried, letting the
     key miss a change the review actually depended on.
@@ -4792,7 +4761,6 @@ async def phase_per_stack_reviews(
     diff_text: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
-    write_coverage_receipts: bool = False,
     strategies: dict[str, str] | None = None,
     registry: Registry | None = None,
     artifact_session: ArtifactSession | None = None,
@@ -4800,17 +4768,9 @@ async def phase_per_stack_reviews(
     run_context: RunContext | None = None,
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
-    reuse_pending: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
-    ``reuse_pending`` is an optional out-channel for the real pipeline: a
-    freshly reviewed stack's store inputs are collected here instead of being
-    committed by the fan-out, because the records file is only final after
-    ``_step_per_stack_parse`` reconciles verdicts against the completed review
-    forks (issue #745). The caller persists the entries once that finalization
-    has happened, so a cached shard restores exactly the bytes a fresh run
-    leaves. Direct callers that omit it keep the immediate-store behavior.
     """
     active_registry = registry if registry is not None else get_registry()
     run_context = resolve_run_context(run_context)
@@ -4843,34 +4803,7 @@ async def phase_per_stack_reviews(
         "intent": intent_path,
         "alternatives": alternatives_path if include_alternatives else None,
     }
-    # Issue #731: when sharding is enabled, write the deterministic coverage
-    # receipts BEFORE the task group spawns (pre-task-group, sequential). Each
-    # stack records what it was assigned, which files were inline-grounded
-    # (all-or-nothing per ``inline_grounded_files``) and its bounded cross-shard
-    # frontier. The structural stack is never inlined (`:3276-3297`) so its
-    # inline evidence is empty. Default False keeps the forensic path
-    # byte-identical (no receipt file written).
     read_only = uses_diff_reference(backend, work.repo, read_only=True)
-    receipts: dict[str, dict[str, list[str]]] = {}
-    if write_coverage_receipts:
-        from daydream.deep.coverage import write_coverage_receipts as _write_coverage_receipts
-        from daydream.deep.prompts import inline_grounded_files as _inline_grounded_files
-
-        for stack in stacks:
-            if read_only or stack.stack_name == STRUCTURE_STACK_NAME:
-                inline_files: list[str] = []
-            else:
-                inline_files = sorted(
-                    _inline_grounded_files(diff_text, stack.files)
-                    if diff_text is not None
-                    else set()
-                )
-            receipts[stack.stack_name] = {
-                "assigned_files": list(stack.files),
-                "inline_files": inline_files,
-                "frontier_files": _frontier_files_for_stack(stack),
-            }
-        _write_coverage_receipts(deep_dir_path, receipts)
 
     hunk_index = load_hunk_index(deep_dir_path.parent)
 
@@ -4885,13 +4818,10 @@ async def phase_per_stack_reviews(
             capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
         )
         prepared[stack.stack_name] = (inline_diff, inputs)
-    delegation_path = deep_dir_path / "structural-delegation.json"
-    delegation_temp = delegation_path.with_suffix(".json.tmp")
     structural_records = per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME)
     structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
-    # A per-stack rerun supersedes any previously committed delegation, including
-    # its compatibility artifacts. Primaries must finish before a new marker exists.
-    for stale_path in (delegation_path, delegation_temp, structural_records, structural_output):
+    # A rerun supersedes structural output from any earlier attempt.
+    for stale_path in (structural_records, structural_output):
         stale_path.unlink(missing_ok=True)
 
     dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
@@ -5020,15 +4950,14 @@ async def phase_per_stack_reviews(
                 task=f"Finalize {stack.stack_name} review",
                 input_priority=("diff", "intent"),
                 assigned_files=tuple(stack.files),
-                output_semantics="Return issues and file verdicts in the required schema. "
-                "Use not_reviewed for unfinished files and an empty issues array "
-                "when no defect is established.",
+                output_semantics="Return issues in the required schema. "
+                "An empty issues array is valid when no defect is established; "
+                "unfinished review work must not be described as clean.",
                 supplied_context=(("diff", inline_diff or ""),
                                   ("intent authority", AUTHORITATIVE_INTENT_BLOCK
                                    if intent_authoritative else "Intent is advisory context.")),
             )
             stack_name = stack.stack_name
-            record_schema = PER_STACK_RECORD_SCHEMA
             structured: Any = None
             budget_reason: str | None = None
             async with limiter:
@@ -5038,9 +4967,7 @@ async def phase_per_stack_reviews(
                     ):
                         # Issue #745 (AC4): the reviewer emits
                         # PER_STACK_RECORD_SCHEMA structured output directly --
-                        # no separate ``parse-<stack>`` fork. The fork is
-                        # finalized on exit so verdict reconciliation below
-                        # can read its completed reads from disk.
+                        # no separate ``parse-<stack>`` fork.
                         structured, _, budget_reason = await run_agent(
                             backend,
                             work.repo,
@@ -5064,7 +4991,7 @@ async def phase_per_stack_reviews(
                     # "Uncovered stacks" instead of silently shipping
                     # a partial review as a complete one.
                     failures[stack_name] = f"budget exhausted: {budget_reason}"
-                    if not _validates_schema(structured, record_schema):
+                    if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                         return
                 if not isinstance(structured, dict):
                     failures[stack_name] = "no structured output produced"
@@ -5103,17 +5030,9 @@ async def phase_per_stack_reviews(
                 # host owns. Stamping before the write makes the artifact
                 # self-describing when debugging.
                 stamp_record_uids(issues, stack_name)
-                declared_verdicts = structured.get("verdicts")
-                declared = (
-                    declared_verdicts if isinstance(declared_verdicts, list) and not budget_reason else []
-                )
-                # Persist the records file with the DECLARED verdicts for
-                # now; final verdict reconciliation happens in
-                # ``_step_per_stack_parse`` AFTER the fan-out completes and
-                # every review fork is finalized on disk (issue #745).
                 try:
                     per_stack_records_path(deep_dir_path, stack_name).write_text(
-                        json.dumps({"issues": issues, "verdicts": declared,
+                        json.dumps({"issues": issues,
                                     **({"incomplete": True} if budget_reason else {})}, indent=2)
                     )
                     write_review_markdown(output_path, issues)
@@ -5129,50 +5048,24 @@ async def phase_per_stack_reviews(
                     and budget_reason is None
                 ):
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
-                    store_inputs: dict[str, Any] = {
-                        "key": stack_reuse_key,
-                        "unit": f"shard:{stack_name}",
-                        # Paths, not yet-read bytes: the records file is rewritten
-                        # by verdict reconciliation after the fan-out, and the
-                        # entry must capture the reconciled bytes.
-                        "payload_names": {
-                            records_path.name: str(records_path),
-                            output_path.name: str(output_path),
+                    reuse_cache.store(
+                        stack_reuse_key,
+                        unit=f"shard:{stack_name}",
+                        payload={
+                            records_path.name: records_path.read_bytes(),
+                            output_path.name: output_path.read_bytes(),
                         },
-                        "components": stack_payload["components"],
-                        "identity": phase_identity,
-                        "grounding": grounding_digests(stack_payload),
-                        "grounding_status": reuse_grounding_statuses(reuse_cache, stack_payload),
-                    }
-                    if reuse_pending is not None:
-                        # Defer the store until verdicts are final; the parse step
-                        # commits it (issue #733, MH6).
-                        reuse_pending[stack_name] = store_inputs
-                    else:
-                        # Direct callers without a deferral channel keep the
-                        # original immediate store; bytes are read from disk so
-                        # the entry restores exactly what this run wrote (A14).
-                        reuse_cache.store(
-                            stack_reuse_key,
-                            unit=f"shard:{stack_name}",
-                            payload={
-                                name: Path(path).read_bytes()
-                                for name, path in store_inputs["payload_names"].items()
-                            },
-                            components=stack_payload["components"],
-                            identity=phase_identity,
-                            grounding=grounding_digests(stack_payload),
-                            grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
-                        )
+                        components=stack_payload["components"],
+                        identity=phase_identity,
+                        grounding=grounding_digests(stack_payload),
+                        grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
+                    )
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:
                 tg.start_soon(_review_stack, stack)
         if dispatch is not None and failures:
             finish_partial_or_failed(dispatch, results)
-
-    if write_coverage_receipts:
-        _write_coverage_receipts(deep_dir_path, receipts)
 
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
@@ -5706,7 +5599,7 @@ def _append_structural_and_write_merged(
             print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
             structural_records = []
         # Issue #742: fresh-run per-stack records files carry the dict shape
-        # ``{"issues": [...], "verdicts": [...]}``; the structural records are
+        # ``{"issues": [...]}``; the structural records are
         # the issues list either way. Legacy bare-list files pass through.
         structural_records = _records_issues(structural_records)
         if structural_records is None:

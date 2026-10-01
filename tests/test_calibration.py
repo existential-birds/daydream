@@ -37,10 +37,7 @@ LABEL_STAMPS = {
     "reply_classifier_version": "980-classifier-r1",
     "rubric_schema_version": "980-rubric-r2",
 }
-#: Imported, never duplicated as a literal: ``build_fixture.py`` stamps the
-#: committed corpora from this same production constant, so a local copy
-#: would silently break every gate on a legitimate bump. Drift is caught by
-#: ``test_build_fixture_replays_byte_identical``, not by a second literal.
+#: Synthetic fresh corpora use current semantics; committed fixture remains frozen.
 REWARD_VERSION = _PRODUCTION_REWARD_VERSION
 
 # Corruption flags the fixture understands; these are test seams, never CLI surface.
@@ -100,7 +97,6 @@ def _build_fixture(tmp_path: Path) -> Path:
             "fidelity": 0.2 + 0.1 * i,
             "specificity": 0.8 - 0.1 * i,
             "correctness": 0.4 + 0.05 * i,
-            "grounding": 0.7 - 0.05 * i,
             "w_fp": w_fp[i],
         }
         for i in range(4)
@@ -250,7 +246,8 @@ def test_stage0_scores_report_marginal_value(fixture_corpus: Path, tmp_path: Pat
     s0 = result["stage0_analysis"]
     assert s0["status"] == "ok"
     marginal = s0["marginal_value_per_axis"]
-    assert set(marginal) >= {"correctness", "grounding"}
+    assert "correctness" in marginal
+    assert "grounding" not in marginal
     # Non-degenerate: a tiny holdout would force every marginal to exactly
     # 0.0 / +/-1 and hide regressions, so at least one axis must be interior.
     assert any(-1.0 < v < 1.0 for v in marginal.values())
@@ -363,6 +360,8 @@ def test_committed_fixture_calibrates_clean(committed_fixture: Path, tmp_path: P
     assert result["metrics"]["class_balance"] == {"accepted": 6, "rejected": 6}
     artifact = json.loads((tmp_path / "out" / "calibration.json").read_text())
     assert artifact["schema_version"] == "calibration-artifact"
+    assert artifact["version_stamps"]["reward_version"] == "2026.09.04-1"
+    assert "grounding_axis" not in artifact["metrics"]["per_axis_correlations"]
 
 
 def test_committed_fixture_contains_both_classes_and_c5_repo(committed_fixture: Path) -> None:
@@ -500,3 +499,21 @@ def test_same_run_identity_rerun_is_allowed(fixture_corpus: Path, tmp_path: Path
     out = tmp_path / "out"
     run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-1"))
     run_calibration(_config(fixture_corpus, tmp_path, out_dir=out, run_id="cal-1"))  # resume/overwrite ok
+
+
+@pytest.mark.parametrize(
+    ("version", "error"),
+    [("2026.09.04-1", "mixes reward versions"), ("unknown", "unrecognized reward version")],
+)
+def test_mixed_or_unknown_reward_versions_are_refused(
+    fixture_corpus: Path, tmp_path: Path, version: str, error: str,
+) -> None:
+    """Historical scoring is readable, but incomparable reward versions cannot mix."""
+    corpus = fixture_corpus / "corpus" / "corpus.jsonl"
+    records = [json.loads(line) for line in corpus.read_text().splitlines()]
+    records[0]["reward_version"] = version
+    payload = ("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n").encode()
+    corpus.write_bytes(payload)
+    (corpus.parent / "SHA256SUMS").write_text(f"{hashlib.sha256(payload).hexdigest()}  corpus.jsonl\n")
+    with pytest.raises(CalibrationError, match=error):
+        run_calibration(_config(fixture_corpus, tmp_path))

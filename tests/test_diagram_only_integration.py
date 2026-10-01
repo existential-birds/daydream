@@ -69,7 +69,6 @@ def diagram_run(
         *,
         diagram: str = "auto",
         specs: dict[str, list[dict[str, Any]]] | None = None,
-        emit_reads: bool = True,
         session_id: str | None = None,
         fail: frozenset[str] = frozenset(),
         inline_transport: bool = False,
@@ -78,7 +77,6 @@ def diagram_run(
 
         stub = install_stub_backend(monkeypatch, target, enable_exploration=inline_transport)
         stub.diagram_specs = specs or {}
-        stub.diagram_emit_reads = emit_reads
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
         if inline_transport:
@@ -627,7 +625,6 @@ def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
-    stub.diagram_emit_reads = True
 
     exit_code = _cli_main(["--diagram-only", "sequence", str(target)])
 
@@ -888,7 +885,6 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     target = _diagram_target(tmp_path, fake_gh)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
-    stub.diagram_emit_reads = True
     artifact_path = tmp_path / "review-findings.json"
 
     exit_code = await run(

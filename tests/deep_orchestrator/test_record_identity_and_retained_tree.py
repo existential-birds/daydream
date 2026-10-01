@@ -11,7 +11,6 @@ from daydream import git_ops
 from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _capture_warnings,
     _fresh_uid_run,
@@ -26,7 +25,6 @@ from tests.deep_orchestrator.support import (
     _source_uids_by_description,
     _uid_list,
     _uid_records,
-    _uncovered_sweep_target,
 )
 from tests.harness.console import collapse_panel_text as _panel_text
 from tests.harness.git_helpers import (
@@ -37,7 +35,6 @@ from tests.harness.git_helpers import (
 )
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
-    MakeConfig,
     Mute,
     _install_stub_backend,
     _prime_merge_resume,
@@ -46,7 +43,6 @@ from tests.test_deep_orchestrator import (
     _run_deep,
     _silence,
 )
-from tests.test_finite_delegation_parse import _mark_delegated_artifacts
 
 
 async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
@@ -95,42 +91,6 @@ async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
     assert _uid_list(deep, "python") == ["python:1", "python:2"]
     assert _uid_list(deep, "structure") == ["structure:1", "structure:2"]
     assert {issue["id"] for issue in _uid_records(deep, "python")} == {1, 2}
-
-
-async def test_uncovered_sweep_stamps_its_own_record_uids(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """#1111 real-path: the uncovered-file sweep identifies its own records."""
-
-    target = _uncovered_sweep_target(tmp_path)
-    # A second file no reviewer reads, with a hunk large enough to clear the
-    # sweep's min-hunk budget, so the sweep has two targets instead of one.
-    (target / "extra.txt").write_text("".join(f"extra{i}\n" for i in range(1, 8)))
-    _git(target, "add", "extra.txt")
-    _commit(target, "test: add a second unread file for the sweep")
-
-    _silence(monkeypatch)
-    mute_side_effects()
-    stub = _install_stub_backend(monkeypatch, target)
-    stub.per_stack_emit_reads = True
-    stub.per_stack_unread = frozenset({"notes.txt", "extra.txt"})
-    stub.merge_echo_records = True
-
-    assert await run(make_config(target, assume="yes", output_mode="loop")) == 0
-
-    deep = target / ".daydream" / "deep"
-    sweep_records = json.loads((deep / "stack-uncovered-records.json").read_text())
-    # Records are written in sorted-file order, so the pairing is deterministic.
-    assert [(r["file"], r["uid"]) for r in sweep_records] == [
-        ("extra.txt", "uncovered:1"),
-        ("notes.txt", "uncovered:2"),
-    ]
-    assert {r["id"] for r in sweep_records} == {1}, (
-        "both sweep records share the reviewer's id -- the uid is the only handle that tells them apart"
-    )
 
 
 async def test_merge_resume_backfills_uids_onto_pre_uid_records(
@@ -436,13 +396,11 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
         assert item["source_uids"] == [item["uid"]], item
 
 
-@pytest.mark.parametrize("delegated", [False, True])
 @pytest.mark.parametrize("base_evidenced", [True, False], ids=["base-survives", "structure-survives"])
 async def test_structural_fold_survivor_inherits_both_provenances(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     base_evidenced: bool,
-    delegated: bool,
 ) -> None:
     """Either fold direction preserves both record identities and the structural severity."""
 
@@ -452,10 +410,6 @@ async def test_structural_fold_survivor_inherits_both_provenances(
         multi_stack_target,
         structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1")],
     )
-    if delegated:
-        _mark_delegated_artifacts(multi_stack_target / ".daydream/deep", {
-            "python": ["api.py"], "react": ["App.tsx"], "generic": ["README.md"],
-        })
     stub.merge_items = [
         _provenance_item(
             1,

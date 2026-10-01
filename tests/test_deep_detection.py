@@ -14,7 +14,7 @@ from daydream.config import (
 )
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
-from daydream.deep.prompts import inline_grounded_files
+from daydream.deep.prompts import _diff_blocks_for_files
 from daydream.deep.sharding import shard_stacks
 from daydream.extensions import Registry, StackRule
 
@@ -424,7 +424,7 @@ def test_shard_stacks_default_bounds_split_16file_50kb_and_inline() -> None:
     # Every shard inlines: its hunks fit the inline budget, so reviewers never
     # fall back to fetching/triaging the full patch.
     for shard in shards:
-        assert inline_grounded_files(diff, shard.files) == set(shard.files)
+        assert _diff_blocks_for_files(diff, shard.files) is not None
 
 
 def test_detect_stacks_registry_independent_same_scopes() -> None:

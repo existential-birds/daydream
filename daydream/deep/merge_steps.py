@@ -339,7 +339,7 @@ def _rewrite_stack_records(
     The cross-stack merge reads per-stack records by path, so arbitration must
     be reflected on disk, not just in memory. Every language stack file is
     rewritten with its surviving records (an emptied stack becomes
-    ``{"issues": [], "verdicts": [...]}`` rather than retaining stale
+    ``{"issues": []}`` rather than retaining stale
     pre-arbitration content).
 
     Routing is by the stack name encoded in each record's ``uid`` (issue
@@ -374,13 +374,6 @@ def _rewrite_stack_records(
                 "its adjudication will not reach disk (issue #1111).",
             )
     for dest_path, stack_records in by_stack.items():
-        # Issue #742: per-stack records files carry the dict shape
-        # ``{"issues": [...], "verdicts": [...]}``. Preserve the verdicts from
-        # the on-disk file (if a dict-shaped file is present) so arbitration
-        # does not silently drop them; the dict shape is written back
-        # regardless so every worker -- merge resume, the coverage evidence
-        # path -- reads the same shape whether or not arbitration fired.
-        verdicts: list[Any] = []
         incomplete = False
         if dest_path.is_file():
             try:
@@ -389,11 +382,8 @@ def _rewrite_stack_records(
                 existing = None
             if isinstance(existing, dict):
                 incomplete = existing.get("incomplete") is True
-                existing_verdicts = existing.get("verdicts", [])
-                if isinstance(existing_verdicts, list):
-                    verdicts = existing_verdicts
         dest_path.write_text(
-            json.dumps({"issues": stack_records, "verdicts": verdicts,
+            json.dumps({"issues": stack_records,
                         **({"incomplete": True} if incomplete else {})}, indent=2)
         )
 
@@ -892,7 +882,7 @@ def _try_reuse_arbiter(
 def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None]:
     """Every records file the merge reads, keyed by basename.
 
-    The primary-scope stacks (including the uncovered sweep's records) plus the
+    The primary-scope stacks (including the structural reviewer's records) plus the
     structural meta-stack. An unreadable file becomes a named miss (see
     :func:`_records_bytes_by_basename`).
     """
@@ -936,7 +926,7 @@ def _try_reuse_merge(
     pre-filter output and the rendered deep-dir report, then records the hit with
     its grounding delta. Any failure is recorded as a miss and the caller runs
     the real merge; ``_step_load_items`` (which runs afterwards on every path)
-    copies the report to the repo and appends the coverage section, an
+    copies the report to the repo and finalizes the report, an
     idempotent no-op because a restored report already carries it (A7).
     """
     hit = lookup_reuse_entry(reuse, "merge", key, deep_state.dd)
@@ -1351,7 +1341,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         )
 
         # Issue #733 — the cross-stack merge is one content-addressed unit over
-        # every contributing records file (per-stack, uncovered and structural),
+        # every contributing records file (per-stack and structural),
         # the failed-stack set, the structural presence flag, and its
         # schema/profile/model/effort contract. Intent, alternatives and the
         # pre-scan are recorded grounding only, so a moved pre-scan can never
@@ -1551,11 +1541,7 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
         if deep_copy.exists():
             merged_report.write_text(deep_copy.read_text())
 
-    # Issue #309: surface the uncovered-sweep coverage stats on the rendered
-    # report. The sweep runs BEFORE the merge writes review-output.md, so the
-    # section is appended here, once the report exists, to both the canonical
-    # report and its deep-dir copy.
-    _append_coverage_section(dd, merged_report, merged_report_path(dd))
+
 
     warning = render_review_warnings(review_warnings(dd))
     if warning:
@@ -1566,111 +1552,6 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     deep_state.merged_report = merged_report
     deep_state.items_file = items_file
     return None
-
-
-def _emit_coverage_section(report: Path, deep_copy: Path, section: str) -> None:
-    """Write ``section`` into the canonical report and its deep-dir copy.
-
-    Shared by both branches of ``_append_coverage_section`` (the missing-index
-    and normal coverage paths) so the two write loops cannot drift. Appends
-    only when a target file does not already carry a ``## Coverage`` section;
-    an absent file is a silent no-op.
-    """
-    for target in (report, deep_copy):
-        if target.is_file():
-            text = target.read_text(encoding="utf-8")
-            if "## Coverage" not in text:
-                target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
-
-
-def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
-    """Append a short ``## Coverage`` section when the sweep produced stats.
-
-    Reads ``deep/coverage-stats.json`` and appends files_in_diff / files read /
-    ratio / swept files to both the canonical report and its deep-dir copy. The
-    ratio rendered is the POST-sweep value (recomputed after the sweep's forks
-    landed); only files whose sweep review produced completed output are labeled
-    covered. Failed sweep attempts are surfaced as failures, not claimed as
-    coverage. A missing or malformed stats file is a silent no-op -- coverage
-    surfacing is advisory, never a gate. ANY failure here (read error, invalid
-    JSON, structurally-malformed root, a non-dict shape) warns and returns; it
-    can never fail the merge step.
-    """
-    stats_p = dd / "coverage-stats.json"
-    if not stats_p.is_file():
-        return
-    try:
-        stats = json.loads(stats_p.read_text())
-        if not isinstance(stats, dict):
-            print_warning(
-                console,
-                "Ignoring malformed coverage stats (expected a JSON object): "
-                f"{stats_p}",
-            )
-            return
-        pre_sweep = stats.get("pre_sweep")
-        if not isinstance(pre_sweep, dict):
-            return
-        if pre_sweep.get("hunk_index_missing"):
-            _emit_coverage_section(
-                report, deep_copy, "## Coverage\n- Coverage not available: hunk index is missing.\n"
-            )
-            return
-        files_in_diff = pre_sweep.get("files_in_diff")
-        if not isinstance(files_in_diff, int):
-            return
-        lines = [
-            "## Coverage",
-            f"- Files in diff: {files_in_diff}",
-        ]
-        # Prefer the POST-sweep numbers (the ratio the sweep actually achieved);
-        # fall back to the pre-sweep snapshot when the sweep did not recompute.
-        post_sweep = stats.get("post_sweep")
-        read_source = post_sweep if isinstance(post_sweep, dict) else pre_sweep
-        if read_source.get("coverage_status") == "unverifiable":
-            lines.append("- Source-read coverage: unverifiable (opaque shell reads).")
-            verified = read_source.get("verified_files")
-            if isinstance(verified, list) and verified:
-                lines.append(f"- Files with verified source evidence: {len(verified)}")
-        else:
-            files_read = read_source.get("files_read_by_reviewers")
-            if isinstance(files_read, int):
-                lines.append(f"- Files read by reviewers: {files_read}")
-            ratio = read_source.get("coverage_ratio")
-            if isinstance(ratio, (int, float)):
-                lines.append(f"- Coverage ratio: {ratio}")
-        if stats.get("sweep_unavailable"):
-            unavailable = pre_sweep.get("unverifiable_files")
-            if isinstance(unavailable, list) and unavailable:
-                lines.append(f"- Coverage-targeted catch-up unavailable: {', '.join(map(str, unavailable))}")
-            else:
-                lines.append("- Coverage-targeted catch-up unavailable; first-pass omissions may remain missed.")
-        covered = stats.get("covered_files")
-        if isinstance(covered, list) and covered:
-            lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in covered)}")
-        completed = stats.get("completed_files")
-        if isinstance(completed, list):
-            unverified = [
-                str(f) for f in completed if not (isinstance(covered, list) and f in covered)
-            ]
-            if unverified:
-                lines.append(
-                    f"- Second-pass sweep completed without verified source read: {', '.join(unverified)}"
-                )
-        failures = stats.get("sweep_failures")
-        if isinstance(failures, dict) and failures:
-            lines.append(f"- Best-effort sweep failures: {', '.join(sorted(str(f) for f in failures))}")
-        skipped = stats.get("sweep_skipped_capacity")
-        if isinstance(skipped, int) and skipped:
-            lines.append(f"- Sweep capacity-skipped files: {skipped}")
-        section = "\n".join(lines) + "\n"
-        _emit_coverage_section(report, deep_copy, section)
-    except Exception as exc:  # noqa: BLE001 -- advisory decoration: never fail the step
-        print_warning(
-            console,
-            "Skipping coverage stats render (advisory; run continues): "
-            f"{type(exc).__name__}: {exc}",
-        )
 
 
 async def _step_findings_out(ctx: FlowContext) -> Stop:

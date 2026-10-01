@@ -367,12 +367,7 @@ Daydream supports four backends. Each implements the same `Backend` protocol and
 
 All four remain available to review flows. Repository-wide `improve` is intentionally stricter and currently accepts only Claude, whose SDK hook provides the required snapshot-root tool boundary.
 
-Source-read coverage requires successful structured `Read`/`read` results or completed host source packets.
-Shell/Bash commands and Codex `command_actions` cannot verify which files were delivered. Affected phases
-report unverifiable coverage and warn once; their coverage-targeted catch-up sweep is unavailable, so
-first-pass omissions may remain missed. Findings and supported mixed-backend coverage are preserved.
-Diagram citations without verified reads are omitted. The `redundant_reads` metric is `null` for any
-trajectory containing shell calls; shell-path estimates are no longer inferred.
+Reviewer tool telemetry does not determine review completeness or diagram validity. Failed or budget-limited reviewers produce partial-result warnings; validated findings survive recovery. Diagram citations are checked directly against repository source.
 
 Select a backend with `--backend`. The selection order, highest first, is:
 
@@ -572,10 +567,6 @@ Supervisor settings are config-file-only:
 
 Configure the LLM supervisor model under `[tool.daydream.phases.supervise]`.
 
-### Uncovered-diff-file sweep
-
-A second-pass reviewer covers diff files that no per-stack reviewer read.
-
 ### Quality gate
 
 The fix-phase anti-degradation quality gate prevents a fix from degrading a file:
@@ -708,7 +699,7 @@ Which diagram and why:
 
 A forced kind still goes through grounding and may still be omitted. Forcing changes eligibility, never verification.
 
-**How grounding works.** Generation checks repository paths, source lines, symbols, and successful structured reads in the diagram phase's own trajectory. Shell commands cannot verify a read. Sequence calls must match their participants; flowchart nodes must belong to the chosen function and match their statement kinds. Unsupported elements and their dependents are pruned after one repair turn, then render caps and minimum diagram sizes apply. Unverified reads produce one warning; diagrams below their minimum size are omitted. `.daydream/deep/diagram.json` stores eligibility, final specs, and omission reasons; `diagram.md` stores the rendered blocks. Posting validates the final specs and immutable head source, then renders safe Mermaid. Per-element audit reports and proposed-spec copies are not persisted.
+**How grounding works.** Generation checks repository paths, source lines, symbols, and definitions directly against the source checkout. Sequence calls must match their participants; flowchart nodes must belong to the chosen function and match their statement kinds. Unsupported elements and their dependents are pruned after one repair turn, then render caps and minimum diagram sizes apply. Diagrams below their minimum size are omitted. `.daydream/deep/diagram.json` stores eligibility, final specs, and omission reasons; `diagram.md` stores the rendered blocks. Posting validates the final specs and immutable head source, then renders safe Mermaid. Per-element audit reports and proposed-spec copies are not persisted.
 
 Flowchart grounding proves that each node is a real statement of the stated kind inside the root function, and that each subroutine call exists at its call site and has a definition. It does **not** prove the arrows. Edge order is checked only for structural validity — a decision's fan-out, and both endpoints being grounded — and no control-flow graph is extracted or compared, so the sequencing of a flowchart is the model's reading of the function rather than a verified execution order. A diagram failure in a review path is fail-open: it warns and the review continues, in both the review run and the `post-findings` poster, which drops a rejected diagram payload and still posts the findings. Under `--diagram-only` the diagram is the deliverable, so a failure exits 1 after the artifact is written.
 

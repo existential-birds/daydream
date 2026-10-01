@@ -218,9 +218,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
 
     metrics = manifest["metrics"]
-    assert metrics["grounding_rate"] is not None
+    assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is not None
-    assert metrics["coverage_ratio"] is not None
+    assert "coverage_ratio" not in metrics
     assert metrics["cost_per_finding_usd"] is not None
     assert (run_dir / "evaluation.json").is_file()
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
@@ -804,9 +804,9 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     metrics = manifest["metrics"]
-    assert metrics["grounding_rate"] is None
+    assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is None
-    assert metrics["coverage_ratio"] is None
+    assert "coverage_ratio" not in metrics
     assert metrics["cost_per_finding_usd"] is None
     assert not (run_dir / "evaluation.json").exists()
 
@@ -851,7 +851,6 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
                                 "evidence": "main.py:1",
                             }
                         ],
-                        "verdicts": [],
                     },
                     continuation=None,
                 ),
@@ -1128,12 +1127,11 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     assert (escape["a_id"], escape["b_id"]) == ("1", "2")
     assert escape["same_file"] is True
 
-    # Grounding records which artifact it checked against.
-    assert evaluation["grounding"]["hunk_source"] == "hunk-index.json"
+    assert "grounding" not in evaluation
 
     # Pre-existing manifest eval metrics are unaffected.
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    assert manifest["metrics"]["grounding_rate"] is not None
+    assert "grounding_rate" not in manifest["metrics"]
     assert manifest["metrics"]["total_findings"] == 3
 
 
@@ -1463,13 +1461,13 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
             yield event
 
 
-async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_source(
+async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     artifact_runtime_root: Path,
 ) -> None:
-    """Real deep run keeps source credit while rejecting artifact evidence."""
+    """A real run archives routed prompt inputs and preserves parsed findings."""
     silence(monkeypatch)
     force_interactive(monkeypatch)
     backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
@@ -1643,60 +1641,11 @@ async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_s
         controlled_records.append(matches[0])
     assert len({record["description"] for record in controlled_records}) == 3
 
-    coverage = evaluation["coverage"]
-    assert coverage["coverage_ratio"] == 1.0
-    assert coverage["files_read_by_reviewers"] == coverage["files_in_diff"]
-    assert coverage["artifact_reads_rejected"] == 2
+    assert "coverage" not in evaluation
+    assert "grounding" not in evaluation
+    assert "grounding_rate" not in manifest["metrics"]
+    assert "coverage_ratio" not in manifest["metrics"]
 
-    grounding = evaluation["grounding"]
-    assert grounding["artifact_evidence_rejections"] == 2
-    python_rows = [
-        row
-        for row in grounding["ungrounded"]
-        if row["stack"] == "python" and row["file"] == "api.py"
-    ]
-    generic_rows = [
-        row
-        for row in grounding["ungrounded"]
-        if row["stack"] == "generic" and row["file"] == "README.md"
-    ]
-    react_rows = [
-        row
-        for row in grounding["grounded"]
-        if row["stack"] == "react" and row["file"] == "App.tsx"
-    ]
-    assert len(python_rows) == len(generic_rows) == len(react_rows) == 1
-    python_row = python_rows[0]
-    generic_row = generic_rows[0]
-    react_row = react_rows[0]
-
-    assert python_row["file_was_read"] is True
-    assert python_row["line_grounded"] is True
-    assert python_row["artifact_file_ref"] is None
-    assert python_row["artifact_rationale_refs"] == [str(private_intent)]
-    assert python_row["unread_rationale_refs"] == []
-    assert python_row["grounded"] is False
-
-    assert generic_row["file_was_read"] is True
-    assert generic_row["line_grounded"] is True
-    assert generic_row["artifact_file_ref"] is None
-    assert generic_row["artifact_rationale_refs"] == [
-        ".daydream/deep/intent.md"
-    ]
-    assert generic_row["unread_rationale_refs"] == []
-    assert generic_row["grounded"] is False
-
-    assert react_row["file_was_read"] is True
-    assert react_row["line_grounded"] is True
-    assert react_row["artifact_rationale_refs"] == []
-    assert react_row["unread_rationale_refs"] == []
-    assert react_row["grounded"] is True
-
-    assert manifest["metrics"]["grounding_rate"] is not None
-    assert (
-        manifest["metrics"]["grounding_rate"]
-        == evaluation["grounding"]["grounding_rate"]
-    )
 
 
 

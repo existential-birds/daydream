@@ -117,8 +117,6 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "branch name, cwd, or memory. A finding without completed source evidence of its "
     "target is INVALID. Completed source excerpts supplied to finalization satisfy "
     "this gate; paths and speculative notes do not.\n"
-    "  A `clean` verdict for a file also requires a completed read in this logical review: "
-    "absent the read, mark the file `not reviewed`, never `clean`.\n"
     "  Gate 1 (anchor): read the full enclosing symbol or configuration section, not just the diff "
     "hunk; state the file path and line range you are judging.\n"
     "  Gate 2 (evidence): produce an artifact for the finding's type — pasted "
@@ -263,16 +261,16 @@ def _artifact_footer(output_path: Path) -> str:
     """The host-managed review-artifact instruction shared by the review builders."""
     return (
         f"Host-managed review artifact: {output_path}. "
-        "Return only the JSON object required by the output schema, with issues and verdicts. "
+        "Return only the JSON object required by the output schema, with issues. "
         "Do not write review files or return a separate markdown report; the host persists the result."
     )
 
 
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
-    """Host-owned scope/verdict envelope for a reviewed stack scope.
+    """Host-owned scope envelope for a reviewed stack scope.
 
     Carries only runtime scope metadata (stack name, assigned files, the
-    parallel-review boundary, and the per-file verdict contract). The judgment
+    parallel-review boundary). The judgment
     policy is the profile-owned ``discovery.per_stack`` strategy, rendered by
     the caller.
     """
@@ -284,10 +282,6 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
         "Read another stack's file only to resolve a concrete candidate in your assigned "
         "changed behavior. End that context trace when the candidate is resolved; do "
         "not independently audit the other stack's workflow, tests, or configuration.\n"
-        f"Return ONE entry per assigned file in the JSON verdicts array with "
-        f"path, lines_read, verdict (clean | has_findings | not_reviewed), and n_findings. "
-        f"A file you did not read in this same review must be marked "
-        f"`not_reviewed`, never `clean`."
     )
 
 
@@ -395,19 +389,6 @@ def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
     if not fits_inline_diff_budget(result):
         return None
     return result
-
-
-def inline_grounded_files(diff: str, files: list[str]) -> set[str]:
-    """Return the set of ``files`` inline-grounded in ``diff`` (issue #731).
-
-    A shard's inline grounding is all-or-nothing: ``_diff_blocks_for_files``
-    returns the concatenated blocks or ``None`` (over the byte budget / no
-    matching blocks). Returns ``set(files)`` when the blocks fit, else
-    ``set()``. Pure and deterministic; feeds the coverage-evidence receipt.
-    """
-    if _diff_blocks_for_files(diff, files) is not None:
-        return set(files)
-    return set()
 
 
 @dataclass
@@ -594,8 +575,7 @@ def _frontier_read_instruction(frontier_files: list[str]) -> str:
     """Cross-shard interface read instruction for a sharded stack (issue #731).
 
     Names the sibling-shard files a shard's review depends on and instructs the
-    agent to Read them for cross-shard context; these become
-    ``dependency_frontier_read`` coverage-evidence candidates.
+    agent to read them for cross-shard context.
     """
     joined = ", ".join(frontier_files)
     return (
@@ -1320,27 +1300,14 @@ def build_generic_fallback_prompt(
 SEQUENCE_DIAGRAM_ROLE = "You are the sequence-diagram author for this pull request."
 FLOWCHART_ROLE = "You are the flowchart author for this pull request."
 
-# Gate-0 anti-confabulation, adapted from ``VERIFICATION_PROTOCOL_INSTRUCTION``
-# for the diagram phase. Embedded inline as instruction text for the same reason
-# as the review rubrics: the diagram agent runs with cwd set to the reviewed
-# repo, so a bare skill-file read resolves against that repo and silently drops
-# the gate. Diagrams are structurally more confabulation-prone than findings --
-# a plausible-looking arrow or branch costs nothing to invent -- so the gate is
-# paired with the two host-side facts that make invention pointless: every cited
-# file must have been read in THIS turn, and every ``file:line`` is re-checked
-# deterministically before anything is rendered.
+# Keep the source-validation contract inline: diagram agents run in the reviewed
+# repository, where a skill-file pointer would refer to the target's files.
 DIAGRAM_GROUNDING_INSTRUCTION = (
     "Grounding contract for this diagram (stated inline here — no skill file "
     "read is required):\n"
-    "  Gate-0 anti-confabulation (before ANY element): echo the exact artifact "
-    "you are citing — file:line plus the cited code, read freshly in THIS turn, "
-    "not recalled. The source is the only truth; never infer an interaction, a "
-    "branch, a call, or a component from the branch name, cwd, or memory. An "
-    "element whose evidence you did not read in THIS turn is INVALID.\n"
-    "  Every file you cite in any `evidence` object must be read in this turn "
-    "(a successful structured Read/read result for the file). The host checks "
-    "this phase's trajectory for a completed read of each cited file; a file you "
-    "never opened is not evidence, however plausible the line looks.\n"
+    "  Inspect the source for every element and cite its exact file:line and "
+    "code. The source is the only truth; never infer an interaction, a branch, "
+    "a call, or a component from the branch name, cwd, or memory.\n"
     "  The host verifies every file:line you emit deterministically, with no "
     "second model in the loop: the path must exist at HEAD and resolve inside "
     "this repository, the line must be within the file, the cited `symbol` must "

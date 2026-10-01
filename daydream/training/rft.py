@@ -9,7 +9,7 @@ inputs. Every candidate is scored through :func:`score_trajectory`
 so the winner filter reads the full breakdown, never a bare scalar (M12).
 
 The winner threshold is a **breakdown-shaped spec**: a mapping of breakdown
-axis names to minimum values (e.g. ``{"composite": 0.6, "grounding": 0.5}``).
+axis names to minimum values (e.g. ``{"composite": 0.6, "correctness_per_finding": 0.5}``).
 A plain float is a :class:`TypeError` at config time.
 
 Determinism contract: given the same inputs file, model id, seed, and rubric
@@ -17,7 +17,7 @@ version, reruns produce **byte-identical** winners files. All iteration is
 sorted (records by stable id), serialization uses ``sort_keys=True`` with
 fixed float formatting, and the header stamps the model id, seed, rubric
 version, and a sha256 digest of the inputs file. Candidate scoring derives
-its breakdown inputs (verdicts + grounding rate) from the *sampled* findings
+its breakdown inputs (verdicts) from the *sampled* findings
 subset, so a sampled completion is scored on what varies, never on a
 byte-identical copy of the record.
 
@@ -68,7 +68,7 @@ def validate_full_sha(record_id: str, field: str, value: object) -> str:
 # Breakdown axes the winner spec may constrain: exactly the attribute names of
 # ``score_trajectory``'s ``RewardBreakdown`` (reward.py:316). Anything else is a
 # typo — fail closed at config time rather than silently filtering on nothing.
-_SPEC_AXES = ("composite", "grounding", "correctness_per_finding", "length_penalty")
+_SPEC_AXES = ("composite", "correctness_per_finding", "length_penalty")
 
 # Minimum candidates sampled per record (full finding set + seeded subsets).
 DEFAULT_CANDIDATES_PER_TASK = 4
@@ -108,7 +108,8 @@ class RftConfig:
         if isinstance(self.min_breakdown, (int, float, bool)) or not isinstance(self.min_breakdown, Mapping):
             raise TypeError(
                 "min_breakdown must be a breakdown-shaped mapping of axis names to minimums "
-                f"(e.g. {{'composite': 0.6, 'grounding': 0.5}}); got {type(self.min_breakdown).__name__!r}. "
+                "(e.g. {'composite': 0.6, 'correctness_per_finding': 0.5}); "
+                f"got {type(self.min_breakdown).__name__!r}. "
                 "A bare scalar cannot name the axes it constrains (M12)."
             )
         unknown = sorted(set(self.min_breakdown) - set(_SPEC_AXES))
@@ -202,8 +203,8 @@ def _sample_candidates(rec: Mapping[str, Any], rid: str, cfg: RftConfig) -> list
 def _score_candidate(rec: Mapping[str, Any]) -> RewardBreakdown:
     """Score one candidate through the canonical ``score_trajectory`` hook.
 
-    The sampled ``findings`` subset is the candidate-varying input: verdicts
-    and grounding rate are derived from it (mirroring ``rubric.score_review``),
+    The sampled ``findings`` subset is the candidate-varying input: verifier verdicts
+    are derived from it (mirroring ``rubric.score_review``),
     so candidates that differ only in their findings subset score differently
     and the winner filter can prefer one sampled completion over another.
     Record-level signals are used only when the record carries no findings.
@@ -212,17 +213,13 @@ def _score_candidate(rec: Mapping[str, Any]) -> RewardBreakdown:
     """
     findings = [f for f in rec.get("findings", []) if isinstance(f, Mapping)]
     if findings:
-        grounded = sum(1 for f in findings if f.get("grounded"))
-        grounding_rate: float | None = grounded / len(findings)
         verdicts_derived = [{"verdict": str(f["verdict"])} for f in findings if f.get("verdict")]
         verifier_verdicts: Any = verdicts_derived or rec.get("verifier_verdicts")
     else:
-        grounding_rate = rec.get("grounding_rate")
         verifier_verdicts = rec.get("verifier_verdicts")
     breakdown = score_trajectory(
         ScoringInputs(
             verifier_verdicts=verifier_verdicts,
-            grounding_rate=grounding_rate,
             format_valid=bool(rec.get("format_valid", False)),
             length=rec.get("length"),
         )

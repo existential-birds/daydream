@@ -14,15 +14,12 @@ from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import orchestrator as deep_orchestrator
 from daydream.deep.orchestrator import STEPS
 from daydream.deep.prompts import bound_deep_diff
-from daydream.eval.analyzer import analyze_coverage, load_trajectories
 from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
 from daydream.runner import RunConfig, run
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
-    _install_uncovered_sweep_stub,
     _silence_gate_noise,
-    _uncovered_sweep_target,
 )
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_alternatives_profile
@@ -390,50 +387,6 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
 
 
-async def test_uncovered_sweep_reads_full_diff_for_block_extraction(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The sweep extracts blocks from the FULL diff.patch, not the bounded ctx.data['diff'], so sweep targets
-    cannot diverge from the coverage set."""
-
-    # Push the in-memory diff over the budget with a file that sorts FIRST in
-    # git's byte-ordered diff: its oversize block is kept whole by the bound,
-    # so every later block -- including the small uncovered file below -- is
-    # dropped from ctx.data['diff'] but survives in the on-disk diff.patch.
-    big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
-    (multi_stack_target / "0big.py").write_text(big + "\n")
-    (multi_stack_target / "zzuncovered.py").write_text("".join(f"content line {i}\n" for i in range(6)))
-    _git(multi_stack_target, "add", "0big.py", "zzuncovered.py")
-    _git(multi_stack_target, "commit", "-m", "add big file and an uncovered file")
-
-    bounded_results: list[str] = []
-    _spy_bound_deep_diff(monkeypatch, bounded_results)
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    # Per-stack reviewers read their scope files; zzuncovered.py is deliberately
-    # unread so it is the sweep's single uncovered target.
-    stub.per_stack_emit_reads = True
-    stub.per_stack_unread = frozenset({"zzuncovered.py"})
-
-    assert await _run_deep(multi_stack_target) == 0
-
-    # Prove the discriminating setup actually held: the bounded in-memory diff
-    # dropped zzuncovered.py's block (truncation marker present, the file's
-    # content absent) while the full on-disk diff.patch kept it. A sweep that
-    # sourced ctx.data['diff'] would then find no block for the file and route
-    # it into skipped_small; the fixed sweep sources diff.patch and sweeps it.
-    assert len(bounded_results) == 1
-    assert "# daydream: deep diff truncated:" in bounded_results[0]
-    assert "content line 3" not in bounded_results[0]
-    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
-    assert "content line 3" in patch
-
-    stats = json.loads((multi_stack_target / ".daydream" / "deep" / "coverage-stats.json").read_text())
-    assert "zzuncovered.py" in stats["attempted_files"]
-    assert "zzuncovered.py" not in stats["sweep_skipped_small_hunks_files"]
-
-
 async def test_intent_artifact_survives_wonder_failure(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -606,72 +559,3 @@ async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
     assert len(matching) == 1, items
     assert matching[0]["severity"] == "medium"
     assert matching[0]["lens"] == lens
-
-
-async def test_run_deep_uncovered_sweep_merges_and_improves_coverage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-) -> None:
-    """AC (issue #309): the sweep reviews an uncovered file, its finding is an ordinary merged finding, coverage
-    stats improve, and the report surfaces coverage."""
-
-    target = _uncovered_sweep_target(tmp_path)
-    _silence(monkeypatch)
-    mute_side_effects()
-    stub = _install_uncovered_sweep_stub(monkeypatch, target)
-    stub.sweep_file = "notes.txt"
-    stub.merge_echo_records = True
-
-    exit_code = await run(make_config(target, assume="yes", output_mode="loop"))
-    assert exit_code == 0
-
-    deep = target / ".daydream" / "deep"
-
-    # (a) The sweep records file exists and its finding is a MERGED finding.
-    records_file = deep / "stack-uncovered-records.json"
-    assert records_file.is_file()
-    records = json.loads(records_file.read_text())
-    assert any(r.get("file") == "notes.txt" for r in records)
-    merged_items = json.loads((deep / "merged-items.json").read_text())
-    merged_files = {item.get("file") for item in merged_items["items"]}
-    assert "notes.txt" in merged_files
-
-    # (b) coverage-stats records the PRE-sweep state separately from the
-    # POST-sweep recompute, and labels the swept files it actually completed.
-    stats = json.loads((deep / "coverage-stats.json").read_text())
-    pre_sweep = stats["pre_sweep"]
-    assert pre_sweep["files_in_diff"] == 4
-    assert pre_sweep["files_read_by_reviewers"] == 3  # api.py, App.tsx, README.md read pre-sweep
-    assert pre_sweep["uncovered_files"] == ["notes.txt"]
-    assert stats["attempted_files"] == ["notes.txt"]
-    assert stats["completed_files"] == ["notes.txt"]
-    assert stats["covered_files"] == ["notes.txt"]  # sweep fork's read is verified
-    assert stats["sweep_attempt_status"] == {"notes.txt": "read"}
-    assert stats["sweep_finding_count"] == len(records) >= 1
-    assert stats["sweep_skipped_small_hunks"] == 0
-    # Finding 10: the skip filename lists are persisted alongside the counts
-    # (derived from the lists) so capacity/hunk skips stay auditable.
-    assert stats["sweep_skipped_small_hunks_files"] == []
-    assert stats["sweep_skipped_capacity"] == 0
-    assert stats["sweep_skipped_capacity_files"] == []
-    # The POST-sweep ratio reflects the sweep fork's completed read of notes.txt.
-    assert stats["post_sweep"]["files_read_by_reviewers"] == 4
-    assert stats["post_sweep"]["coverage_ratio"] > pre_sweep["coverage_ratio"]  # 0.75 -> 1.0
-
-    # (c) post-run analyze_coverage sees the sweep fork's read: ratio improves.
-    trajectories = load_trajectories(target / ".daydream")
-    post = analyze_coverage(trajectories, target / ".daydream")
-    assert post["files_read_by_reviewers"] == 4
-    assert post["coverage_ratio"] == 1.0
-    assert post["coverage_ratio"] == stats["post_sweep"]["coverage_ratio"]  # report shows the achieved ratio
-
-    # (d) the merged report carries the Coverage section with the POST-sweep
-    # ratio and the completed swept-file line.
-    report = (target / ".review-output.md").read_text()
-    assert "## Coverage" in report
-    assert "Files in diff: 4" in report
-    assert "Files read by reviewers: 4" in report
-    assert "Coverage ratio: 1.0" in report
-    assert "Second-pass sweep covered: notes.txt" in report

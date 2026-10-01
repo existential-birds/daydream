@@ -34,8 +34,6 @@ Failure-propagation rules:
 * A *present* verdicts/records file that is malformed JSON ⇒ caught as
   :class:`json.JSONDecodeError` and surfaced as ``format_valid=False``;
   assembly never crashes on bad data.
-* ``grounding_rate`` is read from the indexed manifest row
-  (``row["grounding_rate"]``), never re-derived here.
 * ``length`` is the documented review-output char-count proxy, ``None`` when
   no review output exists.
 
@@ -226,28 +224,11 @@ def _read_review_output(run_dir: Path) -> str | None:
     return None
 
 
-def assemble_scoring_inputs(run_dir: Path, row: Mapping[str, Any]) -> ScoringInputs:
-    """Reduce one run's bronze artifacts to intrinsic :class:`ScoringInputs`.
+def assemble_scoring_inputs(run_dir: Path) -> ScoringInputs:
+    """Read verifier verdicts, artifact validity, and output length from a run.
 
-    Reads the structured bronze artifacts under ``run_dir/deep`` and the
-    review-output length proxy, combining them with the indexed
-    ``grounding_rate`` into the capture-time signals the reward reducer
-    consumes. Absent verdicts yield ``verifier_verdicts=None`` and leave the
-    format gate intact — expected for a shallow run and, after the verify
-    relocation, a declined deep run whose recommendation verification was
-    skipped at the apply-fixes gate. A present-but-malformed structured
-    artifact sets ``format_valid=False`` without raising.
-
-    Args:
-        run_dir: The archived run directory (bronze bundle root).
-        row: Indexed or flattened manifest metadata; ``row["grounding_rate"]``
-            supplies the grounding axis (``None`` when unavailable). Bronze-only
-            callers do not need harvest's repository or session identity.
-
-    Returns:
-        A :class:`ScoringInputs` with the verdicts list (or ``None``), the
-        passed-through grounding rate, the format-validity gate, and the
-        char-count length proxy (or ``None``).
+    Missing verifier verdicts leave correctness absent. Malformed structured
+    artifacts fail the format gate; missing evidence never earns credit.
     """
     deep_dir = run_dir / "deep"
 
@@ -282,7 +263,6 @@ def assemble_scoring_inputs(run_dir: Path, row: Mapping[str, Any]) -> ScoringInp
     review_text = _read_review_output(run_dir)
     return ScoringInputs(
         verifier_verdicts=verifier_verdicts,
-        grounding_rate=row.get("grounding_rate"),
         format_valid=format_valid,
         length=len(review_text) if review_text is not None else None,
     )
@@ -550,7 +530,7 @@ class AnnotationPayload:
             mapped-label path) so re-projection has every axis, including the
             posterior sibling fields when present.
         composite_reward: The cached *pure intrinsic* composite scalar
-            (correctness + grounding − length penalty); the posterior penalty is
+            (correctness − length penalty); the posterior penalty is
             never folded in (C5). ``None`` when uncomputable.
         evidence_sha: The run's ``head_sha`` (the evidence anchor for the
             posterior signals), or ``None``.
@@ -1027,7 +1007,7 @@ class _ProductionHarvestServices:
         set_run_pr_link(self.archive_dir, row.session_id, number, repo)
 
     def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs:
-        return assemble_scoring_inputs(row.archive_path, {"grounding_rate": row.grounding_rate})
+        return assemble_scoring_inputs(row.archive_path)
 
     def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]:
         if row.findings_fingerprints is not None:

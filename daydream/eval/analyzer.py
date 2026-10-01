@@ -1,7 +1,7 @@
 """Quantitative analysis of ATIF v1.7 trajectory data from daydream runs.
 
 Parses trajectory JSON files and deep review artifacts, computes metrics
-across cost, tool usage, file coverage, finding quality, grounding,
+across cost, tool usage, finding quality,
 location accuracy, shipped duplication, and training signal dimensions. Output is a JSON-serializable report for archive
 inspection and downstream training analysis.
 
@@ -17,11 +17,10 @@ import json
 import math
 import re
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import (
     TreeSitterBadVersionError,
@@ -38,7 +37,6 @@ from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     compute_timing_summary,
-    redact_text,
     run_document_path,
     siblings_directory,
 )
@@ -158,148 +156,9 @@ def _agent_label(filename: str) -> str:
     return re.sub(r"--[0-9a-f]{64}$", "", label)
 
 
-def _extract_tool_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
-    calls: list[dict[str, Any]] = []
-    for step in trajectory.get("steps", []):
-        for tc in step.get("tool_calls") or []:
-            calls.append({
-                "step_id": step["step_id"],
-                "function_name": tc["function_name"],
-                "arguments": tc.get("arguments", {}),
-                "phase": (step.get("extra") or {}).get("daydream_phase", "unknown"),
-            })
-    return calls
-
-
-def _files_from_diff(diff_path: Path) -> list[str]:
-    if not diff_path.exists():
-        return []
-    text = diff_path.read_text()
-    files: set[str] = set()
-    for m in re.finditer(r"^diff --git a/.+? b/(.+?)$", text, re.MULTILINE):
-        files.add(m.group(1))
-    return sorted(files)
-
-
 _WRITE_TOOL_ALIASES = frozenset(
     {"write", "edit", "multiedit", "notebookedit", "patch", "apply_patch"}
 )
-
-
-def _semantic_tool_kind(
-    function_name: str,
-) -> Literal["read", "write", "other"]:
-    """Classify a standard-event tool name without changing its raw spelling."""
-    name = function_name.casefold()
-    if name == "read":
-        return "read"
-    if name in _WRITE_TOOL_ALIASES:
-        return "write"
-    return "other"
-
-
-def _read_paths_for_call(tc: dict[str, Any]) -> list[str]:
-    """Native structured read operands; shell text and search paths prove no read."""
-    if _semantic_tool_kind(tc["function_name"]) != "read":
-        return []
-    args = tc.get("arguments") or {}
-    path = args.get("file_path") or args.get("path")
-    return [path] if isinstance(path, str) and path else []
-
-
-_ArtifactPathKind = Literal["repository", "artifact", "exploration_artifact", "rejected"]
-
-
-@dataclass(frozen=True)
-class _ArtifactPathRoots:
-    """Trusted lexical spellings used to classify already-recorded paths."""
-
-    daydream: tuple[tuple[str, ...], ...]
-    review_output: tuple[tuple[str, ...], ...]
-    live: tuple[tuple[str, ...], ...]
-
-
-def _lexical_path(value: str) -> tuple[bool, tuple[str, ...]] | None:
-    """Return an absolute marker plus safe components without touching disk."""
-    if type(value) is not str or not value:
-        return None
-    components = tuple(part for part in value.split("/") if part not in ("", "."))
-    if not components or ".." in components:
-        return None
-    return value.startswith("/"), components
-
-
-def _absolute_spellings(path: Path) -> tuple[tuple[str, ...], ...]:
-    """Raw and canonically redacted component spellings for one absolute path."""
-    spellings: list[tuple[str, ...]] = []
-    for value in (str(path), redact_text(str(path))):
-        lexical = _lexical_path(value)
-        if lexical is not None and lexical[0] and lexical[1] not in spellings:
-            spellings.append(lexical[1])
-    return tuple(spellings)
-
-
-def _artifact_path_roots(
-    daydream_dir: Path | None,
-    artifact_provenance: ArtifactEvidenceProvenance | None,
-) -> _ArtifactPathRoots:
-    """Derive the trusted lexical roots owned by the active artifact session."""
-    daydream_roots: list[tuple[str, ...]] = []
-    if daydream_dir is not None and daydream_dir.is_absolute():
-        daydream_roots.extend(_absolute_spellings(daydream_dir))
-    if artifact_provenance is None:
-        return _ArtifactPathRoots(tuple(daydream_roots), (), ())
-    daydream_roots.extend(_absolute_spellings(artifact_provenance.public_daydream_dir))
-    return _ArtifactPathRoots(
-        tuple(dict.fromkeys(daydream_roots)),
-        _absolute_spellings(artifact_provenance.public_review_output),
-        _absolute_spellings(artifact_provenance.live_root),
-    )
-
-
-def _artifact_path_kind(path: str, *, roots: _ArtifactPathRoots) -> _ArtifactPathKind:
-    """Classify one recorded path by exact lexical component ownership."""
-    lexical = _lexical_path(path)
-    if lexical is None:
-        return "rejected"
-    absolute, components = lexical
-    if not absolute:
-        if components[0] == ".daydream":
-            return "exploration_artifact" if components[1:2] == ("exploration",) else "artifact"
-        return "artifact" if components == (".review-output.md",) else "repository"
-    if components in roots.review_output:
-        return "artifact"
-    # An owned root's whole subtree is artifact evidence; only its own
-    # ``exploration`` directory is the exploration pre-scan.
-    for root, exploration in (
-        *((root, ("exploration",)) for root in roots.daydream),
-        *((root, (".daydream", "exploration")) for root in roots.live),
-    ):
-        if components[: len(root)] == root:
-            relative = components[len(root) :]
-            return "exploration_artifact" if relative[: len(exploration)] == exploration else "artifact"
-    return "repository"
-
-
-def _partition_repository_reads(
-    read_paths: set[str],
-    *,
-    roots: _ArtifactPathRoots,
-) -> tuple[set[str], set[str]]:
-    """Partition source reads from artifact-shaped or unsafe evidence paths."""
-    repository: set[str] = set()
-    rejected: set[str] = set()
-    for path in read_paths:
-        if _artifact_path_kind(path, roots=roots) == "repository":
-            repository.add(path)
-        else:
-            rejected.add(path)
-    return repository, rejected
-
-
-def _path_matches(absolute: str, relative: str) -> bool:
-    """Check if an absolute tool-call path corresponds to a relative diff path."""
-    return absolute == relative or absolute.endswith("/" + relative)
 
 
 # Analysis functions
@@ -387,35 +246,25 @@ def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
 
 
 def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
-    """Tool call counts, per-agent breakdown, and redundancy detection."""
+    """Tool call counts and per-agent breakdown."""
     total_counts: Counter[str] = Counter()
     by_agent: dict[str, dict[str, Any]] = {}
-    redundant_reads: list[dict[str, Any]] = []
-    opaque_reads = False
 
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
-        calls = _extract_tool_calls(traj)
-        opaque_reads |= any(tc["function_name"].casefold() in {"shell", "bash", "exec_command"} for tc in calls)
-        counts = Counter(tc["function_name"] for tc in calls)
+        counts = Counter(
+            call["function_name"]
+            for step in traj.get("steps", [])
+            for call in step.get("tool_calls") or []
+        )
         by_agent[label] = dict(counts)
         total_counts.update(counts)
-
-        read_paths = [
-            tc["arguments"].get("file_path")
-            or tc["arguments"].get("path", "")
-            for tc in calls
-            if _semantic_tool_kind(tc["function_name"]) == "read"
-        ]
-        for path, count in Counter(read_paths).items():
-            if count > 1 and path:
-                redundant_reads.append({"agent": label, "file": path, "read_count": count})
 
     total = sum(total_counts.values())
     write_count = sum(
         count
         for function_name, count in total_counts.items()
-        if _semantic_tool_kind(function_name) == "write"
+        if function_name.casefold() in _WRITE_TOOL_ALIASES
     )
 
     return {
@@ -423,108 +272,6 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
         "by_type": dict(total_counts.most_common()),
         "by_agent": by_agent,
         "write_ratio": round(write_count / total, 4) if total > 0 else 0,
-        "redundant_reads": None if opaque_reads else redundant_reads,
-    }
-
-
-def _completed_source_packet_files(daydream_dir: Path, stack: str | None = None) -> set[str]:
-    """Credit host source only with the same stack's assigned, final verdict."""
-    # Deep coverage imports this module for legacy artifact normalization.
-    from daydream.deep.artifacts import per_stack_records_path
-    from daydream.deep.coverage import coverage_receipt_path, resolve_per_stack_verdicts
-
-    deep_dir = daydream_dir / "deep"
-    try:
-        receipts = json.loads(coverage_receipt_path(deep_dir).read_text())
-    except (OSError, ValueError):
-        return set()
-    if not isinstance(receipts, dict):
-        return set()
-    covered: set[str] = set()
-    for name, receipt in receipts.items():
-        if stack is not None and name != stack:
-            continue
-        if not re.fullmatch(r"[\w-]+(?:#\d+)?", name) or not isinstance(receipt, dict):
-            continue
-        assigned = receipt.get("assigned_files")
-        packet = receipt.get("source_packet_files")
-        if not isinstance(assigned, list) or not isinstance(packet, list):
-            continue
-        try:
-            records = json.loads(per_stack_records_path(deep_dir, name).read_text())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(records, dict) or not isinstance(records.get("verdicts"), list):
-            continue
-        verdicts = resolve_per_stack_verdicts(
-            assigned_files=[path for path in assigned if isinstance(path, str)],
-            declared_verdicts=records["verdicts"],
-            completed_read_paths=set(), finding_files=set(),
-            source_packet_paths={path for path in packet if isinstance(path, str)},
-        )
-        covered.update(v["path"] for v in verdicts if v["verdict"] in {"clean", "has_findings"})
-    return covered
-
-
-def analyze_coverage(
-    trajectories: dict[str, Any],
-    daydream_dir: Path,
-    *,
-    artifact_provenance: ArtifactEvidenceProvenance | None = None,
-) -> dict[str, Any]:
-    """File review coverage from repository reads and completed source packets.
-
-    ``artifact_reads_rejected`` counts the artifact-shaped or lexically unsafe
-    read paths excluded before suffix matching. ``files_read_by_reviewers``
-    retains its tool-read meaning; ``files_reviewed`` also includes host sources
-    with an assigned, completed final verdict from the receiving stack.
-    """
-    diff_files = _files_from_diff(daydream_dir / "diff.patch")
-
-    from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
-
-    review_reads: set[str] = set()
-    unverifiable_agents: list[str] = []
-    for traj in _all_trajectories(trajectories):
-        label = _agent_label(traj["_source_file"])
-        phases = None if label.startswith("deep-") else {"deep", "alternatives"}
-        review_reads.update(_completed_read_paths(traj, phases))
-        if _read_coverage_unverifiable(traj, phases):
-            unverifiable_agents.append(label)
-    review_reads, rejected_reads = _partition_repository_reads(
-        review_reads, roots=_artifact_path_roots(daydream_dir, artifact_provenance),
-    )
-
-    tool_covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
-    packet_covered = set(diff_files) & _completed_source_packet_files(daydream_dir)
-    covered = tool_covered | packet_covered
-    uncovered = sorted(set(diff_files) - covered)
-    unknown_files = uncovered if unverifiable_agents else []
-    # Production knows phase assignments, including resumed shards without a
-    # live fork. Keep its unavailable scope while crediting later verified reads.
-    try:
-        stats = json.loads((daydream_dir / "deep" / "coverage-stats.json").read_text())
-        unavailable = stats.get("post_sweep", stats.get("pre_sweep", {}))["unverifiable_files"]
-        if isinstance(unavailable, list):
-            unknown_files = sorted(set(unavailable) & set(uncovered))
-    except (OSError, ValueError, KeyError, TypeError, AttributeError):
-        pass
-    unverifiable = bool(unknown_files)
-
-    return {
-        "files_in_diff": len(diff_files),
-        "coverage_status": "unverifiable" if unverifiable else "verified",
-        "files_read_by_reviewers": None if unverifiable else len(tool_covered),
-        "verified_files_read_by_reviewers": len(tool_covered),
-        "verified_files": sorted(covered),
-        "unverifiable_agents": sorted(unverifiable_agents),
-        "unverifiable_files": unknown_files,
-        "files_reviewed": None if unverifiable else len(covered),
-        "verified_files_reviewed": len(covered),
-        "source_packet_reviewed": len(packet_covered),
-        "coverage_ratio": None if unverifiable else (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
-        "uncovered_files": None if unverifiable else uncovered,
-        "artifact_reads_rejected": len(rejected_reads),
     }
 
 
@@ -532,12 +279,12 @@ def _records_issues(records: Any) -> list[Any] | None:
     """Normalize a loaded per-stack records file to its bare issues list.
 
     Issue #742: fresh-run per-stack records files carry the dict shape
-    ``{"issues": [...], "verdicts": [...]}``; legacy and primed fixtures use
+    ``{"issues": [...]}``; legacy and primed fixtures use
     the bare list. Returns the issues list when ``records`` is a bare list or
     a dict whose ``issues`` is a list; ``None`` when it is neither (callers
     keep their own fail-open / warn-and-continue handling for non-list
     shapes). This is the canonical records-shape normalization shared by
-    every per-stack records reader (coverage sweep, merge resume, analyzer,
+    every per-stack records reader (merge resume, analyzer,
     phases, and the test harness); a future shape change lands here only.
     """
     if isinstance(records, dict):
@@ -548,6 +295,8 @@ def _records_issues(records: Any) -> list[Any] | None:
 
 def _iter_stack_records(deep_dir: Path) -> Iterator[tuple[str, list[Any]]]:
     for f in sorted(deep_dir.glob("stack-*-records.json")):
+        if f.name == "stack-uncovered-records.json":
+            continue
         yield f.stem.replace("stack-", "").replace("-records", ""), _records_issues_or_empty(json.loads(f.read_text()))
 
 
@@ -562,7 +311,7 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
     return issues
 
 
-_EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
+_EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "structure": 0}
 
 
 def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
@@ -650,7 +399,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
     rendered from). When that file is absent, the count falls back to the
     ``merged_finding_count`` regex on ``review-output.md``, then to the pre-merge
     per-stack total so archived runs never regress to zero. ``per_lens`` attributes
-    findings across the wonder (``alternatives.json``), per-stack, uncovered, and
+    findings across the wonder (``alternatives.json``), per-stack and
     structure lenses.
     """
     deep_dir = daydream_dir / "deep"
@@ -671,7 +420,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
     # ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
     # artifact); the ``stack-*-records.json`` walk below buckets each stack into
-    # per-stack / uncovered / structure by name. These lens counts are raw,
+    # per-stack / structure by name. These lens counts are raw,
     # *pre-merge* attribution -- they are not derived from the shipped
     # ``merged-items.json`` set, so they need not sum to, or relate to, the
     # shipped ``total`` reported by ``_shipped_counts``. Reconciling a lens to
@@ -690,9 +439,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
     for stack_name, records in _iter_stack_records(deep_dir):
         stacks.append({"name": stack_name, "finding_count": len(records)})
-        if stack_name == "uncovered":
-            per_lens["uncovered"] += len(records)
-        elif stack_name == "structure":
+        if stack_name == "structure":
             per_lens["structure"] += len(records)
         else:
             per_lens["per-stack"] += len(records)
@@ -740,9 +487,6 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
 _LOCATION_TIERS = ("in_hunk", "within_tolerance", "beyond_tolerance", "file_absent")
 """The four tiers a scored ``file:line`` citation can land in."""
-
-_GROUNDING_EXEMPT_TIERS = ("whole_file", "no_line", "unchecked")
-"""Grounding-only tiers for citations the line check cannot or must not judge."""
 
 _LOCATION_ITEM_CAP = 200
 """Max per-item rows carried in ``analyze_location``'s ``items`` list.
@@ -879,7 +623,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
 
     Scores every item in ``deep/merged-items.json`` -- the canonical set the
     posted review is rendered from -- against the run's diff hunks. This is a
-    different population from :func:`analyze_grounding`, which scores the
+    different population from the raw stack findings, which include the
     PRE-MERGE per-stack records; the two are not comparable and are reported
     under separate keys.
 
@@ -906,7 +650,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
     records whether validation could run rather than assuming it did.
 
     ``in_hunk_rate`` is ``None`` (not ``1.0``) over zero scored items: the ratio
-    is undefined, not perfect -- the same reasoning as ``grounding_rate``.
+    is undefined, not perfect -- an empty population supplies no evidence.
 
     An absent ``merged-items.json`` yields ``shipped_items: 0`` with everything
     zeroed/``None`` and does NOT raise; only a present-but-corrupt file raises,
@@ -1026,7 +770,7 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     real answer, never an error, and no uid is ever fabricated to fill it.
 
     ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
-    comparable pairs: undefined, not perfect -- the ``grounding_rate``
+    comparable pairs: undefined, not perfect -- the empty-population
     precedent. A present-but-empty ``merged-items.json`` yields real zeros;
     a missing file (:func:`_load_shipped_items` returning ``None``) makes
     ``near_duplicate_pairs`` -- archived as ``manifest.shipped_duplicate_pairs``
@@ -1111,215 +855,6 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
             round(sum(similarities) / len(similarities), 4) if similarities else None
         ),
         "pairs": [_pair_row(pair) for pair in top],
-    }
-
-
-def analyze_grounding(
-    trajectories: dict[str, Any],
-    findings: list[dict[str, Any]],
-    daydream_dir: Path,
-    *,
-    artifact_provenance: ArtifactEvidenceProvenance | None = None,
-) -> dict[str, Any]:
-    """Grounding: the cited file was read AND the cited line resolves to a hunk.
-
-    The predicate is ``file_was_read and not unread_refs and line_grounded``,
-    where ``line_grounded`` is ``location_tier in ("in_hunk",
-    "within_tolerance")`` against the run's diff hunks (issue #1106).
-
-    Exemptions -- every one is COUNTED and visible in ``tiers``, never silently
-    swallowed:
-
-    - **Structural whole-file anchor** (line ``0``): a whole-file citation, not
-      a line citation, mirroring the location validator's own carve-out.
-      Detected as ``lens == "structural"`` OR ``_stack == "structure"``.
-      -> ``line_grounded`` True, tier ``"whole_file"``.
-    - **No usable integer line** (missing, non-int, or ``bool``)
-      -> ``line_grounded`` True, tier ``"no_line"``.
-    - **``hunk_source == "none"``**: nothing can be checked, so every finding
-      falls back to the file-only predicate with tier ``"unchecked"``.
-
-    The denominator is the PRE-MERGE per-stack finding list in
-    ``findings_data["findings"]``, NOT the shipped set (scored separately by
-    :func:`analyze_location` and :func:`analyze_shipped_duplication`).
-
-    ``grounding_rate`` is ``None`` over an empty finding set: undefined, not
-    perfect. It feeds the RL/SFT reward (``daydream/training/reward.py``), where
-    scoring absence of evidence as 1.0 made "report nothing" the cheapest path
-    to a maximal composite. ``file_grounding_rate``/``line_grounding_rate``
-    follow the same convention and are reported alongside the composite.
-
-    An artifact-owned primary file or rationale reference forces the finding
-    ungrounded and is kept in redacted ``artifact_*`` fields.
-    """
-    from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
-
-    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
-    agent_reads: dict[str, set[str]] = {}
-    unverifiable_agents: set[str] = set()
-    for traj in trajectories["forked"]:
-        label = _agent_label(traj["_source_file"])
-        agent_reads[label] = _partition_repository_reads(_completed_read_paths(traj), roots=roots)[0]
-        if _read_coverage_unverifiable(traj):
-            unverifiable_agents.add(label)
-
-    ranges, hunk_source = _hunk_ranges(daydream_dir)
-
-    grounded: list[dict[str, Any]] = []
-    ungrounded: list[dict[str, Any]] = []
-    unverifiable_findings: list[dict[str, Any]] = []
-    tiers = dict.fromkeys((*_LOCATION_TIERS, *_GROUNDING_EXEMPT_TIERS), 0)
-    file_grounded_count = 0
-    line_grounded_count = 0
-    artifact_evidence_rejections = 0
-    file_unknown_count = 0
-
-    for finding in findings:
-        stack = finding.get("_stack", "")
-        label = "deep-" + stack.replace("#", "-")
-        reads = agent_reads.get(label, set()) | _completed_source_packet_files(daydream_dir, stack)
-
-        cited_file = finding.get("file", "")
-        rationale_value = finding.get("rationale", "")
-        rationale = rationale_value if isinstance(rationale_value, str) else ""
-
-        cited_kind = _artifact_path_kind(cited_file, roots=roots)
-        artifact_file_ref = (
-            redact_text(cited_file) if cited_kind in ("artifact", "exploration_artifact") else None
-        )
-        file_was_read = cited_kind == "repository" and any(_path_matches(r, cited_file) for r in reads)
-
-        rationale_refs = re.findall(
-            r"(?:\[REDACTED_USER\]|[\w/.:-])+\."
-            r"(?:md|json|py|ts|tsx|js|txt|yaml|yml|in|toml|cfg)",
-            rationale,
-        )
-        artifact_rationale_refs: list[str] = []
-        unread_refs: list[str] = []
-        for ref in rationale_refs:
-            ref_kind = _artifact_path_kind(ref, roots=roots)
-            if ref_kind in ("artifact", "exploration_artifact"):
-                artifact_rationale_refs.append(redact_text(ref))
-            elif ref_kind == "rejected" or not any(_path_matches(read, ref) for read in reads):
-                unread_refs.append(ref)
-        artifact_rationale_refs = sorted(set(artifact_rationale_refs))
-        artifact_rejected = bool(artifact_file_ref or artifact_rationale_refs)
-        artifact_evidence_rejections += int(artifact_rejected)
-        file_unknown = (
-            label in unverifiable_agents
-            and (not file_was_read or bool(unread_refs))
-            and cited_kind == "repository" and not artifact_rejected
-        )
-        file_unknown_count += int(file_unknown)
-        file_grounded = file_was_read and not unread_refs and not artifact_rejected
-
-        cited = _cited_line(finding)
-        cited_line = _int_or_none(cited)
-        is_structural = (
-            finding.get("lens") == "structural" or finding.get("_stack") == "structure"
-        )
-        if hunk_source == "none":
-            tier = "unchecked"
-            line_grounded = True
-        elif is_structural and cited == 0:
-            tier = "whole_file"
-            line_grounded = True
-        elif cited_line is None:
-            tier = "no_line"
-            line_grounded = True
-        else:
-            tier, _distance = _location_tier(ranges.get(str(cited_file)), cited_line)
-            line_grounded = tier in ("in_hunk", "within_tolerance")
-
-        tiers[tier] += 1
-        file_grounded_count += int(file_grounded)
-        line_grounded_count += int(line_grounded)
-
-        entry = {
-            "id": finding.get("id"),
-            "stack": stack,
-            "file": artifact_file_ref if artifact_file_ref is not None else cited_file,
-            "confidence": finding.get("confidence", "UNKNOWN"),
-            "file_was_read": None if file_unknown and not file_was_read else file_was_read,
-            "unread_rationale_refs": None if file_unknown else unread_refs,
-            "unverifiable_rationale_refs": unread_refs if file_unknown else [],
-            "artifact_file_ref": artifact_file_ref,
-            "artifact_rationale_refs": artifact_rationale_refs,
-            "location_tier": tier,
-            "line_grounded": line_grounded,
-            "grounded": None if file_unknown and line_grounded else file_grounded and line_grounded,
-        }
-        if entry["grounded"] is None:
-            unverifiable_findings.append(entry)
-        else:
-            (grounded if entry["grounded"] else ungrounded).append(entry)
-
-    total = len(findings)
-    return {
-        "total_findings": total,
-        "grounded_count": len(grounded),
-        "ungrounded_count": len(ungrounded),
-        "unverifiable_count": len(unverifiable_findings),
-        "unverifiable": unverifiable_findings,
-        "grounding_rate": round(len(grounded) / total, 4) if total > 0 and not unverifiable_findings else None,
-        "hunk_source": hunk_source,
-        "file_grounded_count": file_grounded_count,
-        "line_grounded_count": line_grounded_count,
-        "file_grounding_rate": (
-            round(file_grounded_count / total, 4) if total > 0 and not file_unknown_count else None
-        ),
-        "line_grounding_rate": (round(line_grounded_count / total, 4) if total > 0 else None),
-        "artifact_evidence_rejections": artifact_evidence_rejections,
-        "tiers": tiers,
-        "grounded": grounded,
-        "ungrounded": ungrounded,
-    }
-
-
-def analyze_exploration_utilization(
-    trajectories: dict[str, Any],
-    *,
-    daydream_dir: Path | None = None,
-    artifact_provenance: ArtifactEvidenceProvenance | None = None,
-) -> dict[str, Any]:
-    """Check whether review agents read current-run exploration artifacts.
-
-    Only the relative public ``.daydream/exploration`` path and the exploration
-    directory of a root this run owns count; a directory merely named
-    ``exploration``, another owner's, and parent traversals do not.
-    """
-    from daydream.deep.coverage import _completed_read_paths, _read_coverage_unverifiable
-
-    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
-    results: list[dict[str, Any]] = []
-    for traj in trajectories["forked"]:
-        label = _agent_label(traj["_source_file"])
-        if not label.startswith("deep-"):
-            continue
-        reads = _completed_read_paths(traj)
-        exploration_refs = [path for path in reads if _artifact_path_kind(path, roots=roots) == "exploration_artifact"]
-        unknown = not exploration_refs and _read_coverage_unverifiable(traj)
-        results.append({
-            "agent": label,
-            "total_reads": None if unknown else len(reads),
-            "verified_structured_reads": len(reads),
-            "exploration_reads": None if unknown else len(exploration_refs),
-            "utilized": None if unknown else bool(exploration_refs),
-        })
-
-    utilized = sum(1 for r in results if r["utilized"])
-    total_reviewers = len(results)
-    unknown = any(r["utilized"] is None for r in results)
-
-    return {
-        "reviewers_utilizing_exploration": None if unknown else utilized,
-        "verified_reviewers_utilizing_exploration": utilized,
-        "total_reviewers": total_reviewers,
-        "utilization_rate": (
-            None if unknown
-            else round(utilized / total_reviewers, 4) if total_reviewers > 0 else 0
-        ),
-        "by_agent": results,
     }
 
 
@@ -1477,7 +1012,6 @@ def _tool_outcome_flags(steps: list[dict[str, Any]]) -> list[str]:
 
 def analyze_training_signals(
     trajectories: dict[str, Any],
-    grounding: dict[str, Any],
 ) -> dict[str, Any]:
     """Assess forked training trajectories for content and evidence quality."""
     signals: list[dict[str, Any]] = []
@@ -1513,17 +1047,6 @@ def analyze_training_signals(
                         break
 
         noise_flags.extend(_tool_outcome_flags(steps))
-
-        # Extract stack name from agent label (e.g. "deep-python" → "python")
-        agent_stack = label.removeprefix("deep-").removeprefix("explore-")
-        agent_ungrounded = [
-            g for g in grounding.get("ungrounded", [])
-            if g.get("stack", "") == agent_stack
-        ]
-        if agent_ungrounded:
-            noise_flags.append(f"ungrounded_findings:{len(agent_ungrounded)}")
-        if any(g.get("stack") == agent_stack for g in grounding.get("unverifiable", [])):
-            noise_flags.append("unverifiable_grounding")
 
         # Keep the documented category order while ensuring repeated evidence
         # never repeats a training-review flag.
@@ -2482,20 +2005,11 @@ def analyze_session(
     costs = analyze_costs(trajectories)
     tools = analyze_tools(trajectories)
     findings_data = analyze_findings(daydream_dir)
-    coverage = analyze_coverage(trajectories, daydream_dir, artifact_provenance=artifact_provenance)
-    grounding = analyze_grounding(
-        trajectories, findings_data["findings"], daydream_dir, artifact_provenance=artifact_provenance
-    )
     location = analyze_location(daydream_dir)
     routing = analyze_routing(daydream_dir)
     shipped_duplication = analyze_shipped_duplication(daydream_dir)
-    exploration = analyze_exploration_utilization(
-        trajectories, daydream_dir=daydream_dir, artifact_provenance=artifact_provenance
-    )
     timing = analyze_timing(trajectories)
-    training = analyze_training_signals(
-        trajectories, grounding,
-    )
+    training = analyze_training_signals(trajectories)
     try:
         quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
     except TreeSitterBadVersionError as exc:
@@ -2531,7 +2045,6 @@ def analyze_session(
         "cost": costs,
         "timing": timing,
         "tools": tools,
-        "coverage": coverage,
         "findings": {
             "total": finding_count,
             "by_confidence": findings_data["by_confidence"],
@@ -2541,11 +2054,9 @@ def analyze_session(
             "merged_review": findings_data.get("merged_review", {}),
             "per_lens": findings_data.get("per_lens", {}),
         },
-        "grounding": grounding,
         "location": location,
         "latency_profile": routing["profile"],
         "routing": routing,
-        "exploration_utilization": exploration,
         "training_signals": training,
         "quality": quality,
         "derived": {

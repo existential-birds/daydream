@@ -10,7 +10,6 @@ ever shifts, that test fails first and explains every other failure.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -31,7 +30,6 @@ from daydream.deep.diagram_grounding import (
     ground_flowchart,
     ground_sequence,
 )
-from daydream.deep.diagram_steps import _diagram_read_evidence
 from daydream.deep.diagram_types import CandidateRoot
 from daydream.tree_sitter_index import definitions_in_file
 from tests.harness.git_helpers import commit, git, init_repo
@@ -165,22 +163,6 @@ def symbols(repo: Path) -> RepoSymbols:
     return RepoSymbols(repo)
 
 
-def reads(repo: Path, *relative: str) -> set[str]:
-    """Return absolute read receipts, the shape a real tool call records."""
-    return {str(repo / name) for name in relative}
-
-
-ALL_READS = (
-    "pkg/api.py",
-    "pkg/service.py",
-    "pkg/flow.py",
-    "pkg/big.py",
-    "pkg/caller.rb",
-    "pkg/legacy.rb",
-    *(f"pkg/p{index:02d}.py" for index in range(12)),
-)
-
-
 def check_for(report: GroundingReport, element: str, ref: str) -> ElementCheck:
     """Return the one check with this element type and ref."""
     matches = [c for c in report.elements if c.element == element and c.ref == ref]
@@ -307,14 +289,13 @@ def base_flowchart() -> dict[str, Any]:
 
 
 def run_sequence(
-    repo: Path, symbols: RepoSymbols, spec: dict[str, Any], *, read: tuple[str, ...] = ALL_READS
+    repo: Path, symbols: RepoSymbols, spec: dict[str, Any]
 ) -> GroundingReport:
     """Ground ``spec`` as a sequence diagram against the fixture repo."""
     return ground_sequence(
         spec,
         repo_root=repo,
         hunk_ranges=HUNKS,
-        read_paths=reads(repo, *read),
         symbols=symbols,
     )
 
@@ -324,7 +305,6 @@ def run_flowchart(
     symbols: RepoSymbols,
     spec: dict[str, Any],
     *,
-    read: tuple[str, ...] = ALL_READS,
     candidate_roots: list[CandidateRoot] | None = None,
 ) -> GroundingReport:
     """Ground ``spec`` as a flowchart against the fixture repo."""
@@ -332,7 +312,6 @@ def run_flowchart(
         spec,
         repo_root=repo,
         hunk_ranges=HUNKS,
-        read_paths=reads(repo, *read),
         candidate_roots=[FLOW_ROOT, BIG_ROOT] if candidate_roots is None else candidate_roots,
         symbols=symbols,
     )
@@ -505,56 +484,6 @@ def test_sequence_symbol_snap_rewrites_the_citation(repo: Path, symbols: RepoSym
     assert check.grounded and check.reason is None
     assert check.snapped_line == 5
     assert report.spec_final["messages"][1]["evidence"]["line"] == 5
-
-
-def test_sequence_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> None:
-    report = run_sequence(repo, symbols, base_sequence(), read=("pkg/api.py",))
-    assert check_for(report, "message", "2").reason == "FILE_READ_UNVERIFIED"
-    # Fail-closed with no receipts at all: the missing-trajectory case.
-    blind = ground_sequence(
-        base_sequence(),
-        repo_root=repo,
-        hunk_ranges=HUNKS,
-        read_paths=set(),
-        symbols=symbols,
-    )
-    assert {c.reason for c in blind.ungrounded()} == {"FILE_READ_UNVERIFIED"}
-
-
-@pytest.mark.parametrize("structured, expected", [(False, "FILE_READ_UNVERIFIED"), (True, None)])
-def test_diagram_citations_require_completed_structured_read(
-    repo: Path, symbols: RepoSymbols, tmp_path: Path, structured: bool, expected: str | None,
-) -> None:
-    receipt = tmp_path / "diagram-fork.json"
-    receipt.write_text(json.dumps({"steps": [{
-        "extra": {"daydream_phase": "diagram"},
-        "tool_calls": [{
-            "tool_call_id": "read-1", "function_name": "Read" if structured else "Bash",
-            "arguments": {"file_path": "pkg/api.py"} if structured else {
-                "command": "for f in missing.py pkg/api.py; do cat $f; done",
-            },
-        }],
-        "observation": {"results": [{"source_call_id": "read-1", "extra": {"exit_code": 0}}]},
-    }]}))
-    paths = _diagram_read_evidence(receipt)
-    report = ground_sequence(
-        base_sequence(), repo_root=repo, hunk_ranges=HUNKS, read_paths=paths, symbols=symbols,
-    )
-    assert check_for(report, "message", "0").reason == expected
-
-
-def test_read_receipt_matches_on_path_components_only(repo: Path, symbols: RepoSymbols) -> None:
-    """A read of ``notapi.py`` must not cover ``pkg/api.py``."""
-    spec = base_sequence()
-    report = ground_sequence(
-        spec,
-        repo_root=repo,
-        hunk_ranges=HUNKS,
-        read_paths={str(repo / "pkg/notapi.py"), str(repo / "pkg/service.py")},
-        symbols=symbols,
-    )
-    assert check_for(report, "message", "0").reason == "FILE_READ_UNVERIFIED"
-    assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
 
 
 def test_sequence_branch_not_a_branch_statement(repo: Path, symbols: RepoSymbols) -> None:
@@ -926,7 +855,6 @@ def test_sequence_floor_no_changed_interaction(repo: Path, symbols: RepoSymbols)
         base_sequence(),
         repo_root=repo,
         hunk_ranges={},
-        read_paths=reads(repo, *ALL_READS),
         symbols=symbols,
     )
     assert report.omit_reasons == ["NO_CHANGED_INTERACTION"]
@@ -1041,7 +969,6 @@ def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoS
         spec,
         repo_root=repo,
         hunk_ranges={"pkg/p01.py": [(1, 3)]},
-        read_paths=reads(repo, *ALL_READS),
         symbols=symbols,
     )
 
@@ -1076,7 +1003,6 @@ def test_flowchart_root_must_still_overlap_a_changed_hunk(
         base_flowchart(),
         repo_root=repo,
         hunk_ranges={"pkg/api.py": [(4, 6)]},
-        read_paths=reads(repo, *ALL_READS),
         candidate_roots=[FLOW_ROOT],
         symbols=symbols,
     )
@@ -1105,14 +1031,6 @@ def test_flowchart_node_line_out_of_range(repo: Path, symbols: RepoSymbols) -> N
     spec["nodes"][6]["evidence"]["line"] = 9999
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N7").reason == "LINE_OUT_OF_RANGE"
-
-
-def test_flowchart_node_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> None:
-    report = run_flowchart(repo, symbols, base_flowchart(), read=("pkg/api.py",))
-    assert {c.reason for c in report.elements if c.element == "node"} == {
-        "FILE_READ_UNVERIFIED"
-    }
-    assert report.spec_final["nodes"] == []
 
 
 def test_flowchart_node_symbol_not_on_line(repo: Path, symbols: RepoSymbols) -> None:
@@ -1207,7 +1125,6 @@ def test_flowchart_executable_nodes_reject_non_executable_lines(
         spec,
         repo_root=repo,
         hunk_ranges={"pkg/non_executable.py": [(1, 8)]},
-        read_paths=reads(repo, "pkg/non_executable.py"),
         candidate_roots=[NON_EXECUTABLE_ROOT],
         symbols=symbols,
     )

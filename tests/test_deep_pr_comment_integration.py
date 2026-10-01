@@ -291,9 +291,6 @@ class _FakeSDKClient:
                 MockResultMessage(
                     structured_output={
                         "issues": issues,
-                        # Issue #742: the deep per-stack parse schema requires a
-                        # ``verdicts`` property (Codex strict-mode output).
-                        "verdicts": [],
                     },
                     total_cost_usd=0.05,
                     usage={
@@ -357,7 +354,7 @@ class _FakeSDKClient:
                 model=FIXTURE_MODEL_ID,
             ),
             MockResultMessage(
-                structured_output={"issues": review_issues, "verdicts": []},
+                structured_output={"issues": review_issues},
                 total_cost_usd=0.20,
                 usage={
                     "input_tokens": 4000,
@@ -779,8 +776,8 @@ async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
     class MalformedSiblingSDK(_FakeSDKClient):
         async def query(self, prompt: str) -> None:
             await super().query(prompt)
-            # Merge follows the sweep's trajectory reads. Inject here so only
-            # live post acquisition encounters the malformed completed child.
+            # Inject at merge so live post acquisition encounters the
+            # malformed completed child.
             if not malformed_paths and "cross-stack merge agent" in prompt.lower():
                 path = _write_live_sibling_canary(malformed=True)
                 if path is not None:

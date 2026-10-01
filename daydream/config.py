@@ -319,7 +319,7 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
-# Issue #731: deep-review sharding + coverage-evidence gated uncovered sweep.
+# Issue #731: deep-review sharding.
 # Splits oversized per-language stacks into bounded, dependency-aware shards
 # that ride the existing ``stack_name``-keyed pipeline. Default-off preserves
 # the established single-agent-per-stack behavior unless explicitly enabled.

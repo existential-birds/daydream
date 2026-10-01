@@ -111,6 +111,11 @@ serial because their findings enter that review through its artifact pointer.
 
 ## Implemented behavior
 
+Automatic uncovered-file sweeps and reviewer-read coverage accounting have been removed.
+Review findings, failed-stack warnings, and bounded recovery remain; diagram citations
+are validated directly against repository source. Evaluation retains cost, timing,
+finding quality, duplicates, and citation-location checks.
+
 The host enforces investigation time and tool-start limits across backends,
 independently of native turn-limit support. Existing 60-minute hard ceilings
 remain as outer safeguards. Earlier limits now bound useful work:
@@ -121,7 +126,6 @@ remain as outer safeguards. Earlier limits now bound useful work:
 | Intent | 120 s | 12 | 60 s |
 | Alternatives | 300 s | 24 | 90 s |
 | Each language/generic/structural reviewer | 480 s | 48 | 120 s |
-| Each uncovered-file sweep | 90 s | 10 | 30 s |
 | Arbiter | 120 s | 16 | 60 s |
 | Suppression/supervision | 120 s | 12 | 60 s |
 | Merge | 180 s | 16 | 60 s |
@@ -224,15 +228,14 @@ groups still propagate their other failures. The existing real-signal recorder
 test and deterministic grouped-interrupt regressions cover this behavior.
 
 Partial stack records carry `incomplete: true`, survive adjudication rewrites
-and merge resume, and retain their stable finding identities. Their declared
-clean verdicts are discarded. Warnings still prevent approval or resolution of
+and merge resume, and retain their stable finding identities. Warnings still
+prevent approval or resolution of
 absent prior findings. Invalid or unfinished JSON is never checkpointed as a
 finding. Checkpoints are invocation-local until the phase persists them; this is
 not durable recovery from an operating-system kill during investigation.
 
 Small, whole intent/summary/file-map artifacts are shared inline (4 KiB each,
-with pointer fallback for larger/missing/invalid files). They do not count as
-source-read receipts. Source evidence and coverage gates remain in place.
+with pointer fallback for larger/missing/invalid files). Direct source validation remains in place.
 Reviewers return JSON; the host writes the review artifacts. Default strategies
 separate intent/design, local correctness, and cross-module responsibilities and
 give concrete conditions for ending an investigation.
@@ -285,9 +288,9 @@ and 2,000 seconds; bounded investigation plus finalization uses 48 reads and
 measures deadline/work reduction, not live model quality. Real-clock hung-stream
 and hung-finalizer tests verify that silent backends are bounded too.
 
-Large changes can lose review coverage under these bounds. Incomplete warnings,
-the existing uncovered-file sweep, and preserved findings make that tradeoff
-visible; they do not establish equivalent recall. More representative isolated
+Large changes can lose review coverage under these bounds. Incomplete warnings
+and preserved findings make that tradeoff visible; they do not establish equivalent
+recall. More representative isolated
 reviews and production trajectories are needed before tuning limits upward or
 claiming a broad quality or latency improvement.
 
@@ -327,8 +330,8 @@ so its usage is unknown, not zero.
 
 The reserve-only defect fixture supplies both changed functions and their contracts
 inline. Its returned findings cite that code, but no source tools ran and complete
-coverage is not established. Production clears incomplete stacks' declared verdicts
-and preserves warnings through merge/publication. Adjudication/sweep callers remain
+coverage is not established. Production preserves incomplete warnings through
+merge/publication. Adjudication callers remain
 conservative: a budget stop can cause them to discard even a valid finalized result,
 retaining earlier findings and incomplete status instead of treating the phase as
 complete.
@@ -500,13 +503,13 @@ limit.
 ### Pi discovery and prompt transport
 
 Pi discovery uses the actual live session diff path for every diff size. Intent,
-alternatives, per-stack, structural, adjudication and uncovered-file prompts
+alternatives, per-stack, structural and adjudication prompts
 retain the admitted path instead of embedding diff content. Reviewers inspect the
 relevant diff sections and source checkout with their read-only tools. Small Pi
 reviews use this same path; the former tools-disabled finite evidence packet and
 primary-owned structural delegation are no longer dispatched. Structural review
-runs explicitly. A per-stack rerun removes stale delegation artifacts; validated
-historical delegation remains readable when resuming an existing merge or fix.
+runs explicitly. A per-stack rerun replaces stale structural outputs; resumes
+load records for the current structural reviewer assignment.
 
 A durable diff reference has a separate 128 MiB streaming-validation resource
 limit. It does not consume captured prompt-input allowances (1 MiB per exact file,
@@ -516,15 +519,6 @@ read-only mode. Each retry revalidates the reference, including its content hash
 Use the supplied session path: reconstructing `<repo>/.daydream/diff.patch` can
 point into the detached public tree. INLINE transports keep their existing
 bounded capture and isolation behavior.
-
-The uncovered sweep uses the full durable hunk index for eligibility, so files
-omitted from the short display diff are still reviewed. Its prompt contains file
-assignment metadata and references, not hunks; strategy metadata is bounded in
-UTF-8 bytes. Pi discovery is read-only and the host persists structured findings and
-the Markdown sidecar. Non-Pi sweeps retain their existing access mode and bounded
-selected-file context, streamed from the durable diff without whole-file capture;
-isolated transports receive no new host-private diff pointer. A completed review without a verified source read is labeled
-as such and never credited as source-read coverage.
 
 Recovery finalization remains a tools-disabled serialization step. Pointer-only
 diffs are excluded from sanctioned content capture; reference metadata, established
@@ -546,8 +540,8 @@ wrapper; it is not byte-identical to the logical prompt. Pi also resolves existi
 system-prompt file paths directly, without an `@` prefix.
 
 Deterministic runner tests cover small and 3,690,129-byte single-file diff blocks,
-live-session admission, child-visible references, sweep findings through merge and
-report, and no-read coverage. Separate real protocol-child tests exercise large
+live-session admission, child-visible references, and findings through merge and
+report. Separate real protocol-child tests exercise large
 arbitrary prompt transport and concurrent cancellation. These checks establish
 workflow and transport behavior without claiming live-model recall or convergence.
 
@@ -576,7 +570,7 @@ one thing:
   phases. Real runs carry no `arbiter` timing bucket -- every arbiter call runs
   inside the `deep` phase -- so the arbiter number is read from
   `timing.phase_timings.deep`, which aggregates the whole deep phase (arbiter,
-  suppression, supervision, review, uncovered sweep). A legacy `arbiter` bucket
+  suppression, supervision, and review). A legacy `arbiter` bucket
   is honoured only for hand-authored corpora that predate the pipeline keying.
 - `high_severity_recall`: golden `(file, line)` pairs found among shipped items
   at `high` severity, over the corpus's golden high-severity pairs.

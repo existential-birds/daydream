@@ -38,12 +38,12 @@ def test_source_normalization_accepts_both_spellings() -> None:
     """A records filename and a bare stack name must collapse to one key.
 
     The pipeline has two producers: the loop that loads records off disk tags
-    them with the filename, while the uncovered sweep tags its records with a
+    them with the filename, while direct callers can tag records with a
     bare stack name. Both have to route to the same file.
     """
     assert stack_name_from_records_source("stack-python-records.json") == "python"
     assert stack_name_from_records_source("stack-structure-records.json") == "structure"
-    assert stack_name_from_records_source("uncovered") == "uncovered"
+    assert stack_name_from_records_source("python") == "python"
 
 
 def test_unrecognized_source_shape_passes_through_unchanged() -> None:

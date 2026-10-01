@@ -314,41 +314,6 @@ def _eroded_main_repo(tmp_path: Path) -> Path:
     return project
 
 
-def _uncovered_sweep_target(tmp_path: Path) -> Path:
-    """Git repo whose diff has one file NO per-stack reviewer reads.
-
-    ``notes.txt`` is an ambiguous-extension file routed to the generic stack;
-    the stub leaves it unread (``per_stack_unread``) and its hunk is large
-    enough (6 added lines) to clear the sweep's ``uncovered_sweep_min_hunk_lines``
-    budget, so it is the single file the sweep covers. The other files' hunks
-    are trivially small (<5 changed lines), so the sweep has exactly one target.
-    """
-    project = tmp_path / "sweep_target"
-    project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'world'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>hello</div>;\n")
-    (project / "README.md").write_text("# Project\n")
-    _init_repo(project)
-    _git(project, "add", ".")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
-    (project / "App.tsx").write_text("export const App = () => <div>universe</div>;\n")
-    (project / "README.md").write_text("# Project\n\nUpdated.\n")
-    (project / "notes.txt").write_text("".join(f"line{i}\n" for i in range(1, 7)))
-    _git(project, "add", ".")
-    _commit(project, "change")
-    return project
-
-
-def _install_uncovered_sweep_stub(monkeypatch: pytest.MonkeyPatch, target: Path) -> _StubBackend:
-    """Leave notes.txt unread by per-stack agents so the sweep can exercise it."""
-    stub = _install_stub_backend(monkeypatch, target)
-    stub.per_stack_emit_reads = True
-    stub.per_stack_unread = frozenset({"notes.txt"})
-    return stub
-
-
 def _uid_records(deep: Path, stack: str) -> list[dict[str, Any]]:
     """Return the issues list on disk for *stack*'s per-stack records file."""
     return _record_issues(json.loads((deep / f"stack-{stack}-records.json").read_text()))

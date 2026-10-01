@@ -209,7 +209,7 @@ import types  # noqa: E402  (rubric-scoring section)
 
 from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, _clip, score_trajectory  # noqa: E402
 
-REWARD_VERSION_RUBRIC = "2026.09.04-rubric-1"
+REWARD_VERSION_RUBRIC = "2026.10.01-rubric-1"
 """Bump on any change to rubric weights, penalty semantics, or composite shape.
 
 Read at call time so a test can monkeypatch
@@ -236,18 +236,11 @@ class RubricV2Weights:
             the term that cannot be substituted by intrinsic or golden signals).
         w_false_positive: Weight of the subtractive CR-Bench false-positive
             penalty. Must be positive (M2).
-        w_localization: Weight of the localization term (grounded findings /
-            total findings).
-        w_tool_grounded: Weight of the tool-grounded term (fraction of
-            findings carrying tool evidence); absent when no finding reports
-            tool usage.
         w_intrinsic: Weight of the shipped intrinsic composite (signal only).
     """
 
     w_learned_outcome: float = 0.4
     w_false_positive: float = 0.3
-    w_localization: float = 0.2
-    w_tool_grounded: float = 0.1
     w_intrinsic: float = 0.5
 
     def __post_init__(self) -> None:
@@ -265,8 +258,6 @@ DEFAULT_RUBRIC_WEIGHTS = RubricV2Weights()
 _WEIGHT_FIELDS = (
     "w_learned_outcome",
     "w_false_positive",
-    "w_localization",
-    "w_tool_grounded",
     "w_intrinsic",
 )
 
@@ -307,10 +298,6 @@ class RubricV2Breakdown:
         signal_to_noise: CR-Bench Usefulness Rate ``(total − fp)/total``
             telemetry (not a composite term), or ``None`` when ``total`` is
             zero.
-        localization: Fraction of findings grounded (``grounded/total``), or
-            ``None`` when ``total`` is zero.
-        tool_grounded: Fraction of findings carrying tool evidence, or
-            ``None`` when no finding reports tool usage.
         golden_overlap: Telemetry — fraction of findings present in the
             supplied gold evidence set (``0.0`` when none supplied). Carried
             as a signal only; never a substitute for the learned term (M6).
@@ -329,8 +316,6 @@ class RubricV2Breakdown:
     learned_outcome: float | None
     false_positive_penalty: float | None
     signal_to_noise: float | None
-    localization: float | None
-    tool_grounded: float | None
     golden_overlap: float
     intrinsic_composite: float | None
     terms: dict[str, float | None]
@@ -348,7 +333,6 @@ def score_review(
     findings: list[dict[str, Any]],
     fp_count: int,
     total_findings: int,
-    grounded: int,
     breakdown: bool = False,
     gold_texts: frozenset[str] | set[str] | None = None,
     weights: RubricV2Weights = DEFAULT_RUBRIC_WEIGHTS,
@@ -363,7 +347,6 @@ def score_review(
             finding id.
         fp_count: Number of the findings judged false positives.
         total_findings: Total number of findings reported.
-        grounded: Number of findings grounded in real code.
         breakdown: When ``True`` return the full :class:`RubricV2Breakdown`;
             otherwise return the composite scalar only.
         gold_texts: Optional set of finding texts known to overlap gold
@@ -380,10 +363,6 @@ def score_review(
     if not 0 <= fp_count <= total_findings:
         raise ValueError(
             f"fp_count must be in [0, total_findings] (got fp_count={fp_count!r}, total={total_findings!r})."
-        )
-    if not 0 <= grounded <= total_findings:
-        raise ValueError(
-            f"grounded must be in [0, total_findings] (got grounded={grounded!r}, total={total_findings!r})."
         )
     checked = _validate_findings(findings)
 
@@ -403,14 +382,6 @@ def score_review(
     false_positive_penalty = fp_count / total_findings if total_findings else None
     signal_to_noise = (total_findings - fp_count) / total_findings if total_findings else None
 
-    # Localization term: grounded / total.
-    localization: float | None = grounded / total_findings if total_findings > 0 else None
-
-    # Tool-grounded term: present only when at least one finding reports
-    # tool evidence; absent otherwise (None, never imputed 0.0).
-    with_tools = [f for f in checked if f.get("tools")]
-    tool_grounded: float | None = len(with_tools) / len(checked) if with_tools else None
-
     # Golden overlap: telemetry only (never a composite substitute, M6).
     gold = gold_texts or set()
     golden_overlap = len([f for f in checked if str(f["text"]) in gold]) / len(checked) if checked else 0.0
@@ -421,7 +392,6 @@ def score_review(
     intrinsic = score_trajectory(
         ScoringInputs(
             verifier_verdicts=verdicts or None,
-            grounding_rate=grounded / total_findings if total_findings else None,
             format_valid=True,
             length=total_chars or None,
         ),
@@ -432,8 +402,6 @@ def score_review(
     terms: dict[str, float | None] = {
         "learned_outcome": learned,
         "fp_penalty": -false_positive_penalty if false_positive_penalty is not None else None,
-        "localization": localization,
-        "tool_grounded": tool_grounded,
         "intrinsic_composite": intrinsic_composite,
         "golden_overlap": golden_overlap,  # telemetry only — never contributes (M6)
     }
@@ -457,8 +425,6 @@ def score_review(
         learned_outcome=learned,
         false_positive_penalty=false_positive_penalty,
         signal_to_noise=signal_to_noise,
-        localization=localization,
-        tool_grounded=tool_grounded,
         golden_overlap=golden_overlap,
         intrinsic_composite=intrinsic_composite,
         terms=terms,
@@ -472,8 +438,6 @@ _TERM_WEIGHTS: types.MappingProxyType[str, str] = types.MappingProxyType(
     {
         "learned_outcome": "w_learned_outcome",
         "fp_penalty": "w_false_positive",
-        "localization": "w_localization",
-        "tool_grounded": "w_tool_grounded",
         "intrinsic_composite": "w_intrinsic",
     }
 )

@@ -23,8 +23,8 @@ from daydream.archive._schema import RUNS_COLUMNS, RunColumn
 from daydream.archive.index import _get_connection, _run_upsert_values
 from tests.harness.trajectory import make_manifest
 
-# Frozen witness: the whole generated CREATE TABLE text at the refactor commit.
-FROZEN_DDL_SHA256 = "eac468a7be8b7830b245925e55e3be2d03abceeb3f443d9332404e0ff36e68c8"
+# Current fresh-database shape after removing reviewer-read metrics.
+CURRENT_DDL_SHA256 = "92d502a2e38d7147c30f0ca5c1d8ab89da92cc8f9c734fe84a9c3ebb6d4db41a"
 
 # Frozen witness: the columns of the original v1 runs table (every column that
 # is already present in any legacy database by construction, so it must never
@@ -104,29 +104,31 @@ FROZEN_MIGRATION_ENTRIES = frozenset(
 WRITER_OWNED = frozenset({"rubric_json", "has_posterior"})
 
 ADDITIVE_NAMES = frozenset(name for name, _ in FROZEN_MIGRATION_ENTRIES)
-ALL_NAMES = V1_BASELINE_NAMES | ADDITIVE_NAMES
+OBSOLETE_NAMES = frozenset({"coverage_ratio", "grounding_rate"})
+CURRENT_BASELINE_NAMES = V1_BASELINE_NAMES - OBSOLETE_NAMES
+ALL_NAMES = CURRENT_BASELINE_NAMES | ADDITIVE_NAMES
 UPSERT_NAMES = ALL_NAMES - WRITER_OWNED
 
 
 def test_the_declaration_lists_every_column_exactly_once() -> None:
     names = [col.name for col in RUNS_COLUMNS]
     assert set(names) == ALL_NAMES
-    assert len(names) == len(set(names)) == 58
+    assert len(names) == len(set(names)) == 56
     assert all(col.definition.strip() for col in RUNS_COLUMNS)
 
 
 def test_the_declaration_partitions_additive_and_writer_owned_columns() -> None:
     assert {col.name for col in RUNS_COLUMNS if col.additive} == ADDITIVE_NAMES
     # The v1 witness: a column declared "already present" cannot be new.
-    assert {col.name for col in RUNS_COLUMNS if not col.additive} == V1_BASELINE_NAMES
+    assert {col.name for col in RUNS_COLUMNS if not col.additive} == CURRENT_BASELINE_NAMES
     assert {col.name for col in RUNS_COLUMNS if col.upserted} == UPSERT_NAMES
 
 
-def test_create_table_is_generated_and_byte_identical_to_the_frozen_text() -> None:
+def test_create_table_is_generated_with_obsolete_metrics_removed() -> None:
     assert _schema._CREATE_TABLE == _schema._create_table_sql(RUNS_COLUMNS)
     assert (
-        hashlib.sha256(_schema._CREATE_TABLE.encode()).hexdigest() == FROZEN_DDL_SHA256
-    ), f"generated CREATE TABLE drifted from the frozen text:\n{_schema._CREATE_TABLE}"
+        hashlib.sha256(_schema._CREATE_TABLE.encode()).hexdigest() == CURRENT_DDL_SHA256
+    ), f"generated CREATE TABLE drifted from the current text:\n{_schema._CREATE_TABLE}"
     lines = _schema._CREATE_TABLE.splitlines()
     assert lines[0] == "" and lines[1] == "CREATE TABLE IF NOT EXISTS runs ("
     assert lines[-1] == ")"
@@ -195,7 +197,9 @@ def _v1_baseline_sql() -> str:
     # Derived from the frozen V1_BASELINE_NAMES witness, never from the
     # ``additive`` flag under test: a column newly mis-marked
     # ``additive=False`` must stay absent here so fresh-vs-upgraded diverges.
-    return _schema._create_table_sql([col for col in RUNS_COLUMNS if col.name in V1_BASELINE_NAMES])
+    columns = [col for col in RUNS_COLUMNS if col.name in V1_BASELINE_NAMES]
+    columns.extend(RunColumn(name, "REAL") for name in sorted(OBSOLETE_NAMES))
+    return _schema._create_table_sql(columns)
 
 
 def _pre_v4_sql() -> str:
@@ -253,7 +257,8 @@ def test_fresh_and_upgraded_databases_end_with_the_same_column_set(
     fresh_dir = tmp_path / "fresh"
     _open_legacy(legacy_dir, build_legacy())
 
-    assert _runs_columns(legacy_dir) == _runs_columns(fresh_dir) == set(ALL_NAMES)
+    legacy_columns = _runs_columns(legacy_dir)
+    assert legacy_columns - OBSOLETE_NAMES == _runs_columns(fresh_dir) == set(ALL_NAMES)
 
 
 def test_generation_tracks_a_mutated_declaration() -> None:
@@ -283,3 +288,31 @@ def test_generation_tracks_a_mutated_declaration() -> None:
     assert "    zzz_probe TEXT NOT NULL DEFAULT 'probe'\n" in namespace["_CREATE_TABLE"]
     assert ("zzz_probe", "TEXT NOT NULL DEFAULT 'probe'") in namespace["_migration_entries"](mutated_columns)
     assert ":zzz_probe" in namespace["_UPSERT_SQL"]
+
+
+def test_old_database_keeps_obsolete_values_without_recomputing(tmp_path: Path) -> None:
+    _open_legacy(tmp_path, _v1_baseline_sql())
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    try:
+        conn.execute("ALTER TABLE runs ADD COLUMN composite_reward REAL")
+        conn.execute(
+            "UPDATE runs SET grounding_rate = 0.25, coverage_ratio = 0.75 "
+            "WHERE session_id = 'legacy-row'"
+        )
+        conn.execute("UPDATE runs SET composite_reward = 0.4 WHERE session_id = 'legacy-row'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = _get_connection(tmp_path)
+    try:
+        row = conn.execute(
+            "SELECT grounding_rate, coverage_ratio, composite_reward FROM runs WHERE session_id = 'legacy-row'"
+        ).fetchone()
+        assert tuple(row) == (0.25, 0.75, 0.4)
+    finally:
+        conn.close()
+
+    rows = index.query_runs(archive_dir=tmp_path)
+    assert rows[0]["session_id"] == "legacy-row"
+    assert rows[0]["composite_reward"] == 0.4

@@ -170,7 +170,7 @@ async def test_review_mode_writes_findings_artifact(
         # Issue #742: the deep per-stack parse schema requires a ``verdicts``
         # property (Codex strict-mode output).
         ResultEvent(
-            structured_output={"issues": [issue], "verdicts": []},
+            structured_output={"issues": [issue]},
             continuation=None,
         ),
     ])

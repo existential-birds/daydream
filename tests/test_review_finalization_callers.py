@@ -26,7 +26,7 @@ def _stop_then_finalize(result: dict[str, Any]) -> ScriptedBackend:
 async def test_structural_finalizer_captures_prioritized_diff_without_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
 ) -> None:
-    backend = _stop_then_finalize({"issues": [], "verdicts": []})
+    backend = _stop_then_finalize({"issues": []})
     monkeypatch.setattr(phases, "ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
     diff = tmp_path / "diff.patch"
     diff.write_text("diff --git a/api.py b/api.py\n+FOUNDATIONAL_DIFF\n")
@@ -50,7 +50,7 @@ async def test_structural_finalizer_captures_prioritized_diff_without_session(
     records = next(tmp_path.rglob("stack-structure-records.json"))
     saved = json.loads(records.read_text())
     assert saved["incomplete"] is True
-    assert saved["verdicts"] == []
+    assert saved["issues"] == []
 
 
 async def test_merge_finalizer_prioritizes_records_and_keeps_budget_failure(
@@ -59,7 +59,7 @@ async def test_merge_finalizer_prioritizes_records_and_keeps_budget_failure(
     backend = _stop_then_finalize({"items": []})
     monkeypatch.setattr(phases, "ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
     records = tmp_path / "stack-python-records.json"
-    records.write_text(json.dumps({"issues": [{"description": "ESTABLISHED_RECORD"}], "verdicts": []}))
+    records.write_text(json.dumps({"issues": [{"description": "ESTABLISHED_RECORD"}]}))
     intent = tmp_path / "intent.md"
     intent.write_text("Preserve contracts")
     alternatives = tmp_path / "alternatives.json"

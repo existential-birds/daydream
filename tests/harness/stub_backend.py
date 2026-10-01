@@ -257,66 +257,14 @@ class StubBackend:
         # the real pre_scan degrade path runs: specialist_failed -> completed
         # False -> exploration dir materialized without a cache-key.
         self.fail_exploration: bool = False
-        # Issue #309 (uncovered-file sweep): knobs for the per-stack review
-        # branches' simulated reads and the sweep branch/parse.
-        # When True, the per-stack / generic review branch emits a Read
-        # ToolStartEvent per file in its scope (except `per_stack_unread`), so
-        # analyze_coverage sees per-stack reviewers as having read their own
-        # files -- leaving only genuinely-unread files uncovered.
+        # Paired source reads let recovery tests exercise real review evidence.
         self.per_stack_emit_reads: bool = False
-        # Files in a stack's scope to NOT emit a read for, even when
-        # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
-        # leave one diff file unread by every reviewer).
-        self.per_stack_unread: frozenset[str] = frozenset()
-        self.read_result_extra: dict[str, Any] | None = None
-        # Issue #742: when set, the per-stack parse branch emits these as the
-        # declared per-file verdicts in its structured_output
-        # (``{"issues": issues, "verdicts": self.parse_declared_verdicts}``),
-        # so the orchestrator's ``include_verdicts=True`` parse surfaces them
-        # and the clean-verdict gate reconciles them against completed reads.
-        # Default ``None`` keeps the existing parse output (no ``verdicts``
-        # key), so all current tests are unchanged.
-        self.parse_declared_verdicts: list[dict[str, Any]] | None = None
-        # When set, the sweep parse branch emits its finding for this file
-        # (instead of the default api.py), so stack-uncovered-records.json names
-        # the swept file.
-        self.sweep_file: str | None = None
-        # When True, the uncovered-file-sweep branch returns success without
-        # either structured output or a review file -- a backend can return
-        # normally while producing nothing (issue #309 finding 7). A successful
-        # return must NOT be recorded as completed coverage.
-        self.sweep_no_output: bool = False
-        # When True, the sweep still returns valid structured output but omits
-        # the legacy Markdown review sidecar. Real structured-output backends
-        # can behave this way; the host-owned records artifact remains the
-        # authoritative finding source.
-        self.sweep_no_review_file: bool = False
-        # When True, the uncovered-file-sweep branch writes its review output
-        # but emits NO Read tool call -- a successful hunk-only review (issue
-        # #309 finding 6). The file must be recorded as a completed ATTEMPT
-        # ("completed without verified source read"), never as covered.
-        self.sweep_no_read: bool = False
-        # When True, the uncovered-file-sweep branch raises -- exercising the
-        # sweep's fail-open contract.
-        self.fail_sweep: bool = False
         # Issue #1113 (grounded diagrams). Per-kind queue of specs the diagram
         # author branch returns: index 0 answers the first turn, index 1 the
         # repair turn (the last entry repeats if the queue is shorter). A kind
         # with no queue entry gets the empty spec for its shape, which grounds
         # to an omission rather than a failure.
         self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
-        # When True, the diagram branch emits a COMPLETED Read (paired start +
-        # result) for every file its returned spec cites, so the grounding
-        # pass's read receipts are satisfied. Off by default, which is the
-        # fail-closed case: every citation fails FILE_READ_UNVERIFIED.
-        self.diagram_emit_reads: bool = False
-        self.diagram_shell_reads: bool = False
-        # Explicit per-kind read paths, replacing the spec-derived list above
-        # (for tests that need a read of a file the spec does not cite).
-        self.diagram_reads: dict[str, list[str]] = {}
-        # Files to withhold a read for even when diagram_emit_reads is on --
-        # the FILE_READ_UNVERIFIED knob.
-        self.diagram_unread: frozenset[str] = frozenset()
         # When set, the diagram author branch mints a ContinuationToken with
         # this session id, so the repair turn can resume the session. Without
         # it there is no continuation and the repair turn never runs.
@@ -385,39 +333,6 @@ class StubBackend:
             return "flowchart", False
         return None
 
-    @staticmethod
-    def _diagram_spec_paths(spec: dict[str, Any]) -> list[str]:
-        """Every repo-relative path the spec cites, de-duplicated, in spec order.
-
-        The paths a truthful author agent would have read. Repo-relative is
-        fine: the coverage matcher accepts an exact relative match.
-        """
-        paths: list[str] = []
-
-        def _add(value: Any) -> None:
-            if isinstance(value, str) and value and value not in paths:
-                paths.append(value)
-
-        for participant in spec.get("participants") or []:
-            if isinstance(participant, dict):
-                for path in participant.get("files") or []:
-                    _add(path)
-        for message in spec.get("messages") or []:
-            if isinstance(message, dict) and isinstance(message.get("evidence"), dict):
-                _add(message["evidence"].get("file"))
-        for block in spec.get("blocks") or []:
-            if not isinstance(block, dict):
-                continue
-            for branch in block.get("branches") or []:
-                if isinstance(branch, dict) and isinstance(branch.get("evidence"), dict):
-                    _add(branch["evidence"].get("file"))
-        root = spec.get("root")
-        if isinstance(root, dict):
-            _add(root.get("file"))
-        for node in spec.get("nodes") or []:
-            if isinstance(node, dict) and isinstance(node.get("evidence"), dict):
-                _add(node["evidence"].get("file"))
-        return paths
 
     @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
@@ -431,19 +346,6 @@ class StubBackend:
         if m is None:
             return []
         return [part.strip() for part in m.group(1).split(",") if part.strip()]
-
-    def _read_result(self, *, id: str, output: str) -> ToolResultEvent:
-        """Build a read ``ToolResultEvent``, applying :attr:`read_result_extra`.
-
-        Default ``None`` yields the same ``is_error=False`` result as before;
-        when set, its keys (typically ``is_error``/``exit_code``/``status``/
-        ``cancelled``/``truncated``) override the successful defaults so a test
-        can simulate a damaged read observation.
-        """
-        fields: dict[str, Any] = {"id": id, "output": output, "is_error": False}
-        if self.read_result_extra is not None:
-            fields.update(self.read_result_extra)
-        return ToolResultEvent(**fields)
 
     def _tick(self) -> None:
         """Charge one emitted event's worth of injected clock time, if configured.
@@ -614,22 +516,6 @@ class StubBackend:
                 spec = {"participants": [], "messages": [], "blocks": []}
             else:
                 spec = {"root": None, "nodes": [], "edges": []}
-            if self.diagram_emit_reads:
-                read_paths = (
-                    self.diagram_reads.get(f"{kind}-repair") if is_repair else None
-                ) or self.diagram_reads.get(kind) or self._diagram_spec_paths(spec)
-                for index, path in enumerate(read_paths):
-                    if path in self.diagram_unread:
-                        continue
-                    call_id = f"diagram-{kind}-{turn}-read-{index}"
-                    yield ToolStartEvent(
-                        id=call_id, name="Bash" if self.diagram_shell_reads else "Read",
-                        input={"command": f"for f in missing.py {path}; do cat \"$f\"; done"}
-                        if self.diagram_shell_reads else {"file_path": path},
-                    )
-                    # Paired result: a bare start is an INTERRUPTED read and
-                    # yields no coverage, so grounding would reject the citation.
-                    yield self._read_result(id=call_id, output="file content")
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output=spec,
@@ -700,58 +586,6 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Issue #309: uncovered-file sweep reviewer. Dispatch marker phrase is
-        # unique to build_uncovered_sweep_prompt. Emits a Read of the swept
-        # file (so post-run analyze_coverage counts it as read) and writes a
-        # review the sweep parse pass turns into a PER_STACK_RECORD_SCHEMA
-        # finding for that file. fail_sweep raises to exercise the fail-open
-        # contract.
-        if "uncovered file sweep" in pl:
-            if self.fail_sweep:
-                raise RuntimeError("stub: uncovered-file sweep blew up")
-            file_match = re.search(r"changed file (\S+) was NOT read", prompt)
-            swept_file = file_match.group(1) if file_match else "notes.txt"
-            if not self.sweep_no_output and not self.sweep_no_review_file:
-                out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
-                if out_match is not None:
-                    out_path = Path(out_match.group(1).rstrip("."))
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(
-                        f"# Review (uncovered)\n\n## Issues\n\n"
-                        f"1. [{swept_file}:1] Uncovered-file finding for {swept_file}\n"
-                    )
-            if not self.sweep_no_read:
-                yield ToolStartEvent(
-                    id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
-                )
-                yield self._read_result(id=f"sweep-read-{swept_file}", output="sweep read returned")
-            # Issue #745 (AC4): the sweep reviewer emits UNCOVERED_SWEEP_SCHEMA
-            # structured output directly (no parse-uncovered-<n> fork).
-            yield TextEvent(text="")
-            if self.sweep_no_output:
-                # Backend succeeds but produces nothing: no structured output
-                # either, so the sweep must not claim coverage (issue #309 f7).
-                yield ResultEvent(structured_output=None, continuation=None)
-                return
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": f"Sweep finding for {swept_file}",
-                            "file": swept_file,
-                            "line": 1,
-                            "severity": self.parse_severity or "low",
-                            "confidence": "MEDIUM",
-                            "rationale": "stub",
-                            "evidence": f"{swept_file}:1",
-                        }
-                    ]
-                },
-                continuation=None,
-            )
-            return
-
         # Per-stack review -> write a markdown file + emit done.
         m = re.search(r"you are reviewing the (\S+) stack", pl)
         if m is None:
@@ -768,14 +602,11 @@ class StubBackend:
             if self.per_stack_emit_reads:
                 scope_files = self._stack_scope_files(prompt)
                 for scope_file in scope_files:
-                    if scope_file in self.per_stack_unread:
-                        continue
                     yield ToolStartEvent(
                         id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
                     )
-                    # Paired result: the sweep's coverage computation credits
-                    # the file only when this observation is not damaged.
-                    yield self._read_result(id=f"read-{scope_file}", output="file content")
+                    # Budget recovery retains only completed source reads.
+                    yield ToolResultEvent(id=f"read-{scope_file}", output="file content", is_error=False)
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
@@ -816,7 +647,6 @@ class StubBackend:
             yield ResultEvent(
                 structured_output={
                     "issues": issues,
-                    "verdicts": self.parse_declared_verdicts or [],
                 },
                 continuation=None,
             )
@@ -904,7 +734,7 @@ class StubBackend:
                 # Echo the on-disk per-stack records as merged items so the
                 # rendered artifact reflects any arbiter revisions (#168).
                 # Issue #742: fresh-run records files carry the dict shape
-                # {"issues": [...], "verdicts": [...]}; normalize to the
+                # {"issues": [...]}; normalize to the
                 # bare issues list (legacy files stay bare lists).
                 echoed: list[dict[str, Any]] = []
                 next_id = 1

@@ -610,7 +610,6 @@ async def test_complete_overlapping_deep_run_timing_completeness(
         "sequence": [dr.sequence_spec()],
         "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
     }
-    backend.diagram_emit_reads = True
     backend.per_stack_emit_reads = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
 

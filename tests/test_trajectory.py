@@ -32,7 +32,6 @@ from daydream.backends import (
 )
 from daydream.cli import _signal_handler
 from daydream.deep.artifacts import push_verdict_path, remote_ci_handoff_path, remote_ci_verdict_path
-from daydream.deep.coverage import _completed_read_paths
 from daydream.eval.analyzer import analyze_costs, load_trajectories
 from daydream.phases import _do_commit
 from daydream.trajectory import (
@@ -352,7 +351,7 @@ async def test_finish_marks_in_flight_tool_on_its_host_step(tmp_path: Path, host
     events.append(ResultEvent(structured_output=None, continuation=None))
     _, steps = await _record_events(tmp_path, *events)
     result = _single_observation_result(steps, 0)
-    # A marker without source_call_id cannot derive as a completed read.
+    # The marker is distinct from a completed tool-call result.
     assert result.source_call_id is None
     assert result.content == INCOMPLETE_CONTENT
     assert result.extra == {"is_error": True, "status": "interrupted"}
@@ -370,59 +369,6 @@ async def test_late_result_before_finish_still_amends_normally(tmp_path: Path) -
     result = _single_observation_result(steps, 0)
     assert result.content == "made"
     assert result.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
-
-
-# Regression: interruption markers vs the deep-flow completed-read derivation.
-# deep/coverage._completed_read_paths -- shared by the uncovered-file sweep,
-# the per-stack verdict evidence gate and diagram-grounding receipts -- treats
-# every observation result with a STRING source_call_id as a completed tool
-# call, so an interrupted read's marker must carry NO source_call_id: otherwise
-# a diff file mid-read at interruption would derive as covered/reviewed and the
-# documented fail-open invariant ("an interrupted read must NOT count as
-# coverage") flips to fail-closed.
-
-
-async def test_completed_read_derivation_sees_finished_read(tmp_path: Path) -> None:
-    """Positive control: a Read paired with its result IS a completed read."""
-
-    traj = await _drive(
-        tmp_path,
-        ToolStartEvent(id="done-read", name="Read", input={"file_path": "src/app.py"}),
-        ToolResultEvent(id="done-read", output="print('ok')", is_error=False),
-        ResultEvent(structured_output=None, continuation=None),
-    )
-    assert "src/app.py" in _completed_read_paths(traj)
-
-
-async def test_interrupted_read_never_completes_in_fork_review_trajectory(
-    recorder: TrajectoryRecorder,
-) -> None:
-    """A Read still in flight at finish() stays derivable-uncovered in a deep-<stack> fork.
-
-    Recording an in-flight Read through the recorder (the exact failure shape
-    of budget truncation / backend cancel / CLI death mid-read) and deriving
-    completed reads the way the deep-flow consumers do must NOT yield the file:
-    fail-open means the sweep still sees it.
-    """
-
-    async with recorder:
-        async with recorder.fork("deep-python") as child:
-            async with child.invocation(phase=DaydreamPhase.DEEP) as inv:
-                inv.observe(ToolStartEvent(id="hung-read", name="Read", input={"file_path": "src/app.py"}))
-    # finish() marked the in-flight read interrupted when the invocation exited.
-    fork_traj = read_trajectory(child.path)
-    assert "src/app.py" not in _completed_read_paths(fork_traj)
-    agent_steps = [s for s in fork_traj["steps"] if s["source"] == "agent"]
-    results = [r for s in agent_steps for r in (s.get("observation") or {}).get("results") or []]
-    assert results == [
-        {
-            "content": INCOMPLETE_CONTENT,
-            "extra": {"is_error": True, "status": "interrupted"},
-        }
-    ]
-    # The marker serializes with NO source_call_id key (null excludes from
-    # JSON), so no consumer can derive it as a completed tool call.
-    assert "source_call_id" not in results[0]
 
 
 # Behavior: mark_aborted stamps extra["stop_reason"] on the closing step

@@ -125,7 +125,6 @@ def _snapshot_manifest(session_id: str, repo_slug: str, skill: str, outcome_labe
         branch="feat/x",
         base_branch="main",
         head_sha="abc123",
-        grounding_rate=0.9,
         outcome_labels=json.dumps(list(outcome_labels)),
         archive_path=f"/archive/runs/{session_id}",
         remote_url=f"https://github.com/{repo_slug}",

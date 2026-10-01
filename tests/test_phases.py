@@ -46,12 +46,10 @@ from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
 from daydream.phases import (
     _FIX_GUARDRAILS,
     _PR_BODY_MAX_CHARS,
-    FEEDBACK_SCHEMA,
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
     FIX_VERIFY_VERDICTS,
     FIX_VERIFY_VERDICTS_SCHEMA,
-    PER_STACK_RECORD_SCHEMA,
     TEST_OUTPUT_TAIL_LINES,
     PushAttemptError,
     TestAttemptEvidence,
@@ -657,7 +655,6 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     assert "under-commit" not in out
 
 
-
 @pytest.mark.asyncio
 async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     git_repo: Path,
@@ -937,7 +934,6 @@ async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
     assert "app.py" in committed
     # Fix-created new file is untracked at snapshot time and dropped.
     assert "generated.py" not in committed
-
 
 
 def _init_committed_repo(path: Path, branch: str) -> Path:
@@ -1774,9 +1770,6 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
     assert "assumes single-threaded" in prompt
 
 
-
-
-
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_batches_same_file_findings(
     tmp_path: Path,
@@ -1853,9 +1846,6 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(
     assert 1 not in fix_calls and 2 not in fix_calls
     # The fallback succeeded, so no failure was collected.
     assert failures == {}
-
-
-
 
 
 @pytest.mark.asyncio
@@ -1935,7 +1925,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
         events=(
             TextEvent(text="done"),
             ResultEvent(
-                structured_output={"issues": [], "verdicts": []}, continuation=None
+                structured_output={"issues": []}, continuation=None
             ),
         )
     )
@@ -3140,7 +3130,6 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     # The backtick-only suggestion never produced an executable argv and was
     # never handed to run_test_command; no shlex/empty-argv crash.
     assert calls == []
-
 
 
 @pytest.mark.asyncio
@@ -4745,7 +4734,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         intent = _write_sized(deep / "intent.md", "intent", 6_361)
         alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
         dedup = _write_sized(deep / "dedup.json", "[]", 60)
-        records = '{"issues": [], "verdicts": []}'
+        records = '{"issues": []}'
         python_records = _write_sized(deep / "python-records.json", records, 7_593)
         generic_records = _write_sized(deep / "generic-records.json", records, 2_180)
         structural = _write_sized(deep / "structural-records.json", "[]", 7_880)
@@ -6002,18 +5991,6 @@ def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
     assert len(multibyte) < INLINE_DIFF_BUDGET_BYTES
     assert len(multibyte.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES
     assert _inlineable_diff(multibyte) is None
-
-
-async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched() -> None:
-    """Key Decision 2: PER_STACK_RECORD_SCHEMA gains per-file verdicts; FEEDBACK_SCHEMA is not mutated."""
-    props = PER_STACK_RECORD_SCHEMA["properties"]
-    assert "verdicts" in props
-    v_items = props["verdicts"]["items"]["properties"]
-    assert {"path", "lines_read", "verdict"}.issubset(v_items)
-    assert v_items["verdict"]["enum"] == ["clean", "has_findings", "not_reviewed", "unknown"]
-    assert v_items["lines_read"]["type"] == ["integer", "null"]
-    assert "verdicts" not in FEEDBACK_SCHEMA["properties"]  # base schema untouched
-    assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved
 
 
 def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path: Path) -> None:

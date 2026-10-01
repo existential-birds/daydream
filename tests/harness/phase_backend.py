@@ -168,7 +168,7 @@ class PhaseDispatchBackend:
                 self._review_call += 1
                 issues = _shape_issues(issues, severity="medium")
                 yield ResultEvent(
-                    structured_output={"issues": issues, "verdicts": []},
+                    structured_output={"issues": issues},
                     continuation=None,
                 )
             else:
@@ -182,11 +182,8 @@ class PhaseDispatchBackend:
             self._parse_call += 1
             issues = _shape_issues(issues)
             yield TextEvent(text="Parsed.")
-            # Issue #742: the deep per-stack parse schema requires a
-            # ``verdicts`` property (Codex strict-mode output), so the parse
-            # payload always carries it (empty when not exercised).
             yield ResultEvent(
-                structured_output={"issues": issues, "verdicts": []}, continuation=None
+                structured_output={"issues": issues}, continuation=None
             )
         elif "post-fix fix-verifier agent" in prompt_lower:
             ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]

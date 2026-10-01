@@ -17,13 +17,11 @@ import copy
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
-from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
-from rich.console import Console
 
 from daydream import pr_review
 from daydream.artifact_visibility import (
@@ -32,6 +30,7 @@ from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,
 )
+from daydream.backends import ToolResultEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import diagram_steps as deep
 from daydream.deep.diagram_grounding import RepoSymbols
@@ -44,7 +43,6 @@ from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnavailable
 from daydream.runner import RunConfig, run
-from daydream.ui import print_warning
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
@@ -177,20 +175,12 @@ def review_run(
         target: Path,
         *,
         specs: dict[str, list[dict[str, Any]]] | None = None,
-        emit_reads: bool = True,
-        opaque_reads: bool = False,
-        unread: frozenset[str] = frozenset(),
-        reads: dict[str, list[str]] | None = None,
         session_id: str | None = None,
         fail: frozenset[str] = frozenset(),
         **config_overrides: Any,
     ) -> tuple[int, StubBackend]:
         stub = install_stub_backend(monkeypatch, target)
         stub.diagram_specs = specs or {}
-        stub.diagram_emit_reads = emit_reads
-        stub.diagram_shell_reads = opaque_reads
-        stub.diagram_unread = unread
-        stub.diagram_reads = reads or {}
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
         config_overrides.setdefault("output_mode", "comment")
@@ -291,11 +281,8 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     report = (target / ".review-output.md").read_text(encoding="utf-8")
     assert "## Diagrams" in report
     assert SEQUENCE_HEADING in report
-    # The section is inserted directly after ``# Review`` and leaves every
-    # other section -- including the ``## Coverage`` block ``load-items``
-    # appended before this step ran -- exactly where it was.
+    # The diagram section sits after the report title and before findings.
     assert report.index("# Review") < report.index("## Diagrams")
-    assert report.index("## Diagrams") < report.index("## Coverage")
     assert report.index("## Diagrams") < report.index("## Issues")
     deep_report = (target / ".daydream" / "deep" / "review-output.md").read_text(
         encoding="utf-8"
@@ -606,80 +593,43 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
     assert FLOWCHART_HEADING in captured_post.body()
 
 
-# --- Spec test 6: read receipts ---------------------------------------------
-
-
-async def test_unread_evidence_file_omits_sequence_when_pairs_break(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
-) -> None:
-    """Unread calls also invalidate their dependent replies, below the render floor."""
-    target = dr.build_cross_module_repo(tmp_path)
-
-    exit_code, _ = await review_run(
-        target,
-        specs={"sequence": [dr.sequence_spec()]},
-        unread=frozenset({"pkg_b/client.py"}),
-    )
-
-    assert exit_code == 0
-    sequence = _artifact(target)["results"]["sequence"]
-    assert sequence["status"] == "omitted"
-    assert len(sequence["spec_final"]["messages"]) == 1
-    assert sequence["omit_reasons"] == ["TOO_FEW_MESSAGES", "TOO_FEW_PARTICIPANTS"]
-    assert sequence["mermaid"] is None
-    assert SEQUENCE_HEADING not in captured_post.body()
-
-
-@pytest.mark.parametrize("opaque_reads", [False, True])
-async def test_unverified_diagram_reads_omit_both_kinds_with_one_warning(
+@pytest.mark.parametrize("shell_reads", [False, True])
+async def test_valid_diagrams_render_without_structured_read_receipts(
     tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
-    monkeypatch: pytest.MonkeyPatch, opaque_reads: bool,
+    monkeypatch: pytest.MonkeyPatch, shell_reads: bool,
 ) -> None:
-    warnings = StringIO()
-    monkeypatch.setattr(deep, "console", Console(file=warnings, width=200))
-    monkeypatch.setattr(deep, "print_warning", print_warning)
+    """Direct repository validation accepts shell-backed and receipt-free specs."""
+    if shell_reads:
+        original_execute = StubBackend.execute
+
+        async def execute(self: StubBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+            if self._diagram_dispatch(prompt.lower()) is not None:
+                yield ToolStartEvent(
+                    id="source-shell", name="Bash",
+                    input={"command": "cat pkg_a/core.py pkg_a/util.py pkg_b/client.py"},
+                )
+                yield ToolResultEvent(id="source-shell", output="source content", is_error=False)
+            async for event in original_execute(self, cwd, prompt, *args, **kwargs):
+                yield event
+
+        monkeypatch.setattr(StubBackend, "execute", execute)
     target = dr.build_both_signals_repo(tmp_path)
-    code, _ = await review_run(
+    code, backend = await review_run(
         target,
         specs={
             "sequence": [dr.sequence_spec()],
             "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
         },
-        emit_reads=opaque_reads, opaque_reads=opaque_reads,
+        session_id="diagram-source-validation",
     )
     assert code == 0
     for result in _artifact(target)["results"].values():
-        assert result["status"] == "omitted"
-        assert "grounding" not in result
-        assert "spec_proposed" not in result
-        assert result["mermaid"] is None
-    assert SEQUENCE_HEADING not in captured_post.body()
-    assert FLOWCHART_HEADING not in captured_post.body()
-    assert warnings.getvalue().count("Diagram source-read coverage is unverifiable") == 1
-
-
-async def test_successful_native_read_repair_clears_unverified_warning(
-    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    warnings = StringIO()
-    monkeypatch.setattr(deep, "console", Console(file=warnings, width=200))
-    monkeypatch.setattr(deep, "print_warning", print_warning)
-    target = dr.build_cross_module_repo(tmp_path)
-    code, backend = await review_run(
-        target, specs={"sequence": [dr.sequence_spec()]}, session_id="diagram-repair",
-        reads={"sequence": ["pkg_a/core.py", "pkg_a/util.py"], "sequence-repair": ["pkg_b/client.py"]},
-    )
-    assert code == 0
-    calls = _diagram_calls(backend, "sequence")
-    assert len(calls) == 2
-    assert "FILE_READ_UNVERIFIED" in calls[1]["prompt"]
-    result = _artifact(target)["results"]["sequence"]
-    assert result["status"] == "rendered" and result["mermaid"] == SEQUENCE_GOLDEN
-    assert SEQUENCE_GOLDEN in captured_post.body()
-    assert "Diagram source-read coverage is unverifiable" not in warnings.getvalue()
+        assert result["status"] == "rendered"
+        assert result["mermaid"]
+    assert SEQUENCE_HEADING in captured_post.body()
+    assert FLOWCHART_HEADING in captured_post.body()
+    assert len(_diagram_calls(backend, "sequence")) == 1
+    assert len(_diagram_calls(backend, "flowchart")) == 1
 
 
 # --- Spec test 7: omission floors -------------------------------------------
@@ -1121,7 +1071,6 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     def factory(name: str, model: str | None = None, **_kwargs: Any) -> StubBackend:
         stub = StubBackend(target, model=model or "mock-model", shared_calls=shared)
         stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
-        stub.diagram_emit_reads = True
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", factory)

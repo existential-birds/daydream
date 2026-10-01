@@ -141,7 +141,7 @@ class _DeepMockBackend(ScriptedBackend):
             # Issue #745: per-stack reviewer emits structured output directly.
             events += [
                 TextEvent(text=""),
-                ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None),
+                ResultEvent(structured_output={"issues": []}, continuation=None),
             ]
             return events
 
@@ -173,7 +173,7 @@ class _DeepMockBackend(ScriptedBackend):
             else:
                 events += [
                     TextEvent(text=""),
-                    ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None),
+                    ResultEvent(structured_output={"issues": []}, continuation=None),
                 ]
             return events
 

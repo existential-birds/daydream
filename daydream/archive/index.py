@@ -293,8 +293,6 @@ def _run_upsert_values(manifest: Manifest) -> dict[str, Any]:
         "pr_repo": manifest.pr_repo,
         "total_cost_usd": manifest.total_cost_usd,
         "total_findings": manifest.total_findings,
-        "grounding_rate": manifest.grounding_rate,
-        "coverage_ratio": manifest.coverage_ratio,
         "cost_per_finding_usd": manifest.cost_per_finding_usd,
         "wall_clock_seconds": manifest.wall_clock_seconds,
         "erosion": manifest.erosion,

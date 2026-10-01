@@ -86,18 +86,6 @@ HOST_OWNED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Host safety/cost caps (mirror config.py:386-388). After parsing a profile,
-# lower profile values are CLAMPED UP to the host floor (and capped at
-# the host ceiling) BEFORE the digest is computed, so digest reflects the
-# clamped semantic value. The caps themselves are production defaults: safety
-# floors, not tunable budget knobs.
-HOST_CAPS: dict[str, tuple[int | None, int | None]] = {
-    # (floor, ceiling) — ceiling None = no ceiling.
-    "uncovered_sweep_max_files": (1, 10),
-    "uncovered_sweep_min_hunk_lines": (5, None),
-}
-
-
 @dataclass(frozen=True)
 class Strategy:
     """One stage's profile-owned strategy component.
@@ -137,16 +125,12 @@ class Suppression:
 class Pipeline:
     """The bounded pipeline section (R2).
 
-    Defaults mirror ``config.py:386-388`` (uncovered sweep),
-    ``config.DEFAULT_DEEP_SHARD_*`` family, and the deep pipeline's product
+    Defaults mirror the deep pipeline's product
     defaults (structural meta-stack always on; arbitration on
     high-severity/contested; suppression opt-in off).
     """
 
     structural_enabled: bool = True
-    uncovered_sweep_enabled: bool = True
-    uncovered_sweep_max_files: int = 10
-    uncovered_sweep_min_hunk_lines: int = 5
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
     review_wall_budget_s: int = 2700
@@ -383,17 +367,6 @@ def build_default_profile() -> ReviewProfile:
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",
         ),
-        "uncovered_review": Strategy(
-            content=(
-                "You are the uncovered file sweep reviewer for the deep-review "
-                "pipeline (issue #309).\n"
-                "The changed file {file} was NOT read by any per-stack reviewer, "
-                "so you are the second pass that covers it. Review ONLY this "
-                "file's hunks below -- correctness, error handling, test quality, "
-                "and maintainability. Do NOT review other files."
-            ),
-            source="copied: daydream.deep.coverage.build_uncovered_sweep_prompt",
-        ),
         "arbitration": Strategy(
             content=(
                 "You are the arbiter. The cheaper per-stack reviewers flagged the "
@@ -520,9 +493,6 @@ _ENVELOPE_BY_STAGE: dict[str, str] = {
     "discovery.generic_fallback": (
         "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION"
     ),
-    "uncovered_review": (
-        "daydream.deep.prompts.CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION"
-    ),
     "arbitration": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
     "suppression": "daydream.deep.prompts.TRUST_MODEL_INSTRUCTION",
     "merge": "daydream.improve.prompts.FINDING_FORMAT",
@@ -634,9 +604,6 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         {
             "review_wall_budget_s",
             "structural_enabled",
-            "uncovered_sweep_enabled",
-            "uncovered_sweep_max_files",
-            "uncovered_sweep_min_hunk_lines",
             "arbitration_enabled",
             "arbitration_min_severity",
             "arbitration_contested_location",
@@ -662,22 +629,6 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             raise ProfileError(f"pipeline.{key} must be an integer", source)
         if value < 0:
             raise ProfileError(f"pipeline.{key} must not be negative", source)
-        return value
-
-    def _clamped_int(key: str, fallback: int) -> int:
-        """Read a host-capped int, clamping into the host cap range (R5).
-
-        Host caps are the floor: a profile supplying LOWER than the host cap
-        is clamped up, never the reverse. The ceiling keeps a profile from
-        raising a host cap. Clamping happens here (before digest) so the
-        digest reflects the clamped semantic value.
-        """
-        value = _int(key, fallback)
-        floor, ceiling = HOST_CAPS[key]
-        if floor is not None:
-            value = max(value, floor)
-        if ceiling is not None:
-            value = min(value, ceiling)
         return value
 
     def _severity_classes(
@@ -733,15 +684,6 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
     return Pipeline(
         review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
-        uncovered_sweep_enabled=_bool(
-            "uncovered_sweep_enabled", defaults.uncovered_sweep_enabled
-        ),
-        uncovered_sweep_max_files=_clamped_int(
-            "uncovered_sweep_max_files", defaults.uncovered_sweep_max_files
-        ),
-        uncovered_sweep_min_hunk_lines=_clamped_int(
-            "uncovered_sweep_min_hunk_lines", defaults.uncovered_sweep_min_hunk_lines
-        ),
         arbitration=arbitration,
         suppression=suppression,
     )

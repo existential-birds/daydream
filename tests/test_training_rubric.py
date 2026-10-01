@@ -186,7 +186,6 @@ def test_all_noise_scores_below_clean_with_same_recall(model: _StubModel) -> Non
             findings=[_finding("vague") for _ in range(5)],
             fp_count=5,
             total_findings=5,
-            grounded=0,
         ),
     )
     clean = cast(
@@ -196,7 +195,6 @@ def test_all_noise_scores_below_clean_with_same_recall(model: _StubModel) -> Non
             findings=[_finding("real bug, line 3") for _ in range(5)],
             fp_count=0,
             total_findings=5,
-            grounded=5,
         ),
     )
     assert noise < clean  # M5: strictly below, same recall, no noise
@@ -212,7 +210,6 @@ def test_fp_penalty_term_present_and_dominant_direction(model: _StubModel) -> No
             findings=[_finding()],
             fp_count=3,
             total_findings=3,
-            grounded=1,
             breakdown=True,
         ),
     )
@@ -230,18 +227,20 @@ def test_version_fingerprint_changes_on_weight_change() -> None:
 def test_breakdown_stamps_rubric_version(model: _StubModel) -> None:
     b = cast(
         RubricV2Breakdown,
-        score_review(model, findings=[_finding()], fp_count=0, total_findings=1, grounded=1, breakdown=True),
+        score_review(model, findings=[_finding()], fp_count=0, total_findings=1, breakdown=True),
     )
     assert b.reward_version.startswith(REWARD_VERSION_RUBRIC)
 
 
-def test_missing_signal_is_none_not_zero(model: _StubModel) -> None:
-    # No tool signals on any finding -> tool_grounded term absent (None), never 0.0.
+def test_missing_correctness_is_none_not_zero(model: _StubModel) -> None:
+    # No verifier verdicts means no intrinsic correctness credit.
     b = cast(
         RubricV2Breakdown,
-        score_review(model, findings=[_finding()], fp_count=0, total_findings=1, grounded=1, breakdown=True),
+        score_review(model, findings=[_finding()], fp_count=0, total_findings=1, breakdown=True),
     )
-    assert b.terms["tool_grounded"] is None
+    assert b.terms["intrinsic_composite"] is None
+    assert "localization" not in b.terms
+    assert "tool_grounded" not in b.terms
 
 
 def test_zero_total_findings_guards_fp_and_snr_terms(model: _StubModel) -> None:
@@ -249,7 +248,7 @@ def test_zero_total_findings_guards_fp_and_snr_terms(model: _StubModel) -> None:
     # total_findings == 0; the ratio terms are then absent (None), never 0.0.
     b = cast(
         RubricV2Breakdown,
-        score_review(model, findings=[_finding()], fp_count=0, total_findings=0, grounded=0, breakdown=True),
+        score_review(model, findings=[_finding()], fp_count=0, total_findings=0, breakdown=True),
     )
     assert b.false_positive_penalty is None
     assert b.terms["fp_penalty"] is None  # renormalized out, not imputed 0.0
@@ -259,4 +258,4 @@ def test_zero_total_findings_guards_fp_and_snr_terms(model: _StubModel) -> None:
 
 def test_malformed_finding_raises_with_id(model: _StubModel) -> None:
     with pytest.raises(ValueError, match="f-9"):
-        score_review(model, findings=[{"id": "f-9"}], fp_count=0, total_findings=1, grounded=1)
+        score_review(model, findings=[{"id": "f-9"}], fp_count=0, total_findings=1,)

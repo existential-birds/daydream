@@ -56,7 +56,8 @@ def test_check_deep_artifacts_merge_requires_records(deep_artifacts_dir: Path) -
     (deep_artifacts_dir / "intent.md").write_text("x")
     (deep_artifacts_dir / "alternatives.json").write_text("[]")
     with pytest.raises(FileNotFoundError) as excinfo:
-        check_deep_artifacts("merge", deep_artifacts_dir)
+        check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"])
     assert "stack-*-records.json" in str(excinfo.value)
 
 
@@ -87,7 +88,8 @@ def test_check_deep_artifacts_merge_ignores_directory_records(
     (deep_artifacts_dir / "alternatives.json").write_text("[]")
     (deep_artifacts_dir / "stack-bogus-records.json").mkdir()  # directory, not a file
     with pytest.raises(FileNotFoundError) as excinfo:
-        check_deep_artifacts("merge", deep_artifacts_dir)
+        check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"])
     assert "stack-*-records.json" in str(excinfo.value)
 
 
@@ -143,7 +145,8 @@ def test_check_deep_artifacts_rejects_mismatched_diff_key(deep_artifacts_dir: Pa
     (deep_artifacts_dir / "diff-key").write_text("aaaa")
 
     with pytest.raises(FileNotFoundError, match="different diff"):
-        check_deep_artifacts("merge", deep_artifacts_dir, current_diff_sha="bbbb")
+        check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"], current_diff_sha="bbbb")
 
 
 def test_check_deep_artifacts_rejects_missing_key(deep_artifacts_dir: Path) -> None:
@@ -151,14 +154,17 @@ def test_check_deep_artifacts_rejects_missing_key(deep_artifacts_dir: Path) -> N
     _seed_merge_stage(deep_artifacts_dir)
 
     with pytest.raises(FileNotFoundError, match="produced before diff tracking"):
-        check_deep_artifacts("merge", deep_artifacts_dir, current_diff_sha="bbbb")
+        check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"], current_diff_sha="bbbb")
 
 
 def test_check_deep_artifacts_accepts_matching_diff_key(deep_artifacts_dir: Path) -> None:
     (deep_artifacts_dir / "diff-key").write_text("bbbb")
     _seed_merge_stage(deep_artifacts_dir)
 
-    check_deep_artifacts("merge", deep_artifacts_dir, current_diff_sha="bbbb")  # must not raise
+    check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"],
+                             current_diff_sha="bbbb")  # must not raise
 
 
 def test_check_deep_artifacts_rejects_prerequisites_older_than_matching_key(
@@ -172,7 +178,8 @@ def test_check_deep_artifacts_rejects_prerequisites_older_than_matching_key(
     os.utime(key_file, ns=(key_mtime, key_mtime))
 
     with pytest.raises(FileNotFoundError, match="different diff"):
-        check_deep_artifacts("merge", deep_artifacts_dir, current_diff_sha="bbbb")
+        check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"], current_diff_sha="bbbb")
 
 
 def test_check_deep_artifacts_without_sha_skips_the_freshness_gate(
@@ -181,13 +188,15 @@ def test_check_deep_artifacts_without_sha_skips_the_freshness_gate(
     """Omitting current_diff_sha preserves the presence-only behavior."""
     _seed_merge_stage(deep_artifacts_dir)
 
-    check_deep_artifacts("merge", deep_artifacts_dir)  # must not raise
+    check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"])  # must not raise
 
 
 def test_missing_artifacts_are_reported_before_staleness(deep_artifacts_dir: Path) -> None:
     """A missing prereq keeps its own actionable message, not the stale one."""
     with pytest.raises(FileNotFoundError, match="missing artifacts"):
-        check_deep_artifacts("merge", deep_artifacts_dir, current_diff_sha="bbbb")
+        check_deep_artifacts("merge", deep_artifacts_dir,
+                             record_paths=[deep_artifacts_dir / "stack-python-records.json"], current_diff_sha="bbbb")
 
 
 def test_diff_key_is_content_addressed() -> None:
@@ -202,3 +211,14 @@ def test_diagram_artifact_paths_live_in_the_deep_dir(tmp_path: Path) -> None:
     assert diagram_path(dd) == dd / "diagram.json"
     assert diagram_markdown_path(dd) == dd / "diagram.md"
     assert diagram_path(dd).parent == diagram_markdown_path(dd).parent == dd
+
+
+def test_merge_gate_ignores_stale_sweep_findings(deep_artifacts_dir: Path) -> None:
+    (deep_artifacts_dir / "intent.md").write_text("x")
+    (deep_artifacts_dir / "alternatives.json").write_text("[]")
+    (deep_artifacts_dir / "stack-uncovered-records.json").write_text('[{"description": "stale"}]')
+    with pytest.raises(FileNotFoundError, match="missing artifacts"):
+        check_deep_artifacts(
+            "merge", deep_artifacts_dir,
+            record_paths=[deep_artifacts_dir / "stack-python-records.json"],
+        )

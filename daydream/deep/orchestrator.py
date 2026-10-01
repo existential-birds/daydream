@@ -29,6 +29,7 @@ from daydream.deep.artifacts import (
     diff_key,
     diff_key_path,
     intent_path as _intent_path,
+    per_stack_records_path,
 )
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
@@ -59,11 +60,9 @@ from daydream.deep.prompts import bound_deep_diff
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
 from daydream.deep.reuse_store import build_reuse_cache
 from daydream.deep.review_steps import (
-    _clear_sweep_artifacts,
     _step_exploration,
     _step_intent,
     _step_per_stack_parse,
-    _step_uncovered_sweep,
     _step_wonder_and_per_stack,
 )
 from daydream.deep.routing_record import write_routing_record
@@ -181,43 +180,6 @@ def _deep_shard_max_files(config: RunConfig) -> int:
     """Resolve the per-shard max file-count bound (issue #731)."""
     return _resolve_non_negative_int(config, "deep_shard_max_files", DEFAULT_DEEP_SHARD_MAX_FILES)
 
-
-def _uncovered_sweep_enabled(ctx: FlowContext) -> bool:
-    """Resolve the uncovered-file sweep toggle from the profile pipeline (issue #309).
-
-    Reads ``ctx.pipeline().uncovered_sweep_enabled`` (already host-clamped);
-    resume at ``merge``/``fix`` disables the step outright -- the per-stack
-    records are already finalized on disk, so a sweep would re-review stale
-    coverage.
-    """
-    if ctx.config.start_at in ("merge", "fix"):
-        return False
-    return ctx.pipeline().uncovered_sweep_enabled
-
-
-def _uncovered_sweep_preflight_note(config: RunConfig, changed_files: list[str]) -> str | None:
-    """Sweep additive for the pre-flight agent estimate (issue #309 finding 8).
-
-    The pre-flight total counts only the known phases; the uncovered files the
-    sweep will review are not known until after per-stack reviews + parse. Every
-    swept file adds one review invocation AND one parse invocation (parse per
-    stack file), so an honest estimate appends an upper-bound note: 2 agents per
-    file, capped by the pipeline capacity and the number of changed files that
-    could possibly be swept. Returns ``None`` when the sweep is disabled or
-    nothing could be swept.
-    """
-    if config.start_at in ("merge", "fix"):
-        return None
-    pipeline = _config_pipeline(config)
-    if not pipeline.uncovered_sweep_enabled:
-        return None
-    eligible = min(len(changed_files), pipeline.uncovered_sweep_max_files)
-    if eligible <= 0:
-        return None
-    return (
-        f"(+ up to {2 * eligible} sweep agents: review + parse per uncovered "
-        "file, capped by eligible changed files)"
-    )
 
 
 def _collapse_stacks_for_tiny_diff(
@@ -462,7 +424,6 @@ STEPS: tuple[FlowStep, ...] = (
         config_phase="per_stack_review",
     ),
     FlowStep(name="per-stack-parse", run=_step_per_stack_parse, config_phase="parse", enabled=_before_fix_resume),
-    FlowStep(name="uncovered-sweep", run=_step_uncovered_sweep, enabled=_uncovered_sweep_enabled, config_phase="parse"),
     FlowStep(name="arbiter", run=_step_arbiter, enabled=_multi_stack_merge_enabled),
     FlowStep(
         name="cross-stack-merge", run=_step_cross_stack_merge, config_phase="merge", enabled=_multi_stack_merge_enabled
@@ -735,7 +696,7 @@ async def _run_review_spine(
     diff_path.write_text(diff)
     # Persist the hunk index immediately after the diff bytes, so the run-time
     # authority (changed file/line ranges) is available to every later step
-    # (reviews, arbiter, merge, uncovered sweep) and never predates the patch.
+    # (reviews, arbiter, merge) and never predates the patch.
     write_hunk_index(daydream_dir, diff)
     # Diff is immutable from here on; compute the tiering verdict once and reuse
     # it at both the exploration step's gate and the alternatives step's gate.
@@ -779,10 +740,18 @@ async def _run_review_spine(
         print_info(console, f"GitHub identity: {escape_markup(config.identity)}")
         console.print()
 
+        changed_files = _diff_changed_files(diff)
+        stacks, single_stack_mode, import_graph = _prepare_review_stacks(
+            config, changed_files, diff, target_dir, mode
+        )
+
         # Resume gate (D-34, D-36, D-37) + diff-freshness gate.
         if config.start_at in ("per-stack", "merge", "fix"):
             try:
-                check_deep_artifacts(config.start_at, dd, current_diff_sha=current_diff_sha)
+                check_deep_artifacts(
+                    config.start_at, dd, current_diff_sha=current_diff_sha,
+                    record_paths=[per_stack_records_path(dd, stack.stack_name) for stack in stacks],
+                )
                 if _has_non_daydream_worktree_changes(git_ops.status_porcelain(target_dir)):
                     raise FileNotFoundError(
                         f"Cannot resume at stage '{config.start_at}' -- the worktree has changed "
@@ -793,30 +762,6 @@ async def _run_review_spine(
             except FileNotFoundError as exc:
                 print_error(console, "Unusable Deep Artifacts", str(exc))
                 return 1
-            # Issue #309: a per-stack resume re-runs the sweep, so the prior
-            # run's sweep artifacts are about to be superseded. Clear them now
-            # (before new per-stack work) so a rerun whose sweep is disabled,
-            # finds nothing, or produces no output cannot leave stale records
-            # that a later merge resume would reload. Merge/fix resumes keep
-            # them (the sweep is a no-op there and the records must survive).
-            # Fail-CLOSED: an artifact that cannot be removed stops the resume
-            # (stale records reloaded as current findings would be worse than
-            # no resume); this call is at the resume boundary, OUTSIDE the
-            # sweep step's fail-open wrapper, so the raise cannot be swallowed.
-            if config.start_at == "per-stack":
-                try:
-                    _clear_sweep_artifacts(dd)
-                except OSError as exc:
-                    print_error(
-                        console, "Unusable Deep Artifacts", f"{exc}\n\nRe-run without --start-at to regenerate them."
-                    )
-                    return 1
-
-        changed_files = _diff_changed_files(diff)
-        stacks, single_stack_mode, import_graph = _prepare_review_stacks(
-            config, changed_files, diff, target_dir, mode
-        )
-
         # Pre-flight notice (D-30). Agent count reflects the tiny-diff collapse
         # when single_stack_mode is active (issue #172): merge+arbiter are
         # skipped, so the estimate uses ``_single_stack_agent_count``.
@@ -850,17 +795,16 @@ async def _run_review_spine(
                 stack_lines=stack_lines,
                 agent_count=notice_agent_count,
                 exploration_available=review_steps.EXPLORATION_AVAILABLE,
-                sweep_note=_uncovered_sweep_preflight_note(config, changed_files),
             )
 
         # Flow context owns the per-run backend cache shared by all steps;
         # steps communicate through ctx.data.
         # Issue #644 — the in-memory diff is bounded at gather time to
         # ``INLINE_DIFF_BUDGET_BYTES`` via whole-block retention (``diff.patch``
-        # above stays FULL on disk for the archival/coverage/eval/training
+        # above stays FULL on disk for the archival/eval/training
         # consumers; tiering / ``diff_key`` / ``changed_files`` above already
-        # ran on the full ``diff``; the exploration pre-scan and the uncovered
-        # sweep read the FULL on-disk patch at step time, never this bounded
+        # ran on the full ``diff``; the exploration pre-scan reads the FULL
+        # on-disk patch at step time, never this bounded
         # value). ``bound_deep_diff`` is infallible and runs
         # after the full diff is persisted, so the disk copy is never bounded.
         bounded_diff, bound_info = bound_deep_diff(diff)

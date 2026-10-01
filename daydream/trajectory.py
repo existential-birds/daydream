@@ -2755,16 +2755,10 @@ class Invocation:
     def _interrupted_marker() -> ObservationResult:
         """Synthetic terminal outcome for a tool call still in flight.
 
-        Deliberately carries NO ``source_call_id``: consumers derive completed
-        tool calls from an observation result's string ``source_call_id``
-        (``deep/coverage._completed_read_paths``, shared by the uncovered-file
-        sweep, per-stack verdict evidence and diagram-grounding receipts), so
-        stamping the in-flight tool's id here would make an interrupted read
-        derive as completed and flip their fail-open invariant ("an interrupted
-        read must NOT count as coverage") to fail-closed. Null ``source_call_id``
-        is the ATIF v1.7 encoding for "not a standard tool-call result" and
-        keeps the marker schema-valid. Content is fixed ASCII and ``extra``
-        carries only the two fixed keys, so the marker is redaction-stable.
+        Null ``source_call_id`` is the ATIF v1.7 encoding for "not a standard
+        tool-call result" and keeps the marker distinct from a completed tool
+        outcome. Content is fixed ASCII and ``extra`` carries only the two
+        fixed keys, so the marker is redaction-stable.
         """
         return ObservationResult(
             source_call_id=None,

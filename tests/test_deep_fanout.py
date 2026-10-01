@@ -26,10 +26,10 @@ from tests.harness.trajectory import (
 
 # The minimal turn a per-stack review agent has to emit to satisfy run_agent.
 # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
-# output directly (issues + verdicts) -- there is no separate parse stage.
+# output directly (issues) -- there is no separate parse stage.
 _REVIEW_TURN: Turn = [
     TextEvent(text="done"),
-    ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None),
+    ResultEvent(structured_output={"issues": []}, continuation=None),
 ]
 
 
@@ -75,9 +75,7 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
              "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
 
     async def checkpoint(*args: Any, **kwargs: Any) -> Any:
-        return {"issues": [issue], "verdicts": [
-            {"path": "api.py", "lines_read": 10, "verdict": "clean", "n_findings": 0},
-        ]}, None, "wall_budget_exceeded"
+        return {"issues": [issue]}, None, "wall_budget_exceeded"
 
     monkeypatch.setattr("daydream.phases.run_agent", checkpoint)
     diff, intent, alts = _mk_context_files(tmp_path)
@@ -89,7 +87,6 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
     assert saved["issues"][0]["description"] == issue["description"]
     assert saved["incomplete"] is True
-    assert saved["verdicts"] == []
 
 
 def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
@@ -165,10 +162,10 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     # ``stack-<name>-records.json`` -- the on-disk input ``_step_per_stack_parse``
     # / merge consume. A regression that stops persisting records.json would
     # silently break merge while these md-path assertions still pass, so assert
-    # the records artifact exists and carries the declared issues/verdicts.
+    # the records artifact exists and carries the declared issues.
 
     deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
-    declared: dict[str, list[Any]] = {"issues": [], "verdicts": []}
+    declared: dict[str, list[Any]] = {"issues": []}
     for name in results:
         records = per_stack_records_path(deep_dir_path, name)
         assert records.is_file(), f"missing {records.name} for {name}"

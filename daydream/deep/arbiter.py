@@ -66,7 +66,7 @@ def _stack_name(record: dict[str, Any], source: str) -> str:
     location?", so it needs one spelling per stack. ``source`` does not provide
     that: the pipeline tags records with the ``stack-<name>-records.json``
     filename on every path that loads them off disk, and with a bare stack name
-    for the uncovered sweep's in-memory append, so comparing raw ``source``
+    for direct in-memory records, so comparing raw ``source``
     strings could count a single stack twice and mark a location contested that
     only one stack ever reported. The record's ``uid`` (issue #1111) is the
     single-form handle -- one host-minted spelling, assigned at record birth --
@@ -155,7 +155,7 @@ def contested_indices(
     # line: with location alone (no description text) there is no way to tell
     # which of two-or-more reported lines, if any, restates the whole-file
     # finding, so folding the whole-file record into every line group would
-    # sweep findings that merely share a file -- not the defect -- into
+    # findings that merely share a file -- not the defect -- into
     # arbitration and out of the precision-mode suppression pool.
     lines_per_file: dict[Any, set[Any]] = defaultdict(set)
     for file, line in by_location:

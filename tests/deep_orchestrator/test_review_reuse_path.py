@@ -28,8 +28,6 @@ from tests.deep_orchestrator.support import (
     _arbiter_stacks,
     _count_merge_prompts,
     _count_review_prompts,
-    _install_uncovered_sweep_stub,
-    _uncovered_sweep_target,
 )
 from tests.harness.review_profile import (
     independent_alternatives_profile,
@@ -54,28 +52,9 @@ def _stack_files(deep: Path) -> list[str]:
     return sorted(path.name for path in deep.glob("stack-*-records.json"))
 
 
-def _expected_stack_files(deep: Path) -> list[str]:
-    """One records file per stack the deterministic assignment named.
-
-    The pre-fan-out coverage receipts are computed from the current run's
-    assignments, so they name exactly the stacks a fresh run reviews.
-    """
-    return sorted(f"stack-{name}-records.json" for name in _stack_receipts(deep))
-
-
-def _stack_receipts(deep: Path) -> dict[str, dict[str, list[str]]]:
-    """The deterministic pre-fan-out coverage receipts, keyed by stack name."""
-    receipts: dict[str, dict[str, list[str]]] = json.loads(
-        (deep / "coverage-receipts.json").read_text(encoding="utf-8")
-    )
-    return receipts
-
-
 _PER_STACK_PROMPT = re.compile(r"you are reviewing the (\S+) stack", re.IGNORECASE)
 _INTENT_DISCRIMINATOR = "understand the intent of these changes"
 _WONDER_DISCRIMINATOR = "evaluate the implementation"
-# A sentence only the uncovered-sweep prompt carries (coverage.py).
-_SWEEP_DISCRIMINATOR = "you may only comment on hunks you have read"
 
 
 def _count_unit_prompts(calls: list[dict[str, object]], needle: str) -> int:
@@ -196,7 +175,6 @@ def _review_surface_prompts(
         prompt = str(call.get("prompt", "")).lower()
         if (
             _PER_STACK_PROMPT.search(prompt)
-            or _SWEEP_DISCRIMINATOR in prompt
             or _ARBITER_DISCRIMINATOR in prompt
             or _INTENT_DISCRIMINATOR in prompt
             or _WONDER_DISCRIMINATOR in prompt
@@ -204,38 +182,6 @@ def _review_surface_prompts(
         ):
             surface.append(call)
     return surface
-
-
-async def test_identical_rerun_reuses_the_uncovered_sweep_and_restores_coverage(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """MH8/A8: an identical rerun performs no sweep model call and restores the
-    origin run's uncovered records AND its coverage accounting byte-for-byte --
-    the counters are read back from the entry, never recomputed against a
-    different run's trajectory."""
-    target = _uncovered_sweep_target(tmp_path)
-    stub = _install_uncovered_sweep_stub(monkeypatch, target)
-    stub.sweep_file = "notes.txt"
-    stub.merge_echo_records = True
-    config = make_config(target, assume="yes", output_mode="loop")
-    assert await run(config) == 0
-    deep = target / ".daydream" / "deep"
-    assert _count_unit_prompts(stub.calls, _SWEEP_DISCRIMINATOR) >= 1
-    records_bytes = (deep / "stack-uncovered-records.json").read_bytes()
-    coverage_bytes = (deep / "coverage-stats.json").read_bytes()
-    assert json.loads(records_bytes), "the seed sweep must produce findings"
-    assert json.loads(coverage_bytes)["sweep_finding_count"] >= 1
-    stub.calls.clear()
-    assert await run(config) == 0
-    assert _count_unit_prompts(stub.calls, _SWEEP_DISCRIMINATOR) == 0
-    assert (deep / "stack-uncovered-records.json").read_bytes() == records_bytes
-    assert (deep / "coverage-stats.json").read_bytes() == coverage_bytes
-    units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
-    assert units["sweep"]["outcome"] == "hit"
-    assert set(cast(dict[str, object], units["sweep"]["grounding_status"])) == {
-        "intent",
-        "exploration",
-    }
 
 
 async def test_identical_rerun_reuses_intent_and_wonder_units(
@@ -323,29 +269,17 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_misses_only_its_
 async def test_reused_shard_leaves_no_stale_companion_artifact(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH6: the restore set is complete (records + review sidecar + coverage
-    receipt + failure state) and the structural stack's delegation artifacts from
-    an earlier iteration never survive into a reused structural unit."""
+    """MH6: records, review sidecars and failure state agree with the fresh run."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    # Every reviewer completes a read of its own scope, so its clean-verdict
-    # files carry evidence-gated ``clean`` verdicts -- the witness that a reused
-    # stack's restored records are never re-reconciled against this run's empty
-    # read set and downgraded to ``not_reviewed``.
-    stub.per_stack_emit_reads = True
     config = make_config(multi_stack_target)
     assert await run(config) == 0
     deep = multi_stack_target / ".daydream" / "deep"
-    fresh_receipts = json.loads((deep / "coverage-receipts.json").read_text())
     fresh_failures = (deep / "per-stack-failures.json").exists()
     fresh_records = _records_bytes(multi_stack_target)
-    (deep / "structural-delegation.json").write_text(json.dumps({"primary_scopes": {"python": ["api.py"]}}))
     stub.calls.clear()
     assert await run(config) == 0
     assert _count_review_prompts(stub.calls) == 0
-    assert json.loads((deep / "coverage-receipts.json").read_text()) == fresh_receipts
     assert (deep / "per-stack-failures.json").exists() == fresh_failures
-    assert not (deep / "structural-delegation.json").exists(), "stale delegation must not survive"
-    assert _stack_files(deep) == _expected_stack_files(deep)   # one records file per detected stack
     assert _records_bytes(multi_stack_target) == fresh_records, "reused records must be byte-identical"
 
 
@@ -362,15 +296,28 @@ async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it
                          deep_shard_max_bytes=10**9)
     assert await run(config) == 0
     deep = sibling_frontier_target / ".daydream" / "deep"
-    receipts = _stack_receipts(deep)
-    namers = {name for name, rec in receipts.items() if "core.py" in rec["frontier_files"]}
+    scopes = {}
+    for call in stub.calls:
+        prompt = str(call["prompt"])
+        scope = _PER_STACK_PROMPT.search(prompt)
+        assigned = re.search(r"Assigned files: ([^\n]+)", prompt)
+        if scope is None or assigned is None:
+            continue
+        frontier = re.search(r"review targets\): ([^\n]+)\.", prompt)
+        scopes[scope.group(1)] = {
+            "assigned_files": assigned.group(1).split(", "),
+            "frontier_files": frontier.group(1).split(", ") if frontier else [],
+        }
+    assert (deep / f"stack-{STRUCTURE_STACK_NAME}-records.json").is_file()
+    scopes[STRUCTURE_STACK_NAME] = {"assigned_files": [], "frontier_files": []}
+    namers = {name for name, rec in scopes.items() if "core.py" in rec["frontier_files"]}
     assert namers, "fixture must ground at least one shard with core.py"
-    assert all("core.py" not in receipts[name]["assigned_files"] for name in namers), (
+    assert all("core.py" not in scopes[name]["assigned_files"] for name in namers), (
         "a frontier namer must not own the edited file, or its miss would not prove the frontier is keyed"
     )
     owner = {
         name
-        for name, rec in receipts.items()
+        for name, rec in scopes.items()
         if "core.py" in rec["assigned_files"] and name != STRUCTURE_STACK_NAME
     }
     origin_structure = _stack_bytes(deep, {STRUCTURE_STACK_NAME})
@@ -379,7 +326,7 @@ async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it
     assert await run(config) == 0
     expected_miss = namers | owner
     assert _reviewed_stacks(stub.calls) == expected_miss
-    assert _reused_stacks(deep) == set(receipts) - expected_miss
+    assert _reused_stacks(deep) == set(scopes) - expected_miss
     # A frontier namer recomputes under a moved key, so the store holds both the
     # origin entry and this run's entry; the reused shard keeps exactly one and
     # restores the origin bytes verbatim.
@@ -519,7 +466,7 @@ async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
 ) -> None:
     """MH1/MH8/MH16: an identical rerun performs no cross-stack merge call; the
     merged items and the dedup candidates are restored byte-for-byte, and the
-    render-only public report still lands with its coverage section."""
+    render-only public report still lands."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target)
     assert await run(config) == 0
@@ -549,7 +496,7 @@ async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
             os.close(report_fd)
     finally:
         os.close(parent_fd)
-    assert "## Coverage" in content
+    assert "## Coverage" not in content
 
 
 async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(

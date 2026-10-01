@@ -2205,7 +2205,6 @@ def _diagram_head_evidence_problem(
                 spec,
                 repo_root=snapshot_root,
                 hunk_ranges={},
-                read_paths=paths,
                 symbols=RepoSymbols(snapshot_root),
             )
         if report.spec_final != spec:

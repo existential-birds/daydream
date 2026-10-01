@@ -195,8 +195,6 @@ class Manifest:
             fix phase edited. ``None`` when the gate artifact is absent or
             malformed.
         total_findings: Number of findings (from eval, if available).
-        grounding_rate: Grounding rate (from eval, if available).
-        coverage_ratio: File coverage ratio (from eval, if available).
         cost_per_finding_usd: Cost per finding (from eval, if available).
         erosion: Structural erosion ratio of the post-fix workspace (from eval,
             if available).
@@ -315,8 +313,6 @@ class Manifest:
     phase_timings: dict[str, Any] | None = None
     timing_coverage: dict[str, Any] | None = None
     total_findings: int | None = None
-    grounding_rate: float | None = None
-    coverage_ratio: float | None = None
     cost_per_finding_usd: float | None = None
     erosion: float | None = None
     verbosity: float | None = None
@@ -399,8 +395,6 @@ class Manifest:
                 "phase_timings": self.phase_timings,
                 **_omit_falsy(timing_coverage=self.timing_coverage),
                 "total_findings": self.total_findings,
-                "grounding_rate": self.grounding_rate,
-                "coverage_ratio": self.coverage_ratio,
                 "cost_per_finding_usd": self.cost_per_finding_usd,
                 "erosion": self.erosion,
                 "verbosity": self.verbosity,
@@ -534,12 +528,6 @@ def build_manifest_from_snapshot(
         # "undefined" rather than coerced, same as every other eval metric.
         location = evaluation.get("location", {})
         m.location_in_hunk_rate = location.get("in_hunk_rate")
-
-        grounding = evaluation.get("grounding", {})
-        m.grounding_rate = grounding.get("grounding_rate")
-
-        coverage = evaluation.get("coverage", {})
-        m.coverage_ratio = coverage.get("coverage_ratio")
 
         quality = evaluation.get("quality", {})
         m.erosion = quality.get("erosion")

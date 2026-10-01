@@ -20,9 +20,9 @@ Layout (consumed by ``daydream.training.calibration.run_calibration``):
                          ``posterior/`` (valid_at posterior to as_of),
                          ``digest/`` (tampered corpus, pristine SHA256SUMS)
 
-Version stamps (labeler/reward versions) are imported from the production
-modules, so a version bump requires re-running this generator and committing
-the diff — which is exactly the reviewability the fixture wants.
+The frozen reward stamp identifies the original supplied breakdowns. Replaying
+this generator preserves their historical semantics and bytes. Labeler stamps
+remain imported from their unchanged production modules.
 """
 
 from __future__ import annotations
@@ -40,7 +40,8 @@ from daydream.training.labeler_versions import (
     REPLY_CLASSIFIER_VERSION,
     RUBRIC_SCHEMA_VERSION,
 )
-from daydream.training.reward import REWARD_VERSION
+
+REWARD_VERSION = "2026.09.04-1"  # Frozen fixture semantics; never rescore on a production bump.
 
 AS_OF = "2026-01-01T00:00:00+00:00"
 VALID_AT = "2025-12-01T00:00:00+00:00"

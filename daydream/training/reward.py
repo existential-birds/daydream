@@ -5,12 +5,10 @@ the posterior false-positive axis derived from maintainer accept/reject
 outcomes. All weights, ramps, and label maps live on :class:`RewardWeights`;
 scoring under :data:`DEFAULT_WEIGHTS` reproduces the golden-locked formula.
 
-Composite = ``round(clip(credit − w_len·len_norm, 0, 1), 4)`` — a pure
-intrinsic score. ``credit`` is the weighted mean over the *present* credit
-axes only, renormalized so present weights sum to one
-(``w_i' = w_i / Σ_present w_j``). A missing/empty/unparseable signal makes
-that axis ``None`` and ``axes_present[axis] = False`` — never impute ``0.0``
-for a missing axis, never raise. If no credit axis is present while
+Composite = ``round(clip(correctness − w_len·len_norm, 0, 1), 4)``.
+Verifier correctness supplies credit; a missing or empty verdict set leaves
+correctness ``None`` and ``axes_present["correctness"] = False``.
+If no correctness evidence is present while
 ``format_valid`` is ``True``, the composite is ``None`` (uncomputable). The
 posterior is a *sibling* of the composite, carried on
 :class:`PosteriorBreakdown`, and is **never** subtracted inside it.
@@ -32,7 +30,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-REWARD_VERSION = "2026.09.04-1"
+REWARD_VERSION = "2026.10.01-1"
 """Bump on any change to axis weights, verdict map, gate, or composite shape.
 
 Read at call time (not captured in a default argument) so a test can
@@ -67,12 +65,7 @@ class RewardWeights:
     :data:`DEFAULT_WEIGHTS`).
 
     Attributes:
-        w_correctness: Credit weight for the correctness axis
-            (correctness-dominant).
-        w_grounding: Credit weight for the grounding axis (secondary
-            guardrail).
-        w_len: Length-penalty weight; strictly smaller than every credit
-            weight, so verbosity can shave but never dominate.
+        w_len: Length-penalty weight, so verbosity can shave correctness credit.
         w_fp: False-positive (posterior reject) penalty weight. **No longer
             applied inside the composite** (C5 made the posterior a sibling
             field, not a subtracted term); retained as a documented
@@ -87,8 +80,6 @@ class RewardWeights:
             An unmapped/``"unknown"`` label leaves the axis absent.
     """
 
-    w_correctness: float = 0.6
-    w_grounding: float = 0.4
     w_len: float = 0.2
     w_fp: float = 0.3
     len_tau: float = 2000.0
@@ -118,7 +109,7 @@ earns the canonical stamp, keyed by object identity in
 def _weights_fingerprint(weights: RewardWeights) -> str:
     """Return a stable 8-char fingerprint of a :class:`RewardWeights`.
 
-    Serializes the six scalar fields plus the two map fields (as plain
+    Serializes the four scalar fields plus the two map fields (as plain
     ``dict``) via sorted-key JSON, then takes the leading 8 hex chars of the
     SHA-256 digest. Pure; no I/O.
 
@@ -127,8 +118,6 @@ def _weights_fingerprint(weights: RewardWeights) -> str:
         JSON serialization of the scoring parameters.
     """
     payload = {
-        "w_correctness": weights.w_correctness,
-        "w_grounding": weights.w_grounding,
         "w_len": weights.w_len,
         "w_fp": weights.w_fp,
         "len_tau": weights.len_tau,
@@ -152,15 +141,12 @@ class ScoringInputs:
         verifier_verdicts: Per-finding verifier verdict records (each a
             dict with a ``"verdict"`` key), or ``None`` when the run has no
             structured verdicts (e.g. a shallow run).
-        grounding_rate: Fraction of findings grounded in real code, in
-            ``[0, 1]``, or ``None`` when unavailable.
         format_valid: Whether the structured bronze artifacts parsed
             cleanly. ``False`` floors the composite (dominating gate).
         length: Char-count length proxy, or ``None`` when absent.
     """
 
     verifier_verdicts: Sequence[Mapping[str, Any]] | None
-    grounding_rate: float | None
     format_valid: bool
     length: int | None
 
@@ -176,7 +162,6 @@ class RewardBreakdown:
     Attributes:
         correctness_per_finding: Mapped verdict scores per finding, or
             ``None`` when the correctness axis is absent.
-        grounding: Grounding rate passed through, or ``None`` when absent.
         format_valid: The dominating format gate flag.
         length_penalty: Bounded length ramp ``len_norm ∈ [0, 1]``, or
             ``None`` when no length proxy was available.
@@ -184,12 +169,11 @@ class RewardBreakdown:
             ``0.0`` when format-invalid, or ``None`` when uncomputable (no
             present credit axis while format-valid).
         axes_present: Per-axis presence flags (``correctness``,
-            ``grounding``, ``length``).
+            ``length``).
         reward_version: The :data:`REWARD_VERSION` stamped at scoring time.
     """
 
     correctness_per_finding: list[float] | None
-    grounding: float | None
     format_valid: bool
     length_penalty: float | None
     composite: float | None
@@ -202,7 +186,6 @@ class RewardBreakdown:
             "correctness_per_finding": (
                 list(self.correctness_per_finding) if self.correctness_per_finding is not None else None
             ),
-            "grounding": self.grounding,
             "format_valid": self.format_valid,
             "length_penalty": self.length_penalty,
             "composite": self.composite,
@@ -262,7 +245,7 @@ def score_trajectory(
 
     Pure: no filesystem, network, or subprocess access; identical inputs
     yield identical output. The ``composite`` is always a pure intrinsic
-    score (correctness + grounding − length penalty); the posterior
+    score (correctness − length penalty); the posterior
     false-positive axis is a *sibling* field, never folded in (C5).
 
     ``pr_feedback`` carries the maintainer outcome label. When it maps to a
@@ -310,9 +293,6 @@ def score_trajectory(
         correctness_per_finding = scores
         correctness = sum(scores) / len(scores)
 
-    # Grounding axis: present only when a rate was supplied.
-    grounding = inputs.grounding_rate
-
     # Length penalty: bounded ramp; absent when no length proxy.
     length_penalty: float | None = None
     if inputs.length is not None:
@@ -327,7 +307,6 @@ def score_trajectory(
 
     axes_present = {
         "correctness": correctness is not None,
-        "grounding": grounding is not None,
         "length": length_penalty is not None,
     }
 
@@ -336,27 +315,11 @@ def score_trajectory(
     if not inputs.format_valid:
         # Format gate dominates everything below it.
         composite = FLOOR
+    elif correctness is None:
+        composite = None
     else:
-        # Weighted credit mean, renormalized over PRESENT credit axes only.
-        present: list[tuple[float, float]] = []
-        if correctness is not None:
-            present.append((weights.w_correctness, correctness))
-        if grounding is not None:
-            present.append((weights.w_grounding, grounding))
-
-        if not present:
-            # No present credit axis while format-valid ⇒ uncomputable.
-            composite = None
-        else:
-            weight_sum = sum(weight for weight, _ in present)
-            if weight_sum <= 0:
-                raise ValueError(
-                    "Invalid RewardWeights for present credit axes: "
-                    f"sum of present credit weights must be > 0 (got {weight_sum!r})."
-                )
-            credit = sum((weight / weight_sum) * value for weight, value in present)
-            ramp = length_penalty if length_penalty is not None else 0.0
-            composite = round(_clip(credit - weights.w_len * ramp, FLOOR, 1.0), 4)
+        ramp = length_penalty if length_penalty is not None else 0.0
+        composite = round(_clip(correctness - weights.w_len * ramp, FLOOR, 1.0), 4)
 
     # Mapped maintainer label ⇒ PosteriorBreakdown carrying the sibling axis.
     if fp_penalty is not None:
@@ -367,7 +330,6 @@ def score_trajectory(
         posterior_cost = abs(fp_penalty - effective_prior)
         return PosteriorBreakdown(
             correctness_per_finding=correctness_per_finding,
-            grounding=grounding,
             format_valid=inputs.format_valid,
             length_penalty=length_penalty,
             composite=composite,
@@ -381,7 +343,6 @@ def score_trajectory(
 
     return RewardBreakdown(
         correctness_per_finding=correctness_per_finding,
-        grounding=grounding,
         format_valid=inputs.format_valid,
         length_penalty=length_penalty,
         composite=composite,

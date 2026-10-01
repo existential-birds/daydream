@@ -26,8 +26,6 @@ _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
     "alternatives.json",
     "arbiter-complete.marker",
     "arbiter-input.json",
-    "coverage-receipts.json",
-    "coverage-stats.json",
     "dedup-candidates.json",
     "diagram.json",
     "diagram.md",

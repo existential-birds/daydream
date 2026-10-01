@@ -664,8 +664,8 @@ def test_build_manifest_with_evaluation(tmp_path: Path) -> None:
 
     assert m.wall_clock_seconds == 42.5
     assert m.total_findings == 7
-    assert m.grounding_rate == 0.85
-    assert m.coverage_ratio == 0.6
+    assert "grounding_rate" not in m.to_dict()["metrics"]
+    assert "coverage_ratio" not in m.to_dict()["metrics"]
     assert m.cost_per_finding_usd == 0.007
 
 
@@ -688,8 +688,8 @@ def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
     m = _build(tmp_path)
 
     assert m.total_findings is None
-    assert m.grounding_rate is None
-    assert m.coverage_ratio is None
+    assert "grounding_rate" not in m.to_dict()["metrics"]
+    assert "coverage_ratio" not in m.to_dict()["metrics"]
     assert m.cost_per_finding_usd is None
     assert m.erosion is None
     assert m.verbosity is None
