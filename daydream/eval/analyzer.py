@@ -222,6 +222,45 @@ def _is_import_only_pattern(pattern: str) -> bool:
 _SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
 _REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
 _SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
+
+# Literal-loop resolution (issue #1397). A shell ``for VAR in <words>; do``
+# binding is recognised only when every listed word is a plain literal (no
+# shell metacharacter) and the loop body is straight-line, i.e. it carries no
+# nested/conditional control flow and no flow control (``break``/``continue``/
+# ``return``/``exit``) that could skip a listed read; every ambiguous shape
+# contributes no binding, so no operand is ever credited from it and the
+# affected files stay uncovered and are swept (fail-open).
+_NON_LITERAL_CHARS = frozenset("$`*?[]{}~()|&<>;!\\\"'")
+_BODY_CONTROL_KEYWORDS = frozenset(
+    {
+        "for",
+        "while",
+        "until",
+        "if",
+        "then",
+        "else",
+        "elif",
+        "fi",
+        "case",
+        "esac",
+        "do",
+        "done",
+        "select",
+        "time",
+        "break",
+        "continue",
+        "return",
+        "exit",
+        "{",
+        "}",
+        "|",
+        "||",
+        "&&",
+        "&",
+    }
+)
+_LOOP_VAR_RE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
+_LOOP_PREFIX_OPERAND_RE = re.compile(r"([^$]*)(\$(?:\{\w+\}|\w+))")
 _RG_LONG_VALUE_OPTS = frozenset(
     {
         "context",
@@ -399,6 +438,172 @@ def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
     return paths
 
 
+def _is_literal_word(tok: str) -> bool:
+    """Whether ``tok`` is a plain literal with no shell metacharacter.
+
+    Used for the ``for VAR in <words>`` word list (issue #1397): a word
+    carrying any expansion, glob, quote, separator or redirection character
+    makes the whole loop unrecognised, so no partial credit is ever granted.
+    """
+    if not tok:
+        return False
+    return not any(ch in _NON_LITERAL_CHARS for ch in tok)
+
+
+def _is_straight_line_body(body: list[str]) -> bool:
+    """Whether a loop body is free of nested/conditional control flow.
+
+    A body qualifies only when every listed read is unconditionally reached.
+    Nested ``for``/``if``/``case``, ``while``/``until``, brace groups,
+    pipelines and the ``&&``/``&``/``||`` conditionals make the read
+    conditionally reached, as do command substitution, backticks, and flow
+    control (``break``/``continue``/``return``/``exit``) that can skip a later
+    read altogether; such a loop credits nothing (issue #1397, requirement 6,
+    whole-loop-or-nothing).
+    """
+    for tok in body:
+        if tok in _BODY_CONTROL_KEYWORDS:
+            return False
+        if "$(" in tok or "`" in tok:
+            return False
+    return True
+
+
+def _literal_loop_bindings(
+    tokens: list[str],
+) -> list[tuple[str, tuple[str, ...], int, int]]:
+    """Loop bindings as ``(var, words, body_start, body_end)`` records.
+
+    Each record carries its own ``do``…``done`` token span so that sequential
+    loops resolve independently — including two loops that reuse the same
+    variable name (issue #1397, Should Have) — and a read operand outside every
+    recognised loop credits nothing.
+
+    Only a top-level loop (the ``for`` token at index 0 or immediately after a
+    segment separator) with an all-literal, non-empty word list, a ``do`` and a
+    ``done``, and a straight-line body contributes a binding. Every ambiguous
+    shape credits nothing, per requirement 6: an empty list; a non-literal word
+    (command substitution, backticks, glob, ``$@``/``$*``, variable reference,
+    brace expansion, tilde); a missing ``do``/``done``; a nested ``for``, an
+    ``if``/``case`` body, a ``while``/``until`` loop; or a read reached through
+    ``&&``/``&``/``||``, a pipe, or a brace group. No partial credit is ever
+    granted (issue #1397).
+    """
+    bindings: list[tuple[str, tuple[str, ...], int, int]] = []
+    n = len(tokens)
+    i = 0
+    while i < n:
+        if tokens[i] != "for" or not (i == 0 or tokens[i - 1] in _SEGMENT_SEPARATORS):
+            i += 1
+            continue
+        if i + 2 >= n or not _is_literal_word(tokens[i + 1]) or tokens[i + 2] != "in":
+            i += 1
+            continue
+        var = tokens[i + 1]
+        j = i + 3
+        words: list[str] = []
+        while j < n and tokens[j] not in (";", "do"):
+            words.append(tokens[j])
+            j += 1
+        if j >= n or not words or any(not _is_literal_word(w) for w in words):
+            i += 1
+            continue
+        if tokens[j] == ";":
+            j += 1
+        if j >= n or tokens[j] != "do":
+            i += 1
+            continue
+        body_start = j + 1
+        k = body_start
+        while k < n and tokens[k] != "done":
+            k += 1
+        if k >= n:
+            i += 1
+            continue
+        if not _is_straight_line_body(tokens[body_start:k]):
+            i += 1
+            continue
+        bindings.append((var, tuple(words), body_start, k))
+        i = k + 1
+    return bindings
+
+
+def _enclosing_loop_binding(
+    bindings: list[tuple[str, tuple[str, ...], int, int]], index: int
+) -> tuple[str, tuple[str, ...]] | None:
+    """Binding of the recognised loop whose ``do``…``done`` span holds *index*.
+
+    A read operand credits a loop's words only when the read segment sits inside
+    that loop's own body, so a variable reused by a later loop — or a read
+    outside every loop — never picks up another loop's word list (issue #1397,
+    requirement 6: whole-loop-or-nothing). Nested bodies are rejected up front,
+    and spans never overlap, so at most one span can match.
+    """
+    for var, words, body_start, body_end in bindings:
+        if body_start <= index < body_end:
+            return (var, words)
+    return None
+
+
+def _resolve_loop_operand(
+    operand: str, binding: tuple[str, tuple[str, ...]] | None
+) -> tuple[str, ...] | None:
+    """Resolve a ``$``-bearing operand through one loop's binding, if possible.
+
+    ``$VAR`` and ``${VAR}`` return that loop's words; one literal prefix followed
+    by exactly one reference to the same loop variable (``src/$f``) returns each
+    word with the prefix prepended. A reference to a different variable, a
+    second ``$``, any trailing suffix, or no enclosing loop returns ``None``
+    (issue #1397).
+    """
+    if binding is None:
+        return None
+    var, words = binding
+    m = _LOOP_VAR_RE.fullmatch(operand)
+    if m:
+        return words if (m.group(1) or m.group(2)) == var else None
+    m = _LOOP_PREFIX_OPERAND_RE.fullmatch(operand)
+    if not m:
+        return None
+    var_match = _LOOP_VAR_RE.fullmatch(m.group(2))
+    if not var_match or (var_match.group(1) or var_match.group(2)) != var:
+        return None
+    prefix = m.group(1)
+    return tuple(prefix + w for w in words)
+
+
+def _loop_resolved_paths(
+    verb: str, operands: list[str], binding: tuple[str, tuple[str, ...]] | None
+) -> set[str]:
+    """Resolved literal-loop paths for one read segment inside a loop body.
+
+    Each ``$``-bearing operand is replaced by a unique sentinel literal and
+    ``_read_paths_for_segment`` re-run, so the verb's own position rules
+    (``rg``/``grep`` pattern skipping, ``sed`` address ranges, redirects,
+    option tables) decide which operands are credited. A sentinel the verb
+    credited is resolved through the enclosing loop's binding; an unresolvable
+    one contributes nothing.
+    """
+    resolved: set[str] = set()
+    sentinels: dict[str, str] = {}
+    substituted: list[str] = []
+    for idx, op in enumerate(operands):
+        if "$" in op:
+            sentinel = f"\x00loop{idx}\x00"
+            sentinels[sentinel] = op
+            substituted.append(sentinel)
+        else:
+            substituted.append(op)
+    credited = _read_paths_for_segment(verb, substituted)
+    for sentinel, op in sentinels.items():
+        if sentinel not in credited:
+            continue
+        words = _resolve_loop_operand(op, binding)
+        if words:
+            resolved.update(words)
+    return resolved
+
+
 def _paths_from_command(command: str) -> set[str]:
     """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
 
@@ -408,13 +613,16 @@ def _paths_from_command(command: str) -> set[str]:
     ``2>/dev/null``. Tokenization is shell-aware: quoted paths survive,
     redirection targets are consumed with their operator, and option values
     plus the ``rg``/``grep`` search pattern and the ``awk`` program are
-    filtered. Extraction is deliberately permissive — ``_path_matches``
+    filtered. A read segment inside a recognised literal ``for … in <words>;
+    do … done`` body is resolved to that loop's listed words (issue #1397)
+    while everything else falls through verbatim. Extraction is deliberately permissive — ``_path_matches``
     matches by ``endswith``, so a stray operand simply never matches a diff
     file — but options, redirect targets, sed address ranges, and the
     ``rg``/``grep`` search patterns are filtered.
     """
     paths: set[str] = set()
     tokens = _tokenize_command(command)
+    bindings = _literal_loop_bindings(tokens)
     i = 0
     n = len(tokens)
     while i < n:
@@ -430,12 +638,19 @@ def _paths_from_command(command: str) -> set[str]:
         if verb not in _READ_VERBS:
             i += 1
             continue
+        segment_start = i
         i += 1
         operands: list[str] = []
         while i < n and tokens[i] not in _SEGMENT_SEPARATORS:
             operands.append(tokens[i])
             i += 1
-        paths.update(_read_paths_for_segment(verb, operands))
+        credited = _read_paths_for_segment(verb, operands)
+        dynamic = {op for op in operands if "$" in op}
+        paths.update(credited - dynamic)
+        if dynamic and bindings:
+            binding = _enclosing_loop_binding(bindings, segment_start)
+            if binding is not None:
+                paths.update(_loop_resolved_paths(verb, operands, binding))
     return paths
 
 

@@ -1133,6 +1133,107 @@ def test_files_read_grep_context_options_do_not_eat_operand() -> None:
     assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
 
 
+def test_files_read_resolves_literal_loop_bindings() -> None:
+    # Issue #1397: the two archived reviewer patterns credit the literal word
+    # list -- never the unexpanded ``$task_file``/``$f`` spelling.
+    assert _shell_reads(
+        'for task_file in .gitignore openapi.yaml; do '
+        'echo "--- $task_file"; nl -ba "$task_file"; done'
+    ) == {".gitignore", "openapi.yaml"}
+    assert _shell_reads(
+        "for f in ios/App/App.entitlements ios/App/App.xcodeproj/project.pbxproj; "
+        'do nl -ba "$f"; done'
+    ) == {"ios/App/App.entitlements", "ios/App/App.xcodeproj/project.pbxproj"}
+    # Braced form and one literal prefix (Should Have): identical resolution.
+    assert _shell_reads('for f in a.py b.py; do nl -ba "${f}"; done') == {"a.py", "b.py"}
+    assert _shell_reads('for f in a.py b.py; do cat "src/$f"; done') == {"src/a.py", "src/b.py"}
+    # Sequential top-level loops resolve independently, each to its own list.
+    assert _shell_reads(
+        'for f in a.py b.py; do nl -ba "$f"; done; for g in c.py; do cat "$g"; done'
+    ) == {"a.py", "b.py", "c.py"}
+
+
+def test_files_read_sequential_loops_reusing_a_variable_resolve_independently() -> None:
+    # Issue #1397 Should Have: sequential loops resolve each to its OWN literal
+    # list -- including two loops that reuse the same variable name.
+    assert _shell_reads(
+        'for f in a.py b.py; do nl -ba "$f"; done; for f in c.py; do nl -ba "$f"; done'
+    ) == {"a.py", "b.py", "c.py"}
+
+
+def test_files_read_loop_credit_is_scoped_to_the_enclosing_loop_body() -> None:
+    # Issue #1397 requirement 6 (whole-loop-or-nothing): a read operand resolves
+    # only through the loop body that encloses it. A later loop's word list
+    # never attributes credit to a read it did not perform, and an ambiguous
+    # loop's read is not rescued by an unrelated literal loop.
+    assert _shell_reads(
+        'for f in a.py; do nl -ba "$f"; done; for f in b.py; do :; done'
+    ) == {"a.py"}
+    assert _shell_reads(
+        'for f in $(git ls-files); do cat "$f"; done; for f in readme.md; do :; done'
+    ) == set()
+
+
+def test_files_read_loop_binding_is_whole_loop_or_nothing() -> None:
+    # Issue #1397 AC2 / requirement 6: every ambiguous shape credits nothing
+    # for that call, so the affected files stay uncovered and reach the sweep.
+    for command in (
+        'for f in $(git ls-files); do nl -ba "$f"; done',            # command substitution
+        'for f in `ls`; do nl -ba "$f"; done',                       # backticks
+        'for f in src/*.py; do nl -ba "$f"; done',                   # glob
+        'for f in "$@"; do nl -ba "$f"; done',                       # "$@"
+        'for f in $FILES; do nl -ba "$f"; done',                     # variable list
+        'for f in {a,b}.py; do nl -ba "$f"; done',                   # brace expansion
+        'for f in ~/a.py; do nl -ba "$f"; done',                     # tilde
+        'for f in a.py b.py; do [ -f "$f" ] && nl -ba "$f"; done',   # && guard
+        'for f in a.py b.py; do break; nl -ba "$f"; done',            # skipped read
+        'for f in a.py b.py; do continue; nl -ba "$f"; done',         # skipped read
+        'for f in a.py b.py; do exit 0; nl -ba "$f"; done',           # skipped read
+        'for f in a.py b.py; do return 0; nl -ba "$f"; done',         # skipped read
+        'for f in a.py b.py; do if [ -f "$f" ]; then nl -ba "$f"; fi; done',
+        'for d in x y; do for f in a.py; do nl -ba "$f"; done; done',  # nested
+        'while read f; do nl -ba "$f"; done',                        # while
+        'for f in a.py b.py; do nl -ba "$g"; done',                  # unbound operand
+        'for f in a.py b.py; do nl -ba "src/$f/extra"; done',        # suffix after var
+    ):
+        assert _shell_reads(command) == set(), command
+
+
+def test_analyze_coverage_credits_a_completed_loop_read(tmp_path: Path) -> None:
+    # The same resolution is visible to eval coverage analysis (shared seam).
+    daydream_dir = tmp_path / ".daydream"
+    daydream_dir.mkdir()
+    (daydream_dir / "diff.patch").write_text(
+        "diff --git a/.gitignore b/.gitignore\n"
+        "diff --git a/openapi.yaml b/openapi.yaml\n"
+    )
+    trajectories = {
+        "main": None,
+        "forked": [
+            {
+                "_source_file": "deep-generic.json",
+                "steps": [
+                    {
+                        "step_id": "s0",
+                        "tool_calls": [
+                            {
+                                "function_name": "shell",
+                                "arguments": {
+                                    "command": 'for task_file in .gitignore openapi.yaml; '
+                                    'do nl -ba "$task_file"; done'
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        ],
+    }
+
+    result = analyze_coverage(trajectories, daydream_dir)
+
+    assert result["uncovered_files"] == []
+    assert result["files_read_by_reviewers"] == 2
 
 
 # Only a quote opened and never closed makes shlex raise; the two other

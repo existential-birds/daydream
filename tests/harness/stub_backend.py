@@ -56,6 +56,11 @@ class StubBackend:
     Writes realistic per-stack review outputs and a merged report so the
     orchestrator can progress through every stage. Records every call so
     tests can assert ordering, agents-kwarg absence, and per-stack isolation.
+
+    Every knob declared on ``__init__`` defaults to the pre-existing behaviour;
+    in particular ``per_stack_read_command``, ``per_stack_loop_reads``, and
+    ``read_result_extra`` are ``None``/empty/``None`` by default, so emitted
+    read events stay byte-identical unless a test opts in.
     """
 
     model = "mock-model"
@@ -267,6 +272,23 @@ class StubBackend:
         # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
         # leave one diff file unread by every reviewer).
         self.per_stack_unread: frozenset[str] = frozenset()
+        # Issue #1397: when set, a per-stack/generic branch whose scope
+        # contains any file in ``per_stack_loop_reads`` emits exactly one
+        # completed ``Bash`` command (this string) reading the loop-listed
+        # files together, and skips the per-file ``Read`` for those files.
+        # ``None`` (the default) emits no batched command, leaving the event
+        # stream byte-identical to today.
+        self.per_stack_read_command: str | None = None
+        # Files in a stack's scope read by ``per_stack_read_command`` rather
+        # than one ``Read`` each. Empty by default (no batched read).
+        self.per_stack_loop_reads: frozenset[str] = frozenset()
+        # Issue #1397 (requirement 5): when set, every read ToolResultEvent the
+        # stub emits -- per-file ``Read``, the batched shell command, and the
+        # sweep read alike -- carries these metadata fields, so a test can
+        # simulate a damaged observation (e.g. ``{"is_error": True}``) and prove
+        # the coverage outcome gate refuses it credit. ``None`` (the default)
+        # emits byte-identical successful reads.
+        self.read_result_extra: dict[str, Any] | None = None
         # Issue #742: when set, the per-stack parse branch emits these as the
         # declared per-file verdicts in its structured_output
         # (``{"issues": issues, "verdicts": self.parse_declared_verdicts}``),
@@ -428,6 +450,19 @@ class StubBackend:
         if m is None:
             return []
         return [part.strip() for part in m.group(1).split(",") if part.strip()]
+
+    def _read_result(self, *, id: str, output: str) -> ToolResultEvent:
+        """Build a read ``ToolResultEvent``, applying :attr:`read_result_extra`.
+
+        Default ``None`` yields the same ``is_error=False`` result as before;
+        when set, its keys (typically ``is_error``/``exit_code``/``status``/
+        ``cancelled``/``truncated``) override the successful defaults so a test
+        can simulate a damaged read observation.
+        """
+        fields: dict[str, Any] = {"id": id, "output": output, "is_error": False}
+        if self.read_result_extra is not None:
+            fields.update(self.read_result_extra)
+        return ToolResultEvent(**fields)
 
     def _tick(self) -> None:
         """Charge one emitted event's worth of injected clock time, if configured.
@@ -607,7 +642,7 @@ class StubBackend:
                     yield ToolStartEvent(id=call_id, name="Read", input={"file_path": path})
                     # Paired result: a bare start is an INTERRUPTED read and
                     # yields no coverage, so grounding would reject the citation.
-                    yield ToolResultEvent(id=call_id, output="file content", is_error=False)
+                    yield self._read_result(id=call_id, output="file content")
             yield TextEvent(text="")
             yield ResultEvent(
                 structured_output=spec,
@@ -702,9 +737,7 @@ class StubBackend:
                 yield ToolStartEvent(
                     id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
                 )
-                yield ToolResultEvent(
-                    id=f"sweep-read-{swept_file}", output="sweep read returned", is_error=False
-                )
+                yield self._read_result(id=f"sweep-read-{swept_file}", output="sweep read returned")
             # Issue #745 (AC4): the sweep reviewer emits UNCOVERED_SWEEP_SCHEMA
             # structured output directly (no parse-uncovered-<n> fork).
             yield TextEvent(text="")
@@ -746,17 +779,33 @@ class StubBackend:
             m = _M()  # type: ignore[assignment]
         if m is not None:
             if self.per_stack_emit_reads:
-                for scope_file in self._stack_scope_files(prompt):
-                    if scope_file in self.per_stack_unread:
+                scope_files = self._stack_scope_files(prompt)
+                if self.per_stack_read_command and any(
+                    scope_file in self.per_stack_loop_reads for scope_file in scope_files
+                ):
+                    # One shell read of the loop-listed files (issue #1397). The
+                    # analyzer resolves the literal ``for`` binding so the
+                    # coverage computation credits each listed file when the
+                    # paired observation is undamaged.
+                    loop_id = f"loop-{len(scope_files)}"
+                    yield ToolStartEvent(
+                        id=loop_id,
+                        name="Bash",
+                        input={"command": self.per_stack_read_command},
+                    )
+                    yield self._read_result(id=loop_id, output="loop read returned")
+                for scope_file in scope_files:
+                    if (
+                        scope_file in self.per_stack_unread
+                        or scope_file in self.per_stack_loop_reads
+                    ):
                         continue
                     yield ToolStartEvent(
                         id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
                     )
-                    # Completed read: a ToolResultEvent paired with the start,
-                    # so the sweep's coverage computation counts the file as read.
-                    yield ToolResultEvent(
-                        id=f"read-{scope_file}", output="file content", is_error=False
-                    )
+                    # Paired result: the sweep's coverage computation credits
+                    # the file only when this observation is not damaged.
+                    yield self._read_result(id=f"read-{scope_file}", output="file content")
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
