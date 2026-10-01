@@ -147,7 +147,20 @@ def test_fix_applied_signal_no_file_overlap_returns_not_applied(tmp_path: Path) 
 def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
     """≥50% hunks applied → applied; below → not_applied."""
     (tmp_path / "diff.patch").write_text(
-        diff_adding("foo = 1") + diff_adding("bar = 2") + diff_adding("baz = 3")
+        # A valid single-file three-hunk diff: distinct new-side line numbers so
+        # each added line belongs to exactly one hunk.
+        "diff --git a/app.py b/app.py\n"
+        "--- a/app.py\n"
+        "+++ b/app.py\n"
+        "@@ -1,1 +1,2 @@\n"
+        " existing\n"
+        "+foo = 1\n"
+        "@@ -10,1 +11,2 @@\n"
+        " existing\n"
+        "+bar = 2\n"
+        "@@ -20,1 +21,2 @@\n"
+        " existing\n"
+        "+baz = 3\n"
     )
     row = _row(tmp_path, base_branch="main")
     sig = fix_applied_signal(

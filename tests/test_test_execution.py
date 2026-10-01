@@ -18,7 +18,6 @@ from daydream.test_execution import (
     RequiredContract,
     RequiredRun,
     TargetedCheckRun,
-    TestExecutionIdentity,
     TestExecutionResult,
     TestRecipe,
     canonical_test_command,
@@ -31,6 +30,7 @@ from daydream.test_execution import (
     run_test_command,
 )
 from daydream.trajectory import DaydreamPhase
+from tests.harness.execution import test_execution_identity as _identity
 from tests.harness.trajectory import make_recorder
 
 
@@ -42,26 +42,6 @@ def _pid_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
-
-
-def _identity(**overrides: Any) -> TestExecutionIdentity:
-    fields: dict[str, Any] = {
-        "session_id": "s",
-        "argv": ("uv", "run", "pytest"),
-        "cwd_relative": ".",
-        "runner": "uv",
-        "interpreter": None,
-        "config_digest": "d" * 64,
-        "absent_components": (),
-        "input_tree_key": "t",
-        "output_tree_key": "t",
-        "head_sha": "a" * 40,
-        "branch": "feature",
-        "kind": "host",
-        "outcome": "passed",
-    }
-    return TestExecutionIdentity(**{**fields, **overrides})
-
 
 
 def _run(
@@ -461,12 +441,7 @@ def test_load_test_recipe_is_fail_open(tmp_path: Path, writer: Callable[[Path], 
 
 
 def test_execution_identity_carries_every_reuse_component() -> None:
-    identity = TestExecutionIdentity(
-        session_id="s", argv=("uv", "run", "pytest"), cwd_relative="services/api",
-        runner="uv", interpreter="3.12", config_digest="d" * 64, absent_components=(),
-        input_tree_key="t", output_tree_key="t", head_sha="a" * 40, branch="feature",
-        kind="host", outcome="passed",
-    )
+    identity = _identity(cwd_relative="services/api", interpreter="3.12")
 
     assert identity.reusable is True
     assert identity.payload()["config_digest"] == "d" * 64

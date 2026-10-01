@@ -373,26 +373,42 @@ _FIX_EDIT_ERODED = (
 )
 
 
-def _build_gate_target(tmp_path: Path, name: str) -> Path:
-    """Build a python-only fixture repo (the shape the quality gate measures)."""
+def _feature_branch_repo(
+    tmp_path: Path,
+    name: str,
+    *,
+    initial: dict[str, str],
+    changed: dict[str, str],
+) -> Path:
+    """Commit ``initial`` on the default branch, branch, then commit ``changed``."""
     project = tmp_path / name
     project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
+    for relative, content in initial.items():
+        (project / relative).write_text(content)
     _init_repo(project)
-    _git(project, "add", "api.py")
+    _git(project, "add", *initial)
     _commit(project, "init")
     _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'galaxy'\n")
-    _git(project, "add", "api.py")
+    for relative, content in changed.items():
+        (project / relative).write_text(content)
+    _git(project, "add", *changed)
     _commit(project, "change")
     return project
 
 
+def _build_gate_target(tmp_path: Path, name: str) -> Path:
+    """Build a python-only fixture repo (the shape the quality gate measures)."""
+    return _feature_branch_repo(
+        tmp_path,
+        name,
+        initial={"api.py": "def hello():\n    return 'universe'\n"},
+        changed={"api.py": "def hello():\n    return 'galaxy'\n"},
+    )
+
+
 def _build_gate_target_no_functions(tmp_path: Path, name: str) -> Path:
     """A python-only fixture repo whose api.py has NO functions (erosion None pre-fix)."""
-    project = tmp_path / name
-    project.mkdir()
-    (project / "api.py").write_text(
+    initial = (
         "import os\n"
         "import sys\n"
         "\n"
@@ -401,22 +417,12 @@ def _build_gate_target_no_functions(tmp_path: Path, name: str) -> Path:
         "\n"
         "CONFIG = os.environ.get('APP_CONFIG', 'default')\n"
     )
-    _init_repo(project)
-    _git(project, "add", "api.py")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text(
-        "import os\n"
-        "import sys\n"
-        "\n"
-        "NAME = 'gate_five'\n"
-        "VERSION = '1.0.1'\n"
-        "\n"
-        "CONFIG = os.environ.get('APP_CONFIG', 'default')\n"
+    return _feature_branch_repo(
+        tmp_path,
+        name,
+        initial={"api.py": initial},
+        changed={"api.py": initial.replace("1.0.0", "1.0.1")},
     )
-    _git(project, "add", "api.py")
-    _commit(project, "change")
-    return project
 
 
 def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
@@ -442,18 +448,15 @@ def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
     must protect: a fix agent editing ``unrelated.py`` is editing outside the
     reviewed diff.
     """
-    project = tmp_path / name
-    project.mkdir()
-    (project / "api.py").write_text("def hello():\n    return 'universe'\n")
-    (project / "unrelated.py").write_text("def util():\n    return 'untouched'\n")
-    _init_repo(project)
-    _git(project, "add", "api.py", "unrelated.py")
-    _commit(project, "init")
-    _git(project, "checkout", "-b", "feature")
-    (project / "api.py").write_text("def hello():\n    return 'galaxy'\n")
-    _git(project, "add", "api.py")
-    _commit(project, "change")
-    return project
+    return _feature_branch_repo(
+        tmp_path,
+        name,
+        initial={
+            "api.py": "def hello():\n    return 'universe'\n",
+            "unrelated.py": "def util():\n    return 'untouched'\n",
+        },
+        changed={"api.py": "def hello():\n    return 'galaxy'\n"},
+    )
 
 
 class _PromptHookStub(_StubBackend):

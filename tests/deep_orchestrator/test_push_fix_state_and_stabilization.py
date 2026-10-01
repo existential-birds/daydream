@@ -31,7 +31,6 @@ from daydream.extensions.api import Stop
 from daydream.git_ops import GitError
 from daydream.phases import PushReceipt, TestAndHealResult, TestAttemptEvidence
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.test_execution import TestExecutionIdentity
 from tests.deep_orchestrator.support import (
     _base_repo,
     _direct_fix_context,
@@ -40,6 +39,7 @@ from tests.deep_orchestrator.support import (
     _remote_identity_context,
 )
 from tests.harness.backend import ScriptedBackend
+from tests.harness.execution import test_execution_identity as _identity
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
 from tests.test_deep_orchestrator import (
     _merge_item,
@@ -64,25 +64,6 @@ def _host_test_evidence(
         output_tree_key=output_tree_key,
     )
 
-
-
-def _identity(**overrides: Any) -> TestExecutionIdentity:
-    fields: dict[str, Any] = {
-        "session_id": "s",
-        "argv": ("uv", "run", "pytest"),
-        "cwd_relative": ".",
-        "runner": "uv",
-        "interpreter": None,
-        "config_digest": "d" * 64,
-        "absent_components": (),
-        "input_tree_key": "t",
-        "output_tree_key": "t",
-        "head_sha": "a" * 40,
-        "branch": "feature",
-        "kind": "host",
-        "outcome": "passed",
-    }
-    return TestExecutionIdentity(**{**fields, **overrides})
 
 def test_push_verdict_is_current_session_and_exact_identity(tmp_path: Path) -> None:
 

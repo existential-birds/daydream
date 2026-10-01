@@ -753,19 +753,7 @@ def test_local_harbor_task_with_fake_backend(
     # the in-process runner deterministic.
     repo = _seed_defect_repo(tmp_path)
     install_stub_backend(monkeypatch, repo)
-    task_env = {
-        "DAYDREAM_REVIEW_CASE_ID": key,
-        "DAYDREAM_REVIEW_BACKEND": "pi",
-        "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
-        "DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api",
-        "DAYDREAM_REVIEW_REPO_DIR": str(repo),
-        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(
-            tmp_path / "logs" / "artifacts" / "review.json"
-        ),
-        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(
-            tmp_path / "logs" / "agent" / "trajectory.json"
-        ),
-    }
+    task_env = _end_env(repo, tmp_path, key)
     # Host secrets present in the parent env must never reach the child env.
     for banned in env_policy.HOST.banned_vars:
         monkeypatch.setenv(banned, "super-secret")
@@ -864,18 +852,11 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(
     install_stub_backend(monkeypatch, repo)
     case_id = "case-abc123def456"
     task_env = {
-        "DAYDREAM_REVIEW_CASE_ID": case_id,
+        **_end_env(repo, tmp_path, case_id),
         "DAYDREAM_REVIEW_BACKEND": "claude",
         "DAYDREAM_REVIEW_API_KEY": "k",
         "ANTHROPIC_API_KEY": "sk-ant-live",
         "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
-        "DAYDREAM_REVIEW_REPO_DIR": str(repo),
-        "DAYDREAM_REVIEW_ARTIFACT_PATH": str(
-            tmp_path / "logs" / "artifacts" / "review.json"
-        ),
-        "DAYDREAM_REVIEW_TRAJECTORY_PATH": str(
-            tmp_path / "logs" / "agent" / "trajectory.json"
-        ),
     }
     # Host secrets present in the parent env must never reach the child env --
     # except the ANTHROPIC_* credential the claude backend is allowed to carry,
