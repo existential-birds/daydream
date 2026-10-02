@@ -84,8 +84,7 @@ def test_redactor_scrubs_git_url_credentials() -> None:
     assert "[REDACTED_USER]" in out.message
     assert "[REDACTED_API_KEY]" in out.message
     # Host and path preserved (debugging/replay value).
-    assert "github.com" in out.message
-    assert "/user/repo.git" in out.message
+    assert out.message == "git+https://[REDACTED_USER]:[REDACTED_API_KEY]@github.com/user/repo.git"
 
 
 @pytest.mark.parametrize(("text", "absent", "present", "preserved_tail"),
@@ -666,4 +665,3 @@ def test_redactor_sensitive_suffix_block_empty_value_not_redacted() -> None:
     out = redact_structured_text(text)
     assert out == text
     assert "[REDACTED_CREDENTIAL]" not in out
-

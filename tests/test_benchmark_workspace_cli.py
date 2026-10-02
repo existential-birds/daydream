@@ -95,8 +95,10 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
         ], capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stdout + r.stderr
-    assert "confidential" in r.stdout  # prints privacy classification
-    assert "api.anthropic.com" in r.stdout  # prints egress boundary
+    assert r.stdout.splitlines() == [
+        "classification: confidential",
+        "egress boundary: api.anthropic.com api.anthropic.com",
+    ]
     assert (ws / "benchmark.yaml").exists()
 
     r2 = subprocess.run(  # noqa: S603
@@ -359,4 +361,3 @@ def test_stale_approval_keeps_collecting_and_curating_priority_contract() -> Non
     assert derive_workspace_state(
         pull_requests=[{"import_state": "fetched"}], cases=[{"curation_state": "stale"}, {"curation_state": "draft"}],
     ) == "curating"
-
