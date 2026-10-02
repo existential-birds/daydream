@@ -1,6 +1,6 @@
 # Daydream Harbor runtime requirements (generated; do not edit)
 # daydream_version: 0.29.0
-# source_uv_lock_sha256: ae2197eefa45d8b8992aed41340bacf9256ffd0d2e58511d27cbf687dc8975d3
+# source_uv_lock_sha256: e035f70c23015967fb6d69d5f09dac7d77081e8cf943e60e0c41bd58680da5e1
 # generation_command: uv export --frozen --no-dev --no-emit-project --format requirements-txt
 # template_version: 4
 
@@ -328,13 +328,13 @@ charset-normalizer==3.5.1 \
     --hash=sha256:fd0a274c0e5f9a21565cd9d3dd749b61f96b7aa1e20a93aa1ba4029518f2e5c0 \
     --hash=sha256:fdb8a068947befafba9952162645dc2fecaeb400e64584829ed5e9b2fbe21a7f
     # via requests
-claude-agent-sdk==0.2.154 \
-    --hash=sha256:0f2df9cd2aaa7b85d09b8da3e45363eaa0355201cec15f6c013194b3d7c91198 \
-    --hash=sha256:14e39c1d17a126e64b3b390ef2bf278c40535c625f42754793159c274148d36d \
-    --hash=sha256:59427635611229e3c069a8bae2c83aa4d805b0e5078654a1a96e23b34900dff1 \
-    --hash=sha256:5b43f3578123596a471c886c4298ee8fe535b0c6bbe1febdcbdf03ca18127fe4 \
-    --hash=sha256:abfdbbbe528a094308beb565f6157dda3e82d4838ae141667394d521c295fb76 \
-    --hash=sha256:d07d8831a115e50afebc319fdfd6ee6b377643c7f0766c46590bf68de703110d
+claude-agent-sdk==0.2.159 \
+    --hash=sha256:87f553fda74e2f57e00f2bcb1705ab9311a937f97571f4f9eceea2bd411b6e32 \
+    --hash=sha256:b03683d12d217b0b6c189c88a3d260a045171e7fdc9f23e2d0dfb05ff3276834 \
+    --hash=sha256:ba7f152560dca5001a0bc46ed13b7da14eb14b419faed25bb1af821bfa95d3de \
+    --hash=sha256:cc1b92ae56f42ade2d083ef2d2e5edb4aa8c7a6d856818a9b8f60cf6ae746f3a \
+    --hash=sha256:d3ba57c187b07c87702b94e2b62dd7c61ed874899defcbb35bb5cef4cb94ace1 \
+    --hash=sha256:e1905e2637b27971bb561bb6ad317aeb3d50619be5261bfa7ff2e9c2be0f0fd1
     # via daydream
 click==8.5.0 ; sys_platform != 'emscripten' \
     --hash=sha256:255bc9599cf7748b4b1a446ccc735421bd08a2ae529a8b88597d3de5664ee360 \
@@ -1634,9 +1634,9 @@ typing-inspection==0.4.4 \
     #   mcp
     #   pydantic
     #   pydantic-settings
-urllib3==2.7.0 \
-    --hash=sha256:231e0ec3b63ceb14667c67be60f2f2c40a518cb38b03af60abc813da26505f4c \
-    --hash=sha256:9fb4c81ebbb1ce9531cce37674bbc6f1360472bc18ca9a553ede278ef7276897
+urllib3==2.8.0 \
+    --hash=sha256:0cf3cae568d36aa9576b28dfb35f11328f1cb974ca7647d9475ebb86c75ac6e3 \
+    --hash=sha256:63bf2ead4c879426ebf22ef2a781eeb4aa3b4ae798a0435506f8687fd5bb9b63
     # via requests
 uvicorn==0.52.4 ; sys_platform != 'emscripten' \
     --hash=sha256:73acfee47a0b133c5de13d219492d62d8a31e935f4fe6e41a232451a15379f86 \
