@@ -937,7 +937,7 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
     monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
-    warnings = ("Alternatives: wall_budget_exceeded",)
+    warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
     if failed_reviewer:
         per_stack_failures_path(tmp_path).write_text(json.dumps({"python": "RuntimeError: provider unavailable"}))
         warnings = review_warnings(tmp_path)
