@@ -15,13 +15,41 @@ from daydream.agent import run_agent
 from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint
 from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
 from daydream.backends._subprocess import StreamStalledError
-from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
+from daydream.backends.pi import PiBackend, PiError, _pi_error_category, _pi_retryable_for
 from daydream.config import DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
 from daydream.retry_policy import classify_failure
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock, patch_retry_sleep
+from tests.harness.pi_replay import make_mock_process
 from tests.harness.trajectory import make_recorder
+
+# The sanitized provider 429 and the healthy follow-up, replayed through the real
+# Pi transport by the timing proofs below. Defined once and shared by both tests.
+_ERROR_MESSAGE = (
+    '429: {"message":"Temporary admission failure","code":429,'
+    '"metadata":{"headers":{"Retry-After":"10"}}}'
+)
+_ERROR_LINES = (
+    '{"type":"session","sessionId":"pi_ses_429"}',
+    '{"type":"agent_start"}',
+    '{"type":"turn_start"}',
+    json.dumps({
+        "type": "turn_end",
+        "message": {
+            "role": "assistant", "content": [], "stopReason": "error", "errorMessage": _ERROR_MESSAGE,
+        },
+    }),
+)
+_HEALTHY_LINES = (
+    '{"type":"session","sessionId":"pi_ses_ok"}',
+    '{"type":"agent_start"}',
+    '{"type":"turn_start"}',
+    '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}',
+    '{"type":"turn_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}],'
+    '"usage":{"input":1,"output":1},"stopReason":"stop"}}',
+    '{"type":"agent_end","messages":[]}',
+)
 
 
 def _fail_then_succeed(error: BaseException, *, text: str, partial: str | None = None, **attrs: Any) -> ScriptedBackend:
@@ -562,3 +590,58 @@ def test_the_extracted_retry_delay_planner_clamps_to_every_bound(monkeypatch: py
         attempt=0, base_delay_s=30.0, max_delay_s=60.0,
         allowance_remaining_s=None, deadline_remaining_s=12.0, hint=45.0,
     ) == (0.0, "retry_hint_exceeds_budget")
+
+
+async def test_run_agent_waits_a_server_hint_in_full_when_it_fits(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The next attempt begins no earlier than the advertised delay, even when
+    the configured jitter maximum (4s) is smaller than the hint (10s)."""
+    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, clock)
+    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(_HEALTHY_LINES))]
+    spawned: list[int] = []
+
+    async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
+        spawned.append(1)
+        return procs.pop(0)
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
+    backend = PiBackend(model="glm-5.2")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = 1.0
+    backend.retry_max_delay_s = 4.0
+    out, _, _ = await run_agent(
+        cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
+        wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+    )
+    assert out == "done"
+    assert len(spawned) == 2  # exactly one retry after the admission failure
+    assert slept == [pytest.approx(10.0)]  # the full hint, not the 1.0 jitter cap
+
+
+async def test_run_agent_stops_when_the_hint_exceeds_the_remaining_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unfittable hint: exactly one attempt, one stop reason, no second spawn."""
+    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    slept = patch_retry_sleep(monkeypatch, clock)
+    procs = [make_mock_process(list(_ERROR_LINES)), make_mock_process(list(_ERROR_LINES))]
+    spawned: list[int] = []
+
+    async def _spawn(*_args: Any, **_kwargs: Any) -> Any:
+        spawned.append(1)
+        return procs.pop(0)
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", _spawn)
+    backend = PiBackend(model="glm-5.2")
+    backend.retry_attempts = 1
+    backend.retry_base_delay_s = 1.0
+    backend.retry_max_delay_s = 4.0
+    with pytest.raises(PiError):
+        await run_agent(
+            cast(Backend, backend), tmp_path, "p", phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0, retry_recovery_allowance_s=5.0,  # hint 10 > 5
+        )
+    assert len(spawned) == 1  # no further attempt dispatched after the stop
+    assert slept == []  # no shortened wait is substituted
