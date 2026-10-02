@@ -29,46 +29,32 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, git
 
 
-async def test_recorder_public_output_requires_standalone_opt_in(
-    tmp_path: Path, make_config: Callable[..., RunConfig],
+async def test_recorder_public_output_requires_standalone_opt_in(tmp_path: Path, make_config: Callable[..., RunConfig],
 ) -> None:
     config = make_config(tmp_path)
     with pytest.raises(ArtifactVisibilityError, match="allow_standalone=True"):
-        runner._open_recorder(
-            config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,
-        )
+        runner._open_recorder(config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,)
     assert not (tmp_path / ".daydream").exists()
 
     recorder = runner._open_recorder(
-        config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,
-        allow_standalone=True,
+        config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
     )
     async with recorder:
-        await run_agent(
-            ScriptedBackend(
+        await run_agent(ScriptedBackend(
                 events=[TextEvent(text="Standalone result"), ResultEvent(structured_output=None, continuation=None)],
-            ),
-            tmp_path,
-            "Record one standalone turn.",
-            phase=DaydreamPhase.REVIEW,
+            ), tmp_path, "Record one standalone turn.", phase=DaydreamPhase.REVIEW,
         )
     assert recorder.path.is_file()
     assert json.loads(recorder.path.read_text())["session_id"] == recorder.session_id
 
-
 @pytest.mark.parametrize("entrypoint", ["deep", "recorder"])
 async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., RunConfig],
-    make_work: Callable[..., WorkContext],
-    entrypoint: str,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
+    make_work: Callable[..., WorkContext], entrypoint: str,
 ) -> None:
     repo = tiny_diff_target
     work = make_work(
-        repo, base_sha=git(repo, "rev-parse", "main"),
-        head_sha=git(repo, "rev-parse", "HEAD"), head_branch="feature",
+        repo, base_sha=git(repo, "rev-parse", "main"), head_sha=git(repo, "rev-parse", "HEAD"), head_branch="feature",
     )
     prior = repo / ".daydream" / "deep" / "prior.txt"
     prior.parent.mkdir(parents=True)
@@ -88,8 +74,7 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
                 await run_deep(config, work, allow_standalone=True)
             else:
                 runner._open_recorder(
-                    config=config, target_dir=repo, work=work,
-                    flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
+                    config=config, target_dir=repo, work=work, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
                 )
         assert not (repo / ".daydream").exists()
         assert (live / "deep" / "prior.txt").read_bytes() == b"prior session evidence\n"
@@ -98,17 +83,12 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
 
     assert prior.read_bytes() == b"prior session evidence\n"
 
-
 @pytest.mark.parametrize(
     "relative_destination", ["operator evidence/trajectory.json", ".daydream/custom trajectory.json"],
 )
 async def test_ephemeral_failure_handoff_retains_explicit_trajectory_without_archive(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: Callable[..., RunConfig],
-    relative_destination: str,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
+    make_config: Callable[..., RunConfig], relative_destination: str,
 ) -> None:
     repo = tiny_diff_target
     origin = bare_remote(tmp_path / "origin.git")
@@ -143,20 +123,12 @@ async def test_ephemeral_failure_handoff_retains_explicit_trajectory_without_arc
         "    registry.set_flow('artifact-handoff', ['artifact-handoff'])\n"
     )
     # An empty, valid response exercises the deterministic host handoff.
-    backend = ScriptedBackend(
-        events=[ResultEvent(structured_output={"handoff_prompt": ""}, continuation=None)],
-    )
+    backend = ScriptedBackend(events=[ResultEvent(structured_output={"handoff_prompt": ""}, continuation=None)],)
     monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
     config = make_config(
-        repo,
-        flow_name="artifact-handoff",
-        force_worktree=True,
-        trajectory_path=explicit,
-        archive=False,
+        repo, flow_name="artifact-handoff", force_worktree=True, trajectory_path=explicit, archive=False,
         run_eval=False,
-        test_command=shlex.join(
-            [sys.executable, "-c", "import sys; print('1 failed, 0 passed'); sys.exit(1)"]
-        ),
+        test_command=shlex.join([sys.executable, "-c", "import sys; print('1 failed, 0 passed'); sys.exit(1)"]),
     )
 
     result = await runner.run(config, private_roots=private_root_locations(base=private_base))
@@ -184,13 +156,9 @@ async def test_ephemeral_failure_handoff_retains_explicit_trajectory_without_arc
     # and preserve their bytes when writing its own default trajectory.
     published = explicit.read_bytes()
     second_config = replace(
-        config,
-        trajectory_path=None,
-        test_command=shlex.join([sys.executable, "-c", "print('1 passed')"]),
+        config, trajectory_path=None, test_command=shlex.join([sys.executable, "-c", "print('1 passed')"]),
     )
-    assert await runner.run(
-        second_config, private_roots=private_root_locations(base=private_base),
-    ) == 0
+    assert await runner.run(second_config, private_roots=private_root_locations(base=private_base),) == 0
     assert explicit.read_bytes() == published
     assert handoffs[0].read_text() == body
     assert backend.call_count == 1

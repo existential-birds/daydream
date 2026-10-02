@@ -38,41 +38,20 @@ _LINK_SPAN_ID = 0x5555555555555555
 _VENDORS = ("honeyhive", "langsmith", "otlp")
 
 
-def _ctx(
-    trace_id: int,
-    span_id: int,
-    *,
-    is_remote: bool = False,
-    sampled: bool = True,
+def _ctx(trace_id: int, span_id: int, *, is_remote: bool = False, sampled: bool = True,
     state_entries: list[tuple[str, str]] | None = None,
 ) -> SpanContext:
     return SpanContext(
-        trace_id=trace_id,
-        span_id=span_id,
-        is_remote=is_remote,
-        trace_flags=TraceFlags(0x01 if sampled else 0x00),
+        trace_id=trace_id, span_id=span_id, is_remote=is_remote, trace_flags=TraceFlags(0x01 if sampled else 0x00),
         trace_state=TraceState(entries=state_entries) if state_entries else None,
     )
 
 
-def _span(
-    *,
-    trace_id: int = _TRACE_ID,
-    span_id: int = _SPAN_ID,
-    parent: SpanContext | None = None,
-    name: str = "span",
-    sampled: bool = True,
-    links: list[Link] | None = None,
-    events: list[Event] | None = None,
-    attributes: Any = None,
+def _span(*, trace_id: int = _TRACE_ID, span_id: int = _SPAN_ID, parent: SpanContext | None = None, name: str = "span",
+    sampled: bool = True, links: list[Link] | None = None, events: list[Event] | None = None, attributes: Any = None,
 ) -> ReadableSpan:
-    return ReadableSpan(
-        name=name,
-        context=_ctx(trace_id, span_id, sampled=sampled),
-        parent=parent,
-        resource=Resource({"service.name": "daydream-test"}),
-        attributes=attributes or {},
-        events=list(events or []),
+    return ReadableSpan(name=name, context=_ctx(trace_id, span_id, sampled=sampled), parent=parent,
+        resource=Resource({"service.name": "daydream-test"}), attributes=attributes or {}, events=list(events or []),
         links=list(links or []),
     )
 
@@ -82,8 +61,7 @@ def _hex_id(value: str) -> str:
 
 
 def _wire_spans(request: dict[str, Any]) -> list[dict[str, Any]]:
-    return [
-        span
+    return [span
         for resource in request["body"]["resourceSpans"]
         for scope in resource["scopeSpans"]
         for span in scope["spans"]
@@ -112,7 +90,6 @@ def _vendor_wire(monkeypatch: pytest.MonkeyPatch, vendor: str, spans: list[Reada
         assert len(receiver.requests) == 1
         return _wire_spans(receiver.requests[0])
 
-
 def test_stock_encoder_drops_low_trace_flags_and_link_state() -> None:
     """Documents the pinned SDK's fidelity gap the Task 4A repair exists for."""
     link = Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=True, sampled=True, state_entries=[("vendor", "1")]))
@@ -122,25 +99,17 @@ def test_stock_encoder_drops_low_trace_flags_and_link_state() -> None:
     assert wire.links[0].flags & _FLAGS_SAMPLED == 0  # and on the link
     assert wire.links[0].trace_state == ""  # link trace state lost entirely
 
-
 def test_wire_repairs_span_flags(monkeypatch: pytest.MonkeyPatch) -> None:
     remote_parent = _ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=False)
     cases = [
         # Remote parent with an unsampled span context: masks only.
-        (
-            _span(sampled=False, parent=remote_parent),
-            _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE,
-        ),
+        (_span(sampled=False, parent=remote_parent), _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE,),
         # Local root, unsampled span context.
-        (
-            _span(span_id=0x4444444444444444, sampled=False, parent=None),
-            _FLAGS_HAS_IS_REMOTE,
-        ),
+        (_span(span_id=0x4444444444444444, sampled=False, parent=None), _FLAGS_HAS_IS_REMOTE,),
         # Local root, sampled span context: the low sampled bit is restored.
         (_span(span_id=0x5555555555555555, parent=None), _FLAGS_HAS_IS_REMOTE | _FLAGS_SAMPLED),
         # Remote parent, sampled span context.
-        (
-            _span(parent=_ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=True)),
+        (_span(parent=_ctx(_TRACE_ID, _PARENT_SPAN_ID, is_remote=True, sampled=True)),
             _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE | _FLAGS_SAMPLED,
         ),
     ]
@@ -149,10 +118,8 @@ def test_wire_repairs_span_flags(monkeypatch: pytest.MonkeyPatch) -> None:
             wire = _vendor_wire(monkeypatch, vendor, [span])[0]
             assert wire.get("flags", 0) == expected, vendor
 
-
 @pytest.mark.parametrize("remote_sampled", [(False, False), (False, True), (True, False), (True, True)])
-def test_wire_repairs_link_flags_and_trace_state(
-    monkeypatch: pytest.MonkeyPatch, remote_sampled: tuple[bool, bool]
+def test_wire_repairs_link_flags_and_trace_state(monkeypatch: pytest.MonkeyPatch, remote_sampled: tuple[bool, bool]
 ) -> None:
     remote, sampled = remote_sampled
     link = Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=remote, sampled=sampled, state_entries=[("vendor", "1")]))
@@ -163,12 +130,8 @@ def test_wire_repairs_link_flags_and_trace_state(
         assert wire["links"][0].get("flags", 0) == expected, vendor
         assert wire["links"][0]["traceState"] == "vendor=1", vendor
 
-
-def test_wire_keeps_duplicate_position_links_with_distinct_flags_and_state(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    links = [
-        Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=False, sampled=True, state_entries=[("a", "1")])),
+def test_wire_keeps_duplicate_position_links_with_distinct_flags_and_state(monkeypatch: pytest.MonkeyPatch,) -> None:
+    links = [Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=False, sampled=True, state_entries=[("a", "1")])),
         Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID, is_remote=True, sampled=False, state_entries=[("b", "2")])),
     ]
     span = _span(links=links)
@@ -180,10 +143,7 @@ def test_wire_keeps_duplicate_position_links_with_distinct_flags_and_state(
         assert wire["links"][1].get("flags", 0) == _FLAGS_HAS_IS_REMOTE | _FLAGS_IS_REMOTE, vendor
         assert wire["links"][1]["traceState"] == "b=2", vendor
 
-
-def test_wire_preserves_identity_order_and_fields_for_all_destinations(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_wire_preserves_identity_order_and_fields_for_all_destinations(monkeypatch: pytest.MonkeyPatch,) -> None:
     root = _span(name="root")
     child = _span(name="child", span_id=0x4444444444444444, parent=root.context)
     for vendor in _VENDORS:
@@ -197,14 +157,8 @@ def test_wire_preserves_identity_order_and_fields_for_all_destinations(
         assert wires[0]["kind"] == "SPAN_KIND_INTERNAL", vendor
         assert wires[0].get("droppedAttributesCount", 0) == 0, vendor
 
-
-@pytest.mark.parametrize(
-    "pressure",
-    ["attributes", "events", "links", "event_attributes", "link_attributes"],
-)
-def test_wire_preserves_exact_dropped_counters_under_limit_pressure(
-    monkeypatch: pytest.MonkeyPatch,
-    pressure: str,
+@pytest.mark.parametrize("pressure", ["attributes", "events", "links", "event_attributes", "link_attributes"],)
+def test_wire_preserves_exact_dropped_counters_under_limit_pressure(monkeypatch: pytest.MonkeyPatch, pressure: str,
 ) -> None:
     """Original bounded dropped counters stay exact after vendor additions."""
     span: ReadableSpan
@@ -218,14 +172,8 @@ def test_wire_preserves_exact_dropped_counters_under_limit_pressure(
                 events.append(Event(f"e{index}"))
             except Exception:
                 pass
-        span = ReadableSpan(
-            name="span",
-            context=_ctx(_TRACE_ID, _SPAN_ID),
-            parent=None,
-            resource=Resource({"service.name": "daydream-test"}),
-            attributes={},
-            events=events,
-            links=BoundedList(0),
+        span = ReadableSpan(name="span", context=_ctx(_TRACE_ID, _SPAN_ID), parent=None,
+            resource=Resource({"service.name": "daydream-test"}), attributes={}, events=events, links=BoundedList(0),
         )
     elif pressure == "links":
         links: BoundedList[Link] = BoundedList(2)
@@ -234,22 +182,15 @@ def test_wire_preserves_exact_dropped_counters_under_limit_pressure(
                 links.append(Link(_ctx(_LINK_TRACE_ID, _LINK_SPAN_ID + index)))
             except Exception:
                 pass
-        span = ReadableSpan(
-            name="span",
-            context=_ctx(_TRACE_ID, _SPAN_ID),
-            parent=None,
-            resource=Resource({"service.name": "daydream-test"}),
-            attributes={},
-            events=BoundedList(0),
-            links=links,
+        span = ReadableSpan(name="span", context=_ctx(_TRACE_ID, _SPAN_ID), parent=None,
+            resource=Resource({"service.name": "daydream-test"}), attributes={}, events=BoundedList(0), links=links,
         )
     elif pressure == "event_attributes":
         event = Event("e", attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}))
         span = _span(events=[event])
     else:
         link = Link(
-            _ctx(_LINK_TRACE_ID, _LINK_SPAN_ID),
-            attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}),
+            _ctx(_LINK_TRACE_ID, _LINK_SPAN_ID), attributes=BoundedAttributes(maxlen=1, attributes={"x": 1, "y": 2}),
         )
         span = _span(links=[link])
     for vendor in _VENDORS:
@@ -268,10 +209,7 @@ def test_wire_preserves_exact_dropped_counters_under_limit_pressure(
         else:
             assert wire["links"][0]["droppedAttributesCount"] == 1, vendor
 
-
-def test_vendor_wire_attributes_survive_additions_on_the_wire(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_vendor_wire_attributes_survive_additions_on_the_wire(monkeypatch: pytest.MonkeyPatch,) -> None:
     """Vendor additions land in wire attributes without erasing originals."""
     with otlp_collector() as receiver:
         monkeypatch.setenv("HH_API_URL", receiver.base_url)
@@ -279,11 +217,8 @@ def test_vendor_wire_attributes_survive_additions_on_the_wire(
         exporter = honeyhive_exporter(ObservabilityConfig())
         provider = TracerProvider(shutdown_on_exit=False)
         provider.add_span_processor(SimpleSpanProcessor(exporter))
-        with provider.get_tracer("daydream-test").start_as_current_span(
-            "attempt",
-            attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "structural_attempt",
+        with provider.get_tracer("daydream-test").start_as_current_span("attempt",
+            attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
                 "gen_ai.usage.input_tokens": 100,
             },
         ):

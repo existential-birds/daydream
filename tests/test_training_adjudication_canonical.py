@@ -19,41 +19,26 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.projector import project_findings
 from tests.harness.adjudication import make_hydrated_sqlite_index, seed_index_dispositions, write_sessions_jsonl
 
-_PIN = {
-    "curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
+_PIN = {"curation_id": "cur-1", "sanitized_hub_commit": "a" * 40,
     "source_hub_commit": "b" * 40, "archive_index_digest": "c" * 64,
-    "evidence_observed_at": "2026-01-01T00:00:00+00:00",
-    "as_of": "2026-02-01T00:00:00+00:00",
+    "evidence_observed_at": "2026-01-01T00:00:00+00:00", "as_of": "2026-02-01T00:00:00+00:00",
     "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1",
 }
 
 
 def _annotation_records(mat: Path) -> list[dict[str, Any]]:
     """Parse the materialized ``annotations.jsonl`` records."""
-    return [
-        json.loads(line)
-        for line in (mat / "annotations.jsonl").read_text().splitlines()
-        if line.strip()
-    ]
+    return [json.loads(line) for line in (mat / "annotations.jsonl").read_text().splitlines() if line.strip()]
 
 
 def _index(
-    tmp_path: Path,
-    digest: str = "d" * 32,
-    *,
-    session_id: str = "s1",
-    created_at: str = "2026-01-01T00:00:00+00:00",
+    tmp_path: Path, digest: str = "d" * 32, *, session_id: str = "s1", created_at: str = "2026-01-01T00:00:00+00:00",
 ) -> Path:
     root = tmp_path / "index"
-    sessions = [{
-        "session_id": session_id, "trajectory_id": f"{session_id}-t",
-        "segment_id": f"{session_id}-seg",
-        "resolutions": [{
-            "fingerprint": "fp-1", "disposition": "unanswered",
-            "evidence": [{"reply_id": 1, "body_sha256": "abc",
-                          "created_at": created_at}],
-            "evidence_digest": digest, "profile": "pr_review", "stack": "python",
-            "comment_id": 7,
+    sessions = [{"session_id": session_id, "trajectory_id": f"{session_id}-t", "segment_id": f"{session_id}-seg",
+        "resolutions": [{"fingerprint": "fp-1", "disposition": "unanswered",
+            "evidence": [{"reply_id": 1, "body_sha256": "abc", "created_at": created_at}],
+            "evidence_digest": digest, "profile": "pr_review", "stack": "python", "comment_id": 7,
         }],
     }]
     write_sessions_jsonl(root, sessions)
@@ -67,34 +52,22 @@ def _stored_resolutions(rubric: dict[str, Any]) -> list[dict[str, Any]]:
     return stored if isinstance(stored, list) else []
 
 
-def _write_observation(
-    path: Path,
-    record_id: str,
-    *,
-    labeler: str,
-    role: str,
-    rationale: str,
-    observed_at: str,
-    disposition: str = "accepted",
-    evidence_digest: str = "d" * 32,
+def _write_observation(path: Path, record_id: str, *, labeler: str, role: str, rationale: str, observed_at: str,
+    disposition: str = "accepted", evidence_digest: str = "d" * 32,
 ) -> None:
     """Write a single canonical-pin observation JSONL row."""
     path.write_text(json.dumps({
-        "record_id": record_id, "disposition": disposition,
-        "evidence_digest": evidence_digest, "evidence": [],
+        "record_id": record_id, "disposition": disposition, "evidence_digest": evidence_digest, "evidence": [],
         "labeler": labeler, "role": role, "rationale": rationale,
-        "valid_at": "2026-01-02T00:00:00+00:00", "observed_at": observed_at,
-        "rubric_version": "v1",
+        "valid_at": "2026-01-02T00:00:00+00:00", "observed_at": observed_at, "rubric_version": "v1",
     }) + "\n", encoding="utf-8")
 
 
 def _seed_archive(archive_dir: Path, session_id: str = "s1") -> None:
     # Real-path seeding: the project's own schema (index.db), one run row.
     conn = _get_connection(archive_dir)
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
-        "VALUES (?, '2026-01-01T00:00:00+00:00', 'deep', ?)",
-        (session_id, f"archive/{session_id}"),
+    conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        "VALUES (?, '2026-01-01T00:00:00+00:00', 'deep', ?)", (session_id, f"archive/{session_id}"),
     )
     conn.commit()
     conn.close()
@@ -110,18 +83,10 @@ def _materialized(tmp_path: Path) -> tuple[Path, Path, Path]:
     return root, archive, mat
 
 
-def _harvest(
-    root: Path,
-    archive: Path,
-    mat: Path,
-    observations_path: Path | None = None,
-) -> dict[str, Any]:
+def _harvest(root: Path, archive: Path, mat: Path, observations_path: Path | None = None,) -> dict[str, Any]:
     """Run the canonical harvest over a materialized fixture."""
     return run_canonical_harvest(
-        index_root=root,
-        materialize_dir=mat,
-        archive_dir=archive,
-        observations_path=observations_path,
+        index_root=root, materialize_dir=mat, archive_dir=archive, observations_path=observations_path,
     )
 
 
@@ -137,14 +102,11 @@ def test_canonical_harvest_appends_label_observation_exactly_once(tmp_path: Path
     stored = _stored_resolutions(rubric)
     assert stored and stored[0]["evidence_digest"] == "d" * 32
     # session-level digest matches the shared serializer's (K5 spike)
-    assert row["reply_evidence_digest"] == record_evidence_digest(
-        [stored[0]["evidence"]]
-    )
+    assert row["reply_evidence_digest"] == record_evidence_digest([stored[0]["evidence"]])
     # re-run unchanged => idempotent, no duplicate row
     out2 = _harvest(root, archive, mat, None)
     assert out2["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 1
-
 
 def test_canonical_harvest_fails_closed_on_drift_before_any_write(tmp_path: Path) -> None:
     root, archive, mat = _materialized(tmp_path)
@@ -160,10 +122,7 @@ def test_canonical_harvest_fails_closed_on_drift_before_any_write(tmp_path: Path
     assert label_observation_history(archive, "s1") == []  # nothing written
     assert not (tmp_path / "mat" / "annotations.jsonl").exists()
 
-
-def test_canonical_harvest_fails_closed_when_record_absent_from_fresh_queue(
-    tmp_path: Path,
-) -> None:
+def test_canonical_harvest_fails_closed_when_record_absent_from_fresh_queue(tmp_path: Path,) -> None:
     """Sibling fail-closed gate: a materialized record_id absent from the freshly
     built queue raises ValueError before any write (the absent-from-queue branch,
     not the digest-drift branch)."""
@@ -174,17 +133,12 @@ def test_canonical_harvest_fails_closed_when_record_absent_from_fresh_queue(
     # exists in the freshly built queue.
     sessions = json.loads((root / "sessions.jsonl").read_text().splitlines()[0])
     sessions["session_id"] = "gone"
-    (root / "sessions.jsonl").write_text(
-        json.dumps(sessions, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    (root / "sessions.jsonl").write_text(json.dumps(sessions, sort_keys=True) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="absent from the freshly built"):
         _harvest(root, archive, tmp_path / "mat", None)
     assert not (tmp_path / "mat" / "annotations.jsonl").exists()
 
-
-def test_canonical_harvest_fails_closed_on_missing_materialized_outputs(
-    tmp_path: Path,
-) -> None:
+def test_canonical_harvest_fails_closed_on_missing_materialized_outputs(tmp_path: Path,) -> None:
     """Sibling fail-closed gate: a materialize_dir missing the preview manifest or
     the materialized sessions.jsonl raises FileNotFoundError before any write."""
     root = _index(tmp_path)
@@ -196,17 +150,12 @@ def test_canonical_harvest_fails_closed_on_missing_materialized_outputs(
     # Manifest present but sessions.jsonl absent: _load_materialized_records refuses.
     mat = tmp_path / "mat"
     mat.mkdir()
-    (mat / "preview-manifest.json").write_text(
-        json.dumps(_PIN, sort_keys=True), encoding="utf-8"
-    )
+    (mat / "preview-manifest.json").write_text(json.dumps(_PIN, sort_keys=True), encoding="utf-8")
     with pytest.raises(FileNotFoundError, match="materialized preview snapshot not found"):
         _harvest(root, archive, mat, None)
     assert not (mat / "annotations.jsonl").exists()
 
-
-def test_canonical_harvest_fails_closed_on_unreadable_materialized_outputs(
-    tmp_path: Path,
-) -> None:
+def test_canonical_harvest_fails_closed_on_unreadable_materialized_outputs(tmp_path: Path,) -> None:
     """Sibling fail-closed gate: an unreadable preview manifest or materialized
     sessions.jsonl raises ValueError before any write."""
     root = _index(tmp_path)
@@ -218,9 +167,7 @@ def test_canonical_harvest_fails_closed_on_unreadable_materialized_outputs(
         _harvest(root, archive, bad_manifest, None)
     mat = tmp_path / "mat"
     mat.mkdir()
-    (mat / "preview-manifest.json").write_text(
-        json.dumps(_PIN, sort_keys=True), encoding="utf-8"
-    )
+    (mat / "preview-manifest.json").write_text(json.dumps(_PIN, sort_keys=True), encoding="utf-8")
     (mat / "sessions.jsonl").write_text("{not json\n", encoding="utf-8")
     with pytest.raises(ValueError, match="unreadable materialized snapshot"):
         _harvest(root, archive, mat, None)
@@ -248,8 +195,7 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
     _write_observation(
-        obs, rid, labeler="alice", role="rater", rationale="looked right",
-        observed_at="2026-01-02T01:00:00+00:00",
+        obs, rid, labeler="alice", role="rater", rationale="looked right", observed_at="2026-01-02T01:00:00+00:00",
     )
     out = _harvest(root, archive, mat, obs)
     assert out["human_adjudicated"] == 1
@@ -259,18 +205,15 @@ def test_canonical_harvest_merges_human_observations_by_precedence(tmp_path: Pat
     # the human disposition wins the stored resolution (M5 precedence merge)
     assert stored[0]["disposition"] == "accepted"
 
-
 def test_canonical_harvest_rejects_unknown_observation_record_id(tmp_path: Path) -> None:
     root, archive, mat = _materialized(tmp_path)
     obs = tmp_path / "observations.jsonl"
     _write_observation(
-        obs, "e" * 64, labeler="alice", role="rater", rationale="x",
-        observed_at="2026-01-02T01:00:00+00:00",
+        obs, "e" * 64, labeler="alice", role="rater", rationale="x", observed_at="2026-01-02T01:00:00+00:00",
     )
     with pytest.raises(ValueError, match="e" * 64):
         _harvest(root, archive, mat, obs)
     assert label_observation_history(archive, "s1") == []
-
 
 def test_canonical_harvest_emits_annotations_jsonl_from_merged_records(tmp_path: Path) -> None:
     root, archive, mat = _materialized(tmp_path)
@@ -283,9 +226,7 @@ def test_canonical_harvest_emits_annotations_jsonl_from_merged_records(tmp_path:
     assert records[0]["evidence_digest"] == "d" * 32
     assert records[0]["session_id"] == "s1"
     for line in lines:
-        assert line == json.dumps(json.loads(line), sort_keys=True,
-                                  separators=(",", ":"), ensure_ascii=False)
-
+        assert line == json.dumps(json.loads(line), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     """Recorded-and-flagged as_of edge policy: evidence observed after the pin's
@@ -302,9 +243,7 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     _index(tmp_path, session_id="s2", created_at="2026-03-01T00:00:00+00:00")
     run_materialize(root, tmp_path / "mat2", pin=_PIN)
     out = _harvest(root, archive, tmp_path / "mat2", None)
-    assert out["evidence_after_as_of"] == [
-        _annotation_records(tmp_path / "mat2")[0]["record_id"]
-    ]
+    assert out["evidence_after_as_of"] == [_annotation_records(tmp_path / "mat2")[0]["record_id"]]
     records = _annotation_records(tmp_path / "mat2")
     assert records[0]["evidence_after_as_of"] is True
     # The first (pre-pin) harvest carries a before-pin created_at
@@ -312,7 +251,6 @@ def test_canonical_harvest_flags_evidence_after_as_of(tmp_path: Path) -> None:
     # unflagged — a real timestamp comparison, not the missing-key guard.
     first = _annotation_records(tmp_path / "mat")
     assert first[0]["evidence_after_as_of"] is False
-
 
 def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) -> None:
     """A re-harvest under a changed pin (new as_of/rubric_version ⇒ new
@@ -361,10 +299,7 @@ def test_canonical_harvest_changed_pin_appends_new_generation(tmp_path: Path) ->
     assert out_c["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 2
 
-
-def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
-    tmp_path: Path,
-) -> None:
+def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(tmp_path: Path,) -> None:
     """Unchanged pin + a label-preserving observation-overlay edit (the
     disposition set stays put) still appends a fresh generation: the dedup
     tuple omits ``rubric_json``, so the rubric-content digest riding on
@@ -375,8 +310,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     rid = record_id("s1", "s1-t", "s1-seg", "fp-1")
     obs = tmp_path / "observations.jsonl"
     _write_observation(
-        obs, rid, labeler="alice", role="rater", rationale="first pass",
-        observed_at="2026-01-02T01:00:00+00:00",
+        obs, rid, labeler="alice", role="rater", rationale="first pass", observed_at="2026-01-02T01:00:00+00:00",
     )
     out1 = _harvest(root, archive, mat, obs)
     assert out1["appended_sessions"] == 1
@@ -385,8 +319,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     # unchanged, so only the rubric-content digest can tell the generations
     # apart.
     _write_observation(
-        obs, rid, labeler="bob", role="adjudicator", rationale="second pass",
-        observed_at="2026-01-02T02:00:00+00:00",
+        obs, rid, labeler="bob", role="adjudicator", rationale="second pass", observed_at="2026-01-02T02:00:00+00:00",
     )
     out2 = _harvest(root, archive, mat, obs)
     assert out2["appended_sessions"] == 1  # fresh generation, never a silent skip
@@ -403,10 +336,7 @@ def test_canonical_harvest_label_preserving_overlay_change_skips_nothing(
     assert out3["appended_sessions"] == 0
     assert len(label_observation_history(archive, "s1")) == 2
 
-
-def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(
-    tmp_path: Path,
-) -> None:
+def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(tmp_path: Path,) -> None:
     """The drift gate re-derives the *complete* record set (decisive included)
     via ``build_queue(..., include_decisive=True)``: harvesting a widened
     materialization succeeds, preserves unchanged automatic decisive
@@ -415,8 +345,7 @@ def test_canonical_harvest_complete_set_is_idempotent_and_exactly_once(
     stage, archive, mat = _seed_decisive_fixture(tmp_path)
     run_canonical_harvest(stage, mat, archive, observations_path=None)
     first = (mat / "annotations.jsonl").read_bytes()
-    dispositions = [json.loads(ln)["disposition"] for ln in
-                    first.splitlines() if ln]
+    dispositions = [json.loads(ln)["disposition"] for ln in first.splitlines() if ln]
     assert sorted(dispositions) == ["accepted", "rejected", "unanswered"]
 
     # Re-run with identical inputs: identical annotations.jsonl, no new generation
@@ -430,10 +359,8 @@ def _hydrated_sqlite_index_with_conflict(tmp_path: Path) -> Path:
     """Two distinct-dedup-key ``label_observations`` rows for one ``s1``: two
     harvester generations disagreeing (labels differ). The latest-observed auto
     row wins; the session is conflicting."""
-    return make_hydrated_sqlite_index(
-        tmp_path,
-        [
-            ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted"),
+    return make_hydrated_sqlite_index(tmp_path,
+        [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted"),
             ("2026-01-03T00:00:00+00:00", '["finding-rejected"]', "f" * 64, "980-rubric-r2", "accepted"),
         ],
     )
@@ -463,7 +390,6 @@ def test_conflicted_session_yields_no_decisive_label(tmp_path: Path) -> None:
     # and no decisive label was projected from the conflicted disposition
     assert "finding-accepted" not in history[0]["labels"]
 
-
 def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path) -> None:
     """A session that becomes conflicting *after* materialize (runbook step-3b
     import appends a disagreeing generation to the same index.db) passes the
@@ -472,9 +398,7 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     trusted from the materialized snapshot's flags (issue #336 item 2)."""
 
     root = make_hydrated_sqlite_index(
-        tmp_path,
-        [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64,
-          "980-rubric-r2", "accepted")],
+        tmp_path, [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted")],
     )
     mat = tmp_path / "mat"
     run_materialize(root, mat, pin=_PIN)
@@ -482,19 +406,14 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     assert record.get("conflicting") is None  # not conflicting at materialize time
     # Step-3b import: an older disagreeing generation lands in the same
     # index.db -- the winning row (and its evidence digest) is unchanged.
-    rubric_json = json.dumps({
-        "posterior_source": "pr_review",
-        "per_finding_resolutions": [{
-            "fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
-            "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
-            "evidence_digest": "d" * 32}]})
+    rubric_json = json.dumps({"posterior_source": "pr_review",
+        "per_finding_resolutions": [{"fingerprint": "fp-1", "comment_id": 7, "disposition": "accepted",
+            "evidence": [{"reply_id": 1, "body_sha256": "abc"}], "evidence_digest": "d" * 32}]})
     conn = _get_connection(root)
-    conn.execute(
-        "INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
+    conn.execute("INSERT INTO label_observations (session_id, observed_at, labels, labeler_version, "
         "evidence_sha, rubric_json, has_posterior, source, labeler_policy_version) "
         "VALUES ('s1', '2026-01-01T00:00:00+00:00', '[\"finding-rejected\"]', 'v1', "
-        "'d' * 64, ?, 0, 'auto', '980-rubric-r2')",
-        (rubric_json,),
+        "'d' * 64, ?, 0, 'auto', '980-rubric-r2')", (rubric_json,),
     )
     conn.commit()
     conn.close()
@@ -510,10 +429,7 @@ def test_canonical_harvest_re_derives_conflict_after_materialize(tmp_path: Path)
     assert rows[0]["disposition"] == "ambiguous"
     assert rows[0]["conflicting"] is True
 
-
-def test_canonical_harvest_human_resolution_clears_session_conflict(
-    tmp_path: Path,
-) -> None:
+def test_canonical_harvest_human_resolution_clears_session_conflict(tmp_path: Path,) -> None:
     """A decisive human adjudication on a conflicted finding resolves the
     conflict: the precedence merge clears the ``conflicting`` flag so the
     resolution is not suppressed to non-gold, and the archive row projects the
@@ -527,8 +443,7 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
     rid = record_id("s1", "s1", "s1", "fp-1")
     obs = tmp_path / "observations.jsonl"
     _write_observation(
-        obs, rid, labeler="alice", role="adjudicator",
-        rationale="operator resolved the disagreeing generations",
+        obs, rid, labeler="alice", role="adjudicator", rationale="operator resolved the disagreeing generations",
         observed_at="2026-01-02T01:00:00+00:00",
     )
     out = _harvest(root, archive, mat, obs)
@@ -542,7 +457,6 @@ def test_canonical_harvest_human_resolution_clears_session_conflict(
     rows = _annotation_records(mat)
     assert rows[0]["disposition"] == "accepted"
     assert rows[0].get("conflicting") is not True
-
 
 def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     """The non-gold guarantee extends to the projection projection: a
@@ -563,10 +477,7 @@ def test_conflicted_session_never_projects_gold(tmp_path: Path) -> None:
     assert any(row.get("conflicting") is True for row in rows)
     # build_frozen_corpus's snapshot assembly (session-scoped resolutions) --
     # the boundary classify_tier reaches the projection gold label through.
-    session = {
-        "session_id": "s1",
-        "trajectory_id": "s1",
-        "segment_id": "s1",
+    session = {"session_id": "s1", "trajectory_id": "s1", "segment_id": "s1",
         "resolutions": [row for row in rows if row.get("session_id") == "s1"],
     }
     records = project_findings(session)

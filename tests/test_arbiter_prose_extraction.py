@@ -33,23 +33,12 @@ from daydream.run_context import InteractionPolicy, RunContext
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 
-SELECTED_RECORDS: list[dict[str, Any]] = [
-    {
-        "id": "py-1",
-        "description": "OAuth `state` is a deterministic md5; CSRF is defeated.",
-        "file": "src/sentry/integrations/github/integration.py",
-        "line": 402,
-        "severity": "high",
-        "confidence": "HIGH",
+SELECTED_RECORDS: list[dict[str, Any]] = [{
+        "id": "py-1", "description": "OAuth `state` is a deterministic md5; CSRF is defeated.",
+        "file": "src/sentry/integrations/github/integration.py", "line": 402, "severity": "high", "confidence": "HIGH",
         "rationale": "signature is md5 over view FQNs, knowable a priori.",
-    },
-    {
-        "id": "py-2",
-        "description": "Unchecked metadata['sender']['login'] raises KeyError -> 500.",
-        "file": "src/sentry/integrations/github/integration.py",
-        "line": 502,
-        "severity": "high",
-        "confidence": "HIGH",
+    }, {"id": "py-2", "description": "Unchecked metadata['sender']['login'] raises KeyError -> 500.",
+        "file": "src/sentry/integrations/github/integration.py", "line": 502, "severity": "high", "confidence": "HIGH",
         "rationale": "metadata is JSONField(default=dict); sender may be absent.",
     },
 ]
@@ -90,21 +79,14 @@ def _pi_like_backend(message: str) -> ScriptedBackend:
     """Mirrors the pi backend: structured_output = extract_json(final text), gated on the schema."""
     return _split_text_backend(message, extract_json(message))
 
-
 async def test_arbiter_extracts_findings_from_prose_wrapped_message(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
+    tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _pi_like_backend(ARBITER_MESSAGE)),
-        make_work(tmp_path),
-        selected_records=SELECTED_RECORDS,
-        diff_path=diff_path,
-        intent_path=intent_path,
-        alternatives_path=alternatives_path,
-        allow_standalone=True,
+        cast(Backend, _pi_like_backend(ARBITER_MESSAGE)), make_work(tmp_path), selected_records=SELECTED_RECORDS,
+        diff_path=diff_path, intent_path=intent_path, alternatives_path=alternatives_path, allow_standalone=True,
     )
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
@@ -113,22 +95,15 @@ async def test_arbiter_extracts_findings_from_prose_wrapped_message(
     # silently coerce that into a bogus finding.
     assert verdicts[1]["description"].startswith("OAuth state")
 
-
 async def test_arbiter_still_raises_on_genuinely_unparseable_output(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
+    tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """A message with no JSON yields no findings object; the phase raises, not papers over."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     with pytest.raises(ValueError):
         await phase_arbiter_review(
-            cast(Backend, _pi_like_backend(MALFORMED_MESSAGE)),
-            make_work(tmp_path),
-            selected_records=SELECTED_RECORDS,
-            diff_path=diff_path,
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            allow_standalone=True,
+            cast(Backend, _pi_like_backend(MALFORMED_MESSAGE)), make_work(tmp_path), selected_records=SELECTED_RECORDS,
+            diff_path=diff_path, intent_path=intent_path, alternatives_path=alternatives_path, allow_standalone=True,
         )
 
 
@@ -152,22 +127,10 @@ PROSE_WITH_TRUNCATED_JSON = (
 
 # What the backend actually managed to extract into the ResultEvent: the full,
 # well-formed structured answer.
-STRUCTURED_OUTPUT: dict[str, Any] = {
-    "findings": [
-        {
-            "arb_id": 1,
-            "keep": True,
-            "severity": "low",
-            "confidence": "HIGH",
+STRUCTURED_OUTPUT: dict[str, Any] = {"findings": [{"arb_id": 1, "keep": True, "severity": "low", "confidence": "HIGH",
             "description": "init_instrumentation() omits the ddtrace setLevel.",
             "rationale": "Confirmed against code; log-hygiene only.",
-        },
-        {
-            "arb_id": 2,
-            "keep": False,
-            "severity": "low",
-            "confidence": "MEDIUM",
-            "description": "Not a real defect.",
+        }, {"arb_id": 2, "keep": False, "severity": "low", "confidence": "MEDIUM", "description": "Not a real defect.",
             "rationale": "Rejected on inspection.",
         },
     ]
@@ -185,53 +148,37 @@ def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
     """
 
     def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
-        return [
-            TextEvent(text=text),
+        return [TextEvent(text=text),
             ResultEvent(structured_output=structured if output_schema else None, continuation=None),
         ]
 
     return ScriptedBackend(responder=respond, model="glm-5.2")
 
-
-async def test_arbiter_captures_structured_output_in_log_mode(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
+async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """In --log mode the ResultEvent's structured dict must reach the phase, not be dropped.
 
-    Regression for ``Arbiter returned no findings list (got str)``: log_mode
-    printed ``[result]`` but skipped assigning ``structured_result``, so the
-    phase received the prose-fallback string. Drives the real production path
-    (phase_arbiter_review -> run_agent -> backend events) with log_mode on.
-    """
+    Regression for ``Arbiter returned no findings list (got str)``: log_mode printed ``[result]`` but skipped
+    assigning ``structured_result``, so the phase received the prose-fallback string. Drives the real production
+    path (phase_arbiter_review -> run_agent -> backend events) with log_mode on."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)),
-        make_work(tmp_path),
-        selected_records=SELECTED_RECORDS,
-        diff_path=diff_path,
-        intent_path=intent_path,
-        alternatives_path=alternatives_path,
-        run_context=RunContext(InteractionPolicy(log_mode=True)),
+        cast(Backend, _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)), make_work(tmp_path),
+        selected_records=SELECTED_RECORDS, diff_path=diff_path, intent_path=intent_path,
+        alternatives_path=alternatives_path, run_context=RunContext(InteractionPolicy(log_mode=True)),
         allow_standalone=True,
     )
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
     assert verdicts[2]["keep"] is False
 
-
 async def test_pi_contract_fakes_gate_structured_output_on_the_requested_schema() -> None:
     """Both arbiter fakes mirror the real pi contract: no schema requested ⇒ no structured output.
 
-    ``daydream/backends/pi.py`` computes ``structured_output`` only when the call
-    passed an ``output_schema``, so an ungated fake would let a test observe a
-    structured payload production can never produce (and vice versa).
-    """
+    ``daydream/backends/pi.py`` computes ``structured_output`` only when the call passed an ``output_schema``, so
+    an ungated fake would let a test observe a structured payload production can never produce (and vice versa)."""
     schema: dict[str, Any] = {"type": "object"}
-    fakes = (
-        _pi_like_backend(ARBITER_MESSAGE),
-        _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),
-    )
+    fakes = (_pi_like_backend(ARBITER_MESSAGE), _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),)
     for fake in fakes:
         with_schema = [event async for event in fake.execute(Path("."), "prompt", schema)]
         without_schema = [event async for event in fake.execute(Path("."), "prompt")]

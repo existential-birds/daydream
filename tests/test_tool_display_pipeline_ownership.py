@@ -23,8 +23,7 @@ _DISPLAY_OWNER_FUNCTION = "_redacted_bash_command"
 _BACKEND_MODULE = "daydream/backends/codex.py"
 
 #: The only modules permitted to reference the Codex display-variant strip step.
-_PERMITTED_CALLERS = frozenset(
-    {
+_PERMITTED_CALLERS = frozenset({
         "daydream/ui/tools.py",  # the display-pipeline owner: _redacted_bash_command
         "daydream/backends/codex.py",  # the strip definition + strip-only supervisor entry point
     }
@@ -54,8 +53,7 @@ def _is_command_value(expr: ast.expr | None, aliases: set[str]) -> bool:
             return True
         if isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant) and node.slice.value == "command":
             return True
-        if (
-            isinstance(node, ast.Call)
+        if (isinstance(node, ast.Call)
             and isinstance(node.func, ast.Attribute)
             and node.func.attr == "get"
             and node.args
@@ -97,8 +95,7 @@ def _redaction_lines(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[i
             elif isinstance(statement, ast.If):
                 check(statement.test, aliases)
                 branch_aliases = aliases.copy()
-                if any(
-                    isinstance(node, ast.Compare)
+                if any(isinstance(node, ast.Compare)
                     and any(isinstance(item, ast.Constant) and item.value == "command" for item in node.comparators)
                     and isinstance(node.left, ast.Name)
                     and node.left.id == "key"
@@ -124,12 +121,9 @@ def _redaction_lines(function: ast.FunctionDef | ast.AsyncFunctionDef) -> list[i
 def _command_pipeline_violations(source: str, module: str) -> list[int]:
     """Report recognized command shortcuts outside the one display owner."""
     tree = ast.parse(source)
-    owner = next(
-        (
-            node for node in tree.body
+    owner = next((node for node in tree.body
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == _DISPLAY_OWNER_FUNCTION
-        ),
-        None,
+        ), None,
     ) if module == _DISPLAY_OWNER_MODULE else None
 
     def within_owner(line: int) -> bool:
@@ -138,24 +132,18 @@ def _command_pipeline_violations(source: str, module: str) -> list[int]:
     if module == _BACKEND_MODULE:
         strip_lines: list[int] = []
     else:
-        strip_lines = [
-            line for line in _strip_reference_lines(source)
-            if not within_owner(line)
-        ]
-        strip_lines += [
-            node.lineno for node in ast.walk(tree)
+        strip_lines = [line for line in _strip_reference_lines(source) if not within_owner(line)]
+        strip_lines += [node.lineno for node in ast.walk(tree)
             if isinstance(node, ast.Name)
             and node.id == "_CD_PREFIX_RE"
             and not within_owner(node.lineno)
         ]
-    redaction_lines = [
-        line
+    redaction_lines = [line
         for node in ast.walk(tree)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node is not owner
         for line in _redaction_lines(node)
     ]
     return sorted(set(strip_lines + redaction_lines))
-
 
 def test_command_display_pipeline_has_one_render_owner() -> None:
     offenders: list[str] = []
@@ -163,7 +151,6 @@ def test_command_display_pipeline_has_one_render_owner() -> None:
         rel = path.relative_to(_REPO_ROOT).as_posix()
         offenders += [f"{rel}:{line}" for line in _command_pipeline_violations(path.read_text(encoding="utf-8"), rel)]
     assert offenders == []
-
 
 def test_scanner_reports_a_reintroduced_strip_call() -> None:
     """The guard's own discrimination check: feed it the shape it exists to catch."""
@@ -181,32 +168,21 @@ def test_scanner_reports_a_reintroduced_strip_call() -> None:
     # ...and it stays quiet on a mere string mention:
     assert _strip_reference_lines("value = 'display_shell_command'\n") == []
 
-
 def test_permitted_callers_still_reference_the_helper() -> None:
     """The allowlist cannot rot into a blanket exemption."""
     for rel in sorted(_PERMITTED_CALLERS):
         source = (_REPO_ROOT / rel).read_text(encoding="utf-8")
         assert _strip_reference_lines(source), f"{rel} is allowlisted but no longer references {_FORBIDDEN_NAME}"
 
-
 @pytest.mark.parametrize("module", ["daydream/ui/new_surface.py", "daydream/ui/tools.py"])
 def test_new_command_renderer_cannot_redact_a_capped_command(module: str) -> None:
-    source = (
-        "def render(args):\n"
-        "    return redact_structured_text(args['command'][:200])\n"
-    )
+    source = ("def render(args):\n" "    return redact_structured_text(args['command'][:200])\n")
     assert _strip_reference_lines(source) == []  # the previous guard missed this exact shortcut
     assert _command_pipeline_violations(source, module) == [2]
 
-
-@pytest.mark.parametrize(
-    "source, expected_lines",
+@pytest.mark.parametrize("source, expected_lines",
     [
-        (
-            "def render(args):\n"
-            "    return redact_structured_text(args['command'])\n",
-            [2],
-        ),
+        ("def render(args):\n" "    return redact_structured_text(args['command'])\n", [2],),
         (
             "def render(args):\n"
             "    command = args.get('command', '')[:200]\n"
@@ -226,12 +202,10 @@ def test_new_command_renderer_cannot_redact_a_capped_command(module: str) -> Non
             "    return redact_structured_text(command[:200])\n",
             [2, 3],
         ),
-    ],
-    ids=["direct-redaction", "cap-before-redact-alias", "copied-strip-call", "copied-strip-regex"],
+    ], ids=["direct-redaction", "cap-before-redact-alias", "copied-strip-call", "copied-strip-regex"],
 )
 def test_command_pipeline_shortcuts_are_reported(source: str, expected_lines: list[int]) -> None:
     assert _command_pipeline_violations(source, "daydream/ui/tools.py") == expected_lines
-
 
 def test_unrelated_redaction_and_strip_only_supervisor_are_outside_guard() -> None:
     source = (

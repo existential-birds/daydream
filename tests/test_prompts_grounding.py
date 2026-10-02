@@ -14,12 +14,10 @@ def test_grounding_instruction_contains_cwd_warning() -> None:
     assert "git rev-parse --git-common-dir" in text
     assert "git worktree list" in text
 
-
 def test_grounding_instruction_formats_cwd() -> None:
     cwd = Path("/tmp/some/linked/worktree")
     rendered = CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)
     assert str(cwd) in rendered
-
 
 def test_review_stopping_guidance_bounds_candidate_work_and_environment_setup() -> None:
     assert "one pass" in REVIEW_STOPPING_GUIDANCE

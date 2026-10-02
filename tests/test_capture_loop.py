@@ -52,12 +52,7 @@ def _never_fetch(*_args: Any, **_kwargs: Any) -> None:
 
 
 @contextmanager
-def _review_run_env(
-    repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    out: Path,
-    backend: Any,
-    fake_gh: FakeGh,
+def _review_run_env(repo: Path, monkeypatch: pytest.MonkeyPatch, out: Path, backend: Any, fake_gh: FakeGh,
 ) -> Iterator[Any]:
     """`--review --findings-out` real-path setup, mocking ONLY the backend seam.
 
@@ -67,25 +62,13 @@ def _review_run_env(
     """
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-    fake_gh.serve_pr_view(
-        {
-            "number": 7,
-            "state": "OPEN",
-            "headRefName": "feature",
-            "baseRefName": "main",
+    fake_gh.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
             "headRefOid": git_ops.head_sha(repo),
             "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-            "headRepositoryOwner": {"login": "acme"},
-            "url": "https://github.com/acme/widgets/pull/7",
-            "body": "",
+            "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": "",
         }
     )
-    config = RunConfig(
-        target=str(repo),
-        output_mode="review",
-        pr_number=7,
-        findings_out=str(out),
-        non_interactive=True,
+    config = RunConfig(target=str(repo), output_mode="review", pr_number=7, findings_out=str(out), non_interactive=True,
     )
     with patch("daydream.runner.create_backend", return_value=backend):
         yield config
@@ -93,61 +76,39 @@ def _review_run_env(
 
 def _scripted_review_backend(issue: dict[str, Any]) -> PhaseDispatchBackend:
     """A backend that reports exactly one scripted per-stack issue."""
-    return PhaseDispatchBackend(
-        events=[
-            TextEvent(text="Review complete."),
+    return PhaseDispatchBackend(events=[TextEvent(text="Review complete."),
             # Issue #742: the deep per-stack parse schema requires a
             # ``verdicts`` property (Codex strict-mode output).
-            ResultEvent(
-                structured_output={"issues": [issue]},
-                continuation=None,
-            ),
+            ResultEvent(structured_output={"issues": [issue]}, continuation=None,),
         ]
     )
 
 
 def _issue(*, line: int) -> dict[str, Any]:
     """A scripted review issue citing ``main.py`` at ``line``."""
-    return {
-        "id": 1,
-        "title": "Module lacks a rollback barrier",
+    return {"id": 1, "title": "Module lacks a rollback barrier",
         "description": "No `quiescent_rollback_barrier` guards this module",
-        "recommendation": "Introduce a `quiescent_rollback_barrier`",
-        "severity": "medium",
-        "confidence": "HIGH",
-        "files": ["main.py"],
-        "file": "main.py",
-        "line": line,
-        "rationale": "",
-        "evidence": f"main.py:{line}",
+        "recommendation": "Introduce a `quiescent_rollback_barrier`", "severity": "medium", "confidence": "HIGH",
+        "files": ["main.py"], "file": "main.py", "line": line, "rationale": "", "evidence": f"main.py:{line}",
     }
 
-
 async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
-    feature_branch_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_gh: FakeGh,
+    feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
     """A finding whose anchors match nothing still gets a trackable placement.
 
-    Enters from ``runner.run`` against a real git worktree. The scripted issue
-    targets ``main.py`` — a file genuinely in the PR diff — but its text
-    contains no token present in that file, so anchor resolution yields no
-    line. Before the fix this fell through to ``placement="body"``, which no
-    posterior signal can ever read back. It must now be ``"file"``.
+    Enters from ``runner.run`` against a real git worktree. The scripted issue targets ``main.py`` — a file
+    genuinely in the PR diff — but its text contains no token present in that file, so anchor resolution yields no
+    line. Before the fix this fell through to ``placement="body"``, which no posterior signal can ever read back.
+    It must now be ``"file"``.
 
-    The cited line is deliberately past the end of ``main.py`` (2 lines at
-    head) and so outside every hunk: since #1102 an in-hunk citation is
-    authoritative and would be posted inline, which is a *different*
-    invariant (see the sibling test below). Only a citation that no path can
-    place exercises the file-level fallback this test guards.
-    """
+    The cited line is deliberately past the end of ``main.py`` (2 lines at head) and so outside every hunk: since
+    #1102 an in-hunk citation is authoritative and would be posted inline, which is a *different* invariant (see
+    the sibling test below). Only a citation that no path can place exercises the file-level fallback this test
+    guards."""
     out = tmp_path / "findings.json"
     issue = _issue(line=9)
-    with _review_run_env(
-        feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh
-    ) as config:
+    with _review_run_env(feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh) as config:
         assert await run(config) == 0
 
     findings = json.loads(out.read_text())["findings"]
@@ -159,28 +120,19 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
         f"placed file-level, not folded into the invisible review body: {main_py}"
     )
 
-
 async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
-    feature_branch_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    fake_gh: FakeGh,
+    feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
     """Real-path #1102: an in-hunk cited line keeps its inline placement.
 
-    Same harness as the sibling test — ``runner.run`` over a real worktree,
-    only the backend mocked — but the scripted issue cites ``main.py:1``, a
-    line inside the live PR hunk, while its text still shares no token with
-    the file. Posting-time resolution is documented as a no-op on a valid
-    line; before #1102 it had no view of the diff, so it discarded the correct
-    hint and demoted the finding to a file-level comment. It must now post
-    inline on the cited line.
-    """
+    Same harness as the sibling test — ``runner.run`` over a real worktree, only the backend mocked — but the
+    scripted issue cites ``main.py:1``, a line inside the live PR hunk, while its text still shares no token with
+    the file. Posting-time resolution is documented as a no-op on a valid line; before #1102 it had no view of the
+    diff, so it discarded the correct hint and demoted the finding to a file-level comment. It must now post
+    inline on the cited line."""
     out = tmp_path / "findings.json"
     issue = _issue(line=1)
-    with _review_run_env(
-        feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh
-    ) as config:
+    with _review_run_env(feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh) as config:
         assert await run(config) == 0
 
     findings = json.loads(out.read_text())["findings"]
@@ -199,15 +151,9 @@ async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
 
 
 def _artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
-    write_findings_artifact(
-        path,
-        {
-            "schema_version": FINDINGS_SCHEMA_VERSION,
-            "repo": "o/r",
-            "pr_number": 7,
-            "head_sha": "h" * 40,
-            "run_info": "test run info",
-            "findings": findings,
+    write_findings_artifact(path,
+        {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
+            "run_info": "test run info", "findings": findings,
         },
     )
     return path
@@ -216,18 +162,9 @@ def _artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
 @pytest.fixture
 def file_level_artifact(tmp_path: Path) -> Path:
     """One finding with ``placement="file"`` on a path inside the PR diff."""
-    return _artifact(
-        tmp_path / "findings.json",
-        [
-            {
-                "fingerprint": FILE_FINGERPRINT,
-                "path": "b.py",
-                "line": None,
-                "placement": "file",
-                "title": "Cross-cutting concern in b.py",
-                "body": "Body text",
-                "severity": "high",
-                "confidence": "HIGH",
+    return _artifact(tmp_path / "findings.json",
+        [{"fingerprint": FILE_FINGERPRINT, "path": "b.py", "line": None, "placement": "file",
+                "title": "Cross-cutting concern in b.py", "body": "Body text", "severity": "high", "confidence": "HIGH",
                 "is_cross_stack": True,
             }
         ],
@@ -237,28 +174,18 @@ def file_level_artifact(tmp_path: Path) -> Path:
 def _posted_comments(fake_gh: FakeGh) -> list[dict[str, Any]]:
     """Rebuild the ``/comments`` GET payload from what actually crossed the gh boundary."""
     posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/comments")
-    return [
-        {
-            "id": 9000 + i,
-            "in_reply_to_id": None,
-            "user": {"login": "daydream-review"},
-            "body": call.payload["body"],
-        }
+    return [{"id": 9000 + i, "in_reply_to_id": None, "user": {"login": "daydream-review"}, "body": call.payload["body"]}
         for i, call in enumerate(posts, start=1)
     ]
-
 
 def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_level_artifact: Path) -> None:
     """The full loop: post → read back → count → resolve on reply.
 
-    Drives ``daydream post-findings`` from ``cli.main`` with the real
-    ``git_ops`` subprocess seam (only the ``gh`` binary is faked), then feeds
-    the comments that actually crossed that boundary into the labeler's own
-    signals. Asserts the rubric-visible outcome, not that anything was called.
-    """
+    Drives ``daydream post-findings`` from ``cli.main`` with the real ``git_ops`` subprocess seam (only the ``gh``
+    binary is faked), then feeds the comments that actually crossed that boundary into the labeler's own signals.
+    Asserts the rubric-visible outcome, not that anything was called."""
     fake_gh.set_response("diff-paths", value=["b.py"])
-    assert cli_main(
-        ["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
+    assert cli_main(["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
     ) == 0
 
     # 1. The finding reached /pulls/{n}/comments carrying footer + marker.
@@ -279,12 +206,8 @@ def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_lev
     assert unreplied.unresolved == 1
 
     # 3. A maintainer reply moves it to resolved — per-finding, by fingerprint.
-    reply = {
-        "id": 9999,
-        "in_reply_to_id": comments[0]["id"],
-        "user": {"login": "kevin", "type": "User"},
-        "author_association": "MEMBER",
-        "body": "Fixed in abc123",
+    reply = {"id": 9999, "in_reply_to_id": comments[0]["id"], "user": {"login": "kevin", "type": "User"},
+        "author_association": "MEMBER", "body": "Fixed in abc123",
     }
     replied = [*comments, reply]
     threads = index_pr_review_comments(row, gh_api=lambda *a, **k: replied)
@@ -295,17 +218,13 @@ def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_lev
     )
     assert [(r.fingerprint, r.disposition) for r in per_finding] == [(FILE_FINGERPRINT, "accepted")]
 
-
 def test_file_level_post_rejected_falls_back_to_review_body(fake_gh: FakeGh, file_level_artifact: Path) -> None:
     """A finding GitHub refuses a file-level comment for is never silently dropped.
 
-    ``diff-paths`` excludes ``b.py``, so the shim 422s the file-level POST the
-    way real GitHub does for a path outside the PR diff. The finding must then
-    appear in the review body — worse for capture, but delivered.
-    """
+    ``diff-paths`` excludes ``b.py``, so the shim 422s the file-level POST the way real GitHub does for a path
+    outside the PR diff. The finding must then appear in the review body — worse for capture, but delivered."""
     fake_gh.set_response("diff-paths", value=["other.py"])
-    assert cli_main(
-        ["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
+    assert cli_main(["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
     ) == 0
 
     reviews = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
@@ -314,25 +233,18 @@ def test_file_level_post_rejected_falls_back_to_review_body(fake_gh: FakeGh, fil
         "a rejected file-level finding must fall back into the review body"
     )
 
-
 def test_review_failure_still_reports_live_file_level_comments(
-    fake_gh: FakeGh,
-    file_level_artifact: Path,
-    capsys: pytest.CaptureFixture[str],
+    fake_gh: FakeGh, file_level_artifact: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A failed review POST must not claim nothing was posted.
 
-    File-level comments post *before* the consolidated review, so when the
-    review POST fails they are already live on the PR. Reporting "no comments
-    were posted" would send the operator looking for a clean slate that does
-    not exist.
-    """
+    File-level comments post *before* the consolidated review, so when the review POST fails they are already live
+    on the PR. Reporting "no comments were posted" would send the operator looking for a clean slate that does not
+    exist."""
     fake_gh.set_response("diff-paths", value=["b.py"])
     fake_gh.set_response("POST", "/repos/o/r/pulls/7/reviews", value=None)
 
-    rc = cli_main(
-        ["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
-    )
+    rc = cli_main(["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"])
 
     assert rc == 1, "a failed review POST is still a failure"
     assert len(fake_gh.calls("POST", "/repos/o/r/pulls/7/comments")) == 1

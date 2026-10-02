@@ -61,12 +61,7 @@ class StubBackend:
 
     model = "mock-model"
 
-    def __init__(
-        self,
-        target: Path,
-        *,
-        model: str = "mock-model",
-        shared_calls: list[dict[str, Any]] | None = None,
+    def __init__(self, target: Path, *, model: str = "mock-model", shared_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self._target = target
@@ -307,8 +302,7 @@ class StubBackend:
                 loaded = json.loads(Path(path_str).read_text())
             except (OSError, json.JSONDecodeError):
                 continue
-            uids = [
-                uid
+            uids = [uid
                 for rec in _records_issues_or_empty(loaded)
                 if isinstance(rec, dict) and (uid := record_uid(rec))
             ]
@@ -363,8 +357,7 @@ class StubBackend:
             "would you have done this differently" in pl or "evaluate the implementation" in pl
         ):
             return True
-        if (
-            self.runaway_stack is not None
+        if (self.runaway_stack is not None
             and "you are reviewing the" in pl
             and f"you are reviewing the {self.runaway_stack} stack" in pl
         ):
@@ -373,9 +366,7 @@ class StubBackend:
             return True
         return False
 
-    def _apply_parse_by_stack_override(
-        self, prompt: str, issue: dict[str, Any]
-    ) -> list[dict[str, Any]]:
+    def _apply_parse_by_stack_override(self, prompt: str, issue: dict[str, Any]) -> list[dict[str, Any]]:
         """#232: per-stack override keyed off the review-file path the prompt
         points at (``stack-<name>-review.md``). Lets one stack emit a HIGH
         finding and another a borderline LOW one at DISTINCT locations, so they
@@ -413,23 +404,15 @@ class StubBackend:
         if extra is not None:
             ex_file = extra.get("file", issue["file"])
             ex_line = extra.get("line", issue["line"])
-            issues.append(
-                {
-                    "id": 2,
-                    "description": extra.get("description", "extra finding"),
-                    "file": ex_file,
-                    "line": ex_line,
-                    "severity": extra["severity"],
-                    "confidence": extra["confidence"],
-                    "rationale": "stub",
+            issues.append({
+                    "id": 2, "description": extra.get("description", "extra finding"), "file": ex_file, "line": ex_line,
+                    "severity": extra["severity"], "confidence": extra["confidence"], "rationale": "stub",
                     "evidence": f"{ex_file}:{ex_line}",
                 }
             )
         return issues
 
-    async def _runaway_burst(
-        self, prefix: str, sleep_s: float
-    ) -> AsyncIterator[AgentEvent]:
+    async def _runaway_burst(self, prefix: str, sleep_s: float) -> AsyncIterator[AgentEvent]:
         """Emit 500 unbounded tool calls, never a ResultEvent, pacing each on the
         stub clock when installed (else sleeping *sleep_s*)."""
         for n in range(500):
@@ -440,25 +423,11 @@ class StubBackend:
                 await anyio.sleep(sleep_s)
 
     async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
+        self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
-        call = {
-            "cwd": cwd,
-            "prompt": prompt,
-            "output_schema": output_schema,
-            "agents": agents,
-            "model": self.model,
-            "continuation": continuation,
-            "max_turns": max_turns,
-            "read_only": read_only,
+        call = {"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
+            "continuation": continuation, "max_turns": max_turns, "read_only": read_only,
             "persist_session": persist_session,
         }
         self.calls.append(call)
@@ -482,20 +451,12 @@ class StubBackend:
                 yield ToolStartEvent(id=f"alt-tc-{n}", name="Read", input={"file_path": "api.py"})
                 await anyio.sleep(0)
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "title": "Inconsistent greeting wording",
-                            "description": "'universe' diverges from 'world' in docs",
-                            "recommendation": "align copy",
-                            "severity": "low",
-                            "files": ["api.py", "README.md"],
+            yield ResultEvent(structured_output={"issues": [{"id": 1, "title": "Inconsistent greeting wording",
+                            "description": "'universe' diverges from 'world' in docs", "recommendation": "align copy",
+                            "severity": "low", "files": ["api.py", "README.md"],
                         }
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
 
@@ -517,12 +478,8 @@ class StubBackend:
             else:
                 spec = {"root": None, "nodes": [], "edges": []}
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output=spec,
-                continuation=(
-                    ContinuationToken(
-                        backend="claude", data={"session_id": self.diagram_session_id}
-                    )
+            yield ResultEvent(structured_output=spec,
+                continuation=(ContinuationToken(backend="claude", data={"session_id": self.diagram_session_id})
                     if self.diagram_session_id
                     else None
                 ),
@@ -535,15 +492,10 @@ class StubBackend:
         if "you are the **pattern-scanner** specialist" in pl:
             if self.fail_exploration:
                 raise RuntimeError("exploration unavailable")
-            payload = {
-                "conventions": [
-                    {
-                        "name": self.exploration_sentinel or "OpenAPI First",
-                        "description": "openapi.yaml is the HTTP contract",
-                        "source": "CLAUDE.md",
+            payload = {"conventions": [{"name": self.exploration_sentinel or "OpenAPI First",
+                        "description": "openapi.yaml is the HTTP contract", "source": "CLAUDE.md",
                     }
-                ],
-                "guidelines": [],
+                ], "guidelines": [],
             }
             yield TextEvent(text=json.dumps({"conventions": payload["conventions"], "guidelines": []}))
             yield ResultEvent(structured_output=payload, continuation=None)
@@ -551,14 +503,9 @@ class StubBackend:
         if "you are the **dependency-tracer** specialist" in pl:
             if self.fail_exploration:
                 raise RuntimeError("exploration unavailable")
-            payload = {
-                "affected_files": [],
+            payload = {"affected_files": [],
                 "dependencies": [
-                    {
-                        "source": "App.tsx",
-                        "target": "api.py",
-                        "relationship": self.exploration_sentinel or "calls",
-                    }
+                    {"source": "App.tsx", "target": "api.py", "relationship": self.exploration_sentinel or "calls"}
                 ],
             }
             yield TextEvent(text=json.dumps(payload))
@@ -602,9 +549,7 @@ class StubBackend:
             if self.per_stack_emit_reads:
                 scope_files = self._stack_scope_files(prompt)
                 for scope_file in scope_files:
-                    yield ToolStartEvent(
-                        id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
-                    )
+                    yield ToolStartEvent(id=f"read-{scope_file}", name="Read", input={"file_path": scope_file})
                     # Budget recovery retains only completed source reads.
                     yield ToolResultEvent(id=f"read-{scope_file}", output="file content", is_error=False)
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
@@ -613,9 +558,7 @@ class StubBackend:
                 out_path = Path(raw)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
                 stack = m.group(1)
-                out_path.write_text(
-                    f"# Review ({stack})\n\n## Issues\n\n1. [api.py:1] Sample issue for {stack}\n"
-                )
+                out_path.write_text(f"# Review ({stack})\n\n## Issues\n\n1. [api.py:1] Sample issue for {stack}\n")
             # Issue #745 (AC4): the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
             # structured output directly (no separate parse-<stack> fork). Build a
             # schema-valid payload with every required issue field.
@@ -626,30 +569,16 @@ class StubBackend:
             # a single item (issue #1103) -- erasing the structural item that
             # every structural-lens test looks for.
             stack_label = m.group(1)
-            issue: dict[str, Any] = {
-                "id": 1,
-                "description": (
-                    "Structural maintainability concern"
+            issue: dict[str, Any] = {"id": 1,
+                "description": ("Structural maintainability concern"
                     if stack_label == "structure"
                     else "Sample issue"
-                ),
-                "file": "api.py",
-                "line": 1,
-                "severity": self.parse_severity or "medium",
-                "confidence": "MEDIUM",
-                "rationale": "stub",
-                "evidence": "api.py:1",
+                ), "file": "api.py", "line": 1, "severity": self.parse_severity or "medium", "confidence": "MEDIUM",
+                "rationale": "stub", "evidence": "api.py:1",
             }
-            issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(
-                prompt, issue
-            )
+            issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(prompt, issue)
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": issues,
-                },
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"issues": issues}, continuation=None,)
             return
 
         # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
@@ -668,23 +597,16 @@ class StubBackend:
             if in_match is not None and not self.arbiter_omit_verdicts:
                 arb_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in arb_inputs:
-                    findings.append(
-                        {
-                            "arb_id": entry["arb_id"],
-                            "keep": True,
-                            "severity": entry.get("severity") or "high",
+                    findings.append({
+                            "arb_id": entry["arb_id"], "keep": True, "severity": entry.get("severity") or "high",
                             "confidence": entry.get("confidence") or "HIGH",
                             "description": f"ARBITRATED: {entry.get('description')}",
                             "rationale": "arbiter second opinion",
                         }
                     )
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={"findings": findings},
-                continuation=(
-                    ContinuationToken(
-                        backend="claude", data={"session_id": self.arbiter_session_id}
-                    )
+            yield ResultEvent(structured_output={"findings": findings},
+                continuation=(ContinuationToken(backend="claude", data={"session_id": self.arbiter_session_id})
                     if self.arbiter_session_id
                     else None
                 ),
@@ -702,16 +624,10 @@ class StubBackend:
             if in_match is not None:
                 sup_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in sup_inputs:
-                    sup_findings.append(
-                        {
-                            "sup_id": entry["sup_id"],
-                            "keep": self.suppression_keep,
-                            "severity": entry.get("severity") or "low",
-                            "confidence": entry.get("confidence") or "LOW",
+                    sup_findings.append({"sup_id": entry["sup_id"], "keep": self.suppression_keep,
+                            "severity": entry.get("severity") or "low", "confidence": entry.get("confidence") or "LOW",
                             "description": entry.get("description") or "finding",
-                            "rationale": (
-                                "confirmed by code" if self.suppression_keep else "no confirming evidence"
-                            ),
+                            "rationale": ("confirmed by code" if self.suppression_keep else "no confirming evidence"),
                             "evidence": entry.get("evidence") or "",
                         }
                     )
@@ -742,14 +658,9 @@ class StubBackend:
                     loaded = json.loads(Path(path_str).read_text())
                     recs = _records_issues_or_empty(loaded)
                     for rec in recs:
-                        echoed.append(
-                            {
-                                "id": next_id,
-                                "lens": "per-stack",
-                                "file": rec.get("file"),
-                                "line": rec.get("line"),
-                                "severity": rec.get("severity", "medium"),
-                                "description": rec.get("description"),
+                        echoed.append({
+                                "id": next_id, "lens": "per-stack", "file": rec.get("file"), "line": rec.get("line"),
+                                "severity": rec.get("severity", "medium"), "description": rec.get("description"),
                                 "confidence": rec.get("confidence", "MEDIUM"),
                                 "rationale": rec.get("rationale", "rationale"),
                                 "evidence": rec.get("evidence", "api.py:1"),
@@ -767,10 +678,7 @@ class StubBackend:
                 yield ResultEvent(structured_output={"items": echoed}, continuation=None)
                 return
             if self.merge_items is not None:
-                yield ResultEvent(
-                    structured_output={"items": self.merge_items},
-                    continuation=None,
-                )
+                yield ResultEvent(structured_output={"items": self.merge_items}, continuation=None,)
                 return
             # Issue #1111: attribute the default payload to REAL record uids
             # read off disk, so the default multi-stack fixtures exercise the
@@ -789,48 +697,20 @@ class StubBackend:
                 uid = leads_by_stack.get(stack) or (lead_uids[0] if lead_uids else "")
                 return [uid] if uid else []
 
-            yield ResultEvent(
-                structured_output={
-                    "items": [
-                        {
-                            "id": 1,
-                            "lens": "per-stack",
-                            "file": "api.py",
-                            "line": 1,
-                            "severity": "medium",
-                            "description": "Python issue",
-                            "confidence": "MEDIUM",
-                            "rationale": "rationale",
-                            "evidence": "api.py:1",
-                            "source_uids": _lead("python"),
-                        },
-                        {
-                            "id": 2,
-                            "lens": "per-stack",
-                            "file": "App.tsx",
-                            "line": 1,
-                            "severity": "medium",
-                            "description": "React issue",
-                            "confidence": "MEDIUM",
-                            "rationale": "rationale",
-                            "evidence": "App.tsx:1",
-                            "source_uids": _lead("react"),
-                        },
-                        {
-                            "id": 3,
-                            "lens": "cross-stack",
-                            "file": "api.py",
-                            "line": 1,
-                            "severity": "high",
+            yield ResultEvent(structured_output={"items": [{
+                            "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "medium",
+                            "description": "Python issue", "confidence": "MEDIUM", "rationale": "rationale",
+                            "evidence": "api.py:1", "source_uids": _lead("python"),
+                        }, {"id": 2, "lens": "per-stack", "file": "App.tsx", "line": 1, "severity": "medium",
+                            "description": "React issue", "confidence": "MEDIUM", "rationale": "rationale",
+                            "evidence": "App.tsx:1", "source_uids": _lead("react"),
+                        }, {"id": 3, "lens": "cross-stack", "file": "api.py", "line": 1, "severity": "high",
                             "description": "Contract drift between Python handler and React caller",
-                            "confidence": "HIGH",
-                            "rationale": "rationale",
-                            "evidence": "api.py:1",
+                            "confidence": "HIGH", "rationale": "rationale", "evidence": "api.py:1",
                             "source_uids": list(lead_uids),
                         },
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
 
@@ -870,20 +750,16 @@ class StubBackend:
             # than exhausting every attempt. Charge one event's worth of clock for
             # the failed attempt before raising (the backend time a real failure
             # burns), then let subsequent turns apply the normal fix.
-            if (
-                (self.fix_retryable_file is None or self.fix_retryable_file == fixed_name)
+            if ((self.fix_retryable_file is None or self.fix_retryable_file == fixed_name)
                 and self._fix_retry_counts.get(fixed_name, 0) < self.fix_retryable_failures
             ):
                 self._fix_retry_counts[fixed_name] = self._fix_retry_counts.get(fixed_name, 0) + 1
                 self._tick()
-                raise self.fix_retryable_error or _StubRetryableError(
-                    f"stub: retryable fix failure for {fixed_name}"
-                )
+                raise self.fix_retryable_error or _StubRetryableError(f"stub: retryable fix failure for {fixed_name}")
             # Runaway ONLY the single-item turn for the marked file: same burst
             # shape as the batched runaway below, but for a group with exactly
             # one finding (no "Fix these N issues" header).
-            if (
-                self.runaway_single_fix_file is not None
+            if (self.runaway_single_fix_file is not None
                 and m is not None
                 and batched_hdr is None
                 and fixed_name == self.runaway_single_fix_file
@@ -896,8 +772,7 @@ class StubBackend:
             # Runaway ONLY the batched turn for the marked file: burn real wall so
             # run_agent's per-invocation wall budget trips, returns a budget_reason,
             # and phase_fix_batched raises into the per-finding fallback (#201).
-            if (
-                self.runaway_batched_fix_file is not None
+            if (self.runaway_batched_fix_file is not None
                 and batched_hdr is not None
                 and fixed_name == self.runaway_batched_fix_file
             ):
@@ -906,8 +781,7 @@ class StubBackend:
                 return
             # Fail ONLY the batched turn for the marked file so the group falls
             # back to per-finding fixes (the #186 pattern under budget test).
-            if (
-                self.fail_batched_fix_file is not None
+            if (self.fail_batched_fix_file is not None
                 and batched_hdr is not None
                 and fixed_name == self.fail_batched_fix_file
             ):
@@ -931,9 +805,7 @@ class StubBackend:
             if self.deferred_write_pairs is not None:
                 for index, path in enumerate(self.deferred_write_pairs, start=1):
                     edit_target = Path(path) if Path(path).is_absolute() else cwd / path
-                    yield ToolStartEvent(
-                        id=f"deferred-write-{index}",
-                        name="Write",
+                    yield ToolStartEvent(id=f"deferred-write-{index}", name="Write",
                         input={"file_path": str(edit_target), "content": "backend resumed"},
                     )
                     self._tick()
@@ -976,18 +848,12 @@ class StubBackend:
         # recommendation-verdicts.json itself.
         if "you are the recommendation-verifier agent" in pl:
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "verdicts": [
-                        {
-                            "issue_id": 1,
-                            "verdict": self.verifier_verdict,
-                            "evidence": "stub",
+            yield ResultEvent(structured_output={"verdicts": [{
+                            "issue_id": 1, "verdict": self.verifier_verdict, "evidence": "stub",
                             "unverified_assumptions": list(self.verifier_unverified_assumptions),
                         }
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
 
@@ -999,10 +865,7 @@ class StubBackend:
         if "post-fix fix-verifier agent" in pl:
             if not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
-            round_match = re.search(
-                r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))",
-                prompt,
-            )
+            round_match = re.search(r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))", prompt,)
             round_num = int(next(group for group in round_match.groups() if group)) if round_match else 1
             ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             verdicts = []
@@ -1015,10 +878,7 @@ class StubBackend:
                 else:
                     verdicts.append({"issue_id": i, "verdict": "resolved", "reason": "stub"})
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={"verdicts": verdicts},
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"verdicts": verdicts}, continuation=None,)
             return
 
         # Heal-loop fix turn (prompt starts with "The tests failed."). Writes a
@@ -1048,8 +908,7 @@ class StubBackend:
         if "run the project's test suite" in pl:
             self.test_suite_calls += 1
             if self.environmental_test_failure:
-                yield TextEvent(
-                    text=(
+                yield TextEvent(text=(
                         "could not connect to server: Connection refused\n"
                         "\tIs the server running on host localhost (127.0.0.1) "
                         "and accepting TCP/IP connections on port 5432?\n"
@@ -1103,11 +962,7 @@ def force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CI", raising=False)
 
 
-def install_stub_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-    *,
-    pin_skill_availability: bool = True,
+def install_stub_backend(monkeypatch: pytest.MonkeyPatch, target: Path, *, pin_skill_availability: bool = True,
     enable_exploration: bool = False,
 ) -> StubBackend:
     """Patch create_backend to return a single stub backend instance.

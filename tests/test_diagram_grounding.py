@@ -91,24 +91,15 @@ end
 
 #: ``pkg/flow.py``'s ``resolve_identity``, exactly as ``decide_eligibility``
 #: would publish it.
-FLOW_ROOT = CandidateRoot(
-    file="pkg/flow.py", name="resolve_identity", line=1, end_line=9, branch_points=4
-)
+FLOW_ROOT = CandidateRoot(file="pkg/flow.py", name="resolve_identity", line=1, end_line=9, branch_points=4)
 #: ``pkg/big.py``'s ``big``, used by the node/edge cap tests.
 BIG_ROOT = CandidateRoot(file="pkg/big.py", name="big", line=1, end_line=39, branch_points=1)
-NON_EXECUTABLE_ROOT = CandidateRoot(
-    file="pkg/non_executable.py", name="classify", line=1, end_line=8, branch_points=1
-)
+NON_EXECUTABLE_ROOT = CandidateRoot(file="pkg/non_executable.py", name="classify", line=1, end_line=8, branch_points=1)
 
 #: Head-side changed ranges covering every fixture file.
 HUNKS: dict[str, list[tuple[int, int]]] = {
-    "pkg/api.py": [(4, 6)],
-    "pkg/service.py": [(1, 2)],
-    "pkg/flow.py": [(1, 9)],
-    "pkg/big.py": [(1, 39)],
-    "pkg/caller.rb": [(1, 3)],
-    "pkg/legacy.rb": [(1, 3)],
-    **{f"pkg/p{index:02d}.py": [(1, 3)] for index in range(12)},
+    "pkg/api.py": [(4, 6)], "pkg/service.py": [(1, 2)], "pkg/flow.py": [(1, 9)], "pkg/big.py": [(1, 39)],
+    "pkg/caller.rb": [(1, 3)], "pkg/legacy.rb": [(1, 3)], **{f"pkg/p{index:02d}.py": [(1, 3)] for index in range(12)},
 }
 
 _BIG_LAST_STATEMENT = 38
@@ -134,13 +125,8 @@ def repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
     root = tmp_path_factory.mktemp("grounding-repo")
     init_repo(root)
     (root / "pkg").mkdir()
-    files = {
-        "pkg/api.py": _API_PY,
-        "pkg/service.py": _SERVICE_PY,
-        "pkg/flow.py": _FLOW_PY,
-        "pkg/non_executable.py": _NON_EXECUTABLE_PY,
-        "pkg/big.py": _big_py(),
-        "pkg/legacy.rb": _LEGACY_RB,
+    files = {"pkg/api.py": _API_PY, "pkg/service.py": _SERVICE_PY, "pkg/flow.py": _FLOW_PY,
+        "pkg/non_executable.py": _NON_EXECUTABLE_PY, "pkg/big.py": _big_py(), "pkg/legacy.rb": _LEGACY_RB,
         "pkg/caller.rb": _CALLER_RB,
     }
     for index in range(12):
@@ -180,152 +166,72 @@ def reasons(report: GroundingReport) -> dict[str, str | None]:
 
 def base_sequence() -> dict[str, Any]:
     """A fully groundable three-message sequence spec over the fixture repo."""
-    return {
-        "participants": [
-            {"name": "Client", "kind": "external", "files": [], "service": None},
+    return {"participants": [{"name": "Client", "kind": "external", "files": [], "service": None},
             {"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None},
-            {
-                "name": "Service",
-                "kind": "internal",
-                "files": ["pkg/service.py"],
-                "service": "svc",
-            },
-        ],
-        "messages": [
-            {
-                "from": "Client",
-                "to": "API",
-                "label": "request",
-                "kind": "call",
-                "changed": True,
+            {"name": "Service", "kind": "internal", "files": ["pkg/service.py"], "service": "svc"},
+        ], "messages": [{"from": "Client", "to": "API", "label": "request", "kind": "call", "changed": True,
                 "evidence": {"file": "pkg/api.py", "line": 4, "symbol": "handle"},
-            },
-            {
-                "from": "API",
-                "to": "Service",
-                "label": "resolve identity",
-                "kind": "call",
-                "changed": True,
+            }, {"from": "API", "to": "Service", "label": "resolve identity", "kind": "call", "changed": True,
                 "evidence": {"file": "pkg/api.py", "line": 5, "symbol": "resolve"},
             },
             {
                 # A reply cites the return statement in its enclosing function.
-                "from": "Service",
-                "to": "API",
-                "label": "payload",
-                "kind": "reply",
-                "changed": False,
+                "from": "Service", "to": "API", "label": "payload", "kind": "reply", "changed": False,
                 "evidence": {"file": "pkg/service.py", "line": 2, "symbol": "resolve"},
             },
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }
 
 
 def base_flowchart() -> dict[str, Any]:
     """A fully groundable eight-node flowchart over ``pkg/flow.py``."""
-    return {
-        "root": {"file": "pkg/flow.py", "name": "resolve_identity", "line": 1},
-        "nodes": [
-            {
-                "id": "N1",
-                "kind": "start",
-                "label": "resolve identity",
+    return {"root": {"file": "pkg/flow.py", "name": "resolve_identity", "line": 1},
+        "nodes": [{"id": "N1", "kind": "start", "label": "resolve identity",
                 "evidence": {"file": "pkg/flow.py", "line": 1, "symbol": "resolve_identity"},
-            },
-            {
-                "id": "N2",
-                "kind": "decision",
-                "label": "token missing?",
+            }, {"id": "N2", "kind": "decision", "label": "token missing?",
                 "evidence": {"file": "pkg/flow.py", "line": 2, "symbol": None},
-            },
-            {
-                "id": "N3",
-                "kind": "end",
-                "label": "raise ValueError",
+            }, {"id": "N3", "kind": "end", "label": "raise ValueError",
                 "evidence": {"file": "pkg/flow.py", "line": 3, "symbol": None},
-            },
-            {
-                "id": "N4",
-                "kind": "decision",
-                "label": "bearer token?",
+            }, {"id": "N4", "kind": "decision", "label": "bearer token?",
                 "evidence": {"file": "pkg/flow.py", "line": 4, "symbol": None},
-            },
-            {
-                "id": "N5",
-                "kind": "subroutine",
-                "label": "verify jwt",
+            }, {"id": "N5", "kind": "subroutine", "label": "verify jwt",
                 "evidence": {"file": "pkg/flow.py", "line": 5, "symbol": "verify_jwt"},
-            },
-            {
-                "id": "N6",
-                "kind": "end",
-                "label": "return claims",
+            }, {"id": "N6", "kind": "end", "label": "return claims",
                 "evidence": {"file": "pkg/flow.py", "line": 6, "symbol": None},
-            },
-            {
-                "id": "N7",
-                "kind": "process",
-                "label": "scan parts",
+            }, {"id": "N7", "kind": "process", "label": "scan parts",
                 "evidence": {"file": "pkg/flow.py", "line": 8, "symbol": None},
-            },
-            {
-                "id": "N8",
-                "kind": "end",
-                "label": "return result",
+            }, {"id": "N8", "kind": "end", "label": "return result",
                 "evidence": {"file": "pkg/flow.py", "line": 9, "symbol": None},
             },
-        ],
-        "edges": [
-            {"from": "N1", "to": "N2", "label": None},
-            {"from": "N2", "to": "N3", "label": "missing"},
-            {"from": "N2", "to": "N4", "label": "present"},
-            {"from": "N4", "to": "N5", "label": "bearer"},
-            {"from": "N4", "to": "N7", "label": "other"},
-            {"from": "N5", "to": "N6", "label": None},
+        ], "edges": [{"from": "N1", "to": "N2", "label": None}, {"from": "N2", "to": "N3", "label": "missing"},
+            {"from": "N2", "to": "N4", "label": "present"}, {"from": "N4", "to": "N5", "label": "bearer"},
+            {"from": "N4", "to": "N7", "label": "other"}, {"from": "N5", "to": "N6", "label": None},
             {"from": "N7", "to": "N8", "label": None},
         ],
     }
 
 
-def run_sequence(
-    repo: Path, symbols: RepoSymbols, spec: dict[str, Any]
-) -> GroundingReport:
+def run_sequence(repo: Path, symbols: RepoSymbols, spec: dict[str, Any]) -> GroundingReport:
     """Ground ``spec`` as a sequence diagram against the fixture repo."""
-    return ground_sequence(
-        spec,
-        repo_root=repo,
-        hunk_ranges=HUNKS,
-        symbols=symbols,
-    )
+    return ground_sequence(spec, repo_root=repo, hunk_ranges=HUNKS, symbols=symbols,)
 
 
 def run_flowchart(
-    repo: Path,
-    symbols: RepoSymbols,
-    spec: dict[str, Any],
-    *,
-    candidate_roots: list[CandidateRoot] | None = None,
+    repo: Path, symbols: RepoSymbols, spec: dict[str, Any], *, candidate_roots: list[CandidateRoot] | None = None,
 ) -> GroundingReport:
     """Ground ``spec`` as a flowchart against the fixture repo."""
-    return ground_flowchart(
-        spec,
-        repo_root=repo,
-        hunk_ranges=HUNKS,
-        candidate_roots=[FLOW_ROOT, BIG_ROOT] if candidate_roots is None else candidate_roots,
-        symbols=symbols,
+    return ground_flowchart(spec, repo_root=repo, hunk_ranges=HUNKS,
+        candidate_roots=[FLOW_ROOT, BIG_ROOT] if candidate_roots is None else candidate_roots, symbols=symbols,
     )
 
 
 # --- Fixture pinning ---------------------------------------------------------
 
-
 def test_fixture_definition_ranges_are_pinned(repo: Path) -> None:
     """The candidate ranges every other test hardcodes come from tree-sitter."""
     flow = {record["name"]: record for record in definitions_in_file(repo, "pkg/flow.py")}
     assert (flow["resolve_identity"]["line"], flow["resolve_identity"]["end_line"]) == (
-        FLOW_ROOT.line,
-        FLOW_ROOT.end_line,
+        FLOW_ROOT.line, FLOW_ROOT.end_line,
     )
     assert flow["verify_jwt"]["line"] == 12
     big = definitions_in_file(repo, "pkg/big.py")
@@ -334,18 +240,13 @@ def test_fixture_definition_ranges_are_pinned(repo: Path) -> None:
 
 # --- Happy paths -------------------------------------------------------------
 
-
 def test_sequence_happy_path_grounds_every_element(repo: Path, symbols: RepoSymbols) -> None:
     report = run_sequence(repo, symbols, base_sequence())
 
     assert report.ungrounded() == []
     assert report.omit_reasons == []
     assert report.rejected is None
-    assert [m["label"] for m in report.spec_final["messages"]] == [
-        "request",
-        "resolve identity",
-        "payload",
-    ]
+    assert [m["label"] for m in report.spec_final["messages"]] == ["request", "resolve identity", "payload"]
     # Internal calls resolve to real definitions.
     assert check_for(report, "message", "0").strength == "definition"
     assert check_for(report, "message", "0").defined_at == "pkg/api.py:4"
@@ -353,12 +254,7 @@ def test_sequence_happy_path_grounds_every_element(repo: Path, symbols: RepoSymb
     # A reply is proven by a return statement within its enclosing function.
     assert check_for(report, "message", "2").strength == "definition"
     assert check_for(report, "message", "2").defined_at == "pkg/service.py:1"
-    assert [check_for(report, "message", str(i)).in_changed_hunk for i in range(3)] == [
-        True,
-        True,
-        True,
-    ]
-
+    assert [check_for(report, "message", str(i)).in_changed_hunk for i in range(3)] == [True, True, True]
 
 def test_flowchart_happy_path_grounds_every_element(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, base_flowchart())
@@ -368,11 +264,7 @@ def test_flowchart_happy_path_grounds_every_element(repo: Path, symbols: RepoSym
     assert report.rejected is None
     assert [node["id"] for node in report.spec_final["nodes"]] == [f"N{i}" for i in range(1, 9)]
     assert len(report.spec_final["edges"]) == 7
-    assert report.spec_final["root"] == {
-        "file": "pkg/flow.py",
-        "name": "resolve_identity",
-        "line": 1,
-    }
+    assert report.spec_final["root"] == {"file": "pkg/flow.py", "name": "resolve_identity", "line": 1}
     # The subroutine's symbol resolves to a real definition in the repo.
     subroutine = check_for(report, "node", "N5")
     assert (subroutine.strength, subroutine.defined_at) == ("definition", "pkg/flow.py:12")
@@ -380,24 +272,13 @@ def test_flowchart_happy_path_grounds_every_element(repo: Path, symbols: RepoSym
     kinds = {node["id"]: node["kind"] for node in report.spec_final["nodes"]}
     assert kinds["N2"] == "decision" and kinds["N4"] == "decision"
 
-
 def test_spec_final_key_sets_match_the_schemas(repo: Path, symbols: RepoSymbols) -> None:
     """``spec_final`` is annotation-free: Phase B re-validates it strictly."""
     spec = base_sequence()
-    spec["blocks"] = [
-        {
-            "kind": "alt",
+    spec["blocks"] = [{"kind": "alt",
             "branches": [
-                {
-                    "condition": "token missing",
-                    "evidence": {"file": "pkg/flow.py", "line": 2},
-                    "messages": [0],
-                },
-                {
-                    "condition": "bearer token",
-                    "evidence": {"file": "pkg/flow.py", "line": 4},
-                    "messages": [1, 2],
-                },
+                {"condition": "token missing", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0]},
+                {"condition": "bearer token", "evidence": {"file": "pkg/flow.py", "line": 4}, "messages": [1, 2]},
             ],
         }
     ]
@@ -433,13 +314,11 @@ def test_spec_final_key_sets_match_the_schemas(repo: Path, symbols: RepoSymbols)
 
 # --- Shared reason codes, sequence side --------------------------------------
 
-
 def test_sequence_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"][1]["evidence"]["file"] = "../outside/secrets.py"
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "message", "1").reason == "PATH_ESCAPES_REPO"
-
 
 def test_sequence_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -457,13 +336,11 @@ def test_sequence_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     lone = run_sequence(repo, symbols, spec)
     assert check_for(lone, "message", "1").reason == "FILE_MISSING"
 
-
 def test_sequence_line_out_of_range(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"][1]["evidence"]["line"] = 999
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "message", "1").reason == "LINE_OUT_OF_RANGE"
-
 
 def test_sequence_symbol_not_on_line_beyond_snap_range(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -472,7 +349,6 @@ def test_sequence_symbol_not_on_line_beyond_snap_range(repo: Path, symbols: Repo
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "message", "1").reason == "SYMBOL_NOT_ON_LINE"
     assert check_for(report, "message", "1").snapped_line is None
-
 
 def test_sequence_symbol_snap_rewrites_the_citation(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -485,16 +361,10 @@ def test_sequence_symbol_snap_rewrites_the_citation(repo: Path, symbols: RepoSym
     assert check.snapped_line == 5
     assert report.spec_final["messages"][1]["evidence"]["line"] == 5
 
-
 def test_sequence_branch_not_a_branch_statement(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    spec["blocks"] = [
-        {
-            "kind": "opt",
-            "branches": [
-                {
-                    "condition": "assignment is not a branch",
-                    "evidence": {"file": "pkg/flow.py", "line": 5},
+    spec["blocks"] = [{"kind": "opt",
+            "branches": [{"condition": "assignment is not a branch", "evidence": {"file": "pkg/flow.py", "line": 5},
                     "messages": [0],
                 }
             ],
@@ -510,13 +380,11 @@ def test_sequence_branch_not_a_branch_statement(repo: Path, symbols: RepoSymbols
 
 # --- Sequence-specific reason codes ------------------------------------------
 
-
 def test_sequence_evidence_not_in_source_participant(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"][1]["evidence"] = {"file": "pkg/service.py", "line": 1, "symbol": "resolve"}
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "message", "1").reason == "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"
-
 
 def test_sequence_callee_not_defined_in_target(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -524,7 +392,6 @@ def test_sequence_callee_not_defined_in_target(repo: Path, symbols: RepoSymbols)
     spec["messages"][1]["evidence"] = {"file": "pkg/api.py", "line": 4, "symbol": "handle"}
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "message", "1").reason == "CALLEE_NOT_DEFINED_IN_TARGET"
-
 
 def test_sequence_reply_requires_a_return_statement(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -534,7 +401,6 @@ def test_sequence_reply_requires_a_return_statement(repo: Path, symbols: RepoSym
 
     assert check_for(report, "message", "2").reason == "NOT_A_REPLY_STATEMENT"
 
-
 def test_sequence_reply_requires_a_reversed_preceding_call(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"][1]["kind"] = "self"
@@ -543,10 +409,7 @@ def test_sequence_reply_requires_a_reversed_preceding_call(repo: Path, symbols: 
 
     assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
 
-
-def test_sequence_reply_requires_a_grounded_preceding_call(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_reply_requires_a_grounded_preceding_call(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"][1]["evidence"]["line"] = 999
 
@@ -556,9 +419,7 @@ def test_sequence_reply_requires_a_grounded_preceding_call(
     assert check_for(report, "message", "2").reason == "REPLY_NOT_PRECEDED_BY_CALL"
     assert all(message["kind"] != "reply" for message in report.spec_final["messages"])
 
-
-def test_sequence_reply_requires_an_enclosing_function(
-    repo: Path, symbols: RepoSymbols, monkeypatch: pytest.MonkeyPatch
+def test_sequence_reply_requires_an_enclosing_function(repo: Path, symbols: RepoSymbols, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     spec = base_sequence()
     original_definitions = symbols.definitions
@@ -573,7 +434,6 @@ def test_sequence_reply_requires_an_enclosing_function(
 
     assert check_for(report, "message", "2").reason == "REPLY_NOT_IN_ENCLOSING_FUNCTION"
 
-
 def test_sequence_participant_no_files(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["participants"][2]["files"] = []
@@ -583,13 +443,11 @@ def test_sequence_participant_no_files(repo: Path, symbols: RepoSymbols) -> None
     assert check_for(report, "message", "1").reason == "CALLEE_NOT_DEFINED_IN_TARGET"
     assert check_for(report, "message", "2").reason == "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"
 
-
 def test_sequence_participant_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["participants"][2]["files"] = ["pkg/vanished.py"]
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "participant", "Service").reason == "PARTICIPANT_FILE_MISSING"
-
 
 def test_sequence_participant_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -597,17 +455,13 @@ def test_sequence_participant_path_escapes_repo(repo: Path, symbols: RepoSymbols
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "participant", "Service").reason == "PATH_ESCAPES_REPO"
 
-
 def test_sequence_external_misused_by_declaring_files(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["participants"][0]["files"] = ["pkg/api.py"]
     report = run_sequence(repo, symbols, spec)
     assert check_for(report, "participant", "Client").reason == "EXTERNAL_MISUSED"
 
-
-def test_sequence_external_misused_by_sourcing_a_later_message(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_external_misused_by_sourcing_a_later_message(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"][1]["from"] = "Client"
     report = run_sequence(repo, symbols, spec)
@@ -615,13 +469,10 @@ def test_sequence_external_misused_by_sourcing_a_later_message(
     # Message 0 loses its (now ungrounded) source too.
     assert check_for(report, "message", "0").reason == "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"
 
-
 def test_sequence_malformed_elements(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["participants"].append({"name": "Ghost", "kind": "spectral", "files": [], "service": None})
-    spec["participants"].append(
-        {"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None}
-    )
+    spec["participants"].append({"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None})
     spec["messages"].append("not a message")
     spec["messages"].append({**base_sequence()["messages"][1], "kind": "telepathy"})
     spec["blocks"].append({"kind": "whenever", "branches": [{"condition": "x"}]})
@@ -629,35 +480,20 @@ def test_sequence_malformed_elements(repo: Path, symbols: RepoSymbols) -> None:
 
     assert check_for(report, "participant", "Ghost").reason == "MALFORMED_ELEMENT"
     # The duplicate name is rejected, not silently allowed to shadow the first.
-    assert [c.reason for c in report.elements if c.element == "participant"].count(
-        "MALFORMED_ELEMENT"
-    ) == 2
+    assert [c.reason for c in report.elements if c.element == "participant"].count("MALFORMED_ELEMENT") == 2
     assert check_for(report, "message", "3").reason == "MALFORMED_ELEMENT"
     assert check_for(report, "message", "4").reason == "MALFORMED_ELEMENT"
     assert check_for(report, "block", "b0").reason == "MALFORMED_ELEMENT"
     assert check_for(report, "branch", "b0.0").reason == "MALFORMED_ELEMENT"
 
-
-def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(repo: Path, symbols: RepoSymbols) -> None:
     """Ruby has no tree-sitter grammar here, so a callee is proven by token only."""
-    spec = {
-        "participants": [
-            {"name": "Caller", "kind": "internal", "files": ["pkg/caller.rb"], "service": None},
+    spec = {"participants": [{"name": "Caller", "kind": "internal", "files": ["pkg/caller.rb"], "service": None},
             {"name": "Legacy", "kind": "internal", "files": ["pkg/legacy.rb"], "service": None},
-        ],
-        "messages": [
-            {
-                "from": "Caller",
-                "to": "Legacy",
-                "label": "resolve legacy",
-                "kind": "call",
-                "changed": True,
+        ], "messages": [{"from": "Caller", "to": "Legacy", "label": "resolve legacy", "kind": "call", "changed": True,
                 "evidence": {"file": "pkg/caller.rb", "line": 2, "symbol": "resolve_legacy"},
             }
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }
     report = run_sequence(repo, symbols, spec)
 
@@ -666,7 +502,6 @@ def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(
     assert (check.strength, check.defined_at) == ("token", None)
     # One message is below the floor, which is the honest outcome.
     assert report.omit_reasons == ["TOO_FEW_MESSAGES"]
-
 
 def test_repo_symbols_survives_a_repo_without_git_history(tmp_path: Path) -> None:
     """No commits (and no git dir at all) must degrade to "not found", never raise."""
@@ -682,25 +517,14 @@ def test_repo_symbols_survives_a_repo_without_git_history(tmp_path: Path) -> Non
 
 # --- Sequence prune semantics ------------------------------------------------
 
-
-def test_sequence_prune_flattens_a_block_whose_condition_is_ungrounded(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_prune_flattens_a_block_whose_condition_is_ungrounded(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    spec["blocks"] = [
-        {
-            "kind": "alt",
+    spec["blocks"] = [{"kind": "alt",
             "branches": [
-                {
-                    "condition": "token missing",
-                    "evidence": {"file": "pkg/flow.py", "line": 2},
-                    "messages": [0],
-                },
+                {"condition": "token missing", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0]},
                 {
                     # Line 5 is an assignment: not a branch statement.
-                    "condition": "fabricated",
-                    "evidence": {"file": "pkg/flow.py", "line": 5},
-                    "messages": [1, 2],
+                    "condition": "fabricated", "evidence": {"file": "pkg/flow.py", "line": 5}, "messages": [1, 2],
                 },
             ],
         }
@@ -714,71 +538,38 @@ def test_sequence_prune_flattens_a_block_whose_condition_is_ungrounded(
     assert len(report.spec_final["messages"]) == 3
     assert check_for(report, "block", "b0").grounded
 
-
-def test_sequence_prune_drops_participants_with_no_remaining_messages(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_prune_drops_participants_with_no_remaining_messages(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    spec["participants"].append(
-        {"name": "Store", "kind": "internal", "files": ["pkg/service.py"], "service": None}
-    )
+    spec["participants"].append({"name": "Store", "kind": "internal", "files": ["pkg/service.py"], "service": None})
     report = run_sequence(repo, symbols, spec)
 
     assert check_for(report, "participant", "Store").grounded
     assert [p["name"] for p in report.spec_final["participants"]] == ["Client", "API", "Service"]
 
-
-def test_sequence_preserves_message_order_after_a_mid_list_prune(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_preserves_message_order_after_a_mid_list_prune(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    spec["messages"].insert(
-        1,
-        {
-            "from": "API",
-            "to": "Service",
-            "label": "fabricated",
-            "kind": "call",
-            "changed": True,
+    spec["messages"].insert(1,
+        {"from": "API", "to": "Service", "label": "fabricated", "kind": "call", "changed": True,
             "evidence": {"file": "pkg/api.py", "line": 999, "symbol": "resolve"},
         },
     )
     report = run_sequence(repo, symbols, spec)
 
     assert check_for(report, "message", "1").reason == "LINE_OUT_OF_RANGE"
-    assert [m["label"] for m in report.spec_final["messages"]] == [
-        "request",
-        "resolve identity",
-        "payload",
-    ]
+    assert [m["label"] for m in report.spec_final["messages"]] == ["request", "resolve identity", "payload"]
 
-
-def test_sequence_block_message_indices_are_remapped_after_a_prune(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_block_message_indices_are_remapped_after_a_prune(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     # After the entrypoint, so message 0 keeps its "first message" status -- an
     # external participant may only source the entrypoint.
-    spec["messages"].insert(
-        1,
-        {
-            "from": "API",
-            "to": "Service",
-            "label": "fabricated",
-            "kind": "call",
-            "changed": True,
+    spec["messages"].insert(1,
+        {"from": "API", "to": "Service", "label": "fabricated", "kind": "call", "changed": True,
             "evidence": {"file": "pkg/ghost.py", "line": 1, "symbol": "resolve"},
         },
     )
-    spec["blocks"] = [
-        {
-            "kind": "opt",
+    spec["blocks"] = [{"kind": "opt",
             "branches": [
-                {
-                    "condition": "token missing",
-                    "evidence": {"file": "pkg/flow.py", "line": 2},
-                    "messages": [1, 2, 3],
-                }
+                {"condition": "token missing", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [1, 2, 3]}
             ],
         }
     ]
@@ -788,25 +579,11 @@ def test_sequence_block_message_indices_are_remapped_after_a_prune(
     # Proposed indices 2 and 3 became final positions 1 and 2; index 1 is gone.
     assert report.spec_final["blocks"][0]["branches"][0]["messages"] == [1, 2]
 
-
-def test_sequence_opt_block_keeps_only_its_first_branch(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_opt_block_keeps_only_its_first_branch(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    spec["blocks"] = [
-        {
-            "kind": "opt",
-            "branches": [
-                {
-                    "condition": "first",
-                    "evidence": {"file": "pkg/flow.py", "line": 2},
-                    "messages": [0],
-                },
-                {
-                    "condition": "second",
-                    "evidence": {"file": "pkg/flow.py", "line": 4},
-                    "messages": [1],
-                },
+    spec["blocks"] = [{"kind": "opt",
+            "branches": [{"condition": "first", "evidence": {"file": "pkg/flow.py", "line": 2}, "messages": [0]},
+                {"condition": "second", "evidence": {"file": "pkg/flow.py", "line": 4}, "messages": [1]},
             ],
         }
     ]
@@ -819,7 +596,6 @@ def test_sequence_opt_block_keeps_only_its_first_branch(
 
 # --- Sequence floors ---------------------------------------------------------
 
-
 def test_sequence_floor_too_few_messages(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
     spec["messages"] = spec["messages"][:2]
@@ -827,36 +603,19 @@ def test_sequence_floor_too_few_messages(repo: Path, symbols: RepoSymbols) -> No
     assert report.omit_reasons == ["TOO_FEW_MESSAGES"]
     assert len(report.spec_final["messages"]) == 2
 
-
 def test_sequence_floor_too_few_participants(repo: Path, symbols: RepoSymbols) -> None:
-    spec = {
-        "participants": [
-            {"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None}
-        ],
-        "messages": [
-            {
-                "from": "API",
-                "to": "API",
-                "label": f"self step {index}",
-                "kind": "self",
-                "changed": True,
+    spec = {"participants": [{"name": "API", "kind": "internal", "files": ["pkg/api.py"], "service": None}],
+        "messages": [{"from": "API", "to": "API", "label": f"self step {index}", "kind": "self", "changed": True,
                 "evidence": {"file": "pkg/api.py", "line": 4, "symbol": "handle"},
             }
             for index in range(3)
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }
     report = run_sequence(repo, symbols, spec)
     assert report.omit_reasons == ["TOO_FEW_PARTICIPANTS"]
 
-
 def test_sequence_floor_no_changed_interaction(repo: Path, symbols: RepoSymbols) -> None:
-    report = ground_sequence(
-        base_sequence(),
-        repo_root=repo,
-        hunk_ranges={},
-        symbols=symbols,
-    )
+    report = ground_sequence(base_sequence(), repo_root=repo, hunk_ranges={}, symbols=symbols,)
     assert report.omit_reasons == ["NO_CHANGED_INTERACTION"]
     assert len(report.spec_final["messages"]) == 3
     assert all(not c.in_changed_hunk for c in report.elements if c.element == "message")
@@ -867,38 +626,18 @@ def test_sequence_floor_no_changed_interaction(repo: Path, symbols: RepoSymbols)
 
 def _wide_sequence(count: int) -> dict[str, Any]:
     """A groundable spec with ``count`` participants chained by one call each."""
-    return {
-        "participants": [
-            {
-                "name": f"P{index:02d}",
-                "kind": "internal",
-                "files": [f"pkg/p{index:02d}.py"],
-                "service": None,
-            }
+    return {"participants": [
+            {"name": f"P{index:02d}", "kind": "internal", "files": [f"pkg/p{index:02d}.py"], "service": None}
             for index in range(count)
-        ],
-        "messages": [
-            {
-                "from": f"P{index:02d}",
-                "to": f"P{index + 1:02d}",
-                "label": f"step {index}",
-                "kind": "call",
+        ], "messages": [{"from": f"P{index:02d}", "to": f"P{index + 1:02d}", "label": f"step {index}", "kind": "call",
                 "changed": True,
-                "evidence": {
-                    "file": f"pkg/p{index:02d}.py",
-                    "line": 3,
-                    "symbol": f"fn{index + 1:02d}",
-                },
+                "evidence": {"file": f"pkg/p{index:02d}.py", "line": 3, "symbol": f"fn{index + 1:02d}"},
             }
             for index in range(count - 1)
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }
 
-
-def test_sequence_participant_cap_drops_orphaned_messages(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_sequence_participant_cap_drops_orphaned_messages(repo: Path, symbols: RepoSymbols) -> None:
     report = run_sequence(repo, symbols, _wide_sequence(12))
 
     assert report.ungrounded() == []
@@ -910,12 +649,10 @@ def test_sequence_participant_cap_drops_orphaned_messages(
     # Cap drops are not ungrounded drops.
     assert check_for(report, "message", "10").grounded
 
-
 def test_sequence_message_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols) -> None:
     spec = _wide_sequence(2)
     template = spec["messages"][0]
-    spec["messages"] = [
-        {**template, "evidence": dict(template["evidence"]), "label": f"step {index}"}
+    spec["messages"] = [{**template, "evidence": dict(template["evidence"]), "label": f"step {index}"}
         for index in range(DIAGRAM_MAX_MESSAGES + 5)
     ]
     report = run_sequence(repo, symbols, spec)
@@ -924,21 +661,12 @@ def test_sequence_message_cap_truncates_the_tail(repo: Path, symbols: RepoSymbol
     assert report.spec_final["messages"][-1]["label"] == f"step {DIAGRAM_MAX_MESSAGES - 1}"
     assert report.omit_reasons == []
 
-
 def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
-    spec["blocks"] = [
-        {
-            "kind": "alt",
-            "branches": [
-                {
-                    "condition": f"block {index} first",
-                    "evidence": {"file": "pkg/flow.py", "line": 2},
+    spec["blocks"] = [{"kind": "alt",
+            "branches": [{"condition": f"block {index} first", "evidence": {"file": "pkg/flow.py", "line": 2},
                     "messages": [0],
-                },
-                {
-                    "condition": f"block {index} second",
-                    "evidence": {"file": "pkg/flow.py", "line": 4},
+                }, {"condition": f"block {index} second", "evidence": {"file": "pkg/flow.py", "line": 4},
                     "messages": [1],
                 },
             ],
@@ -949,28 +677,17 @@ def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols)
 
     assert len(report.spec_final["blocks"]) == DIAGRAM_MAX_BLOCKS
 
-
 def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
     """The floor is evaluated on the capped spec, so a cap drop cannot hide.
 
-    The only two interactions inside a changed hunk sit past the message cap.
-    Trimming them must omit the kind, since no changed interaction survives.
-    """
+    The only two interactions inside a changed hunk sit past the message cap. Trimming them must omit the kind,
+    since no changed interaction survives."""
     spec = _wide_sequence(3)
     unchanged, changed = spec["messages"][0], spec["messages"][1]
-    spec["messages"] = [
-        {**unchanged, "evidence": dict(unchanged["evidence"]), "label": f"step {index}"}
+    spec["messages"] = [{**unchanged, "evidence": dict(unchanged["evidence"]), "label": f"step {index}"}
         for index in range(DIAGRAM_MAX_MESSAGES)
-    ] + [
-        {**changed, "evidence": dict(changed["evidence"]), "label": f"changed {index}"}
-        for index in range(2)
-    ]
-    report = ground_sequence(
-        spec,
-        repo_root=repo,
-        hunk_ranges={"pkg/p01.py": [(1, 3)]},
-        symbols=symbols,
-    )
+    ] + [{**changed, "evidence": dict(changed["evidence"]), "label": f"changed {index}"} for index in range(2)]
+    report = ground_sequence(spec, repo_root=repo, hunk_ranges={"pkg/p01.py": [(1, 3)]}, symbols=symbols,)
 
     assert len(report.spec_final["messages"]) == DIAGRAM_MAX_MESSAGES
     assert not any(m["label"].startswith("changed") for m in report.spec_final["messages"])
@@ -979,10 +696,7 @@ def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoS
 
 # --- Flowchart root ----------------------------------------------------------
 
-
-def test_flowchart_root_not_candidate_rejects_the_whole_spec(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_root_not_candidate_rejects_the_whole_spec(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["root"] = {"file": "pkg/flow.py", "name": "verify_jwt", "line": 12}
     report = run_flowchart(repo, symbols, spec)
@@ -995,15 +709,9 @@ def test_flowchart_root_not_candidate_rejects_the_whole_spec(
     assert report.omit_reasons == ["TOO_FEW_NODES"]
     assert len(report.elements) == 1
 
-
-def test_flowchart_root_must_still_overlap_a_changed_hunk(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_root_must_still_overlap_a_changed_hunk(repo: Path, symbols: RepoSymbols) -> None:
     report = ground_flowchart(
-        base_flowchart(),
-        repo_root=repo,
-        hunk_ranges={"pkg/api.py": [(4, 6)]},
-        candidate_roots=[FLOW_ROOT],
+        base_flowchart(), repo_root=repo, hunk_ranges={"pkg/api.py": [(4, 6)]}, candidate_roots=[FLOW_ROOT],
         symbols=symbols,
     )
     assert report.rejected == "ROOT_NOT_CANDIDATE"
@@ -1011,13 +719,11 @@ def test_flowchart_root_must_still_overlap_a_changed_hunk(
 
 # --- Flowchart node reason codes ---------------------------------------------
 
-
 def test_flowchart_node_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["nodes"][6]["evidence"]["file"] = "../outside/flow.py"
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N7").reason == "PATH_ESCAPES_REPO"
-
 
 def test_flowchart_node_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1025,13 +731,11 @@ def test_flowchart_node_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N7").reason == "FILE_MISSING"
 
-
 def test_flowchart_node_line_out_of_range(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["nodes"][6]["evidence"]["line"] = 9999
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N7").reason == "LINE_OUT_OF_RANGE"
-
 
 def test_flowchart_node_symbol_not_on_line(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1039,10 +743,7 @@ def test_flowchart_node_symbol_not_on_line(repo: Path, symbols: RepoSymbols) -> 
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N7").reason == "SYMBOL_NOT_ON_LINE"
 
-
-def test_flowchart_node_symbol_snap_stays_inside_the_root(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_node_symbol_snap_stays_inside_the_root(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     # "verify_jwt" is on line 5; the node cites line 6 and snaps back one line.
     spec["nodes"][4]["evidence"]["line"] = 6
@@ -1051,7 +752,6 @@ def test_flowchart_node_symbol_snap_stays_inside_the_root(
     check = check_for(report, "node", "N5")
     assert check.grounded and check.snapped_line == 5
     assert report.spec_final["nodes"][4]["evidence"]["line"] == 5
-
 
 def test_flowchart_node_outside_root(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1063,11 +763,7 @@ def test_flowchart_node_outside_root(repo: Path, symbols: RepoSymbols) -> None:
 
     other_file = base_flowchart()
     other_file["nodes"][6]["evidence"] = {"file": "pkg/api.py", "line": 5, "symbol": None}
-    assert (
-        check_for(run_flowchart(repo, symbols, other_file), "node", "N7").reason
-        == "NODE_OUTSIDE_ROOT"
-    )
-
+    assert (check_for(run_flowchart(repo, symbols, other_file), "node", "N7").reason == "NODE_OUTSIDE_ROOT")
 
 def test_flowchart_not_a_terminal_statement(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1075,64 +771,31 @@ def test_flowchart_not_a_terminal_statement(repo: Path, symbols: RepoSymbols) ->
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N8").reason == "NOT_A_TERMINAL_STATEMENT"
 
-
-def test_flowchart_executable_nodes_reject_non_executable_lines(
-    repo: Path, symbols: RepoSymbols
-) -> None:
-    spec = {
-        "root": {"file": "pkg/non_executable.py", "name": "classify", "line": 1},
-        "nodes": [
-            {
-                "id": "N1",
-                "kind": "start",
-                "label": "describe the flow",
+def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symbols: RepoSymbols) -> None:
+    spec = {"root": {"file": "pkg/non_executable.py", "name": "classify", "line": 1},
+        "nodes": [{"id": "N1", "kind": "start", "label": "describe the flow",
                 "evidence": {"file": "pkg/non_executable.py", "line": 2, "symbol": None},
-            },
-            {
-                "id": "N2",
-                "kind": "process",
-                "label": "perform the work",
+            }, {"id": "N2", "kind": "process", "label": "perform the work",
                 "evidence": {"file": "pkg/non_executable.py", "line": 3, "symbol": None},
-            },
-            {
-                "id": "N3",
-                "kind": "io",
-                "label": "read the value",
+            }, {"id": "N3", "kind": "io", "label": "read the value",
                 "evidence": {"file": "pkg/non_executable.py", "line": 4, "symbol": None},
-            },
-            {
-                "id": "N4",
-                "kind": "decision",
-                "label": "has a result?",
+            }, {"id": "N4", "kind": "decision", "label": "has a result?",
                 "evidence": {"file": "pkg/non_executable.py", "line": 6, "symbol": None},
-            },
-            {
-                "id": "N5",
-                "kind": "end",
-                "label": "return the result",
+            }, {"id": "N5", "kind": "end", "label": "return the result",
                 "evidence": {"file": "pkg/non_executable.py", "line": 7, "symbol": None},
             },
-        ],
-        "edges": [
-            {"from": "N1", "to": "N2", "label": None},
-            {"from": "N2", "to": "N3", "label": None},
-            {"from": "N3", "to": "N4", "label": None},
-            {"from": "N4", "to": "N5", "label": "yes"},
+        ], "edges": [{"from": "N1", "to": "N2", "label": None}, {"from": "N2", "to": "N3", "label": None},
+            {"from": "N3", "to": "N4", "label": None}, {"from": "N4", "to": "N5", "label": "yes"},
         ],
     }
 
     report = ground_flowchart(
-        spec,
-        repo_root=repo,
-        hunk_ranges={"pkg/non_executable.py": [(1, 8)]},
-        candidate_roots=[NON_EXECUTABLE_ROOT],
+        spec, repo_root=repo, hunk_ranges={"pkg/non_executable.py": [(1, 8)]}, candidate_roots=[NON_EXECUTABLE_ROOT],
         symbols=symbols,
     )
 
-    assert {
-        check_for(report, "node", node_id).reason for node_id in ("N1", "N2", "N3")
+    assert {check_for(report, "node", node_id).reason for node_id in ("N1", "N2", "N3")
     } == {"NOT_AN_EXECUTABLE_STATEMENT"}
-
 
 def test_flowchart_decision_not_a_branch_statement(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1140,13 +803,11 @@ def test_flowchart_decision_not_a_branch_statement(repo: Path, symbols: RepoSymb
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N4").reason == "NOT_A_BRANCH_STATEMENT"
 
-
 def test_flowchart_subroutine_not_called_here(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["nodes"][4]["evidence"]["symbol"] = "nonexistent_helper"
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N5").reason == "SUBROUTINE_NOT_CALLED_HERE"
-
 
 def test_flowchart_subroutine_not_defined(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1156,15 +817,11 @@ def test_flowchart_subroutine_not_defined(repo: Path, symbols: RepoSymbols) -> N
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N5").reason == "SUBROUTINE_NOT_DEFINED"
 
-
-def test_flowchart_subroutine_without_a_symbol_is_malformed(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_subroutine_without_a_symbol_is_malformed(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["nodes"][4]["evidence"]["symbol"] = None
     report = run_flowchart(repo, symbols, spec)
     assert check_for(report, "node", "N5").reason == "MALFORMED_ELEMENT"
-
 
 def test_flowchart_malformed_nodes_and_edges(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1180,14 +837,9 @@ def test_flowchart_malformed_nodes_and_edges(repo: Path, symbols: RepoSymbols) -
     assert {c.element for c in malformed} == {"node", "edge"}
     assert len(malformed) == 5
 
-
 def test_flowchart_multiple_start(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
-    spec["nodes"].append(
-        {
-            "id": "N9",
-            "kind": "start",
-            "label": "second entry",
+    spec["nodes"].append({"id": "N9", "kind": "start", "label": "second entry",
             "evidence": {"file": "pkg/flow.py", "line": 1, "symbol": "resolve_identity"},
         }
     )
@@ -1198,7 +850,6 @@ def test_flowchart_multiple_start(repo: Path, symbols: RepoSymbols) -> None:
     assert check_for(report, "node", "N1").grounded
     assert check_for(report, "edge", "N9->N2").reason == "EDGE_ENDPOINT_UNGROUNDED"
 
-
 def test_flowchart_edge_endpoint_ungrounded(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["nodes"][6]["evidence"]["line"] = 9999
@@ -1207,7 +858,6 @@ def test_flowchart_edge_endpoint_ungrounded(repo: Path, symbols: RepoSymbols) ->
     assert check_for(report, "node", "N7").reason == "LINE_OUT_OF_RANGE"
     assert check_for(report, "edge", "N4->N7").reason == "EDGE_ENDPOINT_UNGROUNDED"
     assert check_for(report, "edge", "N7->N8").reason == "EDGE_ENDPOINT_UNGROUNDED"
-
 
 def test_flowchart_decision_edges_invalid(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1218,10 +868,7 @@ def test_flowchart_decision_edges_invalid(repo: Path, symbols: RepoSymbols) -> N
     assert check_for(report, "edge", "N2->N4").reason == "DECISION_EDGES_INVALID"
     assert check_for(report, "edge", "N4->N6").reason == "DECISION_EDGES_INVALID"
 
-
-def test_flowchart_decision_with_one_branch_is_demoted_not_dropped(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_decision_with_one_branch_is_demoted_not_dropped(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["edges"] = [edge for edge in spec["edges"] if edge != {"from": "N2", "to": "N3", "label": "missing"}]
     report = run_flowchart(repo, symbols, spec)
@@ -1235,14 +882,9 @@ def test_flowchart_decision_with_one_branch_is_demoted_not_dropped(
     assert check_for(report, "node", "N3").grounded
     assert kinds["N4"] == "decision"
 
-
 def test_flowchart_unreachable_nodes_are_removed(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
-    spec["nodes"].append(
-        {
-            "id": "N9",
-            "kind": "process",
-            "label": "orphan",
+    spec["nodes"].append({"id": "N9", "kind": "process", "label": "orphan",
             "evidence": {"file": "pkg/flow.py", "line": 8, "symbol": None},
         }
     )
@@ -1251,17 +893,10 @@ def test_flowchart_unreachable_nodes_are_removed(repo: Path, symbols: RepoSymbol
     assert [node["id"] for node in report.spec_final["nodes"]] == [f"N{i}" for i in range(1, 9)]
     assert check_for(report, "node", "N9").grounded
 
-
-def test_flowchart_preserves_live_nodes_and_edges_after_a_mid_list_prune(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_preserves_live_nodes_and_edges_after_a_mid_list_prune(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
-    spec["nodes"].insert(
-        2,
-        {
-            "id": "NX",
-            "kind": "process",
-            "label": "fabricated",
+    spec["nodes"].insert(2,
+        {"id": "NX", "kind": "process", "label": "fabricated",
             "evidence": {"file": "pkg/flow.py", "line": 9999, "symbol": None},
         },
     )
@@ -1275,7 +910,6 @@ def test_flowchart_preserves_live_nodes_and_edges_after_a_mid_list_prune(
 
 # --- Flowchart floors --------------------------------------------------------
 
-
 def test_flowchart_floor_too_few_nodes(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     spec["nodes"] = spec["nodes"][:3]
@@ -1283,7 +917,6 @@ def test_flowchart_floor_too_few_nodes(repo: Path, symbols: RepoSymbols) -> None
     report = run_flowchart(repo, symbols, spec)
     assert report.omit_reasons == ["TOO_FEW_NODES", "NO_DECISION"]
     assert len(report.spec_final["nodes"]) == 3
-
 
 def test_flowchart_floor_no_end(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -1293,7 +926,6 @@ def test_flowchart_floor_no_end(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, spec)
     assert report.omit_reasons == ["NO_END"]
 
-
 def test_flowchart_floor_no_decision(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
     for node in spec["nodes"]:
@@ -1301,30 +933,18 @@ def test_flowchart_floor_no_decision(repo: Path, symbols: RepoSymbols) -> None:
             node["kind"] = "process"
     report = run_flowchart(repo, symbols, spec)
     assert report.omit_reasons == ["NO_DECISION"]
-    assert {node["kind"] for node in report.spec_final["nodes"]} == {
-        "start",
-        "process",
-        "subroutine",
-        "end",
-    }
+    assert {node["kind"] for node in report.spec_final["nodes"]} == {"start", "process", "subroutine", "end"}
 
-
-def test_flowchart_unlabeled_decision_edges_cascade_into_an_omission(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_unlabeled_decision_edges_cascade_into_an_omission(repo: Path, symbols: RepoSymbols) -> None:
     """Stripping a decision's labels invalidates its edges, not just its kind."""
     spec = base_flowchart()
     for edge in spec["edges"]:
         edge["label"] = None
     report = run_flowchart(repo, symbols, spec)
 
-    assert reasons(report) == {
-        "edge:N2->N3": "DECISION_EDGES_INVALID",
-        "edge:N2->N4": "DECISION_EDGES_INVALID",
-        "edge:N4->N5": "DECISION_EDGES_INVALID",
-        "edge:N4->N7": "DECISION_EDGES_INVALID",
-        "edge:N5->N6": "EDGE_ENDPOINT_UNGROUNDED",
-        "edge:N7->N8": "EDGE_ENDPOINT_UNGROUNDED",
+    assert reasons(report) == {"edge:N2->N3": "DECISION_EDGES_INVALID", "edge:N2->N4": "DECISION_EDGES_INVALID",
+        "edge:N4->N5": "DECISION_EDGES_INVALID", "edge:N4->N7": "DECISION_EDGES_INVALID",
+        "edge:N5->N6": "EDGE_ENDPOINT_UNGROUNDED", "edge:N7->N8": "EDGE_ENDPOINT_UNGROUNDED",
     }
     assert [node["id"] for node in report.spec_final["nodes"]] == ["N1", "N2"]
     assert report.omit_reasons == ["TOO_FEW_NODES", "NO_END", "NO_DECISION"]
@@ -1341,33 +961,18 @@ def _tall_flowchart(*, end_last: bool) -> dict[str, Any]:
     instead of rendering an endless diagram.
     """
     process_lines = list(range(4, _BIG_LAST_STATEMENT + 1))[: DIAGRAM_MAX_NODES + 1]
-    end_node = {
-        "id": "NEND",
-        "kind": "end",
-        "label": "return",
+    end_node = {"id": "NEND", "kind": "end", "label": "return",
         "evidence": {"file": "pkg/big.py", "line": _BIG_RETURN_LINE, "symbol": None},
     }
-    nodes: list[dict[str, Any]] = [
-        {
-            "id": "NSTART",
-            "kind": "start",
-            "label": "big",
+    nodes: list[dict[str, Any]] = [{"id": "NSTART", "kind": "start", "label": "big",
             "evidence": {"file": "pkg/big.py", "line": 1, "symbol": "big"},
-        },
-        {
-            "id": "NDEC",
-            "kind": "decision",
-            "label": "flag?",
+        }, {"id": "NDEC", "kind": "decision", "label": "flag?",
             "evidence": {"file": "pkg/big.py", "line": 2, "symbol": None},
         },
     ]
     if not end_last:
         nodes.append(end_node)
-    nodes.extend(
-        {
-            "id": f"NP{index}",
-            "kind": "process",
-            "label": f"step {index}",
+    nodes.extend({"id": f"NP{index}", "kind": "process", "label": f"step {index}",
             "evidence": {"file": "pkg/big.py", "line": line, "symbol": None},
         }
         for index, line in enumerate(process_lines)
@@ -1375,20 +980,15 @@ def _tall_flowchart(*, end_last: bool) -> dict[str, Any]:
     if end_last:
         nodes.append(end_node)
     edges: list[dict[str, Any]] = [
-        {"from": "NSTART", "to": "NDEC", "label": None},
-        {"from": "NDEC", "to": "NEND", "label": "done"},
+        {"from": "NSTART", "to": "NDEC", "label": None}, {"from": "NDEC", "to": "NEND", "label": "done"},
         {"from": "NDEC", "to": "NP0", "label": "work"},
     ]
-    edges.extend(
-        {"from": f"NP{index}", "to": f"NP{index + 1}", "label": None}
+    edges.extend({"from": f"NP{index}", "to": f"NP{index + 1}", "label": None}
         for index in range(len(process_lines) - 1)
     )
     return {"root": {"file": "pkg/big.py", "name": "big", "line": 1}, "nodes": nodes, "edges": edges}
 
-
-def test_flowchart_node_cap_trims_the_tail_and_keeps_rendering(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_node_cap_trims_the_tail_and_keeps_rendering(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, _tall_flowchart(end_last=False))
 
     assert report.ungrounded() == []
@@ -1397,10 +997,7 @@ def test_flowchart_node_cap_trims_the_tail_and_keeps_rendering(
     assert report.spec_final["nodes"][0]["id"] == "NSTART"
     assert len(report.spec_final["edges"]) == DIAGRAM_MAX_NODES - 1
 
-
-def test_flowchart_cap_can_push_a_kind_below_its_floor(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
     report = run_flowchart(repo, symbols, _tall_flowchart(end_last=True))
 
     # Losing the terminal node also strips the decision's second branch, so the
@@ -1410,10 +1007,7 @@ def test_flowchart_cap_can_push_a_kind_below_its_floor(
     assert check_for(report, "node", "NEND").grounded
     assert "NEND" not in {n["id"] for n in report.spec_final["nodes"]}
 
-
-def test_flowchart_node_cap_never_trims_the_start_node(
-    repo: Path, symbols: RepoSymbols
-) -> None:
+def test_flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: RepoSymbols) -> None:
     spec = _tall_flowchart(end_last=False)
     start = spec["nodes"].pop(0)
     spec["nodes"].append(start)  # start now sits past the cap in spec order
@@ -1426,24 +1020,15 @@ def test_flowchart_node_cap_never_trims_the_start_node(
 
 # --- Vocabulary contracts ----------------------------------------------------
 
-
 def test_every_emitted_reason_code_is_declared(repo: Path, symbols: RepoSymbols) -> None:
     """Nothing may leak a reason code that is not in the published vocabulary."""
     specs: list[GroundingReport] = []
     broken_sequence = base_sequence()
     broken_sequence["participants"][0]["files"] = ["pkg/api.py"]
     broken_sequence["participants"][2]["files"] = ["pkg/gone.py"]
-    broken_sequence["messages"][1]["evidence"] = {
-        "file": "../outside.py",
-        "line": 0,
-        "symbol": "nope",
-    }
-    broken_sequence["blocks"] = [
-        {
-            "kind": "loop",
-            "branches": [
-                {"condition": "", "evidence": {"file": "pkg/flow.py", "line": 5}, "messages": [0]}
-            ],
+    broken_sequence["messages"][1]["evidence"] = {"file": "../outside.py", "line": 0, "symbol": "nope"}
+    broken_sequence["blocks"] = [{"kind": "loop",
+            "branches": [{"condition": "", "evidence": {"file": "pkg/flow.py", "line": 5}, "messages": [0]}],
         }
     ]
     specs.append(run_sequence(repo, symbols, broken_sequence))
@@ -1460,7 +1045,6 @@ def test_every_emitted_reason_code_is_declared(repo: Path, symbols: RepoSymbols)
     assert emitted, "the deliberately broken specs must fail something"
     assert emitted <= REASON_CODES
     assert {r for report in specs for r in report.omit_reasons} <= OMIT_REASONS
-
 
 def test_reason_and_omit_vocabularies_are_disjoint_and_complete() -> None:
     assert "NO_END" in OMIT_REASONS and "NO_END" not in REASON_CODES

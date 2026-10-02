@@ -66,12 +66,7 @@ def _argv_opt(argv: list[str], name: str) -> str | None:
             return argv[i + 1]
     return None
 
-_GIT_CREDENTIAL_HELPER = (
-    "protocol=https\n"
-    "host=github.com\n"
-    "username=x\n"
-    "password=<fake>\n"
-)
+_GIT_CREDENTIAL_HELPER = ("protocol=https\n" "host=github.com\n" "username=x\n" "password=<fake>\n")
 
 _LS_REMOTE_DEFAULT = (
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\trefs/heads/head\n"
@@ -81,30 +76,14 @@ _LS_REMOTE_DEFAULT = (
 # Frozen to the subset verified present in gh 2.45 by issue #1109. The fake
 # rejects every other requested PR JSON field before serving a response, just
 # as the real CLI validates --json before contacting GitHub.
-_GH_245_PR_JSON_FIELDS = frozenset(
-    {
-        "number",
-        "title",
-        "body",
-        "state",
-        "headRefName",
-        "baseRefName",
-        "headRefOid",
-        "url",
-        "headRepository",
+_GH_245_PR_JSON_FIELDS = frozenset({
+        "number", "title", "body", "state", "headRefName", "baseRefName", "headRefOid", "url", "headRepository",
         "headRepositoryOwner",
     }
 )
 
-_EMPTY_THREADS_RESPONSE: dict[str, Any] = {
-    "data": {
-        "repository": {
-            "pullRequest": {
-                "reviewThreads": {
-                    "pageInfo": {"hasNextPage": False, "endCursor": None},
-                    "nodes": [],
-                }
-            }
+_EMPTY_THREADS_RESPONSE: dict[str, Any] = {"data": {"repository": {
+            "pullRequest": {"reviewThreads": {"pageInfo": {"hasNextPage": False, "endCursor": None}, "nodes": []}}
         }
     }
 }
@@ -146,11 +125,7 @@ def _take_response(state: Path, key: str, value: Any) -> Any:
     if not isinstance(sequence, list):
         return {"__error__": f"fake gh: invalid response sequence for {key}"}
     cursor_path = state / "response_cursors.json"
-    cursors = (
-        json.loads(cursor_path.read_text(encoding="utf-8"))
-        if cursor_path.exists()
-        else {}
-    )
+    cursors = (json.loads(cursor_path.read_text(encoding="utf-8")) if cursor_path.exists() else {})
     index = cursors.get(key, 0)
     if not isinstance(index, int) or index < 0 or index >= len(sequence):
         return {"__error__": f"fake gh: response sequence exhausted for {key}"}
@@ -159,12 +134,7 @@ def _take_response(state: Path, key: str, value: Any) -> Any:
     return sequence[index]
 
 
-def _serve_api_response(
-    state: Path,
-    key: str,
-    value: Any,
-    jq: str | None,
-) -> tuple[int, str, str]:
+def _serve_api_response(state: Path, key: str, value: Any, jq: str | None,) -> tuple[int, str, str]:
     """Render one structured canned API response."""
     value = _take_response(state, key, value)
     if isinstance(value, dict) and isinstance(value.get("__error__"), str):
@@ -177,10 +147,7 @@ def _serve_api_response(
         if child_pid == 0:
             while True:
                 time.sleep(3600)
-        pid_file.write_text(
-            json.dumps({"direct": os.getpid(), "grandchild": child_pid}),
-            encoding="utf-8",
-        )
+        pid_file.write_text(json.dumps({"direct": os.getpid(), "grandchild": child_pid}), encoding="utf-8",)
         while True:
             time.sleep(3600)
     if value is None:
@@ -315,8 +282,7 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
             # incoming ``commentsAfter`` cursor, deterministic endCursor per page.
             unknown = github_schema.unknown_query_fields(query)
             if unknown:
-                return (1, "",
-                        f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
+                return (1, "", f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
             thread_id = variables.get("threadId") if isinstance(variables, dict) else None
             pages = responses.get(f"graphql_thread_comments:{thread_id}")
             if not isinstance(pages, list) or not pages:
@@ -332,8 +298,7 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         if "reviewThreads" in query:
             unknown = github_schema.unknown_query_fields(query)
             if unknown:
-                return (1, "",
-                        f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
+                return (1, "", f"fake gh: graphql query requests fields not in GitHub schema: {sorted(unknown)}\n")
             pr_num = variables.get("number") if isinstance(variables, dict) else None
             key = f"graphql_threads:{pr_num}" if pr_num is not None else "graphql_threads"
             value = responses.get(key) or responses.get("graphql_threads") or _EMPTY_THREADS_RESPONSE
@@ -360,9 +325,7 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         # Issue-comment creation (issue #1113: the standalone diagram comment).
         # ``node_id`` is present because minimization is keyed on it.
         seq = _next_comment_seq(state)
-        reply = {
-            "id": 7000 + seq,
-            "node_id": f"IC_fake{seq}",
+        reply = {"id": 7000 + seq, "node_id": f"IC_fake{seq}",
             "html_url": f"https://github.test/fake/pull/7#issuecomment-{7000 + seq}",
         }
         return 0, json.dumps(reply) + "\n", ""
@@ -373,10 +336,7 @@ def _handle_api(argv: list[str], state: Path) -> tuple[int, str, str]:
         path = (payload or {}).get("path")
         if allowed is not None and path not in allowed:
             return 1, "", f"fake gh: path {path!r} not in PR diff (422)\n"
-        reply = {
-            "id": 9000 + _next_comment_seq(state),
-            "html_url": "https://github.test/fake/pull/7#discussion_r1",
-        }
+        reply = {"id": 9000 + _next_comment_seq(state), "html_url": "https://github.test/fake/pull/7#discussion_r1"}
         return 0, json.dumps(reply) + "\n", ""
     return 1, "", f"fake gh: no canned response for {key}\n"
 
@@ -501,13 +461,7 @@ class FakeGh:
                 continue
             if wanted_endpoint is not None and record["endpoint"] != wanted_endpoint:
                 continue
-            out.append(
-                GhCall(
-                    endpoint=record["endpoint"],
-                    payload=record["payload"],
-                    argv=record.get("argv"),
-                )
-            )
+            out.append(GhCall(endpoint=record["endpoint"], payload=record["payload"], argv=record.get("argv"),))
         return out
 
     def command_calls(self, kind: str) -> list[GhCommandCall]:
@@ -523,12 +477,7 @@ class FakeGh:
         out: list[GhProcessCall] = []
         for record in self._records():
             if record.get("kind") == "gh process":
-                out.append(
-                    GhProcessCall(
-                        cwd=Path(record["cwd"]),
-                        argv=record["argv"],
-                    )
-                )
+                out.append(GhProcessCall(cwd=Path(record["cwd"]), argv=record["argv"],))
         return out
 
     def pr_view_calls(self) -> list[GhCommandCall]:
@@ -542,12 +491,7 @@ class FakeGh:
                 continue
             argv = record["argv"]
             name = argv[2] if len(argv) > 2 and not argv[2].startswith("-") else None
-            out.append(
-                GhSetCall(
-                    name=name,
-                    org=_argv_opt(argv, "--org"),
-                    repo=_argv_opt(argv, "--repo"),
-                    argv=argv,
+            out.append(GhSetCall(name=name, org=_argv_opt(argv, "--org"), repo=_argv_opt(argv, "--repo"), argv=argv,
                     stdin=record.get("stdin", ""),
                 )
             )
@@ -609,17 +553,10 @@ class FakeGh:
         """
         from daydream import git_ops
 
-        self.serve_pr_view(
-            {
-                "number": 7,
-                "state": "OPEN",
-                "headRefName": "feature",
-                "baseRefName": "main",
+        self.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
                 "headRefOid": git_ops.head_sha(target),
                 "headRepository": {"name": "widgets", "nameWithOwner": "acme/widgets"},
-                "headRepositoryOwner": {"login": "acme"},
-                "url": "https://github.com/acme/widgets/pull/7",
-                "body": "",
+                "headRepositoryOwner": {"login": "acme"}, "url": "https://github.com/acme/widgets/pull/7", "body": "",
             }
         )
 
@@ -639,12 +576,7 @@ class FakeGh:
         """
         self.set_response("GET", "/app/installations", value=installations)
 
-    def serve_prior_issue_comments(
-        self,
-        comments: list[dict[str, Any]],
-        *,
-        repo: str = "acme/widgets",
-        number: int = 7,
+    def serve_prior_issue_comments(self, comments: list[dict[str, Any]], *, repo: str = "acme/widgets", number: int = 7,
     ) -> None:
         """Serve ``GET /repos/<repo>/issues/<number>/comments`` (issue #1113).
 
@@ -661,12 +593,7 @@ class FakeGh:
         """
         self.set_response("GET", f"repos/{repo}/issues/{number}/comments", value=comments)
 
-    def serve_prior_threads(
-        self,
-        *,
-        fingerprints: list[str],
-        thread_ids: list[str],
-        authors: list[str] | None = None,
+    def serve_prior_threads(self, *, fingerprints: list[str], thread_ids: list[str], authors: list[str] | None = None,
         viewer_did_author: bool | None = None,
     ) -> None:
         """Serve a prior-thread inventory: one unresolved inline thread per fingerprint.
@@ -678,27 +605,15 @@ class FakeGh:
         """
         if authors is not None and len(authors) != len(fingerprints):
             raise ValueError("authors must parallel fingerprints")
-        nodes = [
-            self._thread_node(
-                thread_id,
-                f"RC_{i}",
-                1000 + i,
-                finding_marker(fingerprint),
-                author=authors[i - 1] if authors is not None else None,
-                viewer_did_author=viewer_did_author,
+        nodes = [self._thread_node(thread_id, f"RC_{i}", 1000 + i, finding_marker(fingerprint),
+                author=authors[i - 1] if authors is not None else None, viewer_did_author=viewer_did_author,
             )
-            for i, (fingerprint, thread_id) in enumerate(
-                zip(fingerprints, thread_ids, strict=True), start=1
-            )
+            for i, (fingerprint, thread_id) in enumerate(zip(fingerprints, thread_ids, strict=True), start=1)
         ]
         self._write_threads(nodes)
 
     def serve_prior_threads_from(
-        self,
-        call: GhCall,
-        *,
-        author: str | None = None,
-        viewer_did_author: bool | None = None,
+        self, call: GhCall, *, author: str | None = None, viewer_did_author: bool | None = None,
     ) -> None:
         """Make GitHub "remember" a recorded review POST as prior findings.
 
@@ -709,10 +624,8 @@ class FakeGh:
         so the bot-author trust rule in ``fetch_prior_findings`` accepts them.
         """
         payload = call.payload or {}
-        nodes = [
-            self._thread_node(
-                f"RT_{i}", f"RC_{i}", i, comment.get("body", ""),
-                author=author, viewer_did_author=viewer_did_author,
+        nodes = [self._thread_node(
+                f"RT_{i}", f"RC_{i}", i, comment.get("body", ""), author=author, viewer_did_author=viewer_did_author,
             )
             for i, comment in enumerate(payload.get("comments", []), start=1)
         ]
@@ -725,32 +638,17 @@ class FakeGh:
     # --- internals ------------------------------------------------------------
 
     @staticmethod
-    def _thread_node(
-        thread_id: str,
-        comment_node_id: str,
-        database_id: int,
-        body: str,
-        *,
-        author: str | None = None,
+    def _thread_node(thread_id: str, comment_node_id: str, database_id: int, body: str, *, author: str | None = None,
         viewer_did_author: bool | None = None,
     ) -> dict[str, Any]:
-        comment: dict[str, Any] = {
-            "id": comment_node_id,
-            "databaseId": database_id,
-            "body": body,
-            "isMinimized": False,
+        comment: dict[str, Any] = {"id": comment_node_id, "databaseId": database_id, "body": body, "isMinimized": False,
         }
         if author is not None:
             comment["author"] = {"login": author}
         if viewer_did_author is not None:
             comment["viewerDidAuthor"] = bool(viewer_did_author)
-        return {
-            "id": thread_id,
-            "isResolved": False,
-            "comments": {
-                "nodes": [comment],
-                "pageInfo": {"hasNextPage": False, "endCursor": None},
-            },
+        return {"id": thread_id, "isResolved": False,
+            "comments": {"nodes": [comment], "pageInfo": {"hasNextPage": False, "endCursor": None}},
         }
 
     def _write_threads(self, nodes: list[dict[str, Any]], number: int | None = None) -> None:
@@ -778,9 +676,7 @@ class FakeGh:
         responses[key] = response
         self._responses_path.write_text(json.dumps(responses), encoding="utf-8")
 
-    def _serve_thread_comments(
-        self, thread_id: str, comment_nodes: list[dict[str, Any]], *, page_size: int
-    ) -> None:
+    def _serve_thread_comments(self, thread_id: str, comment_nodes: list[dict[str, Any]], *, page_size: int) -> None:
         """Store a per-thread nested-comment page catalog for ``node(id:)`` queries.
 
         A ``node(id: \"<thread_id>\") { ... on PullRequestReviewThread { comments(
@@ -793,16 +689,9 @@ class FakeGh:
             chunk = comment_nodes[start : start + page_size]
             page_index = start // page_size
             has_next = start + page_size < len(comment_nodes)
-            pages.append(
-                {
-                    "data": {
-                        "node": {
-                            "comments": {
-                                "pageInfo": {
-                                    "hasNextPage": has_next,
+            pages.append({"data": {"node": {"comments": {"pageInfo": {"hasNextPage": has_next,
                                     "endCursor": f"{thread_id}:p{page_index}" if has_next else None,
-                                },
-                                "nodes": chunk,
+                                }, "nodes": chunk,
                             }
                         }
                     }
@@ -821,14 +710,7 @@ class FakeGh:
 def _shim_main(state_dir: Path) -> int:
     """Run the fake handler behind the executable PATH boundary."""
     argv = sys.argv[1:]
-    _record(
-        state_dir,
-        {
-            "kind": "gh process",
-            "cwd": str(Path.cwd().resolve()),
-            "argv": ["gh", *argv],
-        },
-    )
+    _record(state_dir, {"kind": "gh process", "cwd": str(Path.cwd().resolve()), "argv": ["gh", *argv]},)
     rc, stdout, stderr = _handle_gh(argv, sys.stdin.read(), state_dir)
     sys.stdout.write(stdout)
     sys.stderr.write(stderr)
@@ -869,18 +751,10 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
     def router(args: Any, *pargs: Any, **kwargs: Any) -> Any:
         if isinstance(args, (list, tuple)) and args and args[0] == "gh":
             cwd = Path(kwargs.get("cwd") or Path.cwd()).resolve()
-            _record(
-                state_dir,
-                {"kind": "gh process", "cwd": str(cwd), "argv": list(args)},
-            )
+            _record(state_dir, {"kind": "gh process", "cwd": str(cwd), "argv": list(args)},)
             rc, out, err = _handle_gh(list(args[1:]), kwargs.get("input") or "", state_dir)
             return subprocess.CompletedProcess(list(args), rc, stdout=out, stderr=err)
-        if (
-            isinstance(args, (list, tuple))
-            and args
-            and args[0] == "git"
-            and "ls-remote" in args
-        ):
+        if (isinstance(args, (list, tuple)) and args and args[0] == "git" and "ls-remote" in args):
             # A bare ``ls-remote <remote-name> <ref>`` (remote_contains_commit,
             # issue #726) targets a configured local/real remote — run it for
             # real. The authenticated URL form (git_ls_remote) must still
@@ -890,15 +764,11 @@ def install_fake_gh(state_dir: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
             if "://" not in target and "@" not in target:
                 return real_run(args, *pargs, **kwargs)
             if not any("credential.helper=" in a for a in args):
-                return subprocess.CompletedProcess(
-                    list(args), 1, stdout="",
+                return subprocess.CompletedProcess(list(args), 1, stdout="",
                     stderr="fake gh: git ls-remote without a command-scoped credential helper\n",
                 )
             refs = _read_responses(state_dir).get("git-ls-remote", _LS_REMOTE_DEFAULT)
-            _record(
-                state_dir,
-                {"kind": "git ls-remote", "argv": list(args), "env": kwargs.get("env")},
-            )
+            _record(state_dir, {"kind": "git ls-remote", "argv": list(args), "env": kwargs.get("env")},)
             return subprocess.CompletedProcess(list(args), 0, stdout=refs, stderr="")
         return real_run(args, *pargs, **kwargs)
 

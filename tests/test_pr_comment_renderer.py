@@ -45,61 +45,34 @@ _DEEP_FORK_B = _FIXTURE_DIR / "deep_mode_fork_b.json"
 
 
 def _agent_step(
-    *,
-    step_id: int,
-    phase: str,
-    model: str | None,
-    prompt: int = 1000,
-    completion: int = 100,
-    cached: int = 500,
-    cost_usd: float | None = None,
-    tool_calls: int = 0,
+    *, step_id: int, phase: str, model: str | None, prompt: int = 1000, completion: int = 100, cached: int = 500,
+    cost_usd: float | None = None, tool_calls: int = 0,
 ) -> dict[str, Any]:
     """Build a minimal valid agent step dict for fixture construction."""
     step: dict[str, Any] = {
-        "step_id": step_id,
-        "timestamp": f"2026-05-02T00:00:{step_id:02d}.000000Z",
-        "source": "agent",
-        "message": "ok",
+        "step_id": step_id, "timestamp": f"2026-05-02T00:00:{step_id:02d}.000000Z", "source": "agent", "message": "ok",
         "extra": {"daydream_phase": phase, "daydream_run_flow": "ttt"},
         "metrics": {
-            "prompt_tokens": prompt,
-            "completion_tokens": completion,
-            "cached_tokens": cached,
-            "cost_usd": cost_usd,
+            "prompt_tokens": prompt, "completion_tokens": completion, "cached_tokens": cached, "cost_usd": cost_usd,
         },
     }
     if model is not None:
         step["model_name"] = model
     if tool_calls > 0:
-        tcs = [
-            {"tool_call_id": f"s{step_id}-t{i}", "function_name": "X", "arguments": {}}
-            for i in range(tool_calls)
-        ]
+        tcs = [{"tool_call_id": f"s{step_id}-t{i}", "function_name": "X", "arguments": {}} for i in range(tool_calls)]
         step["tool_calls"] = tcs
-        step["observation"] = {
-            "results": [{"source_call_id": tc["tool_call_id"], "content": "ok"} for tc in tcs]
-        }
+        step["observation"] = {"results": [{"source_call_id": tc["tool_call_id"], "content": "ok"} for tc in tcs]}
     return step
 
 
 def _user_step(phase: str = "review") -> dict[str, Any]:
     """Build the leading user step (step_id 1) the Trajectory validator expects."""
-    return {
-        "step_id": 1,
-        "timestamp": "2026-05-02T00:00:00.000000Z",
-        "source": "user",
-        "message": "go",
+    return {"step_id": 1, "timestamp": "2026-05-02T00:00:00.000000Z", "source": "user", "message": "go",
         "extra": {"daydream_phase": phase, "daydream_run_flow": "ttt"},
     }
 
 
-def _write_trajectory(
-    tmp_path: Path,
-    *,
-    name: str = "t.json",
-    session_id: str = "fixture",
-    model: str = "gpt-5.5",
+def _write_trajectory(tmp_path: Path, *, name: str = "t.json", session_id: str = "fixture", model: str = "gpt-5.5",
     steps: list[dict[str, Any]],
 ) -> Path:
     """Write a trajectory dict to tmp and return the path.
@@ -107,11 +80,8 @@ def _write_trajectory(
     Wraps the steps with a minimal Agent block + the single user step the
     Trajectory validator expects (step_id 1 sequential).
     """
-    full = {
-        "schema_version": "ATIF-v1.6",
-        "session_id": session_id,
-        "agent": {"name": "daydream", "version": "0.14.0", "model_name": model},
-        "steps": steps,
+    full = {"schema_version": "ATIF-v1.6", "session_id": session_id,
+        "agent": {"name": "daydream", "version": "0.14.0", "model_name": model}, "steps": steps,
     }
     p = tmp_path / name
     p.write_text(json.dumps(full), encoding="utf-8")
@@ -119,34 +89,17 @@ def _write_trajectory(
 
 
 def _single_phase_trajectory(
-    tmp_path: Path,
-    *,
-    name: str = "t.json",
-    model: str | None = "gpt-5.5",
-    phase: str = "review",
-    prompt: int = 1000,
-    completion: int = 100,
-    cached: int = 500,
-    cost_usd: float | None = None,
+    tmp_path: Path, *, name: str = "t.json", model: str | None = "gpt-5.5", phase: str = "review", prompt: int = 1000,
+    completion: int = 100, cached: int = 500, cost_usd: float | None = None,
 ) -> Path:
     """Write the common one-user-step + one-agent-step trajectory.
 
     The root agent model follows *model* (falling back to ``gpt-5.5``), so a
     caller passing ``model=None`` exercises the root-model fallback.
     """
-    return _write_trajectory(
-        tmp_path,
-        name=name,
-        model=model or "gpt-5.5",
-        steps=[
-            _user_step(),
-            _agent_step(
-                step_id=2,
-                phase=phase,
-                model=model,
-                prompt=prompt,
-                completion=completion,
-                cached=cached,
+    return _write_trajectory(tmp_path, name=name, model=model or "gpt-5.5",
+        steps=[_user_step(),
+            _agent_step(step_id=2, phase=phase, model=model, prompt=prompt, completion=completion, cached=cached,
                 cost_usd=cost_usd,
             ),
         ],
@@ -156,16 +109,10 @@ def _single_phase_trajectory(
 def _sonnet5_transition_step() -> dict[str, Any]:
     """Archived claude-sonnet-5 review step at its introductory rate."""
     step = _agent_step(
-        step_id=2,
-        phase="review",
-        model="claude-sonnet-5",
-        prompt=2_000_000,
-        completion=1_000_000,
-        cached=1_000_000,
+        step_id=2, phase="review", model="claude-sonnet-5", prompt=2_000_000, completion=1_000_000, cached=1_000_000,
     )
     step["timestamp"] = "2026-08-31T12:00:00.000000Z"
     return step
-
 
 def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Path) -> None:
     """Rendering after the transition uses the archived step's usage date."""
@@ -175,19 +122,14 @@ def test_archived_claude_sonnet_5_usage_keeps_its_introductory_rate(tmp_path: Pa
 
 
 # M6b — user price override synthesizes cost for an otherwise-unknown model (#156)
-def test_m6b_user_override_synthesizes_cost_for_unknown_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_m6b_user_override_synthesizes_cost_for_unknown_model(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A user-supplied price (via DAYDREAM_PRICES_FILE) for an unknown Codex
-    model produces a SYNTHESIZED cost — not a dash and not the unavailable
-    footnote.
+    """A user-supplied price (via DAYDREAM_PRICES_FILE) for an unknown Codex model produces a SYNTHESIZED cost — not
+    a dash and not the unavailable footnote.
 
-    Extends M6: without the override the model renders '—' (cost unavailable).
-    With the override the renderer's resolve_prices(load_user_prices()) merges
-    it in and compute_cost synthesizes a dollar figure. This is the #156/#61
-    acceptance criterion #1 (Codex cost synthesis reads the overridable table).
-    """
+    Extends M6: without the override the model renders '—' (cost unavailable). With the override the renderer's
+    resolve_prices(load_user_prices()) merges it in and compute_cost synthesizes a dollar figure. This is the
+    #156/#61 acceptance criterion #1 (Codex cost synthesis reads the overridable table)."""
     prices_file = tmp_path / "prices.toml"
     prices_file.write_text(
         '[prices."custom-codex-op"]\ninput = 2.0\ncached_input = 0.5\noutput = 8.0\n',
@@ -196,12 +138,7 @@ def test_m6b_user_override_synthesizes_cost_for_unknown_model(
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
 
     p = _single_phase_trajectory(
-        tmp_path,
-        model="custom-codex-op",
-        prompt=1_000_000,
-        completion=0,
-        cached=0,
-        cost_usd=None,
+        tmp_path, model="custom-codex-op", prompt=1_000_000, completion=0, cached=0, cost_usd=None,
     )
     out = render_run_info_block([p])
     # 1M uncached input * $2.00/1M = $2.00 synthesized (no cost_usd from backend).
@@ -232,7 +169,6 @@ def test_m9_missing_trajectory_renders_fallback(tmp_path: Path) -> None:
     assert "| Phase |" not in out3
     assert "<sub>Generated by daydream v" in out3
 
-
 def test_missing_trajectory_fallback_is_byte_exact() -> None:
     assert render_run_info_block([]) == (
         "*run details unavailable*\n\n"
@@ -242,17 +178,9 @@ def test_missing_trajectory_fallback_is_byte_exact() -> None:
 
 # M10 — number formatting
 def test_m10_number_formatting_rules(tmp_path: Path) -> None:
-    """Thousand separators on >=1,000; sub-cent cost renders <$0.01; cache-hit
-    omitted when input == 0."""
+    """Thousand separators on >=1,000; sub-cent cost renders <$0.01; cache-hit omitted when input == 0."""
     # Sub-cent cost
-    p = _single_phase_trajectory(
-        tmp_path,
-        name="subcent.json",
-        prompt=500,
-        completion=10,
-        cached=0,
-        cost_usd=0.001,
-    )
+    p = _single_phase_trajectory(tmp_path, name="subcent.json", prompt=500, completion=10, cached=0, cost_usd=0.001,)
     out = render_run_info_block([p])
     assert "- **Cost:** <$0.01" in out
     # 500 in -> no thousand separator
@@ -263,12 +191,7 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
 
     # Thousand separators in tokens line.
     p2 = _single_phase_trajectory(
-        tmp_path,
-        name="big.json",
-        prompt=33_600,
-        completion=6_900,
-        cached=22_600,
-        cost_usd=0.42,
+        tmp_path, name="big.json", prompt=33_600, completion=6_900, cached=22_600, cost_usd=0.42,
     )
     out2 = render_run_info_block([p2])
     assert "33,600 in" in out2
@@ -276,14 +199,7 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
     assert "6,900 out" in out2
 
     # Zero-input edge: no hit ratio.
-    p3 = _single_phase_trajectory(
-        tmp_path,
-        name="zero_input.json",
-        prompt=0,
-        completion=10,
-        cached=0,
-        cost_usd=0.0,
-    )
+    p3 = _single_phase_trajectory(tmp_path, name="zero_input.json", prompt=0, completion=10, cached=0, cost_usd=0.0,)
     out3 = render_run_info_block([p3])
     # Tokens line uses the no-cache form when input is 0.
     assert "0 in → 10 out" in out3
@@ -293,14 +209,11 @@ def test_m10_number_formatting_rules(tmp_path: Path) -> None:
 def test_renderer_is_pure_idempotent() -> None:
     """Calling the renderer twice with identical inputs returns identical output.
 
-    Pure function: no globals, no time.now(), no env. Two consecutive
-    renders must be byte-equal. Catches accidental UUID generation,
-    cache-busting timestamps, or random ordering of phase rows.
-    """
+    Pure function: no globals, no time.now(), no env. Two consecutive renders must be byte-equal. Catches
+    accidental UUID generation, cache-busting timestamps, or random ordering of phase rows."""
     a = render_run_info_block([_MULTI_PHASE_CODEX])
     b = render_run_info_block([_MULTI_PHASE_CODEX])
     assert a == b
-
 
 def test_value_and_path_renderers_are_byte_identical() -> None:
     paths = [_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B]
@@ -308,10 +221,7 @@ def test_value_and_path_renderers_are_byte_identical() -> None:
 
     assert render_run_info(trajectories) == render_run_info_block(paths)
 
-
-def test_value_renderer_does_not_read_ambient_user_prices(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_value_renderer_does_not_read_ambient_user_prices(monkeypatch: pytest.MonkeyPatch,) -> None:
 
     def fail() -> dict[str, ModelPrice]:
         raise AssertionError("value renderer read ambient pricing")
@@ -321,7 +231,6 @@ def test_value_renderer_does_not_read_ambient_user_prices(
 
     assert "- **Cost:**" in render_run_info([trajectory])
 
-
 def test_value_renderer_respects_an_explicit_empty_price_table() -> None:
     trajectory = Trajectory.model_validate_json(_MULTI_PHASE_CODEX.read_bytes())
 
@@ -330,33 +239,23 @@ def test_value_renderer_respects_an_explicit_empty_price_table() -> None:
     assert "- **Cost:** —" in rendered
     assert "not in the price table" in rendered
 
-
 def test_value_renderer_preserves_resolved_price_policy(tmp_path: Path) -> None:
-    trajectory = Trajectory.model_validate_json(
-        _write_trajectory(
-            tmp_path,
-            model="claude-sonnet-5",
-            steps=[_user_step(), _sonnet5_transition_step()],
+    trajectory = Trajectory.model_validate_json(_write_trajectory(
+            tmp_path, model="claude-sonnet-5", steps=[_user_step(), _sonnet5_transition_step()],
         ).read_bytes()
     )
     resolved = resolve_prices()
 
     assert "- **Cost:** $12.20" in render_run_info([trajectory], prices=resolved)
 
-
 def test_path_renderer_skips_bad_sibling_before_value_delegation(tmp_path: Path) -> None:
     malformed = tmp_path / "malformed.json"
     malformed.write_text("{not json", encoding="utf-8")
     trajectory = Trajectory.model_validate_json(_SINGLE_PHASE.read_bytes())
 
-    assert render_run_info_block([malformed, _SINGLE_PHASE]) == render_run_info(
-        [trajectory]
-    )
+    assert render_run_info_block([malformed, _SINGLE_PHASE]) == render_run_info([trajectory])
 
-
-def test_path_renderer_skips_price_lookup_when_no_document_is_valid(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_path_renderer_skips_price_lookup_when_no_document_is_valid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
 
     malformed = tmp_path / "malformed.json"
@@ -379,13 +278,11 @@ def test_path_renderer_skips_price_lookup_when_no_document_is_valid(
 def test_aggregates_across_multiple_trajectory_files() -> None:
     """Sibling fork trajectories sum into the parent's per-phase rollup.
 
-    multi_phase_codex.json: review (10K input, 5K cached, 1K out) +
-                            fix    (8K input, 4K cached, 2K out).
-    sibling_fix.json:       fix    (5K input, 2K cached, 0.5K out).
+    multi_phase_codex.json: review (10K input, 5K cached, 1K out) + fix (8K input, 4K cached, 2K out).
+    sibling_fix.json: fix (5K input, 2K cached, 0.5K out).
 
-    Combined fix totals: 13K input, 6K cached, 2.5K output.
-    Combined run totals: 23K input, 11K cached, 3.5K output.
-    """
+    Combined fix totals: 13K input, 6K cached, 2.5K output. Combined run totals: 23K input, 11K cached, 3.5K
+    output."""
     out = render_run_info_block([_MULTI_PHASE_CODEX, _SIBLING_FIX])
     # Rollup totals.
     assert "23,000 in" in out
@@ -406,9 +303,7 @@ def test_aggregates_across_multiple_trajectory_files() -> None:
 def test_e2e_single_phase_claude_renders_full_block() -> None:
     """Single Claude review: rollup + 1-row table + footer, no footnote.
 
-    Uses the baseline fixture verbatim — verifies it satisfies the e2e
-    expectations.
-    """
+    Uses the baseline fixture verbatim — verifies it satisfies the e2e expectations."""
     out = render_run_info_block([_SINGLE_PHASE])
     # Rollup block (Mode line dropped).
     assert "- **Mode:**" not in out
@@ -433,14 +328,11 @@ def test_e2e_single_phase_claude_renders_full_block() -> None:
     # Block ends with the version footer (renderer-owned).
     assert out.rstrip().endswith("</sub>")
 
-
 def test_e2e_multi_phase_renders_per_phase_table_rows() -> None:
     """Review/parse/fix/test all on Claude: four rows in execution order.
 
-    Covers M2 (table content), M4 (uniform layout), and the multi-phase
-    Claude scenario from S2. Asserts row order matches the order phases
-    were first seen in the trajectory (Review → Parse → Fix → Test).
-    """
+    Covers M2 (table content), M4 (uniform layout), and the multi-phase Claude scenario from S2. Asserts row order
+    matches the order phases were first seen in the trajectory (Review → Parse → Fix → Test)."""
     out = render_run_info_block([_MULTI_PHASE_CLAUDE])
     assert "</details>" in out
     # Rollup totals (sum across all four Claude phases).
@@ -461,14 +353,11 @@ def test_e2e_multi_phase_renders_per_phase_table_rows() -> None:
     assert "2,000" in fix_row
     assert "$0.10" in fix_row
 
-
 def test_e2e_mixed_models_renders_mixed_label() -> None:
     """Claude review + Codex fix: rollup says 'mixed', table shows both models.
 
-    Covers M7 (mixed-model rollup label) and M5 (per-backend cost source).
-    Codex fix row has cost_usd=None and gets cost synthesized from the
-    price table (gpt-5-codex: $1.25/1M in cached + uncached, $10/1M out).
-    """
+    Covers M7 (mixed-model rollup label) and M5 (per-backend cost source). Codex fix row has cost_usd=None and
+    gets cost synthesized from the price table (gpt-5-codex: $1.25/1M in cached + uncached, $10/1M out)."""
     out = render_run_info_block([_MIXED_MODELS])
     # Rollup model label per M7.
     assert "- **Model:** mixed — see breakdown" in out
@@ -485,16 +374,12 @@ def test_e2e_mixed_models_renders_mixed_label() -> None:
     # No 'unknown' footnote — both models price-table-known.
     assert "not in the price table" not in out
 
-
 def test_e2e_codex_cached_tokens_show_in_rollup() -> None:
     """Codex run with cached_input_tokens > 0: rollup shows hit ratio + synth cost.
 
-    Covers M8 (cache-hit ratio rendered) and exercises the codex pricing
-    path end-to-end through the renderer.
-    20K input / 14K cached / 1K out on gpt-5.5 → 70% cache hit, synth cost
-    $0.07 (uncached: 6K * $5/1M = $0.030; cached: 14K * $0.50/1M = $0.007;
-    output: 1K * $30/1M = $0.030; total $0.067 → rounds to $0.07).
-    """
+    Covers M8 (cache-hit ratio rendered) and exercises the codex pricing path end-to-end through the renderer. 20K
+    input / 14K cached / 1K out on gpt-5.5 → 70% cache hit, synth cost $0.07 (uncached: 6K * $5/1M = $0.030;
+    cached: 14K * $0.50/1M = $0.007; output: 1K * $30/1M = $0.030; total $0.067 → rounds to $0.07)."""
     out = render_run_info_block([_CODEX_WITH_CACHED])
     assert "- **Model:** gpt-5.5" in out
     assert "- **Cost:** $0.07" in out
@@ -505,14 +390,11 @@ def test_e2e_codex_cached_tokens_show_in_rollup() -> None:
     assert "20,000" in review_row
     assert "$0.07" in review_row
 
-
 def test_e2e_unknown_model_emits_named_footnote() -> None:
     """Unknown model: rollup cost '—', per-phase '—', footnote names model.
 
-    Covers M6. Both Review and Fix ran on the unknown model so both rows
-    must show '—' in the cost cell, and the footnote names the model
-    exactly once with backticks.
-    """
+    Covers M6. Both Review and Fix ran on the unknown model so both rows must show '—' in the cost cell, and the
+    footnote names the model exactly once with backticks."""
     out = render_run_info_block([_UNKNOWN_MODEL])
     assert "- **Cost:** —" in out
     # Per-phase rows both end in '| — |'.
@@ -525,14 +407,11 @@ def test_e2e_unknown_model_emits_named_footnote() -> None:
     # Footnote names the unknown model with backticks.
     assert "<sub>Cost unavailable: model `gpt-6.0-experimental` is not in the price table.</sub>" in out
 
-
 def test_e2e_deep_mode_aggregates_fork_files() -> None:
     """Deep mode: parent + 2 sibling forks aggregate into one rollup.
 
-    Covers C1 (multi-trajectory aggregation) end-to-end. The parent
-    trajectory has Review + Parse Feedback steps; forks A and B each have
-    one Fix step. Combined Fix row totals must sum across both forks.
-    """
+    Covers C1 (multi-trajectory aggregation) end-to-end. The parent trajectory has Review + Parse Feedback steps;
+    forks A and B each have one Fix step. Combined Fix row totals must sum across both forks."""
     out = render_run_info_block([_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B])
     # Single model across all files.
     assert "- **Model:** claude-sonnet-4-5" in out
@@ -553,19 +432,15 @@ def test_e2e_deep_mode_aggregates_fork_files() -> None:
     assert "1,300" in fix_row
     assert "$0.07" in fix_row  # 0.04 + 0.03
 
-
 def test_deep_mode_phase_rows_preserve_traversal_order() -> None:
     """Phase rows in deep mode follow first-encounter order across files.
 
-    Regression for CodeRabbit #6 on PR #66: each fork trajectory restarts
-    step_id at 1, so sorting phases by ``first_seen_step_id`` would rank a
-    fork's first phase (Fix, step_id=2) ahead of the parent's later phase
-    (Parse Feedback, step_id=4). The fix relies on dict insertion order
-    instead — parent phases land before fork phases.
-    """
+    Regression for CodeRabbit #6 on PR #66: each fork trajectory restarts step_id at 1, so sorting phases by
+    ``first_seen_step_id`` would rank a fork's first phase (Fix, step_id=2) ahead of the parent's later phase
+    (Parse Feedback, step_id=4). The fix relies on dict insertion order instead — parent phases land before fork
+    phases."""
     out = render_run_info_block([_DEEP_PARENT, _DEEP_FORK_A, _DEEP_FORK_B])
-    phase_rows = [
-        line
+    phase_rows = [line
         for line in out.splitlines()
         if line.startswith("| ") and "---" not in line and "Phase" not in line
     ]
@@ -577,10 +452,8 @@ def test_deep_mode_phase_rows_preserve_traversal_order() -> None:
 def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     """malformed input where cached > prompt is defensively clamped.
 
-    Per ATIF v1.6, cached_tokens is a SUBSET of prompt_tokens. A trajectory
-    that reports prompt=10, cached=20 (corrupt or racy upstream) must not
-    bleed the raw 20 into the rollup or per-phase row.
-    """
+    Per ATIF v1.6, cached_tokens is a SUBSET of prompt_tokens. A trajectory that reports prompt=10, cached=20
+    (corrupt or racy upstream) must not bleed the raw 20 into the rollup or per-phase row."""
     p = _single_phase_trajectory(tmp_path, prompt=10, completion=5, cached=20, cost_usd=0.0)
     out = render_run_info_block([p])
     # Rollup: cached cell shows clamped 10, hit-ratio 100%, never raw 20.
@@ -592,14 +465,11 @@ def test_metrics_clamped_when_cached_exceeds_prompt(tmp_path: Path) -> None:
     # Columns: ['', 'Review', model, tools, input(cached), output, cost, latency, '']
     assert cells[4] == "10 (100%)"
 
-
 def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
     """Negative token counts on a step must not surface as negative numbers.
 
-    Token counts are by definition non-negative; a negative value implies a
-    corrupt trajectory. The renderer clamps to 0 at aggregation and the
-    rollup falls back to the no-cache form (cached==0 omits hit ratio).
-    """
+    Token counts are by definition non-negative; a negative value implies a corrupt trajectory. The renderer
+    clamps to 0 at aggregation and the rollup falls back to the no-cache form (cached==0 omits hit ratio)."""
     p = _single_phase_trajectory(tmp_path, prompt=-5, completion=-2, cached=-3, cost_usd=0.0)
     out = render_run_info_block([p])
     # No negative numbers anywhere in the rendered markdown. (Hyphens
@@ -618,22 +488,14 @@ def test_metrics_clamp_negative_token_counts(tmp_path: Path) -> None:
 def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     """ATIF v1.6: step.model_name=None implies Trajectory.agent.model_name.
 
-    Per the Step.model_name field docstring ("Omission implies the model
-    defined in the root-level agent config"), an agent step that omits
-    model_name must be attributed to the trajectory's root agent model —
-    both for the per-phase model cell AND for cost synthesis. Today
-    daydream's recorder always stamps step.model_name explicitly, so this
-    is a defensive/spec-conformant guarantee on the renderer side.
-    """
-    p = _single_phase_trajectory(
-        tmp_path,
+    Per the Step.model_name field docstring ("Omission implies the model defined in the root-level agent config"),
+    an agent step that omits model_name must be attributed to the trajectory's root agent model — both for the
+    per-phase model cell AND for cost synthesis. Today daydream's recorder always stamps step.model_name
+    explicitly, so this is a defensive/spec-conformant guarantee on the renderer side."""
+    p = _single_phase_trajectory(tmp_path,
         # The agent step omits model_name (model=None) and falls back to the
         # root agent model, which is in MODEL_PRICES so cost synthesis lands.
-        model=None,
-        prompt=10_000,
-        completion=200,
-        cached=0,
-        cost_usd=None,
+        model=None, prompt=10_000, completion=200, cached=0, cost_usd=None,
     )
     out = render_run_info_block([p])
     # Rollup model line uses the root agent's model, not "unknown".
@@ -650,12 +512,9 @@ def test_step_model_falls_back_to_root_agent_model(tmp_path: Path) -> None:
     # No 'unknown model' footnote, since the fallback resolved to a priced model.
     assert "not in the price table" not in out
 
-
 def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
     """The backend name is a fallback, not an actual model identity."""
-    p = _single_phase_trajectory(
-        tmp_path, model="osprey", phase="exploration", prompt=0, completion=0, cached=0
-    )
+    p = _single_phase_trajectory(tmp_path, model="osprey", phase="exploration", prompt=0, completion=0, cached=0)
 
     out = render_run_info_block([p])
 
@@ -666,29 +525,11 @@ def test_osprey_backend_alias_is_not_rendered_as_model(tmp_path: Path) -> None:
 
 
 # Duration formatting
-@pytest.mark.parametrize(
-    ("seconds", "expected"),
-    [
-        (None, "—"),
-        (0.0, "<1s"),
-        (0.5, "<1s"),
-        (0.999, "<1s"),
-        (1.0, "1s"),
-        (30.0, "30s"),
-        (59.9, "59s"),
-        (60.0, "1m"),
-        (61.0, "1m 1s"),
-        (150.0, "2m 30s"),
-        (3599.0, "59m 59s"),
-        (3600.0, "1h"),
-        (3660.0, "1h 1m"),
-        (7200.0, "2h"),
-        (7380.0, "2h 3m"),
-    ],
-    ids=[
-        "none", "zero", "half", "sub-second",
-        "1s", "30s", "59s",
-        "1m", "1m1s", "2m30s", "59m59s",
+@pytest.mark.parametrize(("seconds", "expected"),
+    [(None, "—"), (0.0, "<1s"), (0.5, "<1s"), (0.999, "<1s"), (1.0, "1s"), (30.0, "30s"), (59.9, "59s"),
+        (60.0, "1m"), (61.0, "1m 1s"), (150.0, "2m 30s"), (3599.0, "59m 59s"), (3600.0, "1h"), (3660.0, "1h 1m"),
+        (7200.0, "2h"), (7380.0, "2h 3m"),
+    ], ids=["none", "zero", "half", "sub-second", "1s", "30s", "59s", "1m", "1m1s", "2m30s", "59m59s",
         "1h", "1h1m", "2h", "2h3m",
     ],
 )
@@ -703,7 +544,6 @@ def test_duration_in_rollup() -> None:
     out = render_run_info_block([_SINGLE_PHASE])
     assert "- **Duration:** 1s" in out
 
-
 def test_latency_column_in_phase_table() -> None:
     """Per-phase breakdown must include a Latency column with per-phase durations."""
     out = render_run_info_block([_MULTI_PHASE_CLAUDE])
@@ -716,32 +556,14 @@ def test_latency_column_in_phase_table() -> None:
     # Total duration across all 4 phases: 00:00:00 to 00:00:07 = 7s.
     assert "- **Duration:** 7s" in out
 
-
 def test_duration_degrades_gracefully(tmp_path: Path) -> None:
     """Duration renders '—' when step timestamps are absent."""
-    p = _write_trajectory(
-        tmp_path,
-        steps=[
-            {
-                "step_id": 1,
-                "timestamp": None,
-                "source": "user",
-                "message": "go",
+    p = _write_trajectory(tmp_path,
+        steps=[{"step_id": 1, "timestamp": None, "source": "user", "message": "go",
                 "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-            },
-            {
-                "step_id": 2,
-                "timestamp": None,
-                "source": "agent",
-                "message": "ok",
-                "model_name": "gpt-5.5",
+            }, {"step_id": 2, "timestamp": None, "source": "agent", "message": "ok", "model_name": "gpt-5.5",
                 "extra": {"daydream_phase": "review", "daydream_run_flow": "ttt"},
-                "metrics": {
-                    "prompt_tokens": 100,
-                    "completion_tokens": 10,
-                    "cached_tokens": 0,
-                    "cost_usd": 0.01,
-                },
+                "metrics": {"prompt_tokens": 100, "completion_tokens": 10, "cached_tokens": 0, "cost_usd": 0.01},
             },
         ],
     )
@@ -749,7 +571,6 @@ def test_duration_degrades_gracefully(tmp_path: Path) -> None:
     assert "- **Duration:** —" in out
     review_row = next(line for line in out.splitlines() if line.startswith("| Review |"))
     assert review_row.rstrip().endswith("| — |")
-
 
 def test_deep_mode_latency_aggregates_across_forks() -> None:
     """Fix phase latency spans across fork trajectory files."""
@@ -793,11 +614,9 @@ def _write_reconciled_trajectory(tmp_path: Path) -> Path:
 
     return asyncio.run(_build())
 
-
 def test_reconciled_phase_output_consistent_with_session_total(tmp_path: Path) -> None:
-    """A trajectory whose per-step metrics were reconciled (Σ == session total)
-    renders per-phase output tokens consistent with the session total, not the
-    collapsed per-message sum."""
+    """A trajectory whose per-step metrics were reconciled (Σ == session total) renders per-phase output tokens
+    consistent with the session total, not the collapsed per-message sum."""
     path = _write_reconciled_trajectory(tmp_path)
     rendered = render_run_info_block([path])
     # The reconciled session total (rendered with thousand separators), not the

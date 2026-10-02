@@ -39,7 +39,6 @@ async def test_claude_strategy_is_env_only() -> None:
     assert runtime.writes == {}, "claude needs no provisioning file"
     assert runtime.commands == []
 
-
 async def test_codex_strategy_writes_a_responses_provider_block() -> None:
     strategy = CodexStrategy(HOME)
     runtime = FakeRuntime()
@@ -50,11 +49,7 @@ async def test_codex_strategy_writes_a_responses_provider_block() -> None:
     # CODEX_HOME, not HOME: a live rollout with only HOME moved had codex resolve
     # its config elsewhere, miss the provider block, and reach the provider
     # directly — real tokens billed, zero calls captured in the trace.
-    assert env == {
-        "CODEX_HOME": "/rollout/.codex",
-        "CODEX_INTERCEPT_KEY": SECRET,
-        "DAYDREAM_FANOUT_CONCURRENCY": "4",
-    }
+    assert env == {"CODEX_HOME": "/rollout/.codex", "CODEX_INTERCEPT_KEY": SECRET, "DAYDREAM_FANOUT_CONCURRENCY": "4"}
     written = runtime.writes["/rollout/.codex/config.toml"]
     config = tomllib.loads(written.decode())
     assert config["model_provider"] == INTERCEPT_PROVIDER
@@ -63,7 +58,6 @@ async def test_codex_strategy_writes_a_responses_provider_block() -> None:
     assert provider["wire_api"] == "responses"
     assert provider["env_key"] == "CODEX_INTERCEPT_KEY"
     assert provider["requires_openai_auth"] is False
-
 
 async def test_pi_strategy_installs_a_chat_completions_provider_extension() -> None:
     strategy = PiStrategy(HOME)
@@ -95,7 +89,6 @@ async def test_pi_strategy_installs_a_chat_completions_provider_extension() -> N
         "a written extension that is never installed does nothing"
     )
 
-
 async def test_pi_strategy_raises_when_install_fails() -> None:
     class FailingInstall(FakeRuntime):
         async def run(self, argv: list[str], env: dict[str, str]) -> vf.ProgramResult:
@@ -105,7 +98,6 @@ async def test_pi_strategy_raises_when_install_fails() -> None:
     runtime = FailingInstall()
     with pytest.raises(RuntimeError, match="pi install"):
         await PiStrategy(HOME).provision(runtime, ENDPOINT, SECRET, MODEL)
-
 
 async def test_every_strategy_honours_a_relocated_home() -> None:
     """The local smoke path has no /rollout to write into."""
@@ -119,7 +111,6 @@ async def test_every_strategy_honours_a_relocated_home() -> None:
         env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=4)
         assert all("/rollout" not in value for value in env.values()), f"{name} env pins /rollout: {env}"
 
-
 def test_unknown_backend_rejected() -> None:
     with pytest.raises(ValueError) as excinfo:
         DaydreamReviewHarnessConfig(backend="nope")
@@ -127,7 +118,6 @@ def test_unknown_backend_rejected() -> None:
     assert "nope" in message
     for name in STRATEGIES:
         assert name in message
-
 
 def test_shipped_strategies_cover_every_daydream_backend() -> None:
     """daydream's --backend choices are claude|codex|pi (cli.py:238-244)."""

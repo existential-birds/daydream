@@ -11,13 +11,11 @@ R1 = "a" * 64  # record_id-shaped
 
 def _obs(record_id: str, labeler: str, disposition: str = "accepted",
          digest: str = "e" * 64, **kw: Any) -> dict[str, Any]:
-    base = {
-        "record_id": record_id, "disposition": disposition,
+    base = {"record_id": record_id, "disposition": disposition,
         "evidence_digest": digest, "labeler": labeler, "role": "rater",
         "rationale": "matches reply meaning", "valid_at": "2026-08-30T12:00:00+00:00",
         "observed_at": "2026-08-30T12:00:01+00:00",
-        "rubric_version": ADJUDICATION_LABELER_VERSION, "review_required": False,
-        "evidence": [{"reply_id": "r1"}],
+        "rubric_version": ADJUDICATION_LABELER_VERSION, "review_required": False, "evidence": [{"reply_id": "r1"}],
     }
     return {**base, **kw}
 
@@ -49,7 +47,6 @@ def test_observation_missing_evidence_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="evidence"):
         append_observation(tmp_path / "o.jsonl", o)
 
-
 def test_invalid_disposition_raises(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="bogus"):
         append_observation(tmp_path / "o.jsonl", _obs(R1, "alice", disposition="bogus"))
@@ -71,6 +68,4 @@ def test_role_adjudicator_with_model_labeler_raises(tmp_path: Path) -> None:
     # An unreviewed LLM classifier is never a human labeler: an observation
     # claiming adjudicator authority under a model-shaped labeler is rejected.
     with pytest.raises(ValueError, match="labeler"):
-        append_observation(
-            tmp_path / "o.jsonl", _obs(R1, "claude-classifier", role="adjudicator")
-        )
+        append_observation(tmp_path / "o.jsonl", _obs(R1, "claude-classifier", role="adjudicator"))

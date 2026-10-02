@@ -42,14 +42,10 @@ async def _execute_events(model: str, fixture: str) -> list[object]:
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         return [event async for event in backend.execute(Path("/tmp"), "test")]
 
-
-@pytest.mark.asyncio
 async def test_metrics_event_emitted_at_turn_completed() -> None:
-    """turn.completed with full usage produces MetricsEvent with EVNT-02 field names (EVNT-07).
-
-    Model gpt-5.3-codex is in MODEL_PRICES, so #194 synthesizes cost at the
-    backend layer; the value must match compute_cost for these tokens.
-    """
+    """turn.completed with full usage produces MetricsEvent with EVNT-02 field names (EVNT-07). Model gpt-5.3-codex is
+    in MODEL_PRICES, so #194 synthesizes cost at the backend layer; the value must match compute_cost for these
+    tokens."""
     events = await _execute_events("gpt-5.3-codex", "turn_completed_with_usage.jsonl")
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 1
@@ -59,25 +55,18 @@ async def test_metrics_event_emitted_at_turn_completed() -> None:
     assert m.completion_tokens == 100      # EVNT-02 verbatim (NOT output_tokens)
     assert m.cached_tokens is None         # fixture carries no cached_input_tokens
     expected = compute_cost(
-        model="gpt-5.3-codex",
-        input_tokens=200,
-        cached_input_tokens=0,
-        output_tokens=100,
+        model="gpt-5.3-codex", input_tokens=200, cached_input_tokens=0, output_tokens=100,
         prices=resolve_prices(load_user_prices()),
     )
     assert expected is not None
     assert m.cost_usd is not None          # #194: synthesized at the backend layer
     assert m.cost_usd == pytest.approx(expected)
 
-
-@pytest.mark.asyncio
 async def test_cost_event_still_emitted() -> None:
-    """The legacy CostEvent emission is preserved (so FinalMetrics aggregation works for Codex too).
-
-    Model ``fixture-model`` is unknown to the price table, so cost_usd stays
-    None here (#156); a known model would synthesize (see test_metrics_event
-    above and test_backend_codex.py::test_codex_synthesizes_cost_for_known_model).
-    """
+    """The legacy CostEvent emission is preserved (so FinalMetrics aggregation works for Codex too). Model
+    ``fixture-model`` is unknown to the price table, so cost_usd stays None here (#156); a known model would
+    synthesize (see test_metrics_event above and
+    test_backend_codex.py::test_codex_synthesizes_cost_for_known_model)."""
     events = await _execute_events("fixture-model", "turn_completed_with_usage.jsonl")
     cost = [e for e in events if isinstance(e, CostEvent)]
     assert len(cost) == 1
@@ -86,8 +75,6 @@ async def test_cost_event_still_emitted() -> None:
     assert cost[0].cached_tokens is None
     assert cost[0].cost_usd is None        # fixture-model unknown → #156 marker
 
-
-@pytest.mark.asyncio
 async def test_partial_usage_skips_metrics_event() -> None:
     """usage missing output_tokens => no MetricsEvent emitted (EVNT-02 requires both as int)."""
     events = await _execute_events("fixture-model", "turn_completed_partial_usage.jsonl")

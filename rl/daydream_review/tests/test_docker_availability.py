@@ -12,10 +12,7 @@ import pytest
 from conftest import docker_daemon_is_available
 
 
-def _patch_subprocess_run(
-    monkeypatch: pytest.MonkeyPatch,
-    returncode: int = 0,
-) -> None:
+def _patch_subprocess_run(monkeypatch: pytest.MonkeyPatch, returncode: int = 0,) -> None:
     """Replace subprocess.run with a deterministic stub."""
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
@@ -25,9 +22,7 @@ def _patch_subprocess_run(
 
 
 @pytest.mark.parametrize(
-    "returncode, expected",
-    [(0, True), (1, False)],
-    ids=["daemon-reachable", "daemon-unreachable"],
+    "returncode, expected", [(0, True), (1, False)], ids=["daemon-reachable", "daemon-unreachable"],
 )
 def test_docker_daemon_is_available_mirrors_docker_info_returncode(
     monkeypatch: pytest.MonkeyPatch, returncode: int, expected: bool
@@ -37,10 +32,7 @@ def test_docker_daemon_is_available_mirrors_docker_info_returncode(
     _patch_subprocess_run(monkeypatch, returncode)
     assert docker_daemon_is_available() is expected
 
-
-def test_docker_daemon_is_available_false_when_client_missing(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_docker_daemon_is_available_false_when_client_missing(monkeypatch: pytest.MonkeyPatch,) -> None:
     """A client that fails to launch (FileNotFoundError) is treated as unavailable."""
 
     def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:

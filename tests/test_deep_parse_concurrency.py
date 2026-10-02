@@ -19,9 +19,7 @@ from tests.harness.stub_backend import install_stub_backend
 
 
 async def test_shard_names_flow_through_parse_and_sort_deterministically(
-    shard_many_python_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
 ) -> None:
     """Issue #731 (P2): synthetic ``#`` shard names ride artifact paths and the
     sorted parse/merge ordering deterministically."""

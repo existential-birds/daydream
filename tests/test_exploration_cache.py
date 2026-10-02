@@ -38,8 +38,7 @@ def _count_specialist_calls(stub: StubBackend) -> int:
     return sum(1 for c in stub.calls if _SPECIALIST_MARKER in c["prompt"].lower())
 
 
-def _drift_cached_key_between_runs(
-    artifact_runtime_root: Path, target: Path, *, drop: bool = False, content: str = "",
+def _drift_cached_key_between_runs(artifact_runtime_root: Path, target: Path, *, drop: bool = False, content: str = "",
 ) -> None:
     """Drift the cached exploration key between two runs, consistently.
 
@@ -68,8 +67,7 @@ async def _run_deep(target: Path, *, custom_exploration: bool = True) -> int:
 
     exclude = target / ".git" / "info" / "exclude"
     exclude.write_text(f"{exclude.read_text()}\n.daydream/\n.review-output.md\n")
-    return await run(RunConfig(
-        target=str(target), start_at="review", cleanup=False,
+    return await run(RunConfig(target=str(target), start_at="review", cleanup=False,
         review_profile=independent_exploration_profile() if custom_exploration else None,
     ))
 
@@ -83,9 +81,7 @@ def _add_one_hop_graph_on_main(multi_stack_target: Path) -> None:
     (multi_stack_target / "dep.py").write_text(
         "from secondhop import indirect\n\n\ndef direct() -> str:\n    return indirect()\n"
     )
-    (multi_stack_target / "secondhop.py").write_text(
-        "def indirect() -> str:\n    return 'base'\n"
-    )
+    (multi_stack_target / "secondhop.py").write_text("def indirect() -> str:\n    return 'base'\n")
     (multi_stack_target / "consumer.py").write_text(
         "from changed import subject\n\n\ndef consume() -> str:\n    return subject()\n"
     )
@@ -102,10 +98,7 @@ def _add_one_hop_graph_on_main(multi_stack_target: Path) -> None:
     _git(multi_stack_target, "add", "changed.py")
     _git(multi_stack_target, "commit", "-m", "change one-hop graph root")
 
-
-async def test_second_run_reuses_exploration(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_second_run_reuses_exploration(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An exact key match reuses the directory and fires zero specialists."""
     silence(monkeypatch)
     _add_one_hop_graph_on_main(multi_stack_target)
@@ -118,10 +111,7 @@ async def test_second_run_reuses_exploration(
     first_key = (exploration / "cache-key").read_text().strip()
     first_exploration = (exploration / "exploration.json").read_bytes()
     assert first_key
-    affected = {
-        (row["path"], row["role"])
-        for row in json.loads(first_exploration)["affected_files"]
-    }
+    affected = {(row["path"], row["role"]) for row in json.loads(first_exploration)["affected_files"]}
     assert ("changed.py", "modified") in affected
     assert ("dep.py", "imports") in affected
     assert ("consumer.py", "imported_by") in affected
@@ -136,12 +126,9 @@ async def test_second_run_reuses_exploration(
     # Reviewers are still grounded by the pointer. An identical rerun reuses
     # the completed per-stack shards (issue #733), so the pointer grounding is
     # inspected on the run that produced the reviews.
-    review_prompt = next(
-        c["prompt"] for c in stub1.calls if "you are reviewing the" in c["prompt"].lower()
-    )
+    review_prompt = next(c["prompt"] for c in stub1.calls if "you are reviewing the" in c["prompt"].lower())
     assert ".daydream/exploration" in review_prompt
-    assert not any(
-        "you are reviewing the" in c["prompt"].lower() for c in stub2.calls
+    assert not any("you are reviewing the" in c["prompt"].lower() for c in stub2.calls
     ), "an identical rerun must reuse the per-stack reviews"
 
 
@@ -152,10 +139,7 @@ async def test_second_run_reuses_exploration(
     assert "RUN2 SENTINEL" not in dependencies
     assert "No data collected" not in dependencies
 
-
-async def test_diff_change_invalidates_cache(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_diff_change_invalidates_cache(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A new commit changes head+diff, so the pre-scan re-runs and rewrites."""
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
@@ -164,29 +148,22 @@ async def test_diff_change_invalidates_cache(
 
     exploration = multi_stack_target / ".daydream" / "exploration"
     key_after_run1 = (exploration / "cache-key").read_text().strip()
-
     (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
     _git(multi_stack_target, "add", "api.py")
     _git(multi_stack_target, "commit", "-m", "change again")
-
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) > 0, "changed diff must re-fire specialists"
-
     assert (exploration / "cache-key").read_text().strip() != key_after_run1
     dependencies = (exploration / "dependencies.md").read_text()
     assert "RUN2 SENTINEL" in dependencies
     assert "RUN1 SENTINEL" not in dependencies
 
-
-async def test_uncommitted_edit_reuses_an_exact_cache_key(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_uncommitted_edit_reuses_an_exact_cache_key(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An exact key hit remains reusable when the worktree is dirty."""
     silence(monkeypatch)
     (multi_stack_target / "api.py").write_text("def hello():\n    return 'galaxy'\n")
-
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub1) > 0
@@ -195,54 +172,40 @@ async def test_uncommitted_edit_reuses_an_exact_cache_key(
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) == 0, "exact key hit must skip specialists"
-
     assert (exploration / "cache-key").exists()
     dependencies = (exploration / "dependencies.md").read_text()
     assert "RUN1 SENTINEL" in dependencies
     assert "RUN2 SENTINEL" not in dependencies
 
-
 async def test_daydream_artifacts_do_not_block_writing_a_rebuilt_cache_key(
-    multi_stack_target: Path,
-    artifact_runtime_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Unignored Daydream output alone does not make a rebuilt cache ineligible."""
-
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
-    assert await run(RunConfig(
-        target=str(multi_stack_target), start_at="review", cleanup=False,
+    assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False,
         review_profile=independent_exploration_profile(),
     )) == 0
     assert _count_specialist_calls(stub1) > 0
 
-    _drift_cached_key_between_runs(
-        artifact_runtime_root, multi_stack_target, content="stale"
-    )
-
+    _drift_cached_key_between_runs(artifact_runtime_root, multi_stack_target, content="stale")
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
-    assert await run(RunConfig(
-        target=str(multi_stack_target), start_at="review", cleanup=False,
+    assert await run(RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False,
         review_profile=independent_exploration_profile(),
     )) == 0
     assert _count_specialist_calls(stub2) > 0
     exploration = multi_stack_target / ".daydream" / "exploration"
     assert (exploration / "cache-key").read_text().strip() != "stale"
 
-
-async def test_cache_version_change_invalidates_cache(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
+async def test_cache_version_change_invalidates_cache(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A cache-format bump forces a real second-run pre-scan."""
-
     silence(monkeypatch)
     stub1 = _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub1) > 0
     exploration = multi_stack_target / ".daydream" / "exploration"
     first_key = (exploration / "cache-key").read_text().strip()
-
     monkeypatch.setattr(exploration_mod, "_CACHE_VERSION", exploration_mod._CACHE_VERSION + 1)
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
@@ -250,32 +213,23 @@ async def test_cache_version_change_invalidates_cache(
     assert (exploration / "cache-key").read_text().strip() != first_key
     assert "RUN2 SENTINEL" in (exploration / "dependencies.md").read_text()
 
-
 async def test_corrupt_key_file_is_a_miss_not_a_crash(
-    multi_stack_target: Path,
-    artifact_runtime_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A truncated/garbage key file re-runs the pre-scan instead of failing."""
     silence(monkeypatch)
     _install(monkeypatch, multi_stack_target, "RUN1 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
 
-    _drift_cached_key_between_runs(
-        artifact_runtime_root, multi_stack_target, content="not-a-real-key"
-    )
-
+    _drift_cached_key_between_runs(artifact_runtime_root, multi_stack_target, content="not-a-real-key")
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) > 0
     exploration = multi_stack_target / ".daydream" / "exploration"
     assert "RUN2 SENTINEL" in (exploration / "dependencies.md").read_text()
 
-
 async def test_missing_key_file_is_a_miss(
-    multi_stack_target: Path,
-    artifact_runtime_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-upgrade exploration dir (no key file) is treated as stale."""
     silence(monkeypatch)
@@ -283,15 +237,11 @@ async def test_missing_key_file_is_a_miss(
     assert await _run_deep(multi_stack_target) == 0
 
     _drift_cached_key_between_runs(artifact_runtime_root, multi_stack_target, drop=True)
-
     stub2 = _install(monkeypatch, multi_stack_target, "RUN2 SENTINEL")
     assert await _run_deep(multi_stack_target) == 0
     assert _count_specialist_calls(stub2) > 0
 
-
-async def test_failed_exploration_is_not_durably_cached(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_failed_exploration_is_not_durably_cached(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A degraded pre-scan is materialized for this run but cannot be reused."""
     silence(monkeypatch)
@@ -304,12 +254,8 @@ async def test_failed_exploration_is_not_durably_cached(
     assert exploration.is_dir()
     assert not (exploration / "cache-key").exists()
 
-
-def test_cache_key_is_sensitive_to_every_component(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_cache_key_is_sensitive_to_every_component(monkeypatch: pytest.MonkeyPatch,) -> None:
     """Each of head, diff, tier, and the format version changes the key."""
-
     base = exploration_cache_key("sha1", "diff", "standard")
     assert base == exploration_cache_key("sha1", "diff", "standard")
     assert base != exploration_cache_key("sha2", "diff", "standard")
@@ -322,14 +268,10 @@ def test_cache_key_is_sensitive_to_every_component(
     monkeypatch.setattr(exploration_mod, "_CACHE_VERSION", 999)
     assert base != exploration_cache_key("sha1", "diff", "standard")
 
-
 def test_cache_key_components_cannot_be_confused_by_delimiters() -> None:
     """Shifting content across the newline boundary changes the key."""
 
-    assert exploration_cache_key("a", "b", "standard") != exploration_cache_key(
-        "a\nb", "", "standard"
-    )
-
+    assert exploration_cache_key("a", "b", "standard") != exploration_cache_key("a\nb", "", "standard")
 
 def test_cache_key_distinguishes_exploration_strategy_identity() -> None:
 
@@ -338,7 +280,6 @@ def test_cache_key_distinguishes_exploration_strategy_identity() -> None:
     assert exploration_cache_key("sha", "diff", "parallel", strategies=default) != exploration_cache_key(
         "sha", "diff", "parallel", strategies=custom,
     )
-
 
 async def test_static_cache_does_not_suppress_custom_exploration(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,

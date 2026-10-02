@@ -18,16 +18,12 @@ from typing import Any, cast
 
 import pytest
 
-_TEMPLATES_TESTS = (
-    Path(__file__).resolve().parents[1]
+_TEMPLATES_TESTS = (Path(__file__).resolve().parents[1]
     / "daydream" / "benchmark" / "harbor" / "templates" / "tests"
 )
 
-_SENTINELS = {
-    "GH_TOKEN": "GH_TOKEN_SENTINEL_9f3a",
-    "GITHUB_TOKEN": "GITHUB_TOKEN_SENTINEL_7b2c",
-    "HF_TOKEN": "HF_TOKEN_SENTINEL_1a4d",
-    "DAYDREAM_APP_PRIVATE_KEY": "APP_PRIVATE_KEY_SENTINEL_0c8e",
+_SENTINELS = {"GH_TOKEN": "GH_TOKEN_SENTINEL_9f3a", "GITHUB_TOKEN": "GITHUB_TOKEN_SENTINEL_7b2c",
+    "HF_TOKEN": "HF_TOKEN_SENTINEL_1a4d", "DAYDREAM_APP_PRIVATE_KEY": "APP_PRIVATE_KEY_SENTINEL_0c8e",
 }
 
 _JUDGE_KEY = "sk-or-isolation-only-7f1e"
@@ -62,13 +58,8 @@ def _write_verifier_metadata(verifier_dir: Path) -> None:
     # Bind both entrypoints to the shipped gold and its case-x oracle fixture.
     gold_bytes = (verifier_dir / "golden-review.json").read_bytes()
     (verifier_dir / "verifier-metadata.json").write_text(json.dumps({
-        "schema_version": 1,
-        "case_id": "case-x",
-        "source_case_id": "case-x",
-        "base_ref": "base",
-        "head_ref": "head",
-        "template_version": "1",
-        "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
+        "schema_version": 1, "case_id": "case-x", "source_case_id": "case-x", "base_ref": "base", "head_ref": "head",
+        "template_version": "1", "gold_sha256": hashlib.sha256(gold_bytes).hexdigest(),
     }))
 
 
@@ -94,8 +85,7 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
     for rel in ("score_review.py", "judge_prompt.md", "golden-review.json"):
         (verifier_dir / rel).write_bytes((_TEMPLATES_TESTS / rel).read_bytes())
     # verifier_core.py comes from the canonical host module (issue #1004)
-    (verifier_dir / "verifier_core.py").write_bytes(
-        (_TEMPLATES_TESTS.parents[1] / "verifier_core.py").read_bytes())
+    (verifier_dir / "verifier_core.py").write_bytes((_TEMPLATES_TESTS.parents[1] / "verifier_core.py").read_bytes())
     # task-binding metadata: run_verifier binds the candidate to the immutable
     # verifier-metadata.json beside the gold (case id + base/head refs + digest)
     # case id tied to the shipped fixture via test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1
@@ -108,15 +98,11 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
 
     srv = _serve()
     try:
-        env = {
-            "PATH": os.environ.get("PATH", ""),
+        env = {"PATH": os.environ.get("PATH", ""),
             "PYTHONPATH": str(verifier_dir),            # bare `import verifier_core` resolves here
-            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": _JUDGE_KEY,
-            "DAYDREAM_JUDGE_BASE_URL": f"http://127.0.0.1:{srv.server_port}",
-            "DAYDREAM_JUDGE_ALLOWED_HOSTS": "127.0.0.1",
-            "DAYDREAM_JUDGE_ARTIFACT_PATH": str(artifact_path),
+            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": _JUDGE_KEY, "DAYDREAM_JUDGE_BASE_URL": f"http://127.0.0.1:{srv.server_port}",
+            "DAYDREAM_JUDGE_ALLOWED_HOSTS": "127.0.0.1", "DAYDREAM_JUDGE_ARTIFACT_PATH": str(artifact_path),
             "DAYDREAM_JUDGE_OUT_PATH": str(out_dir),
         }  # whitelist: NONE of the host sentinels are inherited
         proc = subprocess.run([sys.executable, "score_review.py"], cwd=verifier_dir,
@@ -139,7 +125,6 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
     for p, digest in zip((secret_file, source_file, agent_file), pre.values()):
         assert p.read_bytes() == digest             # host files untouched (no writes outside out_dir)
 
-
 def test_verifier_asset_set_never_includes_task_md() -> None:
     """The verifier image/asset set is fixed and must not read Task.md (R12/R13 constraint)."""
     # The fixed verifier asset set is exactly what templates/tests/Dockerfile COPYs:
@@ -153,10 +138,7 @@ def test_verifier_asset_set_never_includes_task_md() -> None:
     # verifier_core.py is no longer a template twin: the build deploys the
     # canonical host module directly (issue #1004).
     assert not (_TEMPLATES_TESTS / "verifier_core.py").exists()
-    assert (
-        _TEMPLATES_TESTS.parents[1] / "verifier_core.py"
-    ).exists()
-
+    assert (_TEMPLATES_TESTS.parents[1] / "verifier_core.py").exists()
 
 def test_test_sh_runs_copied_bundle_from_unrelated_cwd(tmp_path: Path) -> None:
     verifier_dir = tmp_path / "copied bundle" / "tests"
@@ -176,8 +158,7 @@ def test_test_sh_runs_copied_bundle_from_unrelated_cwd(tmp_path: Path) -> None:
     # interpreter and bare import intact so the caller cwd cannot be masked.
     source_script = _TEMPLATES_TESTS / "test.sh"
     source_text = source_script.read_text()
-    for required in (
-        "/logs/artifacts/review.json", "/logs/verifier/reward.json",
+    for required in ("/logs/artifacts/review.json", "/logs/verifier/reward.json",
         "python3 -c", "from verifier_core import validate_candidate_artifact", "python3 score_review.py",
     ):
         assert required in source_text
@@ -192,19 +173,14 @@ def test_test_sh_runs_copied_bundle_from_unrelated_cwd(tmp_path: Path) -> None:
 
     srv = _serve()
     try:
-        env = {
-            "PATH": os.pathsep.join((str(Path(sys.executable).parent), os.environ.get("PATH", ""))),
-            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
-            "DAYDREAM_JUDGE_MODEL": "m",
-            "DAYDREAM_JUDGE_API_KEY": _JUDGE_KEY,
-            "DAYDREAM_JUDGE_BASE_URL": f"http://127.0.0.1:{srv.server_port}",
-            "DAYDREAM_JUDGE_ALLOWED_HOSTS": "127.0.0.1",
-            "DAYDREAM_JUDGE_ARTIFACT_PATH": str(artifact_path),
+        env = {"PATH": os.pathsep.join((str(Path(sys.executable).parent), os.environ.get("PATH", ""))),
+            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
+            "DAYDREAM_JUDGE_API_KEY": _JUDGE_KEY, "DAYDREAM_JUDGE_BASE_URL": f"http://127.0.0.1:{srv.server_port}",
+            "DAYDREAM_JUDGE_ALLOWED_HOSTS": "127.0.0.1", "DAYDREAM_JUDGE_ARTIFACT_PATH": str(artifact_path),
             "DAYDREAM_JUDGE_OUT_PATH": str(out_dir),
         }  # No PYTHONPATH/PYTHONHOME: python3 -c must find verifier_core via cwd.
         proc = subprocess.run(
-            [str(copied_script)], cwd=unrelated_cwd, env=env,
-            capture_output=True, text=True, timeout=120,
+            [str(copied_script)], cwd=unrelated_cwd, env=env, capture_output=True, text=True, timeout=120,
         )
         assert proc.returncode == 0, proc.stdout + proc.stderr
     finally:

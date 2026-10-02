@@ -21,25 +21,16 @@ def mock_ui_loop(monkeypatch: pytest.MonkeyPatch) -> None:
     """Decline interactive gates so the run runs unattended."""
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "n")
 
-
 @pytest.mark.asyncio
-async def test_shared_phase_backend_drives_shallow_pass(
-    feature_branch_repo: Path,
+async def test_shared_phase_backend_drives_shallow_pass(feature_branch_repo: Path,
     mock_ui_loop: Any,  # noqa: F841
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One issue on the single pass → the shallow deep run completes and exits 0."""
     backend = PhaseDispatchBackend(parse_results=[[ISSUE]])
     monkeypatch.setattr("daydream.runner.create_backend", lambda n, model=None, **kwargs: backend)
-
     exit_code = await run(
-        RunConfig(
-            target=str(feature_branch_repo),
-            stack="python",
-            quiet=True,
-            cleanup=False,
-            shallow=True,
-        )
+        RunConfig(target=str(feature_branch_repo), stack="python", quiet=True, cleanup=False, shallow=True,)
     )
 
     assert exit_code == 0

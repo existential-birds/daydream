@@ -46,24 +46,17 @@ from tests.test_deep_orchestrator import (
 
 
 async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: every record a fresh deep run writes is born identified."""
     _silence(monkeypatch)
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     borderline = {"severity": "medium", "confidence": "MEDIUM"}
-    stub.parse_by_stack = {
-        "python": {
-            **borderline,
-            "description": "python primary finding",
+    stub.parse_by_stack = {"python": {**borderline, "description": "python primary finding",
             "extra": {**borderline, "description": "python second finding"},
         },
-        "structure": {
-            **borderline,
-            "description": "structural primary finding",
+        "structure": {**borderline, "description": "structural primary finding",
             "extra": {**borderline, "description": "structural second finding"},
         },
     }
@@ -73,9 +66,7 @@ async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
     deep = multi_stack_target / ".daydream" / "deep"
     records_files = sorted(deep.glob("stack-*-records.json"))
     assert [p.name for p in records_files] == [
-        "stack-generic-records.json",
-        "stack-python-records.json",
-        "stack-react-records.json",
+        "stack-generic-records.json", "stack-python-records.json", "stack-react-records.json",
         "stack-structure-records.json",
     ]
     for path in records_files:
@@ -92,25 +83,18 @@ async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
     assert _uid_list(deep, "structure") == ["structure:1", "structure:2"]
     assert {issue["id"] for issue in _uid_records(deep, "python")} == {1, 2}
 
-
 async def test_merge_resume_backfills_uids_onto_pre_uid_records(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: a resume over artifacts written before ``uid`` existed re-derives the identity the
     producing run would have minted."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
-    deep = _prime_uid_merge_resume(
-        multi_stack_target,
-        python=[
-            _high_record(description="py first"),
-            _record(description="py second", line=2, evidence="api.py:2"),
-        ],
+    deep = _prime_uid_merge_resume(multi_stack_target,
+        python=[_high_record(description="py first"), _record(description="py second", line=2, evidence="api.py:2")],
     )
     primed = json.loads((deep / "stack-python-records.json").read_text())
     assert all("uid" not in record for record in primed), "fixture must predate the uid field"
-
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
     # Backfilled by position, in the file that owns them -- not renumbered
@@ -126,49 +110,37 @@ async def test_merge_resume_backfills_uids_onto_pre_uid_records(
     assert python_records[1]["description"] == "py second"
     assert (deep / "merged-items.json").is_file()
 
-
 async def test_merge_resume_preserves_existing_non_contiguous_uid(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: a uid already on disk is never re-minted by position."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
-    deep = _prime_uid_merge_resume(
-        multi_stack_target,
-        python=[_high_record(description="py survivor", uid="python:4")],
+    deep = _prime_uid_merge_resume(multi_stack_target, python=[_high_record(description="py survivor", uid="python:4")],
     )
-
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
-
     assert _uid_list(deep, "python") == ["python:4"], (
         "the surviving record was renumbered by position instead of keeping the uid the producing run minted"
     )
     assert _uid_records(deep, "python")[0]["description"] == "ARBITRATED: py survivor"
 
-
 async def test_duplicate_record_uid_stops_the_run_before_merge(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: two records sharing one uid is fatal, not a warning."""
     errors: list[tuple[str, str]] = []
-    monkeypatch.setattr(
-        "daydream.deep.review_steps.print_error",
+    monkeypatch.setattr("daydream.deep.review_steps.print_error",
         lambda console, title, message, *a, **k: errors.append((title, message)),
     )
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
-    deep = _prime_uid_merge_resume(
-        multi_stack_target,
-        python=[
-            _high_record(description="py first", uid="python:1"),
+    deep = _prime_uid_merge_resume(multi_stack_target,
+        python=[_high_record(description="py first", uid="python:1"),
             _high_record(description="py collision", uid="python:1"),
         ],
     )
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 1
-
     assert not (deep / "merged-items.json").exists(), "the run merged despite a colliding record identity"
     assert not (multi_stack_target / ".review-output.md").exists()
     titles = [title for title, _message in errors]
@@ -178,10 +150,8 @@ async def test_duplicate_record_uid_stops_the_run_before_merge(
     assert "stack-python-records.json" in message
     assert "Re-run without --start-at" in message
 
-
 async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: an arbiter rejection deletes one record and only that one."""
     _silence(monkeypatch)
@@ -191,9 +161,7 @@ async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
     stub.merge_echo_records = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    deep = _prime_merge_resume(
-        multi_stack_target,
-        python=[_high_record(description="py issue")],
+    deep = _prime_merge_resume(multi_stack_target, python=[_high_record(description="py issue")],
         react=[_high_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
         generic=[_high_record(description="docs issue", file="README.md", evidence="README.md:1")],
         structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
@@ -221,19 +189,14 @@ async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
     assert "tsx issue" not in descriptions
     assert "ARBITRATED: py issue" in descriptions
 
-
 async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: a record that routes outside the rewritten files is named."""
     warnings = _capture_warnings(monkeypatch, "daydream.deep.merge_steps.print_warning")
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
-    deep = _prime_uid_merge_resume(
-        multi_stack_target,
-        python=[_high_record(description="py issue", uid="ghost:1")],
-    )
+    deep = _prime_uid_merge_resume(multi_stack_target, python=[_high_record(description="py issue", uid="ghost:1")],)
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
@@ -251,11 +214,8 @@ async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
     assert _uid_list(deep, "generic") == ["generic:1"]
     assert _uid_list(deep, "structure") == ["structure:1"]
 
-
 async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: every shipped item names the records it derives from."""
     deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
@@ -280,9 +240,7 @@ async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
     assert by_description["Python issue"] == ["python:1"]
     assert by_description["React issue"] == ["react:1"]
     assert by_description["Contract drift between Python handler and React caller"] == [
-        "generic:1",
-        "python:1",
-        "react:1",
+        "generic:1", "python:1", "react:1",
     ]
 
     # (3) The host-appended structural items never see the merge agent, so the
@@ -291,11 +249,8 @@ async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
     assert structural, f"no structural item shipped: {items}"
     assert [item["source_uids"] for item in structural] == [["structure:1"]]
 
-
 async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """#1111 real-path: an invented uid is discarded; the finding is not."""
 
@@ -328,25 +283,20 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
     # convention misreads it for every item at once), naming both bad uids and
     # how much provenance the run lost.
     out = _panel_text(capsys)
-    assert (
-        "Merge agent cited 2 source_uid(s) that match no record in this run "
+    assert ("Merge agent cited 2 source_uid(s) that match no record in this run "
         "(ghost:7, python:99); dropped them from item provenance. "
         "1 of 2 merged item(s) now carry no record attribution." in out
     ), out
 
-
 async def test_unattributable_merge_source_uids_degrade_to_empty_list(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """#1111 real-path: null / missing / wrong-typed provenance ships as ``[]``."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target)
-    stub.merge_items = [
-        _provenance_item(1, "Explicit null provenance", source_uids=None),
+    stub.merge_items = [_provenance_item(1, "Explicit null provenance", source_uids=None),
         _provenance_item(2, "Omitted provenance key", file="App.tsx", omit_source_uids=True),
         _provenance_item(3, "Bare-string provenance", file="README.md", source_uids="python:1"),
     ]
@@ -355,11 +305,7 @@ async def test_unattributable_merge_source_uids_degrade_to_empty_list(
 
     deep = deep_dir(multi_stack_target, allow_standalone=True)
     by_description = _source_uids_by_description(deep)
-    for description in (
-        "Explicit null provenance",
-        "Omitted provenance key",
-        "Bare-string provenance",
-    ):
+    for description in ("Explicit null provenance", "Omitted provenance key", "Bare-string provenance",):
         assert description in by_description, f"an unattributable finding was lost: {sorted(by_description)}"
         assert by_description[description] == [], by_description[description]
 
@@ -368,11 +314,8 @@ async def test_unattributable_merge_source_uids_degrade_to_empty_list(
     out = _panel_text(capsys)
     assert "match no record in this run" not in out, out
 
-
 async def test_single_stack_bypass_attributes_items_to_their_own_records(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: the tiny-diff bypass attributes items to their records."""
 
@@ -381,7 +324,6 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
     mute_side_effects()
 
     assert await _run_deep(tiny_diff_target) == 0
-
     assert [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()] == [], (
         "the single-stack bypass must not invoke the merge agent"
     )
@@ -395,30 +337,20 @@ async def test_single_stack_bypass_attributes_items_to_their_own_records(
     for item in _merged_items(deep):
         assert item["source_uids"] == [item["uid"]], item
 
-
 @pytest.mark.parametrize("base_evidenced", [True, False], ids=["base-survives", "structure-survives"])
 async def test_structural_fold_survivor_inherits_both_provenances(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    base_evidenced: bool,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, base_evidenced: bool,
 ) -> None:
     """Either fold direction preserves both record identities and the structural severity."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    _prime_source_uid_merge_resume(
-        multi_stack_target,
+    _prime_source_uid_merge_resume(multi_stack_target,
         structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1")],
     )
-    stub.merge_items = [
-        _provenance_item(
-            1,
-            _TWIN_DESCRIPTION,
-            line=5,
-            evidence="api.py:5" if base_evidenced else "",
-            source_uids=["python:1"],
-        ),
-        _provenance_item(2, "Unrelated react concern", file="App.tsx", source_uids=["react:1"]),
+    stub.merge_items = [_provenance_item(
+            1, _TWIN_DESCRIPTION, line=5, evidence="api.py:5" if base_evidenced else "", source_uids=["python:1"],
+        ), _provenance_item(2, "Unrelated react concern", file="App.tsx", source_uids=["react:1"]),
     ]
 
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
@@ -437,25 +369,17 @@ async def test_structural_fold_survivor_inherits_both_provenances(
     assert folded["folded"][0]["survivor"] == survivor
     assert folded["folded"][0]["source_uids"] == source_uids
 
-
 async def test_dropped_speculative_sidecar_records_item_provenance(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: the evidence gate's sidecar records what it deleted."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target)
-    stub.merge_items = [
-        _provenance_item(1, "Grounded finding", source_uids=["python:1"]),
-        _provenance_item(
-            2,
-            "Speculative unfounded finding",
-            file="App.tsx",
-            evidence="",
-            rationale="inferred from the diff alone, no exploration evidence",
-            source_uids=["react:1", "generic:1"],
+    stub.merge_items = [_provenance_item(1, "Grounded finding", source_uids=["python:1"]),
+        _provenance_item(2, "Speculative unfounded finding", file="App.tsx", evidence="",
+            rationale="inferred from the diff alone, no exploration evidence", source_uids=["react:1", "generic:1"],
         ),
     ]
 
@@ -477,11 +401,9 @@ async def test_dropped_speculative_sidecar_records_item_provenance(
     # being omitted.
     assert dropped["dropped_uids"] == [""]
 
-
 @pytest.mark.anyio
 async def test_legacy_artifact_backfills_structural_provenance_consistently(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A pre-uid artifact must not yield two different answers in one run (#1111)."""
     _silence(monkeypatch)
@@ -489,9 +411,7 @@ async def test_legacy_artifact_backfills_structural_provenance_consistently(
     # Prime WITHOUT uid on disk -- the shape a run from before the field existed
     # left behind. Deliberately not `_prime_source_uid_merge_resume`, which primes
     # uids precisely to avoid this condition.
-    _prime_merge_resume(
-        multi_stack_target,
-        python=[_record(description="py issue", evidence="api.py:1")],
+    _prime_merge_resume(multi_stack_target, python=[_record(description="py issue", evidence="api.py:1")],
         react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
         generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
         structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
@@ -509,11 +429,8 @@ async def test_legacy_artifact_backfills_structural_provenance_consistently(
     assert structural, "the structural record must still reach the report"
     assert structural[0]["source_uids"] == ["structure:1"]
 
-
 async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: every merged item ships with a distinct durable handle."""
     deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
@@ -535,11 +452,8 @@ async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run
     # tests, where the two deliberately diverge).
     assert uids == [f"item:{item['id']}" for item in items], uids
 
-
 async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
     """#1111 real-path: three fields, three questions, one item dict."""
     deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
@@ -564,11 +478,8 @@ async def test_shipped_item_carries_id_item_uid_and_provenance_independently(
     # And the display ordinal, which is none of the above.
     assert isinstance(item["id"], int), item
 
-
 @pytest.mark.parametrize("scratch_is_related", [False, True])
-def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
-    tmp_path: Path,
-    scratch_is_related: bool,
+def test_retained_tree_uses_full_delta_identity_but_authorized_patch(tmp_path: Path, scratch_is_related: bool,
 ) -> None:
     """Unrelated/protected bytes invalidate evidence without entering the patch."""
 
@@ -581,21 +492,13 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
     (repo / "scratch.bin").write_bytes(b"\x00user")
     protected = git_ops.snapshot_untracked_paths(repo)
     item = {
-        "id": 1,
-        "item_uid": "item:1",
-        "file": "a.py",
-        "related_files": ["scratch.bin"] if scratch_is_related else [],
+        "id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["scratch.bin"] if scratch_is_related else [],
     }
     footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
     index = git_ops.snapshot_index(repo)
     state = FixCycleState(
-        session_id="s",
-        stable_ref=git_ops.head_sha(repo),
-        stable_head=git_ops.head_sha(repo),
-        initial_index=index,
-        preexisting_untracked=protected,
-        preexisting_gitlinks=(),
-        footprint=footprint,
+        session_id="s", stable_ref=git_ops.head_sha(repo), stable_head=git_ops.head_sha(repo), initial_index=index,
+        preexisting_untracked=protected, preexisting_gitlinks=(), footprint=footprint,
     )
     (repo / "a.py").write_text("A = 2\n")
     first = capture_retained_tree(work_context(repo, run_id="s"), state)
@@ -604,7 +507,6 @@ def test_retained_tree_uses_full_delta_identity_but_authorized_patch(
     assert first.paths == second.paths == frozenset({"a.py"})
     assert b"c.py" not in second.recommended_patch
     assert first.tree_key != second.tree_key
-
 
 def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path) -> None:
     """Commit selection is HEAD-relative even though evidence stays run-relative."""
@@ -621,25 +523,14 @@ def test_retained_tree_includes_preexisting_authorized_head_delta(tmp_path: Path
     # stable rollback snapshot, but it still belongs in the eventual commit.
     (repo / "a.py").write_text("A = 2\n")
     stable_ref = git_ops.stash_create(repo) or head
-    item = {
-        "id": 1,
-        "item_uid": "item:1",
-        "file": "b.py",
-        "related_files": ["a.py"],
-    }
+    item = {"id": 1, "item_uid": "item:1", "file": "b.py", "related_files": ["a.py"]}
     footprint = AuthorizedFixFootprint.build(repo, {"a.py"}, [item])
     state = FixCycleState(
-        session_id="s",
-        stable_ref=stable_ref,
-        stable_head=head,
-        initial_index=git_ops.snapshot_index(repo),
-        preexisting_untracked={},
-        preexisting_gitlinks=(),
-        footprint=footprint,
+        session_id="s", stable_ref=stable_ref, stable_head=head, initial_index=git_ops.snapshot_index(repo),
+        preexisting_untracked={}, preexisting_gitlinks=(), footprint=footprint,
     )
     (repo / "b.py").write_text("B = 2\n")
     work = work_context(repo, run_id="s")
-
     snapshot = capture_retained_tree(work, state)
 
     assert snapshot.paths == frozenset({"a.py", "b.py"})

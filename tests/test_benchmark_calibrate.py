@@ -33,8 +33,7 @@ from daydream.benchmark.harbor.calibrate import (
 
 _FIXTURE = Path(__file__).parents[1] / "daydream" / "benchmark" / "harbor" / "calibration"
 
-REQUIRED_CATEGORIES = {
-    "wording_location", "related_distinct", "negation", "same_class_different_components",
+REQUIRED_CATEGORIES = {"wording_location", "related_distinct", "negation", "same_class_different_components",
     "severity_disagreement", "locationless", "delimiter_injection", "near_miss",
 }
 _CRED = re.compile(r"sk-ant-|sk-or-|Bearer |x-api-key")
@@ -46,14 +45,11 @@ def test_fixture_is_24_pairs_12_12() -> None:
     labels = [p["label"] for p in pairs]
     assert labels.count("match") == 12 and labels.count("nonmatch") == 12
 
-
 def test_fixture_covers_all_eight_categories() -> None:
     pairs = _load_fixture()
     assert {p["category"] for p in pairs} >= REQUIRED_CATEGORIES
 
-
 def test_fixture_is_source_free() -> None:
-
     pairs = calibrate._load_fixture()
     text = json.dumps(pairs, ensure_ascii=False)
     raw_text = (_FIXTURE / "pairs.json").read_text(encoding="utf-8")
@@ -65,8 +61,7 @@ def test_fixture_is_source_free() -> None:
     sr = calibrate._load_judge_template()
     gold = sr._read_json(Path(sr.__file__).with_name("golden-review.json"))
     assert isinstance(gold, list) and gold
-    source_values = {
-        value
+    source_values = {value
         for finding in gold
         for field in ("title", "body", "finding_id")
         if isinstance(finding, dict)
@@ -76,9 +71,7 @@ def test_fixture_is_source_free() -> None:
     assert source_values
     assert all(value not in text for value in source_values)
 
-
 def test_fixture_provenance_declares_unverified_llm_origin() -> None:
-
     pairs = _load_fixture()
     prov = _load_provenance(pairs)
     assert prov["origin"] == "llm_generated"
@@ -89,18 +82,13 @@ def test_fixture_provenance_declares_unverified_llm_origin() -> None:
     assert prov["categories"] == 8
     assert len(pairs) == 24          # the 24 pairs survive the shape change
 
-
 def test_every_pair_renders_within_24kib() -> None:
     sr = _load_judge_template()
     for p in _load_fixture():
-        prompt = sr.render_pair_prompt(
-            p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE
-        )
+        prompt = sr.render_pair_prompt(p["gold"], p["candidate"], template=sr.JUDGE_PROMPT_TEMPLATE)
         assert len(prompt.encode("utf-8")) <= 24 * 1024
 
-
 def test_loader_resolves_sibling_verifier_core() -> None:
-
     sr = calibrate._load_judge_template()
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
@@ -108,12 +96,9 @@ def test_loader_resolves_sibling_verifier_core() -> None:
     # verifier_core` resolves to the canonical host module.
     assert sr.verifier_core is canonical_vc
 
-    verdict = sr.parse_verdict(
-        {"match": True, "confidence": 0.9, "reasoning": "known verifier call"}
-    )
+    verdict = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "known verifier call"})
     assert isinstance(verdict, sr.verifier_core.Verdict)
     assert verdict.match is True and verdict.confidence == 0.9
-
 
 def test_client_builder_threads_http_seam() -> None:
     fake, calls = _scripted_http([{"match": False, "confidence": 0.2, "reasoning": "n"}])
@@ -122,12 +107,10 @@ def test_client_builder_threads_http_seam() -> None:
     assert calls == [1]                      # the fake seam was used, not a real socket
     assert raw == {"match": False, "confidence": 0.2, "reasoning": "n"}
 
-
 def test_client_builder_fails_closed_without_model_or_key() -> None:
     sr = _load_judge_template()
     with pytest.raises(sr.VerifierError):
         _build_calibration_client({"DAYDREAM_JUDGE_MODEL": "m"})  # no API key
-
 
 def test_judge_host_resolved_from_env() -> None:
     assert _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
@@ -141,11 +124,7 @@ def test_judge_host_resolved_from_env() -> None:
     with pytest.raises(ValueError, match="expected anthropic, openai-compatible, or claude-cli"):
         _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "bogus"})
     with pytest.raises(ValueError, match="missing DAYDREAM_JUDGE_BASE_URL"):
-        _judge_host_from_env({
-            "DAYDREAM_JUDGE_PROVIDER": "openai-compatible",
-            "DAYDREAM_JUDGE_API_KEY": "sk-or-key",
-        })
-
+        _judge_host_from_env({"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_API_KEY": "sk-or-key"})
 
 def test_out_of_allowlist_host_rejected(tmp_path: Path, ws_factory: Any) -> None:
     ws = ws_factory(tmp_path)
@@ -155,9 +134,7 @@ def test_out_of_allowlist_host_rejected(tmp_path: Path, ws_factory: Any) -> None
         _validate_workspace_host(allow, "evil.example")
     _validate_workspace_host(allow, "127.0.0.1")  # in-allowlist passes
 
-
 def test_judge_pairs_makes_exactly_72_calls() -> None:
-
     sr = _load_judge_template()
     pairs = _load_fixture()
     fake, calls = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
@@ -175,9 +152,7 @@ def sr() -> Any:
 
 
 def _v(sr: Any, match: Any, conf: Any) -> Any:
-    return sr.verifier_core.Verdict(
-        gold_id="g", candidate_id="c", match=match, confidence=conf, reasoning="x"
-    )
+    return sr.verifier_core.Verdict(gold_id="g", candidate_id="c", match=match, confidence=conf, reasoning="x")
 
 
 def test_majority_and_stability(sr: Any) -> None:
@@ -188,24 +163,19 @@ def test_majority_and_stability(sr: Any) -> None:
     assert _per_pair_stable(flips, sr.verifier_core.CONFIDENCE_THRESHOLD) is False
     assert _per_pair_stable(stable, sr.verifier_core.CONFIDENCE_THRESHOLD) is True
 
-
 def test_balanced_accuracy_and_confusion(sr: Any) -> None:
     assert _class_balanced_accuracy({"tp": 12, "fp": 0, "tn": 12, "fn": 0}) == pytest.approx(1.0)
     assert _class_balanced_accuracy({"tp": 9, "fp": 3, "tn": 12, "fn": 0}) == pytest.approx(0.9)
     assert _confusion_matrix([True, True, False, False],
                              [True, False, True, False]) == {"tp": 1, "fp": 1, "tn": 1, "fn": 1}
 
-
 def test_pass_gate_reports_instability_only(sr: Any) -> None:
     pairs = [{"label": "match"}, {"label": "match"}, {"label": "nonmatch"}]
     runs = [
-        [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)],
-        [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .9)],
+        [_v(sr, True, .9), _v(sr, True, .5), _v(sr, True, .9)], [_v(sr, True, .9), _v(sr, True, .9), _v(sr, True, .9)],
         [_v(sr, False, .2), _v(sr, False, .2), _v(sr, False, .2)],
     ]
-    passed, failures, _, _ = _pass_gate(
-        pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD
-    )
+    passed, failures, _, _ = _pass_gate(pairs, runs, sr.verifier_core.CONFIDENCE_THRESHOLD)
     assert passed is False
     assert list(failures) == ["instability"]
     assert 0 in failures["instability"]
@@ -222,19 +192,14 @@ def test_invalidation_inputs_and_determinism() -> None:
     b = _invalidation_inputs(_env(), pairs, sr)
     assert a == b
 
-
 def test_receipt_written_atomic_0600_and_current(tmp_path: Path) -> None:
     sr, pairs = _load_judge_template(), _load_fixture()
     receipt = _build_receipt(sr, pairs, _env(), passed=True,
-                             balanced_accuracy=0.9583,
-                             confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
+                             balanced_accuracy=0.9583, confusion={"tp": 12, "fp": 0, "tn": 12, "fn": 0},
                              disagreements=[])
     _write_receipt(tmp_path, receipt)
     assert (tmp_path / "runtime" / "calibration-receipt.json").exists()
-    assert stat.S_IMODE(
-        (tmp_path / "runtime" / "calibration-receipt.json").stat().st_mode
-    ) == 0o600
-
+    assert stat.S_IMODE((tmp_path / "runtime" / "calibration-receipt.json").stat().st_mode) == 0o600
 
 def test_receipt_has_no_credentials_or_source() -> None:
     sr, pairs = _load_judge_template(), _load_fixture()
@@ -258,20 +223,14 @@ def ws_factory() -> Any:
         ws = tmp_path / "ws"
         (ws / "runtime").mkdir(parents=True)
         (ws / "benchmark.yaml").write_text(json.dumps({
-            "schema_version": 1,
-            "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
-            "created_at": "2026-08-21T12:00:00Z",
-            "source": {"provider": "github", "hostname": "github.com",
-                        "repository": "OWNER/REPO", "repository_id": None,
-                        "visibility": "unresolved"},
+            "schema_version": 1, "benchmark_id": "6c38dc0a-5f5a-4b73-bf36-9a2eb390f63b",
+            "created_at": "2026-08-21T12:00:00Z", "source": {"provider": "github", "hostname": "github.com",
+                        "repository": "OWNER/REPO", "repository_id": None, "visibility": "unresolved"},
             "privacy": {"classification": "confidential",
-                        "reviewer_data": "source_snapshot",
-                        "reviewer_allowed_hosts": ["review.example"],
+                        "reviewer_data": "source_snapshot", "reviewer_allowed_hosts": ["review.example"],
                         "judge_data": "finding_text_and_location_only",
-                        "judge_allowed_hosts": list(judge_allowed_hosts),
-                        "archive": "disabled", "uploads": "disabled"},
-            "pull_requests": [],
-            "cases": [],
+                        "judge_allowed_hosts": list(judge_allowed_hosts), "archive": "disabled", "uploads": "disabled"},
+            "pull_requests": [], "cases": [],
         }))
         return ws
 
@@ -279,11 +238,8 @@ def ws_factory() -> Any:
 
 
 def test_run_calibration_reports_missing_judge_provider(
-    ws_factory: Any,
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
+    ws_factory: Any, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
     assert run_calibration(ws_factory(tmp_path), yes=True, env={}) == 1
     assert "missing DAYDREAM_JUDGE_PROVIDER" in capsys.readouterr().err
 
@@ -297,8 +253,7 @@ def _scripted_http(responses: Any) -> tuple[Any, ...]:
             v = responses[i[0] % len(responses)]
             i[0] += 1
             body = {"choices": [{"message": {"content": _jsonlib.dumps(v)}}]}
-            return type("R", (), {"status_code": 200, "text": "ok",
-                                  "json": lambda self: body})()
+            return type("R", (), {"status_code": 200, "text": "ok", "json": lambda self: body})()
     return Fake(), i
 
 
@@ -370,18 +325,12 @@ class TestCalibrateAcceptance:
 
     def test_confirmation_refuses_before_any_call(self, tmp_path: Path, ws_factory: Any) -> None:
         fake, counter = _scripted_http([{"match": True, "confidence": 0.9, "reasoning": "x"}])
-        code = run_calibration(
-            ws_factory(tmp_path), yes=False, confirm=lambda _: False, env=_env(), http=fake
-        )
+        code = run_calibration(ws_factory(tmp_path), yes=False, confirm=lambda _: False, env=_env(), http=fake)
         assert code == 1
         assert counter[0] == 0
         assert not (tmp_path / "ws" / "runtime" / "calibration-receipt.json").exists()
 
-    def test_acceptance_instability_failure(
-        self,
-        tmp_path: Path,
-        ws_factory: Any,
-        capsys: pytest.CaptureFixture[str],
+    def test_acceptance_instability_failure(self, tmp_path: Path, ws_factory: Any, capsys: pytest.CaptureFixture[str],
     ) -> None:
         pairs = _load_fixture()
         responses = []
@@ -392,8 +341,7 @@ class TestCalibrateAcceptance:
                               {"match": True, "confidence": 0.9, "reasoning": "x"}]
             else:
                 m = p["label"] == "match"
-                responses += [{"match": m, "confidence": 0.95 if m else 0.1,
-                               "reasoning": "x"} for _ in range(3)]
+                responses += [{"match": m, "confidence": 0.95 if m else 0.1, "reasoning": "x"} for _ in range(3)]
         fake, _ = _scripted_http(responses)
         code = run_calibration(ws_factory(tmp_path), yes=True, env=_env(), http=fake)
         assert code == 1
@@ -415,22 +363,16 @@ def test_calibrate_judge_subparser_and_flags() -> None:
     args = _build_benchmark_parser().parse_args(["calibrate-judge", "/ws", "--yes"])
     assert args.subcommand == "calibrate-judge" and str(args.dir) == "/ws" and args.yes is True
 
-
 def test_calibrate_judge_refuses_without_tty_or_yes(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
     code = cli._handle_benchmark_command(["calibrate-judge", str(tmp_path)])
     assert code == 1
     assert "requires TTY confirmation or --yes" in capsys.readouterr().err
 
-
 def test_calibrate_judge_handler_forwards_yes_and_dir(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     seen: dict[str, Any] = {}
     def fake_run(workspace: Any, *, yes: Any, env: Any, http: Any) -> int:
@@ -442,11 +384,8 @@ def test_calibrate_judge_handler_forwards_yes_and_dir(
     capsys.readouterr()
     assert code == 0 and seen == {"ws": str(tmp_path), "yes": True}
 
-
 def test_calibrate_judge_handler_threads_claude_oauth_token(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     seen: dict[str, Any] = {}
 
@@ -465,11 +404,7 @@ def test_calibrate_judge_handler_threads_claude_oauth_token(
     # Whitelisted but not exported -> None, not an ambient leak via dict(os.environ).
     assert seen["env"]["DAYDREAM_JUDGE_PROVIDER"] is None
 
-
-def test_calibrate_judge_claude_cli_composed_path(
-    tmp_path: Path,
-    ws_factory: Any,
-    monkeypatch: pytest.MonkeyPatch,
+def test_calibrate_judge_claude_cli_composed_path(tmp_path: Path, ws_factory: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Composed real path: handler -> run_calibration -> _build_client -> CLI.
 
@@ -493,12 +428,8 @@ def test_calibrate_judge_claude_cli_composed_path(
     assert (ws / "runtime" / "calibration-receipt.json").exists()
     assert counter[0] == 72          # all 72 judge calls went through the fake runner
 
-
 def test_calibrate_judge_claude_cli_missing_token_fails_closed(
-    tmp_path: Path,
-    ws_factory: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, ws_factory: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """No ambient token: the composed path fails closed before any CLI call.
 

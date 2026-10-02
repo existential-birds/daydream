@@ -61,22 +61,12 @@ from daydream.workspace import WorkContext
 from tests.harness.git_helpers import git as _git
 
 _TRANSITIONS = (
-    "DETACH_STAGED",
-    "DETACH_CANONICAL",
-    "DETACH_REMOVING",
-    "DETACHED",
-    "PUBLISH_STAGED",
-    "PUBLISH_BACKED_UP",
-    "PUBLISH_INSTALLED",
-    "PUBLISH_VERIFIED",
+    "DETACH_STAGED", "DETACH_CANONICAL", "DETACH_REMOVING", "DETACHED", "PUBLISH_STAGED", "PUBLISH_BACKED_UP",
+    "PUBLISH_INSTALLED", "PUBLISH_VERIFIED",
 )
 
 _CLEANUP_TRANSITIONS = (
-    "STAGES_REMOVED",
-    "TICKET_FSYNCED",
-    "TRANSACTION_RENAMED",
-    "JOURNAL_REMOVED",
-    "CLEANUP_DIRECTORY_REMOVED",
+    "STAGES_REMOVED", "TICKET_FSYNCED", "TRANSACTION_RENAMED", "JOURNAL_REMOVED", "CLEANUP_DIRECTORY_REMOVED",
 )
 
 _CUTOFF = "2026-09-06T12:00:00Z"
@@ -123,11 +113,7 @@ def _owner(source: Path, *, locations: PrivateRootLocations | None = None) -> Pr
 
 
 @asynccontextmanager
-async def open_artifact_session(
-    work: WorkContext,
-    *,
-    session_id: str,
-    owner: PrivateWorkspaceOwner | None = None,
+async def open_artifact_session(work: WorkContext, *, session_id: str, owner: PrivateWorkspaceOwner | None = None,
 ) -> AsyncIterator[Any]:
     selected = _owner(work.source) if owner is None else owner
     async with _open_artifact_session(work, session_id=session_id, owner=selected) as session:
@@ -161,10 +147,7 @@ def _read_regular_nofollow(path: Path, expected: os.stat_result) -> bytes:
     fd = os.open(path, flags)
     try:
         opened = os.fstat(fd)
-        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (
-            expected.st_dev,
-            expected.st_ino,
-        ):
+        if not stat.S_ISREG(opened.st_mode) or (opened.st_dev, opened.st_ino) != (expected.st_dev, expected.st_ino,):
             raise RuntimeError("artifact entry changed during no-follow read")
         chunks: list[bytes] = []
         while chunk := os.read(fd, 64 * 1024):
@@ -209,13 +192,9 @@ def _load_manifest(path: Path) -> tuple[_Entry, ...]:
         assert isinstance(raw, dict)
         kind = raw.get("kind")
         assert kind in ("directory", "file")
-        entries.append(
-            _Entry(
-                path=cast(str, raw["path"]),
-                kind=cast(Literal["directory", "file"], kind),
-                mode=cast(int, raw["mode"]),
-                size=cast(int, raw["size"]),
-                sha256=cast(str | None, raw["sha256"]),
+        entries.append(_Entry(
+                path=cast(str, raw["path"]), kind=cast(Literal["directory", "file"], kind), mode=cast(int, raw["mode"]),
+                size=cast(int, raw["size"]), sha256=cast(str | None, raw["sha256"]),
             )
         )
     return tuple(entries)
@@ -246,11 +225,8 @@ def _wait_for_marker(process: subprocess.Popen[str], marker: Path) -> None:
 
 def _spawn_helper(*args: str) -> subprocess.Popen[str]:
     return subprocess.Popen(  # noqa: S603 - this module is the fixed test helper
-        [sys.executable, str(Path(__file__).resolve()), *args],
-        cwd=Path(__file__).resolve().parents[1],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
+        [sys.executable, str(Path(__file__).resolve()), *args], cwd=Path(__file__).resolve().parents[1],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
     )
 
 
@@ -297,13 +273,7 @@ def _production_lock_child(source: Path, runtime: Path, marker: Path) -> None:
     anyio.run(run)
 
 
-def _production_external_child(
-    source: Path,
-    repo: Path,
-    runtime: Path,
-    checkpoint: str,
-    purpose: str,
-    marker: Path,
+def _production_external_child(source: Path, repo: Path, runtime: Path, checkpoint: str, purpose: str, marker: Path,
 ) -> None:
     locations = private_root_locations(base=runtime.parent)
     owner = resolve_private_workspace_owner(source, locations=locations)
@@ -348,9 +318,7 @@ def _production_external_child(
 
                 session._name_exchange = FailAfterMutation()
             session.write_trajectory_document(
-                route,
-                TrajectoryDocumentSnapshot(session_id, requested, _payload(session_id)),
-                "complete",
+                route, TrajectoryDocumentSnapshot(session_id, requested, _payload(session_id)), "complete",
             )
             raise AssertionError(f"external checkpoint was not observed: {checkpoint}:{purpose}")
 
@@ -393,21 +361,13 @@ def _seed_public_artifacts(source: Path) -> tuple[_Entry, ...]:
 
 def _manifest_identity(entries: Any) -> tuple[tuple[str, str, int, int, Any], ...]:
     """Comparable identity of manifest entries regardless of dataclass type."""
-    return tuple(
-        (entry.path, entry.kind, entry.size, entry.mode, entry.sha256) for entry in entries
-    )
+    return tuple((entry.path, entry.kind, entry.size, entry.mode, entry.sha256) for entry in entries)
 
 
 def _work(source: Path, *, repo: Path | None = None, run_id: str = "work") -> WorkContext:
-    return WorkContext(
-        repo=source if repo is None else repo,
-        source=source,
-        base_branch="main",
-        base_sha=_git(source, "rev-parse", "HEAD"),
-        head_branch="main" if repo is None else None,
-        head_sha=_git(source, "rev-parse", "HEAD"),
-        is_ephemeral=repo is not None,
-        run_id=run_id,
+    return WorkContext(repo=source if repo is None else repo, source=source, base_branch="main",
+        base_sha=_git(source, "rev-parse", "HEAD"), head_branch="main" if repo is None else None,
+        head_sha=_git(source, "rev-parse", "HEAD"), is_ephemeral=repo is not None, run_id=run_id,
     )
 
 
@@ -432,35 +392,22 @@ def _external_target(parent: Path, *, prior: bool = True) -> tuple[Path, Path]:
 
 def _payload(session_id: str, trajectory_id: str | None = None, **extra: Any) -> bytes:
     return json.dumps(
-        {
-            "session_id": session_id,
-            "trajectory_id": session_id if trajectory_id is None else trajectory_id,
-            **extra,
-        },
+        {"session_id": session_id, "trajectory_id": session_id if trajectory_id is None else trajectory_id, **extra},
         sort_keys=True,
     ).encode()
 
 
-def _snapshot(
-    session_id: str,
-    documents: tuple[TrajectoryDocumentSnapshot, ...],
-    *,
-    status: str = "complete",
+def _snapshot(session_id: str, documents: tuple[TrajectoryDocumentSnapshot, ...], *, status: str = "complete",
     root_trajectory_id: str | None = None,
 ) -> RunWriteSnapshot:
-    return RunWriteSnapshot(
-        status=cast(Any, status),
-        cutoff_at=_CUTOFF,
-        root_trajectory_id=session_id if root_trajectory_id is None else root_trajectory_id,
-        documents=documents,
+    return RunWriteSnapshot(status=cast(Any, status), cutoff_at=_CUTOFF,
+        root_trajectory_id=session_id if root_trajectory_id is None else root_trajectory_id, documents=documents,
     )
 
 
 def _freeze_run(session: Any, session_id: str, *, payload: bytes | None = None) -> Any:
     """Freeze one root trajectory document written into the session's own run dir."""
-    document = TrajectoryDocumentSnapshot(
-        session_id,
-        session.daydream_dir / "runs" / session_id / "trajectory.json",
+    document = TrajectoryDocumentSnapshot(session_id, session.daydream_dir / "runs" / session_id / "trajectory.json",
         _payload(session_id) if payload is None else payload,
     )
     return session.freeze(_snapshot(session_id, (document,)))
@@ -470,11 +417,7 @@ def _publish(session: Any, frozen: Any, disposition: Any = None) -> None:
     session.finalize_frozen(frozen, disposition=_COMPLETE if disposition is None else disposition)
 
 
-async def _publish_custom_public_trajectory(
-    source: Path,
-    *,
-    session_id: str,
-    status: str = "complete",
+async def _publish_custom_public_trajectory(source: Path, *, session_id: str, status: str = "complete",
 ) -> tuple[Path, Path, bytes]:
     requested = source / ".daydream" / "custom" / "root.json"
     selected = requested if status == "complete" else requested.with_suffix(".json.partial")
@@ -545,10 +488,7 @@ def source(tmp_path: Path) -> Path:
     _init_repo(repo)
     return repo
 
-
-def test_private_root_locations_explicit_base_bypasses_default_provider(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_private_root_locations_explicit_base_bypasses_default_provider(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     base = tmp_path / "explicit-private"
 
@@ -561,34 +501,26 @@ def test_private_root_locations_explicit_base_bypasses_default_provider(
     locations = private_root_locations(base=base)
 
     assert locations == PrivateRootLocations(
-        artifact_runtime=base / "runtime",
-        operational_workspaces=base / "workspaces",
+        artifact_runtime=base / "runtime", operational_workspaces=base / "workspaces",
     )
     assert dict(os.environ) == environment
     assert not locations.artifact_runtime.exists()
     assert not locations.operational_workspaces.exists()
 
-
 @pytest.mark.parametrize("kind", ["relative", "equal", "nested", "symlink"])
-def test_resolve_private_workspace_owner_rejects_unsafe_direct_root_pairs(
-    tmp_path: Path,
-    source: Path,
-    kind: str,
+def test_resolve_private_workspace_owner_rejects_unsafe_direct_root_pairs(tmp_path: Path, source: Path, kind: str,
 ) -> None:
     if kind == "relative":
         locations = PrivateRootLocations(
-            artifact_runtime=Path("relative-runtime"),
-            operational_workspaces=tmp_path / "operations",
+            artifact_runtime=Path("relative-runtime"), operational_workspaces=tmp_path / "operations",
         )
     elif kind == "equal":
         locations = PrivateRootLocations(
-            artifact_runtime=tmp_path / "private",
-            operational_workspaces=tmp_path / "private",
+            artifact_runtime=tmp_path / "private", operational_workspaces=tmp_path / "private",
         )
     elif kind == "nested":
         locations = PrivateRootLocations(
-            artifact_runtime=tmp_path / "private",
-            operational_workspaces=tmp_path / "private" / "operations",
+            artifact_runtime=tmp_path / "private", operational_workspaces=tmp_path / "private" / "operations",
         )
     else:
         actual = tmp_path / "actual"
@@ -600,10 +532,7 @@ def test_resolve_private_workspace_owner_rejects_unsafe_direct_root_pairs(
     with pytest.raises(ArtifactVisibilityError, match="absolute lexical|overlap|symlink"):
         resolve_private_workspace_owner(source, locations=locations)
 
-
-def test_private_workspace_owner_creates_byte_identical_peers_and_operational_root(
-    tmp_path: Path,
-    source: Path,
+def test_private_workspace_owner_creates_byte_identical_peers_and_operational_root(tmp_path: Path, source: Path,
 ) -> None:
     locations = private_root_locations(base=tmp_path / "private")
     before_worktrees = _git(source, "worktree", "list", "--porcelain")
@@ -615,12 +544,8 @@ def test_private_workspace_owner_creates_byte_identical_peers_and_operational_ro
     assert owner.operational_state_root == locations.operational_workspaces / owner.workspace_key
     assert operational == owner.operational_state_root / "operational"
     assert _git(source, "worktree", "list", "--porcelain") == before_worktrees
-    for directory in (
-        locations.artifact_runtime,
-        locations.operational_workspaces,
-        owner.artifact_state_root,
-        owner.operational_state_root,
-        operational,
+    for directory in (locations.artifact_runtime, locations.operational_workspaces, owner.artifact_state_root,
+        owner.operational_state_root, operational,
     ):
         assert stat.S_IMODE(directory.lstat().st_mode) == 0o700
     artifact_owner = owner.artifact_state_root / "owner.json"
@@ -629,17 +554,12 @@ def test_private_workspace_owner_creates_byte_identical_peers_and_operational_ro
     assert stat.S_IMODE(artifact_owner.lstat().st_mode) == 0o600
     assert stat.S_IMODE(operational_owner.lstat().st_mode) == 0o600
     assert _load_json(artifact_owner) == {
-        "git_common_dir": str(_git_common_dir(source)),
-        "schema_version": 1,
-        "source": str(source.resolve(strict=True)),
+        "git_common_dir": str(_git_common_dir(source)), "schema_version": 1, "source": str(source.resolve(strict=True)),
         "workspace_key": _workspace_key(source),
     }
     validate_private_workspace_owner(owner, source=source, repo=source)
 
-
-def test_private_workspace_owner_conflicting_peer_prevents_missing_peer_creation(
-    tmp_path: Path,
-    source: Path,
+def test_private_workspace_owner_conflicting_peer_prevents_missing_peer_creation(tmp_path: Path, source: Path,
 ) -> None:
     locations = private_root_locations(base=tmp_path / "private")
     key = _workspace_key(source)
@@ -647,12 +567,8 @@ def test_private_workspace_owner_conflicting_peer_prevents_missing_peer_creation
     conflicting_state.mkdir(parents=True, mode=0o700)
     os.chmod(locations.operational_workspaces, 0o700)
     os.chmod(conflicting_state, 0o700)
-    _atomic_json(
-        conflicting_state / "owner.json",
-        {
-            "schema_version": 1,
-            "workspace_key": key,
-            "source": "different-source",
+    _atomic_json(conflicting_state / "owner.json",
+        {"schema_version": 1, "workspace_key": key, "source": "different-source",
             "git_common_dir": str(_git_common_dir(source)),
         },
     )
@@ -661,7 +577,6 @@ def test_private_workspace_owner_conflicting_peer_prevents_missing_peer_creation
         resolve_private_workspace_owner(source, locations=locations)
 
     assert not (locations.artifact_runtime / key).exists()
-
 
 async def test_artifact_session_revalidates_supplied_owner_before_mutation(tmp_path: Path) -> None:
     first = tmp_path / "first"
@@ -679,23 +594,17 @@ async def test_artifact_session_revalidates_supplied_owner_before_mutation(tmp_p
     assert not (second / ".review-output.md").exists()
     assert not (owner.artifact_state_root / "runs").exists()
 
-
-def test_validate_private_workspace_owner_rejects_direct_dataclass_path_tampering(
-    tmp_path: Path,
-    source: Path,
+def test_validate_private_workspace_owner_rejects_direct_dataclass_path_tampering(tmp_path: Path, source: Path,
 ) -> None:
     owner = _owner(source, locations=private_root_locations(base=tmp_path / "private"))
     tampered = PrivateWorkspaceOwner(
-        source=owner.source,
-        git_common_dir=owner.git_common_dir,
-        workspace_key=owner.workspace_key,
+        source=owner.source, git_common_dir=owner.git_common_dir, workspace_key=owner.workspace_key,
         artifact_state_root=owner.artifact_state_root.parent / "different-key",
         operational_state_root=owner.operational_state_root,
     )
 
     with pytest.raises(ArtifactVisibilityError, match="path mismatch|accessible|real directory"):
         validate_private_workspace_owner(tampered, source=source)
-
 
 def test_derive_workspace_identity_rejects_repo_with_different_git_common_dir(tmp_path: Path, source: Path) -> None:
     unrelated = tmp_path / "unrelated"
@@ -705,10 +614,7 @@ def test_derive_workspace_identity_rejects_repo_with_different_git_common_dir(tm
     with pytest.raises(ArtifactVisibilityError, match="share the source Git identity"):
         derive_workspace_identity(_work(source, repo=unrelated), owner=owner)
 
-
-async def test_artifact_session_detaches_routes_and_restores_public_bytes(
-    source: Path,
-    artifact_runtime_root: Path,
+async def test_artifact_session_detaches_routes_and_restores_public_bytes(source: Path, artifact_runtime_root: Path,
 ) -> None:
     expected = _seed_public_artifacts(source)
     work = _work(source)
@@ -726,7 +632,6 @@ async def test_artifact_session_detaches_routes_and_restores_public_bytes(
 
     assert _manifest(source) == expected
     assert artifact_dir_for(work.repo, allow_standalone=True) == source / ".daydream"
-
 
 async def test_artifact_session_preserves_resume_mtimes_across_publication_and_reopen(source: Path) -> None:
 
@@ -771,7 +676,6 @@ async def test_artifact_session_preserves_resume_mtimes_across_publication_and_r
         assert (live_deep / "alternatives.json").stat().st_mtime_ns == prerequisite_mtime_ns
         check_deep_artifacts("per-stack", live_deep, current_diff_sha=current_diff_sha)
 
-
 async def test_artifact_session_uses_stable_source_key_across_ephemeral_repos(tmp_path: Path, source: Path) -> None:
     expected = _seed_public_artifacts(source)
     first, second = _worktrees(source, "ephemeral-one", "ephemeral-two")
@@ -786,10 +690,7 @@ async def test_artifact_session_uses_stable_source_key_across_ephemeral_repos(tm
 
     assert _manifest(source) == expected
 
-
-async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_repo(
-    tmp_path: Path,
-    source: Path,
+async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_repo(tmp_path: Path, source: Path,
 ) -> None:
     work = _work(source)
     observed: list[Path] = []
@@ -816,7 +717,6 @@ async def test_bound_routing_propagates_to_tasks_and_rejects_wrong_or_aliased_re
     assert artifact_session_active() is False
     assert artifact_dir_for(work.repo, allow_standalone=True) == source / ".daydream"
 
-
 @pytest.mark.parametrize("exit_kind", ["error", "cancel"])
 async def test_artifact_session_resets_binding_after_error_or_cancellation(source: Path, exit_kind: str) -> None:
     work = _work(source)
@@ -833,10 +733,8 @@ async def test_artifact_session_resets_binding_after_error_or_cancellation(sourc
 
     assert artifact_dir_for(work.repo, allow_standalone=True) == source / ".daydream"
 
-
 async def test_artifact_session_open_and_recovery_run_off_async_owner_thread(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Blocking Git/copy/fsync lifecycle work is awaited outside the event loop."""
     owner_thread = threading.get_ident()
@@ -863,7 +761,6 @@ async def test_artifact_session_open_and_recovery_run_off_async_owner_thread(
     assert restore_threads and all(thread != owner_thread for thread in restore_threads)
     assert artifact_dir_for(source, allow_standalone=True) == source / ".daydream"
 
-
 @pytest.mark.parametrize("tracked", [".daydream/tracked.txt", ".review-output.md"])
 async def test_artifact_session_rejects_tracked_public_collision_untouched(source: Path, tracked: str) -> None:
     target = source / tracked
@@ -878,7 +775,6 @@ async def test_artifact_session_rejects_tracked_public_collision_untouched(sourc
 
     assert target.read_bytes() == b"tracked collision"
 
-
 async def test_artifact_session_rejects_unknown_legacy_tree(source: Path) -> None:
     unknown = source / ".daydream" / "extension-only" / "opaque.bin"
     unknown.parent.mkdir(parents=True)
@@ -887,7 +783,6 @@ async def test_artifact_session_rejects_unknown_legacy_tree(source: Path) -> Non
         async with open_artifact_session(_work(source), session_id="unknown"):
             pass
     assert unknown.read_bytes() == b"extension"
-
 
 async def test_artifact_session_rejects_recognized_legacy_anchor_with_unknown_sibling(source: Path) -> None:
     daydream = source / ".daydream"
@@ -903,19 +798,12 @@ async def test_artifact_session_rejects_recognized_legacy_anchor_with_unknown_si
     assert (daydream / "runs").is_dir()
     assert unknown.read_bytes() == b"extension"
 
-
-@pytest.mark.parametrize(
-    ("anchor", "kind"),
-    [
-        pytest.param("improve", "directory", id="improve"),
-        pytest.param("intents", "directory", id="intents"),
-        pytest.param("recommended.patch", "file", id="patch"),
-        pytest.param(".DS_Store", "file", id="ds-store"),
+@pytest.mark.parametrize(("anchor", "kind"),
+    [pytest.param("improve", "directory", id="improve"), pytest.param("intents", "directory", id="intents"),
+        pytest.param("recommended.patch", "file", id="patch"), pytest.param(".DS_Store", "file", id="ds-store"),
     ],
 )
-async def test_artifact_session_accepts_registered_legacy_anchor_format(
-    source: Path, anchor: str, kind: str,
-) -> None:
+async def test_artifact_session_accepts_registered_legacy_anchor_format(source: Path, anchor: str, kind: str,) -> None:
     target = source / ".daydream" / anchor
     target.parent.mkdir()
     if kind == "directory":
@@ -929,11 +817,8 @@ async def test_artifact_session_accepts_registered_legacy_anchor_format(
 
     assert target.is_dir() if kind == "directory" else target.read_bytes() == b"diff bytes\n"
 
-
-@pytest.mark.parametrize(
-    ("anchor", "make_wrong_type"),
-    [
-        pytest.param("improve", lambda path: path.write_bytes(b"not a directory"), id="improve-file"),
+@pytest.mark.parametrize(("anchor", "make_wrong_type"),
+    [pytest.param("improve", lambda path: path.write_bytes(b"not a directory"), id="improve-file"),
         pytest.param("intents", lambda path: path.write_bytes(b"not a directory"), id="intents-file"),
         pytest.param("recommended.patch", lambda path: path.mkdir(), id="patch-directory"),
         pytest.param(".DS_Store", lambda path: path.mkdir(), id="ds-store-directory"),
@@ -952,19 +837,13 @@ async def test_artifact_session_rejects_registered_legacy_anchor_with_wrong_type
 
     assert target.exists()
 
-
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
-        pytest.param("unknown-sibling", "unregistered artifact anchor", id="unknown-sibling"),
+@pytest.mark.parametrize(("mutation", "message"),
+    [pytest.param("unknown-sibling", "unregistered artifact anchor", id="unknown-sibling"),
         pytest.param("static-kind", "legacy artifact anchor has the wrong filesystem type", id="static-kind"),
     ],
 )
 async def test_legacy_validation_classifies_the_exact_manifested_tree(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
-    message: str,
+    source: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, message: str,
 ) -> None:
     daydream = source / ".daydream"
     anchor = daydream / ("runs" if mutation == "unknown-sibling" else "improve")
@@ -972,12 +851,7 @@ async def test_legacy_validation_classifies_the_exact_manifested_tree(
     original_manifest = artifact_visibility._manifest
     mutated = False
 
-    def mutate_before_manifest(
-        root: Path,
-        names: Any = None,
-        *,
-        digest: bool = True,
-    ) -> Any:
+    def mutate_before_manifest(root: Path, names: Any = None, *, digest: bool = True,) -> Any:
         nonlocal mutated
         if root == source and names == (".daydream", ".review-output.md") and not mutated:
             mutated = True
@@ -997,18 +871,12 @@ async def test_legacy_validation_classifies_the_exact_manifested_tree(
 
     assert mutated is True
 
-
-async def test_artifact_session_rebaselines_public_deletion_at_open(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_rebaselines_public_deletion_at_open(tmp_path: Path,) -> None:
     """F2 brick: a benign between-run public deletion is adopted, not fatal.
 
-    A first run publishes artifacts (canonical seeded). The operator then
-    deletes ``.review-output.md`` between runs. The next session open must
-    adopt the observed public state into the canonical recovery copy (with a
-    warning) instead of failing with "public artifacts do not match canonical
-    recovery state".
-    """
+    A first run publishes artifacts (canonical seeded). The operator then deletes ``.review-output.md`` between
+    runs. The next session open must adopt the observed public state into the canonical recovery copy (with a
+    warning) instead of failing with "public artifacts do not match canonical recovery state"."""
     source = tmp_path / "source"
     _init_repo(source)
     seeded = _seed_public_artifacts(source)
@@ -1031,25 +899,17 @@ async def test_artifact_session_rebaselines_public_deletion_at_open(
         entries = _load_manifest(state_root / "canonical-manifest.json")
         assert _manifest_identity(_pv_manifest(canonical)) == _manifest_identity(entries)
         assert all(entry.path != ".review-output.md" for entry in entries)
-        assert (canonical / ".daydream" / "deep" / "prior.md").read_bytes() == (
-            b"prior reasoning\n"
-        )
+        assert (canonical / ".daydream" / "deep" / "prior.md").read_bytes() == (b"prior reasoning\n")
         # The live private tree still carries the adopted baseline.
-        assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == (
-            b"prior reasoning\n"
-        )
+        assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == (b"prior reasoning\n")
     # On close the adopted baseline is restored to the public tree.
     restored = _load_manifest(state_root / "canonical-manifest.json")
-    assert _manifest_identity(_pv_manifest(source, (".daydream", ".review-output.md"))) == (
-        _manifest_identity(restored)
+    assert _manifest_identity(_pv_manifest(source, (".daydream", ".review-output.md"))) == (_manifest_identity(restored)
     )
     assert (source / ".review-output.md").exists() is False
     assert seeded[0].path  # seeded manifest shape unchanged, sanity
 
-
-async def test_artifact_session_rebaselines_git_clean_between_runs(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_rebaselines_git_clean_between_runs(tmp_path: Path,) -> None:
     """``git clean -fdx`` style full public wipe is adopted as the new baseline."""
     source = tmp_path / "source"
     _init_repo(source)
@@ -1068,10 +928,7 @@ async def test_artifact_session_rebaselines_git_clean_between_runs(
         assert not (source / ".daydream").exists()
         assert session.layout.daydream_dir == session.layout.live_root / ".daydream"
 
-
-async def test_artifact_session_rebaselines_stray_public_addition(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_rebaselines_stray_public_addition(tmp_path: Path,) -> None:
     """A stray external write into the public tree is adopted at session open."""
     source = tmp_path / "source"
     _init_repo(source)
@@ -1087,22 +944,14 @@ async def test_artifact_session_rebaselines_stray_public_addition(
         assert _manifest_identity(_pv_manifest(state_root / "canonical")) == _manifest_identity(entries)
         stray_entry = next(entry for entry in entries if entry.path.endswith("operator-notes.txt"))
         assert stray_entry.kind == "file"
-        assert (session.daydream_dir / "deep" / "operator-notes.txt").read_bytes() == (
-            b"stray external bytes\n"
-        )
+        assert (session.daydream_dir / "deep" / "operator-notes.txt").read_bytes() == (b"stray external bytes\n")
     # On close the adopted baseline (with the stray file) is restored publicly.
     restored = _load_manifest(state_root / "canonical-manifest.json")
-    assert _manifest_identity(_pv_manifest(source, (".daydream", ".review-output.md"))) == (
-        _manifest_identity(restored)
+    assert _manifest_identity(_pv_manifest(source, (".daydream", ".review-output.md"))) == (_manifest_identity(restored)
     )
-    assert (source / ".daydream" / "deep" / "operator-notes.txt").read_bytes() == (
-        b"stray external bytes\n"
-    )
+    assert (source / ".daydream" / "deep" / "operator-notes.txt").read_bytes() == (b"stray external bytes\n")
 
-
-async def test_artifact_session_open_still_fails_closed_on_nonregular_public_node(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_open_still_fails_closed_on_nonregular_public_node(tmp_path: Path,) -> None:
     """Re-baselining adopts benign drift only; unsafe nodes still fail closed."""
     source = tmp_path / "source"
     _init_repo(source)
@@ -1120,16 +969,11 @@ async def test_artifact_session_open_still_fails_closed_on_nonregular_public_nod
             pass
     assert (outside / "canary").read_bytes() == b"outside"
 
-
-async def test_artifact_session_succeeds_with_only_empty_operational_root(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_succeeds_with_only_empty_operational_root(tmp_path: Path,) -> None:
     """F1 cross-check: an EMPTY operational root is not an anchor blocker.
 
-    A wedged checkout can hold ``.daydream/worktrees`` (empty residue) with no
-    other anchor; session open must succeed rather than raising "legacy
-    .daydream tree has no recognized artifact anchor".
-    """
+    A wedged checkout can hold ``.daydream/worktrees`` (empty residue) with no other anchor; session open must
+    succeed rather than raising "legacy .daydream tree has no recognized artifact anchor"."""
     source = tmp_path / "source"
     _init_repo(source)
     (source / ".daydream" / "worktrees").mkdir(parents=True)
@@ -1140,16 +984,9 @@ async def test_artifact_session_succeeds_with_only_empty_operational_root(
     # On close the empty root is restored alongside the rest of the baseline.
     assert (source / ".daydream" / "worktrees").is_dir()
 
-
-@pytest.mark.parametrize(
-    "node_kind",
-    ["root-symlink", "directory-symlink", "leaf-symlink", "fifo", "socket"],
-)
+@pytest.mark.parametrize("node_kind", ["root-symlink", "directory-symlink", "leaf-symlink", "fifo", "socket"],)
 async def test_artifact_session_rejects_nonregular_public_nodes_without_following(
-    tmp_path: Path,
-    source: Path,
-    node_kind: str,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, node_kind: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1173,10 +1010,7 @@ async def test_artifact_session_rejects_nonregular_public_nodes_without_followin
             listener.bind(".daydream/runs/node")
 
     try:
-        with pytest.raises(
-            ArtifactVisibilityError,
-            match="regular files and directories|wrong filesystem type",
-        ):
+        with pytest.raises(ArtifactVisibilityError, match="regular files and directories|wrong filesystem type",):
             async with open_artifact_session(_work(source), session_id=node_kind):
                 pass
         assert (outside / "canary").read_bytes() == b"outside"
@@ -1185,20 +1019,15 @@ async def test_artifact_session_rejects_nonregular_public_nodes_without_followin
             assert listener is not None
             listener.close()
 
-
 @pytest.mark.parametrize("peer", ["artifact", "operational"])
-async def test_artifact_session_rejects_owner_mismatch_and_runtime_overlap(
-    tmp_path: Path,
-    source: Path,
-    peer: str,
+async def test_artifact_session_rejects_owner_mismatch_and_runtime_overlap(tmp_path: Path, source: Path, peer: str,
 ) -> None:
     work = _work(source)
     locations = private_root_locations(base=tmp_path / "private-explicit")
     owner_identity = _owner(source, locations=locations)
     async with open_artifact_session(work, session_id="owner", owner=owner_identity) as session:
         state_root = session.layout.state_root
-    owner_path = (
-        owner_identity.artifact_state_root
+    owner_path = (owner_identity.artifact_state_root
         if peer == "artifact"
         else owner_identity.operational_state_root
     ) / "owner.json"
@@ -1211,16 +1040,12 @@ async def test_artifact_session_rejects_owner_mismatch_and_runtime_overlap(
     assert state_root.exists()
 
     overlapping = PrivateRootLocations(
-        artifact_runtime=source / "nested-runtime",
-        operational_workspaces=tmp_path / "operations",
+        artifact_runtime=source / "nested-runtime", operational_workspaces=tmp_path / "operations",
     )
     with pytest.raises(ArtifactVisibilityError, match="overlap"):
         resolve_private_workspace_owner(source, locations=overlapping)
 
-
-def test_private_workspace_owner_completes_one_missing_peer_after_interrupted_creation(
-    tmp_path: Path,
-    source: Path,
+def test_private_workspace_owner_completes_one_missing_peer_after_interrupted_creation(tmp_path: Path, source: Path,
 ) -> None:
     locations = private_root_locations(base=tmp_path / "private")
     key = _workspace_key(source)
@@ -1228,10 +1053,7 @@ def test_private_workspace_owner_completes_one_missing_peer_after_interrupted_cr
     artifact_state.mkdir(parents=True, mode=0o700)
     os.chmod(locations.artifact_runtime, 0o700)
     os.chmod(artifact_state, 0o700)
-    expected = {
-        "schema_version": 1,
-        "workspace_key": key,
-        "source": str(source.resolve(strict=True)),
+    expected = {"schema_version": 1, "workspace_key": key, "source": str(source.resolve(strict=True)),
         "git_common_dir": str(_git_common_dir(source)),
     }
     _atomic_json(artifact_state / "owner.json", expected)
@@ -1240,7 +1062,6 @@ def test_private_workspace_owner_completes_one_missing_peer_after_interrupted_cr
 
     assert owner.artifact_state_root == artifact_state
     assert (owner.operational_state_root / "owner.json").read_bytes() == (artifact_state / "owner.json").read_bytes()
-
 
 def test_derive_workspace_identity_rejects_model_repo_inside_artifact_runtime(tmp_path: Path, source: Path) -> None:
     locations = private_root_locations(base=tmp_path / "private")
@@ -1251,7 +1072,6 @@ def test_derive_workspace_identity_rejects_model_repo_inside_artifact_runtime(tm
     with pytest.raises(ArtifactVisibilityError, match="runtime and repository overlap"):
         derive_workspace_identity(_work(source, repo=model_repo), owner=owner)
 
-
 def test_private_workspace_owner_rejects_root_overlapping_external_git_common_dir(tmp_path: Path) -> None:
     primary = tmp_path / "primary"
     source = tmp_path / "linked-source"
@@ -1259,8 +1079,7 @@ def test_private_workspace_owner_rejects_root_overlapping_external_git_common_di
     _git(primary, "worktree", "add", "--detach", str(source), "HEAD")
     common_dir = _git_common_dir(source)
     locations = PrivateRootLocations(
-        artifact_runtime=common_dir / "private-runtime",
-        operational_workspaces=tmp_path / "operations",
+        artifact_runtime=common_dir / "private-runtime", operational_workspaces=tmp_path / "operations",
     )
 
     with pytest.raises(ArtifactVisibilityError, match="overlaps source Git ownership"):
@@ -1268,20 +1087,14 @@ def test_private_workspace_owner_rejects_root_overlapping_external_git_common_di
 
     assert not locations.artifact_runtime.exists()
 
-
 @pytest.mark.parametrize("target", ["artifact-root", "operational-owner"])
 def test_validate_private_workspace_owner_rejects_unsafe_private_modes(source: Path, target: str) -> None:
     owner = _owner(source)
-    changed = (
-        owner.artifact_state_root
-        if target == "artifact-root"
-        else owner.operational_state_root / "owner.json"
-    )
+    changed = (owner.artifact_state_root if target == "artifact-root" else owner.operational_state_root / "owner.json")
     changed.chmod(0o755 if target == "artifact-root" else 0o644)
 
     with pytest.raises(ArtifactVisibilityError, match="0700|0600"):
         validate_private_workspace_owner(owner, source=source)
-
 
 async def test_artifact_session_registers_destinations_and_rejects_aliases(tmp_path: Path, source: Path) -> None:
     work = _work(source)
@@ -1299,10 +1112,7 @@ async def test_artifact_session_registers_destinations_and_rejects_aliases(tmp_p
         with pytest.raises(ArtifactVisibilityError, match="destination overlap"):
             session.register_destination(source / "findings.json" / "child", label=OutputLabel.DUMP_DIRECTORY)
 
-
-async def test_artifact_session_freezes_snapshot_bytes_not_document_path_and_publishes(
-    tmp_path: Path,
-    source: Path,
+async def test_artifact_session_freezes_snapshot_bytes_not_document_path_and_publishes(tmp_path: Path, source: Path,
 ) -> None:
     work = _work(source)
     session_id = "snapshot-session"
@@ -1320,7 +1130,6 @@ async def test_artifact_session_freezes_snapshot_bytes_not_document_path_and_pub
 
     assert (source / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
 
-
 @pytest.mark.parametrize("problem", ["wrong-root", "wrong-session", "duplicate-path"])
 async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path, problem: str) -> None:
     work = _work(source)
@@ -1329,41 +1138,28 @@ async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path
     async with open_artifact_session(work, session_id=session_id) as session:
         path = session.daydream_dir / "runs" / session_id / "trajectory.json"
         document = TrajectoryDocumentSnapshot(trajectory_id, path, _payload(trajectory_id))
-        snapshot = _snapshot(
-            session_id,
-            (document, document) if problem == "duplicate-path" else (document,),
+        snapshot = _snapshot(session_id, (document, document) if problem == "duplicate-path" else (document,),
             root_trajectory_id="other" if problem == "wrong-root" else session_id,
         )
         with pytest.raises(ArtifactVisibilityError, match="snapshot"):
             session.freeze(snapshot)
 
-
 @pytest.mark.parametrize("transition", _TRANSITIONS)
 async def test_artifact_session_recovers_real_process_death_at_every_transition(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
-    transition: str,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path, transition: str,
 ) -> None:
     expected = _seed_public_artifacts(source)
     (source / "explicit-output.txt").write_bytes(b"prior explicit bytes")
     first_repo, second_repo = _worktrees(source, "ephemeral-one", "ephemeral-two")
     marker = tmp_path / f"production-{transition}"
     with _child_at_marker(
-        marker,
-        "production-transaction",
-        str(source),
-        str(first_repo),
-        str(artifact_runtime_root),
-        transition,
+        marker, "production-transaction", str(source), str(first_repo), str(artifact_runtime_root), transition,
         str(marker),
     ):
         pass
 
     has_published_run = transition in {"PUBLISH_INSTALLED", "PUBLISH_VERIFIED"}
-    async with open_artifact_session(
-        _work(source, repo=second_repo),
-        session_id=f"recovery-{transition.lower()}",
+    async with open_artifact_session(_work(source, repo=second_repo), session_id=f"recovery-{transition.lower()}",
     ) as recovered:
         prior = recovered.daydream_dir / "deep" / "prior.md"
         published = recovered.daydream_dir / "runs" / "production-crash" / "trajectory.json"
@@ -1385,20 +1181,14 @@ async def test_artifact_session_recovers_real_process_death_at_every_transition(
     assert not any((source / ".daydream" / "deep" / "empty-directory").iterdir())
     assert stat.S_IMODE((source / ".daydream" / "deep" / "prior.md").stat().st_mode) == 0o640
     assert stat.S_IMODE((source / ".daydream" / "runs" / "opaque.bin").stat().st_mode) == 0o600
-    assert stat.S_IMODE(
-        (source / ".daydream" / "deep" / "empty-directory").stat().st_mode
-    ) == 0o711
+    assert stat.S_IMODE((source / ".daydream" / "deep" / "empty-directory").stat().st_mode) == 0o711
     assert stat.S_IMODE((source / ".review-output.md").stat().st_mode) == 0o644
     state_root = artifact_runtime_root / _workspace_key(source)
     assert not any((state_root / "transactions").iterdir())
 
-
 @pytest.mark.parametrize("transition", _CLEANUP_TRANSITIONS)
 async def test_artifact_session_recovers_real_process_death_during_cleanup(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
-    transition: str,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path, transition: str,
 ) -> None:
     _seed_public_artifacts(source)
     (source / "explicit-output.txt").write_bytes(b"prior explicit bytes")
@@ -1410,19 +1200,13 @@ async def test_artifact_session_recovers_real_process_death_during_cleanup(
     runtime_canary.write_bytes(b"runtime sibling")
     marker = tmp_path / f"production-cleanup-{transition}"
     with _child_at_marker(
-        marker,
-        "production-transaction",
-        str(source),
-        str(first_repo),
-        str(artifact_runtime_root),
-        transition,
+        marker, "production-transaction", str(source), str(first_repo), str(artifact_runtime_root), transition,
         str(marker),
     ):
         pass
 
     async with open_artifact_session(
-        _work(source, repo=second_repo),
-        session_id=f"cleanup-recovery-{transition.lower()}",
+        _work(source, repo=second_repo), session_id=f"cleanup-recovery-{transition.lower()}",
     ) as recovered:
         assert (recovered.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
@@ -1433,11 +1217,8 @@ async def test_artifact_session_recovers_real_process_death_during_cleanup(
     assert source_canary.read_bytes() == b"source sibling"
     assert runtime_canary.read_bytes() == b"runtime sibling"
 
-
 async def test_artifact_session_lock_rejects_live_process_and_recovers_after_death(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path,
 ) -> None:
     _seed_public_artifacts(source)
     marker = tmp_path / "production-lock"
@@ -1449,23 +1230,15 @@ async def test_artifact_session_lock_rejects_live_process_and_recovers_after_dea
     async with open_artifact_session(_work(source), session_id="after-death") as session:
         assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
-
 async def test_artifact_session_recovers_staged_detach_with_existing_canonical(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path,
 ) -> None:
     _seed_public_artifacts(source)
     async with open_artifact_session(_work(source), session_id="prime-canonical"):
         pass
     marker = tmp_path / "staged-with-canonical"
     with _child_at_marker(
-        marker,
-        "production-transaction",
-        str(source),
-        str(source),
-        str(artifact_runtime_root),
-        "DETACH_STAGED",
+        marker, "production-transaction", str(source), str(source), str(artifact_runtime_root), "DETACH_STAGED",
         str(marker),
     ):
         pass
@@ -1473,22 +1246,14 @@ async def test_artifact_session_recovers_staged_detach_with_existing_canonical(
     async with open_artifact_session(_work(source), session_id="recover-existing") as session:
         assert (session.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
-
 async def test_artifact_session_recovers_registered_explicit_baseline_after_death(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path,
 ) -> None:
     requested = source / "explicit-output.txt"
     requested.write_bytes(b"prior explicit bytes")
     marker = tmp_path / "explicit-registered"
     with _child_at_marker(
-        marker,
-        "production-transaction",
-        str(source),
-        str(source),
-        str(artifact_runtime_root),
-        "EXPLICIT_REGISTERED",
+        marker, "production-transaction", str(source), str(source), str(artifact_runtime_root), "EXPLICIT_REGISTERED",
         str(marker),
     ):
         assert not requested.exists()
@@ -1497,10 +1262,8 @@ async def test_artifact_session_recovers_registered_explicit_baseline_after_deat
         assert requested.read_bytes() == b"prior explicit bytes"
     assert requested.read_bytes() == b"prior explicit bytes"
 
-
 async def test_artifact_session_rejects_existing_session_and_malformed_transaction(
-    source: Path,
-    artifact_runtime_root: Path,
+    source: Path, artifact_runtime_root: Path,
 ) -> None:
     async with open_artifact_session(_work(source), session_id="fixed-session"):
         pass
@@ -1516,23 +1279,12 @@ async def test_artifact_session_rejects_existing_session_and_malformed_transacti
         async with open_artifact_session(_work(source), session_id="after-malformed"):
             pass
 
-
-@pytest.mark.parametrize(
-    "manifest_problem",
-    [
-        "unsafe-path",
-        "duplicate-path",
-        "dot",
-        "leading-dot",
-        "embedded-dot",
-        "empty-component",
-        "normalized-duplicate",
-        "bool-schema-version",
+@pytest.mark.parametrize("manifest_problem",
+    ["unsafe-path", "duplicate-path", "dot", "leading-dot", "embedded-dot", "empty-component",
+        "normalized-duplicate", "bool-schema-version",
     ],
 )
-async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
-    source: Path,
-    manifest_problem: str,
+async def test_artifact_session_rejects_closed_recovery_manifest_untouched(source: Path, manifest_problem: str,
 ) -> None:
     _seed_public_artifacts(source)
     state_root = _owner(source).artifact_state_root
@@ -1541,15 +1293,9 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
     stage.mkdir(parents=True)
     stage_canary = stage / "canary"
     stage_canary.write_bytes(b"stage must remain unchanged")
-    raw_path = {
-        "unsafe-path": "../escape",
-        "duplicate-path": ".daydream",
-        "dot": ".",
-        "leading-dot": "./runs",
-        "embedded-dot": "runs/./record.json",
-        "empty-component": "runs//record.json",
-        "normalized-duplicate": "runs/record.json",
-        "bool-schema-version": "runs/record.json",
+    raw_path = {"unsafe-path": "../escape", "duplicate-path": ".daydream", "dot": ".", "leading-dot": "./runs",
+        "embedded-dot": "runs/./record.json", "empty-component": "runs//record.json",
+        "normalized-duplicate": "runs/record.json", "bool-schema-version": "runs/record.json",
     }[manifest_problem]
     entry = {"path": raw_path, "kind": "directory", "size": 0, "mode": 0o700, "sha256": None}
     if manifest_problem == "duplicate-path":
@@ -1560,14 +1306,8 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
         entries = [entry]
     schema_version = True if manifest_problem == "bool-schema-version" else 1
     _atomic_json(transaction / "manifest.json", {"schema_version": schema_version, "entries": entries})
-    _atomic_json(
-        transaction / "journal.json",
-        {
-            "schema_version": 1,
-            "transaction_id": "malicious",
-            "session_id": "prior",
-            "state": "DETACH_STAGED",
-        },
+    _atomic_json(transaction / "journal.json",
+        {"schema_version": 1, "transaction_id": "malicious", "session_id": "prior", "state": "DETACH_STAGED"},
     )
 
     with pytest.raises(ArtifactVisibilityError, match="manifest"):
@@ -1575,7 +1315,6 @@ async def test_artifact_session_rejects_closed_recovery_manifest_untouched(
             pass
     assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
     assert stage_canary.read_bytes() == b"stage must remain unchanged"
-
 
 async def test_bound_routing_rejects_same_spelling_repository_replacements(tmp_path: Path) -> None:
     container = tmp_path / "container"
@@ -1620,30 +1359,18 @@ async def test_bound_routing_rejects_same_spelling_repository_replacements(tmp_p
         assert not session.layout.public_daydream_dir.exists()
         assert not session.layout.public_review_output.exists()
 
-
-async def test_destination_collision_matrix_rejects_all_private_model_and_git_roots(
-    tmp_path: Path,
-    source: Path,
+async def test_destination_collision_matrix_rejects_all_private_model_and_git_roots(tmp_path: Path, source: Path,
 ) -> None:
     (model_repo,) = _worktrees(source, "model-worktree")
     owner = _owner(source)
 
-    async with open_artifact_session(
-        _work(source, repo=model_repo),
-        session_id="protected-destinations",
-        owner=owner,
+    async with open_artifact_session(_work(source, repo=model_repo), session_id="protected-destinations", owner=owner,
     ) as session:
         other_key = owner.artifact_state_root.parent / ("f" * 64)
-        protected = (
-            other_key / "output.json",
-            owner.artifact_state_root.parent / "output.json",
-            owner.operational_state_root / "output.json",
-            owner.operational_state_root.parent / "output.json",
-            model_repo / "output.json",
-            source / ".git" / "config",
-            model_repo / ".git",
-            session.layout.repo_git_dir / "output.json",
-            session.layout.git_common_dir / "output.json",
+        protected = (other_key / "output.json", owner.artifact_state_root.parent / "output.json",
+            owner.operational_state_root / "output.json", owner.operational_state_root.parent / "output.json",
+            model_repo / "output.json", source / ".git" / "config", model_repo / ".git",
+            session.layout.repo_git_dir / "output.json", session.layout.git_common_dir / "output.json",
         )
         for index, requested in enumerate(protected):
             with pytest.raises(ArtifactVisibilityError, match="overlap|Git|model"):
@@ -1654,7 +1381,6 @@ async def test_destination_collision_matrix_rejects_all_private_model_and_git_ro
         route = session.register_destination(source / "safe-untracked.json", label=OutputLabel.FINDINGS_OUTPUT)
         assert route.write_path is not None
         assert route.write_path.is_relative_to(session.layout.live_root)
-
 
 @pytest.mark.parametrize("alias_kind", ["hardlink", "normalized-name"])
 async def test_artifact_session_rejects_duplicate_filesystem_aliases(source: Path, alias_kind: str) -> None:
@@ -1675,7 +1401,6 @@ async def test_artifact_session_rejects_duplicate_filesystem_aliases(source: Pat
             pass
     assert first.read_bytes() == b"content"
 
-
 async def test_artifact_session_rejects_symlinked_source_and_runtime_ancestry(tmp_path: Path, source: Path) -> None:
     alias = tmp_path / "source-alias"
     alias.symlink_to(source, target_is_directory=True)
@@ -1691,10 +1416,8 @@ async def test_artifact_session_rejects_symlinked_source_and_runtime_ancestry(tm
     with pytest.raises(ArtifactVisibilityError, match="runtime ancestry contains a symlink"):
         resolve_private_workspace_owner(source, locations=locations)
 
-
 async def test_artifact_session_detects_source_mutation_without_deleting_unique_bytes(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_public_artifacts(source)
 
@@ -1709,10 +1432,7 @@ async def test_artifact_session_detects_source_mutation_without_deleting_unique_
     assert (source / ".daydream" / "concurrent.bin").read_bytes() == b"unique concurrent bytes"
     assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
-
-async def test_detach_revalidates_each_file_after_an_earlier_removal(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_detach_revalidates_each_file_after_an_earlier_removal(source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_public_artifacts(source)
     owner = _owner(source)
@@ -1737,10 +1457,8 @@ async def test_detach_revalidates_each_file_after_an_earlier_removal(
         b"prior reasoning\n"
     )
 
-
 async def test_artifact_session_detects_publication_insertion_without_deleting_it(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_public_artifacts(source)
     session_id = "publish-mutation"
@@ -1762,10 +1480,8 @@ async def test_artifact_session_detects_publication_insertion_without_deleting_i
     canonical = frozen.root.parents[2] / "canonical"
     assert (canonical / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
-
 async def test_publication_preparation_failure_restores_source_without_orphan_state(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected = _seed_public_artifacts(source)
     session_id = "publish-preparation"
@@ -1790,12 +1506,9 @@ async def test_publication_preparation_failure_restores_source_without_orphan_st
     async with open_artifact_session(_work(source), session_id="after-preparation-failure", owner=owner) as recovered:
         assert (recovered.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
 
-
 @pytest.mark.parametrize("exception_kind", ["ordinary", "cancel", "keyboard"])
 async def test_recoverable_detach_failure_restores_before_unlock_and_preserves_primary(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    exception_kind: str,
+    source: Path, monkeypatch: pytest.MonkeyPatch, exception_kind: str,
 ) -> None:
     expected = _seed_public_artifacts(source)
     if exception_kind == "ordinary":
@@ -1828,22 +1541,16 @@ async def test_recoverable_detach_failure_restores_before_unlock_and_preserves_p
     async with open_artifact_session(_work(source), session_id=f"after-primary-{exception_kind}"):
         assert not (source / ".daydream").exists()
 
-
 @pytest.mark.parametrize(
-    ("transition", "exception_kind"),
-    [("PUBLISH_BACKED_UP", "cancel"), ("PUBLISH_INSTALLED", "keyboard")],
+    ("transition", "exception_kind"), [("PUBLISH_BACKED_UP", "cancel"), ("PUBLISH_INSTALLED", "keyboard")],
 )
 async def test_recoverable_publication_failure_reconciles_before_unlock(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    transition: str,
-    exception_kind: str,
+    source: Path, monkeypatch: pytest.MonkeyPatch, transition: str, exception_kind: str,
 ) -> None:
     expected = _seed_public_artifacts(source)
     session_id = f"recover-{transition.lower()}"
     payload = _payload(session_id)
-    primary: BaseException = (
-        anyio.get_cancelled_exc_class()()
+    primary: BaseException = (anyio.get_cancelled_exc_class()()
         if exception_kind == "cancel"
         else KeyboardInterrupt("publication primary")
     )
@@ -1868,7 +1575,6 @@ async def test_recoverable_publication_failure_reconciles_before_unlock(
     monkeypatch.setattr(artifact_visibility, "_transition_observer", None)
     async with open_artifact_session(_work(source), session_id=f"after-{session_id}"):
         assert not (source / ".daydream").exists()
-
 
 async def test_artifact_session_destination_collision_matrix(tmp_path: Path, source: Path) -> None:
     tracked = source / "tracked-dir" / "file.txt"
@@ -1902,7 +1608,6 @@ async def test_artifact_session_destination_collision_matrix(tmp_path: Path, sou
             with pytest.raises(ArtifactVisibilityError, match=message):
                 session.register_destination(requested, label=label)
 
-
 async def test_in_source_explicit_file_is_hidden_then_restored_or_published(source: Path) -> None:
     requested = source / "output with spaces.json"
     requested.write_bytes(b"prior explicit bytes")
@@ -1927,7 +1632,6 @@ async def test_in_source_explicit_file_is_hidden_then_restored_or_published(sour
         _publish(session, frozen)
     assert requested.read_bytes() == b"published explicit bytes"
 
-
 async def test_in_source_dump_publication_merges_and_preserves_unrelated_bytes(source: Path) -> None:
     requested = source / "dump output"
     requested.mkdir()
@@ -1950,7 +1654,6 @@ async def test_in_source_dump_publication_merges_and_preserves_unrelated_bytes(s
     assert (requested / "replace.txt").read_bytes() == b"new"
     assert (requested / "added.txt").read_bytes() == b"added"
 
-
 async def test_absent_nested_explicit_destination_leaves_no_parent_on_failure(source: Path) -> None:
     requested = source / "new parent" / "nested" / "findings.json"
     async with open_artifact_session(_work(source), session_id="absent-explicit") as session:
@@ -1960,7 +1663,6 @@ async def test_absent_nested_explicit_destination_leaves_no_parent_on_failure(so
         assert not requested.exists()
     assert not requested.exists()
     assert not (source / "new parent").exists()
-
 
 async def test_nested_artifact_sessions_restore_exact_context_token(tmp_path: Path) -> None:
     first = tmp_path / "first"
@@ -1979,25 +1681,18 @@ async def test_nested_artifact_sessions_restore_exact_context_token(tmp_path: Pa
         assert artifact_dir_for(first, allow_standalone=True) == first_session.daydream_dir
     assert artifact_dir_for(first, allow_standalone=True) == first / ".daydream"
 
-
 async def test_artifact_session_rejects_forged_snapshot_object(tmp_path: Path, source: Path) -> None:
     session_id = "forged-snapshot"
     async with open_artifact_session(_work(source), session_id=session_id) as session:
         snapshot = _freeze_run(session, session_id)
         forged = ArtifactTreeSnapshot(
-            session_id=snapshot.session_id,
-            workspace_key=snapshot.workspace_key,
-            root=tmp_path,
-            manifest=snapshot.manifest,
-            destinations=snapshot.destinations,
+            session_id=snapshot.session_id, workspace_key=snapshot.workspace_key, root=tmp_path,
+            manifest=snapshot.manifest, destinations=snapshot.destinations,
         )
         with pytest.raises(ArtifactVisibilityError, match="snapshot identity mismatch"):
             _publish(session, forged)
 
-
-async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpaired(
-    tmp_path: Path,
-    source: Path,
+async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpaired(tmp_path: Path, source: Path,
 ) -> None:
     requested, partial = _external_target(tmp_path / "external")
 
@@ -2014,13 +1709,9 @@ async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpa
         assert route.partial.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
         registry = _load_json(session._detach_transaction / "destinations.json")
         assert len(cast(list[object], registry["destinations"])) == 2
-        for label in (
-            OutputLabel.EXPLICIT_TRAJECTORY,
-            OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,
-        ):
+        for label in (OutputLabel.EXPLICIT_TRAJECTORY, OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,):
             with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
                 session.register_destination(requested, label=label)
-
 
 async def test_trajectory_route_paths_are_composed_from_the_layout_surface(source: Path) -> None:
     """The private route's run dir, full path and partial path all come from the owner."""
@@ -2034,19 +1725,14 @@ async def test_trajectory_route_paths_are_composed_from_the_layout_surface(sourc
         assert route.partial.frozen_path == route.run_dir / "trajectory.json.partial"
         assert siblings_directory(route.run_dir) == route.run_dir / "trajectories"
 
-
-@pytest.mark.parametrize(
-    ("disposition", "status"),
-    [
-        (artifact_visibility.ArtifactDisposition.COMPLETE, "complete"),
+@pytest.mark.parametrize(("disposition", "status"),
+    [(artifact_visibility.ArtifactDisposition.COMPLETE, "complete"),
         (artifact_visibility.ArtifactDisposition.PARTIAL_EVIDENCE, "partial"),
         (artifact_visibility.ArtifactDisposition.ROLLBACK, "complete"),
     ],
 )
 async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
-    source: Path,
-    disposition: artifact_visibility.ArtifactDisposition,
-    status: str,
+    source: Path, disposition: artifact_visibility.ArtifactDisposition, status: str,
 ) -> None:
     _seed_public_artifacts(source)
     custom_relative = Path("deep") / "custom outputs" / "nested root.json"
@@ -2066,8 +1752,7 @@ async def test_public_subtree_trajectory_uses_whole_daydream_transaction(
     async with open_artifact_session(_work(source), session_id=session_id) as session:
         public_owner = session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
         review_owner = session.register_destination(
-            source / ".review-output.md",
-            label=OutputLabel.PUBLIC_REVIEW_OUTPUT,
+            source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT,
         )
         assert not (source / ".daydream").exists()
         destinations_before = tuple(session._destinations)
@@ -2141,9 +1826,7 @@ def _open_rolled_back_dump(session: Any, session_id: str, dump: Path) -> Path:
     into it, and the disposition becomes ``ROLLBACK``.
     """
     session.register_destination(session.layout.source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
-    session.register_destination(
-        session.layout.source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT
-    )
+    session.register_destination(session.layout.source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
     route = session.register_destination(dump, label=OutputLabel.DUMP_DIRECTORY)
     frozen = _freeze_run(session, session_id)
     late = cast(Path, session.finalization_merge_path(route, snapshot=frozen))
@@ -2151,7 +1834,6 @@ def _open_rolled_back_dump(session: Any, session_id: str, dump: Path) -> Path:
     assert not any(late.iterdir())
     _publish(session, frozen, artifact_visibility.ArtifactDisposition.ROLLBACK)
     return late
-
 
 async def test_rollback_of_an_absent_dump_destination_reopens_the_workspace(source: Path) -> None:
     """#1171/#1172: an empty directory baseline is a restore target, not a fault.
@@ -2189,16 +1871,13 @@ async def test_rollback_of_an_absent_dump_destination_reopens_the_workspace(sour
         assert not any(transactions.iterdir())
         assert _restore_stage_leaks(source) == []
 
-
 async def test_publishing_an_unused_dump_destination_leaves_it_absent(source: Path) -> None:
     """The publish direction of the same projection: nothing written, nothing created.
 
-    ``_merge_directory_from_tree`` is reached twice — once with the baseline as
-    the projection (rollback) and once with the published manifest (install).
-    A registered dump route whose finalization stage was never taken publishes
-    an empty manifest, which used to abort the whole publication with
-    "dump destination projection is malformed".
-    """
+    ``_merge_directory_from_tree`` is reached twice — once with the baseline as the projection (rollback) and once
+    with the published manifest (install). A registered dump route whose finalization stage was never taken
+    publishes an empty manifest, which used to abort the whole publication with "dump destination projection is
+    malformed"."""
     _seed_public_artifacts(source)
     owner = _owner(source)
     dump = source.parent / "never-existed" / "out"
@@ -2215,10 +1894,7 @@ async def test_publishing_an_unused_dump_destination_leaves_it_absent(source: Pa
     assert (source / ".daydream" / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
     assert not any((owner.artifact_state_root / "transactions").iterdir())
 
-
-async def test_session_open_heals_a_pre_fix_wedged_dump_transaction(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_session_open_heals_a_pre_fix_wedged_dump_transaction(source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1172: a workspace already wedged by the old behaviour heals on next open.
 
@@ -2242,9 +1918,7 @@ async def test_session_open_heals_a_pre_fix_wedged_dump_transaction(
 
     with monkeypatch.context() as patched:
         patched.setattr(artifact_visibility, "_merge_directory_from_tree", pre_fix_merge)
-        patched.setattr(
-            artifact_visibility, "_clear_failed_restore", lambda _root, _source, _txn, error: error
-        )
+        patched.setattr(artifact_visibility, "_clear_failed_restore", lambda _root, _source, _txn, error: error)
         patched.setattr(artifact_visibility, "_reset_source_stage", lambda *_args, **_kwargs: None)
 
         with pytest.raises(ArtifactVisibilityError, match="projection is malformed"):
@@ -2271,11 +1945,8 @@ async def test_session_open_heals_a_pre_fix_wedged_dump_transaction(
     assert not dump.exists()
     assert not (owner.artifact_state_root / "unreconciled").exists()
 
-
 async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
-    source: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1172: a restore that cannot finish is preserved, never replayed forever.
 
@@ -2302,9 +1973,7 @@ async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
         with pytest.raises(ArtifactVisibilityError, match="synthetic destination restore failure") as caught:
             async with open_artifact_session(_work(source), session_id="unrestorable", owner=owner) as session:
                 session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
-                session.register_destination(
-                    source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT
-                )
+                session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
                 session.register_destination(findings, label=OutputLabel.FINDINGS_OUTPUT)
                 frozen = _freeze_run(session, "unrestorable")
                 _publish(session, frozen, artifact_visibility.ArtifactDisposition.ROLLBACK)
@@ -2322,8 +1991,7 @@ async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
     # Nothing was discarded: the public tree is back and the baseline copy of
     # the explicit destination survives under the preserved transaction.
     assert _manifest(source) == baseline
-    assert (preserved / retained[0] / "destination-0000-baseline" / "findings.json").read_bytes() == (
-        b"prior findings"
+    assert (preserved / retained[0] / "destination-0000-baseline" / "findings.json").read_bytes() == (b"prior findings"
     )
     assert not any(transactions.iterdir())
     assert _restore_stage_leaks(source) == []
@@ -2332,7 +2000,6 @@ async def test_failed_destination_restore_preserves_the_transaction_and_reopens(
         assert (reopened.daydream_dir / "deep" / "prior.md").read_bytes() == b"prior reasoning\n"
     assert not any(transactions.iterdir())
 
-
 async def test_public_subtree_trajectory_requires_exact_public_owner(source: Path) -> None:
     requested = source / ".daydream" / "custom.json"
 
@@ -2340,12 +2007,8 @@ async def test_public_subtree_trajectory_requires_exact_public_owner(source: Pat
         with pytest.raises(ArtifactVisibilityError, match="overlaps a public compatibility root"):
             session.register_trajectory_output(requested)
 
-
 @pytest.mark.parametrize("replacement", ["symlink", "file"])
-async def test_public_subtree_trajectory_checks_private_root_itself(
-    tmp_path: Path,
-    source: Path,
-    replacement: str,
+async def test_public_subtree_trajectory_checks_private_root_itself(tmp_path: Path, source: Path, replacement: str,
 ) -> None:
     baseline = _seed_public_artifacts(source)
     outside = tmp_path / "unrelated"
@@ -2374,17 +2037,11 @@ async def test_public_subtree_trajectory_checks_private_root_itself(
     assert _manifest(source) == baseline
     assert artifact_visibility._manifest(outside) == outside_before
 
-
 @pytest.mark.parametrize("status", ["complete", "partial"])
-async def test_public_subtree_trajectory_reopens_from_prior_canonical(
-    source: Path,
-    status: str,
-) -> None:
+async def test_public_subtree_trajectory_reopens_from_prior_canonical(source: Path, status: str,) -> None:
     session_id = f"fresh-custom-root-{status}"
     _state_root, selected, payload = await _publish_custom_public_trajectory(
-        source,
-        session_id=session_id,
-        status=status,
+        source, session_id=session_id, status=status,
     )
     assert selected.read_bytes() == payload
 
@@ -2393,15 +2050,10 @@ async def test_public_subtree_trajectory_reopens_from_prior_canonical(
 
     assert selected.read_bytes() == payload
 
-
 @pytest.mark.parametrize("mutation", ["content", "addition", "kind"])
-async def test_prior_session_owned_nonstatic_subtree_rejects_public_mutation(
-    source: Path,
-    mutation: str,
-) -> None:
+async def test_prior_session_owned_nonstatic_subtree_rejects_public_mutation(source: Path, mutation: str,) -> None:
     _state_root, selected, payload = await _publish_custom_public_trajectory(
-        source,
-        session_id=f"custom-mutation-{mutation}",
+        source, session_id=f"custom-mutation-{mutation}",
     )
     if mutation == "content":
         selected.write_bytes(b"changed public bytes")
@@ -2423,11 +2075,9 @@ async def test_prior_session_owned_nonstatic_subtree_rejects_public_mutation(
     else:
         assert selected.is_dir()
 
-
 async def test_prior_session_owned_nonstatic_subtree_rejects_new_unknown_sibling(source: Path) -> None:
     _state_root, selected, payload = await _publish_custom_public_trajectory(
-        source,
-        session_id="custom-with-new-sibling",
+        source, session_id="custom-with-new-sibling",
     )
     sibling = source / ".daydream" / "not-session-owned" / "opaque.bin"
     sibling.parent.mkdir()
@@ -2440,15 +2090,10 @@ async def test_prior_session_owned_nonstatic_subtree_rejects_new_unknown_sibling
     assert selected.read_bytes() == payload
     assert sibling.read_bytes() == b"unowned bytes"
 
-
 @pytest.mark.parametrize("corruption", ["canonical-bytes", "canonical-manifest"])
-async def test_nonstatic_subtree_authorization_rejects_corrupt_canonical_proof(
-    source: Path,
-    corruption: str,
-) -> None:
+async def test_nonstatic_subtree_authorization_rejects_corrupt_canonical_proof(source: Path, corruption: str,) -> None:
     state_root, selected, payload = await _publish_custom_public_trajectory(
-        source,
-        session_id=f"custom-corrupt-{corruption}",
+        source, session_id=f"custom-corrupt-{corruption}",
     )
     relative = selected.relative_to(source)
     if corruption == "canonical-bytes":
@@ -2467,11 +2112,7 @@ async def test_nonstatic_subtree_authorization_rejects_corrupt_canonical_proof(
 
     assert selected.read_bytes() == payload
 
-
-@pytest.mark.parametrize(
-    "problem",
-    ["directory-leaf", "file-ancestor", "symlink-leaf", "symlink-ancestor"],
-)
+@pytest.mark.parametrize("problem", ["directory-leaf", "file-ancestor", "symlink-leaf", "symlink-ancestor"],)
 async def test_public_subtree_trajectory_rejects_unsafe_private_counterpart(source: Path, problem: str) -> None:
     baseline = _seed_public_artifacts(source)
     requested = source / ".daydream" / "nested" / "custom.json"
@@ -2495,7 +2136,6 @@ async def test_public_subtree_trajectory_rejects_unsafe_private_counterpart(sour
 
     assert _manifest(source) == baseline
 
-
 async def test_independent_model_cwd_rejects_live_external_destination_overlap(tmp_path: Path, source: Path) -> None:
     external = tmp_path / "external"
     external.mkdir()
@@ -2513,10 +2153,7 @@ async def test_independent_model_cwd_rejects_live_external_destination_overlap(t
             artifact_visibility.assert_model_cwd_clean(nested)
         artifact_visibility.assert_model_cwd_clean(disjoint)
 
-
-async def test_live_external_capability_probe_covers_exchange_link_and_missing_parent(
-    tmp_path: Path,
-    source: Path,
+async def test_live_external_capability_probe_covers_exchange_link_and_missing_parent(tmp_path: Path, source: Path,
 ) -> None:
     requested = tmp_path / "missing" / "nested" / "trajectory.json"
     canary = tmp_path / "probe-canary"
@@ -2526,13 +2163,11 @@ async def test_live_external_capability_probe_covers_exchange_link_and_missing_p
         route = session.register_trajectory_output(requested)
         assert route.full.delivery is artifact_visibility.DestinationDelivery.LIVE_EXTERNAL
         records = cast(
-            list[dict[str, object]],
-            _load_json(session._detach_transaction / "external-entries.json")["entries"],
+            list[dict[str, object]], _load_json(session._detach_transaction / "external-entries.json")["entries"],
         )
         purposes = {cast(str, record["purpose"]) for record in records}
         assert {"probe_exchange_a", "probe_exchange_b", "probe_link_target", "missing_parent"} <= purposes
-        assert all(
-            record["lifecycle"] == "retired"
+        assert all(record["lifecycle"] == "retired"
             for record in records
             if cast(str, record["purpose"]).startswith("probe_")
         )
@@ -2541,11 +2176,8 @@ async def test_live_external_capability_probe_covers_exchange_link_and_missing_p
     assert not requested.parent.exists()
     assert canary.read_bytes() == b"unrelated"
 
-
 async def test_live_external_refused_link_probe_rejects_route_before_producer(
-    tmp_path: Path,
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested, _ = _external_target(tmp_path / "external", prior=False)
 
@@ -2561,11 +2193,8 @@ async def test_live_external_refused_link_probe_rejects_route_before_producer(
     assert not requested.exists()
     assert not any(path.name.startswith(".daydream-probe-") for path in requested.parent.iterdir())
 
-
 async def test_unsupported_exchange_rejects_live_route_before_producer(
-    tmp_path: Path,
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested, _ = _external_target(tmp_path / "external", prior=False)
 
@@ -2577,7 +2206,6 @@ async def test_unsupported_exchange_rejects_live_route_before_producer(
         with pytest.raises(ArtifactVisibilityError, match="unsupported"):
             session.register_trajectory_output(requested)
     assert not requested.exists()
-
 
 async def test_atomic_exchange_visibility_is_always_one_complete_document(tmp_path: Path, source: Path) -> None:
     requested, _ = _external_target(tmp_path / "external")
@@ -2601,9 +2229,7 @@ async def test_atomic_exchange_visibility_is_always_one_complete_document(tmp_pa
         try:
             for payload in payloads:
                 session.write_trajectory_document(
-                    route,
-                    TrajectoryDocumentSnapshot("atomic-visible", requested, payload),
-                    "complete",
+                    route, TrajectoryDocumentSnapshot("atomic-visible", requested, payload), "complete",
                 )
         finally:
             stop.set()
@@ -2613,10 +2239,7 @@ async def test_atomic_exchange_visibility_is_always_one_complete_document(tmp_pa
         assert observed
         assert set(observed) <= {b"prior full", *payloads}
 
-
-async def test_absent_first_publication_refuses_concurrent_target_without_exchange(
-    tmp_path: Path,
-    source: Path,
+async def test_absent_first_publication_refuses_concurrent_target_without_exchange(tmp_path: Path, source: Path,
 ) -> None:
     requested, _ = _external_target(tmp_path / "external", prior=False)
     unique = b"concurrent target"
@@ -2628,9 +2251,7 @@ async def test_absent_first_publication_refuses_concurrent_target_without_exchan
             requested.write_bytes(unique)
             with pytest.raises(ArtifactVisibilityError, match="no-clobber"):
                 session.write_trajectory_document(
-                    route,
-                    TrajectoryDocumentSnapshot("absent-race", requested, payload),
-                    "complete",
+                    route, TrajectoryDocumentSnapshot("absent-race", requested, payload), "complete",
                 )
     assert requested.read_bytes() == unique
     stages = list(requested.parent.glob(".daydream-output-*"))
@@ -2689,13 +2310,9 @@ class _ReplaceWithDirectoryBeforeSuccessfulExchange:
             raise AssertionError("nonregular displaced target must not be reversed")
         return self.real.call(parent_fd, staged_name, target_name)
 
-
 @pytest.mark.parametrize("impossible", [False, True])
 async def test_exchange_nonzero_never_reports_success_or_falls_back(
-    tmp_path: Path,
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    impossible: bool,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch, impossible: bool,
 ) -> None:
     requested, _ = _external_target(tmp_path / f"external-{impossible}")
     exchange = _FailAfterExchange(impossible=impossible)
@@ -2707,27 +2324,20 @@ async def test_exchange_nonzero_never_reports_success_or_falls_back(
         async with open_artifact_session(_work(source), session_id=f"exchange-{impossible}") as session:
             route = session.register_trajectory_output(requested)
             session.write_trajectory_document(
-                route,
-                TrajectoryDocumentSnapshot(f"exchange-{impossible}", requested, payload),
-                "complete",
+                route, TrajectoryDocumentSnapshot(f"exchange-{impossible}", requested, payload), "complete",
             )
     assert requested.read_bytes() == b"prior full"
     assert exchange.calls == (4 if not impossible else 3)
 
-
 async def test_zero_exchange_with_unexpected_displaced_target_reverses_once_and_fails(
-    tmp_path: Path,
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested, _ = _external_target(tmp_path / "external")
     unexpected = b"unexpected displaced target"
     events: list[str] = []
     exchange = _ReplaceBeforeSuccessfulExchange(requested, unexpected, events)
     monkeypatch.setattr(artifact_visibility, "_name_exchange_factory", lambda: exchange)
-    monkeypatch.setattr(
-        artifact_visibility,
-        "_external_entry_observer",
+    monkeypatch.setattr(artifact_visibility, "_external_entry_observer",
         lambda state, purpose, _path: events.append(state)
         if purpose == "publication_stage"
         else None,
@@ -2738,9 +2348,7 @@ async def test_zero_exchange_with_unexpected_displaced_target_reverses_once_and_
         async with open_artifact_session(_work(source), session_id="unexpected-zero") as session:
             route = session.register_trajectory_output(requested)
             session.write_trajectory_document(
-                route,
-                TrajectoryDocumentSnapshot("unexpected-zero", requested, payload),
-                "complete",
+                route, TrajectoryDocumentSnapshot("unexpected-zero", requested, payload), "complete",
             )
 
     assert exchange.calls == 4
@@ -2756,11 +2364,8 @@ async def test_zero_exchange_with_unexpected_displaced_target_reverses_once_and_
     assert requested.read_bytes() == unexpected
     assert payload in [path.read_bytes() for path in requested.parent.glob(".daydream-output-*")]
 
-
 async def test_zero_exchange_with_displaced_directory_records_conflict_without_reversal(
-    tmp_path: Path,
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requested, _ = _external_target(tmp_path / "external")
     exchange = _ReplaceWithDirectoryBeforeSuccessfulExchange(requested)
@@ -2771,9 +2376,7 @@ async def test_zero_exchange_with_displaced_directory_records_conflict_without_r
         async with open_artifact_session(_work(source), session_id="nonregular-zero") as session:
             route = session.register_trajectory_output(requested)
             session.write_trajectory_document(
-                route,
-                TrajectoryDocumentSnapshot("nonregular-zero", requested, payload),
-                "complete",
+                route, TrajectoryDocumentSnapshot("nonregular-zero", requested, payload), "complete",
             )
 
     assert exchange.calls == 3
@@ -2797,7 +2400,6 @@ async def test_zero_exchange_with_displaced_directory_records_conflict_without_r
             pass
     assert requested.read_bytes() == payload
     assert staged[0].is_dir()
-
 
 def test_external_fifo_observation_is_nonblocking_and_reaps_child(tmp_path: Path) -> None:
     parent = tmp_path / "external"
@@ -2828,47 +2430,29 @@ def test_external_fifo_observation_is_nonblocking_and_reaps_child(tmp_path: Path
     assert completed.read_text(encoding="ascii") == "_ExternalEntryIssue"
     assert stat.S_ISFIFO(fifo.lstat().st_mode)
 
-
-@pytest.mark.parametrize(
-    ("checkpoint", "purpose", "conflict"),
+@pytest.mark.parametrize(("checkpoint", "purpose", "conflict"),
     [
         # Publication entries: the atomic-exchange stage, its link target, and
         # the absent-parent route.
-        ("CREATION_INTENT", "publication_stage", False),
-        ("ENTRY_CREATED", "publication_stage", True),
-        ("ATTESTED", "publication_stage", False),
-        ("OPERATION_PREPARED", "publication_stage", False),
-        ("PRIMARY_CALLED", "publication_stage", False),
-        ("REVERSAL_ATTEMPTED", "publication_stage", True),
-        ("REVERSAL_CALLED", "publication_stage", True),
-        ("CLEANUP_PREPARED", "publication_stage", False),
-        ("ENTRY_REMOVED", "publication_stage", False),
-        ("CREATION_INTENT", "publication_link_target", False),
-        ("LINK_CREATED", "publication_link_target", True),
-        ("ATTESTED", "publication_link_target", False),
-        ("CREATION_INTENT", "missing_parent", False),
-        ("ENTRY_CREATED", "missing_parent", True),
+        ("CREATION_INTENT", "publication_stage", False), ("ENTRY_CREATED", "publication_stage", True),
+        ("ATTESTED", "publication_stage", False), ("OPERATION_PREPARED", "publication_stage", False),
+        ("PRIMARY_CALLED", "publication_stage", False), ("REVERSAL_ATTEMPTED", "publication_stage", True),
+        ("REVERSAL_CALLED", "publication_stage", True), ("CLEANUP_PREPARED", "publication_stage", False),
+        ("ENTRY_REMOVED", "publication_stage", False), ("CREATION_INTENT", "publication_link_target", False),
+        ("LINK_CREATED", "publication_link_target", True), ("ATTESTED", "publication_link_target", False),
+        ("CREATION_INTENT", "missing_parent", False), ("ENTRY_CREATED", "missing_parent", True),
         ("ATTESTED", "missing_parent", False),
         # Registration-time capability probes take the same reconciliation path.
-        ("CREATION_INTENT", "probe_exchange_a", False),
-        ("ENTRY_CREATED", "probe_exchange_a", True),
-        ("ATTESTED", "probe_exchange_a", False),
-        ("PRIMARY_CALLED", "probe_exchange_a", False),
-        ("REVERSAL_ATTEMPTED", "probe_exchange_a", True),
-        ("REVERSAL_CALLED", "probe_exchange_a", True),
-        ("CREATION_INTENT", "probe_link_target", False),
-        ("LINK_CREATED", "probe_link_target", True),
+        ("CREATION_INTENT", "probe_exchange_a", False), ("ENTRY_CREATED", "probe_exchange_a", True),
+        ("ATTESTED", "probe_exchange_a", False), ("PRIMARY_CALLED", "probe_exchange_a", False),
+        ("REVERSAL_ATTEMPTED", "probe_exchange_a", True), ("REVERSAL_CALLED", "probe_exchange_a", True),
+        ("CREATION_INTENT", "probe_link_target", False), ("LINK_CREATED", "probe_link_target", True),
         ("ATTESTED", "probe_link_target", False),
     ],
 )
 async def test_external_entry_process_death_reconciles_attested_and_retains_unattested(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    checkpoint: str,
-    purpose: str,
-    conflict: bool,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch, checkpoint: str,
+    purpose: str, conflict: bool,
 ) -> None:
     _seed_public_artifacts(source)
     first_repo, second_repo = _worktrees(source, "external-ephemeral-one", "external-ephemeral-two")
@@ -2876,13 +2460,7 @@ async def test_external_entry_process_death_reconciles_attested_and_retains_unat
     canary = source.parent / f"canary-{checkpoint}-{purpose}"
     canary.write_bytes(b"unrelated external canary")
     with _child_at_marker(
-        marker,
-        "production-external",
-        str(source),
-        str(first_repo),
-        str(artifact_runtime_root),
-        checkpoint,
-        purpose,
+        marker, "production-external", str(source), str(first_repo), str(artifact_runtime_root), checkpoint, purpose,
         str(marker),
     ):
         pass
@@ -2891,9 +2469,7 @@ async def test_external_entry_process_death_reconciles_attested_and_retains_unat
     if checkpoint in ("REVERSAL_ATTEMPTED", "REVERSAL_CALLED"):
         monkeypatch.setattr(artifact_visibility, "_name_exchange_factory", _no_reversal())
     reopen = open_artifact_session(
-        _work(source, repo=second_repo),
-        session_id=f"recover-{checkpoint.lower()}-{purpose}",
-        owner=owner,
+        _work(source, repo=second_repo), session_id=f"recover-{checkpoint.lower()}-{purpose}", owner=owner,
     )
     if conflict:
         with pytest.raises(ArtifactVisibilityError, match="conflict|unattested|reversal"):
@@ -2905,25 +2481,14 @@ async def test_external_entry_process_death_reconciles_attested_and_retains_unat
             pass
     assert canary.read_bytes() == b"unrelated external canary"
 
-
 async def test_unexpected_displaced_target_death_after_reversal_marker_never_reverses_on_reopen(
-    tmp_path: Path,
-    source: Path,
-    artifact_runtime_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, source: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_public_artifacts(source)
     first_repo, second_repo = _worktrees(source, "unexpected-ephemeral-one", "unexpected-ephemeral-two")
     marker = tmp_path / "unexpected-reversal-attempted"
-    with _child_at_marker(
-        marker,
-        "production-external",
-        str(source),
-        str(first_repo),
-        str(artifact_runtime_root),
-        "UNEXPECTED_REVERSAL_ATTEMPTED",
-        "publication_stage",
-        str(marker),
+    with _child_at_marker(marker, "production-external", str(source), str(first_repo), str(artifact_runtime_root),
+        "UNEXPECTED_REVERSAL_ATTEMPTED", "publication_stage", str(marker),
     ):
         pass
 
@@ -2937,18 +2502,13 @@ async def test_unexpected_displaced_target_death_after_reversal_marker_never_rev
     owner = _owner(source)
     with pytest.raises(ArtifactVisibilityError, match="reversal|conflict"):
         async with open_artifact_session(
-            _work(source, repo=second_repo),
-            session_id="unexpected-reversal-reopen",
-            owner=owner,
+            _work(source, repo=second_repo), session_id="unexpected-reversal-reopen", owner=owner,
         ):
             pass
     assert requested.read_bytes() == payload
     assert stages[0].read_bytes() == b"unexpected displaced external bytes"
 
-
-async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_bytes(
-    tmp_path: Path,
-    source: Path,
+async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_bytes(tmp_path: Path, source: Path,
 ) -> None:
     requested, partial_path = _external_target(tmp_path / "external")
     session_id = "external-freeze"
@@ -2978,12 +2538,8 @@ async def test_external_trajectory_write_freeze_and_dispositions_use_immutable_b
     assert partial_path.read_bytes() == b"mutable path is not evidence"
     assert requested.read_bytes() == b"prior full"
 
-
 @pytest.mark.parametrize("status", ["complete", "partial"])
-async def test_child_trajectory_write_never_updates_external_root_destination(
-    tmp_path: Path,
-    source: Path,
-    status: str,
+async def test_child_trajectory_write_never_updates_external_root_destination(tmp_path: Path, source: Path, status: str,
 ) -> None:
     requested, partial = _external_target(tmp_path / f"external-{status}")
     session_id = f"child-{status}"
@@ -3012,35 +2568,24 @@ async def test_child_trajectory_write_never_updates_external_root_destination(
     assert untouched_path.read_bytes() == untouched_bytes
     assert (source / ".daydream" / "runs" / session_id / "children" / f"{child_id}.json").read_bytes() == child_bytes
 
-
-async def test_active_session_snapshots_latest_complete_direct_siblings_from_retained_bytes(
-    source: Path,
-) -> None:
+async def test_active_session_snapshots_latest_complete_direct_siblings_from_retained_bytes(source: Path,) -> None:
     """Live review input is complete-child-only, sorted, and detached from disk."""
     session_id = "live-siblings"
     async with open_artifact_session(_work(source), session_id=session_id) as session:
         route = session.register_trajectory_output(None)
         root = TrajectoryDocumentSnapshot(
-            session_id,
-            cast(Path, route.full.requested),
-            _payload(session_id, session_id, marker="root"),
+            session_id, cast(Path, route.full.requested), _payload(session_id, session_id, marker="root"),
         )
         session.write_trajectory_document(route, root, "complete")
-        partial = TrajectoryDocumentSnapshot(
-            "partial",
-            route.run_dir / "trajectories" / "partial.json",
+        partial = TrajectoryDocumentSnapshot("partial", route.run_dir / "trajectories" / "partial.json",
             _payload(session_id, "partial", marker="partial"),
         )
         session.write_trajectory_document(route, partial, "partial")
         zed = TrajectoryDocumentSnapshot(
-            "zed",
-            route.run_dir / "trajectories" / "zed.json",
-            _payload(session_id, "zed", marker="first"),
+            "zed", route.run_dir / "trajectories" / "zed.json", _payload(session_id, "zed", marker="first"),
         )
         alpha = TrajectoryDocumentSnapshot(
-            "alpha",
-            route.run_dir / "trajectories" / "alpha.json",
-            _payload(session_id, "alpha", marker="first"),
+            "alpha", route.run_dir / "trajectories" / "alpha.json", _payload(session_id, "alpha", marker="first"),
         )
         session.write_trajectory_document(route, zed, "complete")
         session.write_trajectory_document(route, alpha, "partial")
@@ -3054,15 +2599,10 @@ async def test_active_session_snapshots_latest_complete_direct_siblings_from_ret
             ("alpha", _payload(session_id, "alpha", marker="first")),
             ("zed", _payload(session_id, "zed", marker="first")),
         ]
-        alpha_latest = TrajectoryDocumentSnapshot(
-            "alpha",
-            alpha.path,
-            _payload(session_id, "alpha", marker="latest"),
-        )
+        alpha_latest = TrajectoryDocumentSnapshot("alpha", alpha.path, _payload(session_id, "alpha", marker="latest"),)
         session.write_trajectory_document(route, alpha_latest, "complete")
         session.write_trajectory_document(
-            route,
-            TrajectoryDocumentSnapshot("alpha", alpha.path, _payload(session_id, "alpha", marker="partial")),
+            route, TrajectoryDocumentSnapshot("alpha", alpha.path, _payload(session_id, "alpha", marker="partial")),
             "partial",
         )
 
@@ -3073,18 +2613,13 @@ async def test_active_session_snapshots_latest_complete_direct_siblings_from_ret
             ("zed", _payload(session_id, "zed", marker="first")),
         ]
 
-
 async def test_live_sibling_snapshot_rejects_wrong_session_and_frozen_session(source: Path) -> None:
     session_id = "snapshot-lifetime"
     async with open_artifact_session(_work(source), session_id=session_id) as session:
         with pytest.raises(ArtifactVisibilityError, match="not registered"):
             session.snapshot_completed_sibling_trajectories(session_id=session_id)
         route = session.register_trajectory_output(None)
-        root = TrajectoryDocumentSnapshot(
-            session_id,
-            cast(Path, route.full.requested),
-            _payload(session_id),
-        )
+        root = TrajectoryDocumentSnapshot(session_id, cast(Path, route.full.requested), _payload(session_id),)
         session.write_trajectory_document(route, root, "complete")
         with pytest.raises(ArtifactVisibilityError, match="session"):
             session.snapshot_completed_sibling_trajectories(session_id="other-session")
@@ -3092,17 +2627,13 @@ async def test_live_sibling_snapshot_rejects_wrong_session_and_frozen_session(so
         with pytest.raises(ArtifactVisibilityError, match="frozen"):
             session.snapshot_completed_sibling_trajectories(session_id=session_id)
 
-
-@pytest.mark.parametrize(
-    "path",
-    [
-        lambda route: route.run_dir / "trajectories" / "nested" / "child.json",
+@pytest.mark.parametrize("path",
+    [lambda route: route.run_dir / "trajectories" / "nested" / "child.json",
         lambda route: route.run_dir / "trajectories" / "not-json.txt",
     ],
 )
 async def test_live_sibling_snapshot_rejects_writer_accepted_unsafe_child_paths(
-    source: Path,
-    path: Callable[[TrajectoryOutputRoute], Path],
+    source: Path, path: Callable[[TrajectoryOutputRoute], Path],
 ) -> None:
     """The read seam is stricter than the legacy writer without changing its policy."""
     session_id = "snapshot-path-validation"
@@ -3114,27 +2645,19 @@ async def test_live_sibling_snapshot_rejects_writer_accepted_unsafe_child_paths(
         with pytest.raises(ArtifactVisibilityError, match="sibling"):
             session.snapshot_completed_sibling_trajectories(session_id=session_id)
 
-
-@pytest.mark.parametrize(
-    "retained",
-    [
-        lambda route, session_id: {
-            "wrong-key": TrajectoryDocumentSnapshot(
+@pytest.mark.parametrize("retained",
+    [lambda route, session_id: {"wrong-key": TrajectoryDocumentSnapshot(
                 "child", route.run_dir / "trajectories" / "child.json", _payload(session_id, "child")
             )
         },
-        lambda route, session_id: {
-            "child": TrajectoryDocumentSnapshot(
-                "child",
-                route.run_dir / "trajectories" / "child.json",
-                cast(Any, "not-bytes"),
+        lambda route, session_id: {"child": TrajectoryDocumentSnapshot(
+                "child", route.run_dir / "trajectories" / "child.json", cast(Any, "not-bytes"),
             )
         },
     ],
 )
 async def test_live_sibling_snapshot_revalidates_retained_entries(
-    source: Path,
-    retained: Callable[[TrajectoryOutputRoute, str], dict[str, TrajectoryDocumentSnapshot]],
+    source: Path, retained: Callable[[TrajectoryOutputRoute, str], dict[str, TrajectoryDocumentSnapshot]],
 ) -> None:
     session_id = "snapshot-retained-validation"
     async with open_artifact_session(_work(source), session_id=session_id) as session:
@@ -3144,12 +2667,9 @@ async def test_live_sibling_snapshot_revalidates_retained_entries(
         with pytest.raises(ArtifactVisibilityError, match="sibling"):
             session.snapshot_completed_sibling_trajectories(session_id=session_id)
 
-
 @pytest.mark.parametrize("disposition", ["complete", "partial_evidence", "rollback"])
 async def test_artifact_disposition_controls_external_trajectory_independent_of_write_status(
-    tmp_path: Path,
-    source: Path,
-    disposition: str,
+    tmp_path: Path, source: Path, disposition: str,
 ) -> None:
     requested = tmp_path / f"external-{disposition}" / "trajectory.json"
     requested.parent.mkdir()
@@ -3171,10 +2691,7 @@ async def test_artifact_disposition_controls_external_trajectory_independent_of_
     expected_mode = 0o640 if disposition == "rollback" else 0o600
     assert stat.S_IMODE(requested.stat().st_mode) == expected_mode
 
-
-async def test_findings_delivery_and_finalization_merge_are_closed_host_boundaries(
-    tmp_path: Path,
-    source: Path,
+async def test_findings_delivery_and_finalization_merge_are_closed_host_boundaries(tmp_path: Path, source: Path,
 ) -> None:
     findings = tmp_path / "external" / "findings.json"
     findings.parent.mkdir()
@@ -3212,10 +2729,8 @@ async def test_findings_delivery_and_finalization_merge_are_closed_host_boundari
     assert (dump / "unrelated.bin").read_bytes() == b"unrelated"
     assert (dump / "nested" / "bundle.json").read_bytes() == b"bundle"
 
-
 async def test_current_entry_replacement_is_transferred_and_preserved_during_detach(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_public_artifacts(source)
     target = source / ".review-output.md"
@@ -3231,10 +2746,8 @@ async def test_current_entry_replacement_is_transferred_and_preserved_during_det
     owner = _owner(source)
     assert (owner.artifact_state_root / "canonical" / ".review-output.md").read_bytes() == b"review output\n"
 
-
 async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    source: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _seed_public_artifacts(source)
     target = source / ".review-output.md"
@@ -3284,12 +2797,9 @@ async def test_transfer_conflict_never_replaces_a_second_concurrent_occupant(
     retained_after = [path.read_bytes() for path in source.parent.glob(f".daydream-transfer-*/entries/{target.name}")]
     assert first in retained_after
 
-
 @pytest.mark.parametrize("label", [OutputLabel.FINDINGS_OUTPUT, OutputLabel.DUMP_DIRECTORY])
 async def test_current_entry_replacement_is_preserved_during_publication(
-    source: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    label: OutputLabel,
+    source: Path, monkeypatch: pytest.MonkeyPatch, label: OutputLabel,
 ) -> None:
     """A concurrent occupant of a published destination is a conflict, never overwritten."""
     dump = label is OutputLabel.DUMP_DIRECTORY
@@ -3324,24 +2834,18 @@ async def test_current_entry_replacement_is_preserved_during_publication(
 
 # ``<action>`` to child entrypoint, with the positions of its non-Path arguments.
 _HELPERS: dict[str, tuple[Callable[..., None], tuple[int, ...]]] = {
-    "production-transaction": (_production_transaction_child, (3,)),
-    "production-lock": (_production_lock_child, ()),
+    "production-transaction": (_production_transaction_child, (3,)), "production-lock": (_production_lock_child, ()),
     "production-external": (_production_external_child, (3, 4)),
     "external-observe-fifo": (_external_fifo_observation_child, ()),
 }
 
-
-async def test_transfer_intents_are_durable_before_first_move(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_transfer_intents_are_durable_before_first_move(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Every transfer intent is persisted before the first entry move (#1162).
 
-    The former per-entry rewrite fsynced the whole ledger before each move;
-    batching the writes must keep at least that guarantee, so when the first
-    ``os.replace`` fires the stage's ``intents.json`` must already contain the
-    complete, validated intent set for the detach.
-    """
+    The former per-entry rewrite fsynced the whole ledger before each move; batching the writes must keep at least
+    that guarantee, so when the first ``os.replace`` fires the stage's ``intents.json`` must already contain the
+    complete, validated intent set for the detach."""
     source = tmp_path / "source"
     _init_repo(source)
     seeded = _seed_public_artifacts(source)
@@ -3351,14 +2855,10 @@ async def test_transfer_intents_are_durable_before_first_move(
     def capture_first_move(path: Path, moved: Path) -> None:
         if "stage" in observed_at_first_move:
             return
-        stage = next(
-            (candidate for candidate in moved.parents if (candidate / "stage-owner.json").is_file()),
-            None,
-        )
+        stage = next((candidate for candidate in moved.parents if (candidate / "stage-owner.json").is_file()), None,)
         observed_at_first_move["stage"] = stage
         observed_at_first_move["path"] = path
-        observed_at_first_move["intents"] = (
-            json.loads((stage / "intents.json").read_text(encoding="utf-8"))
+        observed_at_first_move["intents"] = (json.loads((stage / "intents.json").read_text(encoding="utf-8"))
             if stage is not None and (stage / "intents.json").is_file()
             else None
         )
@@ -3377,10 +2877,7 @@ async def test_transfer_intents_are_durable_before_first_move(
     first_source = Path(cast(str, observed_at_first_move["path"]))
     assert str(first_source) in [cast(str, intent["source"]) for intent in intents["intents"]]
 
-
-async def test_routed_path_accessors_resolve_explicit_session_over_fallbacks(
-    tmp_path: Path,
-) -> None:
+async def test_routed_path_accessors_resolve_explicit_session_over_fallbacks(tmp_path: Path,) -> None:
     """Strict calls require a session; compatibility requires affirmative opt-in."""
     source = tmp_path / "source"
     _init_repo(source)
@@ -3406,10 +2903,7 @@ async def test_routed_path_accessors_resolve_explicit_session_over_fallbacks(
     with pytest.raises(ArtifactVisibilityError, match="explicit artifact session"):
         artifact_dir_for(work.repo)
 
-
-async def test_artifact_session_projects_registered_live_and_durable_paths(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_projects_registered_live_and_durable_paths(tmp_path: Path,) -> None:
     source = tmp_path / "source"
     _init_repo(source)
     work = _work(source)
@@ -3418,20 +2912,14 @@ async def test_artifact_session_projects_registered_live_and_durable_paths(
         session.register_destination(source / ".daydream", label=OutputLabel.PUBLIC_DAYDREAM)
         session.register_destination(source / ".review-output.md", label=OutputLabel.PUBLIC_REVIEW_OUTPUT)
         findings = session.register_destination(source / "findings.json", label=OutputLabel.FINDINGS_OUTPUT)
-        trajectory = session.register_trajectory_output(
-            source / ".daydream" / "custom" / "trajectory.json"
-        )
+        trajectory = session.register_trajectory_output(source / ".daydream" / "custom" / "trajectory.json")
 
         public_deep = source / ".daydream" / "deep" / "summary.md"
         live_deep = session.daydream_dir / "deep" / "summary.md"
         assert session.durable_path_for(live_deep, repo=work.repo) == public_deep
         assert session.live_path_for(public_deep, repo=work.repo) == live_deep
-        assert session.durable_path_for(session.review_output, repo=work.repo) == (
-            source / ".review-output.md"
-        )
-        assert session.live_path_for(source / ".review-output.md", repo=work.repo) == (
-            session.review_output
-        )
+        assert session.durable_path_for(session.review_output, repo=work.repo) == (source / ".review-output.md")
+        assert session.live_path_for(source / ".review-output.md", repo=work.repo) == (session.review_output)
 
         assert findings.write_path is not None
         assert session.durable_path_for(findings.write_path, repo=work.repo) == findings.requested
@@ -3444,10 +2932,7 @@ async def test_artifact_session_projects_registered_live_and_durable_paths(
             assert session.durable_path_for(route.write_path, repo=work.repo) == route.requested
             assert session.live_path_for(route.requested, repo=work.repo) == route.write_path
 
-
-async def test_artifact_session_projection_rejects_unowned_or_unsafe_paths(
-    tmp_path: Path,
-) -> None:
+async def test_artifact_session_projection_rejects_unowned_or_unsafe_paths(tmp_path: Path,) -> None:
     source = tmp_path / "source"
     other = tmp_path / "other"
     _init_repo(source)
@@ -3502,14 +2987,11 @@ def _main() -> None:
     handler, strings = _HELPERS[action]
     handler(*(value if index in strings else Path(value) for index, value in enumerate(arguments)))
 
-
 def test_create_private_directory_rejects_symlinked_leaf(tmp_path: Path) -> None:
     """A symlinked final component fails closed at the leaf validation.
 
-    The leaf keeps the ``validate_private_directory`` contract ("must be a
-    real directory") exactly as before the consolidation; ancestors are
-    covered by the restored ancestry scan.
-    """
+    The leaf keeps the ``validate_private_directory`` contract ("must be a real directory") exactly as before the
+    consolidation; ancestors are covered by the restored ancestry scan."""
     target = tmp_path / "storage" / "runs"
     target.parent.mkdir(parents=True)
     outside = tmp_path / "outside-secret"
@@ -3522,14 +3004,11 @@ def test_create_private_directory_rejects_symlinked_leaf(tmp_path: Path) -> None
     assert outside.is_dir()
     assert list(outside.iterdir()) == []
 
-
 def test_create_private_directory_rejects_symlinked_ancestor(tmp_path: Path) -> None:
     """A symlink anywhere in the ancestry fails closed (#1162 review finding).
 
-    The collapsed helper must keep the ancestry lstat scan the deleted
-    ``_ensure_private_directory`` enforced: creation must never mkdir through
-    a symlinked ancestor or chmod through the link.
-    """
+    The collapsed helper must keep the ancestry lstat scan the deleted ``_ensure_private_directory`` enforced:
+    creation must never mkdir through a symlinked ancestor or chmod through the link."""
     outside = tmp_path / "outside-secret"
     outside.mkdir()
     (tmp_path / "storage").mkdir()

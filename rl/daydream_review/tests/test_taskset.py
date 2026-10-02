@@ -36,10 +36,7 @@ def _pr(number: int, base_sha: str, head_sha: str) -> dict[str, object]:
     return {"pr_number": number, "base_sha": base_sha, "head_sha": head_sha, "base_ref": "main"}
 
 
-def _manifest_entry(
-    slug: str,
-    prs: list[dict[str, object]],
-    protected_test_paths: Sequence[str] | None = ("tests",),
+def _manifest_entry(slug: str, prs: list[dict[str, object]], protected_test_paths: Sequence[str] | None = ("tests",),
 ) -> str:
     block = (
         f'[repos."{slug}"]\n'
@@ -56,9 +53,7 @@ def _manifest_entry(
     return block
 
 
-def _write_manifest(
-    path: Path,
-    entries: list[tuple[str, list[dict[str, object]]]],
+def _write_manifest(path: Path, entries: list[tuple[str, list[dict[str, object]]]],
     protected_test_paths: Sequence[str] | None = ("tests",),
 ) -> Path:
     path.write_text(
@@ -69,12 +64,8 @@ def _write_manifest(
 
 
 def _taskset(manifest_path: Path, gate_report_path: Path, **overrides: object) -> DaydreamReviewTaskset:
-    return DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
-            manifest_path=manifest_path,
-            gate_report_path=gate_report_path,
-            **overrides,
+    return DaydreamReviewTaskset(DaydreamReviewConfig(
+            id="daydream-review", manifest_path=manifest_path, gate_report_path=gate_report_path, **overrides,
         )
     )
 
@@ -87,19 +78,12 @@ def test_fixture_repo_is_deterministic(tmp_path: Path, precreate_dest: bool) -> 
         dest.mkdir()
     repo = build_fixture_repo(dest)
     assert (repo.base_sha, repo.pr1_head_sha, repo.pr2_head_sha) == (
-        FIXTURE_BASE_SHA,
-        FIXTURE_PR1_HEAD_SHA,
-        FIXTURE_PR2_HEAD_SHA,
+        FIXTURE_BASE_SHA, FIXTURE_PR1_HEAD_SHA, FIXTURE_PR2_HEAD_SHA,
     )
     green = subprocess.run(FIXTURE_TEST_COMMAND.split(), cwd=repo.path, capture_output=True, text=True)
     assert green.returncode == 0, green.stderr
 
-
-@pytest.mark.parametrize(
-    "kind",
-    ["non-empty-dir", "existing-file"],
-    ids=["non-empty-directory", "existing-file"],
-)
+@pytest.mark.parametrize("kind", ["non-empty-dir", "existing-file"], ids=["non-empty-directory", "existing-file"])
 def test_fixture_repo_rejects_occupied_destination(tmp_path: Path, kind: str) -> None:
     """build_fixture_repo raises before mutating an occupied destination."""
     dest = tmp_path / "occupied"
@@ -118,7 +102,6 @@ def test_fixture_repo_rejects_occupied_destination(tmp_path: Path, kind: str) ->
     else:
         assert dest.read_text(encoding="utf-8") == "caller-owned"
 
-
 def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_path: Path) -> None:
     """An occupied git destination is rejected before any mutation; the CLI exits 2."""
     dest = tmp_path / "occupied"
@@ -133,16 +116,11 @@ def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_pa
 
     head_before = (dest / ".git" / "HEAD").read_text(encoding="utf-8")
     config_before = (dest / ".git" / "config").read_text(encoding="utf-8")
-    status_before = subprocess.run(
-        ["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True
+    status_before = subprocess.run(["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True
     ).stdout
     entries_before = sorted(p.name for p in dest.iterdir())
 
-    proc = subprocess.run(
-        [sys.executable, "-m", "daydream_review.fixture", str(dest)],
-        capture_output=True,
-        text=True,
-    )
+    proc = subprocess.run([sys.executable, "-m", "daydream_review.fixture", str(dest)], capture_output=True, text=True)
 
     assert proc.returncode == 2
     assert proc.stdout == ""
@@ -150,16 +128,12 @@ def test_fixture_cli_rejects_existing_git_repository_without_modification(tmp_pa
     assert (dest / "caller.txt").read_text(encoding="utf-8") == "caller-owned"
     assert (dest / ".git" / "HEAD").read_text(encoding="utf-8") == head_before
     assert (dest / ".git" / "config").read_text(encoding="utf-8") == config_before
-    assert (
-        subprocess.run(["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True).stdout
+    assert (subprocess.run(["git", "-C", str(dest), "status", "--porcelain"], capture_output=True, text=True).stdout
         == status_before
     )
     assert sorted(p.name for p in dest.iterdir()) == entries_before
 
-
-def test_load_builds_tasks_from_the_committed_manifest(
-    fixture_manifest_path: Path, stage0_gate_report: Path
-) -> None:
+def test_load_builds_tasks_from_the_committed_manifest(fixture_manifest_path: Path, stage0_gate_report: Path) -> None:
     taskset = _taskset(fixture_manifest_path, stage0_gate_report)
     tasks = list(taskset.load())
     assert len(tasks) == 3
@@ -191,23 +165,16 @@ def test_load_builds_tasks_from_the_committed_manifest(
 
     assert [task.data.idx for task in tasks] == [0, 1, 2]
 
-
-def test_use_images_false_leaves_tasks_imageless(
-    fixture_manifest_path: Path, stage0_gate_report: Path
-) -> None:
+def test_use_images_false_leaves_tasks_imageless(fixture_manifest_path: Path, stage0_gate_report: Path) -> None:
     """The subprocess smoke path needs imageless tasks (verifiers env.py:189-195)."""
     taskset = _taskset(fixture_manifest_path, stage0_gate_report, use_images=False)
     tasks = list(taskset.load())
     assert [task.data.image for task in tasks] == [None, None, None]
-    assert [
-        task.data.test_command for task in tasks
+    assert [task.data.test_command for task in tasks
     ] == [FIXTURE_TEST_COMMAND, FIXTURE_TEST_COMMAND, "/opt/repo-venv/bin/python -m pytest -q"]
 
-
 @pytest.mark.parametrize("slug", ["getsentry/sentry", "GetSentry/Sentry"])
-def test_load_rejects_excluded_repo(
-    tmp_path: Path, stage0_gate_report: Path, slug: str,
-) -> None:
+def test_load_rejects_excluded_repo(tmp_path: Path, stage0_gate_report: Path, slug: str,) -> None:
     """C5 is unconditional and case-insensitive: an excluded slug fails the load."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [(slug, [_pr(7, "a" * 40, "b" * 40)])])
 
@@ -217,45 +184,36 @@ def test_load_rejects_excluded_repo(
     assert "C5" in str(excinfo.value)
     assert slug in str(excinfo.value)
 
-
 def test_load_rejects_manifest_without_pr_snapshots(tmp_path: Path) -> None:
     """An entry without at least one PR snapshot is a load error, not an empty taskset."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [("acme/widgets", [])])
 
     with pytest.raises(ValidationError) as excinfo:
         load_manifest(manifest)
-    assert (
-        ("too_short", ("prs",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()]
+    assert (("too_short", ("prs",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()]
         or ("missing", ("prs",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()]
     )
-
 
 def test_load_manifest_rejects_unknown_key(tmp_path: Path) -> None:
     """A misspelled optional key (setp_cmds) fails load_manifest, naming the key."""
     manifest = _write_manifest(tmp_path / "manifest.toml", [("acme/widgets", [_pr(3, "a" * 40, "b" * 40)])])
     # A misspelled entry key must land inside the entry table, not in a PR
     # snapshot table: insert it just ahead of the entry's first pr table.
-    manifest.write_text(
-        manifest.read_text(encoding="utf-8").replace(
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace(
             '\n[[repos."acme/widgets".prs]]', 'setp_cmds = ["true"]\n\n[[repos."acme/widgets".prs]]', 1
-        ),
-        encoding="utf-8",
+        ), encoding="utf-8",
     )
 
     with pytest.raises(ValidationError) as excinfo:
         load_manifest(manifest)
-    assert ("extra_forbidden", ("setp_cmds",)) in [
-        (err["type"], err["loc"]) for err in excinfo.value.errors()
+    assert ("extra_forbidden", ("setp_cmds",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()
     ], excinfo.value.errors()
 
-
-@pytest.mark.parametrize(
-    "protected_test_paths, error_type",
+@pytest.mark.parametrize("protected_test_paths, error_type",
     [
         (None, "missing"),  # missing field entirely
         ([], "too_short"),  # present but empty
-    ],
-    ids=["missing", "empty"],
+    ], ids=["missing", "empty"],
 )
 def test_load_manifest_rejects_missing_or_empty_protected_test_paths(
     tmp_path: Path, protected_test_paths: list[str] | None, error_type: str
@@ -265,53 +223,23 @@ def test_load_manifest_rejects_missing_or_empty_protected_test_paths(
     The security boundary is structural: an entry that ships without a
     protected-path inventory must never silently load into an unprotected task.
     """
-    manifest = _write_manifest(
-        tmp_path / "manifest.toml",
-        [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
+    manifest = _write_manifest(tmp_path / "manifest.toml", [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
         protected_test_paths=protected_test_paths,
     )
 
     with pytest.raises(ValidationError) as excinfo:
         load_manifest(manifest)
-    assert (error_type, ("protected_test_paths",)) in [
-        (err["type"], err["loc"]) for err in excinfo.value.errors()
-    ]
+    assert (error_type, ("protected_test_paths",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()]
 
-
-@pytest.mark.parametrize(
-    "entry",
-    [
-        "",
-        ":(exclude)tests",
-        "tests/*",
-        "tests/?",
-        "tests/[x]",
-        "/tests",
-        "tests/./unit",
-        "docs/../missing",
-        "./tests",
-        "tests/.",
-        "../tests",
-        "tests/..",
-    ],
-    ids=[
-        "empty",
-        "leading-colon-magic",
-        "glob-star",
-        "glob-question",
-        "glob-bracket",
-        "absolute",
-        "dot-component",
-        "dotdot-component",
-        "leading-dot-component",
-        "trailing-dot-component",
-        "leading-dotdot-component",
+@pytest.mark.parametrize("entry",
+    ["", ":(exclude)tests", "tests/*", "tests/?", "tests/[x]", "/tests", "tests/./unit", "docs/../missing",
+        "./tests", "tests/.", "../tests", "tests/..",
+    ], ids=["empty", "leading-colon-magic", "glob-star", "glob-question", "glob-bracket", "absolute", "dot-component",
+        "dotdot-component", "leading-dot-component", "trailing-dot-component", "leading-dotdot-component",
         "trailing-dotdot-component",
     ],
 )
-def test_load_manifest_rejects_non_literal_protected_test_paths(
-    tmp_path: Path, entry: str
-) -> None:
+def test_load_manifest_rejects_non_literal_protected_test_paths(tmp_path: Path, entry: str) -> None:
     """A protected_test_paths entry with git pathspec syntax is a load error.
 
     The manifest promises LITERAL repository-relative paths, but the scoring gate
@@ -322,30 +250,22 @@ def test_load_manifest_rejects_non_literal_protected_test_paths(
     load, exactly like a missing or empty inventory.
     """
     manifest = _write_manifest(
-        tmp_path / "manifest.toml",
-        [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
-        protected_test_paths=[entry],
+        tmp_path / "manifest.toml", [("acme/widgets", [_pr(3, A_SHA, B_SHA)])], protected_test_paths=[entry],
     )
 
     with pytest.raises(ValidationError) as excinfo:
         load_manifest(manifest)
-    assert ("value_error", ("protected_test_paths",)) in [
-        (err["type"], err["loc"]) for err in excinfo.value.errors()
-    ]
-
+    assert ("value_error", ("protected_test_paths",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()]
 
 def test_load_manifest_accepts_canonical_protected_test_paths(tmp_path: Path) -> None:
     """Canonical nested paths and dotfiles load unchanged through the loader."""
-    manifest = _write_manifest(
-        tmp_path / "manifest.toml",
-        [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
+    manifest = _write_manifest(tmp_path / "manifest.toml", [("acme/widgets", [_pr(3, A_SHA, B_SHA)])],
         protected_test_paths=["tests/unit", "tests/unit/test_api.py", ".pytest.ini", "tests/.hidden"],
     )
     loaded = load_manifest(manifest)
     assert loaded["acme/widgets"].protected_test_paths == [
         "tests/unit", "tests/unit/test_api.py", ".pytest.ini", "tests/.hidden"
     ]
-
 
 def test_golden_comment_rejects_unknown_key() -> None:
     """A misspelled/extra key in a manifest golden_comments table must not be
@@ -356,13 +276,8 @@ def test_golden_comment_rejects_unknown_key() -> None:
     drift in the manifest fails loudly instead of being silently ignored.
     """
     with pytest.raises(ValidationError) as excinfo:
-        GoldenComment.model_validate(
-            {"comment": "looks good", "typo_field": "nope"}
-        )
-    assert ("extra_forbidden", ("typo_field",)) in [
-        (err["type"], err["loc"]) for err in excinfo.value.errors()
-    ]
-
+        GoldenComment.model_validate({"comment": "looks good", "typo_field": "nope"})
+    assert ("extra_forbidden", ("typo_field",)) in [(err["type"], err["loc"]) for err in excinfo.value.errors()]
 
 def test_load_rejects_snapshot_without_base_sha(tmp_path: Path, stage0_gate_report: Path) -> None:
     """No base SHA means no reviewable diff and no image to build — fail loudly."""
@@ -374,7 +289,6 @@ def test_load_rejects_snapshot_without_base_sha(tmp_path: Path, stage0_gate_repo
     assert "base_sha" in str(excinfo.value)
     assert "acme/widgets#4" in str(excinfo.value)
 
-
 def test_load_refuses_without_gate_report_path(fixture_manifest_path: Path) -> None:
     """M4: an unconfigured gate path is itself a refusal, never a default-to-allow."""
     taskset = _taskset(fixture_manifest_path, Path(""))
@@ -382,14 +296,12 @@ def test_load_refuses_without_gate_report_path(fixture_manifest_path: Path) -> N
         list(taskset.load())
     assert "--taskset.gate-report-path" in str(excinfo.value)
 
-
 def test_load_refuses_missing_gate_report(fixture_manifest_path: Path, tmp_path: Path) -> None:
     """A missing gate report refuses the load, not just the require_stage0_gate leaf."""
     taskset = _taskset(fixture_manifest_path, tmp_path / "missing-gate.json")
     with pytest.raises(Stage0GateRefused) as excinfo:
         list(taskset.load())
     assert "gate report missing" in str(excinfo.value)
-
 
 def test_load_refuses_failed_gate_report(fixture_manifest_path: Path, tmp_path: Path) -> None:
     """A report that did not pass refuses the load, not just the require_stage0_gate leaf."""
@@ -400,7 +312,6 @@ def test_load_refuses_failed_gate_report(fixture_manifest_path: Path, tmp_path: 
         list(taskset.load())
     assert "failed" in str(excinfo.value)
 
-
 def test_load_refuses_model_not_bound_to_gate_report(
     fixture_manifest_path: Path, stage0_gate_report: Path, tmp_path: Path
 ) -> None:
@@ -408,21 +319,12 @@ def test_load_refuses_model_not_bound_to_gate_report(
     evidence_digest refuses the load — any-checkpoint-plus-any-report must not
     schedule rollouts."""
     model = tmp_path / "outcome-model.json"
-    model.write_text(
-        json.dumps(
-            {
-                "weights": {"bug": 1.0},
-                "bias": -0.25,
+    model.write_text(json.dumps({"weights": {"bug": 1.0}, "bias": -0.25,
                 # Not the split the report's evidence_digest was computed over.
-                "split_digest": "some-other-split",
-                "label_ratio_reported": 0.5,
-                "train_rows": 10,
-                "held_out_rows": 4,
-                "held_out_accuracy": 0.75,
-                "model_fingerprint": "",
+                "split_digest": "some-other-split", "label_ratio_reported": 0.5, "train_rows": 10, "held_out_rows": 4,
+                "held_out_accuracy": 0.75, "model_fingerprint": "",
             }
-        ),
-        encoding="utf-8",
+        ), encoding="utf-8",
     )
     taskset = _taskset(fixture_manifest_path, stage0_gate_report, outcome_model_path=model)
     with pytest.raises(Stage0GateRefused) as excinfo:
@@ -430,9 +332,7 @@ def test_load_refuses_model_not_bound_to_gate_report(
     assert "does not bind" in str(excinfo.value)
     assert str(model) in str(excinfo.value)
 
-
-def test_load_refuses_missing_outcome_model(
-    fixture_manifest_path: Path, stage0_gate_report: Path, tmp_path: Path
+def test_load_refuses_missing_outcome_model(fixture_manifest_path: Path, stage0_gate_report: Path, tmp_path: Path
 ) -> None:
     """A configured-but-absent checkpoint refuses the load, not the first score."""
     missing = tmp_path / "missing-outcome-model.json"
@@ -441,7 +341,6 @@ def test_load_refuses_missing_outcome_model(
         list(taskset.load())
     assert "missing" in str(excinfo.value)
     assert str(missing) in str(excinfo.value)
-
 
 def test_load_binds_outcome_model_to_gate_report(
     fixture_manifest_path: Path, stage0_gate_report: Path, outcome_model_path: Path
@@ -452,35 +351,25 @@ def test_load_binds_outcome_model_to_gate_report(
     assert tasks
     assert all(task.config.outcome_model_path == outcome_model_path for task in tasks)
 
-
 def test_load_requires_manifest_path_flag() -> None:
     taskset = DaydreamReviewTaskset(DaydreamReviewConfig(id="daydream-review"))
     with pytest.raises(ValueError) as excinfo:
         list(taskset.load())
     assert "--taskset.manifest-path" in str(excinfo.value)
 
-
-def test_loader_contract_resolves_package(
-    fixture_manifest_path: Path, stage0_gate_report: Path
-) -> None:
+def test_loader_contract_resolves_package(fixture_manifest_path: Path, stage0_gate_report: Path) -> None:
     """The real path the verifiers CLI/orchestrator takes (loaders.py:110-127)."""
     config_type = taskset_config_type("daydream-review")
     assert config_type is DaydreamReviewConfig
 
     taskset = load_taskset(
-        config_type(
-            id="daydream-review",
-            manifest_path=fixture_manifest_path,
-            gate_report_path=stage0_gate_report,
-        )
+        config_type(id="daydream-review", manifest_path=fixture_manifest_path, gate_report_path=stage0_gate_report)
     )
     # load(), not select(): select() is a 0.2.1 convenience the verifiers
     # submodule prime-rl trains against does not have, and load() is the payload.
     assert len(list(taskset.load())) == 3
 
-
-def test_reference_manifest_loads_against_the_committed_snapshot(
-    fixture_manifest_path: Path, stage0_gate_report: Path
+def test_reference_manifest_loads_against_the_committed_snapshot(fixture_manifest_path: Path, stage0_gate_report: Path
 ) -> None:
     """The reference entry is real upstream history, not another synthetic repo.
 
@@ -498,12 +387,6 @@ def test_reference_manifest_loads_against_the_committed_snapshot(
     assert task.data.base_sha == "4dffa1963f896a0a311dec3c14f003a5f382c446"
     assert task.data.test_command == "/opt/repo-venv/bin/python -m pytest -q"
     assert task.data.protected_test_paths == [
-        "tests",
-        "conftest.py",
-        ".pytest.ini",
-        "pytest.ini",
-        "pyproject.toml",
-        "setup.cfg",
-        "tox.ini",
+        "tests", "conftest.py", ".pytest.ini", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini",
     ]
     assert task.data.image == "daydream-rl/itsdangerous:4bb03cd68192"

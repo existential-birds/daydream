@@ -18,23 +18,15 @@ from daydream_review.verifier import seal_artifacts
 #: of pinned here. trajectory.json and any per-fork trajectories/*.json are
 #: deliberately NOT in the projection — untrusted, model-directed, test-only
 #: data that must never reach model context through the collector.
-_REQUIRED_SCORING_FILES: frozenset[str] = frozenset(
-    {
-        "manifest.json",
-        "review-output.md",
-        "deep/review-output.md",
-        "deep/recommendation-verdicts.json",
-        "deep/merged-items.json",
-        "deep/test-verdict.json",
+_REQUIRED_SCORING_FILES: frozenset[str] = frozenset({
+        "manifest.json", "review-output.md", "deep/review-output.md", "deep/recommendation-verdicts.json",
+        "deep/merged-items.json", "deep/test-verdict.json",
     }
 )
 
 
 async def test_fetch_run_dir_excludes_fixture_trajectories(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime: SubprocessRuntime, rundir_golden: Path,
 ) -> None:
     """The collector's projection excludes trajectory payloads from the golden run.
 
@@ -71,19 +63,14 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
     # would fail the build for reasons unrelated to the exclusion guard (same
     # convention as tests.test_rewards::test_rundir_golden_user_messages_are_inert).
     for rel in projected:
-        assert rel in RUN_DIR_FILES or (
-            rel.startswith("deep/stack-") and rel.endswith("-records.json")
+        assert rel in RUN_DIR_FILES or (rel.startswith("deep/stack-") and rel.endswith("-records.json")
         ), rel
     assert _REQUIRED_SCORING_FILES <= projected
     assert not (selected / "trajectory.json").exists()
     assert not (selected / "trajectories").exists()
 
-
 async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """verify_seal must fail closed when the candidate diff cannot be re-derived.
 
@@ -96,8 +83,7 @@ async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(fixture_manifest_path)
 
-    present = [
-        run_dir / rel for rel in RUN_DIR_FILES if rel != "seal.json" and (run_dir / rel).is_file()
+    present = [run_dir / rel for rel in RUN_DIR_FILES if rel != "seal.json" and (run_dir / rel).is_file()
     ] + sorted(run_dir.glob("deep/stack-*-records.json"))
     # A seal produced while git failed at seal time sealed the empty diff.
     seal = seal_artifacts(present, candidate_diff=b"")
@@ -105,6 +91,5 @@ async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
 
     # The repo under review is not a git repository: git diff fails at verify
     # time with a non-zero exit, exactly the empty-diff collision.
-    ok = await verify_seal(run_dir, runtime, str(tmp_path / "not-a-repo"), task.data.head_sha,
-                           seal_expected=True)
+    ok = await verify_seal(run_dir, runtime, str(tmp_path / "not-a-repo"), task.data.head_sha, seal_expected=True)
     assert ok is False

@@ -58,16 +58,9 @@ class ScriptedBackend:
         cancel_calls: Total ``cancel`` invocations.
     """
 
-    def __init__(
-        self,
-        script: Sequence[Turn] | None = None,
-        *,
-        events: Turn | None = None,
+    def __init__(self, script: Sequence[Turn] | None = None, *, events: Turn | None = None,
         responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
-        responder: Responder | None = None,
-        model: str | None = "test-model",
-        fanout_concurrency: int = 4,
-        **attrs: Any,
+        responder: Responder | None = None, model: str | None = "test-model", fanout_concurrency: int = 4, **attrs: Any,
     ) -> None:
         """Configure the fake.
 
@@ -156,26 +149,11 @@ class ScriptedBackend:
     # --- Backend surface -----------------------------------------------------
 
     async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
+        self, cwd: Path, prompt: str, output_schema: dict[str, Any] | None = None, continuation: Any = None,
+        agents: Any = None, max_turns: int | None = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": output_schema,
-                "continuation": continuation,
-                "agents": agents,
-                "max_turns": max_turns,
-                "read_only": read_only,
-                "persist_session": persist_session,
+        self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "continuation": continuation,
+                "agents": agents, "max_turns": max_turns, "read_only": read_only, "persist_session": persist_session,
             }
         )
         index = min(len(self.calls) - 1, len(self._script) - 1)

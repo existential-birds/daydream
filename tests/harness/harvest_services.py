@@ -23,15 +23,9 @@ class HarvestTestServices:
     SQLite/cache behavior through the supplied delegate.
     """
 
-    def __init__(
-        self,
-        delegate: HarvestServices,
-        *,
-        rows: list[Mapping[str, Any]] | None = None,
-        completed: set[str] | None = None,
-        completed_sessions: Callable[[], set[str]] | None = None,
-        github: Callable[..., Any] | None = None,
-        resolve_repo: Callable[..., Path | None] | None = None,
+    def __init__(self, delegate: HarvestServices, *, rows: list[Mapping[str, Any]] | None = None,
+        completed: set[str] | None = None, completed_sessions: Callable[[], set[str]] | None = None,
+        github: Callable[..., Any] | None = None, resolve_repo: Callable[..., Path | None] | None = None,
         reviewer_prior: Callable[..., tuple[float | None, int]] | None = None,
         local_commit_applied: Callable[..., LocalCommitAppliedSignal] | None = None,
         append_annotation: Callable[..., bool] | None = None,
@@ -67,9 +61,7 @@ class HarvestTestServices:
             return self._resolve_repo(row, console=console)
         return self._delegate.resolve_repo(row, console=console)
 
-    def materialize_base_sha(
-        self, row: HarvestRow, repo_clone: Path | None, *, console: Console
-    ) -> BaseShaStatus:
+    def materialize_base_sha(self, row: HarvestRow, repo_clone: Path | None, *, console: Console) -> BaseShaStatus:
         return self._delegate.materialize_base_sha(row, repo_clone, console=console)
 
     def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
@@ -78,25 +70,14 @@ class HarvestTestServices:
         return self._delegate.github(repo, endpoint, **kwargs)
 
     def reviewer_prior(
-        self,
-        logins: tuple[str, ...],
-        *,
-        before_valid_at: str,
-        exclude_session: str,
-        repo_slug: str | None,
+        self, logins: tuple[str, ...], *, before_valid_at: str, exclude_session: str, repo_slug: str | None,
     ) -> tuple[float | None, int]:
         if self._reviewer_prior is not None:
             return self._reviewer_prior(
-                logins,
-                before_valid_at=before_valid_at,
-                exclude_session=exclude_session,
-                repo_slug=repo_slug,
+                logins, before_valid_at=before_valid_at, exclude_session=exclude_session, repo_slug=repo_slug,
             )
         return self._delegate.reviewer_prior(
-            logins,
-            before_valid_at=before_valid_at,
-            exclude_session=exclude_session,
-            repo_slug=repo_slug,
+            logins, before_valid_at=before_valid_at, exclude_session=exclude_session, repo_slug=repo_slug,
         )
 
     def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None:
@@ -108,9 +89,7 @@ class HarvestTestServices:
     def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]:
         return self._delegate.read_recorded_fingerprints(row)
 
-    def fix_applied(
-        self, row: HarvestRow, *, changed_files: tuple[str, ...], repo_clone: Path
-    ) -> FixAppliedSignal:
+    def fix_applied(self, row: HarvestRow, *, changed_files: tuple[str, ...], repo_clone: Path) -> FixAppliedSignal:
         return self._delegate.fix_applied(row, changed_files=changed_files, repo_clone=repo_clone)
 
     def local_commit_applied(self, row: HarvestRow, *, repo_clone: Path) -> LocalCommitAppliedSignal:

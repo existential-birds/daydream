@@ -52,7 +52,6 @@ def test_cache_refetches_stale_response(tmp_path: Path) -> None:
     assert second == {"merged": True, "n": 2}
     assert calls == [("org/repo", "repos/org/repo/pulls/42")] * 2
 
-
 def test_cache_returns_cached_response_on_second_call(tmp_path: Path) -> None:
     calls: list[tuple[str, str]] = []
 
@@ -61,7 +60,6 @@ def test_cache_returns_cached_response_on_second_call(tmp_path: Path) -> None:
     second = cache("org/repo", "repos/org/repo/pulls/42")
     assert first == second == {"merged": True, "n": 1}
     assert calls == [("org/repo", "repos/org/repo/pulls/42")]
-
 
 def test_cache_misses_for_different_endpoints(tmp_path: Path) -> None:
     calls: list[tuple[str, str]] = []
@@ -75,7 +73,6 @@ def test_cache_misses_for_different_endpoints(tmp_path: Path) -> None:
     cache("o/r", "pulls/2")
     assert len(calls) == 2
 
-
 def test_progress_log_appends_one_line_per_session(tmp_path: Path) -> None:
     """BackfillCache writes a versioned JSONL line per session_id processed."""
     cache = BackfillCache(cache_dir=tmp_path, inner=lambda r, e, **kw: {})
@@ -88,7 +85,6 @@ def test_progress_log_appends_one_line_per_session(tmp_path: Path) -> None:
     # M15: the row is stamped with the labeler policy version at completion time.
     assert first["labeler_policy_version"] == labeler_versions.LABELER_POLICY_VERSION
 
-
 def test_completed_sessions_resume(tmp_path: Path) -> None:
     """On startup, BackfillCache exposes the set of already-completed sessions.
 
@@ -100,21 +96,12 @@ def test_completed_sessions_resume(tmp_path: Path) -> None:
     current = labeler_versions.LABELER_POLICY_VERSION
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     (tmp_path / "progress.jsonl").write_text(
-        json.dumps(
-            {"session_id": "s1", "labeler_policy_version": current,
-             "completed_at": now},
-        ) + "\n"
-        + json.dumps(
-            {"session_id": "s-legacy", "completed_at": now},
-        ) + "\n"
-        + json.dumps(
-            {"session_id": "s-old", "labeler_policy_version": "980-policy-r0",
-             "completed_at": now},
-        ) + "\n"
+        json.dumps({"session_id": "s1", "labeler_policy_version": current, "completed_at": now}) + "\n"
+        + json.dumps({"session_id": "s-legacy", "completed_at": now}) + "\n"
+        + json.dumps({"session_id": "s-old", "labeler_policy_version": "980-policy-r0", "completed_at": now}) + "\n"
     )
     cache = BackfillCache(cache_dir=tmp_path, inner=lambda r, e, **kw: {})
     assert cache.completed_sessions() == {"s1"}
-
 
 def test_completed_sessions_age_out_after_freshness_window(tmp_path: Path) -> None:
     """A marker older than CACHE_TTL_SECONDS does not resume the session (M14).
@@ -128,14 +115,8 @@ def test_completed_sessions_age_out_after_freshness_window(tmp_path: Path) -> No
     stale_ts = time.time() - CACHE_TTL_SECONDS - 60
     stale = datetime.fromtimestamp(stale_ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     (tmp_path / "progress.jsonl").write_text(
-        json.dumps(
-            {"session_id": "s-fresh", "labeler_policy_version": current,
-             "completed_at": now},
-        ) + "\n"
-        + json.dumps(
-            {"session_id": "s-stale", "labeler_policy_version": current,
-             "completed_at": stale},
-        ) + "\n"
+        json.dumps({"session_id": "s-fresh", "labeler_policy_version": current, "completed_at": now}) + "\n"
+        + json.dumps({"session_id": "s-stale", "labeler_policy_version": current, "completed_at": stale}) + "\n"
     )
     cache = BackfillCache(cache_dir=tmp_path, inner=lambda r, e, **kw: {})
     assert cache.completed_sessions() == {"s-fresh"}

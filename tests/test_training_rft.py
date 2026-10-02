@@ -20,20 +20,12 @@ from daydream.training.rft import RftConfig, run_rft
 
 
 def _record(rid: str, **overrides: object) -> dict[str, object]:
-    rec: dict[str, object] = {
-        "id": rid,
-        "repo_slug": "owner/repo",
-        "base_sha": "a" * 40,
-        "head_sha": "b" * 40,
+    rec: dict[str, object] = {"id": rid, "repo_slug": "owner/repo", "base_sha": "a" * 40, "head_sha": "b" * 40,
         "diff": f"diff --git a/f.py b/f.py\n--- a/f.py\n+++ b/f.py\n@@ for {rid}\n",
-        "findings": [
-            {"id": f"{rid}-f1", "text": "Fix the off-by-one in the loop bound.",
+        "findings": [{"id": f"{rid}-f1", "text": "Fix the off-by-one in the loop bound.",
              "grounded": True, "verdict": "consistent"},
-            {"id": f"{rid}-f2", "text": "Add a guard for empty input.",
-             "grounded": True, "verdict": "consistent"},
-        ],
-        "format_valid": True,
-        "length": 400,
+            {"id": f"{rid}-f2", "text": "Add a guard for empty input.", "grounded": True, "verdict": "consistent"},
+        ], "format_valid": True, "length": 400,
     }
     rec.update(overrides)
     return rec
@@ -51,23 +43,16 @@ def frozen_rft_inputs(tmp_path: Path) -> Path:
 
 
 def test_winners_byte_identical_on_rerun(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    cfg_a = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
-                      output_dir=tmp_path / "a")
-    cfg_b = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
-                      output_dir=tmp_path / "b")
+    cfg_a = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "a")
+    cfg_b = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b")
     w1 = run_rft(cfg_a)
     w2 = run_rft(cfg_b)
     # AC6: byte-identical winners given the same inputs/model/seeds/rubric version.
     assert w1.winners_path.read_bytes() == w2.winners_path.read_bytes()
     assert w1.records, "expected at least one winner from a well-formed corpus"
 
-
 def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    cfg = RftConfig(
-        inputs=frozen_rft_inputs,
-        seed=11,
-        rubric_version="2026.08.29-1",
-        output_dir=tmp_path / "c",
+    cfg = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "c",
         min_breakdown={"composite": 0.6, "correctness_per_finding": 0.5},
     )
     winners = run_rft(cfg)
@@ -77,44 +62,29 @@ def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Pat
         assert w.breakdown.correctness_per_finding
         assert sum(w.breakdown.correctness_per_finding) / len(w.breakdown.correctness_per_finding) >= 0.5
 
-
-def test_shipped_threshold_example_replays_current_reward(
-    frozen_rft_inputs: Path, tmp_path: Path,
-) -> None:
+def test_shipped_threshold_example_replays_current_reward(frozen_rft_inputs: Path, tmp_path: Path,) -> None:
     """The shipped launch example must produce winners with supported reward axes."""
     example = Path(__file__).resolve().parents[1] / "rl/train/rft.toml"
     match = re.search(r"e\.g\. (\{[^\n]+\})", example.read_text())
     assert match is not None, "the reference recipe must document a winner threshold"
     spec = json.loads(match.group(1))
-    winners = run_rft(RftConfig(
-        inputs=frozen_rft_inputs, seed=11, rubric_version="current",
+    winners = run_rft(RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="current",
         output_dir=tmp_path / "shipped-example", min_breakdown=spec,
     ))
     assert winners.records
     assert all(w.breakdown.composite is not None and w.breakdown.composite >= spec["composite"]
                for w in winners.records)
 
-
-def test_spec_axes_match_score_trajectory_breakdown_fields(
-    frozen_rft_inputs: Path, tmp_path: Path
-) -> None:
+def test_spec_axes_match_score_trajectory_breakdown_fields(frozen_rft_inputs: Path, tmp_path: Path) -> None:
     """Stage-boundary contract: allowed spec axes are the breakdown's actual attribute names."""
     # "correctness" is not a field of score_trajectory's RewardBreakdown — the real
     # axis is correctness_per_finding. A spec naming a non-axis must be rejected at
     # config time (fail closed), and the real axis name must filter.
     with pytest.raises(TypeError, match="unknown axis"):
-        RftConfig(
-            inputs=frozen_rft_inputs,
-            seed=11,
-            rubric_version="v",
-            output_dir=tmp_path / "axis-bogus",
+        RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="v", output_dir=tmp_path / "axis-bogus",
             min_breakdown={"correctness": 0.5},
         )
-    cfg = RftConfig(
-        inputs=frozen_rft_inputs,
-        seed=11,
-        rubric_version="v",
-        output_dir=tmp_path / "axis-real",
+    cfg = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="v", output_dir=tmp_path / "axis-real",
         min_breakdown={"correctness_per_finding": 0.5},
     )
     winners = run_rft(cfg)
@@ -122,24 +92,17 @@ def test_spec_axes_match_score_trajectory_breakdown_fields(
         assert w.breakdown.correctness_per_finding is not None
         assert min(w.breakdown.correctness_per_finding) >= 0.5
 
-
 def test_scalar_threshold_is_rejected(frozen_rft_inputs: Path, tmp_path: Path) -> None:
     # M12: the filter threshold names axes, never a bare scalar.
     with pytest.raises(TypeError, match="min_breakdown"):
-        RftConfig(
-            inputs=frozen_rft_inputs,
-            seed=11,
-            rubric_version="v",
-            output_dir=tmp_path / "d",
+        RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="v", output_dir=tmp_path / "d",
             min_breakdown=0.6,  # type: ignore[arg-type]
         )
-
 
 def test_missing_identity_fails_closed_naming_the_record(tmp_path: Path) -> None:
     path = _write_corpus(tmp_path, [_record("ok"), _record("broken", base_sha="")])
     with pytest.raises(ValueError, match="broken"):
         run_rft(RftConfig(inputs=path, seed=11, rubric_version="v", output_dir=tmp_path / "e"))
-
 
 def test_winners_header_stamps_provenance(frozen_rft_inputs: Path, tmp_path: Path) -> None:
     result = run_rft(RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1",
@@ -153,15 +116,12 @@ def test_winners_header_stamps_provenance(frozen_rft_inputs: Path, tmp_path: Pat
     ids = [w["record_id"] for w in payload["winners"]]
     assert ids == sorted(ids)
 
-
 def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
     """Issue 6: scoring inputs derive from the sampled findings subset, so candidates
     that differ only in their findings score differently (breakdown filter can prefer
     one sampled completion). Determinism on identical inputs is preserved."""
-    rec: dict[str, object] = _record(
-        "r-vary",
-        findings=[
-            {"id": "r-vary-f1", "text": "grounded fix A", "grounded": True, "verdict": "consistent"},
+    rec: dict[str, object] = _record("r-vary",
+        findings=[{"id": "r-vary-f1", "text": "grounded fix A", "grounded": True, "verdict": "consistent"},
             {"id": "r-vary-f2", "text": "ungrounded guess B", "grounded": False, "verdict": "contradicts"},
         ],
     )

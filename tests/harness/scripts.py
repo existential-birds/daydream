@@ -75,17 +75,14 @@ def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
     raw_lines = script.get("raw_lines")
     if raw_lines is not None:
         if "turns" in script or "structured_output" in script:
-            raise AssertionError(
-                "a raw_lines passthrough script must not also carry synthesized "
+            raise AssertionError("a raw_lines passthrough script must not also carry synthesized "
                 "'turns' or 'structured_output'"
             )
         return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))
 
 
-async def drive_codex(
-    lines: list[str], output_schema: dict[str, Any] | None = None
-) -> list[AgentEvent]:
+async def drive_codex(lines: list[str], output_schema: dict[str, Any] | None = None) -> list[AgentEvent]:
     """Drive a real ``CodexBackend`` over *lines*, collecting emitted events.
 
     Thin helper: ``make_mock_process`` +
@@ -104,10 +101,7 @@ async def drive_codex(
     mock_proc = make_mock_process(lines)
     backend = CodexBackend(model="codex-test-model")
     events: list[AgentEvent] = []
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc,):
         async for event in backend.execute(Path("/tmp"), "go", output_schema=output_schema):
             events.append(event)
     return events

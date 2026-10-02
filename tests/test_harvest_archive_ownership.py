@@ -24,13 +24,7 @@ _SESSION_ID = "shared-session"
 class _ObservedServices(HarvestTestServices):
     """Record the archive query boundary while retaining production adapters."""
 
-    def __init__(
-        self,
-        delegate: HarvestServices,
-        *,
-        github: Callable[..., Any],
-        events: list[str],
-    ) -> None:
+    def __init__(self, delegate: HarvestServices, *, github: Callable[..., Any], events: list[str],) -> None:
         super().__init__(delegate, github=github)
         self._events = events
 
@@ -51,32 +45,16 @@ def _github(events: list[str]) -> Callable[..., Any]:
 
 def _seed_archive(path: Path) -> None:
     path.mkdir(exist_ok=True)
-    _seed_archived_deep_run(
-        path,
-        _SESSION_ID,
-    )
+    _seed_archived_deep_run(path, _SESSION_ID,)
 
 
-async def _invoke(
-    requested_archive: Path,
-    services: HarvestServices,
-    *,
-    cache_dir: Path,
-) -> None:
+async def _invoke(requested_archive: Path, services: HarvestServices, *, cache_dir: Path,) -> None:
     await run_harvest(
-        HarvestConfig(
-            archive_dir=requested_archive,
-            cache_dir=cache_dir,
-            gh_request_spacing_sec=0,
-        ),
-        services=services,
+        HarvestConfig(archive_dir=requested_archive, cache_dir=cache_dir, gh_request_spacing_sec=0,), services=services,
     )
-
 
 @pytest.mark.anyio
-async def test_entrypoint_rejects_services_owned_by_another_archive_before_side_effects(
-    tmp_path: Path,
-) -> None:
+async def test_entrypoint_rejects_services_owned_by_another_archive_before_side_effects(tmp_path: Path,) -> None:
     archive_a = tmp_path / "archive-a"
     archive_b = tmp_path / "archive-b"
     _seed_archive(archive_a)
@@ -85,62 +63,34 @@ async def test_entrypoint_rejects_services_owned_by_another_archive_before_side_
     requested_cache = tmp_path / "requested-cache"
     events: list[str] = []
     services = _ObservedServices(
-        make_harvest_services(
-            HarvestConfig(archive_dir=archive_a, cache_dir=service_cache)
-        ),
-        github=_github(events),
+        make_harvest_services(HarvestConfig(archive_dir=archive_a, cache_dir=service_cache)), github=_github(events),
         events=events,
     )
-    histories_before = {
-        archive: label_observation_history(archive, _SESSION_ID)
-        for archive in (archive_a, archive_b)
-    }
-
+    histories_before = {archive: label_observation_history(archive, _SESSION_ID) for archive in (archive_a, archive_b)}
     with pytest.raises(ValueError, match="archive"):
-        await _invoke(
-            archive_b,
-            services,
-            cache_dir=requested_cache,
-        )
+        await _invoke(archive_b, services, cache_dir=requested_cache,)
 
     assert events == []
-    assert {
-        archive: label_observation_history(archive, _SESSION_ID)
+    assert {archive: label_observation_history(archive, _SESSION_ID)
         for archive in (archive_a, archive_b)
     } == histories_before
     assert not service_cache.exists()
     assert not requested_cache.exists()
 
-
 @pytest.mark.anyio
-async def test_entrypoint_accepts_services_owned_by_symlink_alias(
-    tmp_path: Path,
-) -> None:
+async def test_entrypoint_accepts_services_owned_by_symlink_alias(tmp_path: Path,) -> None:
     archive = tmp_path / "archive"
     _seed_archive(archive)
     archive_alias = tmp_path / "archive-alias"
     archive_alias.symlink_to(archive, target_is_directory=True)
     events: list[str] = []
     services = _ObservedServices(
-        make_harvest_services(
-            HarvestConfig(
-                archive_dir=archive,
-                cache_dir=tmp_path / "service-cache",
-            )
-        ),
-        github=_github(events),
-        events=events,
+        make_harvest_services(HarvestConfig(archive_dir=archive, cache_dir=tmp_path / "service-cache",)),
+        github=_github(events), events=events,
     )
-
-    await _invoke(
-        archive_alias,
-        services,
-        cache_dir=tmp_path / "requested-cache",
-    )
+    await _invoke(archive_alias, services, cache_dir=tmp_path / "requested-cache",)
 
     assert events[0] == "query"
     assert "github" in events
     assert len(label_observation_history(archive, _SESSION_ID)) == 1
-    assert label_observation_history(archive_alias, _SESSION_ID) == (
-        label_observation_history(archive, _SESSION_ID)
-    )
+    assert label_observation_history(archive_alias, _SESSION_ID) == (label_observation_history(archive, _SESSION_ID))

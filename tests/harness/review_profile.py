@@ -27,26 +27,17 @@ class PromptPaths(TypedDict):
 
 def prompt_paths(tmp_path: Path, output_name: str = "stack-review.md") -> PromptPaths:
     """Canonical deep-review artifact path set; only the output basename varies."""
-    return {
-        "diff_path": tmp_path / ".daydream" / "diff.patch",
+    return {"diff_path": tmp_path / ".daydream" / "diff.patch",
         "intent_path": tmp_path / ".daydream" / "deep" / "intent.md",
         "alternatives_path": tmp_path / ".daydream" / "deep" / "alternatives.json",
-        "output_path": tmp_path / ".daydream" / "deep" / output_name,
-        "cwd": tmp_path,
+        "output_path": tmp_path / ".daydream" / "deep" / output_name, "cwd": tmp_path,
     }
 
 
 def sample_pr() -> PRInfo:
     """The canonical test PRInfo used across submission/review/severity tests."""
-    return PRInfo(
-        number=42,
-        head_sha="head123",
-        base_sha="base456",
-        base_ref="main",
-        head_ref="feature",
-        owner="acme",
-        repo="widgets",
-        url="https://github.com/acme/widgets/pull/42",
+    return PRInfo(number=42, head_sha="head123", base_sha="base456", base_ref="main", head_ref="feature", owner="acme",
+        repo="widgets", url="https://github.com/acme/widgets/pull/42",
     )
 
 
@@ -56,8 +47,7 @@ def default_strategy(stage: str) -> str:
 
 def exploration_strategies() -> dict[str, str]:
     """Return the default profile's exploration.* strategy content by key."""
-    return {
-        name: value.content
+    return {name: value.content
         for name, value in build_default_profile().strategies.items()
         if name.startswith("exploration.")
     }
@@ -73,9 +63,7 @@ def independent_alternatives_profile() -> ResolvedProfile:
     return ResolvedProfile(profile=replace(profile, strategies=strategies), source_kind="test")
 
 
-def independent_exploration_profile(
-    resolved: ResolvedProfile | None = None,
-) -> ResolvedProfile:
+def independent_exploration_profile(resolved: ResolvedProfile | None = None,) -> ResolvedProfile:
     """Request model exploration when testing specialist dispatch and lifecycle."""
     profile = resolved.profile if resolved is not None else build_default_profile()
     strategies = dict(profile.strategies)

@@ -69,18 +69,12 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
         if turn.get("thinking"):
             blocks.append(MockThinkingBlock(thinking=turn["thinking"]))
         for tc in turn.get("tool_calls", []):
-            blocks.append(
-                MockToolUseBlock(id=tc["id"], name=tc["name"], input=tc.get("input") or {})
-            )
+            blocks.append(MockToolUseBlock(id=tc["id"], name=tc["name"], input=tc.get("input") or {}))
         # Per-turn usage only on the final turn so MetricsEvent is emitted
         # exactly once (same cardinality as Codex's single turn.completed).
         usage = final_usage if idx == len(turns) - 1 else None
-        messages.append(
-            MockAssistantMessage(
-                content=blocks,
-                model="claude-test-model",
-                message_id=turn["message_id"],
-                usage=usage,
+        messages.append(MockAssistantMessage(
+                content=blocks, model="claude-test-model", message_id=turn["message_id"], usage=usage,
             )
         )
 
@@ -91,29 +85,18 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
             tr = tool_results_by_id.get(tc["id"])
             if tr is None:
                 continue
-            result_blocks.append(
-                MockToolResultBlock(
-                    tool_use_id=tr["id"],
-                    content=tr.get("output", ""),
-                    is_error=bool(tr.get("is_error", False)),
+            result_blocks.append(MockToolResultBlock(
+                    tool_use_id=tr["id"], content=tr.get("output", ""), is_error=bool(tr.get("is_error", False)),
                 )
             )
         if result_blocks:
             messages.append(MockUserMessage(content=result_blocks))
 
-    messages.append(
-        MockResultMessage(
-            total_cost_usd=None,
-            structured_output=None,
-            usage=final_usage,
-        )
-    )
+    messages.append(MockResultMessage(total_cost_usd=None, structured_output=None, usage=final_usage,))
     return messages
 
 
-async def claude_loader(
-    script: dict[str, Any], *, read_only: bool = False
-) -> AsyncIterator[AgentEvent]:
+async def claude_loader(script: dict[str, Any], *, read_only: bool = False) -> AsyncIterator[AgentEvent]:
     """Drive ``ClaudeBackend.execute`` against the canonical script."""
     messages = _build_claude_messages(script)
     client = scripted_client(messages)
@@ -148,42 +131,23 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
     tool_results_by_id = _tool_results_by_id(script)
     final_usage = script.get("final_usage") or {}
 
-    lines: list[str] = [
-        json.dumps({"type": "thread.started", "thread_id": "th_canonical"})
-    ]
+    lines: list[str] = [json.dumps({"type": "thread.started", "thread_id": "th_canonical"})]
 
     for turn in turns:
         if turn.get("thinking"):
             reasoning_id = f"reason_{turn['message_id']}"
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "item.started",
-                        "item": {"type": "reasoning", "id": reasoning_id, "content": []},
-                    }
+            lines.append(json.dumps(
+                    {"type": "item.started", "item": {"type": "reasoning", "id": reasoning_id, "content": []}}
                 )
             )
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "item.completed",
-                        "item": {
-                            "type": "reasoning",
-                            "id": reasoning_id,
-                            "text": turn["thinking"],
-                        },
+            lines.append(json.dumps({"type": "item.completed",
+                        "item": {"type": "reasoning", "id": reasoning_id, "text": turn["thinking"]},
                     }
                 )
             )
         for tc in turn.get("tool_calls", []):
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "item.started",
-                        "item": {
-                            "type": "mcp_tool_call",
-                            "id": tc["id"],
-                            "tool": tc["name"],
+            lines.append(json.dumps({"type": "item.started",
+                        "item": {"type": "mcp_tool_call", "id": tc["id"], "tool": tc["name"],
                             "arguments": tc.get("input") or {},
                         },
                     }
@@ -193,44 +157,20 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
             output = "" if tr is None else tr.get("output", "")
             is_error = False if tr is None else bool(tr.get("is_error", False))
             completed_item: dict[str, Any] = {
-                "type": "mcp_tool_call",
-                "id": tc["id"],
-                "tool": tc["name"],
-                "arguments": tc.get("input") or {},
+                "type": "mcp_tool_call", "id": tc["id"], "tool": tc["name"], "arguments": tc.get("input") or {},
                 "result": {"content": output},
             }
             if is_error:
                 completed_item["error"] = output
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "item.completed",
-                        "item": completed_item,
-                    }
-                )
-            )
+            lines.append(json.dumps({"type": "item.completed", "item": completed_item}))
         if turn.get("text"):
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "item.started",
-                        "item": {
-                            "type": "agent_message",
-                            "id": turn["message_id"],
-                            "content": [],
-                        },
+            lines.append(json.dumps({"type": "item.started",
+                        "item": {"type": "agent_message", "id": turn["message_id"], "content": []},
                     }
                 )
             )
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "item.completed",
-                        "item": {
-                            "type": "agent_message",
-                            "id": turn["message_id"],
-                            "text": turn["text"],
-                        },
+            lines.append(json.dumps({"type": "item.completed",
+                        "item": {"type": "agent_message", "id": turn["message_id"], "text": turn["text"]},
                     }
                 )
             )
@@ -246,17 +186,12 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
     return lines
 
 
-async def codex_loader(
-    script: dict[str, Any], *, read_only: bool = False
-) -> AsyncIterator[AgentEvent]:
+async def codex_loader(script: dict[str, Any], *, read_only: bool = False) -> AsyncIterator[AgentEvent]:
     """Drive ``CodexBackend.execute`` against the canonical script."""
     lines = _build_codex_jsonl(script)
     mock_proc = make_mock_process(lines)
     backend = CodexBackend(model="codex-test-model")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc,):
         async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):
             yield event
 
@@ -296,8 +231,7 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
     final_usage = script.get("final_usage") or {}
 
     lines: list[str] = [
-        json.dumps({"type": "session", "sessionId": "pi_canonical_session"}),
-        json.dumps({"type": "agent_start"}),
+        json.dumps({"type": "session", "sessionId": "pi_canonical_session"}), json.dumps({"type": "agent_start"}),
     ]
 
     for idx, turn in enumerate(turns):
@@ -308,13 +242,7 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
         if turn.get("thinking"):
             content.append({"type": "thinking", "thinking": turn["thinking"]})
         for tc in turn.get("tool_calls", []):
-            content.append(
-                {
-                    "type": "toolCall",
-                    "id": tc["id"],
-                    "name": tc["name"],
-                    "arguments": tc.get("input") or {},
-                }
+            content.append({"type": "toolCall", "id": tc["id"], "name": tc["name"], "arguments": tc.get("input") or {}}
             )
 
         usage_payload: dict[str, Any] = {}
@@ -327,11 +255,7 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
                 usage_payload["cacheRead"] = final_usage["cached_tokens"]
             usage_payload["cost"] = {"total": 0.0}
 
-        assistant_msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": content,
-            "model": "pi-test-model",
-        }
+        assistant_msg: dict[str, Any] = {"role": "assistant", "content": content, "model": "pi-test-model"}
         if usage_payload:
             assistant_msg["usage"] = usage_payload
 
@@ -343,33 +267,19 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
             tr = tool_results_by_id.get(tc["id"])
             output = "" if tr is None else tr.get("output", "")
             is_error = False if tr is None else bool(tr.get("is_error", False))
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "tool_execution_start",
-                        "toolCallId": tc["id"],
-                        "toolName": tc["name"],
+            lines.append(json.dumps({"type": "tool_execution_start", "toolCallId": tc["id"], "toolName": tc["name"],
                         "args": tc.get("input") or {},
                     }
                 )
             )
-            lines.append(
-                json.dumps(
-                    {
-                        "type": "tool_execution_end",
-                        "toolCallId": tc["id"],
-                        "toolName": tc["name"],
-                        "result": {"content": [{"type": "text", "text": output}]},
-                        "isError": is_error,
+            lines.append(json.dumps({"type": "tool_execution_end", "toolCallId": tc["id"], "toolName": tc["name"],
+                        "result": {"content": [{"type": "text", "text": output}]}, "isError": is_error,
                     }
                 )
             )
 
         turn_end_msg: dict[str, Any] = {
-            "role": "assistant",
-            "content": list(content),
-            "model": "pi-test-model",
-            "stopReason": "stop",
+            "role": "assistant", "content": list(content), "model": "pi-test-model", "stopReason": "stop",
         }
         if usage_payload:
             turn_end_msg["usage"] = usage_payload
@@ -379,16 +289,11 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
     return lines
 
 
-async def pi_loader(
-    script: dict[str, Any], *, read_only: bool = False
-) -> AsyncIterator[AgentEvent]:
+async def pi_loader(script: dict[str, Any], *, read_only: bool = False) -> AsyncIterator[AgentEvent]:
     """Drive ``PiBackend.execute`` against the canonical script."""
     lines = _build_pi_jsonl(script)
     mock_proc = make_mock_process_pi(lines)
     backend = PiBackend(model="pi-test-model")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc,):
         async for event in backend.execute(Path("/tmp"), "go", read_only=read_only):
             yield event

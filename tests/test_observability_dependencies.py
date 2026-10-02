@@ -9,17 +9,13 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    "missing",
-    ["opentelemetry.exporter.otlp.proto.grpc", "opentelemetry.exporter.otlp.proto.http", "traceloop"],
+    "missing", ["opentelemetry.exporter.otlp.proto.grpc", "opentelemetry.exporter.otlp.proto.http", "traceloop"],
 )
 @pytest.mark.parametrize("destination", ["off", "langsmith", "honeyhive", "otlp"])
 def test_missing_tracing_dependency(missing: str, destination: str) -> None:
     # A fresh interpreter avoids SDK imports cached by other tests. Blocking one
     # package reproduces an editable checkout whose dependencies were not refreshed.
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
+    result = subprocess.run([sys.executable, "-c",
             textwrap.dedent("""\
                 import importlib.abc
                 import sys
@@ -59,13 +55,8 @@ def test_missing_tracing_dependency(missing: str, destination: str) -> None:
 
                 anyio.run(run)
                 """),
-            missing,
-            destination,
-        ],
-        env={key: value for key, value in os.environ.items() if not key.startswith(("OTEL_", "_OTEL_"))},
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
+            missing, destination,
+        ], env={key: value for key, value in os.environ.items() if not key.startswith(("OTEL_", "_OTEL_"))},
+        capture_output=True, text=True, timeout=30, check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr

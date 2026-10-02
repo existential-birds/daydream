@@ -6,23 +6,17 @@ from typing import Any, cast
 
 
 def _cfg() -> dict[str, Any]:
-    return cast(
-        dict[str, Any],
-        tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["tool"]["mypy"],
-    )
+    return cast(dict[str, Any], tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["tool"]["mypy"])
 
 
 def test_strict_is_enabled() -> None:
     assert _cfg()["strict"] is True
 
-
 def test_no_global_ignore_errors() -> None:
     assert "ignore_errors" not in _cfg()
 
-
 def test_global_ignore_missing_imports_gone() -> None:
     assert _cfg().get("ignore_missing_imports") is not True
-
 
 def test_overrides_are_narrow_verifier_boundary_only() -> None:
     blocks = _cfg().get("overrides", [])

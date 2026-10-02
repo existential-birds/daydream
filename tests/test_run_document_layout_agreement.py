@@ -34,18 +34,13 @@ def _write_run(target: Path) -> Path:
 
 
 def _snapshot(root_path: Path, status: Literal["complete", "partial"] = "complete") -> RunWriteSnapshot:
-    return RunWriteSnapshot(
-        status=status,
-        cutoff_at="2026-01-01T00:00:00Z",
-        root_trajectory_id=SESSION,
-        documents=(
-            TrajectoryDocumentSnapshot(SESSION, root_path, trajectory_payload(SESSION)),
+    return RunWriteSnapshot(status=status, cutoff_at="2026-01-01T00:00:00Z", root_trajectory_id=SESSION,
+        documents=(TrajectoryDocumentSnapshot(SESSION, root_path, trajectory_payload(SESSION)),
             TrajectoryDocumentSnapshot(
                 "fork-1", root_path.parent / "trajectories" / SIBLING, trajectory_payload("fork-1")
             ),
         ),
     )
-
 
 def test_every_reader_resolves_the_same_document_set(tmp_path: Path) -> None:
     target = tmp_path / "proj"
@@ -69,10 +64,7 @@ def test_every_reader_resolves_the_same_document_set(tmp_path: Path) -> None:
     archive_run_dir = get_archive_dir() / "runs" / SESSION
     archive_run_dir.mkdir(parents=True, exist_ok=True)
     _project_documents(_snapshot(run_dir / "trajectory.json"), archive_run_dir, session_id=SESSION)
-    assert {
-        p.relative_to(archive_run_dir).as_posix() for p in archive_run_dir.rglob("*.json")
-    } == canonical
-
+    assert {p.relative_to(archive_run_dir).as_posix() for p in archive_run_dir.rglob("*.json")} == canonical
 
 def test_the_partial_root_is_stripped_by_the_archive_and_ignored_by_readers(tmp_path: Path) -> None:
     target = tmp_path / "proj"
@@ -90,7 +82,6 @@ def test_the_partial_root_is_stripped_by_the_archive_and_ignored_by_readers(tmp_
     archive_run_dir.mkdir(parents=True, exist_ok=True)
     _project_documents(_snapshot(partial, status="partial"), archive_run_dir, session_id=SESSION)
     assert (archive_run_dir / "trajectory.json").read_bytes() == trajectory_payload(SESSION)
-
 
 async def test_the_artifact_route_reads_the_same_run_directory(tmp_path: Path) -> None:
     source = tmp_path / "source"

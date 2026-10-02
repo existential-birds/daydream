@@ -12,13 +12,10 @@ from tests.harness.scripts import build_codex_jsonl_for_phase, drive_codex
 
 
 async def test_parse_phase_structured_output_roundtrip() -> None:
-    script = {
-        "turns": [{"message_id": "m1", "text": ""}],
+    script = {"turns": [{"message_id": "m1", "text": ""}],
         "structured_output": {"issues": [{"id": 1, "description": "x", "file": "a.py", "line": 1}]},
     }
     lines = build_codex_jsonl_for_phase(script)
     events = await drive_codex(lines, output_schema=FEEDBACK_SCHEMA)
     result = next(e for e in events if isinstance(e, ResultEvent))
-    assert result.structured_output == {
-        "issues": [{"id": 1, "description": "x", "file": "a.py", "line": 1}]
-    }
+    assert result.structured_output == {"issues": [{"id": 1, "description": "x", "file": "a.py", "line": 1}]}

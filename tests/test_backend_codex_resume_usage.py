@@ -20,7 +20,6 @@ from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.otlp import attributes, otlp_collector
 
 
-@pytest.mark.asyncio
 async def test_runner_resumed_codex_usage_is_per_exec_not_prior_session_delta(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
@@ -71,9 +70,7 @@ def register(r):
         FakeCliProcess([
             json.dumps({"type": "thread.started", "thread_id": "native-thread"}),
             json.dumps({"type": "turn.started"}),
-            json.dumps({"type": "item.completed", "item": {
-                "type": "agent_message", "id": "reply", "text": "Done",
-            }}),
+            json.dumps({"type": "item.completed", "item": { "type": "agent_message", "id": "reply", "text": "Done", }}),
             json.dumps({"type": "turn.completed", "usage": usage}),
         ])
         for usage in native_totals

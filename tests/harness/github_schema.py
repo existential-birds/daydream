@@ -27,34 +27,12 @@ import re
 # touch. ``resolvedBy`` is in the subset but must NOT be requested (nothing
 # reads it); it is present so a future *correct* addition is not falsely
 # rejected.
-SCHEMA_FIELDS: dict[str, set[str]] = {
-    "PullRequestReviewThread": {
-        "id",
-        "isResolved",
-        "isOutdated",
-        "resolvedBy",
-        "subjectType",
-        "path",
-        "line",
-        "originalLine",
-        "originalStartLine",
-        "diffSide",
-        "startDiffSide",
-        "comments",
-    },
-    "Comment": {
-        "id",
-        "databaseId",
-        "body",
-        "author",
-        "isMinimized",
-        "createdAt",
-        "updatedAt",
-        "url",
-        "replyTo",
+SCHEMA_FIELDS: dict[str, set[str]] = {"PullRequestReviewThread": {
+        "id", "isResolved", "isOutdated", "resolvedBy", "subjectType", "path", "line", "originalLine",
+        "originalStartLine", "diffSide", "startDiffSide", "comments",
+    }, "Comment": {"id", "databaseId", "body", "author", "isMinimized", "createdAt", "updatedAt", "url", "replyTo",
         "viewerDidAuthor",
-    },
-    "Actor": {"login"},
+    }, "Actor": {"login"},
 }
 
 # Field name -> GraphQL object type of the value it selects, for the few
@@ -72,8 +50,7 @@ _NESTED_SELECTION_TYPE: dict[str, str] = {
     # PullRequestReviewThread
     "comments": "PullRequestReviewCommentConnection",
     # Comment
-    "author": "Actor",
-    "replyTo": "Comment",
+    "author": "Actor", "replyTo": "Comment",
     # Connections
     "pageInfo": "PageInfo",
 }
@@ -82,8 +59,7 @@ _NESTED_SELECTION_TYPE: dict[str, str] = {
 # enclosing connection type (context-dependent, so it cannot live in the
 # single-name map above).
 _CONNECTION_NODE_TYPE: dict[str, str] = {
-    "PullRequestReviewThreadConnection": "PullRequestReviewThread",
-    "PullRequestReviewCommentConnection": "Comment",
+    "PullRequestReviewThreadConnection": "PullRequestReviewThread", "PullRequestReviewCommentConnection": "Comment",
 }
 
 # Query/connection machinery every query relies on, plus ``__typename`` which
@@ -91,14 +67,7 @@ _CONNECTION_NODE_TYPE: dict[str, str] = {
 # selection set, so it is acceptable in any type context; ``__typename`` is
 # never collected at all.
 _MACHINERY_FIELDS = {
-    "repository",
-    "pullRequest",
-    "reviewThreads",
-    "node",
-    "nodes",
-    "pageInfo",
-    "hasNextPage",
-    "endCursor",
+    "repository", "pullRequest", "reviewThreads", "node", "nodes", "pageInfo", "hasNextPage", "endCursor",
 }
 
 _SKIP_CHARS = " \t\r\n,?$"

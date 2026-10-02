@@ -33,7 +33,6 @@ def test_parse_hunks_matches_pr_head_side_ranges() -> None:
     # quote_scrub._added_line_numbers contract: new-side numbers of '+' lines
     assert added_line_numbers(parsed) == {"x.py": {11, 12, 30}}
 
-
 def test_write_hunk_index_round_trips(tmp_path: Path) -> None:
     diff = "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n x\n+y\n"
     write_hunk_index(tmp_path, diff)
@@ -42,7 +41,6 @@ def test_write_hunk_index_round_trips(tmp_path: Path) -> None:
     assert idx["a.py"]["added_total"] == 1 and idx["a.py"]["removed_total"] == 0
     assert idx["a.py"]["hunks"][0]["new_end"] == 2
     assert "added_lines" not in idx["a.py"]
-
 
 def test_head_side_ranges_by_file_groups_the_flat_view_per_path() -> None:
     """#1113: the per-file view answers "is this line in a changed hunk of THIS
@@ -60,25 +58,18 @@ def test_head_side_ranges_by_file_groups_the_flat_view_per_path() -> None:
     flat = [r for ranges in by_file.values() for r in ranges]
     assert sorted(flat) == sorted(head_side_ranges(parsed))
 
-
 def test_head_side_ranges_by_file_reads_the_persisted_index(tmp_path: Path) -> None:
     """#1113: persistence drops only ``added_lines``, so the per-file accessor
     works identically on a loaded ``hunk-index.json``."""
-    diff = (
-        "diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n x\n+y\n"
-    )
+    diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1,2 @@\n x\n+y\n")
     write_hunk_index(tmp_path, diff)
     loaded = load_hunk_index(tmp_path)
     assert head_side_ranges_by_file(loaded) == head_side_ranges_by_file(parse_hunks(diff))
     assert head_side_ranges_by_file(loaded) == {"a.py": [(1, 2)]}
 
-
 def test_head_side_ranges_by_file_keeps_pure_deletion_files_as_empty() -> None:
     """#1113: a file whose only hunk was a pure deletion has no head-side range
     but is still a changed file, so it maps to ``[]`` rather than vanishing."""
-    diff = (
-        "diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ b/gone.py\n"
-        "@@ -1,2 +0,0 @@\n-a\n-b\n"
-    )
+    diff = ("diff --git a/gone.py b/gone.py\n--- a/gone.py\n+++ b/gone.py\n" "@@ -1,2 +0,0 @@\n-a\n-b\n")
     parsed = parse_hunks(diff)
     assert head_side_ranges_by_file(parsed) == {"gone.py": []}

@@ -51,7 +51,6 @@ async def test_tools_disabled_large_prompt_uses_stdin_and_preserves_high_reasoni
     assert request.config.selected_tools_count == 0
     assert request.config.selected_tools_present is False
 
-
 async def test_tools_disabled_bridge_does_not_leak_to_fix_or_change_finalization(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -68,15 +67,12 @@ async def test_tools_disabled_bridge_does_not_leak_to_fix_or_change_finalization
         await run_agent(backend, target, "Bounded evidence", phase=DaydreamPhase.DEEP,
                         tools_disabled=True, review_system_instructions=policy,
                         progress_callback=lambda _: None)
-        await run_agent(backend, target, "Implement fix", phase=DaydreamPhase.FIX,
-                        progress_callback=lambda _: None)
+        await run_agent(backend, target, "Implement fix", phase=DaydreamPhase.FIX, progress_callback=lambda _: None)
     assert execute.call_args_list[0].kwargs["review_instructions"] == policy
     assert "review_instructions" not in execute.call_args_list[1].kwargs
     final_events = [event async for event in backend.execute(target, "Serialize result", finalization=True)]
 
-    observations = {
-        row["prompt_sha256"]: row for row in fixture.read_observations()
-    }
+    observations = {row["prompt_sha256"]: row for row in fixture.read_observations()}
     review, fix, final = [observations[hashlib.sha256(text.encode()).hexdigest()]
                           for text in ("Bounded evidence", "Implement fix", "Serialize result")]
     assert "--no-tools" in review["argv"] and review["stdin_bytes"] > 0
@@ -89,13 +85,11 @@ async def test_tools_disabled_bridge_does_not_leak_to_fix_or_change_finalization
     assert final_request.config is not None and final_request.config.finalization is True
     assert backend.reasoning_effort == "high"
 
-
 async def test_tools_disabled_request_fails_before_dispatch_on_unsupported_backend(tmp_path: Path) -> None:
     backend = ScriptedBackend()
     with pytest.raises(NotImplementedError, match="tools_disabled"):
         await run_agent(backend, tmp_path, "Review", phase=DaydreamPhase.DEEP, tools_disabled=True)
     assert backend.calls == []
-
 
 async def test_review_system_instructions_require_native_tool_free_support(tmp_path: Path) -> None:
     backend = ScriptedBackend(supports_tools_disabled=True)

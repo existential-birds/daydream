@@ -13,10 +13,7 @@ def test_default_is_deep() -> None:
     config = _parse_args(["target"])
     assert config.shallow is False
 
-
-def test_help_all_states_trajectory_and_dump_artifacts_semantics(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_help_all_states_trajectory_and_dump_artifacts_semantics(capsys: pytest.CaptureFixture[str],) -> None:
     """--help-all names the public post-finalization trajectory default, live external
     updates, and --dump-artifacts as a preserving merge with nonfatal refusal.
 
@@ -26,20 +23,13 @@ def test_help_all_states_trajectory_and_dump_artifacts_semantics(
     with pytest.raises(SystemExit):
         _parse_args(["--help-all"])
     out = " ".join(capsys.readouterr().out.split())
-    for fragment in (
-        "--trajectory",
-        "<target>/.daydream/runs/<session_id>/trajectory.json",
-        "after finalization",
-        "explicit external paths receive live updates",
-        "--dump-artifacts",
-        "Merge the finalized run bundle",
+    for fragment in ("--trajectory", "<target>/.daydream/runs/<session_id>/trajectory.json", "after finalization",
+        "explicit external paths receive live updates", "--dump-artifacts", "Merge the finalized run bundle",
         "Preserves unrelated destination files",
         "Blocking secret-scan findings trigger sanitization of a separate copy",
-        "A refused dump warns without failing the review",
-        "the local archive stays unchanged",
+        "A refused dump warns without failing the review", "the local archive stays unchanged",
     ):
         assert fragment in out, fragment
-
 
 @pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
 def test_deep_resume_stages_accepted(stage: str) -> None:
@@ -47,13 +37,11 @@ def test_deep_resume_stages_accepted(stage: str) -> None:
     config = _parse_args(["target", "--start-at", stage])
     assert config.start_at == stage
 
-
 @pytest.mark.parametrize("stage", ["ttt", "per-stack", "merge"])
 def test_shallow_rejects_deep_resume_stages(stage: str) -> None:
     """Deep-pipeline resume stages are not valid with --shallow."""
     with pytest.raises(SystemExit):
         _parse_args(["target", "--shallow", "--start-at", stage])
-
 
 @pytest.mark.parametrize("stage", ["parse", "test"])
 def test_deep_rejects_legacy_resume_stages(stage: str) -> None:
@@ -61,11 +49,8 @@ def test_deep_rejects_legacy_resume_stages(stage: str) -> None:
     with pytest.raises(SystemExit):
         _parse_args(["target", "--start-at", stage])
 
-
 @pytest.mark.parametrize("stage", ["parse", "test"])
-def test_shallow_rejects_legacy_resume_stages(
-    stage: str, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_shallow_rejects_legacy_resume_stages(stage: str, capsys: pytest.CaptureFixture[str]) -> None:
     """parse/test have no mapping in the unified pipeline, even with --shallow.
 
     They must error out rather than silently restart the full pipeline (the
@@ -75,7 +60,6 @@ def test_shallow_rejects_legacy_resume_stages(
     with pytest.raises(SystemExit):
         _parse_args(["target", "--shallow", "--start-at", stage])
     assert "no mapping in the unified pipeline" in capsys.readouterr().err
-
 
 @pytest.mark.parametrize("stage", ["fix", "review"])
 def test_shallow_accepts_unified_resume_stages(stage: str) -> None:

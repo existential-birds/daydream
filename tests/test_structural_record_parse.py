@@ -29,8 +29,7 @@ async def test_parse_preserves_structural_partition_on_resume(
     structural = {"issues": issues}
     path = dd / "stack-structure-records.json"
     path.write_text(json.dumps(structural))
-    ctx = FlowContext(
-        config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=Registry(),
+    ctx = FlowContext(config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=Registry(),
         data={"dd": dd, "stacks": [StackAssignment("python", ["api.py"]),
                                     StackAssignment("structure", ["api.py"])], "failed_stacks": {}},
     )
@@ -39,17 +38,13 @@ async def test_parse_preserves_structural_partition_on_resume(
     assert ctx.data["structural_records"] == issues
     assert ctx.data["records"] == []
 
-
 @pytest.mark.parametrize("start_at", [None, "per-stack"])
 async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
-    start_at: str | None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, start_at: str | None,
 ) -> None:
     dd = tmp_path / ".daydream/deep"
     dd.mkdir(parents=True)
-    artifacts = [dd / name for name in (
-        "stack-structure-records.json", "stack-structure-review.md",
-    )]
+    artifacts = [dd / name for name in ("stack-structure-records.json", "stack-structure-review.md",)]
     for path in artifacts:
         path.write_text("STALE")
     (tmp_path / "api.py").write_text("value = 1\n")
@@ -72,8 +67,7 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     backend = PiBackend(model="test", reasoning_effort="high")
     ctx = FlowContext(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
-        allow_standalone_artifacts=True,
-        run_context=RunContext(InteractionPolicy(interactive=False)),
+        allow_standalone_artifacts=True, run_context=RunContext(InteractionPolicy(interactive=False)),
         _backend_factory=lambda *_: backend,
         data={"dd": dd, "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
               "alts_path": alternatives, "exploration_dir": None, "failed_stacks": {},

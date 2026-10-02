@@ -13,7 +13,6 @@ def test_task_identity_neutral() -> None:
     assert DEFAULT_TASKSET_ID == "daydream-review"
     assert "v1" not in DEFAULT_TASKSET_ID
 
-
 def test_legacy_loader_gone() -> None:
     with pytest.raises(ModuleNotFoundError):
         importlib.import_module("daydream_review.corpus")

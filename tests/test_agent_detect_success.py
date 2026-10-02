@@ -16,28 +16,19 @@ Summary:
 - 0 tests failed
 - 46 tests ignored
 """,
-            True,
-            id="agent-emoji-summary-multiline",
+            True, id="agent-emoji-summary-multiline",
         ),
         pytest.param(
-            "test result: ok. 310 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
-            True,
+            "test result: ok. 310 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out", True,
             id="cargo-native-output",
-        ),
-        pytest.param(
-            "===== 5 passed, 0 failed in 1.23s =====",
-            True,
-            id="pytest-style-inline",
-        ),
+        ), pytest.param("===== 5 passed, 0 failed in 1.23s =====", True, id="pytest-style-inline"),
         pytest.param(
             """Ran test suite.
 5 passed
 0 failed
 """,
-            True,
-            id="pytest-counts-on-separate-lines",
-        ),
-        pytest.param("100 tests passed, 3 failed", False, id="failing-tests-nonzero-count"),
+            True, id="pytest-counts-on-separate-lines",
+        ), pytest.param("100 tests passed, 3 failed", False, id="failing-tests-nonzero-count"),
         pytest.param("0 tests passed, 5 failed", False, id="zero-passed-nonzero-failed"),
         pytest.param("5 tests failed during the run", False, id="n-tests-failed-wording"),
         pytest.param("FAILED (failures=3)", False, id="unittest-style-failed"),
@@ -49,10 +40,8 @@ Traceback (most recent call last):
   File "x.py", line 1, in <module>
     foo()
 """,
-            False,
-            id="traceback-in-output",
-        ),
-        pytest.param("", False, id="empty-output"),
+            False, id="traceback-in-output",
+        ), pytest.param("", False, id="empty-output"),
         pytest.param("the change passed review", False, id="bare-passed-word-no-count"),
         pytest.param("AssertionError: expected 1, got 2", False, id="assertion-error"),
         pytest.param("Results: 0 failures", True, id="zero-failures-sentinel"),
@@ -64,8 +53,7 @@ Traceback (most recent call last):
             """First attempt: 10 passed, 0 failed
 Retry after flake: 8 passed, 5 failed
 """,
-            False,
-            id="later-nonzero-failed-not-hidden-by-earlier-zero",
+            False, id="later-nonzero-failed-not-hidden-by-earlier-zero",
         ),
         pytest.param(
             """all tests pass
@@ -74,14 +62,8 @@ Traceback (most recent call last):
   File "x.py", line 1, in <module>
     foo()
 """,
-            False,
-            id="traceback-overrides-success-sentinel",
-        ),
-        pytest.param(
-            "2528 passed, 391 deselected, 1 warning in 30.30s",
-            True,
-            id="pytest-deselected-passed",
-        ),
+            False, id="traceback-overrides-success-sentinel",
+        ), pytest.param("2528 passed, 391 deselected, 1 warning in 30.30s", True, id="pytest-deselected-passed"),
         pytest.param("100 passed in 5.2s", True, id="pytest-bare-passed-no-failed"),
         pytest.param("50 passed, 3 skipped in 2.1s", True, id="pytest-skipped-passed"),
         pytest.param("10 passed, 2 xfailed", True, id="pytest-xfailed-passed"),

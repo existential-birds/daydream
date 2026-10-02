@@ -53,8 +53,7 @@ def has_checkout(job: dict[str, Any]) -> bool:
 
 def _dispatch_step(wf: dict[str, Any]) -> dict[str, Any]:
     """Return the `dispatch` job step that triggers the review workflow."""
-    return next(
-        step
+    return next(step
         for step in job_steps(wf, "dispatch")
         if "gh workflow run daydream-review.yml" in step.get("run", "")
     )
@@ -66,8 +65,7 @@ def _dispatch_step(wf: dict[str, Any]) -> dict[str, Any]:
 # the human-readable `# vX.Y.Z` inline comment naming the release that SHA pins.
 # Repo-local `./…` actions are exempt. Rides the root pytest suite in ci.yml.
 
-_BOT_WORKFLOW_PATHS = sorted(
-    [*REPO_WORKFLOWS_DIR.glob("daydream-*.yml"), *TEMPLATES_DIR.rglob("*.yml")],
+_BOT_WORKFLOW_PATHS = sorted([*REPO_WORKFLOWS_DIR.glob("daydream-*.yml"), *TEMPLATES_DIR.rglob("*.yml")],
     key=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
 )
 
@@ -96,7 +94,6 @@ def _action_references(wf: dict[str, Any]) -> list[str]:
 
 _EVENT_INTERP = re.compile(r"\$\{\{[^}]*github\.event\.(comment|issue|pull_request|workflow_run|review)[^}]*\}\}")
 
-
 def test_command_workflows_dispatch_approved_head() -> None:
     """The live trusted command workflow binds the PR head at approval time."""
     path = REPO_WORKFLOWS_DIR / "daydream-command.yml"
@@ -108,11 +105,7 @@ def test_command_workflows_dispatch_approved_head() -> None:
     assert '-f approved_at="$COMMENT_CREATED_AT"' in dispatch["run"]
     assert "PR_NUMBER" in dispatch["env"]
     assert "COMMENT_CREATED_AT" in dispatch["env"]
-    assert not any(
-        _EVENT_INTERP.search(step.get("run", ""))
-        for step in job_steps(wf, "dispatch")
-    )
-
+    assert not any(_EVENT_INTERP.search(step.get("run", "")) for step in job_steps(wf, "dispatch"))
 
 def test_template_command_workflow_dispatches_approved_head() -> None:
     """The packaged command template binds the PR head at approval time."""
@@ -126,10 +119,8 @@ def test_template_command_workflow_dispatches_approved_head() -> None:
     assert "COMMENT_CREATED_AT" in dispatch["env"]
     assert "actions/checkout" not in path.read_text(encoding="utf-8")
 
-
 @pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
+    "wf_path", [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
     ids=["template", "live"],
 )
 def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: Path) -> None:
@@ -166,10 +157,7 @@ def test_command_workflow_acknowledges_only_after_successful_dispatch(wf_path: P
         "dispatch would still post the 👀 reaction"
     )
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
     ids=["template", "live"],
 )
 def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
@@ -186,8 +174,7 @@ def test_review_workflow_head_bound_gate(wf_path: Path) -> None:
     assert "approved_at" in inputs
 
     steps = job_steps(wf, "analyze")
-    verify = next(
-        step
+    verify = next(step
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
@@ -235,21 +222,15 @@ def _assert_single_reject_funnel(run: str, *, label: str) -> None:
         f"{label}: every drift rejection must funnel through the single "
         "failure-context helper (one write, one exit) (issue #336)"
     )
-    assert write_idx[0] < exit_idx[0], (
-        f"{label}: the helper must record the failure context before exiting"
-    )
+    assert write_idx[0] < exit_idx[0], (f"{label}: the helper must record the failure context before exiting")
     assert '"message"' in lines[write_idx[0]], (
         f"{label}: the recorded failure context must carry the instructive message (issue #336)"
     )
-    assert len(reject_calls) >= 3, (
-        f"{label}: the drift gate must reject head changes, unresolvable "
+    assert len(reject_calls) >= 3, (f"{label}: the drift gate must reject head changes, unresolvable "
         "push times, and pushes at/after the approving comment"
     )
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
     ids=["template", "live"],
 )
 def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
@@ -265,8 +246,7 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     # The drift gate funnels every rejection through one helper that records
     # the failure context (pr_number + the instructive message) before exiting;
     # ``_assert_single_reject_funnel`` pins that invariant.
-    verify = next(
-        step
+    verify = next(step
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
@@ -283,15 +263,10 @@ def test_review_workflow_persists_failure_context(wf_path: Path) -> None:
     assert upload["with"]["name"] == "daydream-findings-failure"
     assert upload["with"]["path"] == "findings/failure.json"
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [
-        TEMPLATES_DIR / "daydream-review.yml",
-        REPO_WORKFLOWS_DIR / "daydream-review.yml",
+@pytest.mark.parametrize("wf_path",
+    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml",
         TEMPLATES_DIR / "single" / "daydream.yml",
-    ],
-    ids=["template", "live", "single"],
+    ], ids=["template", "live", "single"],
 )
 def test_findings_upload_survives_late_stage_failure(wf_path: Path) -> None:
     """``findings.json`` written before a late-stage failure must still upload.
@@ -321,10 +296,7 @@ def test_findings_upload_survives_late_stage_failure(wf_path: Path) -> None:
     review = next(step for step in steps if "--findings-out" in step.get("run", ""))
     assert steps.index(review) < steps.index(upload)
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
     ids=["template", "live"],
 )
 def test_surface_analyze_failure_resolves_dispatch_run_pr(wf_path: Path) -> None:
@@ -359,7 +331,6 @@ def test_surface_analyze_failure_resolves_dispatch_run_pr(wf_path: Path) -> None
     assert "exit 0" in run
     assert run.index(guard) < run.index("exit 0")
 
-
 def test_single_workflow_head_bound_gate() -> None:
     """The single-file setup is comment-only and enforces the approved head."""
     path = TEMPLATES_DIR / "single" / "daydream.yml"
@@ -383,8 +354,7 @@ def test_single_workflow_head_bound_gate() -> None:
     assert gate["steps"].index(ack) > gate["steps"].index(decide)
 
     steps = wf["jobs"]["analyze"]["steps"]
-    verify = next(
-        step
+    verify = next(step
         for step in steps
         if "approved_head_sha" in step.get("run", "") and "exit 1" in step.get("run", "")
     )
@@ -399,8 +369,7 @@ def test_single_workflow_head_bound_gate() -> None:
 
     checkout_idx = next(i for i, step in enumerate(steps) if "actions/checkout" in step.get("uses", ""))
     assert steps.index(verify) < checkout_idx
-    review = next(
-        step
+    review = next(step
         for step in steps
         if "daydream" in step.get("run", "") and "--approved-head-sha" in step.get("run", "")
     )
@@ -418,8 +387,7 @@ def test_single_workflow_head_bound_gate() -> None:
 # the id is the contract. All three copies (live command, packaged command,
 # packaged single-file) must agree, so every case runs against all three.
 
-_MATCH_STEP_SOURCES = [
-    pytest.param(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch", id="live-command"),
+_MATCH_STEP_SOURCES = [pytest.param(REPO_WORKFLOWS_DIR / "daydream-command.yml", "dispatch", id="live-command"),
     pytest.param(TEMPLATES_DIR / "daydream-command.yml", "dispatch", id="template-command"),
     pytest.param(TEMPLATES_DIR / "single" / "daydream.yml", "gate", id="single"),
 ]
@@ -428,8 +396,7 @@ _MATCH_STEP_SOURCES = [
 # no run is started. The near-misses are the point: a plural, a missing space,
 # a handle that is not at a word boundary, and a different case must all match
 # nothing rather than start a review or a diagram pass.
-_MATCH_CASES = [
-    pytest.param("@bot review", "bot", "review", id="review"),
+_MATCH_CASES = [pytest.param("@bot review", "bot", "review", id="review"),
     pytest.param("@bot add sequence diagram", "bot", "sequence", id="sequence-full"),
     pytest.param("@bot add sequence", "bot", "sequence", id="sequence-alias"),
     pytest.param("@bot add flowchart", "bot", "flowchart", id="flowchart"),
@@ -469,17 +436,9 @@ def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> 
     """Execute *path*'s own `id: match` step and return the outputs it wrote."""
     step = next(s for s in job_steps(load_workflow(path), job) if s.get("id") == "match")
     out.write_text("", encoding="utf-8")
-    subprocess.run(
-        ["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
-        env={
-            "PATH": os.environ["PATH"],
-            "BODY": body,
-            "BOT_HANDLE": handle,
-            "GITHUB_OUTPUT": str(out),
-        },
-        check=True,
-        capture_output=True,
-        text=True,
+    subprocess.run(["bash", "--noprofile", "--norc", "-eo", "pipefail", "-c", step["run"]],
+        env={"PATH": os.environ["PATH"], "BODY": body, "BOT_HANDLE": handle, "GITHUB_OUTPUT": str(out)}, check=True,
+        capture_output=True, text=True,
     )
     parsed: dict[str, str] = {}
     for line in out.read_text(encoding="utf-8").splitlines():
@@ -488,7 +447,6 @@ def _run_match_step(path: Path, job: str, body: str, handle: str, out: Path) -> 
         key, _, value = line.partition("=")
         parsed[key] = value
     return parsed
-
 
 @pytest.mark.parametrize(("wf_path", "job"), _MATCH_STEP_SOURCES)
 @pytest.mark.parametrize(("body", "handle", "expected"), _MATCH_CASES)
@@ -503,10 +461,8 @@ def test_match_step_recognizes_exactly_the_three_bot_commands(
     assert outputs["command"] == expected
     assert outputs["matched"] == ("true" if expected else "false")
 
-
 @pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
+    "wf_path", [TEMPLATES_DIR / "daydream-command.yml", REPO_WORKFLOWS_DIR / "daydream-command.yml"],
     ids=["template", "live"],
 )
 def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:
@@ -523,10 +479,7 @@ def test_command_workflow_dispatches_the_matched_command(wf_path: Path) -> None:
     assert '-f command="$COMMAND"' in dispatch["run"]
     assert not _EVENT_INTERP.search(dispatch["run"])
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
     ids=["template", "live"],
 )
 def test_review_workflow_command_input_is_a_bounded_choice(wf_path: Path) -> None:
@@ -545,10 +498,7 @@ def test_review_workflow_command_input_is_a_bounded_choice(wf_path: Path) -> Non
     assert command["default"] == "review"
     assert command["required"] is False
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-review.yml", REPO_WORKFLOWS_DIR / "daydream-review.yml"],
     ids=["template", "live"],
 )
 def test_review_workflow_branches_on_command_and_fails_closed(wf_path: Path) -> None:
@@ -565,18 +515,13 @@ def test_review_workflow_branches_on_command_and_fails_closed(wf_path: Path) -> 
     assert run_step["env"]["COMMAND"] == "${{ inputs.command }}"
     assert 'case "$COMMAND" in' in run
     assert 'daydream --diagram-only "$COMMAND"' in run
-    for flag in (
-        "--non-interactive",
-        '--pr-number "$PR_NUMBER"',
-        '--approved-head-sha "$APPROVED_HEAD_SHA"',
-        "--findings-out findings/findings.json",
-        '--base "origin/$BASE_REF"',
+    for flag in ("--non-interactive", '--pr-number "$PR_NUMBER"', '--approved-head-sha "$APPROVED_HEAD_SHA"',
+        "--findings-out findings/findings.json", '--base "origin/$BASE_REF"',
     ):
         assert flag in run
     # Unrecognized command: fail closed.
     assert "exit 1" in run
     assert "esac" in run
-
 
 def test_single_workflow_exposes_the_matched_command_to_analyze() -> None:
     """The single-file variant carries the command from `gate` into `analyze`.
@@ -592,17 +537,12 @@ def test_single_workflow_exposes_the_matched_command_to_analyze() -> None:
     analyze = wf["jobs"]["analyze"]
     assert analyze["env"]["COMMAND"] == "${{ needs.gate.outputs.command }}"
 
-    run = next(
-        step["run"]
-        for step in analyze["steps"]
-        if "daydream --non-interactive" in step.get("run", "")
-    )
+    run = next(step["run"] for step in analyze["steps"] if "daydream --non-interactive" in step.get("run", ""))
     assert 'case "$COMMAND" in' in run
     assert 'daydream --diagram-only "$COMMAND"' in run
     # The review branch keeps the default deep flow, not --review.
     assert "daydream --review" not in run
     assert "exit 1" in run and "esac" in run
-
 
 @pytest.mark.parametrize("wf_path", sorted(TEMPLATES_DIR.rglob("*.yml")), ids=lambda p: p.name)
 def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
@@ -614,20 +554,14 @@ def test_no_event_data_interpolated_into_run_steps(wf_path: Path) -> None:
                     f"{wf_path.name}:{job_name}: event data must reach run: via env:, never ${{{{ }}}} interpolation"
                 )
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    _BOT_WORKFLOW_PATHS,
-    ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),
-)
+@pytest.mark.parametrize("wf_path", _BOT_WORKFLOW_PATHS, ids=lambda p: p.relative_to(_REPO_ROOT).as_posix(),)
 def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path) -> None:
     wf = load_workflow(wf_path)
     rel = wf_path.relative_to(_REPO_ROOT).as_posix()
     for ref in _action_references(wf):
         if ref.startswith("./"):
             continue
-        assert _PINNED_ACTION_RE.fullmatch(ref), (
-            f"{rel}: non-local action reference {ref!r} is not a full commit SHA "
+        assert _PINNED_ACTION_RE.fullmatch(ref), (f"{rel}: non-local action reference {ref!r} is not a full commit SHA "
             f"(expected owner/repo@<40 hex chars>)"
         )
 
@@ -637,9 +571,7 @@ def test_bot_workflow_action_references_are_pinned_to_commit_shas(wf_path: Path)
 # workflow surfaces track the package release; diagram-capable surfaces may
 # need a reviewed commit newer than the latest release.
 
-@pytest.mark.parametrize(
-    "post_path",
-    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+@pytest.mark.parametrize("post_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
     ids=["template", "live"],
 )
 def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
@@ -661,15 +593,10 @@ def test_split_setup_preserves_privilege_split(post_path: Path) -> None:
         assert not has_checkout(job)
     assert set(_SECRET_REF_RE.findall(post_text)) == {"DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [
-        TEMPLATES_DIR / "daydream-post.yml",
-        REPO_WORKFLOWS_DIR / "daydream-post.yml",
+@pytest.mark.parametrize("wf_path",
+    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml",
         TEMPLATES_DIR / "single" / "daydream.yml",
-    ],
-    ids=["template", "live", "single"],
+    ], ids=["template", "live", "single"],
 )
 def test_post_job_token_can_read_head_evidence(wf_path: Path) -> None:
     """The posting job's token must keep ``contents: read`` (issue #1167).
@@ -679,18 +606,14 @@ def test_post_job_token_can_read_head_evidence(wf_path: Path) -> None:
     the head SHA. Dropping the permission would resurrect the bug where every
     artifact carrying a diagram is rejected and nothing at all is posted.
     """
-    steps = [
-        step
+    steps = [step
         for step in load_workflow(wf_path)["jobs"]["post"]["steps"]
         if str(step.get("uses", "")).startswith("actions/create-github-app-token@")
     ]
     assert steps
     assert all(step["with"]["permission-contents"] == "read" for step in steps)
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
     ids=["template", "live"],
 )
 def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
@@ -710,10 +633,7 @@ def test_post_findings_step_exports_bot_login(wf_path: Path) -> None:
     )
     assert '--bot-login "$BOT_LOGIN"' in text, f"{wf_path.name}: Post findings step must pass --bot-login explicitly"
 
-
-@pytest.mark.parametrize(
-    "wf_path",
-    [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
+@pytest.mark.parametrize("wf_path", [TEMPLATES_DIR / "daydream-post.yml", REPO_WORKFLOWS_DIR / "daydream-post.yml"],
     ids=["template", "live"],
 )
 def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> None:
@@ -733,9 +653,7 @@ def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> N
     run = handler["run"]
 
     # Exactly one PR_NUMBER assignment, sourced only from the two allowed env vars.
-    assert run.count("PR_NUMBER=") == 1, (
-        f"{wf_path.name}: failure handler must assign PR_NUMBER exactly once"
-    )
+    assert run.count("PR_NUMBER=") == 1, (f"{wf_path.name}: failure handler must assign PR_NUMBER exactly once")
     assert 'PR_NUMBER="${DERIVED_PR_NUMBER:-$EVENT_PR_NUMBER}"' in run, (
         f"{wf_path.name}: failure target must come only from DERIVED_PR_NUMBER or EVENT_PR_NUMBER (issue #384)"
     )
@@ -744,9 +662,7 @@ def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> N
     assert "findings/findings.json" not in run, (
         f"{wf_path.name}: failure handler must not read findings/findings.json (issue #384)"
     )
-    assert "jq" not in run, (
-        f"{wf_path.name}: failure handler must not run jq over an artifact (issue #384)"
-    )
+    assert "jq" not in run, (f"{wf_path.name}: failure handler must not run jq over an artifact (issue #384)")
 
     # The empty-result guard exits 0 before the comment write, so no write
     # happens when neither source yields a number.
@@ -754,13 +670,10 @@ def test_failure_comment_target_never_uses_findings_artifact(wf_path: Path) -> N
     exit_guard = "exit 0"
     assert guard in run, f"{wf_path.name}: empty-result diagnostic must be present"
     assert exit_guard in run, f"{wf_path.name}: exit 0 must be present in the empty-result guard"
-    assert run.index(guard) < run.index(exit_guard), (
-        f"{wf_path.name}: empty-result diagnostic must precede exit 0"
-    )
+    assert run.index(guard) < run.index(exit_guard), (f"{wf_path.name}: empty-result diagnostic must precede exit 0")
     assert run.index(exit_guard) < run.index('gh api "repos/${REPO}/issues/${PR_NUMBER}/comments"'), (
         f"{wf_path.name}: exit 0 must precede the comment write (issue #384)"
     )
-
 
 def test_single_setup_preserves_privilege_split() -> None:
     wf = load_workflow(TEMPLATES_DIR / "single" / "daydream.yml")
@@ -786,8 +699,4 @@ def test_single_setup_preserves_privilege_split() -> None:
     assert "always()" in wf["jobs"]["surface-failure"]["if"]
 
     # Same three secrets as the split setup, nothing more.
-    assert set(_SECRET_REF_RE.findall(text)) == {
-        "ANTHROPIC_API_KEY",
-        "DAYDREAM_APP_ID",
-        "DAYDREAM_APP_PRIVATE_KEY",
-    }
+    assert set(_SECRET_REF_RE.findall(text)) == {"ANTHROPIC_API_KEY", "DAYDREAM_APP_ID", "DAYDREAM_APP_PRIVATE_KEY"}

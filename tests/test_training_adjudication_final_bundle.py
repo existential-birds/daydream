@@ -39,10 +39,7 @@ def _refresh_curation_envelope(root: Path) -> None:
     for path in sorted(root.rglob("*")):
         if not path.is_file() or path.name in {"SHA256SUMS", "_SUCCESS"}:
             continue
-        lines.append(
-            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  "
-            f"{path.relative_to(root).as_posix()}"
-        )
+        lines.append(f"{hashlib.sha256(path.read_bytes()).hexdigest()}  " f"{path.relative_to(root).as_posix()}")
     (root / "SHA256SUMS").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (root / "_SUCCESS").write_text("ok\n", encoding="utf-8")
 
@@ -54,22 +51,12 @@ def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str,
 
     root = tmp_path / "index"
     seed_index_dispositions(root)
-    (root / "policy-binding.json").write_text(
-        json.dumps(_POLICY_BINDING, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    (root / "curation-manifest.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "1",
-                "source_hub_commit": _SOURCE,
-                "curation_id": _CURATION_ID,
-                "sanitizer_version": "v1",
-                "hydration_index_schema_version": "v1",
-                "admission_policy_version": "v1",
-                "publication_prefix": f"curated/{_CURATION_ID}/",
-                "batches": [],
-            },
-            sort_keys=True,
+    (root / "policy-binding.json").write_text(json.dumps(_POLICY_BINDING, sort_keys=True) + "\n", encoding="utf-8")
+    (root / "curation-manifest.json").write_text(json.dumps({
+                "schema_version": "1", "source_hub_commit": _SOURCE, "curation_id": _CURATION_ID,
+                "sanitizer_version": "v1", "hydration_index_schema_version": "v1", "admission_policy_version": "v1",
+                "publication_prefix": f"curated/{_CURATION_ID}/", "batches": [],
+            }, sort_keys=True,
         )
         + "\n",
         encoding="utf-8",
@@ -78,8 +65,7 @@ def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str,
     archive = tmp_path / "archive"
     conn = _get_connection(archive)
     for n in (1, 2, 3):
-        conn.execute(
-            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+        conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
             f"VALUES ('s{n}', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s{n}')"
         )
     conn.commit()
@@ -99,8 +85,7 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=obs_path)
     out = tmp_path / "final-bundle"
     summary = build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out,
-        observations_path=obs_path,
+        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out, observations_path=obs_path,
     )
     for name in FINAL_IDENTITY_FILES:
         assert (out / name).is_file(), name
@@ -125,7 +110,6 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     counts = summary["disposition_counts"]
     assert set(counts) == {"accepted", "rejected", "ambiguous", "unanswered", "missing"}
 
-
 def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path) -> None:
     """With no human observations the 80% admission gate must FAIL, not pass
     trivially on every automatic decisive record (issue #336 finding 1)."""
@@ -134,7 +118,6 @@ def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path
     assert report["outcome_coverage"] == {"adjudicated": 0, "total": 0}
     assert report["unresolved"] == 0
     assert report["admission_gate"]["passes_80pct"] is False
-
 
 def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> None:
     """A legacy publish left ``.publish-stage/`` in the bundle dir; the next
@@ -146,15 +129,12 @@ def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> 
     stage.mkdir()
     (stage / "annotations.jsonl").write_text("stale-stage", encoding="utf-8")
     (stage / "_SUCCESS").write_text("", encoding="utf-8")
-    summary = build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-    )
+    summary = build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
     assert ".publish-stage" not in summary["files"]
     assert final_snapshot_id(out) == original_identity
     assert (stage / "annotations.jsonl").read_text() == "stale-stage"
     for name in FINAL_IDENTITY_FILES:
         assert (out / name).is_file(), name
-
 
 @pytest.mark.parametrize("kind", ["file", "directory-symlink", "file-symlink"])
 def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path) -> None:
@@ -173,15 +153,12 @@ def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path
     with pytest.raises(ValueError, match="foreign"):
         final_snapshot_id(out)
     with pytest.raises(ValueError, match="foreign content"):
-        build_final_bundle(
-            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-        )
+        build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
 
     hub = AnnotationsHub(repo_id="org/private-annotations")
     with pytest.raises(ValueError, match="exactly the seven semantic files"):
         publish_final_annotation_bundle(hub, out)
     assert hub.commit_order == []
-
 
 def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) -> None:
     """A null (unpinned) manifest ``as_of`` must serialize into lineage.json as
@@ -194,22 +171,16 @@ def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) 
     manifest["as_of"] = None
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     out = tmp_path / "final-bundle"
-    build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-    )
+    build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
     lineage = json.loads((out / "lineage.json").read_text())
     assert lineage["as_of"] == ""
-
 
 def test_build_final_bundle_is_byte_identical_on_re_run(tmp_path: Path) -> None:
     index_root, mat, archive_dir, out_one = _built_final_bundle(tmp_path)
     out_two = tmp_path / "bundle-two"
-    build_final_bundle(
-        index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out_two
-    )
+    build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out_two)
     for name in FINAL_IDENTITY_FILES:
         assert (out_one / name).read_bytes() == (out_two / name).read_bytes(), name
-
 
 def test_build_final_bundle_refuses_non_empty_out_dir(tmp_path: Path) -> None:
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
@@ -218,22 +189,16 @@ def test_build_final_bundle_refuses_non_empty_out_dir(tmp_path: Path) -> None:
     (out / "stale.txt").write_text("stale", encoding="utf-8")
 
     with pytest.raises(ValueError, match="final-bundle"):
-        build_final_bundle(
-            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-        )
+        build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
 
-
-def test_build_final_bundle_fails_closed_on_missing_materialized_outputs(
-    tmp_path: Path,
-) -> None:
+def test_build_final_bundle_fails_closed_on_missing_materialized_outputs(tmp_path: Path,) -> None:
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
     empty = tmp_path / "empty-mat"
     empty.mkdir()
 
     with pytest.raises(FileNotFoundError, match="annotations.jsonl"):
         build_final_bundle(
-            index_root=index_root, materialize_dir=empty, archive_dir=archive_dir,
-            out_dir=tmp_path / "out",
+            index_root=index_root, materialize_dir=empty, archive_dir=archive_dir, out_dir=tmp_path / "out",
         )
 
 
@@ -241,12 +206,7 @@ def _built_final_bundle(tmp_path: Path) -> tuple[Path, Path, Path, Path]:
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
     out = tmp_path / "final-bundle"
-    build_final_bundle(
-        index_root=index_root,
-        materialize_dir=mat,
-        archive_dir=archive_dir,
-        out_dir=out,
-    )
+    build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
     return index_root, mat, archive_dir, out
 
 
@@ -254,19 +214,11 @@ def test_build_final_bundle_copies_semantically_bound_policy_and_preview(tmp_pat
     index_root, _mat, _archive, out = _built_final_bundle(tmp_path)
 
     assert tuple(sorted(path.name for path in out.iterdir())) == tuple(sorted(FINAL_IDENTITY_FILES))
-    assert (out / "preview-manifest.json").read_bytes() == (
-        tmp_path / "mat" / "preview-manifest.json"
-    ).read_bytes()
-    assert (out / "policy-binding.json").read_bytes() == (
-        index_root / "policy-binding.json"
-    ).read_bytes()
+    assert (out / "preview-manifest.json").read_bytes() == (tmp_path / "mat" / "preview-manifest.json").read_bytes()
+    assert (out / "policy-binding.json").read_bytes() == (index_root / "policy-binding.json").read_bytes()
 
-
-@pytest.mark.parametrize(
-    ("mutation", "message"),
-    [
-        ({"policy_version": "rival-v2"}, "derives curation_id"),
-        ({"policy_digest": True}, "invalid policy_digest"),
+@pytest.mark.parametrize(("mutation", "message"),
+    [({"policy_version": "rival-v2"}, "derives curation_id"), ({"policy_digest": True}, "invalid policy_digest"),
         ({"allow_copyleft": ["owner/repo", "owner/repo"]}, "invalid allow_copyleft"),
         ({"foreign": "value"}, "exact v2 field set"),
     ],
@@ -278,39 +230,26 @@ def test_policy_binding_semantics_fail_even_with_regenerated_envelope(
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
     binding = dict(_POLICY_BINDING)
     binding.update(mutation)
-    (index_root / "policy-binding.json").write_text(
-        json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    (index_root / "policy-binding.json").write_text(json.dumps(binding, sort_keys=True) + "\n", encoding="utf-8")
     _refresh_curation_envelope(index_root)
     out = tmp_path / "final-bundle"
 
     with pytest.raises(ValueError, match=message):
-        build_final_bundle(
-            index_root=index_root,
-            materialize_dir=mat,
-            archive_dir=archive_dir,
-            out_dir=out,
-        )
+        build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
     assert not out.exists()
-
 
 def test_policy_binding_requires_producer_canonical_bytes(tmp_path: Path) -> None:
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
     (index_root / "policy-binding.json").write_text(
-        json.dumps(_POLICY_BINDING, sort_keys=True, separators=(",", ":")),
-        encoding="utf-8",
+        json.dumps(_POLICY_BINDING, sort_keys=True, separators=(",", ":")), encoding="utf-8",
     )
     _refresh_curation_envelope(index_root)
 
     with pytest.raises(ValueError, match="canonically encoded"):
         build_final_bundle(
-            index_root=index_root,
-            materialize_dir=mat,
-            archive_dir=archive_dir,
-            out_dir=tmp_path / "final-bundle",
+            index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=tmp_path / "final-bundle",
         )
-
 
 @pytest.mark.parametrize("name", FINAL_IDENTITY_FILES)
 def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: Path) -> None:
@@ -323,9 +262,7 @@ def test_complete_identity_changes_for_every_semantic_file(name: str, tmp_path: 
     assert after != before
     assert after_digests[name] != before_digests[name]
 
-
 def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Path) -> None:
-
     index_root, _mat, _archive, out = _built_final_bundle(tmp_path)
     sums = "".join(
         f"{hashlib.sha256((out / name).read_bytes()).hexdigest()}  {name}\n"
@@ -334,9 +271,5 @@ def test_complete_seven_file_bundle_passes_existing_public_consumer(tmp_path: Pa
     (out / "SHA256SUMS").write_text(sums, encoding="utf-8")
     (out / "_SUCCESS").write_text("complete\n", encoding="utf-8")
 
-    lineage = _verify_annotation_bundle(
-        out,
-        load_curated_bundle(index_root),
-        index_root,
-    )
+    lineage = _verify_annotation_bundle(out, load_curated_bundle(index_root), index_root)
     assert lineage["curation_id"] == _CURATION_ID

@@ -63,50 +63,32 @@ CANONICAL_SCRIPT: dict[str, Any] = json.loads(
 #   ``pi-test-model``, so the backend carries the scripted zero through rather
 #   than synthesizing a priced cost (measured against the loader's script).
 KNOWN_DELTAS: dict[str, dict[str, Any]] = {
-    "codex": {
-        "metrics_message_id": "",
-        "cost_usd": None,
-    },
-    "pi": {
-        "metrics_message_id": "",
-        "cost_usd": 0.0,
-    },
+    "codex": {"metrics_message_id": "", "cost_usd": None}, "pi": {"metrics_message_id": "", "cost_usd": 0.0},
     "claude": {},
 }
 
 Loader = Callable[..., AsyncIterator[AgentEvent]]
 
 # Map each loader to its driver key (for KNOWN_DELTAS lookups).
-_DRIVER_OF: dict[str, str] = {
-    "claude_loader": "claude",
-    "codex_loader": "codex",
-    "pi_loader": "pi",
-}
-
+_DRIVER_OF: dict[str, str] = {"claude_loader": "claude", "codex_loader": "codex", "pi_loader": "pi"}
 
 def _driver(loader: Loader) -> str:
     return _DRIVER_OF[loader.__name__]
 
-
 def _vocabulary(events: list[AgentEvent]) -> set[str]:
     return {type(e).__name__ for e in events}
-
 
 @pytest.mark.parametrize("loader", [claude_loader, codex_loader, pi_loader])
 async def test_backend_conformance(loader: Loader) -> None:
     """Documented vocabulary present, tool results pair with starts, a metrics
     event is emitted, and per-driver metrics deltas honor the allow-list."""
     events = [e async for e in loader(CANONICAL_SCRIPT)]
-
     types = _vocabulary(events)
     assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= types
-
     starts = {e.id for e in events if isinstance(e, ToolStartEvent)}
     results = {e.id for e in events if isinstance(e, ToolResultEvent)}
     assert results <= starts
-
     assert any(isinstance(e, (MetricsEvent, CostEvent)) for e in events)
-
     # Per-driver metrics deltas consult the allow-list, not strict cross-driver equivalence.
     driver = _driver(loader)
     deltas = KNOWN_DELTAS[driver]
@@ -125,7 +107,6 @@ async def test_backend_conformance(loader: Loader) -> None:
         assert all(m.message_id == deltas["metrics_message_id"] for m in metrics)
         assert all(c.cost_usd == deltas["cost_usd"] for c in costs)
 
-
 @pytest.mark.parametrize("loader", [claude_loader, codex_loader, pi_loader])
 async def test_read_only_preserves_vocabulary(loader: Loader) -> None:
     """read_only=True is accepted by execute() and does not change the
@@ -135,13 +116,11 @@ async def test_read_only_preserves_vocabulary(loader: Loader) -> None:
     assert _vocabulary(read_only_events) == _vocabulary(default_events)
     assert {"TextEvent", "ToolStartEvent", "ToolResultEvent"} <= _vocabulary(read_only_events)
 
-
 def test_backends_have_no_skill_method() -> None:
     """M13: no backend formats/resolves/registers/permits/invokes a skill."""
     assert not hasattr(Backend, "format_skill_invocation")
     backends = (
-        create_backend("claude", model="test-model"),
-        create_backend("codex", model="test-model"),
+        create_backend("claude", model="test-model"), create_backend("codex", model="test-model"),
         create_backend("pi", model="test-model"),
         create_backend("osprey", model="test-model", osprey_binary="fake-osprey"),
     )

@@ -18,8 +18,7 @@ from tests.harness.backend import ScriptedBackend
 
 
 def _context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
-    *, variant: str = "default",
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, *, variant: str = "default",
 ) -> tuple[FlowContext, list[Any]]:
     paths = ["source.tsx", "scripts/policy.mjs", "README.md", "config.json"]
     if variant == "many_sources":
@@ -39,8 +38,7 @@ def _context(
         strategies = dict(profile.strategies)
         strategies["intent"] = replace(strategies["intent"], content="CUSTOM INTENT POLICY")
         profile = replace(profile, strategies=strategies)
-    ctx = FlowContext(
-        config=make_config(tmp_path, pr_number=7), work=make_work(tmp_path), registry=Registry(),
+    ctx = FlowContext(config=make_config(tmp_path, pr_number=7), work=make_work(tmp_path), registry=Registry(),
         review_profile=ResolvedProfile(profile=profile, source_kind="test"),
         run_context=RunContext(InteractionPolicy(interactive=variant == "interactive")),
         data={"dd": dd, "diff": diff[:300], "diff_path": diff_path, "log": "abc Author commit\n",
@@ -62,7 +60,6 @@ def _context(
     })
     return ctx, calls
 
-
 async def test_modest_unattended_pi_persists_advisory_author_evidence_without_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
@@ -81,7 +78,6 @@ async def test_modest_unattended_pi_persists_advisory_author_evidence_without_mo
     assert ctx.data["intent_authoritative"] is True
     assert not review_budget_path(ctx.data["dd"]).exists()
 
-
 async def test_custom_intent_prompt_keeps_model_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
@@ -92,7 +88,6 @@ async def test_custom_intent_prompt_keeps_model_dispatch(
     await _step_intent(ctx)
     assert len(calls) == 1
     assert ctx.data["intent_summary"] == "MODEL INTENT"
-
 
 @pytest.mark.parametrize("variant", [
     "interactive", "custom", "many_sources", "large_diff", "other_backend", "no_capability",
@@ -105,11 +100,8 @@ async def test_existing_intent_path_retained_outside_modest_unattended_default_p
     assert len(calls) == 1
     assert ctx.data["intent_path"].read_text() == "MODEL INTENT"
 
-
-@pytest.mark.parametrize("view", [
-    {"state": "OPEN", "headRefOid": "mismatched", "body": "STALE AUTHOR BODY"},
-    {"state": "CLOSED", "body": "STALE AUTHOR BODY"},
-    {"state": "OPEN", "body": "   "},
+@pytest.mark.parametrize("view", [{"state": "OPEN", "headRefOid": "mismatched", "body": "STALE AUTHOR BODY"},
+    {"state": "CLOSED", "body": "STALE AUTHOR BODY"}, {"state": "OPEN", "body": "   "},
 ])
 async def test_advisory_context_does_not_promote_stale_or_missing_author_intent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, view: dict[str, str],

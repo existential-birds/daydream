@@ -47,7 +47,6 @@ from tests.harness.git_helpers import commit as _commit, git as _git, init_repo 
 FIXTURE_MODEL_ID = "fixture-model-id"
 _PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
 
-
 def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
     """Exercise the real session sink from the fake external backend boundary."""
 
@@ -64,25 +63,20 @@ def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
     trajectory = recorder.build_trajectory().to_json_dict()
     trajectory["trajectory_id"] = trajectory_id
     trajectory["agent"]["model_name"] = _PARTIAL_MODEL
-    json_bytes = (
-        b"private-prompt-canary: malformed trajectory"
+    json_bytes = (b"private-prompt-canary: malformed trajectory"
         if malformed
         else json.dumps(trajectory).encode("utf-8")
     )
     recorder.document_writer(
-        TrajectoryDocumentSnapshot(trajectory_id, path, json_bytes),
-        "complete" if malformed else "partial",
+        TrajectoryDocumentSnapshot(trajectory_id, path, json_bytes), "complete" if malformed else "partial",
     )
     return path
-
 
 # Fake ClaudeSDKClient: picks a canned response per query() prompt and emulates
 # the agent's tool-use file writes (per-stack + merged reports) so downstream
 # phases don't crash on missing files. Only the SDK boundary is mocked.
 
-
 _OUTPUT_PATH_RE = re.compile(r"to ([^\s]+\.(?:md|json))")
-
 
 def _extract_output_path(prompt: str) -> Path | None:
     """Pull the first ``... to <path>.md|.json`` reference out of a prompt."""
@@ -90,7 +84,6 @@ def _extract_output_path(prompt: str) -> Path | None:
     if not m:
         return None
     return Path(m.group(1))
-
 
 _PER_STACK_REPORT = (
     "# Per-stack review\n"
@@ -114,16 +107,9 @@ _MERGED_REPORT = (
 # merge, and per-stack reviewer canned responses; the three consumers differ
 # only in shape (merge adds ``lens``) and assert on the rendered report.
 _REVIEW_FINDING = {
-    "id": 1,
-    "description": "Use a more descriptive function name",
-    "file": "foo.py",
-    "line": 1,
-    "severity": "medium",
-    "confidence": "MEDIUM",
-    "rationale": "The current name is ambiguous.",
-    "evidence": "foo.py:1",
+    "id": 1, "description": "Use a more descriptive function name", "file": "foo.py", "line": 1, "severity": "medium",
+    "confidence": "MEDIUM", "rationale": "The current name is ambiguous.", "evidence": "foo.py:1",
 }
-
 
 class _FakeSDKClient:
     """Per-call canned response + simulated tool-use side effects."""
@@ -164,12 +150,7 @@ class _FakeSDKClient:
             yield msg
 
     @staticmethod
-    def _exploration_messages(
-        structured: dict[str, Any],
-        *,
-        tool_name: str,
-        tool_input: dict[str, Any],
-    ) -> list[Any]:
+    def _exploration_messages(structured: dict[str, Any], *, tool_name: str, tool_input: dict[str, Any],) -> list[Any]:
         """Build the response stream for one exploration specialist call.
 
         Emits an AssistantMessage with a tool-use block, a UserMessage with
@@ -180,34 +161,12 @@ class _FakeSDKClient:
         fork's child trajectory should pick up FIXTURE_MODEL_ID.
         """
         tool_id = f"toolu_{tool_name.lower()}_01"
-        return [
-            MockAssistantMessage(
-                content=[
-                    MockToolUseBlock(id=tool_id, name=tool_name, input=tool_input),
-                ],
-                model=FIXTURE_MODEL_ID,
-            ),
-            MockUserMessage(
-                content=[
-                    MockToolResultBlock(
-                        tool_use_id=tool_id,
-                        content="ok",
-                        is_error=False,
-                    ),
-                ],
-            ),
-            MockAssistantMessage(
-                content=[MockTextBlock(text="exploration complete")],
-                model=FIXTURE_MODEL_ID,
-            ),
-            MockResultMessage(
-                structured_output=structured,
-                total_cost_usd=0.12,
-                usage={
-                    "input_tokens": 5000,
-                    "output_tokens": 400,
-                    "cache_read_input_tokens": 1200,
-                },
+        return [MockAssistantMessage(
+                content=[MockToolUseBlock(id=tool_id, name=tool_name, input=tool_input),], model=FIXTURE_MODEL_ID,
+            ), MockUserMessage(content=[MockToolResultBlock(tool_use_id=tool_id, content="ok", is_error=False,),],),
+            MockAssistantMessage(content=[MockTextBlock(text="exploration complete")], model=FIXTURE_MODEL_ID,),
+            MockResultMessage(structured_output=structured, total_cost_usd=0.12,
+                usage={"input_tokens": 5000, "output_tokens": 400, "cache_read_input_tokens": 1200,},
             ),
         ]
 
@@ -225,41 +184,24 @@ class _FakeSDKClient:
         # where the 'Exploration' rollup row renders 'unknown' / '$0.00'.
         if "pattern-scanner" in pl:
             return _FakeSDKClient._exploration_messages(
-                {"conventions": [], "guidelines": []},
-                tool_name="Read",
-                tool_input={"file_path": "CLAUDE.md"},
+                {"conventions": [], "guidelines": []}, tool_name="Read", tool_input={"file_path": "CLAUDE.md"},
             )
         if "dependency-tracer" in pl:
             return _FakeSDKClient._exploration_messages(
-                {"affected_files": [], "dependencies": []},
-                tool_name="Grep",
-                tool_input={"pattern": "import foo"},
+                {"affected_files": [], "dependencies": []}, tool_name="Grep", tool_input={"pattern": "import foo"},
             )
         if "test-mapper" in pl:
             return _FakeSDKClient._exploration_messages(
-                {"affected_files": []},
-                tool_name="Read",
-                tool_input={"file_path": "tests/test_foo.py"},
+                {"affected_files": []}, tool_name="Read", tool_input={"file_path": "tests/test_foo.py"},
             )
 
         # phase_alternative_review (ALTERNATIVE_REVIEW_SCHEMA): ResultMessage
         # must carry structured_output of the right shape or it returns [].
-        if "architectural alternatives" in pl or (
-            "alternative" in pl and "intent" in pl and "given" in pl
-        ):
+        if "architectural alternatives" in pl or ("alternative" in pl and "intent" in pl and "given" in pl):
             return [
-                MockAssistantMessage(
-                    content=[MockTextBlock(text="evaluating alternatives")],
-                    model=FIXTURE_MODEL_ID,
-                ),
-                MockResultMessage(
-                    structured_output={"issues": []},
-                    total_cost_usd=0.10,
-                    usage={
-                        "input_tokens": 3000,
-                        "output_tokens": 250,
-                        "cache_read_input_tokens": 1000,
-                    },
+                MockAssistantMessage(content=[MockTextBlock(text="evaluating alternatives")], model=FIXTURE_MODEL_ID,),
+                MockResultMessage(structured_output={"issues": []}, total_cost_usd=0.10,
+                    usage={"input_tokens": 3000, "output_tokens": 250, "cache_read_input_tokens": 1000,},
                 ),
             ]
 
@@ -283,38 +225,19 @@ class _FakeSDKClient:
                 issues = [dict(_REVIEW_FINDING)]
             else:  # structural parse
                 issues = []
-            return [
-                MockAssistantMessage(
-                    content=[MockTextBlock(text="parsing")],
-                    model=FIXTURE_MODEL_ID,
-                ),
-                MockResultMessage(
-                    structured_output={
-                        "issues": issues,
-                    },
-                    total_cost_usd=0.05,
-                    usage={
-                        "input_tokens": 1500,
-                        "output_tokens": 100,
-                        "cache_read_input_tokens": 500,
-                    },
+            return [MockAssistantMessage(content=[MockTextBlock(text="parsing")], model=FIXTURE_MODEL_ID,),
+                MockResultMessage(structured_output={"issues": issues,}, total_cost_usd=0.05,
+                    usage={"input_tokens": 1500, "output_tokens": 100, "cache_read_input_tokens": 500,},
                 ),
             ]
 
         # phase_understand_intent: free-form text.
         if "understand" in pl and "intent" in pl:
-            return [
-                MockAssistantMessage(
-                    content=[MockTextBlock(text="The PR refactors foo() for clarity.")],
-                    model=FIXTURE_MODEL_ID,
+            return [MockAssistantMessage(
+                    content=[MockTextBlock(text="The PR refactors foo() for clarity.")], model=FIXTURE_MODEL_ID,
                 ),
-                MockResultMessage(
-                    total_cost_usd=0.08,
-                    usage={
-                        "input_tokens": 2000,
-                        "output_tokens": 150,
-                        "cache_read_input_tokens": 800,
-                    },
+                MockResultMessage(total_cost_usd=0.08,
+                    usage={"input_tokens": 2000, "output_tokens": 150, "cache_read_input_tokens": 800,},
                 ),
             ]
 
@@ -322,21 +245,10 @@ class _FakeSDKClient:
         # the structured item list the host renders review-output.md from. One
         # item keeps the rendered report (and PR comment) non-empty.
         if "cross-stack merge agent" in pl:
-            return [
-                MockAssistantMessage(
-                    content=[MockTextBlock(text="merging")],
-                    model=FIXTURE_MODEL_ID,
-                ),
+            return [MockAssistantMessage(content=[MockTextBlock(text="merging")], model=FIXTURE_MODEL_ID,),
                 MockResultMessage(
-                    structured_output={
-                        "items": [{**_REVIEW_FINDING, "lens": "per-stack"}]
-                    },
-                    total_cost_usd=0.20,
-                    usage={
-                        "input_tokens": 4000,
-                        "output_tokens": 600,
-                        "cache_read_input_tokens": 1500,
-                    },
+                    structured_output={"items": [{**_REVIEW_FINDING, "lens": "per-stack"}]}, total_cost_usd=0.20,
+                    usage={"input_tokens": 4000, "output_tokens": 600, "cache_read_input_tokens": 1500,},
                 ),
             ]
 
@@ -348,25 +260,13 @@ class _FakeSDKClient:
             review_issues: list[Any] = []
         else:
             review_issues = [dict(_REVIEW_FINDING)]
-        return [
-            MockAssistantMessage(
-                content=[MockTextBlock(text="ok, wrote the review")],
-                model=FIXTURE_MODEL_ID,
-            ),
-            MockResultMessage(
-                structured_output={"issues": review_issues},
-                total_cost_usd=0.20,
-                usage={
-                    "input_tokens": 4000,
-                    "output_tokens": 600,
-                    "cache_read_input_tokens": 1500,
-                },
+        return [MockAssistantMessage(content=[MockTextBlock(text="ok, wrote the review")], model=FIXTURE_MODEL_ID,),
+            MockResultMessage(structured_output={"issues": review_issues}, total_cost_usd=0.20,
+                usage={"input_tokens": 4000, "output_tokens": 600, "cache_read_input_tokens": 1500,},
             ),
         ]
 
-
 # Repo + monkeypatch fixtures.
-
 
 @pytest.fixture
 def deep_target_multi(tmp_path: Path) -> Path:
@@ -394,29 +294,22 @@ def deep_target_multi(tmp_path: Path) -> Path:
     # Assert diff count up-front so a threshold-breaking refactor trips here.
     diff_out = subprocess.run(  # noqa: S603 - controlled args
         ["git", "diff", "--name-only", "main..HEAD"],  # noqa: S607
-        cwd=repo,
-        capture_output=True,
-        check=True,
-        text=True,
+        cwd=repo, capture_output=True, check=True, text=True,
     )
     changed = [ln for ln in diff_out.stdout.splitlines() if ln]
-    assert len(changed) >= 4, (
-        f"deep_target_multi fixture should produce >=4 changed files; "
+    assert len(changed) >= 4, (f"deep_target_multi fixture should produce >=4 changed files; "
         f"got {len(changed)}: {changed!r}"
     )
     return repo
-
 
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ClaudeBackend.execute does isinstance on."""
     patch_claude_sdk(monkeypatch, _FakeSDKClient)
 
-
 # gh / PR plumbing patches: find_open_pr returns a fake PRInfo and fake gh
 # captures the payload (the only allowed non-SDK mock per the brief — it stands
 # in for the gh-CLI subprocess that would post to GitHub).
-
 
 @dataclass
 class _CapturedPost:
@@ -426,63 +319,39 @@ class _CapturedPost:
     def payloads(self) -> list[dict[str, Any]]:
         return [call.payload for call in self.gh.calls("POST", "repos/test-owner/test-repo/pulls/123/reviews")]
 
-
 @pytest.fixture
 def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
     """Wire PR discovery and fake gh so the complete submission runs and we see
     the rendered markdown without ever touching GitHub."""
 
     captured = _CapturedPost(fake_gh)
-
     fake_pr = pr_review.PRInfo(
-        number=123,
-        head_sha="0" * 40,
-        base_sha="1" * 40,
-        base_ref="main",
-        head_ref="feature",
-        owner="test-owner",
-        repo="test-repo",
-        url="https://example/pr/123",
+        number=123, head_sha="0" * 40, base_sha="1" * 40, base_ref="main", head_ref="feature", owner="test-owner",
+        repo="test-repo", url="https://example/pr/123",
     )
 
-    monkeypatch.setattr(
-        "daydream.pr_review.find_open_pr",
-        lambda target_dir, **_kwargs: fake_pr,
-    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda target_dir, **_kwargs: fake_pr,)
 
-    fake_gh.set_response(
-        "POST", "repos/test-owner/test-repo/pulls/123/reviews",
+    fake_gh.set_response("POST", "repos/test-owner/test-repo/pulls/123/reviews",
         {"html_url": "https://example/pr/123#review-1"},
     )
     return captured
 
-
 # Misc: silence Rich UI noise + answer interactive prompts.
 
-
 def _silence_ui(monkeypatch: pytest.MonkeyPatch) -> None:
-    for module in (
-        "daydream.deep.orchestrator",
-        "daydream.phases",
-        "daydream.runner",
-        "daydream.pr_review",
-    ):
+    for module in ("daydream.deep.orchestrator", "daydream.phases", "daydream.runner", "daydream.pr_review",):
         silence_module_console(monkeypatch, module)
-
 
 def _answer_prompts(monkeypatch: pytest.MonkeyPatch) -> None:
     """Accept intent and PR posting through the shared gateway; decline fixes."""
     monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
-
     def answer(_console: Any, message: str, default: str = "") -> str:
         return "n" if "apply fix" in message.lower() else "y"
-
     monkeypatch.setattr("daydream.run_context._prompt_user", answer)
 
-
 # Markdown extraction helpers.
-
 
 def _line_starting(markdown: str, prefix: str) -> str:
     for line in markdown.splitlines():
@@ -492,7 +361,6 @@ def _line_starting(markdown: str, prefix: str) -> str:
         f"No line starting with {prefix!r} in markdown:\n{markdown}"
     )
 
-
 def _phase_rows(markdown: str) -> list[str]:
     rows: list[str] = []
     for line in markdown.splitlines():
@@ -500,19 +368,13 @@ def _phase_rows(markdown: str) -> list[str]:
             rows.append(line)
     return rows
 
-
 def _row_cells(row: str) -> list[str]:
     return [c.strip() for c in row.strip("|").split("|")]
 
-
 # The test.
 
-
 async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
-    deep_target: Path,
-    patch_sdk: None,
-    captured_post: _CapturedPost,
-    monkeypatch: pytest.MonkeyPatch,
+    deep_target: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Drive ``daydream.runner.run`` end-to-end in deep mode.
 
@@ -529,32 +391,23 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     every phase function, ``Invocation._dispatch``, ``build_payload``, the
     ``pr_comment_renderer`` — runs unmodified.
     """
-
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
 
-    config = RunConfig(
-        target=str(deep_target),
-        cleanup=False,
-        archive=False,
-    )
+    config = RunConfig(target=str(deep_target), cleanup=False, archive=False,)
     # Single-file diff -> select_tier "skip": the orchestrator's natural
     # pre-scan path runs unpopulated. (ExplorationContext kept for the linter.)
     _ = ExplorationContext
-
     exit_code = await run(config)
 
     assert exit_code == 0, f"run() returned {exit_code}"
-    assert captured_post.payloads, (
-        "build_payload was never called: deep flow did not reach _post"
-    )
+    assert captured_post.payloads, ("build_payload was never called: deep flow did not reach _post")
     payload = captured_post.payloads[-1]
     body = payload["body"]
     assert isinstance(body, str)
 
     # M3/M4: deep --comment path names the fixture PR's head SHA.
-    assert (
-        "- **Reviewed commit:** [`0000000`]"
+    assert ("- **Reviewed commit:** [`0000000`]"
         "(https://github.com/test-owner/test-repo/commit/" + "0" * 40 + ")"
     ) in body, f"reviewed-commit line missing from payload body.\n\nfull body:\n{body}"
 
@@ -565,20 +418,17 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
 
     # --- Model line: real SDK id, not 'unknown' / backend alias ---------
     model_line = _line_starting(body, "- **Model:**")
-    assert FIXTURE_MODEL_ID in model_line, (
-        f"BUG: rollup Model line is missing the real SDK model id "
+    assert FIXTURE_MODEL_ID in model_line, (f"BUG: rollup Model line is missing the real SDK model id "
         f"({FIXTURE_MODEL_ID!r}).\n  got: {model_line!r}\n\n"
         f"full body:\n{body}"
     )
-    assert "unknown" not in model_line, (
-        f"BUG: rollup Model line still says 'unknown' (no model id "
+    assert "unknown" not in model_line, (f"BUG: rollup Model line still says 'unknown' (no model id "
         f"propagated from SDK).\n  got: {model_line!r}"
     )
 
     # --- Cost line: non-zero ---------------------------------------------
     cost_line = _line_starting(body, "- **Cost:**")
-    assert "$0.00" not in cost_line, (
-        f"BUG: rollup Cost line shows $0.00 — per-step cost never landed "
+    assert "$0.00" not in cost_line, (f"BUG: rollup Cost line shows $0.00 — per-step cost never landed "
         f"on Step.metrics.\n  got: {cost_line!r}"
     )
 
@@ -602,34 +452,25 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
         # Layout: | Phase | Model | Tools | Input (cached) | Output | Cost |
         assert len(cells) >= 6, f"unexpected row layout: {row!r}"
         phase_name, model_cell, _tools, input_cell, _out, cost_cell = cells[:6]
-        assert input_cell != "0", (
-            f"BUG: row {phase_name!r} has Input='0' "
+        assert input_cell != "0", (f"BUG: row {phase_name!r} has Input='0' "
             f"(per-step token metrics never propagated).\n  row: {row!r}"
         )
-        assert model_cell != "unknown", (
-            f"BUG: row {phase_name!r} has Model='unknown' "
+        assert model_cell != "unknown", (f"BUG: row {phase_name!r} has Model='unknown' "
             f"(SDK model id never propagated to the per-phase rollup).\n"
             f"  row: {row!r}"
         )
-        assert FIXTURE_MODEL_ID in model_cell, (
-            f"BUG: row {phase_name!r} Model cell missing real SDK id "
+        assert FIXTURE_MODEL_ID in model_cell, (f"BUG: row {phase_name!r} Model cell missing real SDK id "
             f"{FIXTURE_MODEL_ID!r}.\n  row: {row!r}"
         )
-        assert cost_cell != "$0.00", (
-            f"BUG: row {phase_name!r} has Cost=$0.00 "
+        assert cost_cell != "$0.00", (f"BUG: row {phase_name!r} has Cost=$0.00 "
             f"(per-step cost never landed).\n  row: {row!r}"
         )
-
 
 # Exploration-row reproduction test: forces the parallel tier (which the
 # single-file fixture skips) so the broken Exploration rollup row is exercised.
 
-
 async def test_deep_run_exploration_row_has_real_model_and_metrics(
-    deep_target_multi: Path,
-    patch_sdk: None,
-    captured_post: _CapturedPost,
-    monkeypatch: pytest.MonkeyPatch,
+    deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Reproduce the production 'Exploration ... unknown ... $0.00' row.
 
@@ -646,7 +487,6 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
 
     The assertions below pin every column the user called out as broken.
     """
-
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
 
@@ -662,22 +502,14 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
 
     monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", PartialSiblingSDK)
 
-    config = RunConfig(
-        target=str(deep_target_multi),
-        cleanup=False,
-        archive=False,
-    )
-
+    config = RunConfig(target=str(deep_target_multi), cleanup=False, archive=False,)
     exit_code = await run(config)
 
     assert exit_code == 0, f"run() returned {exit_code}"
-    assert captured_post.payloads, (
-        "build_payload was never called: deep flow did not reach _post"
-    )
+    assert captured_post.payloads, ("build_payload was never called: deep flow did not reach _post")
     payload = captured_post.payloads[-1]
     body = payload["body"]
     assert isinstance(body, str)
-
     assert len(partial_paths) == 1
     assert _PARTIAL_MODEL not in body
 
@@ -688,8 +520,7 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
 
     # --- Top-level rollup must reflect a real model + non-zero cost -------
     model_line = _line_starting(body, "- **Model:**")
-    assert "unknown" not in model_line.lower(), (
-        f"BUG: rollup Model line still says 'unknown' even when exploration "
+    assert "unknown" not in model_line.lower(), (f"BUG: rollup Model line still says 'unknown' even when exploration "
         f"forks observed real model ids.\n  got: {model_line!r}\n\n"
         f"full body:\n{body}"
     )
@@ -708,21 +539,12 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
         "BUG: per-phase breakdown is missing an 'Exploration' row entirely.\n"
         f"  rows: {rows!r}\n\nfull body:\n{body}"
     )
-    assert len(exploration_rows) == 1, (
-        f"unexpected: {len(exploration_rows)} Exploration rows in breakdown."
-    )
+    assert len(exploration_rows) == 1, (f"unexpected: {len(exploration_rows)} Exploration rows in breakdown.")
     exploration_row = exploration_rows[0]
     cells = _row_cells(exploration_row)
     # Layout: | Phase | Model | Tools | Input (cached) | Output | Cost |
     assert len(cells) >= 6, f"unexpected row layout: {exploration_row!r}"
-    (
-        _phase_name,
-        model_cell,
-        tools_cell,
-        _input_cell,
-        _output_cell,
-        cost_cell,
-    ) = cells[:6]
+    (_phase_name, model_cell, tools_cell, _input_cell, _output_cell, cost_cell,) = cells[:6]
 
     # --- The three production-bug symptoms, asserted one at a time. -------
 
@@ -732,16 +554,14 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
         f"BUG: Exploration row Model='unknown' (matches production bug).\n"
         f"  row: {exploration_row!r}\n\nfull body:\n{body}"
     )
-    assert FIXTURE_MODEL_ID in model_cell, (
-        f"BUG: Exploration row Model cell is missing real SDK id "
+    assert FIXTURE_MODEL_ID in model_cell, (f"BUG: Exploration row Model cell is missing real SDK id "
         f"{FIXTURE_MODEL_ID!r}.\n  got Model cell: {model_cell!r}\n"
         f"  row: {exploration_row!r}"
     )
 
     # 2. Cost column — production shows '$0.00' (or '—'). Per-step cost
     #    should be aggregated from the fork CostEvents.
-    assert cost_cell != "$0.00", (
-        f"BUG: Exploration row Cost='$0.00' (matches production bug — "
+    assert cost_cell != "$0.00", (f"BUG: Exploration row Cost='$0.00' (matches production bug — "
         f"per-step cost from fork trajectories never aggregated).\n"
         f"  row: {exploration_row!r}"
     )
@@ -759,12 +579,8 @@ async def test_deep_run_exploration_row_has_real_model_and_metrics(
     assert tools_cell == "3"
     assert cost_cell == "$0.36"
 
-
 async def test_deep_run_posts_safe_fallback_when_completed_sibling_is_malformed(
-    deep_target_multi: Path,
-    patch_sdk: None,
-    captured_post: _CapturedPost,
-    monkeypatch: pytest.MonkeyPatch,
+    deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A bad retained document degrades run details, not the authorized post."""

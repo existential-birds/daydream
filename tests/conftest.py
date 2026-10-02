@@ -34,12 +34,7 @@ from tests.harness.remote_ci import NoCIRemote
 # invocation (test helpers and production git_ops alike) resolves its repo from
 # the working directory, exactly as it does when run outside a hook.
 for _git_env_var in (
-    "GIT_DIR",
-    "GIT_INDEX_FILE",
-    "GIT_WORK_TREE",
-    "GIT_PREFIX",
-    "GIT_OBJECT_DIRECTORY",
-    "GIT_COMMON_DIR",
+    "GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE", "GIT_PREFIX", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR",
     "GIT_NAMESPACE",
 ):
     os.environ.pop(_git_env_var, None)
@@ -80,9 +75,7 @@ def _make_repo_with_main(tmp_path: Path, name: str = "repo") -> Path:
     return repo
 
 
-def _feature_repo(
-    tmp_path: Path, name: str, initial: dict[str, str], changed: dict[str, str]
-) -> Path:
+def _feature_repo(tmp_path: Path, name: str, initial: dict[str, str], changed: dict[str, str]) -> Path:
     """Build a repo with an ``init`` commit on main and a ``change`` commit on
     a ``feature`` branch from *initial*/*changed* path-to-content maps.
     """
@@ -142,9 +135,7 @@ def deep_target(tmp_path: Path) -> Path:
     ``tests/test_deep_pr_comment_integration.py``) so both drive the identical
     single-file deep path (tier ``"skip"``).
     """
-    return _feature_repo(
-        tmp_path,
-        "deep_repo",
+    return _feature_repo(tmp_path, "deep_repo",
         {"foo.py": "def foo():\n    return 1\n"},
         {"foo.py": "def foo():\n    return 2\n"},
     )
@@ -199,12 +190,7 @@ def repo_with_origin(tmp_path: Path, bare_origin: Path) -> Path:
     return repo
 
 
-def _improve_monorepo(
-    tmp_path: Path,
-    name: str,
-    *,
-    with_web: bool = True,
-    branch_changes: tuple[str, ...] = (),
+def _improve_monorepo(tmp_path: Path, name: str, *, with_web: bool = True, branch_changes: tuple[str, ...] = (),
 ) -> Path:
     """Build the shared committed apps/{billing,catalog} monorepo scaffold."""
     project = tmp_path / name
@@ -232,9 +218,7 @@ def _improve_monorepo(
     if branch_changes:
         _git(project, "checkout", "-b", "feature")
         for service in branch_changes:
-            (project / "apps" / service / "api.py").write_text(
-                f'def service_name():\n    return "{service}-v2"\n'
-            )
+            (project / "apps" / service / "api.py").write_text(f'def service_name():\n    return "{service}-v2"\n')
         _git(project, "add", *(f"apps/{service}/api.py" for service in branch_changes))
         _commit(project, "change " + " and ".join(branch_changes) + " api")
     return project
@@ -279,9 +263,7 @@ def improve_branch_target(tmp_path: Path) -> Path:
 @pytest.fixture
 def improve_branch_two_services_target(tmp_path: Path) -> Path:
     """Improve monorepo whose feature branch changes billing AND catalog."""
-    return _improve_monorepo(
-        tmp_path, "improve_branch_two", with_web=False, branch_changes=("billing", "catalog")
-    )
+    return _improve_monorepo(tmp_path, "improve_branch_two", with_web=False, branch_changes=("billing", "catalog"))
 
 
 @pytest.fixture
@@ -334,8 +316,7 @@ def sibling_frontier_target(tmp_path: Path) -> Path:
         for i in range(12)
     }
     before["core.py"] = "def core_helper():\n    return 1\n"
-    after = {
-        f"mod{i}.py": (
+    after = {f"mod{i}.py": (
             f"from core import core_helper\ndef mod{i}_fn() -> int: return core_helper() + {i}\n# v2\n"
             + ("# extra0\n# extra1\n# extra2\n# extra3\n# extra4\n# extra5\n" if i == 5 else "")
         )
@@ -392,24 +373,11 @@ def make_work() -> Callable[..., WorkContext]:
     to spin up a real git repo just to call a phase.
     """
 
-    def _make(
-        repo: Path,
-        *,
-        base_branch: str = "main",
-        base_sha: str = "DEADBEEF",
-        head_sha: str = "CAFEBABE",
-        head_branch: str | None = "feat/x",
-        is_ephemeral: bool = False,
+    def _make(repo: Path, *, base_branch: str = "main", base_sha: str = "DEADBEEF", head_sha: str = "CAFEBABE",
+        head_branch: str | None = "feat/x", is_ephemeral: bool = False,
     ) -> WorkContext:
-        return WorkContext(
-            repo=repo,
-            source=repo,
-            base_branch=base_branch,
-            base_sha=base_sha,
-            head_branch=head_branch,
-            head_sha=head_sha,
-            is_ephemeral=is_ephemeral,
-            run_id="20260101000000-deadbeef",
+        return WorkContext(repo=repo, source=repo, base_branch=base_branch, base_sha=base_sha, head_branch=head_branch,
+            head_sha=head_sha, is_ephemeral=is_ephemeral, run_id="20260101000000-deadbeef",
         )
 
     return _make
@@ -434,11 +402,7 @@ def make_config() -> Callable[..., "RunConfig"]:
     from daydream.runner import RunConfig
 
     def _make(target: Path | str, **overrides: object) -> RunConfig:
-        fields: dict[str, object] = {
-            "target": str(target),
-            "non_interactive": True,
-            "cleanup": False,
-            "archive": False,
+        fields: dict[str, object] = {"target": str(target), "non_interactive": True, "cleanup": False, "archive": False,
         }
         fields.update(overrides)
         return RunConfig(**fields)  # type: ignore[arg-type]
@@ -457,17 +421,13 @@ def install_backend(monkeypatch: pytest.MonkeyPatch) -> Callable[[object], objec
     """
 
     def _install(backend: object) -> object:
-        monkeypatch.setattr(
-            "daydream.runner.create_backend", lambda *_args, **_kwargs: backend
-        )
+        monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
         return backend
 
     return _install
 
 
-def silence_module_console(
-    monkeypatch: pytest.MonkeyPatch, module: str, *, keep: tuple[str, ...] = ()
-) -> None:
+def silence_module_console(monkeypatch: pytest.MonkeyPatch, module: str, *, keep: tuple[str, ...] = ()) -> None:
     """No-op every ``print_*`` UI helper bound into a module, plus its ``console``.
 
     Real-path tests silence terminal output so assertions read against state
@@ -488,9 +448,7 @@ def silence_module_console(
         if callable(getattr(mod, name, None)):
             monkeypatch.setattr(f"{module}.{name}", lambda *a, **kw: None)
     if "console" not in keep and hasattr(mod, "console"):
-        monkeypatch.setattr(
-            f"{module}.console", type("C", (), {"print": lambda *a, **kw: None})()
-        )
+        monkeypatch.setattr(f"{module}.console", type("C", (), {"print": lambda *a, **kw: None})())
 
 
 @pytest.fixture
@@ -530,12 +488,7 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
         commit: Stub ``<module>.phase_commit_push``.
     """
 
-    def _mute(
-        module: str = "daydream.deep.fix_steps",
-        *,
-        post: bool = True,
-        heal: bool = True,
-        commit: bool = True,
+    def _mute(module: str = "daydream.deep.fix_steps", *, post: bool = True, heal: bool = True, commit: bool = True,
     ) -> None:
         async def _no_post(*_args: object, **_kwargs: object) -> None:
             return None
@@ -546,27 +499,16 @@ def mute_side_effects(monkeypatch: pytest.MonkeyPatch) -> Callable[..., None]:
             capture = kwargs["capture_tree_key"]
             session_id = str(kwargs["session_id"])
             key = capture()  # type: ignore[operator]
-            return TestAndHealResult(
-                passed=True,
-                retries=0,
-                proceed=True,
-                ignored=False,
-                attempts=(
-                    TestAttemptEvidence(
-                        session_id=session_id,
-                        kind="agent",
-                        command=None,
-                        passed=True,
-                        input_tree_key=key,
+            return TestAndHealResult(passed=True, retries=0, proceed=True, ignored=False,
+                attempts=(TestAttemptEvidence(
+                        session_id=session_id, kind="agent", command=None, passed=True, input_tree_key=key,
                         output_tree_key=key,
                     ),
                 ),
             )
 
         if post:
-            monkeypatch.setattr(
-                "daydream.pr_review.post_review_to_pr_from_report", _no_post
-            )
+            monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _no_post)
         if heal:
             monkeypatch.setattr(f"{module}.phase_test_and_heal", _ok)
         if commit:
@@ -599,9 +541,7 @@ def _isolate_trace_environment(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _hermetic_skill_availability(
-    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def _hermetic_skill_availability(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
     """No test may read the developer's ``~/.claude`` for skill availability.
 
     ``get_installed_skills()`` reads ``$CLAUDE_CONFIG_DIR/plugins/installed_plugins.json``
@@ -776,11 +716,7 @@ def fake_gh(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> FakeGh:
 
 
 @pytest.fixture
-def no_ci_remote(
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> Iterator[NoCIRemote]:
+def no_ci_remote(fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,) -> Iterator[NoCIRemote]:
     """A real bare transport behind a GitHub URL with external no-CI evidence."""
     harness = NoCIRemote(fake_gh, monkeypatch, tmp_path)
     yield harness
@@ -798,20 +734,14 @@ def improve_fixture_service(apps_dir: Path) -> str:
     """
     service_entries: list[Path] = []
     if apps_dir.is_dir():
-        service_entries = sorted(
-            p
-            for p in apps_dir.iterdir()
-            if p.is_dir() and (p / "pyproject.toml").is_file()
-        )
+        service_entries = sorted(p for p in apps_dir.iterdir() if p.is_dir() and (p / "pyproject.toml").is_file())
     if not service_entries:
-        raise AssertionError(
-            "improve_monorepo_target fixture must contain at least one "
+        raise AssertionError("improve_monorepo_target fixture must contain at least one "
             "service directory under apps/"
         )
     chosen = service_entries[0]
     if chosen.joinpath("pyproject.toml").read_text(encoding="utf-8").splitlines()[:1] != ["[project]"]:
-        raise AssertionError(
-            f"improve_monorepo_target service {chosen.name!r} must declare "
+        raise AssertionError(f"improve_monorepo_target service {chosen.name!r} must declare "
             "'[project]' on pyproject.toml line 1 to anchor host evidence"
         )
     return chosen.name
@@ -864,16 +794,12 @@ def improve_fixture_test_command_anchor(pyproject: Path) -> int:
     """
     cfg = tomllib.loads(pyproject.read_text(encoding="utf-8"))
     if cfg.get("tool", {}).get("daydream", {}).get("test-command") != "uv run pytest":
-        raise AssertionError(
-            "improve_monorepo_target fixture must declare test command "
+        raise AssertionError("improve_monorepo_target fixture must declare test command "
             "'uv run pytest' in its root pyproject.toml"
         )
-    for line_number, line in enumerate(
-        pyproject.read_text(encoding="utf-8").splitlines(), 1
-    ):
+    for line_number, line in enumerate(pyproject.read_text(encoding="utf-8").splitlines(), 1):
         if line.strip().split("=", 1)[0].strip() == "test-command":
             return line_number
-    raise AssertionError(
-        "improve_monorepo_target fixture must declare test command "
+    raise AssertionError("improve_monorepo_target fixture must declare test command "
         "'uv run pytest' in its root pyproject.toml"
     )

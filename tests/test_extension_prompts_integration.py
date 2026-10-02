@@ -31,11 +31,8 @@ from tests.test_deep_orchestrator import _install_stub_backend, _run_deep, _sile
 
 
 async def test_fork_prompt_override_reaches_backend(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    mute_side_effects: Callable[..., None],
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], mute_side_effects: Callable[..., None],
 ) -> None:
     """A daydream_ext override of the ``per-stack`` prompt replaces it wholesale.
 
@@ -50,10 +47,7 @@ async def test_fork_prompt_override_reaches_backend(
         "    r.override_prompt('per-stack', lambda **kw: f\"RO-STACK {kw['strategy']}\")\n"
     )
     backend = ScriptedBackend(
-        events=(
-            TextEvent(text=""),
-            ResultEvent(structured_output={"issues": []}, continuation=None),
-        )
+        events=(TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
     )
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")
@@ -68,11 +62,8 @@ async def test_fork_prompt_override_reaches_backend(
     # wholesale-override contract.
     assert "RO-STACK " in review_prompts[0]
 
-
 async def test_shallow_without_skill_keeps_detected_language_skill(
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
+    feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
     mute_side_effects: Callable[..., None],
 ) -> None:
     """``--shallow <repo>`` without ``--stack`` preserves the detected language scope (#6).
@@ -84,10 +75,7 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
     Observable outcome: the backend receives a per-stack python prompt with no skill.
     """
     backend = ScriptedBackend(
-        events=(
-            TextEvent(text=""),
-            ResultEvent(structured_output={"issues": []}, continuation=None),
-        )
+        events=(TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
     )
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")
@@ -96,8 +84,7 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
 
     assert rc == 0
     per_stack = [p for p in backend.prompts if "python" in p]
-    assert per_stack, (
-        "shallow with no --skill must keep the detected python scope "
+    assert per_stack, ("shallow with no --skill must keep the detected python scope "
         "rather than fall back to the generic-fallback reviewer"
     )
     joined = "\n".join(backend.prompts)
@@ -133,12 +120,9 @@ def _plan_writer_override(*, raises_on_first_call: bool = False) -> str:
         "    r.override_prompt('plan-writer', _plan_writer)\n"
     )
 
-
 @pytest.mark.anyio
 async def test_plan_writer_override_receives_legacy_string_commands_and_typed_output_succeeds(
-    ext_dir: ExtDir,
-    improve_monorepo_target: Path,
-    make_config: Callable[..., RunConfig],
+    ext_dir: ExtDir, improve_monorepo_target: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_plan_writer_override())
@@ -148,28 +132,17 @@ async def test_plan_writer_override_receives_legacy_string_commands_and_typed_ou
     rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
     assert rc == 0
-    plan_calls = [
-        call
-        for call in backend.calls
-        if "EXTENSION_TYPED_PLAN_WRITER" in call["prompt"]
-    ]
+    plan_calls = [call for call in backend.calls if "EXTENSION_TYPED_PLAN_WRITER" in call["prompt"]]
     assert plan_calls
     assert all(call["output_schema"] == PLAN_AUTHOR_SCHEMA for call in plan_calls)
     assert all("uv run pytest" in call["prompt"] for call in plan_calls)
     assert all('"id": "test-suite"' in call["prompt"] for call in plan_calls)
     assert all('"working_directory": "."' in call["prompt"] for call in plan_calls)
-    assert list(
-        (improve_monorepo_target / "daydream_plans").glob(
-            "[0-9][0-9][0-9]-*.md"
-        )
-    )
-
+    assert list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
 
 @pytest.mark.anyio
 async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagnostics(
-    ext_dir: ExtDir,
-    improve_monorepo_target: Path,
-    make_config: Callable[..., RunConfig],
+    ext_dir: ExtDir, improve_monorepo_target: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A legacy markdown-blob payload blocks on missing authored content.
@@ -187,21 +160,14 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     rc = await runner.run(make_config(improve_monorepo_target, flow_name="improve"))
 
     plans_dir = improve_monorepo_target / "daydream_plans"
-    diagnostics = improve_artifact(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    ).read_text(encoding="utf-8")
+    diagnostics = improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json",).read_text(encoding="utf-8")
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
     assert rc == 1
     assert not list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
     assert "BLOCKED (PLAN_VALIDATION_FAILED: " in index
     assert "AUTHOR_SCHEMA_INVALID" in index
     assert "LEGACY_MARKDOWN_OUTPUT" not in index
-    errors = [
-        error
-        for attempt in json.loads(diagnostics)["attempts"]
-        for error in attempt["errors"]
-    ]
+    errors = [error for attempt in json.loads(diagnostics)["attempts"] for error in attempt["errors"]]
     codes = {error["code"] for error in errors}
     pointers = {error["pointer"] for error in errors}
     assert "AUTHOR_SCHEMA_INVALID" in codes
@@ -210,12 +176,9 @@ async def test_legacy_markdown_plan_writer_override_blocks_with_sanitized_diagno
     assert "/markdown" not in pointers
     assert "Make the change." not in diagnostics
 
-
 @pytest.mark.anyio
 async def test_plan_writer_prompt_exception_blocks_only_that_plan(
-    ext_dir: ExtDir,
-    improve_monorepo_target: Path,
-    make_config: Callable[..., RunConfig],
+    ext_dir: ExtDir, improve_monorepo_target: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_plan_writer_override(raises_on_first_call=True))
@@ -226,16 +189,12 @@ async def test_plan_writer_prompt_exception_blocks_only_that_plan(
 
     plans_dir = improve_monorepo_target / "daydream_plans"
     index = (plans_dir / "README.md").read_text(encoding="utf-8")
-    diagnostics = improve_artifact(
-        improve_monorepo_target,
-        "plan-write-diagnostics.json",
-    ).read_text(encoding="utf-8")
+    diagnostics = improve_artifact(improve_monorepo_target, "plan-write-diagnostics.json",).read_text(encoding="utf-8")
     assert rc == 0
     assert list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))
     assert "BLOCKED (PLAN_WRITER_FAILED: PROMPT_CONSTRUCTION_FAILED)" in index
     assert "PROMPT_CONSTRUCTION_FAILED" in diagnostics
     assert "PRIVATE_PROMPT_EXCEPTION_SECRET" not in diagnostics
-
 
 async def test_custom_structural_extension_keeps_alternatives_pass(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,

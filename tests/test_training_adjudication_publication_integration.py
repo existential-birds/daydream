@@ -36,11 +36,8 @@ def _run_cli(argv: list[str], capsys: pytest.CaptureFixture[str]) -> str:
 
 def _hydrate_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureFixture[str]) -> tuple[Path, str]:
     stage = root / "hydrated"
-    _run_cli([
-        "hydrate-hub", "--source-repo", hubs.source.repo_id,
-        "--source-revision", hubs.source_revision,
-        "--destination-repo", hubs.source.repo_id,
-        "--stage-dir", str(stage), "--license-policy", str(hubs.policy_path),
+    _run_cli(["hydrate-hub", "--source-repo", hubs.source.repo_id, "--source-revision", hubs.source_revision,
+        "--destination-repo", hubs.source.repo_id, "--stage-dir", str(stage), "--license-policy", str(hubs.policy_path),
     ], capsys)
     manifests = list((stage / "curated").glob("*/curation-manifest.json"))
     assert len(manifests) == 1
@@ -48,15 +45,10 @@ def _hydrate_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureFixture
     return stage, curation_id
 
 
-def _materialize_vm(
-    root: Path, stage: Path, pin: dict[str, Any], capsys: pytest.CaptureFixture[str],
-) -> Path:
+def _materialize_vm(root: Path, stage: Path, pin: dict[str, Any], capsys: pytest.CaptureFixture[str],) -> Path:
     materialized = root / "materialized"
-    arguments = [
-        "adjudicate", "materialize", "--index-root", str(stage), "--out-dir", str(materialized),
-    ]
-    for name in (
-        "curation_id", "sanitized_hub_commit", "source_hub_commit",
+    arguments = ["adjudicate", "materialize", "--index-root", str(stage), "--out-dir", str(materialized)]
+    for name in ("curation_id", "sanitized_hub_commit", "source_hub_commit",
         "archive_index_digest", "evidence_observed_at", "as_of",
     ):
         if pin.get(name):
@@ -65,38 +57,30 @@ def _materialize_vm(
     return materialized
 
 
-def _import_backup(
-    root: Path, stage: Path, state: Path, capsys: pytest.CaptureFixture[str],
-) -> None:
+def _import_backup(root: Path, stage: Path, state: Path, capsys: pytest.CaptureFixture[str],) -> None:
     # Seed a real external-backup producer index, then import through the CLI.
     # The special history row exists only in SQLite, never state observations.
     backup = root / "local-backup"
     row = query_runs(stage, "session_id = ?", ("sess-a",))[0]
     upsert_run(backup, Manifest(**{field.name: row[field.name] for field in fields(Manifest) if field.name in row}))
     shutil.copytree(stage / "runs" / "sess-a", backup / "runs" / "sess-a")
-    assert append_label_observation(
-        backup, "sess-a", labels=["accepted"], pr_state=None,
-        labeler_version="980-rubric-r2", evidence_sha=str(row["head_sha"]),
-        reward_version="vm-loss-sqlite-canary",
+    assert append_label_observation(backup, "sess-a", labels=["accepted"], pr_state=None,
+        labeler_version="980-rubric-r2", evidence_sha=str(row["head_sha"]), reward_version="vm-loss-sqlite-canary",
         source="human", observed_at="2026-06-01T00:00:00+00:00",
     )
-    _run_cli([
-        "adjudicate", "import-local-observations", "--archive-root", str(backup),
+    _run_cli(["adjudicate", "import-local-observations", "--archive-root", str(backup),
         "--index-root", str(stage), "--archive-dir", str(state), "--state-dir", str(state),
     ], capsys)
     assert any(row["reward_version"] == "vm-loss-sqlite-canary" for row in label_observation_history(state, "sess-a"))
     assert "vm-loss-sqlite-canary" not in (state / "observations.jsonl").read_text()
 
 
-def _publish_first_vm(
-    root: Path, hubs: PublicationHubs, capsys: pytest.CaptureFixture[str], *, import_history: bool,
+def _publish_first_vm(root: Path, hubs: PublicationHubs, capsys: pytest.CaptureFixture[str], *, import_history: bool,
 ) -> str:
     """Return only an operator-known identity; every other input dies with VM 1."""
     root.mkdir()
     stage, curation_id = _hydrate_vm(root, hubs, capsys)
-    pin = {
-        "curation_id": curation_id,
-        "sanitized_hub_commit": hubs.source_revision,
+    pin = {"curation_id": curation_id, "sanitized_hub_commit": hubs.source_revision,
         "source_hub_commit": hubs.source_revision,
         "archive_index_digest": hashlib.sha256((stage / "index.db").read_bytes()).hexdigest(),
         "evidence_observed_at": "2026-06-01T00:00:00+00:00",
@@ -104,23 +88,18 @@ def _publish_first_vm(
     materialized = _materialize_vm(root, stage, pin, capsys)
     state = root / "state"
     _run_cli(["adjudicate", "build", "--index-root", str(materialized), "--state-dir", str(state)], capsys)
-    _run_cli([
-        "adjudicate", "label", "--state-dir", str(state), "--batch", "1",
+    _run_cli(["adjudicate", "label", "--state-dir", str(state), "--batch", "1",
         "--disposition", "accepted", "--rationale", "verified-against-diff-context",
         "--labeler", "alice", "--valid-at", "2026-06-01T00:00:00+00:00",
     ], capsys)
-    _run_cli([
-        "adjudicate", "export", "--index-root", str(materialized),
-        "--state-dir", str(state), "--dry-run",
+    _run_cli(["adjudicate", "export", "--index-root", str(materialized), "--state-dir", str(state), "--dry-run",
     ], capsys)
     if import_history:
         _import_backup(root, stage, state, capsys)
     else:
         assert not (state / "index.db").exists()
-    _run_cli([
-        "adjudicate", "publish-state", "--state-dir", str(state),
-        "--manifest", str(materialized / "preview-manifest.json"),
-        "--hub-repo", hubs.annotations.repo_id,
+    _run_cli(["adjudicate", "publish-state", "--state-dir", str(state),
+        "--manifest", str(materialized / "preview-manifest.json"), "--hub-repo", hubs.annotations.repo_id,
     ], capsys)
     pointer = f"annotations/{curation_id}/checkpoints/batch-latest.json"
     commit = hubs.annotations.commit_order[-1]
@@ -132,8 +111,7 @@ def _publish_first_vm(
 
 @pytest.mark.parametrize("import_history", [False, True], ids=["ordinary-no-backup", "sqlite-backup"])
 def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
-    import_history: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], import_history: bool,
 ) -> None:
     hubs = build_publication_hubs()
 
@@ -155,15 +133,13 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     state = vm2 / "state"
     checkpoint_revision = hubs.annotations.repo_info("main").sha
     hubs.annotations.downloaded_revision_log.clear()
-    _run_cli([
-        "adjudicate", "resume-state", "--curation-id", curation_id,
+    _run_cli(["adjudicate", "resume-state", "--curation-id", curation_id,
         "--destination", str(state), "--hub-repo", hubs.annotations.repo_id,
     ], capsys)
     assert hubs.annotations.downloaded_revision_log
     assert {revision for _, revision in hubs.annotations.downloaded_revision_log} == {checkpoint_revision}
     if import_history:
-        assert any(
-            row["reward_version"] == "vm-loss-sqlite-canary"
+        assert any(row["reward_version"] == "vm-loss-sqlite-canary"
             for row in label_observation_history(state, "sess-a")
         )
     else:
@@ -177,15 +153,12 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     # otherwise the exact rehydrated source index supplies the run identities.
     archive = state if (state / "index.db").is_file() else stage
     assert (archive == state) is import_history
-    _run_cli([
-        "adjudicate", "harvest-snapshot", "--index-root", str(stage),
+    _run_cli(["adjudicate", "harvest-snapshot", "--index-root", str(stage),
         "--materialize-dir", str(materialized), "--archive-dir", str(archive), "--state-dir", str(state),
     ], capsys)
-    final_arguments = [
-        "adjudicate", "publish-final", "--index-root", str(stage),
+    final_arguments = ["adjudicate", "publish-final", "--index-root", str(stage),
         "--materialize-dir", str(materialized), "--archive-dir", str(archive), "--state-dir", str(state),
-        "--curation-bundle-dir", str(stage / "curated" / curation_id),
-        "--hub-repo", hubs.annotations.repo_id,
+        "--curation-bundle-dir", str(stage / "curated" / curation_id), "--hub-repo", hubs.annotations.repo_id,
     ]
     commit_count = len(hubs.annotations.commit_order)
     dry_output = _run_cli([*final_arguments, "--dry-run"], capsys)
@@ -224,8 +197,7 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     assert revision in published_output
     assert final_id in published_output
     downloaded = vm2 / "clean final download"
-    _run_cli([
-        "adjudicate", "download-final", "--curation-id", curation_id,
+    _run_cli(["adjudicate", "download-final", "--curation-id", curation_id,
         "--snapshot-id", final_id, "--revision", revision, "--destination", str(downloaded),
         "--hub-repo", hubs.annotations.repo_id,
     ], capsys)

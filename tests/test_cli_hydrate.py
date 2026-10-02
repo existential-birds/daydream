@@ -38,20 +38,11 @@ class _FakeSummary:
 
 
 def _hydrate_args(
-    stage_dir: pathlib.Path,
-    *,
-    source_repo: str = "org/ds",
-    revision: str = "a" * 40,
-    destination_repo: str = "org/ds",
-    policy: pathlib.Path | None = None,
-    dry_run: bool = False,
-    allow_copyleft: str | None = None,
+    stage_dir: pathlib.Path, *, source_repo: str = "org/ds", revision: str = "a" * 40, destination_repo: str = "org/ds",
+    policy: pathlib.Path | None = None, dry_run: bool = False, allow_copyleft: str | None = None,
 ) -> list[str]:
     """Build the shared `_handle_hydrate_hub_command` argv with per-test extras."""
-    args = [
-        "--source-repo", source_repo,
-        "--source-revision", revision,
-        "--destination-repo", destination_repo,
+    args = ["--source-repo", source_repo, "--source-revision", revision, "--destination-repo", destination_repo,
         "--stage-dir", str(stage_dir),
     ]
     if policy is not None:
@@ -63,60 +54,43 @@ def _hydrate_args(
     return args
 
 
-def _run_dry_hydrate(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, hub: FakeHub
-) -> int:
+def _run_dry_hydrate(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, hub: FakeHub) -> int:
     """Run the private dry-run hydrate command against a fake hub."""
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
-    return cli._handle_hydrate_hub_command(
-        _hydrate_args(
-            tmp_path,
-            source_repo="org/private-ds",
-            revision=SNAPSHOT_REVISION,
-            destination_repo="org/private-ds",
+    return cli._handle_hydrate_hub_command(_hydrate_args(
+            tmp_path, source_repo="org/private-ds", revision=SNAPSHOT_REVISION, destination_repo="org/private-ds",
             dry_run=True,
         )
     )
-
 
 def test_hydrate_hub_requires_explicit_args(capsys: pytest.CaptureFixture[str]) -> None:
     rc = cli._handle_hydrate_hub_command([])
     assert rc == 1
     assert "--source-repo" in capsys.readouterr().out
 
-
 def test_hydrate_hub_rejects_moving_branch_without_optin(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = cli._handle_hydrate_hub_command(
-        ["--source-repo", "org/ds", "--source-revision", "main",
+    rc = cli._handle_hydrate_hub_command(["--source-repo", "org/ds", "--source-revision", "main",
          "--destination-repo", "org/ds", "--stage-dir", "/tmp/x"])
     assert rc == 1
     assert "exploratory" in capsys.readouterr().out
 
-
 def test_hydrate_hub_missing_token_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
-    rc = cli._handle_hydrate_hub_command(
-        ["--source-repo", "org/ds", "--source-revision", "a" * 40,
+    rc = cli._handle_hydrate_hub_command(["--source-repo", "org/ds", "--source-revision", "a" * 40,
          "--destination-repo", "org/ds", "--stage-dir", "/tmp/x"])
     assert rc == 1
-
 
 def test_help_lists_hydrate_hub(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit):
         cli.main(["corpus", "hydrate-hub", "--help"])
     assert "hydrate-hub" in capsys.readouterr().out
 
-
-def test_success_path_drives_orchestrator(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
-) -> None:
+def test_success_path_drives_orchestrator(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
     calls: list[Any] = []
-
     def fake_run(config: Any) -> _FakeSummary:
         calls.append(config)
         return _FakeSummary()
-
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
@@ -126,51 +100,38 @@ def test_success_path_drives_orchestrator(
     assert rc == 0
     assert calls and calls[0].source_revision == "a" * 40
 
-
 def test_cli_wires_license_policy_into_hydration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """--license-policy/--allow-copyleft reach HydrateHubConfig, and the
     previously unreachable license admission summary prints (issue #1080)."""
     calls: list[Any] = []
-
     def fake_run(config: Any) -> _FakeSummary:
         calls.append(config)
-        return _FakeSummary(
-            dry_run_discovered=2,
-            dry_run_admitted=1,
-            dry_run_rejected=1,
-            license_admission={
-                "admitted": 1, "c5_excluded": 1,
-                "c8_copyleft_unopted": 0, "license_evidence_missing": 0,
+        return _FakeSummary(dry_run_discovered=2, dry_run_admitted=1, dry_run_rejected=1,
+            license_admission={"admitted": 1, "c5_excluded": 1, "c8_copyleft_unopted": 0, "license_evidence_missing": 0,
             },
         )
-
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
     monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
-    rc = cli._handle_hydrate_hub_command(
-        _hydrate_args(tmp_path, policy=policy, allow_copyleft="Owner/Gpl-Repo")
-    )
+    rc = cli._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy, allow_copyleft="Owner/Gpl-Repo"))
     assert rc == 0
     assert calls and calls[0].license_policy_path == str(policy)
     assert calls[0].allow_copyleft == frozenset({"owner/gpl-repo"})
     output = " ".join(capsys.readouterr().out.split())
     assert "license admission: admitted 1; c5-excluded 1" in output
 
-
 def test_success_path_surfaces_incomplete_manifests(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setattr(
-        cli, "_run_hydrate_hub",
+    monkeypatch.setattr(cli, "_run_hydrate_hub",
         lambda _config: _FakeSummary(
-            dry_run_discovered=2,
-            dry_run_incomplete_manifests=("sess-a (missing trajectory.json)",),
+            dry_run_discovered=2, dry_run_incomplete_manifests=("sess-a (missing trajectory.json)",),
         ),
     )
     policy = tmp_path / "license-policy.json"
@@ -180,7 +141,6 @@ def test_success_path_surfaces_incomplete_manifests(
     output = " ".join(capsys.readouterr().out.split())
     assert "hydration yield reduced" in output
     assert "sess-a (missing trajectory.json)" in output
-
 
 def test_dry_run_reports_discovery_accounting_without_publication(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
@@ -197,20 +157,13 @@ def test_dry_run_reports_discovery_accounting_without_publication(
     assert "yield reduced" not in output
     assert hub.uploaded_paths == []
 
-
 def test_dry_run_surfaces_incomplete_manifests_with_reduced_yield(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    complete = {
-        "manifest.json": b'{"session_id": "complete"}',
-        "trajectory.json": b'{"messages": []}',
-    }
+    complete = {"manifest.json": b'{"session_id": "complete"}', "trajectory.json": b'{"messages": []}'}
     incomplete = {"manifest.json": b'{"session_id": "incomplete"}'}
-    hub = FakeHub(
-        repo_id="org/private-ds",
-        private=True,
-        files={
-            "sess-complete/manifest.json": complete["manifest.json"],
+    hub = FakeHub(repo_id="org/private-ds", private=True,
+        files={"sess-complete/manifest.json": complete["manifest.json"],
             "sess-complete/trajectory.json": complete["trajectory.json"],
             "sess-incomplete/manifest.json": incomplete["manifest.json"],
         },
@@ -226,14 +179,11 @@ def test_dry_run_surfaces_incomplete_manifests_with_reduced_yield(
     assert "sess-incomplete (missing trajectory.json)" in output
     assert hub.uploaded_paths == []
 
-
 def test_dry_run_fails_closed_on_run_shaped_zero_discovery(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     hub = FakeHub(
-        repo_id="org/private-ds",
-        private=True,
-        files={"incomplete/manifest.json": b'{"session_id": "incomplete"}'},
+        repo_id="org/private-ds", private=True, files={"incomplete/manifest.json": b'{"session_id": "incomplete"}'},
     )
     hub.commit_revision(SNAPSHOT_REVISION)
     rc = _run_dry_hydrate(monkeypatch, tmp_path, hub)
@@ -243,7 +193,6 @@ def test_dry_run_fails_closed_on_run_shaped_zero_discovery(
     assert "zero candidates" in output
     assert "trajectory.json" in output
     assert hub.uploaded_paths == []
-
 
 def test_hydrate_hub_refuses_non_dry_run_without_policy(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: pathlib.Path
@@ -263,26 +212,17 @@ def test_hydrate_hub_refuses_non_dry_run_without_policy(
     output = capsys.readouterr().out + capsys.readouterr().err
     assert rc != 1 or "license policy" not in output.lower()
 
-
 def test_production_policy_file_loads_and_rejects_copyleft() -> None:
-    """The checked-in production SPDX policy validates (M10 discipline) and
-    fail-closes: missing evidence -> reject, GPL without opt-in -> reject,
-    MIT -> admit, exact opt-in -> admit the named repo only."""
+    """The checked-in production SPDX policy validates (M10 discipline) and fail-closes: missing evidence -> reject,
+    GPL without opt-in -> reject, MIT -> admit, exact opt-in -> admit the named repo only."""
     policy_path = pathlib.Path("daydream/training/schema/license-policy-production.json")
     policy, digest = load_license_policy(policy_path)
     assert len(digest) == 64
-    assert resolve_repo_decision("acme/widget", None, policy, frozenset()).reason_code == (
-        "license_evidence_missing"
-    )
+    assert resolve_repo_decision("acme/widget", None, policy, frozenset()).reason_code == ("license_evidence_missing")
     gpl = resolve_repo_decision("acme/widget", {"spdx_id": "GPL-3.0-only"}, policy, frozenset())
     assert gpl.reason_code == "c8_copyleft_unopted"
-    assert (
-        resolve_repo_decision("acme/widget", {"spdx_id": "MIT"}, policy, frozenset()).status
-        == "admitted"
-    )
-    opted = resolve_repo_decision(
-        "acme/widget", {"spdx_id": "GPL-3.0-only"}, policy, frozenset({"acme/widget"})
-    )
+    assert (resolve_repo_decision("acme/widget", {"spdx_id": "MIT"}, policy, frozenset()).status == "admitted")
+    opted = resolve_repo_decision("acme/widget", {"spdx_id": "GPL-3.0-only"}, policy, frozenset({"acme/widget"}))
     assert opted.status == "admitted"
 
 
@@ -301,17 +241,13 @@ class _FakeLicenseResolver:
         if repo_slug.casefold() not in self._mit:
             return None
         commit = "c" * 40
-        return EnrichedEvidence(
-            spdx_id="MIT", source=f"github:{repo_slug}@{commit}", repo_commit=commit,
-        )
+        return EnrichedEvidence(spdx_id="MIT", source=f"github:{repo_slug}@{commit}", repo_commit=commit,)
 
 
 def _seed_three_repo_hub() -> FakeHub:
     """Three-session hub over three repo outcomes: 2x MIT repo, 1x unresolvable."""
     files: dict[str, bytes] = {}
-    for session_id, repo_slug in zip(
-        ("acme-run-1", "acme-run-2", "ghost-run-1"), SEED_THREE_REPO, strict=True
-    ):
+    for session_id, repo_slug in zip(("acme-run-1", "acme-run-2", "ghost-run-1"), SEED_THREE_REPO, strict=True):
         manifest = _snapshot_manifest(session_id, repo_slug, "beagle-python:review-python", ("accepted",))
         files[f"{session_id}/manifest.json"] = json.dumps(manifest.to_dict(), indent=2).encode()
         files[f"{session_id}/trajectory.json"] = json.dumps(_snapshot_trajectory(session_id), indent=2).encode()
@@ -321,11 +257,7 @@ def _seed_three_repo_hub() -> FakeHub:
 
 
 def run_dry_run_capture(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: pathlib.Path,
-    capsys: pytest.CaptureFixture[str],
-    *,
-    hub: FakeHub,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], *, hub: FakeHub,
     resolver: Any,
 ) -> tuple[int, dict[str, Any]]:
     """Run the real CLI dry-run path and parse the printed report.
@@ -339,14 +271,9 @@ def run_dry_run_capture(
     monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: resolver)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "test", "spdx_decisions": {"MIT": "accepted"}}')
-    rc = cli._handle_hydrate_hub_command(
-        _hydrate_args(
-            tmp_path / "stage",
-            source_repo="org/private-ds",
-            revision=SNAPSHOT_REVISION,
-            destination_repo="org/private-ds",
-            policy=policy,
-            dry_run=True,
+    rc = cli._handle_hydrate_hub_command(_hydrate_args(
+            tmp_path / "stage", source_repo="org/private-ds", revision=SNAPSHOT_REVISION,
+            destination_repo="org/private-ds", policy=policy, dry_run=True,
         )
     )
     out = " ".join(capsys.readouterr().out.split())
@@ -356,24 +283,18 @@ def run_dry_run_capture(
         r"copyleft-unopted (\d+), evidence-missing (\d+)"
     )
     for match in re.finditer(pattern, out):
-        per_repo[match.group(1)] = {
-            "admitted": int(match.group(2)),
-            "c5_excluded": int(match.group(3)),
-            "c8_copyleft_unopted": int(match.group(4)),
-            "license_evidence_missing": int(match.group(5)),
+        per_repo[match.group(1)] = {"admitted": int(match.group(2)), "c5_excluded": int(match.group(3)),
+            "c8_copyleft_unopted": int(match.group(4)), "license_evidence_missing": int(match.group(5)),
         }
     discovered_match = re.search(r"discovered (\d+) candidate", out)
     discovered = int(discovered_match.group(1)) if discovered_match else 0
     return rc, {"per_repository": per_repo, "discovered": discovered}
 
-
 def test_dry_run_reports_per_repo_decision_counts(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # Dry run over a stage with three repos and mixed outcomes.
-    rc, report = run_dry_run_capture(
-        monkeypatch, tmp_path, capsys,
-        hub=_seed_three_repo_hub(),
+    rc, report = run_dry_run_capture(monkeypatch, tmp_path, capsys, hub=_seed_three_repo_hub(),
         resolver=_FakeLicenseResolver(mit_repos=("acme/widget",)),
     )
     assert rc == 0

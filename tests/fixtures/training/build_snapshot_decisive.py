@@ -46,9 +46,7 @@ def _add_license_evidence(data: dict[str, object]) -> None:
 def build_snapshot_decisive(*, hostile: bool = False) -> FakeHub:
     """Materialize the pinned three-session snapshot as an in-memory FakeHub."""
     files = _snapshot_files(
-        trajectory_fn=_snapshot_trajectory_decisive,
-        manifest_hook=_add_license_evidence,
-        hostile=hostile,
+        trajectory_fn=_snapshot_trajectory_decisive, manifest_hook=_add_license_evidence, hostile=hostile,
     )
     hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
     hub.commit_revision(SNAPSHOT_REVISION)

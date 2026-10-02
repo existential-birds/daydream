@@ -18,39 +18,17 @@ from tests.harness.scripts import cli_main as _run_main
 FIXTURE_DIR = Path(__file__).parent / "fixtures" / "training" / "calibration"
 
 
-def _base_argv(
-    tmp_path: Path,
-    *,
-    corpus_dir: str = "corpus",
-    candidate: str = "w_fp=0.1,0.2,0.3",
-) -> list[str]:
-    return [
-        "corpus",
-        "calibrate-reward",
-        "--corpus-dir",
-        str(FIXTURE_DIR / corpus_dir),
-        "--gold-labels",
-        str(FIXTURE_DIR / "gold.json"),
-        "--breakdowns",
-        str(FIXTURE_DIR / "breakdowns.json"),
-        "--run-id",
-        "cal-1",
-        "--seed",
-        "7",
-        "--candidate",
-        candidate,
-        "--out",
-        str(tmp_path / "out"),
+def _base_argv(tmp_path: Path, *, corpus_dir: str = "corpus", candidate: str = "w_fp=0.1,0.2,0.3",) -> list[str]:
+    return ["corpus", "calibrate-reward", "--corpus-dir", str(FIXTURE_DIR / corpus_dir), "--gold-labels",
+        str(FIXTURE_DIR / "gold.json"), "--breakdowns", str(FIXTURE_DIR / "breakdowns.json"), "--run-id", "cal-1",
+        "--seed", "7", "--candidate", candidate, "--out", str(tmp_path / "out"),
     ]
-
 
 def test_corpus_calibrate_routes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     called: dict[str, Any] = {}
-
     def _fake_run(cfg: Any) -> dict[str, Any]:
         called["cfg"] = cfg
         return {"total_records": 2, "out": str(tmp_path)}
-
     monkeypatch.setattr("daydream.training.calibration.run_calibration", _fake_run)
     rc = _run_main(_base_argv(tmp_path))
     assert rc == 0
@@ -61,15 +39,10 @@ def test_corpus_calibrate_routes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert cfg.corpus_dir == FIXTURE_DIR / "corpus"
     assert cfg.out_dir == tmp_path / "out"
 
-
-def test_calibrate_validation_failure_exits_nonzero(
-    capsys: pytest.CaptureFixture[str], tmp_path: Path
-) -> None:
+def test_calibrate_validation_failure_exits_nonzero(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     # variants/digest holds a tampered corpus.jsonl against a pristine
     # SHA256SUMS manifest: the real digest gate must fire before anything else.
-    rc = _run_main(
-        _base_argv(tmp_path, corpus_dir="variants/digest")
-    )
+    rc = _run_main(_base_argv(tmp_path, corpus_dir="variants/digest"))
     assert rc == 1
     # print_error renders a rich panel on the shared console (stdout);
     # assert the gate message on the captured output stream.
@@ -77,11 +50,6 @@ def test_calibrate_validation_failure_exits_nonzero(
     assert "digest mismatch" in captured.out + captured.err
     assert not (tmp_path / "out").exists()
 
-
-def test_calibrate_unknown_candidate_flag_exits_nonzero(
-    tmp_path: Path
-) -> None:
-    rc = _run_main(
-        _base_argv(tmp_path, candidate="no_equals_sign")
-    )
+def test_calibrate_unknown_candidate_flag_exits_nonzero(tmp_path: Path) -> None:
+    rc = _run_main(_base_argv(tmp_path, candidate="no_equals_sign"))
     assert rc == 1

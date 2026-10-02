@@ -8,7 +8,6 @@ def test_bot_stem_strips_bot_suffix_and_lowercases() -> None:
     assert bot_stem("Daydream") == "daydream"          # GraphQL drops [bot]
     assert bot_stem(None) == ""
 
-
 def test_bot_login_matches_across_rest_and_graphql_forms() -> None:
     # --bot value is the bare slug (DAYDREAM_BOT_HANDLE shape).
     assert bot_login_matches("daydream[bot]", "daydream") is True   # REST form

@@ -24,7 +24,6 @@ async def test_make_recorder_writes_schema_valid_trajectory(tmp_path: Path) -> N
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.DEEP) as inv:
             observe_text_and_result(inv, "harness-output")
-
     traj = read_trajectory(recorder.path)
     assert atif_validate(traj, validate_images=False) is True
     assert traj["agent"]["model_name"] == "sonnet"
@@ -33,14 +32,10 @@ async def test_make_recorder_writes_schema_valid_trajectory(tmp_path: Path) -> N
     assert agent_steps[0]["message"] == "harness-output"
     assert agent_steps[0]["extra"]["daydream_run_flow"] == "deep"
 
-
 async def test_make_recorder_forwards_on_write(tmp_path: Path) -> None:
     """The on_write callback reaches the recorder and fires on a completed write."""
     calls: list[tuple[str, str]] = []
-    recorder = make_recorder(
-        tmp_path,
-        on_write=lambda rec, snapshot: calls.append((rec.session_id, snapshot.status)),
-    )
+    recorder = make_recorder(tmp_path, on_write=lambda rec, snapshot: calls.append((rec.session_id, snapshot.status)),)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_text_and_result(inv)

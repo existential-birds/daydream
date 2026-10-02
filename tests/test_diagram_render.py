@@ -36,14 +36,10 @@ FIXTURES = Path(__file__).parent / "fixtures" / "deep"
 
 # Golden specs: the spec's "Target rendering" block, as a grounded spec_final.
 
-SEQUENCE_SPEC: dict[str, Any] = {
-    "participants": [
-        {"name": "Client", "kind": "external", "files": [], "service": None},
+SEQUENCE_SPEC: dict[str, Any] = {"participants": [{"name": "Client", "kind": "external", "files": [], "service": None},
         {"name": "External API Proxy", "kind": "internal", "files": ["proxy/handler.py"], "service": "proxy"},
         {"name": "Identity Resolver", "kind": "internal", "files": ["proxy/auth.py"], "service": "proxy"},
-    ],
-    "messages": [
-        {"from": "Client", "to": "External API Proxy", "label": "Request with Authorization",
+    ], "messages": [{"from": "Client", "to": "External API Proxy", "label": "Request with Authorization",
          "kind": "call", "changed": True,
          "evidence": {"file": "proxy/handler.py", "line": 41, "symbol": "handle_request"}},
         {"from": "External API Proxy", "to": "Identity Resolver", "label": "Extract client ID and patient UUID",
@@ -53,26 +49,18 @@ SEQUENCE_SPEC: dict[str, Any] = {
          "kind": "reply", "changed": False,
          "evidence": {"file": "proxy/auth.py", "line": 68, "symbol": "resolve_identity"}},
         {"from": "External API Proxy", "to": "Identity Resolver", "label": "Verify JWT",
-         "kind": "call", "changed": True,
-         "evidence": {"file": "proxy/handler.py", "line": 57, "symbol": "verify_jwt"}},
+         "kind": "call", "changed": True, "evidence": {"file": "proxy/handler.py", "line": 57, "symbol": "verify_jwt"}},
         {"from": "Identity Resolver", "to": "External API Proxy", "label": "Verified claims",
-         "kind": "reply", "changed": False,
-         "evidence": {"file": "proxy/auth.py", "line": 71, "symbol": "verify_jwt"}},
-    ],
-    "blocks": [
-        {"kind": "alt", "branches": [
-            {"condition": "Ro-Passthrough in enabled non-production environment",
+         "kind": "reply", "changed": False, "evidence": {"file": "proxy/auth.py", "line": 71, "symbol": "verify_jwt"}},
+    ], "blocks": [{"kind": "alt", "branches": [{"condition": "Ro-Passthrough in enabled non-production environment",
              "evidence": {"file": "proxy/handler.py", "line": 50}, "messages": [1, 2]},
-            {"condition": "Bearer token",
-             "evidence": {"file": "proxy/handler.py", "line": 55}, "messages": [3, 4]},
+            {"condition": "Bearer token", "evidence": {"file": "proxy/handler.py", "line": 55}, "messages": [3, 4]},
         ]},
     ],
 }
 
-FLOWCHART_SPEC: dict[str, Any] = {
-    "root": {"file": "proxy/auth.py", "name": "resolve_identity", "line": 22},
-    "nodes": [
-        {"id": "enter", "kind": "start", "label": "resolve_identity",
+FLOWCHART_SPEC: dict[str, Any] = {"root": {"file": "proxy/auth.py", "name": "resolve_identity", "line": 22},
+    "nodes": [{"id": "enter", "kind": "start", "label": "resolve_identity",
          "evidence": {"file": "proxy/auth.py", "line": 22, "symbol": "resolve_identity"}},
         {"id": "passthrough", "kind": "decision", "label": "Ro-Passthrough enabled?",
          "evidence": {"file": "proxy/auth.py", "line": 27, "symbol": None}},
@@ -90,12 +78,9 @@ FLOWCHART_SPEC: dict[str, Any] = {
          "evidence": {"file": "proxy/auth.py", "line": 47, "symbol": None}},
     ],
     "edges": [
-        {"from": "enter", "to": "passthrough", "label": None},
-        {"from": "passthrough", "to": "extract", "label": "yes"},
-        {"from": "passthrough", "to": "bearer", "label": "no"},
-        {"from": "bearer", "to": "verify", "label": "yes"},
-        {"from": "bearer", "to": "reject", "label": "no"},
-        {"from": "extract", "to": "unverified", "label": None},
+        {"from": "enter", "to": "passthrough", "label": None}, {"from": "passthrough", "to": "extract", "label": "yes"},
+        {"from": "passthrough", "to": "bearer", "label": "no"}, {"from": "bearer", "to": "verify", "label": "yes"},
+        {"from": "bearer", "to": "reject", "label": "no"}, {"from": "extract", "to": "unverified", "label": None},
         {"from": "verify", "to": "verified", "label": None},
     ],
 }
@@ -106,22 +91,18 @@ def _rendered(spec: dict[str, Any]) -> dict[str, Any]:
 
 
 def _both_rendered() -> dict[str, dict[str, Any] | None]:
-    return {"sequence": _rendered(SEQUENCE_SPEC),
-            "flowchart": _rendered(FLOWCHART_SPEC)}
+    return {"sequence": _rendered(SEQUENCE_SPEC), "flowchart": _rendered(FLOWCHART_SPEC)}
 
 
 # Byte goldens
-
 
 def test_sequence_mermaid_matches_golden_fixture_byte_for_byte() -> None:
     # The fixture carries a final newline (.editorconfig insert_final_newline);
     # the renderer emits none because the text is embedded in a ``` fence.
     assert render_sequence_mermaid(SEQUENCE_SPEC) + "\n" == (FIXTURES / "diagram_sequence.mmd").read_text()
 
-
 def test_flowchart_mermaid_matches_golden_fixture_byte_for_byte() -> None:
     assert render_flowchart_mermaid(FLOWCHART_SPEC) + "\n" == (FIXTURES / "diagram_flowchart.mmd").read_text()
-
 
 @pytest.mark.parametrize("kind,spec", [("sequence", SEQUENCE_SPEC), ("flowchart", FLOWCHART_SPEC)])
 def test_diagram_block_contains_only_the_rendered_diagram(kind: str, spec: dict[str, Any]) -> None:
@@ -134,7 +115,6 @@ def test_diagram_block_contains_only_the_rendered_diagram(kind: str, spec: dict[
 
 # Ordering, gating, and the "never read a stored mermaid" rule
 
-
 def test_blocks_render_sequence_first_then_flowchart() -> None:
     blocks = render_diagram_blocks(_both_rendered())
     assert blocks.index("<h3>Sequence Diagram</h3>") < blocks.index("<h3>Flowchart</h3>")
@@ -142,10 +122,7 @@ def test_blocks_render_sequence_first_then_flowchart() -> None:
     assert blocks.count("<details><summary><h3>") == 2
     assert "</details>\n\n<details><summary><h3>Flowchart</h3>" in blocks
 
-
-@pytest.mark.parametrize("results", [
-    {},
-    {"sequence": None, "flowchart": None},
+@pytest.mark.parametrize("results", [{}, {"sequence": None, "flowchart": None},
     {"sequence": {"status": "omitted", "spec_final": None, "omit_reasons": ["NO_END"]}},
     {"flowchart": {"status": "skipped", "reason": "not eligible", "spec_final": None}},
     {"sequence": {"status": "failed", "reason": "backend error", "spec_final": None}},
@@ -154,7 +131,6 @@ def test_blocks_render_sequence_first_then_flowchart() -> None:
 ])
 def test_blocks_are_empty_when_nothing_rendered(results: dict[str, Any]) -> None:
     assert render_diagram_blocks(results) == ""
-
 
 def test_blocks_always_rerender_and_never_echo_a_stored_mermaid_string() -> None:
     poisoned = _both_rendered()
@@ -165,7 +141,6 @@ def test_blocks_always_rerender_and_never_echo_a_stored_mermaid_string() -> None
     blocks = render_diagram_blocks(poisoned)
     assert "pwned" not in blocks
     assert blocks == render_diagram_blocks(_both_rendered())
-
 
 def test_rendering_is_deterministic_and_does_not_mutate_the_spec() -> None:
     before = copy.deepcopy(_both_rendered())
@@ -189,13 +164,10 @@ def _messages(n: int) -> list[dict[str, Any]]:
     return [{"from": "P0", "to": "P0", "label": "x", "kind": "self", "changed": False,
              "evidence": {"file": "a.py", "line": 1, "symbol": "x"}} for _ in range(n)]
 
-
 def test_over_cap_sequence_specs_raise_value_error() -> None:
     for spec, collection in (
-        ({"participants": _participants(DIAGRAM_MAX_PARTICIPANTS + 1), "messages": [], "blocks": []},
-         "participants"),
-        ({"participants": _participants(1), "messages": _messages(DIAGRAM_MAX_MESSAGES + 1), "blocks": []},
-         "messages"),
+        ({"participants": _participants(DIAGRAM_MAX_PARTICIPANTS + 1), "messages": [], "blocks": []}, "participants"),
+        ({"participants": _participants(1), "messages": _messages(DIAGRAM_MAX_MESSAGES + 1), "blocks": []}, "messages"),
         ({"participants": _participants(1), "messages": [],
           "blocks": [{"kind": "opt", "branches": []}] * (DIAGRAM_MAX_BLOCKS + 1)}, "blocks"),
     ):
@@ -206,18 +178,15 @@ def test_over_cap_sequence_specs_raise_value_error() -> None:
                              "messages": _messages(DIAGRAM_MAX_MESSAGES),
                              "blocks": [{"kind": "opt", "branches": []}] * DIAGRAM_MAX_BLOCKS})
 
-
 def test_over_cap_flowchart_specs_raise_value_error() -> None:
-    nodes = [{"id": f"n{i}", "kind": "process", "label": "x",
-              "evidence": {"file": "a.py", "line": 1, "symbol": None}}
+    nodes = [{"id": f"n{i}", "kind": "process", "label": "x", "evidence": {"file": "a.py", "line": 1, "symbol": None}}
              for i in range(DIAGRAM_MAX_NODES + 1)]
     with pytest.raises(ValueError, match="nodes"):
         render_flowchart_mermaid({"root": {}, "nodes": nodes, "edges": []})
     edges = [{"from": "n0", "to": "n0", "label": None} for _ in range(DIAGRAM_MAX_EDGES + 1)]
     with pytest.raises(ValueError, match="edges"):
         render_flowchart_mermaid({"root": {}, "nodes": nodes[:1], "edges": edges})
-    render_flowchart_mermaid({"root": {}, "nodes": nodes[:DIAGRAM_MAX_NODES],
-                              "edges": edges[:DIAGRAM_MAX_EDGES]})
+    render_flowchart_mermaid({"root": {}, "nodes": nodes[:DIAGRAM_MAX_NODES], "edges": edges[:DIAGRAM_MAX_EDGES]})
 
 
 # Sanitization and injection (spec test 11)
@@ -225,16 +194,10 @@ def test_over_cap_flowchart_specs_raise_value_error() -> None:
 # Every payload from spec test 11, plus a control byte and an entity forgery.
 _PAYLOADS = (
     "end\nP1->>P9: pwned",
-    "N9{x} --> N1",
-    "%%{init: {'theme':'x'}}%%",
-    "`rm -rf /`",
-    "a|b",
-    "</details>",
-    "drop;table",
+    "N9{x} --> N1", "%%{init: {'theme':'x'}}%%", "`rm -rf /`", "a|b", "</details>", "drop;table",
     "forge #lt; entity",
     "bell\x07and\ttab",
 )
-
 
 @pytest.mark.parametrize("payload", _PAYLOADS)
 def test_sanitize_label_strips_every_mermaid_metacharacter(payload: str) -> None:
@@ -248,7 +211,6 @@ def test_sanitize_label_strips_every_mermaid_metacharacter(payload: str) -> None
     for banned in ("#", ";", "`", "|", "[", "]", "{", "}", "(", ")", "\\"):
         assert banned not in bare, f"{banned!r} survived in {out!r}"
 
-
 def test_sanitize_label_escapes_and_collapses_and_caps() -> None:
     assert sanitize_label("a <b> \"c\"", 80) == "a #lt;b#gt; #quot;c#quot;"
     assert sanitize_label("  many   \n spaces\t here  ", 80) == "many spaces here"
@@ -261,10 +223,8 @@ def test_sanitize_label_escapes_and_collapses_and_caps() -> None:
     # Truncation happens before escaping, so an escape is never bisected.
     assert sanitize_label("<<<<", 2) == "#lt;#lt;"
 
-
 def test_injection_payloads_never_add_a_mermaid_statement() -> None:
-    spec: dict[str, Any] = {
-        "participants": [
+    spec: dict[str, Any] = {"participants": [
             {"name": "end\nP1->>P9: pwned", "kind": "internal", "files": ["a.py"], "service": None},
             {"name": "`|</details>", "kind": "internal", "files": ["b.py"], "service": None},
         ],
@@ -287,27 +247,18 @@ def test_injection_payloads_never_add_a_mermaid_statement() -> None:
     assert lines[5] == "    end"
     assert "%%" not in mermaid
 
-
 def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> None:
-    spec: dict[str, Any] = {
-        "root": {"file": "a.py", "name": "`|f", "line": 1},
-        "nodes": [
-            {"id": "a", "kind": "start", "label": "N9{x} --> N1",
+    spec: dict[str, Any] = {"root": {"file": "a.py", "name": "`|f", "line": 1},
+        "nodes": [{"id": "a", "kind": "start", "label": "N9{x} --> N1",
              "evidence": {"file": "a.py", "line": 1, "symbol": "f"}},
             {"id": "b", "kind": "decision", "label": "}{ %% `x`",
              "evidence": {"file": "a.py", "line": 2, "symbol": None}},
-            {"id": "c", "kind": "io", "label": "/]read[/",
-             "evidence": {"file": "a.py", "line": 3, "symbol": None}},
+            {"id": "c", "kind": "io", "label": "/]read[/", "evidence": {"file": "a.py", "line": 3, "symbol": None}},
             {"id": "d", "kind": "subroutine", "label": "[[call]]",
              "evidence": {"file": "a.py", "line": 4, "symbol": "call"}},
-            {"id": "e", "kind": "end", "label": "</details>",
-             "evidence": {"file": "a.py", "line": 5, "symbol": None}},
-        ],
-        "edges": [
-            {"from": "a", "to": "b", "label": "yes|N9 --> N1"},
-            {"from": "b", "to": "c", "label": None},
-            {"from": "c", "to": "d", "label": "%%"},
-            {"from": "d", "to": "e", "label": "x" * 200},
+            {"id": "e", "kind": "end", "label": "</details>", "evidence": {"file": "a.py", "line": 5, "symbol": None}},
+        ], "edges": [{"from": "a", "to": "b", "label": "yes|N9 --> N1"}, {"from": "b", "to": "c", "label": None},
+            {"from": "c", "to": "d", "label": "%%"}, {"from": "d", "to": "e", "label": "x" * 200},
         ],
     }
     mermaid = render_flowchart_mermaid(spec)
@@ -326,13 +277,11 @@ def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> N
     assert lines[3] == "    N3 --> N4[[call]]"
     assert lines[4].endswith(" N5([#lt;/details#gt;])")
 
-
 def test_injection_payloads_cannot_close_the_html_wrapper() -> None:
     spec: dict[str, Any] = {
         "participants": [{"name": "</details>", "kind": "internal", "files": ["a.py"], "service": None}],
         "messages": [{"from": "</details>", "to": "</details>", "label": "a|b</details>",
-                      "kind": "self", "changed": True,
-                      "evidence": {"file": "a|b`.py", "line": 7, "symbol": "x"}}],
+                      "kind": "self", "changed": True, "evidence": {"file": "a|b`.py", "line": 7, "symbol": "x"}}],
         "blocks": [],
     }
     blocks = render_diagram_blocks({"sequence": _rendered(spec)})
@@ -342,13 +291,10 @@ def test_injection_payloads_cannot_close_the_html_wrapper() -> None:
 
 # Block structure edge cases
 
-
 def test_opt_and_loop_blocks_and_a_message_outside_every_block() -> None:
-    spec: dict[str, Any] = {
-        "participants": [{"name": "A", "kind": "internal", "files": ["a.py"], "service": None},
+    spec: dict[str, Any] = {"participants": [{"name": "A", "kind": "internal", "files": ["a.py"], "service": None},
                          {"name": "B", "kind": "internal", "files": ["b.py"], "service": None}],
-        "messages": [
-            {"from": "A", "to": "B", "label": "m0", "kind": "call", "changed": True,
+        "messages": [{"from": "A", "to": "B", "label": "m0", "kind": "call", "changed": True,
              "evidence": {"file": "a.py", "line": 1, "symbol": "x"}},
             {"from": "A", "to": "B", "label": "m1", "kind": "call", "changed": True,
              "evidence": {"file": "a.py", "line": 2, "symbol": "x"}},
@@ -356,34 +302,20 @@ def test_opt_and_loop_blocks_and_a_message_outside_every_block() -> None:
              "evidence": {"file": "b.py", "line": 3, "symbol": "x"}},
             {"from": "A", "to": "A", "label": "m3", "kind": "self", "changed": True,
              "evidence": {"file": "a.py", "line": 4, "symbol": "x"}},
-        ],
-        "blocks": [
-            {"kind": "opt", "branches": [{"condition": "cached", "evidence": {"file": "a.py", "line": 1},
+        ], "blocks": [{"kind": "opt", "branches": [{"condition": "cached", "evidence": {"file": "a.py", "line": 1},
                                           "messages": [1]}]},
             {"kind": "loop", "branches": [{"condition": "each page",
                                            "evidence": {"file": "a.py", "line": 2}, "messages": [2]}]},
         ],
     }
     assert render_sequence_mermaid(spec).split("\n") == [
-        "sequenceDiagram",
-        "    participant P1 as A",
-        "    participant P2 as B",
-        "    P1->>P2: m0",
-        "    opt cached",
-        "        P1->>P2: m1",
-        "    end",
-        "    loop each page",
-        "        P2-->>P1: m2",
-        "    end",
-        "    P1->>P1: m3",
+        "sequenceDiagram", "    participant P1 as A", "    participant P2 as B", "    P1->>P2: m0", "    opt cached",
+        "        P1->>P2: m1", "    end", "    loop each page", "        P2-->>P1: m2", "    end", "    P1->>P1: m3",
     ]
 
-
 def test_malformed_block_indices_and_unknown_endpoints_degrade_without_raising() -> None:
-    spec: dict[str, Any] = {
-        "participants": [{"name": "A", "kind": "internal", "files": ["a.py"], "service": None}],
-        "messages": [
-            {"from": "A", "to": "Ghost", "label": "m0", "kind": "call", "changed": True,
+    spec: dict[str, Any] = {"participants": [{"name": "A", "kind": "internal", "files": ["a.py"], "service": None}],
+        "messages": [{"from": "A", "to": "Ghost", "label": "m0", "kind": "call", "changed": True,
              "evidence": {"file": "a.py", "line": 1, "symbol": "x"}},
             {"from": "A", "to": "A", "label": "m1", "kind": "self", "changed": True,
              "evidence": {"file": "a.py", "line": 2, "symbol": "x"}},
@@ -393,48 +325,37 @@ def test_malformed_block_indices_and_unknown_endpoints_degrade_without_raising()
                    {"kind": "alt", "branches": [{"condition": "d", "evidence": {}, "messages": [1]}]}],
     }
     assert render_sequence_mermaid(spec).split("\n") == [
-        "sequenceDiagram",
-        "    participant P1 as A",
+        "sequenceDiagram", "    participant P1 as A",
         # m0's target is not a declared participant -> no arrow, but the block
         # opened by the message that IS claimed still closes cleanly.
-        "    opt c",
-        "        P1->>P1: m1",
-        "    end",
+        "    opt c", "        P1->>P1: m1", "    end",
     ]
-
 
 def test_empty_labels_fall_back_to_a_placeholder() -> None:
     spec: dict[str, Any] = {
-        "participants": [{"name": "", "kind": "internal", "files": [], "service": None}],
-        "messages": [], "blocks": [],
+        "participants": [{"name": "", "kind": "internal", "files": [], "service": None}], "messages": [], "blocks": [],
     }
     assert render_sequence_mermaid(spec) == "sequenceDiagram\n    participant P1 as unlabeled"
     flow: dict[str, Any] = {"root": {}, "nodes": [{"id": "a", "kind": "process", "label": "```",
                                                    "evidence": {}}], "edges": []}
     assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[unlabeled]"
 
-
 def test_unknown_node_kind_falls_back_to_the_process_shape() -> None:
-    flow: dict[str, Any] = {
-        "root": {"file": "a.py", "name": "f", "line": 1},
-        "nodes": [{"id": "a", "kind": "mystery", "label": "x", "evidence": {"file": "a.py", "line": 1}}],
-        "edges": [],
+    flow: dict[str, Any] = {"root": {"file": "a.py", "name": "f", "line": 1},
+        "nodes": [{"id": "a", "kind": "mystery", "label": "x", "evidence": {"file": "a.py", "line": 1}}], "edges": [],
     }
     assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[x]"
 
 
 # Omission notice
 
-
 def test_omission_notice_reports_floor_codes() -> None:
     notice = render_omission_notice("sequence", {
         "status": "omitted", "omit_reasons": ["TOO_FEW_MESSAGES", "NO_CHANGED_INTERACTION"],
     })
-    assert notice == (
-        "No sequence diagram was rendered for this pull request. "
+    assert notice == ("No sequence diagram was rendered for this pull request. "
         "Grounding floor not met: TOO_FEW_MESSAGES, NO_CHANGED_INTERACTION."
     )
-
 
 def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
     assert render_omission_notice("flowchart", {"status": "rendered"}) == ""
@@ -452,7 +373,6 @@ def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
 def _items() -> list[dict[str, Any]]:
     return [{"id": 1, "lens": "per-stack", "file": "a.py", "line": 9, "description": "bug"},
             {"id": 2, "lens": "cross-stack", "file": "b.py", "line": 2, "description": "drift"}]
-
 
 def test_diagram_section_survives_a_round_trip_through_the_report_and_back() -> None:
     blocks = render_diagram_blocks(_both_rendered())

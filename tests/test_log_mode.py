@@ -77,138 +77,66 @@ def _capture_stdout_and_run(config: RunConfig, monkeypatch: pytest.MonkeyPatch) 
 
     return captured_output.getvalue()
 
-
-@pytest.mark.parametrize(
-    ("events", "config_overrides", "required", "forbidden"),
+@pytest.mark.parametrize(("events", "config_overrides", "required", "forbidden"),
     [
         # Sentinel-absence is asserted at the agent boundary in
         # test_log_mode_emission_redacts_sentinels_on_agent_path; marker presence
         # here proves the agent's `_print_log` redaction runs on the real path.
         # The forbidden tuples keep the log-mode markup-free invariant guarded:
         # captured stdout on this path is plain text (no Rich escape sequences).
-        pytest.param(
-            [TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("hello", "[REDACTED_API_KEY]"),
+        pytest.param([TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
+            {"log_mode": True, "quiet": True, "output_mode": "review"}, ("hello", "[REDACTED_API_KEY]"),
             ("\x1b[", "[bold]", "[dim]"),
             id="plain-text",
-        ),
-        pytest.param(
-            [ThinkingEvent(f"thinking about {REDACTION_SENTINEL}")],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[thinking]", "[REDACTED_API_KEY]"),
-            (),
+        ), pytest.param([ThinkingEvent(f"thinking about {REDACTION_SENTINEL}")],
+            {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[thinking]", "[REDACTED_API_KEY]"), (),
             id="thinking-sentinel",
-        ),
-        pytest.param(
-            [
-                ToolStartEvent(
-                    id="test-id",
-                    name="bash",
-                    input={"command": f"echo {REDACTION_SENTINEL}"},
-                ),
+        ), pytest.param([ToolStartEvent(id="test-id", name="bash", input={"command": f"echo {REDACTION_SENTINEL}"},),
                 ToolResultEvent(id="test-id", output=f"token={REDACTION_SENTINEL}", is_error=False),
-            ],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[tool:bash]", "[REDACTED_API_KEY]"),
-            (),
+            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[tool:bash]", "[REDACTED_API_KEY]"), (),
             id="tool-events",
+        ), pytest.param([CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
+            {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[cost] $0.0042",), (), id="cost",
         ),
-        pytest.param(
-            [CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[cost] $0.0042",),
-            (),
-            id="cost",
-        ),
-        pytest.param(
-            [
-                MetricsEvent(
-                    message_id="test-msg",
-                    prompt_tokens=100,
-                    completion_tokens=50,
-                    cached_tokens=None,
-                    cost_usd=None,
+        pytest.param([MetricsEvent(
+                    message_id="test-msg", prompt_tokens=100, completion_tokens=50, cached_tokens=None, cost_usd=None,
                 )
-            ],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[metrics] prompt=100 completion=50",),
-            (),
+            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[metrics] prompt=100 completion=50",), (),
             id="metrics",
         ),
         pytest.param(
-            [ThinkingEvent("I need to analyze this code")],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[thinking] I need to analyze this code",),
-            (),
-            id="thinking",
+            [ThinkingEvent("I need to analyze this code")], {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[thinking] I need to analyze this code",), (), id="thinking",
         ),
-        pytest.param(
-            [
-                ResultEvent(
-                    structured_output={"status": "complete", "token": REDACTION_SENTINEL},
-                    continuation=None,
-                )
-            ],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[result]", "[REDACTED_CREDENTIAL]"),
-            (),
+        pytest.param([
+                ResultEvent(structured_output={"status": "complete", "token": REDACTION_SENTINEL}, continuation=None,)
+            ], {"log_mode": True, "quiet": True, "output_mode": "review"}, ("[result]", "[REDACTED_CREDENTIAL]"), (),
             id="result-event",
         ),
-        pytest.param(
-            [
-                ToolStartEvent(
-                    id="test-id",
-                    name="bash",
-                    input={"command": "false", "description": "failing command"},
-                ),
-                ToolResultEvent(
-                    id="test-id",
-                    output="command failed with exit code 1",
-                    is_error=True,
-                ),
-            ],
-            {"log_mode": True, "quiet": True, "output_mode": "review"},
-            ("[tool:bash ERROR] command failed with exit code 1",),
-            (),
-            id="tool-error",
-        ),
-        pytest.param(
-            [
-                TextEvent("hello world"),
-                CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50),
-            ],
-            {"log_mode": False, "quiet": False, "output_mode": "review"},
-            (),
-            ("[cost] $0.0042",),
-            id="default-off",
+        pytest.param([ToolStartEvent(
+                    id="test-id", name="bash", input={"command": "false", "description": "failing command"},
+                ), ToolResultEvent(id="test-id", output="command failed with exit code 1", is_error=True,),
+            ], {"log_mode": True, "quiet": True, "output_mode": "review"},
+            ("[tool:bash ERROR] command failed with exit code 1",), (), id="tool-error",
+        ), pytest.param([TextEvent("hello world"), CostEvent(cost_usd=0.0042, input_tokens=100, output_tokens=50)],
+            {"log_mode": False, "quiet": False, "output_mode": "review"}, (), ("[cost] $0.0042",), id="default-off",
         ),
     ],
 )
 def test_log_mode_rendering(
-    tiny_diff_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
-    events: list[AgentEvent],
-    config_overrides: dict[str, object],
-    required: tuple[str, ...],
+    tiny_diff_target: Path, make_config: MakeConfig, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
+    events: list[AgentEvent], config_overrides: dict[str, object], required: tuple[str, ...],
     forbidden: tuple[str, ...],
 ) -> None:
     """Render only the event fields appropriate to each log-mode scenario."""
     install_backend(ScriptedBackend(events=events, retryable=False))
-    config = make_config(
-        tiny_diff_target,
-        non_interactive=True,
-        **config_overrides,
-    )
+    config = make_config(tiny_diff_target, non_interactive=True, **config_overrides,)
     output = _capture_stdout_and_run(config, monkeypatch)
 
     for substring in required:
         assert substring in output
     for substring in forbidden:
         assert substring not in output
-
 
 def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     """A token straddling the 200-char summary boundary is redacted, not truncated
@@ -232,13 +160,9 @@ def test_log_mode_redacts_tool_summary_before_200_truncation() -> None:
     assert "ghp_" not in out
     assert "[REDACTED" in out
 
-
 @pytest.mark.parametrize("name", ["Bash", "shell"])
 def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
-    tiny_diff_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
+    tiny_diff_target: Path, make_config: MakeConfig, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
     name: str,
 ) -> None:
     """The runner's actual log emission applies the command display policy."""
@@ -264,7 +188,6 @@ def test_log_mode_tool_event_redacts_credential_crossing_command_cap(
     assert (cd_prefix in summary) is (name == "Bash")
     assert event.input == {"command": command}
 
-
 def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
     """`--log` summary and callback line key Bash from the shared _PRIMARY_TOOL_ARG table."""
 
@@ -273,33 +196,26 @@ def test_log_summary_and_callback_agree_on_bash_primary_field() -> None:
     value, key = _primary_tool_value("Bash", args)
     assert key == "command", "both surfaces must key Bash from command-first _PRIMARY_TOOL_ARG"
 
-
 def test_log_summary_task_tools_not_subject_to_bash_primary_table() -> None:
     """The (command, description) preference is Bash-only in the --log summary.
 
-    TaskCreate/Agent inputs carry a long ``description`` field; the Bash-only pair
-    must not shadow the short ``subject`` the generic fallback surfaces (mirrors
-    ``_derive_task_label``'s subject-before-description ordering).
-    """
+    TaskCreate/Agent inputs carry a long ``description`` field; the Bash-only pair must not shadow the short
+    ``subject`` the generic fallback surfaces (mirrors ``_derive_task_label``'s subject-before-description
+    ordering)."""
 
     args: dict[str, object] = {
-        "subject": "Add rate limiting",
-        "description": "Investigate and implement rate limiting for the API gateway",
+        "subject": "Add rate limiting", "description": "Investigate and implement rate limiting for the API gateway",
         "prompt": "Add rate limiting",
     }
     assert _summarize_input(args, "TaskCreate") == "Add rate limiting"
 
-
 def test_log_mode_summaries_redact_structured_credentials() -> None:
     """Log-mode summaries must use the structured redactor, not the flat one.
 
-    Issue #455 broadens structured credential redaction. Flat ``redact_text``
-    leaks structured credentials that ``redact_structured_text`` catches -- e.g.
-    a nested ``key=value`` assignment (``token=opaque-test-12345``) and a Basic
-    auth header's base64 credential. These flow through the real agent summary
-    paths (``_summarize_input`` / ``_summarize_output`` / ``_print_log``), so a
-    flat-only redactor would print the secret in --log mode.
-    """
+    Issue #455 broadens structured credential redaction. Flat ``redact_text`` leaks structured credentials that
+    ``redact_structured_text`` catches -- e.g. a nested ``key=value`` assignment (``token=opaque-test-12345``) and
+    a Basic auth header's base64 credential. These flow through the real agent summary paths (``_summarize_input``
+    / ``_summarize_output`` / ``_print_log``), so a flat-only redactor would print the secret in --log mode."""
 
     # Nested assignment under a sensitive key: flat redaction leaks the token.
     out = _summarize_input({"command": "the config: token=opaque-test-12345"}, "Bash")
@@ -319,11 +235,9 @@ def test_log_mode_summaries_redact_structured_credentials() -> None:
     assert "opaque-test-12345" not in buf.getvalue()
     assert "[REDACTED" in buf.getvalue()
 
-
 def test_log_mode_console_redacts_string_payloads() -> None:
-    """phases.py imports agent's module-level console; in --log mode that
-    console redacts string payloads, so phase/UI output (e.g. the failure
-    handoff body) cannot bypass the log-mode redaction boundary."""
+    """phases.py imports agent's module-level console; in --log mode that console redacts string payloads, so
+    phase/UI output (e.g. the failure handoff body) cannot bypass the log-mode redaction boundary."""
 
     sentinel = REDACTION_SENTINEL
     buffer = io.StringIO()
@@ -359,26 +273,17 @@ class _CredentialSummarizerBackend(ScriptedBackend):
 
     def __init__(self, body: str) -> None:
         super().__init__(
-            events=[
-                TextEvent(text=""),
-                ResultEvent(
-                    structured_output={"handoff_prompt": body}, continuation=None
-                ),
-            ]
+            events=[TextEvent(text=""), ResultEvent(structured_output={"handoff_prompt": body}, continuation=None)]
         )
-
 
 @pytest.mark.asyncio
 async def test_log_mode_failure_handoff_redacts_credential_body(
-    git_repo: Path,
-    make_work: Callable[..., WorkContext],
-    capsys: pytest.CaptureFixture[str],
+    git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Integration regression (issue #547): driving the REAL _emit_failure_handoff
-    with a credential-bearing summarizer body under --log mode must not leak the
-    raw token to stdout. The console-level _LogRedactingConsole boundary is the
-    mechanism (RD-1); this proves it on the real handoff path."""
+    """Integration regression (issue #547): driving the REAL _emit_failure_handoff with a credential-bearing
+    summarizer body under --log mode must not leak the raw token to stdout. The console-level _LogRedactingConsole
+    boundary is the mechanism (RD-1); this proves it on the real handoff path."""
 
     # False-pass trap: the module console phases.py binds MUST be the redacting
     # console, otherwise a passing test would mean nothing.
@@ -394,21 +299,15 @@ async def test_log_mode_failure_handoff_redacts_credential_body(
     backend = _CredentialSummarizerBackend(f"token {sentinel}")
 
     with bind_run_context(RunContext(InteractionPolicy(log_mode=True))):
-        await _emit_failure_handoff(
-            backend, work, "failing test output", offer_clipboard=False,
-            allow_standalone=True,
+        await _emit_failure_handoff(backend, work, "failing test output", offer_clipboard=False, allow_standalone=True,
         )
         captured = capsys.readouterr()
         out = captured.out + captured.err
         assert sentinel not in out   # raw token never reaches stdout
         assert "REDACTED" in out     # redaction marker present
 
-
 def test_log_mode_trajectory_still_written(
-    tiny_diff_target: Path,
-    make_config: MakeConfig,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
+    tiny_diff_target: Path, make_config: MakeConfig, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Test that --log mode still writes trajectory file (recorder unaffected)."""
@@ -417,11 +316,7 @@ def test_log_mode_trajectory_still_written(
     trajectory_path = tmp_path / "trajectory.json"
 
     config = make_config(
-        tiny_diff_target,
-        log_mode=True,
-        quiet=True,
-        output_mode="review",
-        trajectory_path=trajectory_path,
+        tiny_diff_target, log_mode=True, quiet=True, output_mode="review", trajectory_path=trajectory_path,
     )
 
     output = _capture_stdout_and_run(config, monkeypatch)
@@ -432,25 +327,13 @@ def test_log_mode_trajectory_still_written(
     # Verify log output still works
     assert "generating trajectory" in output
 
-
 def test_verbose_flag_invocation_reaches_log_mode_pipeline(
-    tiny_diff_target: Path,
-    install_backend: InstallBackend,
-    monkeypatch: pytest.MonkeyPatch,
+    tiny_diff_target: Path, install_backend: InstallBackend, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The real --verbose flag (not a config dict) drives log_mode end-to-end."""
-    install_backend(
-        ScriptedBackend(
-            events=[TextEvent(f"token=hello {REDACTION_SENTINEL} world")],
-            retryable=False,
-        )
-    )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_repo_view", lambda repo, **_kwargs: ("test", "repo")
-    )
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None
-    )
+    install_backend(ScriptedBackend(events=[TextEvent(f"token=hello {REDACTION_SENTINEL} world")], retryable=False,))
+    monkeypatch.setattr("daydream.git_ops.gh_repo_view", lambda repo, **_kwargs: ("test", "repo"))
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, _branch, **_kwargs: None)
     config = _parse_args(["--verbose", str(tiny_diff_target)])
     assert config.log_mode is True
     output = _capture_stdout_and_run(config, monkeypatch)

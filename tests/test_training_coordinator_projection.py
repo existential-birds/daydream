@@ -40,65 +40,27 @@ def _record_id(session_id: str, fingerprint: str) -> str:
 
 
 def _v2_record(
-    *,
-    session_id: str,
-    split: str,
-    label: str | None,
-    fingerprint: str,
-    record_type: str = "outcome-finding",
-    tier: str = "gold",
-    finding_text: str | None = None,
-    base_sha: str = BASE_SHA,
+    *, session_id: str, split: str, label: str | None, fingerprint: str, record_type: str = "outcome-finding",
+    tier: str = "gold", finding_text: str | None = None, base_sha: str = BASE_SHA,
 ) -> dict[str, Any]:
     """A full v2 record the projector would emit for one finding."""
     record: dict[str, Any] = {
-        "schema_version": "2",
-        "record_id": _record_id(session_id, fingerprint),
-        "record_type": record_type,
-        "tier": tier,
-        "session_id": session_id,
-        "trajectory_id": f"traj-{session_id}",
-        "task_segment": "segment-0",
-        "finding_fingerprint": fingerprint,
-        "disposition": label if label is not None else "ambiguous",
-        "evidence": [],
-        "profile": {
-            "profile_schema_version": 1,
-            "profile_name": "decisive-only",
-            "profile_source_kind": "curation",
+        "schema_version": "2", "record_id": _record_id(session_id, fingerprint), "record_type": record_type,
+        "tier": tier, "session_id": session_id, "trajectory_id": f"traj-{session_id}", "task_segment": "segment-0",
+        "finding_fingerprint": fingerprint, "disposition": label if label is not None else "ambiguous", "evidence": [],
+        "profile": {"profile_schema_version": 1, "profile_name": "decisive-only", "profile_source_kind": "curation",
             "profile_digest": hashlib.sha256(b"profile").hexdigest(),
-        },
-        "stack": "python",
-        "outcome_label": label,
-        "lineage": {
-            "hub_commit": None,
-            "curation_id": "cur-1",
-            "content_digests": [],
-            "labeler_policy_version": "labeler-v3",
-            "reply_classifier_version": "rc-1",
-            "rubric_schema_version": "rubric-v2",
-            "as_of": "2026-01-01T00:00:00Z",
-            "valid_at": "2026-01-01T00:00:00Z",
-            "split": split,
-            "exclusion_reason": None,
-            "repo_slug": "owner/repo",
-            "license_decision": {
-                "status": "admitted",
-                "repo_slug": "owner/repo",
-                "reason_code": None,
-            },
-        },
-        "task_identity": {
-            "repo_slug": "owner/repo",
-            "source": "curation-bundle",
-            "base_sha": base_sha,
-            "head_sha": HEAD_SHA,
+        }, "stack": "python", "outcome_label": label, "lineage": {
+            "hub_commit": None, "curation_id": "cur-1", "content_digests": [], "labeler_policy_version": "labeler-v3",
+            "reply_classifier_version": "rc-1", "rubric_schema_version": "rubric-v2", "as_of": "2026-01-01T00:00:00Z",
+            "valid_at": "2026-01-01T00:00:00Z", "split": split, "exclusion_reason": None, "repo_slug": "owner/repo",
+            "license_decision": {"status": "admitted", "repo_slug": "owner/repo", "reason_code": None},
+        }, "task_identity": {
+            "repo_slug": "owner/repo", "source": "curation-bundle", "base_sha": base_sha, "head_sha": HEAD_SHA,
             "diff_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
-            "diff_ref": {
-                "content_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
+            "diff_ref": {"content_digest": hashlib.sha256(DIFF_BODY.encode("utf-8")).hexdigest(),
                 "relpath": f"batches/{session_id}/diff.patch",
-            },
-            "replay_verification": None,
+            }, "replay_verification": None,
         },
         # The materialized diff body the RFT replay rebuilds the task from.
         "diff": DIFF_BODY,
@@ -110,11 +72,7 @@ def _v2_record(
 
 
 def _build_projection(
-    tmp_path: Path,
-    *,
-    omit_finding_text: bool = False,
-    base_sha: str = BASE_SHA,
-    n_sessions: int = 80,
+    tmp_path: Path, *, omit_finding_text: bool = False, base_sha: str = BASE_SHA, n_sessions: int = 80,
 ) -> Path:
     """Build a real projected-corpus projection directory with accepted + rejected
     gold outcome findings (plus one silver process-trace and one task-only
@@ -122,32 +80,19 @@ def _build_projection(
     assigns. Label assignment is seeded off the deterministic holdout
     membership so the holdout side always carries both gold classes."""
     session_ids = [f"sess-{i:04d}" for i in range(n_sessions)]
-    split_of = {
-        sid: assign_split(
-            _record_id(sid, "fp"),
-            salt=SALT,
-            holdout_rate=HOLDOUT_RATE,
-            val_rate=VAL_RATE,
-        )
+    split_of = {sid: assign_split(_record_id(sid, "fp"), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
         for sid in session_ids
     }
     holdout_sessions = [sid for sid in session_ids if split_of[sid] == "holdout"]
     assert len(holdout_sessions) >= 2
     # Deterministic labels: first holdout session accepted, second rejected,
     # everything else alternating — both classes on both sides of the boundary.
-    label_of: dict[str, str] = {
-        holdout_sessions[0]: "accepted",
-        holdout_sessions[1]: "rejected",
-    }
+    label_of: dict[str, str] = {holdout_sessions[0]: "accepted", holdout_sessions[1]: "rejected"}
     others = [sid for sid in session_ids if sid not in label_of]
     for idx, sid in enumerate(others):
         label_of[sid] = "accepted" if idx % 2 == 0 else "rejected"
 
-    records_by_split: dict[str, list[dict[str, Any]]] = {
-        "train": [],
-        "validation": [],
-        "holdout": [],
-    }
+    records_by_split: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "holdout": []}
 
     def _place(record: dict[str, Any]) -> None:
         split = str(record["lineage"]["split"])
@@ -155,16 +100,10 @@ def _build_projection(
 
     for sid in session_ids:
         label = label_of[sid]
-        _place(
-            _v2_record(
-                session_id=sid,
-                split=split_of[sid],
-                label=label,
-                fingerprint="fp",
+        _place(_v2_record(session_id=sid, split=split_of[sid], label=label, fingerprint="fp",
                 finding_text=None if (omit_finding_text and label == "accepted") else (
                     ACCEPTED_TEXT if label == "accepted" else REJECTED_TEXT
-                ),
-                base_sha=base_sha,
+                ), base_sha=base_sha,
             )
         )
     # A silver process-trace and a task-only record — schema-distinct
@@ -175,19 +114,11 @@ def _build_projection(
         ("sess-task", "fp-task", "task-only", "task-only", None),
     ):
         record = _v2_record(
-            session_id=sid,
-            split="train",
-            label=None,
-            fingerprint=fingerprint,
-            record_type=rtype,
-            tier=tier,
+            session_id=sid, split="train", label=None, fingerprint=fingerprint, record_type=rtype, tier=tier,
             finding_text=text,
         )
         record["lineage"]["split"] = assign_split(
-            str(record["record_id"]),
-            salt=SALT,
-            holdout_rate=HOLDOUT_RATE,
-            val_rate=VAL_RATE,
+            str(record["record_id"]), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE,
         )
         _place(record)
 
@@ -198,14 +129,7 @@ def _build_projection(
             "".join(json.dumps(r, sort_keys=True) + "\n" for r in records), encoding="utf-8"
         )
     (out / "lineage.json").write_text(
-        json.dumps(
-            {
-                "schema_version": "lineage",
-                "salt": SALT,
-                "holdout_rate": HOLDOUT_RATE,
-                "val_rate": VAL_RATE,
-            }
-        )
+        json.dumps({"schema_version": "lineage", "salt": SALT, "holdout_rate": HOLDOUT_RATE, "val_rate": VAL_RATE})
         + "\n",
         encoding="utf-8",
     )
@@ -263,20 +187,17 @@ def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
         assert row["format_valid"] is True
         assert row["verifier_verdicts"]
 
-
 def test_stage0_v2_gold_record_without_finding_text_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, omit_finding_text=True)
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="finding_text"):
         run_pipeline(cfg, dry_run=False)
 
-
 def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, base_sha="abc123")
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="base_sha"):
         run_pipeline(cfg, dry_run=False)
-
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     """``daydream train --projection DIR --dry-run`` drives run_pipeline end-to-end."""
@@ -286,13 +207,6 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     assert res.exit_code == 0, res
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
-
-
-def test_cli_legacy_corpus_flag_is_gone(tmp_path: Path, cli_runner: Any) -> None:
-    """#1093: the legacy `--corpus` flag no longer parses."""
-    res = cli_runner.invoke(["train", "--corpus", "x.jsonl", "--out", str(tmp_path / "o")])
-    assert res.exit_code != 0
-
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """AC6: the 50-record real-projection fixture feeds the full pipeline.
@@ -311,26 +225,18 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     proj_dir = build_projection_50(tmp_path)
     projection = load_v2_projection(proj_dir)
     assert len(projection.records) == 50
-    gold_labels = {
-        cast(str, r["outcome_label"])
-        for r in projection.records
-        if r.get("tier") == "gold"
-    }
+    gold_labels = {cast(str, r["outcome_label"]) for r in projection.records if r.get("tier") == "gold"}
     assert {"accepted", "rejected"} <= gold_labels
     record_types = {cast(str, r["record_type"]) for r in projection.records}
     assert {"process-trace", "task-only"} <= record_types
 
-    manifest = run_pipeline(
-        PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out"), dry_run=False
-    )
+    manifest = run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out"), dry_run=False)
     assert manifest["stages"]["stage0"]["status"] == "complete"
-    sft_rows = [
-        json.loads(line)
+    sft_rows = [json.loads(line)
         for line in (tmp_path / "out/stage1/sft-dataset.jsonl").read_text().splitlines()
         if line
     ]
-    rft_rows = [
-        json.loads(line)
+    rft_rows = [json.loads(line)
         for line in (tmp_path / "out/stage2/rft-inputs.jsonl").read_text().splitlines()
         if line
     ]
@@ -345,11 +251,7 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     # the full frozen identity (repo_slug/base_sha/head_sha/diff) carried by
     # the projection itself — the real-projector -> Stage-2 journey, with no
     # fixture-side diff materialization step.
-    replay = run_rft(
-        RftConfig(
-            inputs=tmp_path / "out/stage2/rft-inputs.jsonl",
-            seed=7,
-            rubric_version="2026.08.29-1",
+    replay = run_rft(RftConfig(inputs=tmp_path / "out/stage2/rft-inputs.jsonl", seed=7, rubric_version="2026.08.29-1",
             output_dir=tmp_path / "out/replay",
         )
     )
@@ -366,11 +268,8 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     # is stable across runs (deterministic fixture bytes).
     first = manifest["run_identity"]["corpus_digest"]
     assert first == projection.digest
-    manifest2 = run_pipeline(
-        PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out2"), dry_run=False
-    )
+    manifest2 = run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out2"), dry_run=False)
     assert manifest2["run_identity"]["corpus_digest"] == first
-
 
 def test_projection_is_the_only_input(tmp_path: Path) -> None:
     """#1093: the legacy `corpus` kwarg is gone and `projection` is required."""

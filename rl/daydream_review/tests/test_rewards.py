@@ -64,21 +64,12 @@ def mean(values: list[int]) -> float:
 '''
 
 
-def _task(
-    fixture_manifest_path: Path,
-    *,
-    pr_number: int = 1,
-) -> DaydreamReviewTask:
+def _task(fixture_manifest_path: Path, *, pr_number: int = 1,) -> DaydreamReviewTask:
     # The load path refuses without a passed Stage-0 gate report (M4); tests
     # here exercise scoring, not the gate, so hand them a minimal passed one.
-
     with passed_gate_report() as gate_path:
-        taskset = DaydreamReviewTaskset(
-            DaydreamReviewConfig(
-                id="daydream-review",
-                manifest_path=fixture_manifest_path,
-                gate_report_path=gate_path,
-                use_images=False,
+        taskset = DaydreamReviewTaskset(DaydreamReviewConfig(
+                id="daydream-review", manifest_path=fixture_manifest_path, gate_report_path=gate_path, use_images=False,
             )
         )
         return next(task for task in taskset.load() if task.data.pr_number == pr_number)
@@ -86,8 +77,7 @@ def _task(
 
 def _trace(task: DaydreamReviewTask, *, archive_root: Path, repo_path: Path) -> vf.Trace:
     trace: vf.Trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data),
-        agent=vf.AgentInfo(model=MODEL),
+        task=vf.TraceTask(type=type(task).__name__, data=task.data), agent=vf.AgentInfo(model=MODEL),
         state=DaydreamReviewState(),
     )
     trace.info["daydream_archive_root"] = str(archive_root)
@@ -119,9 +109,7 @@ def _assert_gate_held(trace: vf.Trace) -> None:
     assert runs_root.is_dir(), f"expected archive runs dir under {runs_root}"
     run_dirs = [entry for entry in runs_root.iterdir() if entry.is_dir()]
     assert run_dirs, f"expected at least one archived run dir under {runs_root}"
-    assert all(
-        _claimed_test_verdict(run_dir) is not None for run_dir in run_dirs
-    ), (
+    assert all(_claimed_test_verdict(run_dir) is not None for run_dir in run_dirs), (
         "missing or malformed deep/test-verdict.json claim; without it, the test_claim_mismatch-absence "
         "assertion would pass vacuously"
     )
@@ -140,34 +128,23 @@ def test_review_state_guard_rejects_base_state() -> None:
     pass one explicitly. A base State must fail loudly rather than silently
     dereference a missing run_dir.
     """
-    data = DaydreamReviewData(
-        idx=0,
+    data = DaydreamReviewData(idx=0,
         name="org/repo#1",
         prompt="Deep-review PR #1 of org/repo @ 111111111111",
-        repo_slug="org/repo",
-        clone_url="https://example.com/repo.git",
-        pr_number=1,
-        base_sha="0" * 40,
-        head_sha="1" * 40,
-        test_command="true",
-        protected_test_paths=["tests/"],
+        repo_slug="org/repo", clone_url="https://example.com/repo.git", pr_number=1, base_sha="0" * 40,
+        head_sha="1" * 40, test_command="true", protected_test_paths=["tests/"],
     )
     base_trace = vf.Trace(
-        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
-        agent=vf.AgentInfo(model=MODEL),
+        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data), agent=vf.AgentInfo(model=MODEL),
     )
     with pytest.raises(TypeError):
         _review_state(base_trace)
-    good_trace = vf.Trace(
-        task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
+    good_trace = vf.Trace(task=vf.TraceTask(type=DaydreamReviewTask.__name__, data=data),
         agent=vf.AgentInfo(model=MODEL), state=DaydreamReviewState(),
     )
     assert _review_state(good_trace).run_dir is None
 
-
-async def test_score_without_runtime_records_nothing(
-fixture_manifest_path: Path
-) -> None:
+async def test_score_without_runtime_records_nothing(fixture_manifest_path: Path) -> None:
     """The offline replay path — ``score(trace, None)`` — completes and records nothing.
 
     The verifiers replay CLI scores archived traces with no runtime; the base
@@ -179,10 +156,7 @@ fixture_manifest_path: Path
     state guard, the run-dir fetch, or the runtime.
     """
     task = _task(fixture_manifest_path)
-    trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data),
-        agent=vf.AgentInfo(model=MODEL),
-    )
+    trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data), agent=vf.AgentInfo(model=MODEL))
     trace.info["daydream_archive_root"] = "/does/not/exist"
     trace.info["daydream_repo_path"] = "/does/not/exist"
 
@@ -200,14 +174,11 @@ def _stage_run(archive_root: Path, source: Path, *, session_id: str = SESSION_ID
     return dest
 
 
-def _golden_task(
-    tmp_path: Path, fixture_manifest_path: Path, rundir_golden: Path
-) -> tuple[Path, DaydreamReviewTask]:
+def _golden_task(tmp_path: Path, fixture_manifest_path: Path, rundir_golden: Path) -> tuple[Path, DaydreamReviewTask]:
     """Stage the golden run at ``<tmp_path>/archive`` and load its task."""
     archive_root = tmp_path / "archive"
     _stage_run(archive_root, rundir_golden)
     return archive_root, _task(fixture_manifest_path)
-
 
 # Absolute Unix path shape (``/Users/...``, ``/private/tmp/...``, ``/home/...``):
 # a ``/`` after a string boundary, followed by a letter. The original capture
@@ -270,20 +241,14 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
 
     # 2. no machine-specific absolute paths (all shipped golden fixtures)
     evaluation = json.loads((rundir_golden / "evaluation.json").read_text(encoding="utf-8"))
-    for name, blob in (
-        ("trajectory.json", trajectory),
-        ("manifest.json", manifest),
-        ("evaluation.json", evaluation),
-    ):
-        assert not _ABS_PATH_RE.search(json.dumps(blob)), (
-            f"{name} carries a machine-specific absolute path"
+    for name, blob in (("trajectory.json", trajectory), ("manifest.json", manifest), ("evaluation.json", evaluation)):
+        assert not _ABS_PATH_RE.search(json.dumps(blob)), (f"{name} carries a machine-specific absolute path"
         )
 
     # 2b. the shipped trajectory must satisfy the codebase's own ATIF validator
     #     (daydream.atif.validate, the primary guard): a prune must not leave
     #     dangling observation source_call_id refs that hard-fail validation.
-    assert validate(trajectory) is True, (
-        "trajectory.json fails daydream.atif.validate (dangling tool-call refs)"
+    assert validate(trajectory) is True, ("trajectory.json fails daydream.atif.validate (dangling tool-call refs)"
     )
 
     # 3. no embedded model-directed prompt copies in agent-step internals
@@ -294,15 +259,8 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
         assert not tcs, f"step {step.get('step_id')} carries tool_calls prompt text"
 
 
-
-
 def _stage_repo(
-    repo_path: Path,
-    head_sha: str,
-    *,
-    edit: str | None = None,
-    patch: str | None = None,
-    commit: bool = False,
+    repo_path: Path, head_sha: str, *, edit: str | None = None, patch: str | None = None, commit: bool = False,
     commit_patch: bool = False,
 ) -> Path:
     """Build the fixture repo detached at *head_sha*, as the rollout image does.
@@ -343,11 +301,7 @@ def _stage_repo(
     return repo_path
 
 
-def _assert_checkout_pinned_at(
-    verify_dir: Path,
-    head_sha: str,
-    *,
-    exists_msg: str = "the checkout must exist",
+def _assert_checkout_pinned_at(verify_dir: Path, head_sha: str, *, exists_msg: str = "the checkout must exist",
     pinned_msg: str = "the checkout must be pinned at the baked head",
     clean_msg: str = "the checkout tree must equal the baked head",
 ) -> None:
@@ -360,17 +314,11 @@ def _assert_checkout_pinned_at(
     the tree byte-identical to the baked head.
     """
     assert verify_dir.exists(), exists_msg
-    head = subprocess.run(
-        ["git", "-C", str(verify_dir), "rev-parse", "HEAD"],
-        capture_output=True, check=True,
+    head = subprocess.run(["git", "-C", str(verify_dir), "rev-parse", "HEAD"], capture_output=True, check=True,
     ).stdout.decode().strip()
     assert head == head_sha, pinned_msg
-    clean = subprocess.run(
-        ["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"],
-        capture_output=True,
-    )
+    clean = subprocess.run(["git", "-C", str(verify_dir), "diff", "--quiet", "HEAD", "--"], capture_output=True)
     assert clean.returncode == 0, clean_msg
-
 
 _REAL_PATCH = "diff --git a/tests/test_calc.py b/tests/test_calc.py\n@@ -1 +1 @@\n-old\n+new\n"
 
@@ -387,18 +335,12 @@ def _seal_run(run_dir: Path, task: DaydreamReviewTask, repo_path: Path) -> Path:
     """
 
     repo = _stage_repo(repo_path, task.data.head_sha, edit=_CALC_FIXED, commit=True)
-    diff = subprocess.run(
-        candidate_diff_cmd(str(repo), task.data.head_sha),
-        capture_output=True,
-        check=True,
-    ).stdout
-    present = [
-        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    diff = subprocess.run(candidate_diff_cmd(str(repo), task.data.head_sha), capture_output=True, check=True).stdout
+    present = [run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
     ] + sorted(run_dir.glob("deep/stack-*-records.json"))
     seal = seal_artifacts(present, candidate_diff=diff)
     (run_dir / "seal.json").write_text(seal.model_dump_json(), encoding="utf-8")
     return repo
-
 
 # A gutted suite that PASSES if run: a vulnerable impl that executes the
 # tampered oracle gets exit 0 -> reward 1.0. The gate must return 0.0 instead.
@@ -438,7 +380,6 @@ def test_rundir_golden_user_messages_are_inert(rundir_golden: Path) -> None:
     assert step["source"] == "user"
     assert step["message"] == ""
 
-
 async def test_intrinsic_composite_parity(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
@@ -448,13 +389,10 @@ async def test_intrinsic_composite_parity(
 
     await task.score(trace, runtime)
 
-    expected = score_trajectory(
-        assemble_scoring_inputs(rundir_golden)
-    ).composite
+    expected = score_trajectory(assemble_scoring_inputs(rundir_golden)).composite
     assert expected is not None
     assert trace.rewards["intrinsic_composite"] == expected
     assert trace.info["reward_breakdown"]["composite"] == expected
-
 
 async def test_intrinsic_composite_ignores_historical_read_metrics(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
@@ -468,7 +406,6 @@ async def test_intrinsic_composite_ignores_historical_read_metrics(
     breakdown = trace.info["reward_breakdown"]
     assert "grounding" not in breakdown["axes_present"]
     assert "grounding" not in breakdown
-
 
 async def test_zero_finding_rollout_scores_no_intrinsic_reward(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
@@ -508,9 +445,7 @@ async def test_zero_finding_rollout_scores_no_intrinsic_reward(
     # composite is uncomputable rather than carried by a stale verdict file.
     assert breakdown["axes_present"]["correctness"] is False
 
-
-async def test_missing_run_dir_scores_zero(
-    tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
+async def test_missing_run_dir_scores_zero(tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
     """A crashed daydream still gets a gradient — zero, not an exception."""
     archive_root = tmp_path / "archive"
@@ -524,7 +459,6 @@ async def test_missing_run_dir_scores_zero(
     assert trace.info["reward_breakdown"] == {"error": "no archived run dir"}
     assert trace.metrics["n_findings"] == 0.0
 
-
 async def test_green_suite_records_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
@@ -536,13 +470,9 @@ async def test_green_suite_records_non_regression(
     assert trace.metrics["suite_non_regression"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 1.0
 
-
 @pytest.mark.parametrize("stage_edit", [False, True], ids=["unstaged", "staged"])
 async def test_verifier_identity_branch_executes_and_fails_closed(
-    stage_edit: bool,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    fixture_manifest_path: Path,
+    stage_edit: bool, tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The verifier identity branch is reachable and never falls back to the mutable tree.
@@ -603,17 +533,12 @@ async def test_verifier_identity_branch_executes_and_fails_closed(
     verify_dir = tmp_path / "repo-verify"
     assert (verify_dir / "calc.py").read_text(encoding="utf-8") == _CALC_FIXED
 
-
-async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(
-fixture_manifest_path: Path,
-) -> None:
+async def test_verify_checkout_derives_diff_from_shared_helper_with_empty_guard(fixture_manifest_path: Path,) -> None:
     """_prepare_verify_checkout must derive its candidate diff through
     rundir.candidate_diff_cmd (the single source) and apply it behind an
     empty-guard, so an empty diff is a clean no-op and a failed diff never
     pipes raw/partial output into git apply.
     """
-
-
 
     rt = FakeRuntime(exit_code=0)
     repo, head_sha = "/work/repo", "deadbeef"
@@ -625,7 +550,6 @@ fixture_manifest_path: Path,
     # (b) empty-guard: the apply is skipped when the diff is empty
     assert "[ ! -s " in script and "apply" in script
 
-
 async def test_red_suite_records_no_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
@@ -633,7 +557,6 @@ async def test_red_suite_records_no_non_regression(
 
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["suite_non_regression"] == 0.0
-
 
 async def test_suite_result_is_telemetry_not_reward(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
@@ -646,7 +569,6 @@ async def test_suite_result_is_telemetry_not_reward(
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 1.0
     assert trace.metrics["suite_non_regression"] == 1.0
-
 
 async def test_tampered_suite_never_records_honest_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
@@ -663,9 +585,7 @@ async def test_tampered_suite_never_records_honest_non_regression(
     assert trace.metrics["test_oracle_unchanged"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
 
-
-@pytest.mark.parametrize(
-    ("edit", "tamper_rel", "tamper_content"),
+@pytest.mark.parametrize(("edit", "tamper_rel", "tamper_content"),
     [
         # test-source-tamper: overwrite a tracked test with a passing suite
         (None, "tests/test_calc.py", _TAMPER_PASSING),
@@ -674,17 +594,11 @@ async def test_tampered_suite_never_records_honest_non_regression(
         # untracked oracle file: a real fix (calc.py) plus a NEW non-ignored
         # tests/pytest.ini — ls-files --others must catch it
         (_CALC_FIXED, "tests/pytest.ini", "[pytest]\n"),
-    ],
-    ids=["test-source-tamper", "test-package-config-tamper", "untracked-oracle-file"],
+    ], ids=["test-source-tamper", "test-package-config-tamper", "untracked-oracle-file"],
 )
 async def test_suite_rejects_protected_test_path_changes(
-    edit: str | None,
-    tamper_rel: str,
-    tamper_content: str,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    edit: str | None, tamper_rel: str, tamper_content: str, tmp_path: Path, runtime: SubprocessRuntime,
+    rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A changed test oracle records suite_non_regression 0.0, never an honest reading.
 
@@ -706,18 +620,9 @@ async def test_suite_rejects_protected_test_path_changes(
     _assert_gate_held(trace)
 
 
-async def _score(
-    tmp_path: Path,
-    fixture_manifest_path: Path,
-    runtime: SubprocessRuntime,
-    *,
-    edit: str | None = None,
-    patch: str | None = None,
-    commit: bool = False,
-    commit_patch: bool = False,
-    task: DaydreamReviewTask | None = None,
-    archive_root: Path | None = None,
-    seal_ok: bool = False,
+async def _score(tmp_path: Path, fixture_manifest_path: Path, runtime: SubprocessRuntime, *, edit: str | None = None,
+    patch: str | None = None, commit: bool = False, commit_patch: bool = False, task: DaydreamReviewTask | None = None,
+    archive_root: Path | None = None, seal_ok: bool = False,
 ) -> vf.Trace:
     """Stage a standard repo/archive task and run its real ``task.score``.
 
@@ -737,12 +642,7 @@ async def _score(
 
 
 async def _score_fail_closed(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    archive_root: Path,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
-    *,
+    tmp_path: Path, runtime: SubprocessRuntime, archive_root: Path, rundir_golden: Path, fixture_manifest_path: Path, *,
     unlink_claim: bool = False,
 ) -> vf.Trace:
     """Stage a single run dir and score it down the fail-closed git-error path.
@@ -770,10 +670,7 @@ async def _score_fail_closed(
 
 
 async def test_oracle_gate_fails_closed_on_git_error(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A Git error in the oracle comparison must read as 'changed' (zero reward).
 
@@ -783,18 +680,12 @@ async def test_oracle_gate_fails_closed_on_git_error(
     returned 0.0 without running the suite.
     """
     archive_root = tmp_path / "archive"
-    trace = await _score_fail_closed(
-        tmp_path, runtime, archive_root, rundir_golden, fixture_manifest_path
-    )
+    trace = await _score_fail_closed(tmp_path, runtime, archive_root, rundir_golden, fixture_manifest_path)
 
     _assert_gate_held(trace)
 
-
 async def test_assert_gate_held_raises_when_claim_absent(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A claim-less staged run must not let the gate oracle pass vacuously.
 
@@ -804,24 +695,15 @@ async def test_assert_gate_held_raises_when_claim_absent(
     """
     archive_root = tmp_path / "archive"
     trace = await _score_fail_closed(
-        tmp_path,
-        runtime,
-        archive_root,
-        rundir_golden,
-        fixture_manifest_path,
-        unlink_claim=True,
+        tmp_path, runtime, archive_root, rundir_golden, fixture_manifest_path, unlink_claim=True,
     )
 
     assert "test_claim_mismatch" not in trace.metrics
     with pytest.raises(AssertionError):
         _assert_gate_held(trace)
 
-
 async def test_gate_held_raises_when_a_second_run_dir_is_claim_less(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """The claim precondition covers EVERY archived run dir, not just one.
 
@@ -848,18 +730,9 @@ async def test_gate_held_raises_when_a_second_run_dir_is_claim_less(
     with pytest.raises(AssertionError, match="deep/test-verdict.json claim"):
         _assert_gate_held(trace)
 
-
-@pytest.mark.parametrize(
-    "flag",
-    ["--skip-worktree", "--assume-unchanged"],
-    ids=["skip-worktree", "assume-unchanged"],
-)
+@pytest.mark.parametrize("flag", ["--skip-worktree", "--assume-unchanged"], ids=["skip-worktree", "assume-unchanged"])
 async def test_oracle_gate_rejects_flag_tampered_tracked_file(
-    flag: str,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    flag: str, tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A skip-worktree/assume-unchanged flag hides tamper from the diff probe.
 
@@ -873,22 +746,15 @@ async def test_oracle_gate_rejects_flag_tampered_tracked_file(
     # so only the flag probe stands between this and a free green reading.
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     (repo / "tests/test_calc.py").write_text(_TAMPER_PASSING, encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(repo), "update-index", flag, "tests/test_calc.py"],
-        check=True,
-    )
+    subprocess.run(["git", "-C", str(repo), "update-index", flag, "tests/test_calc.py"], check=True)
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
     await task.score(trace, runtime)
 
     _assert_gate_held(trace)
 
-
 async def test_oracle_gate_rejects_tracked_gitignore_edit(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A tracked .gitignore edit masking a new oracle file must fail closed.
 
@@ -909,12 +775,8 @@ async def test_oracle_gate_rejects_tracked_gitignore_edit(
 
     _assert_gate_held(trace)
 
-
 async def test_oracle_gate_rejects_info_exclude_rule(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A rule written to .git/info/exclude must fail closed.
 
@@ -934,12 +796,8 @@ async def test_oracle_gate_rejects_info_exclude_rule(
 
     _assert_gate_held(trace)
 
-
 async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A core.excludesFile rule masking an untracked oracle file must fail closed.
 
@@ -954,10 +812,7 @@ async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED)
     ignores = repo.parent / "excludes"
     ignores.write_text("tests/pytest.ini\n", encoding="utf-8")
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "core.excludesFile", str(ignores)],
-        check=True,
-    )
+    subprocess.run(["git", "-C", str(repo), "config", "core.excludesFile", str(ignores)], check=True)
     (repo / "tests/pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
@@ -965,12 +820,8 @@ async def test_oracle_gate_rejects_untracked_hidden_by_core_excludesfile(
 
     _assert_gate_held(trace)
 
-
 async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """A green suite's own bytecode under protected paths must not trip the gate.
 
@@ -995,12 +846,8 @@ async def test_oracle_gate_green_despite_suite_bytecode_artifacts(
     assert trace.metrics["test_oracle_unchanged"] == 1.0
     assert trace.metrics["suite_non_regression"] == 1.0
 
-
 async def test_oracle_gate_rejects_root_sitecustomize(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """An untracked root sitecustomize.py that exits 0 must fail closed.
 
@@ -1018,23 +865,13 @@ async def test_oracle_gate_rejects_root_sitecustomize(
 
     _assert_gate_held(trace)
 
-
-@pytest.mark.parametrize(
-    "patch, commit",
-    [
-        (None, False),
-        ("", False),
-        (_REAL_PATCH, False),
+@pytest.mark.parametrize("patch, commit",
+    [(None, False), ("", False), (_REAL_PATCH, False),
         (None, True),  # empty commit: HEAD advances, committed tree unchanged
-    ],
-    ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree", "empty-commit"],
+    ], ids=["no-patch-file", "empty-patch", "non-empty-patch-but-untouched-tree", "empty-commit"],
 )
 async def test_no_fixes_records_no_non_regression(
-    patch: str | None,
-    commit: bool,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    fixture_manifest_path: Path,
+    patch: str | None, commit: bool, tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
 ) -> None:
     """An untouched tree records suite_non_regression 0.0 however recommended.patch looks.
 
@@ -1052,7 +889,6 @@ async def test_no_fixes_records_no_non_regression(
     assert "test_claim_mismatch" not in trace.metrics
     # No archived run at all, so there is no claim to record either.
     assert "test_claim_passed_without_fix" not in trace.metrics
-
 
 async def test_unresolvable_head_sha_scores_no_fix(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
@@ -1079,14 +915,9 @@ async def test_unresolvable_head_sha_scores_no_fix(
     assert trace.metrics["fixes_applied"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
 
-
 @pytest.mark.parametrize("claimed", [True, False], ids=["claimed-green", "claimed-red"])
 async def test_no_fixes_still_records_the_test_claim(
-    claimed: bool,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    claimed: bool, tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
     """Changing nothing while claiming the suite is green must stay visible.
 
@@ -1097,9 +928,7 @@ async def test_no_fixes_still_records_the_test_claim(
     """
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
-    (run_dir / "deep" / "test-verdict.json").write_text(
-        json.dumps({"passed": claimed, "retries": 0}), encoding="utf-8"
-    )
+    (run_dir / "deep" / "test-verdict.json").write_text(json.dumps({"passed": claimed, "retries": 0}), encoding="utf-8")
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, patch=_REAL_PATCH)
@@ -1113,12 +942,8 @@ async def test_no_fixes_still_records_the_test_claim(
     # Observability only: recording the claim must not invent a verdict comparison.
     assert "test_claim_mismatch" not in trace.metrics
 
-
 async def test_score_reuses_one_archived_run_snapshot(
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
-    fixture_manifest_path: Path,
+    tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One score call fetches the archived run dir exactly once; all consumers share it.
@@ -1140,9 +965,7 @@ async def test_score_reuses_one_archived_run_snapshot(
 
         async def __call__(self, path: str) -> bytes:
             if path in self._seen:
-                raise AssertionError(
-                    f"archived artifact {path} read more than once in a single score call"
-                )
+                raise AssertionError(f"archived artifact {path} read more than once in a single score call")
             self._seen.add(path)
             return await self._real(path)
 
@@ -1151,23 +974,16 @@ async def test_score_reuses_one_archived_run_snapshot(
 
     await task.score(trace, runtime)
 
-    expected = score_trajectory(
-        assemble_scoring_inputs(rundir_golden)
-    ).composite
+    expected = score_trajectory(assemble_scoring_inputs(rundir_golden)).composite
     assert expected is not None
     assert trace.rewards["intrinsic_composite"] == expected
     assert trace.metrics["test_claim_passed_without_fix"] == 1.0
     assert trace.metrics["n_findings"] == 1.0
     assert trace.state.run_dir is None
 
-
 @pytest.mark.parametrize("red, expected", [(True, 1.0), (False, 0.0)], ids=["mismatch", "agrees"])
 async def test_metric_claim_mismatch_fires(
-    red: bool,
-    expected: float,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
+    red: bool, expected: float, tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path,
     fixture_manifest_path: Path,
 ) -> None:
     """daydream's prose-derived verdict is a claim, graded against the real re-run."""
@@ -1178,10 +994,7 @@ async def test_metric_claim_mismatch_fires(
 
     task = _task(fixture_manifest_path)
     repo = _stage_repo(
-        tmp_path / "repo",
-        task.data.head_sha,
-        edit=_CALC_BROKEN if red else _CALC_FIXED,
-        patch=_REAL_PATCH,
+        tmp_path / "repo", task.data.head_sha, edit=_CALC_BROKEN if red else _CALC_FIXED, patch=_REAL_PATCH,
     )
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
 
@@ -1190,7 +1003,6 @@ async def test_metric_claim_mismatch_fires(
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["suite_non_regression"] == (0.0 if red else 1.0)
     assert trace.metrics["test_claim_mismatch"] == expected
-
 
 async def test_review_shape_metrics(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
@@ -1216,8 +1028,7 @@ async def test_review_shape_metrics(
     hit_root = tmp_path / "archive-hit"
     hit_run = _stage_run(hit_root, rundir_golden, session_id="session-hit")
     (hit_run / "deep" / "merged-items.json").write_text(
-        json.dumps({"items": [{"id": 1, "file": golden_paths[0]}, {"id": 2, "file": "README.md"}]}),
-        encoding="utf-8",
+        json.dumps({"items": [{"id": 1, "file": golden_paths[0]}, {"id": 2, "file": "README.md"}]}), encoding="utf-8",
     )
     hit_trace = _trace(task, archive_root=hit_root, repo_path=tmp_path / "repo")
 
@@ -1225,7 +1036,6 @@ async def test_review_shape_metrics(
 
     assert hit_trace.metrics["n_findings"] == 2.0
     assert hit_trace.metrics["golden_overlap"] == 1.0
-
 
 async def test_review_shape_survives_a_non_object_merged_items(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
@@ -1242,7 +1052,6 @@ async def test_review_shape_survives_a_non_object_merged_items(
     assert trace.metrics["n_findings"] == 0.0
     assert trace.metrics["golden_overlap"] == 0.0
 
-
 async def test_committed_fix_counts_even_with_a_clean_tree(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
 ) -> None:
@@ -1256,7 +1065,6 @@ async def test_committed_fix_counts_even_with_a_clean_tree(
     assert trace.metrics["fixes_applied"] == 1.0
     assert trace.metrics["suite_non_regression"] == 1.0
     assert trace.metrics["test_oracle_unchanged"] == 1.0
-
 
 async def test_committed_daydream_artifacts_not_a_fix(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path
@@ -1277,7 +1085,6 @@ async def test_committed_daydream_artifacts_not_a_fix(
     assert trace.metrics["suite_non_regression"] == 0.0
     assert "test_claim_mismatch" not in trace.metrics
 
-
 async def test_reward_version_is_pinned(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
@@ -1291,7 +1098,6 @@ async def test_reward_version_is_pinned(
     breakdown stamps both the rollout boundary (``reward_version``) and the
     intrinsic scorer it was evaluated against (``intrinsic_reward_version``).
     """
-
 
     assert REWARD_VERSION == "2026.10.01-1", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
@@ -1310,7 +1116,6 @@ async def test_reward_version_is_pinned(
     assert breakdown["reward_version"] == ROLLOUT_REWARD_VERSION
     assert breakdown["intrinsic_reward_version"] == REWARD_VERSION
 
-
 async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
@@ -1320,8 +1125,7 @@ async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
     task = _task(fixture_manifest_path)
     # Harness produced the seal; the agent then rewrote an archived artifact.
     repo = _seal_run(run_dir, task, tmp_path / "repo")
-    (run_dir / "deep" / "merged-items.json").write_text(
-        json.dumps({"items": []}), encoding="utf-8"
+    (run_dir / "deep" / "merged-items.json").write_text(json.dumps({"items": []}), encoding="utf-8"
     )  # tamper after sealing
 
     trace = _trace(task, archive_root=archive_root, repo_path=repo)
@@ -1331,7 +1135,6 @@ async def test_tampered_sealed_artifact_zeroes_intrinsic_and_non_regression(
     assert trace.metrics["seal_verified"] == 0.0
     assert trace.rewards["intrinsic_composite"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
-
 
 async def test_untampered_sealed_run_scores_normally(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
@@ -1347,12 +1150,8 @@ async def test_untampered_sealed_run_scores_normally(
     await task.score(trace, runtime)
 
     assert trace.metrics["seal_verified"] == 1.0
-    assert trace.rewards["intrinsic_composite"] == (
-        score_trajectory(
-            assemble_scoring_inputs(rundir_golden)
-        ).composite
+    assert trace.rewards["intrinsic_composite"] == (score_trajectory(assemble_scoring_inputs(rundir_golden)).composite
     )
-
 
 async def test_seal_detects_committed_diff_changed_after_sealing(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
@@ -1381,7 +1180,6 @@ async def test_seal_detects_committed_diff_changed_after_sealing(
     assert trace.metrics["seal_verified"] == 0.0
     assert trace.rewards["intrinsic_composite"] == 0.0
 
-
 async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
@@ -1394,15 +1192,13 @@ async def test_vanished_seal_on_a_harness_sealed_run_is_a_tamper(
     of scoring the run at full trust.
     """
     archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
-    trace = await _score(
-        tmp_path, fixture_manifest_path, runtime,
+    trace = await _score(tmp_path, fixture_manifest_path, runtime,
         task=task, archive_root=archive_root, edit=_CALC_FIXED, commit=True, seal_ok=True,
     )
 
     assert trace.metrics["seal_verified"] == 0.0
     assert trace.rewards["intrinsic_composite"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
-
 
 async def test_git_failure_at_verify_time_fails_closed(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
@@ -1419,8 +1215,7 @@ async def test_git_failure_at_verify_time_fails_closed(
     run_dir = _stage_run(archive_root, rundir_golden)
     task = _task(fixture_manifest_path)
 
-    present = [
-        run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
+    present = [run_dir / rel for rel in RUN_DIR_FILES if (run_dir / rel).is_file()
     ] + sorted(run_dir.glob("deep/stack-*-records.json"))
     # A seal produced while git failed at seal time seals the empty diff.
     seal = seal_artifacts(present, candidate_diff=b"")
@@ -1437,7 +1232,6 @@ async def test_git_failure_at_verify_time_fails_closed(
     assert trace.rewards["intrinsic_composite"] == 0.0
     assert trace.metrics["suite_non_regression"] == 0.0
 
-
 async def test_verify_checkout_failed_diff_fails_closed(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
 ) -> None:
@@ -1452,10 +1246,7 @@ async def test_verify_checkout_failed_diff_fails_closed(
     # diff.algorithm is a genuine Git error making ``git diff`` exit non-zero
     # while clone and checkout --detach both succeed. (diff.external is now
     # ignored by the hardened argv, so it can no longer trigger this path.)
-    subprocess.run(
-        ["git", "-C", str(repo), "config", "diff.algorithm", "not-a-real-algorithm"],
-        check=True,
-    )
+    subprocess.run(["git", "-C", str(repo), "config", "diff.algorithm", "not-a-real-algorithm"], check=True)
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     assert result is None, "a failed diff derivation must not return a checkout"
     # The chain died at the diff step, after clone + checkout: the verify dir
@@ -1464,13 +1255,10 @@ async def test_verify_checkout_failed_diff_fails_closed(
     # the baked head, not the fix.
     verify_dir = tmp_path / "repo-verify"
     _assert_checkout_pinned_at(
-        verify_dir,
-        task.data.head_sha,
-        exists_msg="the chain must reach the diff step (clone + checkout ran)",
+        verify_dir, task.data.head_sha, exists_msg="the chain must reach the diff step (clone + checkout ran)",
         pinned_msg="the chain must reach the diff step (checkout detached at the baked head)",
         clean_msg="a failed diff must never apply a partial candidate diff",
     )
-
 
 async def test_verify_checkout_empty_diff_is_clean_noop(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
@@ -1493,12 +1281,9 @@ async def test_verify_checkout_empty_diff_is_clean_noop(
         # repo pinned at the baked head whose tree is identical to it.
         verify_dir = tmp_path / "repo-verify"
         _assert_checkout_pinned_at(
-            verify_dir,
-            task.data.head_sha,
-            exists_msg="the empty diff must not abort the checkout build",
+            verify_dir, task.data.head_sha, exists_msg="the empty diff must not abort the checkout build",
             clean_msg="the empty diff must apply as a clean no-op",
         )
-
 
 async def test_verify_checkout_applies_exactly_the_candidate_diff(
     tmp_path: Path, runtime: SubprocessRuntime, fixture_manifest_path: Path,
@@ -1516,9 +1301,7 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     head_sha = task.data.head_sha
 
     # The contract the seal binds: the shared helper's own output.
-    expected = subprocess.run(
-        candidate_diff_cmd(str(repo), head_sha), capture_output=True, check=True,
-    ).stdout
+    expected = subprocess.run(candidate_diff_cmd(str(repo), head_sha), capture_output=True, check=True).stdout
     assert expected, "staged committed fix must yield a non-empty candidate diff"
 
     result = await taskset._prepare_verify_checkout(runtime, str(repo), head_sha)
@@ -1530,8 +1313,7 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
     if os.geteuid() == 0:
         assert result == str(verify_dir), "construction must return the built checkout path"
     applied = subprocess.run(
-        ["git", "-C", str(verify_dir), "diff", head_sha, "--", "calc.py"],
-        capture_output=True, check=True,
+        ["git", "-C", str(verify_dir), "diff", head_sha, "--", "calc.py"], capture_output=True, check=True,
     ).stdout
     # Drift guard: the tree after apply is head + exactly the candidate diff
     # the seal binds -- the checkout and the seal can never disagree.
@@ -1540,16 +1322,11 @@ async def test_verify_checkout_applies_exactly_the_candidate_diff(
         "the verify checkout did not carry the candidate diff the seal binds"
     )
 
-
 def test_candidate_diff_cmd_carries_hardening_flags() -> None:
-
     argv = candidate_diff_cmd("/work/repo", "deadbeef")
     assert argv == [
-        "git", "-C", "/work/repo", "diff",
-        "--no-ext-diff", "--no-textconv",
-        "deadbeef", "--", DAYDREAM_EXCLUDE,
+        "git", "-C", "/work/repo", "diff", "--no-ext-diff", "--no-textconv", "deadbeef", "--", DAYDREAM_EXCLUDE,
     ]
-
 
 @pytest.mark.parametrize("attack", ["external-diff", "textconv"])
 async def test_verify_checkout_repo_helper_ignored(
@@ -1560,18 +1337,14 @@ async def test_verify_checkout_repo_helper_ignored(
     task = _task(fixture_manifest_path)
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, edit=_CALC_FIXED, commit=True)
     if attack == "external-diff":
-        subprocess.run(
-            ["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"],
-            check=True,
-        )
+        subprocess.run(["git", "-C", str(repo), "config", "diff.external", "/nonexistent-diff-tool"], check=True)
     else:
         # Repository-controlled attribute selecting a driver whose textconv cannot run.
         (repo / ".gitattributes").write_text("*.py diff=evil\n", encoding="utf-8")
         subprocess.run(["git", "-C", str(repo), "add", ".gitattributes"], check=True)
         subprocess.run(["git", "-C", str(repo), "commit", "-qm", "attr"], check=True)
         subprocess.run(
-            ["git", "-C", str(repo), "config", "diff.evil.textconv", "/nonexistent-textconv-tool"],
-            check=True,
+            ["git", "-C", str(repo), "config", "diff.evil.textconv", "/nonexistent-textconv-tool"], check=True,
         )
     result = await taskset._prepare_verify_checkout(runtime, str(repo), task.data.head_sha)
     verify_dir = tmp_path / "repo-verify"
@@ -1582,60 +1355,36 @@ async def test_verify_checkout_repo_helper_ignored(
         "the candidate patch must reach repo-verify despite the repo helper"
     )
 
-
 async def test_fixes_applied_quiet_probe_carries_hardening_flags() -> None:
-
-
     rt = FakeRuntime(exit_code=0)
     await taskset._fixes_applied(rt, "/work/repo", "deadbeef")
     # rt.commands[0] is the git status probe; [1] is the git diff --quiet probe.
-    assert rt.commands[1] == [
-        "git", "-C", "/work/repo", "diff",
-        "--no-ext-diff", "--no-textconv", "--quiet",
+    assert rt.commands[1] == ["git", "-C", "/work/repo", "diff", "--no-ext-diff", "--no-textconv", "--quiet",
         "deadbeef", "HEAD", "--", taskset.DAYDREAM_EXCLUDE,
     ]
 
-
 async def test_protected_test_paths_unchanged_quiet_probe_carries_hardening_flags() -> None:
-
-
     rt = FakeRuntime(exit_code=0)
     await taskset._protected_test_paths_unchanged(rt, "/work/repo", "deadbeef", ["tests"])
     # rt.commands[0] is the first probe row: the git diff --quiet oracle probe.
-    assert rt.commands[0] == [
-        "git", "-C", "/work/repo", "diff",
-        "--no-ext-diff", "--no-textconv", "--quiet",
+    assert rt.commands[0] == ["git", "-C", "/work/repo", "diff", "--no-ext-diff", "--no-textconv", "--quiet",
         "deadbeef", "--", *["tests"], *taskset.ORACLE_IGNORE_PATHSPECS,
     ]
 
-
-@pytest.mark.parametrize(
-    ("stage_kwargs", "expected"),
-    [
-        pytest.param({}, False, id="clean-tree-at-baked-head"),
+@pytest.mark.parametrize(("stage_kwargs", "expected"),
+    [pytest.param({}, False, id="clean-tree-at-baked-head"),
         pytest.param({"edit": _CALC_FIXED}, True, id="uncommitted-edit"),
         pytest.param({"edit": _CALC_FIXED, "commit": True}, True, id="committed-fix"),
         pytest.param({"commit": True}, False, id="empty-commit-moves-head-only"),
-        pytest.param(
-            {"patch": "not-a-fix-signal", "commit": True, "commit_patch": True},
-            False,
+        pytest.param({"patch": "not-a-fix-signal", "commit": True, "commit_patch": True}, False,
             id="committed-daydream-artifacts-only",
-        ),
-        pytest.param(
-            {
-                "edit": _CALC_FIXED,
-                "patch": "not-a-fix-signal",
-                "commit": True,
-                "commit_patch": True,
-            },
-            True,
+        ), pytest.param({"edit": _CALC_FIXED, "patch": "not-a-fix-signal", "commit": True, "commit_patch": True}, True,
             id="committed-fix-plus-daydream-artifacts",
         ),
     ],
 )
 async def test_oracle_acceptance_matches_candidate_diff_semantics(
-    tmp_path: Any, runtime: Any, fixture_manifest_path: Any,
-    stage_kwargs: dict[str, Any], expected: bool,
+    tmp_path: Any, runtime: Any, fixture_manifest_path: Any, stage_kwargs: dict[str, Any], expected: bool,
 ) -> None:
     """Whichever repo state the oracle accepts, the candidate diff must show.
 
@@ -1655,19 +1404,14 @@ async def test_oracle_acceptance_matches_candidate_diff_semantics(
     repo = _stage_repo(tmp_path / "repo", task.data.head_sha, **stage_kwargs)
 
     accepted = await taskset._fixes_applied(runtime, str(repo), task.data.head_sha)
-    assert accepted == expected, (
-        f"oracle verdict {accepted!r} contradicts canonical state "
+    assert accepted == expected, (f"oracle verdict {accepted!r} contradicts canonical state "
         f"{stage_kwargs!r}: the acceptance probe drifted from the "
         f"tracked-tree contract"
     )
 
-    proc = subprocess.run(
-        rundir_mod.candidate_diff_cmd(str(repo), task.data.head_sha),
-        capture_output=True,
-    )
+    proc = subprocess.run(rundir_mod.candidate_diff_cmd(str(repo), task.data.head_sha), capture_output=True)
     produced_fix = bool(proc.stdout.strip())
-    assert produced_fix == expected, (
-        f"derived candidate diff {'showed changes' if produced_fix else 'was empty'} "
+    assert produced_fix == expected, (f"derived candidate diff {'showed changes' if produced_fix else 'was empty'} "
         f"against canonical state {stage_kwargs!r}: the deriv site drifted "
         f"from the tracked-tree contract"
     )

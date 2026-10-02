@@ -31,7 +31,6 @@ def test_materialize_emits_deterministic_sessions_and_manifest(tmp_path: Path) -
     assert record["record_id"] and record["evidence_digest"] == "d" * 32
     assert record["disposition"] == "unanswered"
 
-
 def test_materialize_never_writes_canonical_state(tmp_path: Path) -> None:
     root = _index(tmp_path)
     out = tmp_path / "out"
@@ -40,7 +39,6 @@ def test_materialize_never_writes_canonical_state(tmp_path: Path) -> None:
     assert not (out / "harvest-resume.json").exists()
     assert not (out / "label_observations.jsonl").exists()
     assert not (root / "daydream.sqlite").exists()
-
 
 def test_materialize_dry_run_validates_and_writes_nothing(tmp_path: Path) -> None:
     root = _index(tmp_path)
@@ -55,11 +53,9 @@ def test_materialize_dry_run_validates_and_writes_nothing(tmp_path: Path) -> Non
     assert not out.exists()
     assert not (root / "daydream.sqlite").exists()
 
-
 def test_materialize_missing_sessions_fails_closed(tmp_path: Path) -> None:
     with pytest.raises(HubUnavailableError):
         run_materialize(tmp_path, tmp_path / "out", pin=_PIN)
-
 
 def test_materialize_drift_yields_new_snapshot_id(tmp_path: Path) -> None:
     root = _index(tmp_path)
@@ -79,18 +75,12 @@ def _index_all_dispositions(tmp_path: Path) -> Path:
     evidence = [{"reply_id": 1, "body_sha256": "abc"}]
     digest = hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest()
     dispositions = ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
-    resolutions = [
-        {
-            "fingerprint": f"fp-{i}", "disposition": d,
-            "evidence": evidence, "evidence_digest": digest,
+    resolutions = [{"fingerprint": f"fp-{i}", "disposition": d, "evidence": evidence, "evidence_digest": digest,
             "profile": "pr_review", "stack": "python", "comment_id": 7,
         }
         for i, d in enumerate(dispositions, start=1)
     ]
-    sessions = [{
-        "session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg",
-        "resolutions": resolutions,
-    }]
+    sessions = [{"session_id": "s1", "trajectory_id": "s1-t", "segment_id": "s1-seg", "resolutions": resolutions}]
     write_sessions_jsonl(root, sessions)
     (root / "index-revision.txt").write_text("a" * 40, encoding="utf-8")
     return root
@@ -100,10 +90,8 @@ def test_materialize_emits_every_disposition(tmp_path: Path) -> None:
     root = _index_all_dispositions(tmp_path)  # one session, five dispositions
     result = run_materialize(root, tmp_path / "out", pin=_PIN)
     assert result["record_count"] == 5
-    rows = [json.loads(ln) for ln in
-            (tmp_path / "out" / "sessions.jsonl").read_text().splitlines() if ln]
-    assert {r["disposition"] for r in rows} == {
-        "accepted", "rejected", "ambiguous", "unanswered", "missing"}
+    rows = [json.loads(ln) for ln in (tmp_path / "out" / "sessions.jsonl").read_text().splitlines() if ln]
+    assert {r["disposition"] for r in rows} == {"accepted", "rejected", "ambiguous", "unanswered", "missing"}
     assert len({r["record_id"] for r in rows}) == 5  # no silent dedup across classes
 
 
@@ -111,8 +99,7 @@ def _hydrated_sqlite_index(tmp_path: Path) -> Path:
     """Hydrated staging archive whose per-finding data lives ONLY in
     label_observations.rubric_json — no trajectory.json resolutions key."""
     return make_hydrated_sqlite_index(
-        tmp_path,
-        [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted")],
+        tmp_path, [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r2", "accepted")],
     )
 
 
@@ -150,12 +137,8 @@ def _seed_legacy_trajectory(root: Path, session_id: str = "s1") -> None:
     trajectory_path = run_document_path(run_directory(root, session_id))
     trajectory_path.parent.mkdir(parents=True)
     trajectory_path.write_text(json.dumps({
-        "session_id": session_id,
-        "trajectory_id": session_id,
-        "segment_id": session_id,
-        "resolutions": [{
-            "fingerprint": "fp-1", "disposition": "accepted",
-            "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
+        "session_id": session_id, "trajectory_id": session_id, "segment_id": session_id, "resolutions": [{
+            "fingerprint": "fp-1", "disposition": "accepted", "evidence": [{"reply_id": 1, "body_sha256": "abc"}],
             "evidence_digest": "d" * 32,
         }],
     }), encoding="utf-8")
@@ -177,7 +160,6 @@ def test_materialize_serves_legacy_labels_only_rows_from_trajectory(tmp_path: Pa
     assert record["disposition"] == "accepted"
     assert record["evidence_digest"] == "d" * 32
 
-
 def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> None:
     """The hydrated-index readers address `<index_root>/runs/<sid>/trajectory.json` via the surface."""
 
@@ -189,10 +171,7 @@ def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> No
     assert _trajectory_resolutions_readonly(root, "s1") is not None
     assert _hydrated_identity_index([{"session_id": "s1"}], root)["s1"]["record_id"] == "s1"
 
-
-def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(
-    tmp_path: Path,
-) -> None:
+def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(tmp_path: Path,) -> None:
     """A legacy labels-only session with no trajectory anywhere has no
     materializable resolutions: it contributes no records instead of failing
     the whole curation -- the row is evidence-only (e.g. a session a runbook
@@ -203,9 +182,7 @@ def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(
     _make_labels_only_rubric(root)
     summary = run_materialize(root, tmp_path / "out", pin=_PIN)
     assert summary["record_count"] == 0
-    lines = [
-        ln for ln in (tmp_path / "out" / "sessions.jsonl").read_text().splitlines() if ln
-    ]
+    lines = [ln for ln in (tmp_path / "out" / "sessions.jsonl").read_text().splitlines() if ln]
     assert lines == []  # the session is served nothing, never fabricated
 
 
@@ -213,10 +190,8 @@ def _hydrated_sqlite_index_agreeing_generations(tmp_path: Path) -> Path:
     """Two agreeing ``s1`` generations whose dedup tuple splits only on
     evidence_sha and policy version — what ``append_label_observation``
     produces on a policy-version bump or an edited-reply digest change."""
-    return make_hydrated_sqlite_index(
-        tmp_path,
-        [
-            ("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r1", "accepted"),
+    return make_hydrated_sqlite_index(tmp_path,
+        [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r1", "accepted"),
             ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "980-rubric-r2", "accepted"),
         ],
     )
@@ -233,21 +208,14 @@ def test_materialize_serves_human_labeled_session_from_trajectory(tmp_path: Path
     _seed_legacy_trajectory(root)
 
     append_label_observation(
-        root,
-        "s1",
-        labels=["finding-rejected"],
-        pr_state=None,
-        labeler_version="human",
-        evidence_sha=None,
-        source="human",
-        observed_at="2026-01-04T00:00:00+00:00",
+        root, "s1", labels=["finding-rejected"], pr_state=None, labeler_version="human", evidence_sha=None,
+        source="human", observed_at="2026-01-04T00:00:00+00:00",
     )
     summary = run_materialize(root, tmp_path / "out", pin=_PIN)
     assert summary["record_count"] == 1
     record = json.loads((tmp_path / "out" / "sessions.jsonl").read_text().splitlines()[0])
     assert record["disposition"] == "accepted"  # served from the trajectory
     assert record.get("conflicting") is None  # human override is not a disagreement
-
 
 def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
     """Two generations with identical dispositions (same labels) split only on
@@ -266,18 +234,14 @@ def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
 def _hydrated_sqlite_index_evolving(tmp_path: Path) -> Path:
     """A pre-adjudication ``s1`` generation resolved by a later decisive one:
     an evolution (resolved-unanswered -> accepted), not a disagreement."""
-    return make_hydrated_sqlite_index(
-        tmp_path,
-        [
-            ("2026-01-02T00:00:00+00:00", '["finding-unanswered"]', "e" * 64, "980-rubric-r2", "unanswered"),
+    return make_hydrated_sqlite_index(tmp_path,
+        [("2026-01-02T00:00:00+00:00", '["finding-unanswered"]', "e" * 64, "980-rubric-r2", "unanswered"),
             ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "980-rubric-r2", "accepted"),
         ],
     )
 
 
-def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(
-    tmp_path: Path,
-) -> None:
+def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(tmp_path: Path,) -> None:
     """A pre-adjudication generation (no decisive finding- label) resolved by a
     later decisive generation is an evolution, never a harvester disagreement:
     the session stays gold-eligible after re-materialization (issue #336
@@ -289,7 +253,6 @@ def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(
     assert record.get("conflicting") is None
     assert record["disposition"] == "accepted"
 
-
 def test_materialize_fails_loudly_on_uncheckpointed_wal(tmp_path: Path) -> None:
     """A crashed/interrupted writer between commit and close leaves committed
     rows in ``index.db-wal``; the ``immutable=1`` read-only adapters would
@@ -300,8 +263,7 @@ def test_materialize_fails_loudly_on_uncheckpointed_wal(tmp_path: Path) -> None:
     # has not closed (checkpointed) yet.
     conn = sqlite3.connect(str(root / "index.db"))
     conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute(
-        "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
+    conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "
         "VALUES ('s2', '2026-01-01T00:00:00+00:00', 'deep', 'archive/s2')"
     )
     conn.commit()

@@ -49,11 +49,8 @@ def test_parse_indices_accepts_commas_and_ranges() -> None:
         else:
             raise AssertionError(f"{bad!r} must raise ValueError")
 
-
 def test_run_curate_tui_queue_renders_index_and_quits(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
 
@@ -82,7 +79,6 @@ def test_render_case_shows_header_and_numbered_evidence(tmp_path: Path, fake_gh:
     assert "feature.py:2" in out                                # path/line anchor
     assert "please fix" in out                                  # body preview
 
-
 def test_render_case_pages_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case_mixed(tmp_path, fake_gh)
     out = render_case(cu.get_case(ws, case_id))
@@ -91,17 +87,12 @@ def test_render_case_pages_all_evidence_kinds(tmp_path: Path, fake_gh: FakeGh) -
     assert "reply text" in out and "bob" in out          # inline reply paged
     assert "inline_comment" in out and "please fix" in out  # root candidate still visible
 
-
-def test_run_curate_tui_unknown_action_reprompts(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+def test_run_curate_tui_unknown_action_reprompts(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     rc = run_curate_tui(ws, case_id, read_line=_scripted("z9", "q"))
     assert rc == 0
     assert "unknown" in capsys.readouterr().out
-
 
 def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The evidence row surfaces the strict authoring commit (short form) and the
@@ -115,11 +106,8 @@ def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fak
     assert "[re-anchored]" in out          # fixed reason shown for the non-exact candidate
     assert "feature.py:2" in out           # anchor display unchanged
 
-
 def test_run_curate_tui_queue_bogus_case_id_reprompts(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A non-digit selector that matches no known case_id reprompts (rc 0)
     instead of letting get_case's CurationError kill the whole session."""
@@ -130,43 +118,30 @@ def test_run_curate_tui_queue_bogus_case_id_reprompts(
     assert case_id in out  # the index rendered before the prompt
     assert "unknown case bogus-id" in out
 
-
 def test_action_exclude_evidence_persists_supported_reason(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     source_id = cu.get_case(ws, case_id)["evidence"][0]["source_id"]
 
-    run_curate_tui(
-        ws,
-        case_id,
-        read_line=_scripted("x", "1", "fixed_before_snapshot", "", "q"),
-    )
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "1", "fixed_before_snapshot", "", "q"))
 
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
-    assert raw["curation"]["exclusions"] == [
-        {"source_id": source_id, "reason": "fixed_before_snapshot", "note": None}
-    ]
+    assert raw["curation"]["exclusions"] == [{"source_id": source_id, "reason": "fixed_before_snapshot", "note": None}]
     assert raw["curation"]["state"] == "draft"
     out = capsys.readouterr().out
     assert "excluded 1 evidence source(s)" in out
     assert "fixed_before_snapshot" in out
 
-
 def test_action_accept_persists_historical_finding(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
-    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"]
-               if c["exact_acceptable"])
+    src = next(c["source_id"] for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
 
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "q"))   # accept index 1
     raw = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     f = raw["curation"]["findings"][0]
     assert f["provenance"]["kind"] == "historical" and f["provenance"]["source_ids"] == [src]
     assert raw["curation"]["state"] == "draft"
-
 
 def test_action_accept_invalid_index_mutates_nothing(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
@@ -175,13 +150,9 @@ def test_action_accept_invalid_index_mutates_nothing(tmp_path: Path, fake_gh: Fa
     run_curate_tui(ws, case_id, read_line=_scripted("a", "999", "q"))  # bad idx
     assert path.read_bytes() == before
 
-
 def test_action_accept_non_exact_candidate_offers_edit_path(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
@@ -194,16 +165,11 @@ def test_action_accept_non_exact_candidate_offers_edit_path(
     assert path.read_bytes() == after_rewrite
     assert "not exactly acceptable" in capsys.readouterr().out
 
-
-def test_action_new_via_real_editor_persists_authored(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
+def test_action_new_via_real_editor_persists_authored(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     log = tmp_path / "editor.log"
-    _install_editor(
-        tmp_path, monkeypatch,
+    _install_editor(tmp_path, monkeypatch,
         "#!/usr/bin/env python3\n"
         "import os\n"
         "import stat\n"
@@ -226,9 +192,7 @@ def test_action_new_via_real_editor_persists_authored(
     assert mode == "600"                        # editor buffer was mode 0600
     assert not Path(buf).exists()               # buffer removed after the edit
 
-
-@pytest.mark.parametrize(
-    "editor_script",
+@pytest.mark.parametrize("editor_script",
     [
         pytest.param("#!/bin/sh\nexit 3\n", id="nonzero-exit"),
         pytest.param(
@@ -238,10 +202,7 @@ def test_action_new_via_real_editor_persists_authored(
     ],
 )
 def test_editor_failure_leaves_state_unchanged(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     editor_script: str,
 ) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
@@ -253,12 +214,10 @@ def test_editor_failure_leaves_state_unchanged(
     assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
 
-
 def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     current = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
-    _install_editor(
-        tmp_path, monkeypatch,
+    _install_editor(tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n"
         "  - title: Reworked\n    body: edited wording\n"
         "    severity: low\n    location: null\n"
@@ -270,15 +229,11 @@ def test_action_edit_replaces_seeded_finding(tmp_path: Path, fake_gh: FakeGh, mo
     f = raw["curation"]["findings"][0]
     assert f["title"] == "Reworked" and f["provenance"]["kind"] == "edited"
 
-
 def test_action_edit_authors_edited_finding_from_non_candidate_evidence(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    _install_editor(
-        tmp_path, monkeypatch,
+    _install_editor(tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: From approval\n"
         "    body: edited wording\n    severity: null\n    location: null\n"
         "    source_ids: [github:review:100]\nEOF\n"
@@ -288,19 +243,15 @@ def test_action_edit_authors_edited_finding_from_non_candidate_evidence(
     assert f["title"] == "From approval" and f["provenance"]["kind"] == "edited"
     assert f["provenance"]["source_ids"] == ["github:review:100"]
 
-
 def test_edit_author_prefills_selected_evidence_source_ids(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The [e]->a author selector must pin the selected evidence's source_ids
     into the editor buffer before it opens, so a wrong/empty/off-by-one prefill
     cannot slip past the callers that rewrite source_ids in their heredocs."""
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     log = tmp_path / "prefill.log"
-    _install_editor(
-        tmp_path, monkeypatch,
+    _install_editor(tmp_path, monkeypatch,
         "#!/bin/sh\n"
         "cat > \"$LOG\" < \"$1\"\n"
         "cat > \"$1\" <<'EOF'\nfindings:\n  - title: From selected\n    body: pinned\n"
@@ -316,15 +267,11 @@ def test_edit_author_prefills_selected_evidence_source_ids(
     assert "source_ids" in prefill and "- github:review:100" in prefill
     assert "github:review:100" in prefill and "github:issue_comment:200" not in prefill
 
-
 def test_action_edit_splits_one_evidence_into_two_findings(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
-    _install_editor(
-        tmp_path, monkeypatch,
+    _install_editor(tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Part A\n    body: a\n"
         "    severity: null\n    location: null\n    source_ids: [github:inline_comment:1]\n"
         "  - title: Part B\n    body: b\n    severity: null\n    location: null\n"
@@ -334,15 +281,10 @@ def test_action_edit_splits_one_evidence_into_two_findings(
     fs = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"]
     assert len(fs) == 2 and {f["provenance"]["kind"] for f in fs} == {"edited"}
 
-
-def test_action_edit_merges_range_into_one_finding(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
+def test_action_edit_merges_range_into_one_finding(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ws, case_id, _f = _seed_ready_case_mixed(tmp_path, fake_gh)
-    _install_editor(
-        tmp_path, monkeypatch,
+    _install_editor(tmp_path, monkeypatch,
         "#!/bin/sh\ncat > \"$1\" <<'EOF'\nfindings:\n  - title: Merged\n    body: combined\n"
         "    severity: null\n    location: null\n"
         "    source_ids: [github:inline_comment:1, github:review:100]\nEOF\n"
@@ -351,30 +293,22 @@ def test_action_edit_merges_range_into_one_finding(
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["provenance"]["source_ids"] == ["github:inline_comment:1", "github:review:100"]
 
-
 def test_action_exclude_evidence_other_requires_note(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     src = cu.get_case(ws, case_id)["candidates"][0]["source_id"]
 
-    run_curate_tui(ws, case_id,
-                   read_line=_scripted("x", "1", "other", "stale link", "q"))
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "1", "other", "stale link", "q"))
     ex = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["exclusions"][0]
     assert ex == {"source_id": src, "reason": "other", "note": "stale link"}
 
-
-def test_action_exclude_evidence_rejects_stray_note(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+def test_action_exclude_evidence_rejects_stray_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
-    run_curate_tui(ws, case_id,
-                   read_line=_scripted("x", "1", "duplicate", "a stray note", "q"))
+    run_curate_tui(ws, case_id, read_line=_scripted("x", "1", "duplicate", "a stray note", "q"))
     assert path.read_bytes() == before                      # service rejects the note
     assert "Traceback" not in capsys.readouterr().err
-
 
 def test_action_exclude_range_excludes_all_selected(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
@@ -383,11 +317,8 @@ def test_action_exclude_range_excludes_all_selected(tmp_path: Path, fake_gh: Fak
     assert {e["source_id"] for e in ex} == {"github:inline_comment:1", "github:review:100"}
     assert all(e["reason"] == "duplicate" for e in ex)
 
-
 def test_action_exclude_range_invalid_mutates_nothing(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -395,7 +326,6 @@ def test_action_exclude_range_invalid_mutates_nothing(
     run_curate_tui(ws, case_id, read_line=_scripted("x", "2,2", "q"))   # repeated index
     assert path.read_bytes() == before
     assert "Traceback" not in capsys.readouterr().err
-
 
 def test_clean_confirm_does_not_mark_ready(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=2)   # empty gold
@@ -406,11 +336,8 @@ def test_clean_confirm_does_not_mark_ready(tmp_path: Path, fake_gh: FakeGh, caps
     assert ("as reviewed clean with zero expected findings" in
             capsys.readouterr().out)
 
-
 def test_no_comment_clean_then_ready_marks_case_ready(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=2)   # no-comment, empty gold
     run_curate_tui(ws, case_id, read_line=_scripted("c", "y", "r", "y", "q"))
@@ -420,11 +347,7 @@ def test_no_comment_clean_then_ready_marks_case_ready(
     out = capsys.readouterr().out
     assert "attested" in out and f"mark {case_id} ready?" in out
 
-
-def test_mark_ready_requires_yes_and_exact_sha(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+def test_mark_ready_requires_yes_and_exact_sha(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "n", "q"))
@@ -434,13 +357,8 @@ def test_mark_ready_requires_yes_and_exact_sha(
     assert f"valid against head {head_sha}" in out        # exact SHA confirmation shown
     assert f"mark {case_id} ready?" in out
 
-
-def test_stale_case_shows_marker_and_re_attests(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+def test_stale_case_shows_marker_and_re_attests(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
     raw = load_yaml_strict(path)
@@ -456,7 +374,6 @@ def test_stale_case_shows_marker_and_re_attests(
     out = capsys.readouterr().out
     assert f"valid against head {head_sha}" in out          # stale re-ran the SHA confirm
 
-
 def test_case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -470,7 +387,6 @@ def test_case_exclude_and_reinclude(tmp_path: Path, fake_gh: FakeGh) -> None:
     cur = load_yaml_strict(path)["curation"]
     assert cur["state"] == "draft" and cur["case_exclusion"] is None
 
-
 def test_case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -481,7 +397,6 @@ def test_case_exclude_other_requires_note(tmp_path: Path, fake_gh: FakeGh, capsy
     assert "case exclusion reason 'other' requires a note" in out.out
     assert "Traceback" not in out.err
 
-
 def test_defer_is_ui_local_no_mutation(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str]) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -491,17 +406,13 @@ def test_defer_is_ui_local_no_mutation(tmp_path: Path, fake_gh: FakeGh, capsys: 
     assert path.read_bytes() == before                       # nothing persisted
     assert "deferred" in capsys.readouterr().out
 
-
 def test_quit_ends_and_single_case_defer_ends(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3)
     assert run_curate_tui(ws, read_line=_scripted("q")) == 0
     assert run_curate_tui(ws, case_id, read_line=_scripted("d")) == 0  # single-case d ends
 
-
 def test_ctrl_c_preserves_prior_actions_and_cleans_temp(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -522,11 +433,7 @@ def test_ctrl_c_preserves_prior_actions_and_cleans_temp(
     assert "interrupted" in out.out
     assert "Traceback" not in out.err
 
-
-def test_corrupt_workspace_returns_1_no_traceback(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+def test_corrupt_workspace_returns_1_no_traceback(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _ = _seed_ready_case(tmp_path, fake_gh, lines=3)
     (ws / "cases" / f"{case_id}.yaml").unlink()          # absent case file
@@ -534,19 +441,12 @@ def test_corrupt_workspace_returns_1_no_traceback(
     assert rc == 1
     assert "Traceback" not in capsys.readouterr().err
 
-
-def test_bare_evidence_number_opens_pager(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_bare_evidence_number_opens_pager(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     seen: dict[str, Any] = {}
-    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager",
-                        lambda body: seen.update(body=body))
+    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager", lambda body: seen.update(body=body))
     run_curate_tui(ws, case_id, read_line=_scripted("1", "q"))
     assert seen["body"] and "please fix" in seen["body"]     # full body to pager
-
 
 def test_resume_reflects_persisted_state(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
@@ -559,12 +459,7 @@ def test_resume_reflects_persisted_state(tmp_path: Path, fake_gh: FakeGh) -> Non
     assert cases[0]["state"] == "ready"
     assert "ready" in render_index_table(cases)
 
-
-
-def test_ready_pages_spec_and_approval_sets_digest(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+def test_ready_pages_spec_and_approval_sets_digest(tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
@@ -577,16 +472,12 @@ def test_ready_pages_spec_and_approval_sets_digest(
     assert f"valid against head {head_sha}" in out  # combined question keeps the SHA
     assert "approve this Task Spec and attest" in out.lower() or "Approve this Task Spec" in out
 
-def test_ready_declined_leaves_draft_and_no_digest(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-) -> None:
+def test_ready_declined_leaves_draft_and_no_digest(tmp_path: Path, fake_gh: FakeGh,) -> None:
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "n", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
-
 
 # prioritized sectioned render + captured view binding (issue #879)
 
@@ -616,12 +507,8 @@ def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_
     for n, sid in enumerate(binding, start=1):
         assert f"  {n}. " in out and sid in out
 
-
 def test_number_action_resolves_through_captured_binding_not_fresh_order(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
@@ -631,29 +518,20 @@ def test_number_action_resolves_through_captured_binding_not_fresh_order(
     # the captured binding reorders the raw evidence (band ranking), so a number
     # action re-derived from fresh order would page a different record; pick the
     # first number where the two orders diverge
-    diverging = next(
-        (n for n, sid in enumerate(binding, start=1) if raw_order[n - 1] != sid),
-        None,
-    )
+    diverging = next((n for n, sid in enumerate(binding, start=1) if raw_order[n - 1] != sid), None)
     assert diverging is not None
     bound_sid = binding[diverging - 1]
     paged: dict[str, str] = {}
-    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager",
-                        lambda body: paged.update(body=body))
+    monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager", lambda body: paged.update(body=body))
     # production number action: entry N pages the record the render numbered N
     # through the captured binding, never a fresh re-derivation of raw order
-    tui.run_curate_tui(ws, case_id,
-                       read_line=_scripted(str(diverging), "99", "q"))
+    tui.run_curate_tui(ws, case_id, read_line=_scripted(str(diverging), "99", "q"))
     assert paged["body"] == by_sid[bound_sid]["body"]
     assert paged["body"] != by_sid[raw_order[diverging - 1]]["body"]
     assert "no evidence number 99" in capsys.readouterr().out
 
-
 def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
@@ -692,20 +570,15 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
     cur = load_yaml_strict(path2)["curation"]
     assert len(cur["findings"]) == 2 and not cur.get("exclusions")
 
-
-def test_accept_non_candidate_and_context_is_rejected_without_write(
-    tmp_path: Path, fake_gh: FakeGh,
-) -> None:
+def test_accept_non_candidate_and_context_is_rejected_without_write(tmp_path: Path, fake_gh: FakeGh,) -> None:
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     path = ws / "cases" / f"{case_id}.yaml"
     before = path.read_bytes()
     view = cu.get_case(ws, case_id)
-    ctx_sid = next(e["source_id"] for e in view["prioritized_evidence"]["entries"]
-                   if e["band"] == "context")
+    ctx_sid = next(e["source_id"] for e in view["prioritized_evidence"]["entries"] if e["band"] == "context")
     with pytest.raises(cu.CurationError):
         cu.accept_candidate(ws, case_id, ctx_sid)
     assert path.read_bytes() == before
-
 
 def test_low_priority_exact_candidate_still_acceptable(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Prioritization is advisory: a candidate whose facts/signals sink it to

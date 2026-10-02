@@ -11,10 +11,8 @@ from daydream.trajectory import DaydreamPhase, redact_text
 from tests.harness.trajectory import make_recorder
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "https://opaque-canary-credential@registry.example.com/pkg",
+@pytest.mark.parametrize("text",
+    ["https://opaque-canary-credential@registry.example.com/pkg",
         "HTTPS://user:opaque-canary-credential@registry.example.com/pkg",
         "deploy:opaque-canary-credential@host.example.com:/srv/app",
         "postgresql://user:opaque-canary-credential@db.example.com:5432/app",
@@ -32,11 +30,9 @@ async def test_recorded_url_shapes_pass_publication_scan(tmp_path: Path, text: s
             invocation.observe(ToolStartEvent(id="read-1", name="read", input={"path": text}))
             invocation.observe(ToolResultEvent(id="read-1", output=text, is_error=False))
             invocation.observe(ResultEvent(structured_output=None, continuation=None))
-
     serialized = recorder.path.read_text()
     assert "opaque-canary-credential" not in serialized
     assert not scan_run_dir(recorder.path.parent).blocking
-
 
 def test_url_redaction_is_stable_and_preserves_safe_url_context() -> None:
     text = "https://user:opaque-canary-credential@example.com/pkg?token=another-canary&ref=main"
@@ -47,18 +43,14 @@ def test_url_redaction_is_stable_and_preserves_safe_url_context() -> None:
     assert "&ref=main" in redacted
     assert redact_text(redacted) == redacted
 
-
 def test_url_redaction_preserves_public_urls_and_ssh_logins() -> None:
     text = "https://example.com/pkg?ref=main git@github.com:org/repo.git"
     assert redact_text(text) == text
 
-
-@pytest.mark.parametrize(
-    "url",
+@pytest.mark.parametrize("url",
     [
         "https://example.com?token=opaque-canary-credential#section",
-        "deploy:opaque-canary-credential@host:/app",
-        "https://user:opaque-canary-credential@host/app",
+        "deploy:opaque-canary-credential@host:/app", "https://user:opaque-canary-credential@host/app",
     ],
 )
 def test_url_redaction_preserves_serialized_json(url: str) -> None:
@@ -70,13 +62,8 @@ def test_url_redaction_preserves_serialized_json(url: str) -> None:
     if "#section" in url:
         assert parsed["url"].endswith("#section")
 
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "https://user:can'ary@host/path",
-        "https://u'ser:canary@host/path",
-        "deploy:can'ary@host:/path",
+@pytest.mark.parametrize("text",
+    ["https://user:can'ary@host/path", "https://u'ser:canary@host/path", "deploy:can'ary@host:/path",
         "https://example.com?token=can'ary&ref=main",
     ],
 )

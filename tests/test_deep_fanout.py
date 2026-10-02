@@ -27,35 +27,16 @@ from tests.harness.trajectory import (
 # The minimal turn a per-stack review agent has to emit to satisfy run_agent.
 # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
 # output directly (issues) -- there is no separate parse stage.
-_REVIEW_TURN: Turn = [
-    TextEvent(text="done"),
-    ResultEvent(structured_output={"issues": []}, continuation=None),
-]
-
+_REVIEW_TURN: Turn = [TextEvent(text="done"), ResultEvent(structured_output={"issues": []}, continuation=None),]
 
 def _review_backend(**attrs: Any) -> ScriptedBackend:
     return ScriptedBackend(events=_REVIEW_TURN, model="mock-model", **attrs)
 
-
 def _mk_stacks() -> list[StackAssignment]:
-    return [
-        StackAssignment(
-            stack_name="python",
-            files=["api.py"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="react",
-            files=["App.tsx"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name="generic",
-            files=["README.md"],
-            is_docs_only=True,
-        ),
+    return [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False,),
+        StackAssignment(stack_name="react", files=["App.tsx"], is_docs_only=False,),
+        StackAssignment(stack_name="generic", files=["README.md"], is_docs_only=True,),
     ]
-
 
 def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     diff = tmp_path / "diff.patch"
@@ -66,17 +47,13 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     alts.write_text("[]")
     return diff, intent, alts
 
-
 async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
     issue = {"id": 1, "file": "api.py", "line": 2, "description": "empty input divides by zero",
              "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
-
     async def checkpoint(*args: Any, **kwargs: Any) -> Any:
         return {"issues": [issue]}, None, "wall_budget_exceeded"
-
     monkeypatch.setattr("daydream.phases.run_agent", checkpoint)
     diff, intent, alts = _mk_context_files(tmp_path)
     _, failures = await phase_per_stack_reviews(
@@ -88,10 +65,8 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     assert saved["issues"][0]["description"] == issue["description"]
     assert saved["incomplete"] is True
 
-
 def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
-    steps = [
-        step
+    steps = [step
         for step in trajectory["steps"]
         if step.get("llm_call_count") == 0
         and step.get("extra", {}).get("daydream_phase") == "deep"
@@ -102,10 +77,7 @@ def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
     assert isinstance(step, dict)
     return step
 
-
-async def test_phase_per_stack_reviews_dispatch_interval_success(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
+async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """Successful per-stack reviews retain declared order and enclosure."""
     diff, intent, alts = _mk_context_files(tmp_path)
@@ -113,13 +85,8 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(
 
     async with recorder:
         results, failures = await phase_per_stack_reviews(
-            cast(Backend, _review_backend()),
-            make_work(tmp_path),
-            _mk_stacks(),
-            diff_path=diff,
-            intent_path=intent,
-            alternatives_path=alts,
-            allow_standalone=True,
+            cast(Backend, _review_backend()), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
+            alternatives_path=alts, allow_standalone=True,
         )
 
     assert set(results) == {"python", "react", "generic"}
@@ -132,20 +99,14 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
 
-
 async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """D-17/D-18/D-38: fan-out preserves per-stack calls, paths, prompts, and isolation."""
     backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
     results, failures = await phase_per_stack_reviews(
-        cast(Backend, backend),
-        make_work(tmp_path),
-        _mk_stacks(),
-        diff_path=diff,
-        intent_path=intent,
-        alternatives_path=alts,
-        allow_standalone=True,
+        cast(Backend, backend), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
+        alternatives_path=alts, allow_standalone=True,
     )
 
     assert set(results.keys()) == {"python", "react", "generic"}
@@ -175,11 +136,8 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     assert any("react" in p for p in prompts)
     assert any("generic-fallback" in p for p in prompts)
 
-
 async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stack(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural stack flows through build_structural_prompt; language stacks do not."""
 
@@ -202,26 +160,11 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    stacks = [
-        StackAssignment(
-            stack_name="python",
-            files=["a.py"],
-            is_docs_only=False,
-        ),
-        StackAssignment(
-            stack_name=STRUCTURE_STACK_NAME,
-            files=["a.py"],
-            is_docs_only=False,
-        ),
+    stacks = [StackAssignment(stack_name="python", files=["a.py"], is_docs_only=False,),
+        StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["a.py"], is_docs_only=False,),
     ]
 
-    await _phase(
-        backend,
-        make_work(tmp_path),
-        stacks,
-        diff_path=diff,
-        intent_path=intent,
-        alternatives_path=alts,
+    await _phase(backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
         allow_standalone=True,
     )
 
@@ -232,10 +175,8 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     assert "stack_name" not in structural_calls[0]
     assert per_stack_calls[0]["stack_name"] == "python"
 
-
 async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_failure(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
+    tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """A single stack failure does not abort the whole fan-out, and is reported."""
 
@@ -252,13 +193,8 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
 
     async with recorder:
         results, failures = await phase_per_stack_reviews(
-            cast(Backend, backend),
-            make_work(tmp_path),
-            _mk_stacks(),
-            diff_path=diff,
-            intent_path=intent,
-            alternatives_path=alts,
-            allow_standalone=True,
+            cast(Backend, backend), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
+            alternatives_path=alts, allow_standalone=True,
         )
 
     assert "python" in results
@@ -278,40 +214,24 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
     assert step["extra"]["attempted_count"] == 3
     assert step["extra"]["completed_count"] == 3
 
-
-async def test_per_stack_prompts_are_skill_free(
-    tmp_path: Path, make_work: Callable[..., WorkContext]
-) -> None:
+async def test_per_stack_prompts_are_skill_free(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
 
     backend = ScriptedBackend(events=_REVIEW_TURN)
     diff, intent, alts = _mk_context_files(tmp_path)
 
     # Every built-in stack dispatches through the native profile strategy.
-    stacks = [
-        StackAssignment(stack_name="python",
-            files=["api.py"], is_docs_only=False),
-        StackAssignment(stack_name="react",
-            files=["App.tsx"], is_docs_only=False),
-        StackAssignment(stack_name="go",
-            files=["main.go"], is_docs_only=False),
-        StackAssignment(stack_name="rust",
-            files=["lib.rs"], is_docs_only=False),
-        StackAssignment(stack_name="elixir",
-            files=["app.ex"], is_docs_only=False),
-        StackAssignment(stack_name="generic",
-            files=["notes.txt"], is_docs_only=False),
-        StackAssignment(stack_name=STRUCTURE_STACK_NAME,
-            files=["api.py", "App.tsx"], is_docs_only=False),
+    stacks = [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False),
+        StackAssignment(stack_name="react", files=["App.tsx"], is_docs_only=False),
+        StackAssignment(stack_name="go", files=["main.go"], is_docs_only=False),
+        StackAssignment(stack_name="rust", files=["lib.rs"], is_docs_only=False),
+        StackAssignment(stack_name="elixir", files=["app.ex"], is_docs_only=False),
+        StackAssignment(stack_name="generic", files=["notes.txt"], is_docs_only=False),
+        StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
     _, failures = await phase_per_stack_reviews(
-        cast(Backend, backend),
-        make_work(tmp_path),
-        stacks,
-        diff_path=diff,
-        intent_path=intent,
-        alternatives_path=alts,
+        cast(Backend, backend), make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
         allow_standalone=True,
     )
 
@@ -331,18 +251,12 @@ async def test_per_stack_prompts_are_skill_free(
     generic_prompt = next(p for p in backend.prompts if "generic-fallback" in p)
     assert "/skill:" not in generic_prompt
 
-
 @pytest.mark.parametrize(
-    ("fanout_concurrency", "expected"),
-    [(None, [4]), (2, [2])],
-    ids=["default_concurrency", "low_concurrency"],
+    ("fanout_concurrency", "expected"), [(None, [4]), (2, [2])], ids=["default_concurrency", "low_concurrency"],
 )
 async def test_fanout_concurrency_limiter(
-    tmp_path: Path,
-    make_work: Callable[..., WorkContext],
-    monkeypatch: pytest.MonkeyPatch,
-    fanout_concurrency: int | None,
-    expected: list[int],
+    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
+    fanout_concurrency: int | None, expected: list[int],
 ) -> None:
     """Backend fanout_concurrency selects the limiter width (absent → 4)."""
     captured: list[int] = []
@@ -365,17 +279,11 @@ async def test_fanout_concurrency_limiter(
     diff, intent, alts = _mk_context_files(tmp_path)
 
     await phase_per_stack_reviews(
-        backend,
-        make_work(tmp_path),
-        _mk_stacks(),
-        diff_path=diff,
-        intent_path=intent,
-        alternatives_path=alts,
+        backend, make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent, alternatives_path=alts,
         allow_standalone=True,
     )
 
     assert captured == expected
-
 
 def test_shards_carry_scope_not_skill() -> None:
     """M2: shards inherit stack name / files / frontier, never a skill field."""
@@ -385,17 +293,13 @@ def test_shards_carry_scope_not_skill() -> None:
     python = next(s for s in stacks if s.stack_name == "python")
     assert not hasattr(python, "skill_invocation")
 
-    shards = sharding.shard_stacks(
-        [python],
+    shards = sharding.shard_stacks([python],
         # Synthetic diff so every file has 1 changed byte.
         "index 0..1 100644\n--- a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+x\n"
         "index 0..1 100644\n--- a.py\n+++ b/b.py\n@@ -1 +1 @@\n-x\n+x\n"
         "index 0..1 100644\n--- a.py\n+++ b/c.py\n@@ -1 +1 @@\n-x\n+x\n"
         "index 0..1 100644\n--- a.py\n+++ b/d.py\n@@ -1 +1 @@\n-x\n+x\n",
-        max_files=2,
-        max_bytes=1_000_000,
-        fanout_cap=4,
-        frontier_max=2,
+        max_files=2, max_bytes=1_000_000, fanout_cap=4, frontier_max=2,
     )
     assert len(shards) >= 2  # forced split -> shard path exercised
     for shard in shards:

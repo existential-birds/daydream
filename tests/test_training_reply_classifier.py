@@ -12,8 +12,7 @@ def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str
     return {"user": {"login": login, "type": bot}, "author_association": assoc, "body": body}
 
 
-@pytest.mark.parametrize(
-    "body,expected",
+@pytest.mark.parametrize("body,expected",
     [
         ("Fixed in abc123", "accepted"),                    # M22: fixed-in-sha
         ("Good catch, merged the fix", "accepted"),         # explicit agree
@@ -38,30 +37,17 @@ def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str
 def test_classify_directional_rules(body: str, expected: str) -> None:
     assert classify_reply(_reply(body)) == expected
 
-
-@pytest.mark.parametrize(
-    "reply,expected",
-    [
-        pytest.param(
-            _reply("Fixed in abc123", bot="Bot", login="dependabot[bot]"),
-            "ambiguous",
-            id="reply1-ambiguous",
+@pytest.mark.parametrize("reply,expected",
+    [pytest.param(_reply("Fixed in abc123", bot="Bot", login="dependabot[bot]"), "ambiguous", id="reply1-ambiguous",
         ),  # bot excluded
-        pytest.param(
-            _reply("Fixed in abc123", login="", assoc="NONE"),
-            "ambiguous",
-            id="reply2-ambiguous",
+        pytest.param(_reply("Fixed in abc123", login="", assoc="NONE"), "ambiguous", id="reply2-ambiguous",
         ),  # empty author excluded
-        pytest.param(
-            _reply("Fixed in abc123", login="daydream-agent"),
-            "ambiguous",
-            id="reply3-ambiguous",
+        pytest.param(_reply("Fixed in abc123", login="daydream-agent"), "ambiguous", id="reply3-ambiguous",
         ),  # daydream self-reply excluded
     ],
 )
 def test_qualifying_author_gates_decisive_labels(reply: dict[str, Any], expected: str) -> None:
     assert classify_reply(reply) == expected
-
 
 def test_qualifying_author_rules() -> None:
     """PR author, OWNER/MEMBER/COLLABORATOR, or formal-review author qualify (M6)."""
@@ -72,8 +58,7 @@ def test_qualifying_author_rules() -> None:
     assert (
         is_qualifying_author(_reply("x", assoc="NONE"), pr_author_logins=set(), review_author_logins={"bob"}) is False
     )
-    assert (
-        is_qualifying_author(
+    assert (is_qualifying_author(
             _reply("x", login="bob", assoc="NONE"), pr_author_logins=set(), review_author_logins={"bob"}
         )
         is True

@@ -67,7 +67,6 @@ _logger = logging.getLogger(__name__)
 _CODEX_LIVE_OPT_IN = os.environ.get("DAYDREAM_CODEX_LIVE") == "1"
 _CODEX_AVAILABLE = shutil.which("codex") is not None
 
-
 def test_generic_tool_transport_capture_has_truthful_sanitized_provenance() -> None:
     """The genuine public capture is immutable apart from its declared path redaction."""
     capture_script = Path(__file__).parents[1] / "scripts" / "capture-codex-generic-tool-failure.sh"
@@ -79,41 +78,24 @@ def test_generic_tool_transport_capture_has_truthful_sanitized_provenance() -> N
 
     assert capture_script.is_file() and os.access(capture_script, os.X_OK)
     assert hashlib.sha256(fixture_bytes).hexdigest() == metadata["fixture_sha256_sanitized"]
-    assert metadata["capture_sha256_raw"] == (
-        "896389a5da72401e74ee50324bedd745c513cb7468fa5dcb0fbf682e4b125683"
-    )
+    assert metadata["capture_sha256_raw"] == ("896389a5da72401e74ee50324bedd745c513cb7468fa5dcb0fbf682e4b125683")
     assert metadata["capture_sha256_raw"] != metadata["fixture_sha256_sanitized"]
     assert metadata["fixture_sanitized"] is True
-    assert metadata["sanitizations"] == [
-        {
-            "field": "item.message",
-            "occurrences": 1,
-            "replacement": "/Users/[REDACTED_USER]/.codex/config.toml",
+    assert metadata["sanitizations"] == [{
+            "field": "item.message", "occurrences": 1, "replacement": "/Users/[REDACTED_USER]/.codex/config.toml",
             "reason": "personal_home_path",
         }
     ]
-    assert [
-        record["type"]
+    assert [record["type"]
         if record["type"] != "item.completed"
         else f"item.completed/{record['item']['type']}"
         for record in records
-    ] == [
-        "thread.started",
-        "item.completed/error",
-        "turn.started",
-        "item.completed/error",
-        "item.completed/agent_message",
-        "item.completed/agent_message",
-        "turn.completed",
+    ] == ["thread.started", "item.completed/error", "turn.started", "item.completed/error",
+        "item.completed/agent_message", "item.completed/agent_message", "turn.completed",
     ]
     assert metadata["ordered_public_shape"] == [
-        "thread.started",
-        "item.completed/error",
-        "turn.started",
-        "item.completed/error",
-        "item.completed/agent_message",
-        "item.completed/agent_message",
-        "turn.completed",
+        "thread.started", "item.completed/error", "turn.started", "item.completed/error",
+        "item.completed/agent_message", "item.completed/agent_message", "turn.completed",
     ]
     assert metadata["cli_version"] == "0.153.4"
     assert metadata["captured_at_utc"] == "2026-09-06T02:31:50Z"
@@ -134,12 +116,7 @@ def test_generic_tool_transport_capture_has_truthful_sanitized_provenance() -> N
     )
 
     public_items = [record["item"] for record in records if "item" in record]
-    assert [item["type"] for item in public_items] == [
-        "error",
-        "error",
-        "agent_message",
-        "agent_message",
-    ]
+    assert [item["type"] for item in public_items] == ["error", "error", "agent_message", "agent_message"]
     for item in public_items:
         assert not ({"name", "call_id", "arguments", "output"} & item.keys())
 
@@ -149,21 +126,12 @@ def test_generic_tool_transport_capture_has_truthful_sanitized_provenance() -> N
     assert "/Users/ka" not in metadata_text
     assert "definitely-missing-cell" not in fixture_text
     for forbidden_key in {
-        "private_rollout_bytes",
-        "private_session_path",
-        "home_path",
-        "environment_context",
-        "credentials",
-        "call_id",
-        "arguments",
-        "output_text",
+        "private_rollout_bytes", "private_session_path", "home_path", "environment_context", "credentials", "call_id",
+        "arguments", "output_text",
     }:
         assert forbidden_key not in metadata
 
-
-def test_capture_script_publishes_only_public_candidate_without_replacing_fixture(
-    tmp_path: Path,
-) -> None:
+def test_capture_script_publishes_only_public_candidate_without_replacing_fixture(tmp_path: Path,) -> None:
     """A fake external CLI proves candidate capture is non-publishing and public-only."""
     capture_script = Path(__file__).parents[1] / "scripts" / "capture-codex-generic-tool-failure.sh"
     committed_fixture = FIXTURES_DIR / REAL_GENERIC_TOOL_FAILURE
@@ -212,12 +180,7 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
     env.pop("DAYDREAM_CODEX_PRIVATE_ERROR_CLASS", None)
 
     captured = subprocess.run(
-        [str(capture_script)],
-        cwd=Path(__file__).parents[1],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        [str(capture_script)], cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, check=False,
     )
 
     assert captured.returncode == 0, captured.stderr
@@ -230,9 +193,7 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
     assert metadata["cli_version"] == "9.9.9"
     assert metadata["publication_status"] == "candidate_unpublished"
     assert probe_path.read_text() == metadata["probe_prompt"] + "\n"
-    assert metadata["review_requirements"] == [
-        "privately_correlate_this_exact_candidate_run_before_fixture_update"
-    ]
+    assert metadata["review_requirements"] == ["privately_correlate_this_exact_candidate_run_before_fixture_update"]
     assert not [key for key in metadata if key.startswith("private_")]
     assert hashlib.sha256(candidate_fixture.read_bytes()).hexdigest() == metadata["fixture_sha256_sanitized"]
     assert "/Users/fake-person" not in candidate_fixture.read_text()
@@ -243,12 +204,7 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
     env["DAYDREAM_CODEX_CAPTURE_ROOT"] = str(rejected_root)
     env["FAKE_CODEX_EXPOSE_PAIR"] = "1"
     rejected = subprocess.run(
-        [str(capture_script)],
-        cwd=Path(__file__).parents[1],
-        env=env,
-        capture_output=True,
-        text=True,
-        check=False,
+        [str(capture_script)], cwd=Path(__file__).parents[1], env=env, capture_output=True, text=True, check=False,
     )
     assert rejected.returncode != 0
     assert "update the parser contract" in rejected.stderr
@@ -256,56 +212,39 @@ def test_capture_script_publishes_only_public_candidate_without_replacing_fixtur
     assert committed_fixture.read_bytes() == before_fixture
     assert committed_metadata.read_bytes() == before_metadata
 
-
 @pytest.mark.asyncio
 async def test_generic_tool_transport_capture_maps_only_public_error_sentinel() -> None:
     backend = CodexBackend(model="gpt-5.5")
     mock_proc = make_mock_process_from_fixture(REAL_GENERIC_TOOL_FAILURE)
-
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = [event async for event in backend.execute(Path("/tmp"), "transport contract")]
-
     diagnostics = [event for event in events if isinstance(event, DiagnosticEvent)]
-    assert [event.code for event in diagnostics] == [
-        "codex_transport_coverage",
-        "codex_transport_coverage",
-    ]
+    assert [event.code for event in diagnostics] == ["codex_transport_coverage", "codex_transport_coverage"]
     assert diagnostics[0].metadata["occurrences"] == 1
     assert diagnostics[-1].metadata == {
-        "coverage": "incomplete",
-        "reason": "uncorrelated_public_error_item",
-        "occurrences": 2,
+        "coverage": "incomplete", "reason": "uncorrelated_public_error_item", "occurrences": 2,
         "contract": "codex-cli-0.153.4-json-code-mode",
     }
     assert not [event for event in events if isinstance(event, (ToolStartEvent, ToolResultEvent))]
-
 
 @pytest.mark.asyncio
 async def test_real_golden_has_no_parser_or_transport_diagnostic() -> None:
     backend = CodexBackend(model="gpt-5.5")
     mock_proc = make_mock_process_from_fixture(REAL_GOLDEN)
-
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         events = [event async for event in backend.execute(Path("/tmp"), "golden contract")]
 
     assert not [event for event in events if isinstance(event, DiagnosticEvent)]
 
-
 @pytest.mark.asyncio
 async def test_real_golden_parses_to_expected_events() -> None:
     """The committed REAL codex golden parses to a structurally-correct stream.
 
-    The golden is genuine ``codex exec --experimental-json`` output (codex
-    0.139.0). This asserts the parser still agrees
-    with the live CLI on the observed event coverage: a text span, paired
-    tool calls (zero orphans — the #153 contract), per-turn metrics with
-    prompt/completion tokens, and a result event. Assertions are structural,
-    not byte-exact, so re-capturing on a new model that rewords the agent
-    message still passes.
-    """
-    assert (FIXTURES_DIR / REAL_GOLDEN).exists(), (
-        f"real golden missing at {FIXTURES_DIR / REAL_GOLDEN}"
-    )
+    The golden is genuine ``codex exec --experimental-json`` output (codex 0.139.0). This asserts the parser still
+    agrees with the live CLI on the observed event coverage: a text span, paired tool calls (zero orphans — the
+    #153 contract), per-turn metrics with prompt/completion tokens, and a result event. Assertions are structural,
+    not byte-exact, so re-capturing on a new model that rewords the agent message still passes."""
+    assert (FIXTURES_DIR / REAL_GOLDEN).exists(), (f"real golden missing at {FIXTURES_DIR / REAL_GOLDEN}")
 
     backend = CodexBackend(model="gpt-5.5")
     mock_proc = make_mock_process_from_fixture(REAL_GOLDEN)
@@ -329,9 +268,7 @@ async def test_real_golden_parses_to_expected_events() -> None:
     # This re-asserts the #153 deterministic-correlation contract on REAL data.
     start_ids = {e.id for e in tool_starts}
     result_ids = {e.id for e in tool_results}
-    assert result_ids == start_ids, (
-        f"orphaned tool result on real data: starts={start_ids} results={result_ids}"
-    )
+    assert result_ids == start_ids, (f"orphaned tool result on real data: starts={start_ids} results={result_ids}")
 
     # Per-turn metrics: turn.completed yields a MetricsEvent with prompt AND
     # completion tokens, and cached_tokens surfaced from cached_input_tokens.
@@ -364,36 +301,24 @@ async def test_real_golden_parses_to_expected_events() -> None:
     result_events = [e for e in events if isinstance(e, ResultEvent)]
     assert result_events, "real golden produced no ResultEvent"
 
-
 @pytest.mark.live_codex
 @pytest.mark.asyncio
-@pytest.mark.skipif(
-    not (_CODEX_AVAILABLE and _CODEX_LIVE_OPT_IN),
+@pytest.mark.skipif(not (_CODEX_AVAILABLE and _CODEX_LIVE_OPT_IN),
     reason="live codex smoke test; set DAYDREAM_CODEX_LIVE=1 (and ensure `codex` is on $PATH and logged in) to run",
 )
 async def test_codex_live_smoke() -> None:
     """Live smoke against the real codex binary — opt-in via DAYDREAM_CODEX_LIVE=1.
 
-    Proves the subprocess seam, arg construction, and parser still agree with
-    the live CLI. Skipped by default; set ``DAYDREAM_CODEX_LIVE=1`` to opt in
-    (mirrors the pi smoke test's ``DAYDREAM_PI_LIVE=1`` gate — binary presence
-    alone is not sufficient because an unauthenticated codex exits non-zero).
-    Any unrecognized JSONL event type is logged at WARNING for triage.
-    """
+    Proves the subprocess seam, arg construction, and parser still agree with the live CLI. Skipped by default;
+    set ``DAYDREAM_CODEX_LIVE=1`` to opt in (mirrors the pi smoke test's ``DAYDREAM_PI_LIVE=1`` gate — binary
+    presence alone is not sufficient because an unauthenticated codex exits non-zero). Any unrecognized JSONL
+    event type is logged at WARNING for triage."""
     sample_repo = Path(__file__).parent / "fixtures" / "real_cli_sample_repo"
     prompt = "Read README.md and summarize it in one sentence."
 
     proc = await asyncio.create_subprocess_exec(
-        "codex",
-        "exec",
-        "--experimental-json",
-        "--sandbox",
-        "read-only",
-        "--cd",
-        str(sample_repo),
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
+        "codex", "exec", "--experimental-json", "--sandbox", "read-only", "--cd", str(sample_repo),
+        stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
     )
     if proc.stdout is None or proc.stdin is None:
         pytest.skip("could not open codex stdio")
@@ -403,15 +328,8 @@ async def test_codex_live_smoke() -> None:
     # Collect the raw JSONL lines, logging any line that is not valid JSON or
     # carries an unrecognized event type (the drift signal this test exists to
     # surface, per the issue's "log any unrecognized JSONL event types").
-    known_types = {
-        "thread.started",
-        "turn.started",
-        "turn.completed",
-        "turn.failed",
-        "item.started",
-        "item.updated",
-        "item.completed",
-        "error",
+    known_types = {"thread.started", "turn.started", "turn.completed", "turn.failed", "item.started", "item.updated",
+        "item.completed", "error",
     }
     # Failure event types that indicate a broken live run; their presence must
     # fail the test rather than pass false-green on a non-empty-but-failed stream.

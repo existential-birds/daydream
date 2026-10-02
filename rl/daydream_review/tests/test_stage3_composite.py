@@ -34,18 +34,11 @@ SESSION_ID = "9b36227a-9f80-41e5-a419-5cfed5a34b5b"
 
 
 @pytest.fixture
-def mini_taskset(
-    fixture_manifest_path: Path,
-    stage0_gate_report: Path,
-    outcome_model_path: Path,
+def mini_taskset(fixture_manifest_path: Path, stage0_gate_report: Path, outcome_model_path: Path,
 ) -> DaydreamReviewTaskset:
-    return DaydreamReviewTaskset(
-        DaydreamReviewConfig(
-            id="daydream-review",
+    return DaydreamReviewTaskset(DaydreamReviewConfig(id="daydream-review",
                         manifest_path=fixture_manifest_path,
-            use_images=False,
-            gate_report_path=stage0_gate_report,
-            outcome_model_path=outcome_model_path,
+            use_images=False, gate_report_path=stage0_gate_report, outcome_model_path=outcome_model_path,
         )
     )
 
@@ -53,9 +46,7 @@ def mini_taskset(
 @pytest.fixture
 def rl_train_configs() -> list[dict[str, Any]]:
     """Every shipped training config, parsed."""
-    return [
-        tomllib.loads(p.read_text(encoding="utf-8")) for p in sorted(RL_TRAIN_DIR.glob("*.toml"))
-    ]
+    return [tomllib.loads(p.read_text(encoding="utf-8")) for p in sorted(RL_TRAIN_DIR.glob("*.toml"))]
 
 
 def _stage_run_dir(tmp_path: Path) -> Path:
@@ -63,38 +54,21 @@ def _stage_run_dir(tmp_path: Path) -> Path:
     run_dir = tmp_path / "run"
     deep = run_dir / "deep"
     deep.mkdir(parents=True)
-    (deep / "merged-items.json").write_text(
-        json.dumps(
-            {
-                "items": [
-                    {
-                        "id": 1,
-                        "description": "off-by-one in add() makes every sum wrong",
-                        "file": "calc.py",
-                        "line": 4,
-                        "confidence": "HIGH",
-                        "rationale": "test contradicts implementation",
-                        "evidence": "test_add fails",
-                        "lens": "per-stack",
-                        "severity": "high",
-                        "related_files": None,
+    (deep / "merged-items.json").write_text(json.dumps({"items": [{
+                        "id": 1, "description": "off-by-one in add() makes every sum wrong", "file": "calc.py",
+                        "line": 4, "confidence": "HIGH", "rationale": "test contradicts implementation",
+                        "evidence": "test_add fails", "lens": "per-stack", "severity": "high", "related_files": None,
                     }
                 ]
             }
-        ),
-        encoding="utf-8",
+        ), encoding="utf-8",
     )
-    (run_dir / "manifest.json").write_text(
-        json.dumps({"metrics": {}}), encoding="utf-8"
-    )
+    (run_dir / "manifest.json").write_text(json.dumps({"metrics": {}}), encoding="utf-8")
     return run_dir
 
 
 async def test_env_scores_with_stage0_composite(
-    mini_taskset: DaydreamReviewTaskset,
-    tmp_path: Path,
-    runtime: SubprocessRuntime,
-    rundir_golden: Path,
+    mini_taskset: DaydreamReviewTaskset, tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path,
     outcome_model_path: Path,
 ) -> None:
     """The scoring path composes rubric terms, not intrinsic-only (M13).
@@ -116,8 +90,7 @@ async def test_env_scores_with_stage0_composite(
     dest = archive_root / "runs" / SESSION_ID
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copytree(rundir_golden, dest)
-    trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data),
+    trace = vf.Trace(task=vf.TraceTask(type=type(task).__name__, data=task.data),
         agent=vf.AgentInfo(model=MODEL), state=DaydreamReviewState(),
     )
     trace.info["daydream_archive_root"] = str(archive_root)
@@ -127,8 +100,7 @@ async def test_env_scores_with_stage0_composite(
 
     breakdown = trace.info["reward_breakdown"]
     stage0 = breakdown.get("stage0")
-    assert stage0 is not None, (
-        "outcome_model_path was dropped before the reward: no rubric composite composed (M13)"
+    assert stage0 is not None, ("outcome_model_path was dropped before the reward: no rubric composite composed (M13)"
     )
     # The scored breakdown carries the rubric terms, not intrinsic-only.
     assert "learned_outcome" in stage0["terms"]
@@ -141,11 +113,9 @@ async def test_env_scores_with_stage0_composite(
     assert stage0["terms"]["intrinsic_composite"] is None  # no verifier verdicts in this rollout
     assert trace.rewards["intrinsic_composite"] == stage0["composite"]
 
-
 def test_stage0_composition_absent_without_model(tmp_path: Path) -> None:
     """No outcome model configured → no Stage-0 composition (intrinsic-only)."""
     assert stage0_composite_terms(Path(""), _stage_run_dir(tmp_path)) is None
-
 
 def test_backend_config_pi_only(rl_train_configs: list[dict[str, Any]]) -> None:
     """M24: only pi may be configured for training runs."""
@@ -156,7 +126,6 @@ def test_backend_config_pi_only(rl_train_configs: list[dict[str, Any]]) -> None:
             assert env["harness"]["backend"] == "pi"
             checked += 1
     assert checked >= 1, "no train env found — the backend pin test must not pass vacuously"
-
 
 def test_train_envs_carry_stage0_gate(rl_train_configs: list[dict[str, Any]]) -> None:
     """M4 at the config level: shipped train envs name a Stage-0 gate report."""
