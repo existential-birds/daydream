@@ -7,12 +7,12 @@ merged markdown report to target/REVIEW_OUTPUT_FILE.
 from __future__ import annotations
 
 import hashlib
-import json
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
+from daydream.json_utils import read_json_object
 
 # Reserved entry; resume loaders must not interpret it as a stack name.
 MERGE_FAILURE_KEY = "__merge__"
@@ -323,10 +323,4 @@ def _load_failures(path: Path) -> dict[str, Any]:
 
     Missing files, malformed JSON and non-dict roots yield {}; other I/O errors propagate.
     """
-    if not path.is_file():
-        return {}
-    try:
-        loaded = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
+    return read_json_object(path)

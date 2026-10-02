@@ -5,6 +5,7 @@ from pathlib import Path
 from daydream.archive import hydrate_rules
 from daydream.training.corpus_projection.license import (
     LicensePolicy,
+    RepoDecision,
     load_license_policy,
     resolve_repo_decision,
 )
@@ -16,6 +17,21 @@ def _expected_digest(path: Path) -> str:
 
 def _policy() -> LicensePolicy:
     return LicensePolicy(policy_version="1", spdx_decisions={"MIT": "accepted", "GPL-3.0-only": "rejected"})
+
+
+_MIT_EVIDENCE = {"spdx_id": "MIT", "source": "manifest"}
+_GPL_EVIDENCE = {"spdx_id": "GPL-3.0-only", "source": "manifest"}
+
+
+def _resolve(
+    slug: str,
+    evidence: dict[str, str] | None = _MIT_EVIDENCE,
+    *,
+    allow: frozenset[str] = frozenset(),
+) -> RepoDecision:
+    return resolve_repo_decision(
+        repo_slug=slug, evidence=evidence, policy=_policy(), allow_copyleft=allow
+    )
 
 
 def test_reason_codes_are_frozen_strings() -> None:
@@ -35,18 +51,14 @@ def test_load_license_policy_pins_version_and_digest(tmp_path: Path) -> None:
     assert digest == _expected_digest(policy_path)  # sha256 hex of file bytes
 
 def test_resolve_repo_decision_fail_closed_on_missing_evidence() -> None:
-    decision = resolve_repo_decision(repo_slug="owner/repo", evidence=None, policy=_policy(), allow_copyleft=frozenset()
-    )
+    decision = _resolve("owner/repo", None)
     assert decision.status == "rejected"
     assert decision.reason_code == hydrate_rules.REASON_CODE_LICENSE_EVIDENCE_MISSING
 
 def test_resolve_repo_decision_c5_is_hard() -> None:
     # C5 rejection wins even with evidence saying accepted and even when the
     # slug appears in allow_copyleft (no override exists for C5 — spec M3).
-    decision = resolve_repo_decision(
-        repo_slug="getsentry/sentry", evidence={"spdx_id": "MIT", "source": "manifest"}, policy=_policy(),
-        allow_copyleft=frozenset({"getsentry/sentry"}),
-    )
+    decision = _resolve("getsentry/sentry", allow=frozenset({"getsentry/sentry"}))
     assert decision.status == "rejected"
     assert decision.reason_code == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
 
@@ -57,41 +69,30 @@ def test_resolve_repo_decision_c5_catches_non_canonical_spellings() -> None:
     for slug in ("https://github.com/getsentry/sentry", "getsentry/sentry.git", "  getsentry/sentry  ",
         "https://github.com/getsentry/sentry.git", "git@github.com:getsentry/sentry.git", "git@host:getsentry/sentry",
     ):
-        decision = resolve_repo_decision(
-            repo_slug=slug, evidence={"spdx_id": "MIT", "source": "manifest"}, policy=_policy(),
-            allow_copyleft=frozenset(),
-        )
+        decision = _resolve(slug)
         assert decision.status == "rejected"
         assert decision.reason_code == hydrate_rules.REASON_CODE_C5_EXCLUDED_REPO
         assert decision.repo_slug == "getsentry/sentry"
 
 def test_resolve_repo_decision_stamps_canonical_identity() -> None:
-    decision = resolve_repo_decision(
-        repo_slug=" https://github.com/OWNER/Repo.git ", evidence={"spdx_id": "MIT", "source": "manifest"},
-        policy=_policy(), allow_copyleft=frozenset(),
-    )
+    decision = _resolve(" https://github.com/OWNER/Repo.git ")
     assert decision.status == "admitted"
     assert decision.repo_slug == "OWNER/Repo"  # never the raw URL spelling
 
 def test_resolve_repo_decision_non_canonical_shape_is_identity_missing() -> None:
     # A slug that does not reduce to owner/repo is not a repo identity;
     # fail-closed as repo_identity_missing, never admitted under the raw shape.
-    decision = resolve_repo_decision(
-        repo_slug="owner/repo/extra", evidence={"spdx_id": "MIT", "source": "manifest"}, policy=_policy(),
-        allow_copyleft=frozenset(),
-    )
+    decision = _resolve("owner/repo/extra")
     assert decision.status == "rejected"
     assert decision.reason_code == hydrate_rules.REASON_CODE_REPO_IDENTITY_MISSING
 
 def test_resolve_repo_decision_c8_exact_slug_opt_in_only() -> None:
-    opted = resolve_repo_decision(
-        repo_slug="owner/gpl-repo", evidence={"spdx_id": "GPL-3.0-only", "source": "manifest"}, policy=_policy(),
-        allow_copyleft=frozenset({"OWNER/GPL-REPO"}),  # case-variant of the same slug
+    opted = _resolve(
+        "owner/gpl-repo", _GPL_EVIDENCE, allow=frozenset({"OWNER/GPL-REPO"})
     )
     assert opted.status == "admitted"
-    other = resolve_repo_decision(
-        repo_slug="owner/similar-gpl-repo", evidence={"spdx_id": "GPL-3.0-only", "source": "manifest"},
-        policy=_policy(), allow_copyleft=frozenset({"owner/gpl-repo"}),
+    other = _resolve(
+        "owner/similar-gpl-repo", _GPL_EVIDENCE, allow=frozenset({"owner/gpl-repo"})
     )
     assert other.status == "rejected"
     assert other.reason_code == hydrate_rules.REASON_CODE_C8_COPYLEFT_UNOPTED
