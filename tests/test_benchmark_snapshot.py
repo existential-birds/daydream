@@ -199,27 +199,27 @@ def _seed_double_rename_origin(tmp_path: Path, *, pr: int = 1) -> tuple[str, str
 
 
 
-def test_derive_authoring_path_direct_hit(tmp_path: Path) -> None:
-    """A path that exists in the authoring tree derives to itself -- the
-    authoring commit is present and ``cat-file`` succeeds, so no rename trace
-    (and no ``mapped_sha`` consultation) is needed."""
+@pytest.mark.parametrize(
+    ("seed", "requested", "expected"),
+    [
+        (_seed_anchor_origin, "a.py", "a.py"),
+        (_seed_rename_origin, "new.py", "old.py"),
+    ],
+    ids=["direct-hit", "rename-traced"],
+)
+def test_derive_authoring_path(
+    tmp_path: Path, seed: Any, requested: str, expected: str
+) -> None:
+    """A path present in the authoring tree derives to itself (``direct-hit``:
+    the authoring commit is present, so no rename trace is needed); a head name
+    that is the ``R`` dest of a mirror rename trace resolves to the
+    authoring-time old name (``rename-traced``)."""
 
-    origin, authoring_sha, head_sha = _seed_anchor_origin(tmp_path)
+    origin, authoring_sha, head_sha = seed(tmp_path)
     snapshot.ensure_mirror(tmp_path)
     snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
     m = snapshot.mirror(tmp_path)
-    assert snapshot.derive_authoring_path(m, authoring_sha, "a.py", head_sha) == "a.py"
-
-
-def test_derive_authoring_path_rename_traced(tmp_path: Path) -> None:
-    """A path absent from the authoring tree whose head name is the ``R`` dest
-    of a mirror rename trace resolves to the authoring-time (old) name."""
-
-    origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
-    snapshot.ensure_mirror(tmp_path)
-    snapshot.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
-    m = snapshot.mirror(tmp_path)
-    assert snapshot.derive_authoring_path(m, authoring_sha, "new.py", head_sha) == "old.py"
+    assert snapshot.derive_authoring_path(m, authoring_sha, requested, head_sha) == expected
 
 
 def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:

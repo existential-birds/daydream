@@ -1115,25 +1115,23 @@ def test_flowchart_root_range_comes_from_the_candidate_not_the_model(
 # --- Flowchart node reason codes ---------------------------------------------
 
 
-def test_flowchart_node_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
+@pytest.mark.parametrize(
+    ("field", "value", "reason"),
+    [
+        ("file", "../outside/flow.py", "PATH_ESCAPES_REPO"),
+        ("file", "pkg/ghost.py", "FILE_MISSING"),
+        ("line", 9999, "LINE_OUT_OF_RANGE"),
+        ("symbol", "resolve_identity", "SYMBOL_NOT_ON_LINE"),
+    ],
+    ids=["path-escapes", "file-missing", "line-out-of-range", "symbol-not-on-line"],
+)
+def test_flowchart_node_evidence_rejection(
+    repo: Path, symbols: RepoSymbols, field: str, value: Any, reason: str
+) -> None:
     spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["file"] = "../outside/flow.py"
+    spec["nodes"][6]["evidence"][field] = value
     report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "PATH_ESCAPES_REPO"
-
-
-def test_flowchart_node_file_missing(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["file"] = "pkg/ghost.py"
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "FILE_MISSING"
-
-
-def test_flowchart_node_line_out_of_range(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["line"] = 9999
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "LINE_OUT_OF_RANGE"
+    assert check_for(report, "node", "N7").reason == reason
 
 
 def test_flowchart_node_file_not_read_by_model(repo: Path, symbols: RepoSymbols) -> None:
@@ -1142,13 +1140,6 @@ def test_flowchart_node_file_not_read_by_model(repo: Path, symbols: RepoSymbols)
         "FILE_NOT_READ_BY_MODEL"
     }
     assert report.spec_final["nodes"] == []
-
-
-def test_flowchart_node_symbol_not_on_line(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["symbol"] = "resolve_identity"
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "SYMBOL_NOT_ON_LINE"
 
 
 def test_flowchart_node_symbol_snap_stays_inside_the_root(

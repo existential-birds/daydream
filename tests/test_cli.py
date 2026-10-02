@@ -272,22 +272,17 @@ def test_parse_args_comment_mode_excludes_review(monkeypatch: pytest.MonkeyPatch
         _parse_args()
 
 
-def test_parse_args_comment_mode_sets_output_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--comment", "/tmp/repo"])
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [(["--comment"], "comment"), (["--review"], "review"), ([], "loop")],
+    ids=["comment", "review", "default"],
+)
+def test_parse_args_output_mode(
+    monkeypatch: pytest.MonkeyPatch, argv: list[str], expected: str
+) -> None:
+    monkeypatch.setattr(sys, "argv", ["daydream", *argv, "/tmp/repo"])
     config = _parse_args()
-    assert config.output_mode == "comment"
-
-
-def test_parse_args_review_mode_sets_output_mode(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "--review", "/tmp/repo"])
-    config = _parse_args()
-    assert config.output_mode == "review"
-
-
-def test_parse_args_default_is_loop(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(sys, "argv", ["daydream", "/tmp/repo"])
-    config = _parse_args()
-    assert config.output_mode == "loop"
+    assert config.output_mode == expected
 
 
 def test_findings_out_with_review_populates_config(monkeypatch: pytest.MonkeyPatch) -> None:
