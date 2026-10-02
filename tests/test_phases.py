@@ -3173,9 +3173,13 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         intent = _write_sized(deep / "intent.md", "intent", 6_361)
         alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
         dedup = _write_sized(deep / "dedup.json", "[]", 60)
-        records = '{"issues": []}'
+        # A transport-budget test needs a model-owned finding to dispatch merge.
+        # Keep the same on-disk byte sizes so its exact/inline budget stays fixed.
+        records = json.dumps({"issues": [{"id": 1, "description": "Language finding", "file": "base.py", "line": 1,
+                                         "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
+                                         "evidence": "base.py:1", "uid": "python:1"}]})
         python_records = _write_sized(deep / "python-records.json", records, 7_593)
-        generic_records = _write_sized(deep / "generic-records.json", records, 2_180)
+        generic_records = _write_sized(deep / "generic-records.json", '{"issues": []}', 2_180)
         structural = _write_sized(deep / "structural-records.json", "[]", 7_880)
         exploration = deep / "exploration"
         exploration.mkdir()

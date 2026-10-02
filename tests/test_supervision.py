@@ -2,7 +2,22 @@
 
 from __future__ import annotations
 
-from daydream.extensions import ToolDecision
+import json
+import subprocess
+import sys
+from collections.abc import Callable
+from contextvars import ContextVar
+from pathlib import Path
+
+import pytest
+
+from daydream import review_profile
+from daydream.backends import ResultEvent
+from daydream.deep.artifacts import deep_dir
+from daydream.deep.prompts import build_supervise_prompt
+from daydream.extensions import ToolDecision, get_registry
+from daydream.phases import phase_supervise_review
+from daydream.review_budget import record_review_budget_stop, review_budget_path
 from daydream.supervision import (
     RuleBasedSupervisor,
     RuleBasedToolSupervisor,
@@ -10,6 +25,8 @@ from daydream.supervision import (
     revise_finding_fields,
 )
 from daydream.trajectory import DaydreamPhase
+from daydream.workspace import WorkContext
+from tests.harness.backend import ScriptedBackend
 
 
 def test_revise_finding_fields_updates_whitelist_only() -> None:
@@ -66,3 +83,55 @@ def test_rule_based_tool_supervisor_vetoes_paths_and_bash() -> None:
     assert not allowed_decision.veto
     assert bash_decision.veto and "rm -rf" in bash_decision.reason
     assert not unknown_decision.veto
+
+
+def test_supervision_does_not_break_prompt_module_import() -> None:
+    result = subprocess.run(
+        [sys.executable, "-c", "import daydream.deep.prompts"], capture_output=True, text=True, check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("contract", ["default", "packaged", "custom-strategy", "custom-builder", "nonempty"])
+async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext], contract: str,
+) -> None:
+    work = make_work(tmp_path)
+    dd = deep_dir(work.repo, allow_standalone=True)
+    (dd / "supervise-input.json").write_text('[{"id": 99, "description": "stale"}]')
+    record_review_budget_stop(dd, "Supervisor", "stale timeout")
+    record_review_budget_stop(dd, "Arbiter", "unresolved findings")
+    diff = dd / "diff.patch"
+    diff.write_text("diff --git a/foo.py b/foo.py\n+value = 2\n")
+    intent = dd / "intent.md"
+    intent.write_text("Update value")
+    alternatives = dd / "alternatives.json"
+    alternatives.write_text("[]")
+    items = [{"id": 1, "file": "foo.py", "line": 1, "description": "finding"}] if contract == "nonempty" else []
+    strategy: str | None = review_profile.build_default_profile().strategies["supervision"].content
+    if contract == "default":
+        strategy = None
+    elif contract == "custom-strategy":
+        strategy = "Perform a custom supervision pass over {supervise_input_path}."
+    elif contract == "custom-builder":
+        registry = get_registry()
+        registry.override_prompt("supervise", lambda **kwargs: build_supervise_prompt(**kwargs))
+        monkeypatch.setattr("daydream.extensions.loader._REGISTRY_VAR", ContextVar("test-registry", default=registry))
+    returned_verdicts = [
+        {"id": 1, "action": "edit", "severity": "low", "rationale": None},
+        {"id": 99, "action": "drop"},
+    ] if contract == "nonempty" else []
+    backend = ScriptedBackend(events=[
+        ResultEvent(structured_output={"verdicts": returned_verdicts}, continuation=None),
+    ])
+
+    verdicts = await phase_supervise_review(
+        backend, work, items=items, diff_path=diff, intent_path=intent, alternatives_path=alternatives,
+        strategy=strategy, allow_standalone=True,
+    )
+
+    assert verdicts == ({1: {"id": 1, "action": "edit", "severity": "low"}} if contract == "nonempty" else {})
+    assert json.loads((dd / "supervise-input.json").read_text()) == items
+    assert json.loads(review_budget_path(dd).read_text()) == {"Arbiter": "unresolved findings"}
+    assert backend.call_count == (0 if contract in {"default", "packaged"} else 1)

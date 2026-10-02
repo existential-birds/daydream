@@ -19,6 +19,7 @@ from daydream.deep.artifacts import (
     merged_report_path,
 )
 from daydream.deep.records import (
+    record_issues,
     stack_name_from_records_source,
 )
 from daydream.extensions import get_registry
@@ -45,6 +46,27 @@ from daydream.trajectory import (
     DaydreamPhase,
 )
 from daydream.workspace import WorkContext
+
+
+def _empty_merge_inputs(per_stack_records_paths: list[Path], alternatives_path: Path) -> bool:
+    """Prove there are no synthesis targets from readable, completed artifacts.
+
+    Missing or malformed records cannot establish clean coverage. Alternatives
+    are independent merge inputs, so an empty reviewer pool alone is insufficient.
+    """
+    if not per_stack_records_paths:
+        return False
+    try:
+        for path in per_stack_records_paths:
+            if record_issues(json.loads(path.read_text())) != []:
+                return False
+        # Unlike records, the persisted alternatives contract is a bare list;
+        # an issues envelope does not establish completed alternative coverage.
+        if json.loads(alternatives_path.read_text()) != []:
+            return False
+    except (OSError, ValueError):
+        return False
+    return True
 
 
 @bind_resolved_run_context
@@ -92,8 +114,29 @@ async def phase_cross_stack_merge(
     # outdated content that downstream stages would silently consume.
     _reset_merged_outputs(canonical_path, report_path, items_path)
 
-    prompt = get_registry().prompt("merge")(
-        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["merge"].content,
+    # Only the packaged contract promises to synthesize existing inputs. A
+    # custom builder or distinct policy may perform additional work even when
+    # those inputs are empty. Import lazily to avoid the phases/prompts cycle.
+    from daydream.deep.prompts import build_merge_prompt
+
+    builder = get_registry().prompt("merge")
+    default_strategy = _rp.build_default_profile().strategies["merge"].content
+    resolved_strategy = strategy if strategy is not None else default_strategy
+    if (builder is build_merge_prompt and resolved_strategy == default_strategy
+            and _empty_merge_inputs(per_stack_records_paths, alternatives_path)):
+        if failed_stacks:
+            ui.print_warning(
+                agent.console,
+                "Cross-stack merge completed with uncovered stacks: "
+                + "; ".join(f"{name}: {reason}" for name, reason in sorted(failed_stacks.items())),
+            )
+        _append_structural_and_write_merged(
+            [], structural_records_path, items_path, report_path, canonical_path,
+        )
+        return canonical_path
+
+    prompt = builder(
+        strategy=resolved_strategy,
         per_stack_records_paths=per_stack_records_paths,
         intent_path=intent_path,
         alternatives_path=alternatives_path,

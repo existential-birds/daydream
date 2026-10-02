@@ -12,6 +12,7 @@ import pytest
 
 import daydream.hunk_index as hunk_index
 from daydream import git_ops, pr_comment_renderer, pr_review
+from daydream.deep.artifacts import per_stack_failures_path
 from daydream.extensions import Registry, SummaryContext
 from daydream.extensions.builtins import register_builtins
 from daydream.findings import ArtifactFinding, load_findings_artifact
@@ -36,6 +37,7 @@ from daydream.pr_review import (
     snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
+from daydream.review_budget import review_warnings
 from daydream.reviews.rendering import (
     _build_consolidated_prompt,
     _render_body_section,
@@ -925,8 +927,9 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     assert captured["plan"].diagram_blocks == blocks
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failed_reviewer", [False, True], ids=["phase-budget", "provider-failure"])
 async def test_incomplete_live_review_posts_even_without_findings_and_cannot_approve(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo, failed_reviewer: bool,
 ) -> None:
     merged = tmp_path / "merged-items.json"
     merged.write_text(json.dumps({"items": []}))
@@ -934,7 +937,10 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
     monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
     monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
-    warnings = ("Alternatives: wall_budget_exceeded",)
+    warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
+    if failed_reviewer:
+        per_stack_failures_path(tmp_path).write_text(json.dumps({"python": "RuntimeError: provider unavailable"}))
+        warnings = review_warnings(tmp_path)
     status = await pr_review.post_review_to_pr_from_report(
         tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]
         post=True, approve_on_clean=True, review_warnings=warnings, renderers=BUILTIN_RENDERERS, run_info="test run",
