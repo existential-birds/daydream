@@ -55,7 +55,7 @@ async def _run_per_stack(
     stacks: list[StackAssignment],
 ) -> tuple[dict[str, Path], dict[str, str]]:
     diff, intent, alts = _mk_context_files(tmp_path)
-    return await review_scopes(
+    results, failures = await review_scopes(
         backend,
         make_work(tmp_path),
         stacks,
@@ -64,6 +64,7 @@ async def _run_per_stack(
         alternatives_path=alts,
         allow_standalone=True,
     )
+    return results, failures
 
 
 async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
