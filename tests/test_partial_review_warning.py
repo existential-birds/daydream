@@ -3,10 +3,25 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from daydream.deep.artifacts import per_stack_failures_path
-from daydream.review_budget import review_warnings
+from daydream.review_budget import record_review_budget_stop, review_warnings
 
 
-def test_unavailable_evidence_remains_a_reported_warning(tmp_path: Path) -> None:
-    per_stack_failures_path(tmp_path).write_text(json.dumps({"python": "evidence incomplete: client.py unavailable"}))
-    assert review_warnings(tmp_path) == ("python: evidence incomplete: client.py unavailable",)
+@pytest.mark.parametrize("reason", [
+    "evidence incomplete: client.py unavailable",
+    "budget exhausted: review turn budget exhausted",
+    "RuntimeError: review provider unavailable",
+    "PermissionError: reviewer input inaccessible",
+])
+def test_failed_reviewer_remains_a_reported_warning(tmp_path: Path, reason: str) -> None:
+    per_stack_failures_path(tmp_path).write_text(json.dumps({
+        "python": reason, "__merge__": {"message": "old merge failed", "result_type": "str"},
+    }))
+    record_review_budget_stop(tmp_path, "Arbiter", "wall budget exhausted")
+
+    assert review_warnings(tmp_path) == ("Arbiter: wall budget exhausted", f"python: {reason}")
+
+    per_stack_failures_path(tmp_path).write_text("{}")
+    assert review_warnings(tmp_path) == ("Arbiter: wall budget exhausted",)

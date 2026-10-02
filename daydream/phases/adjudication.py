@@ -83,6 +83,8 @@ async def _adjudicate(
     **inputs: Unpack[AdjudicationInputs],
 ) -> tuple[list[dict[str, Any]] | None, ContinuationToken | None]:
     """Persist targets, run a bounded adjudication, and account for incomplete coverage."""
+    from daydream.deep.prompts import build_supervise_prompt
+
     ui.print_phase_hero(agent.console, mode.hero, ui.phase_subtitle(mode.hero))
     ui.print_dim(agent.console, f"Model: {backend.model}")
     ui.print_info(agent.console, mode.progress.format(count=len(records)))
@@ -93,10 +95,20 @@ async def _adjudicate(
     path.write_text(json.dumps(records, indent=2))
     exploration_dir = inputs.get("exploration_dir")
     strategy = inputs.get("strategy")
+    default_strategy = review_profile.build_default_profile().strategies[mode.strategy].content
+    resolved_strategy = strategy if strategy is not None else default_strategy
+    builder = get_registry().prompt(mode.name)
+    # The built-in supervisor only adjudicates supplied canonical items. With
+    # none, its result is known; context artifacts cannot introduce targets.
+    # A custom policy or builder still runs because its contract may differ.
+    if (
+        mode is _SUPERVISOR and not records and builder is build_supervise_prompt
+        and resolved_strategy == default_strategy
+    ):
+        clear_review_budget_stop(dd, mode.label)
+        return [], None
     prompt_args: dict[str, Any] = {
-        "strategy": strategy if strategy is not None else (
-            review_profile.build_default_profile().strategies[mode.strategy].content
-        ),
+        "strategy": resolved_strategy,
         f"{mode.name}_input_path": path,
         "diff_path": inputs["diff_path"],
         "intent_path": inputs["intent_path"],
@@ -114,7 +126,7 @@ async def _adjudicate(
         supplied_context.append((
             "intent authority", AUTHORITATIVE_INTENT_BLOCK if intent_authoritative else "Intent is advisory context.",
         ))
-    prompt = append_extended_facts(get_registry().prompt(mode.name)(**prompt_args), load_test_recipe(dd))
+    prompt = append_extended_facts(builder(**prompt_args), load_test_recipe(dd))
     input_label = f"{mode.name}-input"
     sanctioned_inputs = _prepare_existing_phase_inputs(
         backend, work,

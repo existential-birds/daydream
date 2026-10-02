@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from rich.console import Console
 
 from daydream.config_file import load_file_config
 from daydream.runner import run
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.support import (
     _capture_warnings,
     _only_archived_run,
@@ -30,8 +32,57 @@ from tests.test_deep_orchestrator import (
     _install_stub_backend,
     _merge_item,
     _pin_findings_pr,
+    _profile_with_pipeline,
     _silence,
 )
+
+
+async def test_cold_empty_supervision_retains_canonical_schema_and_skips_fix_work(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """An auto-accepted real fix gate consumes the deterministic empty schema."""
+    backend = EmptyReviewBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    before = (multi_stack_target / "api.py").read_bytes()
+    trajectory = tmp_path / "trajectory.json"
+
+    assert await run(empty_review_config(multi_stack_target, trajectory, output_mode="loop")) == 0
+
+    prompts = [call["prompt"].lower() for call in backend.calls]
+    assert not any("supervisor adjudication" in prompt for prompt in prompts)
+    assert _fix_prompts(backend) == []
+    assert not any("run the project's test suite" in prompt for prompt in prompts)
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert json.loads((deep / "supervise-input.json").read_text()) == []
+    assert json.loads((deep / "merged-items.json").read_text()) == {"items": [], "held": []}
+    assert (multi_stack_target / "api.py").read_bytes() == before
+    assert "No actionable items" in capsys.readouterr().out
+    assert not (deep / "fix-outcomes.json").exists()
+    events = json.loads(trajectory.read_text())["extra"]["phase_events"]
+    lifecycle = [event for event in events if event.get("metadata", {}).get("stage") == "supervise"]
+    assert [event["event"] for event in lifecycle] == ["phase_start", "phase_end"]
+    assert lifecycle[-1]["status"] == "succeeded"
+
+
+async def test_cold_empty_custom_supervision_still_dispatches(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    backend = EmptyReviewBackend(multi_stack_target, forbid_supervise=False)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    resolved = _profile_with_pipeline()
+    strategies = dict(resolved.profile.strategies)
+    strategies["supervision"] = replace(
+        strategies["supervision"], content=strategies["supervision"].content + "\nCustom supervision policy.",
+    )
+    profile = replace(resolved, profile=replace(resolved.profile, strategies=strategies))
+
+    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json", review_profile=profile)) == 0
+
+    assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert json.loads((deep / "supervise-input.json").read_text()) == []
+    assert json.loads((deep / "merged-items.json").read_text()) == {"items": [], "held": []}
 
 
 def _prepare_fix_stub(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute) -> StubBackend:

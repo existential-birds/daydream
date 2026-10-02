@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream import runner as _runner
+from daydream import git_ops, runner as _runner
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
 from daydream.deep.artifacts import (
     arbiter_input_path,
@@ -22,13 +24,17 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import build_merge_prompt
+from daydream.findings import build_findings_artifact, load_findings_artifact, write_findings_artifact
+from daydream.pr_review import PRInfo, parsed_issues_from_items
+from daydream.review_budget import review_warnings
 from daydream.run_config import RunConfig
 from daydream.runner import _resolve_backend
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
     _install_post_recorder,
 )
-from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_profile import default_strategy as _default_strategy, independent_alternatives_profile
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -36,12 +42,143 @@ from tests.test_deep_orchestrator import (
     _install_model_capturing_stubs,
     _install_stub_backend,
     _prime_merge_resume,
+    _profile_with_pipeline,
     _record,
     _run_deep,
     _silence,
     _twin_parse_by_stack,
     _write_plugin_registry,
 )
+
+
+async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_report(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The real runner must synthesize a clean cold review without merge calls."""
+    backend = EmptyReviewBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    trajectory = tmp_path / "empty-trajectory.json"
+
+    assert await _runner.run(empty_review_config(multi_stack_target, trajectory)) == 0
+
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
+    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+    deep = multi_stack_target / ".daydream" / "deep"
+    payload = json.loads((deep / "merged-items.json").read_text())
+    assert payload == {"items": [], "held": []}
+    assert merged_report_path(deep).is_file()
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).read_text() == merged_report_path(deep).read_text()
+    assert not (deep / "merge-failed.txt").exists()
+    assert not (deep / "per-stack-failures.json").exists()
+    events = json.loads(trajectory.read_text())["extra"]["phase_events"]
+    for phase, stage in (("merge", "cross-stack-agent"), ("deep", "supervise")):
+        lifecycle = [event for event in events if event["phase"] == phase
+                     and event.get("metadata", {}).get("stage") == stage]
+        assert [event["event"] for event in lifecycle] == ["phase_start", "phase_end"]
+        assert lifecycle[-1]["status"] == "succeeded"
+
+
+async def test_cold_structural_only_merge_preserves_identity_and_supervises_findings(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    structural = _record(description="Structural boundary erosion", file="api.py", line=1,
+                         severity="medium", confidence="MEDIUM", rationale="boundary coupling", evidence="api.py:1")
+    backend = EmptyReviewBackend(multi_stack_target, forbid_supervise=False,
+                                 review_by_stack={"structure": [structural]})
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+
+    assert await _runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
+
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
+    assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
+    deep = multi_stack_target / ".daydream" / "deep"
+    records = json.loads(per_stack_records_path(deep, "structure").read_text())["issues"]
+    items = json.loads(merged_items_path(deep).read_text())["items"]
+    assert len(items) == 1
+    assert items[0]["description"] == structural["description"]
+    assert items[0]["lens"] == "structural"
+    assert items[0]["source_uids"] == [records[0]["uid"]]
+    assert items[0]["file"] == structural["file"]
+    assert items[0]["line"] == structural["line"]
+    assert structural["description"] in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+
+
+@pytest.mark.parametrize("budget_stop", [False, True], ids=["provider-failure", "incomplete-coverage"])
+async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str], budget_stop: bool,
+) -> None:
+    backend = EmptyReviewBackend(multi_stack_target, fail_stack=None if budget_stop else "python",
+                                 incomplete_stack="python" if budget_stop else None)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+
+    policy = DaydreamFileConfig(supervisor="llm", tool_supervisor="rules", tool_bash_deny=["blocked-review-tool"])
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", file_config=policy)
+    assert await _runner.run(config) == 0
+
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
+    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert json.loads(merged_items_path(deep).read_text()) == {"items": [], "held": []}
+    failures = json.loads((deep / "per-stack-failures.json").read_text())
+    assert "python" in failures
+    assert "python" in capsys.readouterr().out
+    assert "Review incomplete" in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "python" in merged_report_path(deep).read_text()
+    # Exercise the same canonical loader and strict handoff schema as publication,
+    # with local Git objects providing the PR diff rather than another model call.
+    head = git_ops.head_sha(multi_stack_target)
+    base = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head)
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature",
+                owner="test", repo="fixture", url="https://github.com/test/fixture/pull/7")
+    items = json.loads(merged_items_path(deep).read_text())["items"]
+    warnings = review_warnings(deep)
+    artifact = build_findings_artifact(multi_stack_target, pr, parsed_issues_from_items(items),
+                                      run_info=None, review_warnings=warnings)
+    output = tmp_path / "findings.json"
+    write_findings_artifact(output, artifact)
+    loaded = load_findings_artifact(output, expected_repo="test/fixture", expected_pr_number=7, expected_head_sha=head)
+    assert loaded.findings == []
+    assert loaded.review_warnings == warnings
+    assert any("python" in warning for warning in loaded.review_warnings)
+    if budget_stop:
+        assert failures["python"].startswith("budget exhausted:")
+    else:
+        assert "review provider unavailable" in failures["python"]
+
+
+@pytest.mark.parametrize("input_kind", ["language", "alternatives", "custom"])
+async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, input_kind: str,
+) -> None:
+    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False)
+    config_overrides: dict[str, Any] = {}
+    if input_kind == "language":
+        backend.review_by_stack = {"python": [_record(description="Language defect", file="api.py", severity="medium",
+                                                      confidence="MEDIUM", rationale="stub", evidence="api.py:1")]}
+        backend.merge_echo_records = True
+    elif input_kind == "alternatives":
+        backend.alternatives = [{"id": 1, "title": "Alternative design", "description": "Missing reusable boundary",
+                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"]}]
+        config_overrides["review_profile"] = independent_alternatives_profile()
+    else:
+        resolved = _profile_with_pipeline()
+        strategies = dict(resolved.profile.strategies)
+        strategies["merge"] = replace(strategies["merge"], content=strategies["merge"].content + "\nCustom synthesis.")
+        config_overrides["review_profile"] = replace(resolved, profile=replace(resolved.profile, strategies=strategies))
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", **config_overrides)
+    assert await _runner.run(config) == 0
+
+    assert sum("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls) == 1
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert merged_items_path(deep).is_file()
+    if input_kind == "language":
+        assert json.loads(merged_items_path(deep).read_text())["items"][0]["description"] == "Language defect"
+        assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
+    if input_kind == "alternatives":
+        assert json.loads((deep / "alternatives.json").read_text()) == backend.alternatives
 
 
 def _install_merge_captures(

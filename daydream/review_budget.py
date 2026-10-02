@@ -128,7 +128,6 @@ def review_warnings(deep_dir: Path) -> tuple[str, ...]:
         f"{stack}: {reason}"
         for stack, reason in sorted(_load_failures(per_stack_failures_path(deep_dir)).items())
         if isinstance(reason, str)
-        and reason.startswith(("budget exhausted:", "evidence incomplete:"))
     )
     return tuple(warnings)
 
