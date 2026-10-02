@@ -296,11 +296,11 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
         pytest.param(None, [30.0], None, id="absent-degrades-to-jitter"),
     ],
 )
-async def test_server_retry_hint_is_honoured_and_capped(
+async def test_server_retry_hint_is_honoured_or_stops_insufficient_budget(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_after: float | None, expected_slept: list[float],
     stop: str | None,
 ) -> None:
-    """Server hints replace jitter within budget; cap-pinned jitter makes ignored hints observable."""
+    """Server hints replace jitter within budget; an unfittable hint stops the ladder."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
@@ -521,17 +521,44 @@ def test_the_extracted_retry_delay_planner_clamps_to_every_bound(monkeypatch: py
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=300.0, deadline_remaining_s=None, hint=7.0,
     ) == (7.0, None)
+    # A hint ABOVE the jitter cap (max_delay_s) but inside the budget is honoured
+    # in FULL: jitter bounds never shorten an admitted server wait (req 9, 16).
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=300.0, deadline_remaining_s=None, hint=30.0,
-    ) == (10.0, None)
-    # No declared bound at all: the hint is honoured inside the cap, and nothing is
-    # fabricated when the server offers none.
+    ) == (30.0, None)
+    # No declared bound at all: the hint is honoured in full, nothing is invented.
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=None, deadline_remaining_s=None, hint=45.0,
-    ) == (10.0, None)
+    ) == (45.0, None)
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,
         allowance_remaining_s=None, deadline_remaining_s=None, hint=None,
     ) == (10.0, None)
+    # The issue's repro: hint exceeds BOTH the exponential cap (1s) and the
+    # configured jitter max (4s) yet fits both budgets — honoured in full.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
+        allowance_remaining_s=60.0, deadline_remaining_s=60.0, hint=10.0,
+    ) == (10.0, None)
+    # Unfittable vs the remaining allowance: same insufficient-budget stop, 0 delay.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
+        allowance_remaining_s=5.0, deadline_remaining_s=60.0, hint=10.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
+    # A hint exactly at the remaining bound fits (not strictly greater).
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=1.0, max_delay_s=4.0,
+        allowance_remaining_s=10.0, deadline_remaining_s=60.0, hint=10.0,
+    ) == (10.0, None)
+    # A hint vs a spent deadline: the deadline is a zero bound, never negative.
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=30.0, max_delay_s=60.0,
+        allowance_remaining_s=300.0, deadline_remaining_s=0.0, hint=5.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
+    # A hint vs a remaining deadline only (no allowance).
+    assert _plan_retry_delay(
+        attempt=0, base_delay_s=30.0, max_delay_s=60.0,
+        allowance_remaining_s=None, deadline_remaining_s=12.0, hint=45.0,
+    ) == (0.0, "retry_hint_exceeds_budget")
