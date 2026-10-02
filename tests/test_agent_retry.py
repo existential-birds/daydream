@@ -315,6 +315,29 @@ async def test_bounded_full_jitter_never_exceeds_the_cap(
         )
     assert slept == [pytest.approx(expected)]
 
+async def test_retry_notice_distinguishes_server_hint_from_jitter_fallback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A wait granted by a provider hint is labelled differently from a jitter wait."""
+    import daydream.agent as agent_module
+    rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
+    monkeypatch.setattr(agent_module, "console", rec)
+    clock = FakeClock(monotonic_value=0.0).install(monkeypatch)
+    patch_retry_sleep(monkeypatch, clock)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
+    backend = ScriptedBackend(
+        events=[_HintError("503 Service Unavailable", retry_after=10.0)],
+        retry_attempts=1, retry_base_delay_s=1.0, retry_max_delay_s=4.0,
+    )
+    with pytest.raises(_HintError):
+        await run_agent(
+            backend, tmp_path, "go", phase=DaydreamPhase.FIX,
+            wall_budget_s=10_000.0, retry_recovery_allowance_s=300.0,
+        )
+    notice = rec.export_text()
+    assert "server" in notice.lower() or "advertised" in notice.lower()  # hint wait is labelled
+    assert notice.count("after") == 1  # the jitter/fallback word must not also appear on a hint wait
+
 @pytest.mark.parametrize(
     ("retry_after", "expected_slept", "stop"),
     [
