@@ -372,8 +372,8 @@ async def test_ac_merge_resume_on_tiny_diff(
     # tiny-diff collapse yields a ``generic`` (collapsed language) stack plus
     # the ``structure`` meta-stack, so records files must match both.
     _prime_merge_resume(
-        tiny_diff_target, generic=[_record(id="gen-1", description="generic per-stack issue", evidence="api.py:1")],
-        structure=[_record(id="structure-1", description="file-size budget violated", evidence="api.py:1")],
+        tiny_diff_target, generic=[_record(id=1, description="generic per-stack issue", evidence="api.py:1")],
+        structure=[_record(id=1, description="file-size budget violated", evidence="api.py:1")],
     )
 
     rc = await run(make_config(tiny_diff_target, start_at="merge"))
@@ -444,13 +444,13 @@ async def test_evidence_gate_all_speculative_yields_empty(
     mute_side_effects()
 
     deep = _prime_merge_resume(tiny_diff_target,
-        generic=[_record(id="gen-1", description="speculative generic finding", confidence="MEDIUM",
+        generic=[_record(id=1, description="speculative generic finding", confidence="MEDIUM",
                 rationale="inferred from the diff alone, no exploration evidence", evidence="",
             )
         ],
         structure=[_record(
-                id="structure-1", description="speculative structural finding", confidence="LOW", rationale="hunch",
-                evidence="api.py:1",
+                id=1, description="speculative structural finding", confidence="MEDIUM", rationale="hunch",
+                evidence="",
             )
         ],
     )
@@ -479,12 +479,12 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
     mute_side_effects()
 
     deep = _prime_merge_resume(tiny_diff_target,
-        generic=[_record(id="gen-1", description="grounded generic finding", confidence="MEDIUM", rationale="r",
+        generic=[_record(id=1, description="grounded generic finding", confidence="MEDIUM", rationale="r",
                 evidence="api.py:1",
             )
         ],
         structure=[_record(
-                id="structure-1", description="module exceeds 800 LOC budget", file="big.py", line=0, confidence="HIGH",
+                id=1, description="module exceeds 800 LOC budget", file="big.py", line=0, confidence="HIGH",
                 rationale="file-size budget violated", evidence="big.py is 800 lines",
             )
         ],
@@ -511,12 +511,12 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
     mute_side_effects()
 
     deep = _prime_merge_resume(tiny_diff_target,
-        generic=[_record(id="gen-1", description="grounded generic finding", confidence="MEDIUM", rationale="r",
+        generic=[_record(id=1, description="grounded generic finding", confidence="MEDIUM", rationale="r",
                 evidence="api.py:1",
             )
         ],
         structure=[_record(
-                id="structure-1", description="grounded structural finding", file="big.py", confidence="HIGH",
+                id=1, description="grounded structural finding", file="big.py", confidence="HIGH",
                 rationale="r", evidence="big.py:1",
             )
         ],

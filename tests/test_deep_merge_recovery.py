@@ -30,6 +30,7 @@ from daydream.extensions import get_registry
 from daydream.flows.engine import FlowContext
 from daydream.phases import CrossStackMergeError, phase_cross_stack_merge
 from daydream.review_budget import record_review_budget_stop, review_budget_path
+from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -61,12 +62,17 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
     intent.write_text("Review the new API contract")
     backend = ScriptedBackend(events=[AssertionError("empty synthesis must not dispatch")])
     cache = ReuseCache(review_cache_dir(dd), run_id="empty-synthesis")
+    coverage = ReviewCoverage("empty-synthesis", AnalyzedRevision("a" * 40, "b" * 40, "c" * 64),
+        [PlannedScope("python", "python", ("api.py",)), PlannedScope("react", "react", ("App.tsx",))], ["merge"])
+    coverage.record_scope("python", "complete")
+    coverage.record_scope("react", "failed", reasons=(ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,))
     ctx = FlowContext(
         RunConfig(target=str(tmp_path), review_cache_enabled=True), make_work(tmp_path), get_registry(),
         data={
             "dd": dd, "alts_path": alternatives, "intent_path": intent, "records": [], "record_sources": [],
             "records_paths": [records], "failed_stacks": {"react": "budget exhausted: wall deadline"},
             "structural_records_path": None, "exploration_dir": None, "reuse_cache": cache,
+            "review_coverage": coverage,
         },
         allow_standalone_artifacts=True, _backend_factory=lambda *args: backend,
     )
@@ -118,6 +124,145 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
     merge_ends = [event for event in events if event["phase"] == "merge" and event["event"] == "phase_end"]
     assert len(merge_ends) == 3
     assert all(event["status"] == "succeeded" for event in merge_ends)
+    terminal = coverage.finalize("completed")
+    assert terminal["analysis_state"] == "incomplete"
+    assert terminal["failed_stacks"] == ["react"]
+    assert terminal["phase_outcomes"] == [{"phase": "merge", "status": "complete", "reason_codes": [],
+                                           "noop": True, "usable_evidence": False}]
+
+
+async def test_empty_supervision_persists_complete_host_noop(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The required supervision stage records positive empty-input completion."""
+    from daydream.runner import run
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+
+    backend = EmptyReviewBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
+    coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
+    supervision = next(phase for phase in coverage["phase_outcomes"] if phase["phase"] == "supervision")
+    assert supervision == {"phase": "supervision", "status": "complete", "reason_codes": [],
+                            "noop": True, "usable_evidence": False}
+    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+
+
+@pytest.mark.parametrize("failed_phase", ["merge", "supervision"])
+async def test_phase_failure_preserves_original_error_when_coverage_write_also_fails(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    make_config: Callable[..., RunConfig], failed_phase: str,
+) -> None:
+    """The production terminal boundary must retain the provider's first failure."""
+    from daydream import json_utils
+    from daydream.config_file import DaydreamFileConfig
+    from daydream.runner import run
+    from tests.harness.stub_backend import StubBackend
+    from tests.test_deep_orchestrator import _pin_findings_pr
+
+    original_error = RuntimeError(f"{failed_phase} provider failed first")
+    failed = False
+
+    class FailedPhaseBackend(StubBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
+            nonlocal failed
+            marker = "cross-stack merge agent" if failed_phase == "merge" else "supervisor adjudication"
+            if marker in prompt.lower():
+                failed = True
+                raise original_error
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    backend = FailedPhaseBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    stage = json_utils._stage_bytes
+
+    def fail_after_provider(path: Path, content: bytes, **kwargs: Any) -> Path:
+        if failed and path.name == "review-coverage.json":
+            raise OSError("coverage stage failed after provider failure")
+        return stage(path, content, **kwargs)
+
+    monkeypatch.setattr(json_utils, "_stage_bytes", fail_after_provider)
+    output = tmp_path / "absent-review.json"
+    with pytest.raises(RuntimeError, match=f"{failed_phase} provider failed first") as caught:
+        await run(make_config(multi_stack_target, findings_out=str(output), pr_number=pr.number,
+                              file_config=DaydreamFileConfig(supervisor="llm")))
+    assert caught.value is original_error
+    assert any("Review coverage persistence failed: OSError" in note for note in caught.value.__notes__)
+    assert not output.exists()
+
+
+async def test_partial_merge_resume_retains_failure_until_successful_remerge(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+) -> None:
+    """Public fix-only resumes preserve synthesis failure; same-revision remerge clears it."""
+    from daydream.findings import load_findings_artifact
+    from daydream.runner import run
+    from tests.test_deep_orchestrator import _pin_findings_pr
+
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_emit_str = "malformed synthesis response"
+    outputs = [tmp_path / f"review-{stage}.json" for stage in ("cold", "fix", "merge")]
+    cold = make_config(multi_stack_target, findings_out=str(outputs[0]), pr_number=pr.number)
+    assert await run(cold) == 1
+    stub.merge_emit_str = None
+    stub.calls.clear()
+    assert await run(make_config(multi_stack_target, start_at="fix", findings_out=str(outputs[1]),
+                                pr_number=pr.number)) == 0
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
+    assert await run(make_config(multi_stack_target, start_at="merge", findings_out=str(outputs[2]),
+                                pr_number=pr.number)) == 0
+    loaded = [load_findings_artifact(path, expected_repo="o/r", expected_pr_number=pr.number,
+                                    expected_head_sha=pr.head_sha) for path in outputs]
+    results = [artifact.terminal_result for artifact in loaded]
+    assert all(result is not None for result in results)
+    first, resumed, rerun = cast(list[dict[str, Any]], results)
+    assert len({result["run_id"] for result in results if result is not None}) == 3
+    assert first["analyzed_revision"] == resumed["analyzed_revision"] == rerun["analyzed_revision"]
+    assert first["analysis_state"] == resumed["analysis_state"] == "incomplete"
+    assert first["pipeline_state"] == "failed"
+    assert resumed["pipeline_state"] == "completed"
+    assert "synthesis_failure" in first["reason_codes"]
+    assert "synthesis_failure" in resumed["reason_codes"]
+    assert rerun["analysis_state"] == "complete"
+    assert "synthesis_failure" not in rerun["reason_codes"]
+    assert loaded[0].findings and loaded[1].findings
+
+
+async def test_corrupt_projection_resume_stays_failed_until_valid_remerge(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    make_config: Callable[..., RunConfig],
+) -> None:
+    """Corrupt canonical bytes fail publicly; rebuilding the same snapshot clears that failure."""
+    from daydream.findings import load_findings_artifact
+    from daydream.runner import run
+    from tests.test_deep_orchestrator import _pin_findings_pr
+
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    install_stub_backend(monkeypatch, multi_stack_target)
+    initial = tmp_path / "initial-review.json"
+    assert await run(make_config(multi_stack_target, findings_out=str(initial), pr_number=pr.number)) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    merged_items_path(deep).write_text("{corrupt projection")
+    corrupt, recovered = [tmp_path / name for name in ("corrupt-review.json", "recovered-review.json")]
+    assert await run(make_config(multi_stack_target, start_at="fix", findings_out=str(corrupt),
+                                pr_number=pr.number)) == 0
+    failed = load_findings_artifact(corrupt, expected_repo="o/r", expected_pr_number=pr.number,
+                                   expected_head_sha=pr.head_sha)
+    assert failed.terminal_result is not None
+    assert failed.terminal_result["analysis_state"] == "failed"
+    assert "malformed_artifact" in failed.terminal_result["reason_codes"]
+    assert failed.findings == []
+    assert await run(make_config(multi_stack_target, start_at="merge", findings_out=str(recovered),
+                                pr_number=pr.number)) == 0
+    result = load_findings_artifact(recovered, expected_repo="o/r", expected_pr_number=pr.number,
+                                   expected_head_sha=pr.head_sha)
+    assert result.terminal_result is not None
+    assert result.terminal_result["analysis_state"] == "complete"
+    assert result.findings
 
 def _salvage_record() -> dict[str, object]:
     """Minimal per-stack record shape accepted by the merge phase."""

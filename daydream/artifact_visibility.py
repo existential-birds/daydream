@@ -883,6 +883,7 @@ class ArtifactSession:
             ledger._write_destination_records(
                 transaction, publish_records, include_published=True, include_baseline=True
             )
+            external._inherit_external_capability_proofs(self._detach_transaction, transaction)
             mark(state=_Transition.PUBLISH_STAGED)
         except BaseException:
             if publication_stage is not None:

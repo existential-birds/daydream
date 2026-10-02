@@ -15,6 +15,7 @@ if TYPE_CHECKING:
     from daydream.deep.reuse_store import ReuseCache
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
+    from daydream.review_result import ReviewCoverage
     from daydream.test_execution import TestRecipe
 
 
@@ -95,6 +96,12 @@ class DeepState:
         if value is None:
             return default
         return self._check(key, value, expected, expected_name)
+
+    @property
+    def review_coverage(self) -> ReviewCoverage | None:
+        from daydream.review_result import ReviewCoverage
+
+        return cast(ReviewCoverage | None, self._optional("review_coverage", ReviewCoverage, "ReviewCoverage or None"))
 
     @property
     def mode(self) -> str:

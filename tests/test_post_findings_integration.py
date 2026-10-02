@@ -15,6 +15,7 @@ import pytest
 
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers, validate_diagram_payload
+from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 from tests.harness.console import collapse_panel_text as _console_text
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit, git, init_repo
@@ -106,8 +107,13 @@ def _write_artifact(path: Path, findings: list[dict[str, Any]], *, run_info: str
     diagrams: dict[str, Any] | None = None, head_sha: str = "h" * 40,
 ) -> Path:
     """Build a valid artifact via write_findings_artifact."""
+    coverage = ReviewCoverage("test-run", AnalyzedRevision(head_sha, "b" * 40, "diff-test"),
+                              [PlannedScope("python", "python", ("a.py",))], ["merge"])
+    coverage.record_scope("python", "complete")
+    coverage.record_phase("merge", "complete", noop=True)
     write_findings_artifact(path,
-        {"schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": head_sha,
+        {"terminal_result": coverage.finalize("completed"), "schema_version": FINDINGS_SCHEMA_VERSION,
+            "repo": "o/r", "pr_number": 7, "head_sha": head_sha,
             "run_info": run_info, "diagrams": diagrams, "findings": findings,
         },
     )
@@ -755,3 +761,54 @@ def test_partial_review_posts_warning_without_approval_or_resolving_prior_findin
     assert "Alternatives: wall_budget_exceeded" in posts[0].payload["body"]
     assert len(posts[0].payload["comments"]) == int(has_finding)
     assert not any("minimizeComment" in call.payload.get("query", "") for call in fake_gh.calls("POST", "graphql"))
+
+
+@pytest.mark.parametrize("state", ["incomplete", "failed"])
+@pytest.mark.parametrize("has_finding", [False, True])
+def test_typed_terminal_notice_blocks_approval_and_stale_resolution_without_warnings(
+    fake_gh: FakeGh, tmp_path: Path, state: str, has_finding: bool,
+) -> None:
+    fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_OLD"], viewer_did_author=True)
+    findings = [_finding("b" * 64, path="a.py", line=1, placement="inline", title="Survivor", severity="low")]
+    path = _write_artifact(tmp_path / "typed.json", findings if has_finding else [])
+    data = json.loads(path.read_text())
+    coverage = ReviewCoverage("partial-run", AnalyzedRevision("h" * 40, "b" * 40, "diff-test"),
+                              [PlannedScope("python", "python", ("a.py",))], ["merge"])
+    coverage.record_scope("python", "incomplete" if state == "incomplete" else "failed",
+                          reasons=["backend_failure"], partial_evidence=state == "incomplete")
+    coverage.record_phase("merge", "complete", noop=True)
+    data["terminal_result"] = coverage.finalize("completed")
+    data["review_warnings"] = []
+    write_findings_artifact(path, data)
+    assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert f"analysis is {state}" in posts[0].payload["body"]
+    assert len(posts[0].payload["comments"]) == int(has_finding)
+    assert not any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
+
+
+def test_legacy_unknown_coverage_posts_comments_without_approval_or_stale_resolution(
+    fake_gh: FakeGh, tmp_path: Path,
+) -> None:
+    fake_gh.serve_prior_threads(fingerprints=["c" * 64], thread_ids=["RT_OLD"], viewer_did_author=True)
+    path = _write_artifact(tmp_path / "legacy.json", [_inline_finding("Legacy nit", severity="low")])
+    data = json.loads(path.read_text())
+    data["schema_version"] = 1
+    data.pop("terminal_result")
+    write_findings_artifact(path, data)
+    assert cli_main(_post_argv(path) + ["--approve-on-clean"]) == 0
+    posts = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")
+    assert len(posts) == 1
+    assert posts[0].payload["event"] == "COMMENT"
+    assert not any("minimizeComment" in c.payload.get("query", "") for c in fake_gh.calls("POST", "graphql"))
+
+
+def test_unsupported_version_is_rejected_before_github_writes(fake_gh: FakeGh, tmp_path: Path) -> None:
+    path = _write_artifact(tmp_path / "unknown.json", [])
+    data = json.loads(path.read_text())
+    data["schema_version"] = 99
+    path.write_text(json.dumps(data))
+    assert cli_main(_post_argv(path)) == 1
+    assert fake_gh.calls("POST") == []

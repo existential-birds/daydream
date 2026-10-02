@@ -70,3 +70,32 @@ async def test_merge_finalizer_prioritizes_records_and_keeps_budget_failure(
     assert "ESTABLISHED_RECORD" in backend.last_prompt
     assert "budget exhausted" in backend.last_prompt
     assert "Investigation allowance" not in backend.last_prompt
+
+@pytest.mark.parametrize("payload", [{}, {"issues": "bad"}, {"issues": [{"description": "unfinished"}]}])
+async def test_ordinary_reviewer_rejects_invalid_envelope(
+    tmp_path: Path, make_work: Callable[..., WorkContext], payload: dict[str, Any],
+) -> None:
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=payload, continuation=None)])
+    diff = tmp_path / "diff.patch"
+    diff.write_text("diff --git a/api.py b/api.py\n+change\n")
+    intent = tmp_path / "intent.md"
+    intent.write_text("intent")
+    alternatives = tmp_path / "alternatives.json"
+    alternatives.write_text("[]")
+    results, failures = await phases.phase_per_stack_reviews(backend, make_work(tmp_path),
+        [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False)],
+        diff_path=diff, intent_path=intent, alternatives_path=alternatives, allow_standalone=True)
+    assert results == {}
+    assert failures["python"] == "malformed_output: reviewer response did not satisfy its schema"
+    assert not list(tmp_path.rglob("stack-python-records.json"))
+
+async def test_intent_requires_nonempty_provider_evidence(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
+) -> None:
+    from daydream.phases.review import ReviewOutputError
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=None, continuation=None)])
+    diff = tmp_path / "diff.patch"
+    diff.write_text("diff --git a/api.py b/api.py\n+change\n")
+    with pytest.raises(ReviewOutputError) as raised:
+        await phases.phase_understand_intent(backend, make_work(tmp_path), diff, "log", "branch")
+    assert raised.value.reason_code == "missing_output"

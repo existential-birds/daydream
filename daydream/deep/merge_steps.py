@@ -15,6 +15,7 @@ from daydream.deep.artifacts import (
     merged_items_path,
     merged_report_path,
     per_stack_failures_path,
+    persist_review_coverage,
 )
 from daydream.deep.dedup import (
     build_dedup_candidates,
@@ -45,12 +46,14 @@ from daydream.phases import (
 from daydream.phases.findings import (
     _write_single_stack_merged_items,
 )
+from daydream.redaction import redact_text
 from daydream.review_budget import (
     clear_review_budget_stop,
     record_review_budget_stop,
     render_review_warnings,
     review_warnings,
 )
+from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
 from daydream.supervision import RuleBasedSupervisor, apply_findings_verdicts
 from daydream.trajectory import (
     DaydreamPhase,
@@ -84,6 +87,19 @@ def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None
     if structural is not None:
         paths.append(structural)
     return _records_bytes_by_basename(paths)
+
+
+def _merge_is_host_noop(ctx: FlowContext, deep_state: DeepState) -> bool:
+    """Mirror the packaged phase's proof of an eligible empty synthesis."""
+    from daydream.deep.prompts import build_merge_prompt
+    from daydream.phases.merge import _empty_merge_inputs
+    from daydream.review_profile import build_default_profile
+
+    strategy = ctx.strategy("merge")
+    default = build_default_profile().strategies["merge"].content
+    return (ctx.registry.prompt("merge") is build_merge_prompt
+            and (strategy is None or strategy == default)
+            and _empty_merge_inputs(deep_state.records_paths, deep_state.alts_path))
 
 
 def _merge_store_payload(dd: Path) -> dict[str, bytes] | None:
@@ -193,6 +209,29 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
 
 
 async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
+    """Record failures across merge preparation and execution without losing their cause."""
+    try:
+        return await _cross_stack_merge(ctx)
+    except Exception as exc:
+        state = DeepState(ctx.data)
+        if state.review_coverage is not None:
+            state.review_coverage.record_phase(
+                "merge", "failed", reasons=(ReasonCode.SYNTHESIS_FAILURE, reason_for_exception(exc)),
+            )
+            _persist_failure_coverage(state, exc)
+        raise
+
+
+def _persist_failure_coverage(state: DeepState, original_error: Exception) -> None:
+    """Keep a failed evidence write secondary to the phase's original exception."""
+    assert state.review_coverage is not None
+    try:
+        persist_review_coverage(state.dd, state.review_coverage)
+    except Exception as persistence_error:
+        original_error.add_note(f"Review coverage persistence failed: {type(persistence_error).__name__}")
+
+
+async def _cross_stack_merge(ctx: FlowContext) -> Stop | None:
     """Build dedup candidates and merge stack records, salvaging unparseable responses.
 
     A malformed response persists partial items/report/failure and stops resumably.
@@ -204,6 +243,8 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
     alts_p: Path = deep_state.alts_path
     all_records: list[dict[str, Any]] = deep_state.records
     failed_stacks: dict[str, str] = deep_state.failed_stacks
+    coverage = deep_state.review_coverage
+    host_noop = _merge_is_host_noop(ctx, deep_state)
 
     async with phase_scope(
         DaydreamPhase.MERGE, stage="cross-stack-agent"
@@ -255,8 +296,11 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 identity=merge_identity,
                 grounding=_loop_grounding(deep_state),
             )
-            merge_unit = ReviewReuseUnit(reuse, "merge", merge_identity, merge_payload)
+            merge_unit = ReviewReuseUnit(reuse, "merge", merge_identity, merge_payload, coverage=coverage)
             if merge_unit.restore(deep_state.dd):
+                if coverage is not None:
+                    coverage.record_phase("merge", "complete", noop=host_noop)
+                    persist_review_coverage(dd, coverage)
                 _clear_merge_failure(dd)
                 clear_review_budget_stop(dd, "Cross-stack merge")
                 return None
@@ -281,6 +325,13 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 allow_standalone=ctx.allow_standalone_artifacts,
             )
         except CrossStackMergeError as exc:
+            if coverage is not None:
+                coverage.record_phase(
+                    "merge", "incomplete" if exc.budget_reason else "failed",
+                    reasons=(ReasonCode.SYNTHESIS_FAILURE, reason_for_budget(exc.budget_reason))
+                    if exc.budget_reason else (ReasonCode.SYNTHESIS_FAILURE,),
+                )
+                persist_review_coverage(dd, coverage)
             phase.finish(
                 LifecycleStatus.PARTIAL if exc.budget_reason else LifecycleStatus.FAILED,
                 LifecycleReasonCode.DOMAIN_FAILURE,
@@ -295,6 +346,9 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         # PARTIAL' even though the cross-stack merge has since succeeded.
         _clear_merge_failure(dd)
         clear_review_budget_stop(dd, "Cross-stack merge")
+        if coverage is not None:
+            coverage.record_phase("merge", "complete", noop=host_noop)
+            persist_review_coverage(dd, coverage)
         # Issue #733 — store only a completed merge, once the same artifacts a
         # fresh run leaves are final on disk. A failed or budget-exhausted
         # merge returns above and never reaches here.
@@ -339,7 +393,7 @@ def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
     failures[MERGE_FAILURE_KEY] = {
         "response_shape": exc.response_shape,
         "stack_context": exc.stack_context,
-        "message": str(exc),
+        "message": redact_text(str(exc)),
     }
     failures_p.write_text(json.dumps(failures, indent=2, sort_keys=True))
     print_info(console, f"Wrote partial merged items and merge-failure record to {dd}")
@@ -367,6 +421,9 @@ async def _step_single_stack_merge(ctx: FlowContext) -> None:
             artifact_session=ctx.artifacts,
             allow_standalone=ctx.allow_standalone_artifacts,
         )
+    if deep_state.review_coverage is not None:
+        deep_state.review_coverage.record_phase("merge", "complete", noop=True)
+        persist_review_coverage(deep_state.dd, deep_state.review_coverage)
 
 
 async def _step_load_items(ctx: FlowContext) -> Stop | None:
@@ -416,37 +473,40 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
 
 
 async def _step_findings_out(ctx: FlowContext) -> Stop:
-    """Two-phase findings artifact (Phase A): emit the strict-schema artifact and STOP."""
-    deep_state = DeepState(ctx.data)
-    from daydream.pr_review import resolve_review_renderers
-    from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
-    from daydream.runner import _emit_findings_from_items
-
-    items_file: Path = deep_state.items_file
-    findings_items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-    # Issue #1113: a review artifact carries the run's diagram payload when the
-    # diagram step produced one, so Phase B can re-render the blocks into the
-    # posted review from the validated specs.
-    diagrams = (deep_state.diagrams or {}).get("payload")
-    recorder = get_current_recorder()
-    run_info = render_live_run_info(LiveRunInfoSource(recorder, ctx.artifacts))
-    if run_info.diagnostic is not None:
-        print_warning(console, run_info.diagnostic)
-    return Stop(
-        _emit_findings_from_items(
-            ctx.work.repo,
-            ctx.config,
-            findings_items,
-            run_info=run_info.markdown,
-            review_warnings=review_warnings(deep_state.dd),
-            renderers=resolve_review_renderers(ctx.registry),
-            diagrams=diagrams,
-            auth=ctx.github_execution.auth,
-        )
-    )
+    """Stop at the review boundary; recorder-scoped finalization owns the export."""
+    ctx.data["findings_projection_ready"] = True
+    return Stop(0)
 
 
 async def _step_supervise(ctx: FlowContext) -> None:
+    """Record the required supervision stage at its artifact completion boundary."""
+    deep_state = DeepState(ctx.data)
+    coverage = deep_state.review_coverage
+    from daydream.deep.prompts import build_supervise_prompt
+    from daydream.review_profile import build_default_profile
+
+    try:
+        strategy = ctx.strategy("supervision")
+        default_strategy = build_default_profile().strategies["supervision"].content
+        input_items = json.loads(deep_state.items_file.read_text())["items"]
+        noop = not input_items and (_supervisor_mode(ctx.config) == "rules" or (
+            (strategy is None or strategy == default_strategy)
+            and ctx.registry.prompt("supervise") is build_supervise_prompt))
+        budget_reason = await _supervise_items(ctx)
+    except Exception as exc:
+        if coverage is not None:
+            coverage.record_phase("supervision", "failed", reasons=(reason_for_exception(exc),))
+            _persist_failure_coverage(deep_state, exc)
+        raise
+    if coverage is not None:
+        if budget_reason:
+            coverage.record_phase("supervision", "incomplete", reasons=(reason_for_budget(budget_reason),))
+        else:
+            coverage.record_phase("supervision", "complete", noop=noop)
+        persist_review_coverage(deep_state.dd, coverage)
+
+
+async def _supervise_items(ctx: FlowContext) -> str | None:
     """Apply the configured findings supervisor to canonical merged items."""
     deep_state = DeepState(ctx.data)
     mode = _supervisor_mode(ctx.config)
@@ -490,7 +550,9 @@ async def _step_supervise(ctx: FlowContext) -> None:
     if recorder is not None:
         for finding_id, action, reason in events:
             recorder.emit_supervisor_verdict(finding_id, action, reason)
-    return None
+    from daydream.phases.adjudication import IncompleteVerdicts
+
+    return verdicts.budget_reason if isinstance(verdicts, IncompleteVerdicts) else None
 
 
 async def _step_post_review(ctx: FlowContext) -> Stop | None:
@@ -502,6 +564,11 @@ async def _step_post_review(ctx: FlowContext) -> Stop | None:
     never resolves a PR or enters the posting helper.
     """
     deep_state = DeepState(ctx.data)
+    if ctx.config.findings_out is None and deep_state.review_coverage is not None:
+        from daydream.deep.review_terminal import finalize_review
+
+        if not deep_state.review_coverage.is_finalized:
+            finalize_review(ctx, "completed")
     if deep_state.mode == "review":
         return None
 

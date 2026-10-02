@@ -28,7 +28,9 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend
+from daydream.config_file import DaydreamFileConfig
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
+from daydream.phases.review import ReviewOutputError
 from daydream.review_budget import ReviewLimits
 from daydream.run_config import RunConfig
 from daydream.runner import run
@@ -47,7 +49,7 @@ from tests.harness.stub_backend import (
 )
 from tests.harness.trajectory import diff_adding
 from tests.test_archive import _manifest_write_snapshot, _strict_archive
-from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
+from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok, _pin_findings_pr
 
 
 def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
@@ -319,25 +321,38 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
 async def test_failed_findings_export_retains_requested_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
-    _install_deep_capture_backend(multi_stack_target, monkeypatch)
+    """A required provider failure after snapshot capture exports truthful failure and diagnostics."""
+    class MissingSupervisorBackend(StubBackend):
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+            if "supervisor adjudication" in prompt.lower():
+                self.calls.append({"prompt": prompt, "model": self.model})
+                yield ResultEvent(structured_output=None, continuation=None)
+                return
+            async for event in super().execute(cwd, prompt, *args, **kwargs):
+                yield event
+
+    silence(monkeypatch)
+    backend = MissingSupervisorBackend(multi_stack_target)
+    backend.merge_items = [_merge_item(1, "api.py", "high")]
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    _pin_findings_pr(monkeypatch, multi_stack_target)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
-
-    def invalid_pr(*_args: Any, **_kwargs: Any) -> None:
-        raise git_ops.GitError("invalid PR row: malformed head repository slug")
-
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", invalid_pr)
     diagnostics = tmp_path / "diagnostics"
     trajectory = diagnostics / "trajectory.json"
     bundle = diagnostics / "bundle"
     findings = tmp_path / "findings.json"
-    exit_code = await run(RunConfig(
-        target=str(multi_stack_target), output_mode="review", non_interactive=True, cleanup=False, pr_number=7,
-        findings_out=str(findings), trajectory_path=trajectory, dump_artifacts=str(bundle),
-    ))
+    with pytest.raises(ReviewOutputError):
+        await run(RunConfig(
+            target=str(multi_stack_target), output_mode="review", non_interactive=True, cleanup=False, pr_number=7,
+            findings_out=str(findings), trajectory_path=trajectory, dump_artifacts=str(bundle),
+            file_config=DaydreamFileConfig(supervisor="llm"),
+        ))
 
-    assert exit_code == 1
-    assert not findings.exists()
+    result = json.loads(findings.read_text())["terminal_result"]
+    assert result["pipeline_state"] == "failed"
+    assert result["analysis_state"] == "incomplete"
+    assert "missing_output" in result["reason_codes"]
     exported = json.loads(trajectory.read_text())
     bundled = json.loads((bundle / "trajectory.json").read_text())
     assert exported["trajectory_id"] == bundled["trajectory_id"]

@@ -22,6 +22,20 @@ from daydream.trajectory import DaydreamPhase
 from daydream.workspace import WorkContext
 
 
+class IncompleteVerdicts(dict[int, dict[str, Any]]):
+    """Compatible empty verdict mapping preserving a terminal budget witness."""
+
+    def __init__(self, reason: str, verdicts: dict[int, dict[str, Any]] | None = None) -> None:
+        super().__init__(verdicts or {})
+        self.budget_reason = reason
+
+
+class _IncompleteAdjudication(list[dict[str, Any]]):
+    def __init__(self, reason: str) -> None:
+        super().__init__()
+        self.budget_reason = reason
+
+
 class AdjudicationInputs(TypedDict, total=False):
     """Grounding and runtime controls shared by all adjudication phases."""
 
@@ -138,6 +152,7 @@ async def _adjudicate(
     result, continuation, budget_reason = await agent.run_agent(
         backend, work.repo, prompt,
         output_schema=mode.schema,
+        require_full_schema=True,
         phase=DaydreamPhase.DEEP,
         review_limits=ReviewLimits(120, 60, mode.tool_limit, discovery=False),
         finalization_context=FinalizationContext(
@@ -155,10 +170,11 @@ async def _adjudicate(
     if budget_reason:
         record_review_budget_stop(dd, mode.label, budget_reason)
         ui.print_warning(agent.console, f"{mode.label} budget exhausted; continuing with incomplete adjudication.")
-        return None, None
+        return _IncompleteAdjudication(budget_reason), None
     clear_review_budget_stop(dd, mode.label)
-    if not isinstance(result, dict) or not isinstance(result.get(mode.result_key), list):
-        raise ValueError(f"{mode.label} returned no {mode.result_key} list (got {type(result).__name__})")
+    if not isinstance(result, dict) or not agent._validates_schema(result, mode.schema):
+        from daydream.phases.review import ReviewOutputError
+        raise ReviewOutputError(result)
     return result[mode.result_key], continuation
 
 
@@ -171,6 +187,8 @@ def _index_records(records: list[dict[str, Any]], id_key: str) -> list[dict[str,
 
 def _rekey_verdicts(findings: list[dict[str, Any]], id_key: str, label: str) -> dict[int, dict[str, Any]]:
     """Re-key verdicts by their integer host id and report the kept/dropped tally."""
+    if isinstance(findings, _IncompleteAdjudication):
+        return IncompleteVerdicts(findings.budget_reason)
     verdicts = {finding[id_key]: finding for finding in findings if isinstance(finding.get(id_key), int)}
     kept = sum(1 for verdict in verdicts.values() if verdict.get("keep"))
     ui.print_info(agent.console, f"{label}: kept {kept}, dropped {len(verdicts) - kept}")
@@ -187,6 +205,8 @@ async def phase_supervise_review(
     correspondence between supplied canonical items and echoed ids.
     """
     findings, _ = await _adjudicate(backend, work, _SUPERVISOR, items, **inputs)
+    if isinstance(findings, _IncompleteAdjudication):
+        return IncompleteVerdicts(findings.budget_reason)
     item_ids = {item.get("id") for item in items if isinstance(item.get("id"), int)}
     verdicts: dict[int, dict[str, Any]] = {}
     for verdict in findings or []:
@@ -197,6 +217,8 @@ async def phase_supervise_review(
                 if cleaned.get(field) is None:
                     cleaned.pop(field, None)
             verdicts[item_id] = cleaned
+    if set(verdicts) != item_ids or len(findings or []) != len(item_ids):
+        return IncompleteVerdicts("evidence_incomplete", verdicts)
     return verdicts
 
 

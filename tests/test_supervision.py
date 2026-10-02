@@ -119,8 +119,10 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
         registry.override_prompt("supervise", lambda **kwargs: build_supervise_prompt(**kwargs))
         monkeypatch.setattr("daydream.extensions.loader._REGISTRY_VAR", ContextVar("test-registry", default=registry))
     returned_verdicts = [
-        {"id": 1, "action": "edit", "severity": "low", "rationale": None},
-        {"id": 99, "action": "drop"},
+        {"id": 1, "action": "edit", "reason": "Reduce severity", "severity": "low",
+         "confidence": None, "description": None, "rationale": None, "evidence": None},
+        {"id": 99, "action": "drop", "reason": "Stale target", "severity": None,
+         "confidence": None, "description": None, "rationale": None, "evidence": None},
     ] if contract == "nonempty" else []
     backend = ScriptedBackend(events=[
         ResultEvent(structured_output={"verdicts": returned_verdicts}, continuation=None),
@@ -131,7 +133,8 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
         strategy=strategy, allow_standalone=True,
     )
 
-    assert verdicts == ({1: {"id": 1, "action": "edit", "severity": "low"}} if contract == "nonempty" else {})
+    expected = {1: {"id": 1, "action": "edit", "reason": "Reduce severity", "severity": "low"}}
+    assert verdicts == (expected if contract == "nonempty" else {})
     assert json.loads((dd / "supervise-input.json").read_text()) == items
     assert json.loads(review_budget_path(dd).read_text()) == {"Arbiter": "unresolved findings"}
     assert backend.call_count == (0 if contract in {"default", "packaged"} else 1)

@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+from jsonschema import ValidationError
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
+from daydream.json_utils import atomic_write_json
+
+if TYPE_CHECKING:
+    from daydream.review_result import ReviewCoverage
 
 # Reserved entry; resume loaders must not interpret it as a stack name.
 MERGE_FAILURE_KEY = "__merge__"
@@ -138,6 +145,44 @@ def merged_items_path(deep_dir_path: Path) -> Path:
 def per_stack_failures_path(deep_dir_path: Path) -> Path:
     """Persisted {stack_name: reason} failures, retained across merge resumes."""
     return deep_dir_path / "per-stack-failures.json"
+
+
+def review_coverage_path(deep_dir_path: Path) -> Path:
+    """Versioned planned inventory and positive review evidence for resume."""
+    return deep_dir_path / "review-coverage.json"
+
+
+def persist_review_coverage(deep_dir_path: Path, coverage: ReviewCoverage) -> None:
+    """Atomically persist independently checked coverage after joined phase writes."""
+    from daydream.review_result import ReviewCoverage
+
+    payload = coverage.to_dict()
+    ReviewCoverage.from_dict(payload)
+    atomic_write_json(review_coverage_path(deep_dir_path), payload)
+
+
+def restore_review_coverage(deep_dir_path: Path, current: ReviewCoverage) -> ReviewCoverage:
+    """Restore matching evidence into this run; legacy or foreign evidence fails closed."""
+    from daydream.review_result import ReviewCoverage
+
+    restart = "Re-run without --start-at to restart review and regenerate coverage evidence."
+    try:
+        stored = ReviewCoverage.from_dict(json.loads(review_coverage_path(deep_dir_path).read_text()))
+    except (OSError, ValueError, TypeError, KeyError, ValidationError) as exc:
+        raise ValueError(f"Cannot resume review: missing or corrupt versioned coverage evidence. {restart}") from exc
+    stored_inventory = stored.to_dict()["planned_scopes"]
+    current_inventory = current.to_dict()["planned_scopes"]
+    if stored.revision != current.revision or stored_inventory != current_inventory:
+        raise ValueError(f"Cannot resume review: analyzed revision or planned scope inventory changed. {restart}")
+    extra_phases = stored.required_phases - current.required_phases
+    extra_phases = {phase for phase in extra_phases
+                    if phase not in {"arbiter", "suppression", "findings", "pipeline"}
+                    and re.fullmatch(r"arbiter-group-\d+", phase) is None}
+    if not current.required_phases <= stored.required_phases or extra_phases:
+        raise ValueError(f"Cannot resume review: required review stages changed. {restart}")
+    payload = stored.to_dict()
+    payload["run_id"] = current.run_id
+    return ReviewCoverage.from_dict(payload)
 
 
 def fix_failures_path(deep_dir_path: Path) -> Path:

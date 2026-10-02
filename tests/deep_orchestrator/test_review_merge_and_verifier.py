@@ -10,7 +10,7 @@ from typing import Any
 import anyio
 import pytest
 
-from daydream import git_ops, runner as _runner
+from daydream import runner as _runner
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
@@ -24,9 +24,7 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import build_merge_prompt
-from daydream.findings import build_findings_artifact, load_findings_artifact, write_findings_artifact
-from daydream.pr_review import PRInfo, parsed_issues_from_items
-from daydream.review_budget import review_warnings
+from daydream.findings import load_findings_artifact
 from daydream.run_config import RunConfig
 from daydream.runner import _resolve_backend
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -41,6 +39,7 @@ from tests.test_deep_orchestrator import (
     _force_interactive,
     _install_model_capturing_stubs,
     _install_stub_backend,
+    _pin_findings_pr,
     _prime_merge_resume,
     _profile_with_pipeline,
     _record,
@@ -113,7 +112,10 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
 
     policy = DaydreamFileConfig(supervisor="llm", tool_supervisor="rules", tool_bash_deny=["blocked-review-tool"])
-    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", file_config=policy)
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    output = tmp_path / "findings.json"
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", file_config=policy,
+                                 findings_out=str(output), pr_number=pr.number)
     assert await _runner.run(config) == 0
 
     assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
@@ -125,22 +127,18 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     assert "python" in capsys.readouterr().out
     assert "Review incomplete" in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
     assert "python" in merged_report_path(deep).read_text()
-    # Exercise the same canonical loader and strict handoff schema as publication,
-    # with local Git objects providing the PR diff rather than another model call.
-    head = git_ops.head_sha(multi_stack_target)
-    base = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head)
-    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature",
-                owner="test", repo="fixture", url="https://github.com/test/fixture/pull/7")
-    items = json.loads(merged_items_path(deep).read_text())["items"]
-    warnings = review_warnings(deep)
-    artifact = build_findings_artifact(multi_stack_target, pr, parsed_issues_from_items(items),
-                                      run_info=None, review_warnings=warnings)
-    output = tmp_path / "findings.json"
-    write_findings_artifact(output, artifact)
-    loaded = load_findings_artifact(output, expected_repo="test/fixture", expected_pr_number=7, expected_head_sha=head)
+    loaded = load_findings_artifact(output, expected_repo="o/r", expected_pr_number=pr.number,
+                                    expected_head_sha=pr.head_sha)
     assert loaded.findings == []
-    assert loaded.review_warnings == warnings
     assert any("python" in warning for warning in loaded.review_warnings)
+    public = json.loads(output.read_text())
+    assert public["schema_version"] == 2
+    result = public["terminal_result"]
+    assert result["analysis_state"] == "incomplete"
+    assert result["pipeline_state"] == "completed"
+    assert set(result["completed_stacks"]) == {"generic", "react", "structure"}
+    failed_scope = next(row for row in result["stack_outcomes"] if row["scope_id"] == "python")
+    assert failed_scope["reason_codes"] == ["policy_veto" if budget_stop else "backend_failure"]
     if budget_stop:
         assert failures["python"].startswith("budget exhausted:")
     else:
@@ -159,7 +157,8 @@ async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
         backend.merge_echo_records = True
     elif input_kind == "alternatives":
         backend.alternatives = [{"id": 1, "title": "Alternative design", "description": "Missing reusable boundary",
-                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"]}]
+                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"],
+                                 "confidence": "MEDIUM", "rationale": "Boundary is reused", "evidence": "api.py:1"}]
         config_overrides["review_profile"] = independent_alternatives_profile()
     else:
         resolved = _profile_with_pipeline()
@@ -411,10 +410,10 @@ async def test_orchestrator_partitions_structural_records_from_merge(
 
     # The structural record carries a sentinel id so we can verify it never lands
     # in the dedup input lists.
-    _prime_merge_resume(multi_stack_target, python=[_record(id="py-1", description="py issue")],
-        react=[_record(id="react-1", description="tsx issue", file="App.tsx")],
-        generic=[_record(id="generic-1", description="docs issue", file="README.md")],
-        structure=[_record(id="structure-1", description="1000-line file budget violated")],
+    _prime_merge_resume(multi_stack_target, python=[_record(id=1, description="py issue")],
+        react=[_record(id=2, description="tsx issue", file="App.tsx")],
+        generic=[_record(id=3, description="docs issue", file="README.md")],
+        structure=[_record(id=4, description="1000-line file budget violated")],
     )
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
@@ -429,7 +428,7 @@ async def test_orchestrator_partitions_structural_records_from_merge(
 
     # (2) The structural sentinel record must NOT appear in either dedup input.
     def _has_structure(records: list[dict[str, Any]]) -> bool:
-        return any(str(r.get("id", "")).startswith("structure") for r in records)
+        return any(r.get("id") == 4 for r in records)
 
     assert not _has_structure(captured_dedup_records["records"]), (
         f"structural records leaked into build_dedup_candidates: {captured_dedup_records['records']}"

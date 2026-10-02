@@ -104,8 +104,13 @@ def _supervision_stub(
     return _install_stub_backend(monkeypatch, target, **install_kwargs)
 
 
-def _findings_out_config(make_config: MakeConfig, target: Path, out: Path, trajectory: Path | None = None,) -> Any:
-    """Build the shared findings-out run config (PR 7, target file config)."""
+def _findings_out_config(
+    make_config: MakeConfig, target: Path, out: Path, trajectory: Path | None = None,
+    *, monkeypatch: pytest.MonkeyPatch,
+) -> Any:
+    """Bind the supervision configuration and PR to a clean committed snapshot."""
+    _add_to_reviewed_diff(target, [".daydream.toml"])
+    _pin_findings_pr(monkeypatch, target)
     kwargs: dict[str, Any] = {"pr_number": 7, "findings_out": str(out), "file_config": load_file_config(target)}
     if trajectory is not None:
         kwargs["trajectory_path"] = trajectory
@@ -132,7 +137,7 @@ async def test_supervise_rules_drops_deny_globbed_finding(
     traj = tmp_path / "trajectory.json"
 
     _forbid_pr_post(monkeypatch)
-    rc = await run(_findings_out_config(make_config, multi_stack_target, out, traj))
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out, traj, monkeypatch=monkeypatch))
 
     assert rc == 0
     items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
@@ -191,7 +196,7 @@ async def test_supervise_llm_drop_records_step(
     traj = tmp_path / "trajectory.json"
 
     _forbid_pr_post(monkeypatch)
-    rc = await run(_findings_out_config(make_config, multi_stack_target, out, traj))
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out, traj, monkeypatch=monkeypatch))
 
     assert rc == 0
     items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
@@ -210,7 +215,7 @@ async def test_supervise_llm_edit_revises_severity(
     stub.supervise_verdicts = {1: {"action": "edit", "reason": "less severe", "severity": "low"}}
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
     out = multi_stack_target / "findings.json"
-    rc = await run(_findings_out_config(make_config, multi_stack_target, out))
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out, monkeypatch=monkeypatch))
 
     assert rc == 0
     payload = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())
@@ -226,26 +231,27 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop everything")]
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "rules"\nsupervisor_deny_globs = ["**"]\n')
     out = multi_stack_target / "findings.json"
-    rc = await run(_findings_out_config(make_config, multi_stack_target, out))
+    rc = await run(_findings_out_config(make_config, multi_stack_target, out, monkeypatch=monkeypatch))
     assert rc == 0
     assert json.loads(out.read_text())["findings"] == []
 
 async def test_supervise_off_byte_identical(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    tmp_path: Path,
 ) -> None:
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [
         _merge_item(1, "api.py", "high", desc="first finding"), _merge_item(2, "App.tsx", "low", desc="second finding"),
     ]
-    out = multi_stack_target / "findings.json"
+    out = tmp_path / "findings.json"
     empty_config = load_file_config(multi_stack_target)
     first_rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), file_config=empty_config))
     first_items = (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_bytes()
     first_findings = json.loads(out.read_text())["findings"]
 
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "off"\n')
-    second_rc = await run(_findings_out_config(make_config, multi_stack_target, out))
+    second_rc = await run(_findings_out_config(make_config, multi_stack_target, out, monkeypatch=monkeypatch))
     second_items = (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_bytes()
     second_findings = json.loads(out.read_text())["findings"]
 

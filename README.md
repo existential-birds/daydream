@@ -790,6 +790,54 @@ Private storage prevents generated artifacts from appearing in ordinary cwd-root
 
 The `.daydream/exploration/` cache is reused on an exact key match. The key excludes uncommitted edits. A near-match never counts as a hit, because a stale hit would misground every review prompt. The `--shallow` and `--review` modes delete the directory. Alternating modes degrade to a cache miss, never to stale grounding.
 
+### Terminal review findings contract
+
+Review runs using `--findings-out` emit findings schema version 2 with a required
+`terminal_result` (nested schema version 1). `analysis_state` is `complete` only
+when every planned reviewer and required review stage has positive completion or
+host no-op evidence. `incomplete` retains usable complete/validated partial
+analysis with unfinished coverage; `failed` has no usable analysis or no
+trustworthy findings projection. Empty findings and a successful CLI exit do not
+prove complete coverage. `pipeline_state` describes review processing through
+validated findings finalization, independently of analysis coverage and later
+fixes, publication, or archive upload.
+
+The result records the current run ID, exact planned stack/shard scopes, outcomes,
+bounded reason codes, and the captured head, diff merge-base, initial PR base tip
+when available, and exact analyzed diff key. Model turn exhaustion is
+`model_budget_exhaustion`; host wall, tool, and pipeline limits have separate
+codes. Backend, authentication, invalid/missing output, evidence, and policy-veto
+failures remain typed even if human warning strings are absent. Valid partial
+findings survive normal finalization. Findings and result are validated together
+and installed as one atomic JSON envelope.
+
+Commit-bound export requires a clean analyzed checkout. Dirty input produces a
+failed result and nonzero exit; interactive review without findings export keeps
+its existing dirty-review behavior. Export target identity and placement use the
+initial snapshot, without a later live PR metadata or diff lookup. Privileged
+posters still compare against the caller's independently trusted target.
+
+Readers support strict findings versions 1 and 2; unknown versions and inconsistent
+results are rejected. Version 1 review completeness is unknown and cannot authorize
+approval or stale finding resolution; existing comments remain publishable.
+Diagram-only exports remain version 1 and never establish code-review completeness.
+Producer and poster workflow pins must upgrade together to a reviewed version
+supporting version 2: an older strict poster will reject the new envelope. Existing
+immutable template pins are retained until that reviewed release is available.
+
+Hosted callers must choose a unique, initially absent output path per invocation.
+If a path is reused, compare its run ID against an independently known expected
+invocation ID; reading the file's own opaque ID does not establish freshness.
+A previous complete file may survive a failed replacement. Missing files,
+truncated JSON, process destruction, and failed public installation provide no
+valid current terminal result; callers must never interpret them as clean analysis.
+
+Resume and review-unit cache proofs bind the analyzed revision and exact planned
+scope inventory. Legacy entries without positive typed coverage, corrupt entries,
+and changed head/diff/shard inventories require fresh review. Same-revision
+partial merge resumes retain incomplete coverage; a successful rerun supersedes
+its scope failure. Valid complete reuse is rebound to the current run ID.
+
 ## Development
 
 **New to contributing? Read [CONTRIBUTING.md](CONTRIBUTING.md) — setup, commands, the required gate, and PR workflow.**

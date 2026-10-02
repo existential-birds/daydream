@@ -38,7 +38,8 @@ async def test_fork_prompt_override_reaches_backend(
         "    r.override_prompt('per-stack', lambda **kw: f\"RO-STACK {kw['strategy']}\")\n"
     )
     backend = ScriptedBackend(
-        events=(TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
+        events=(TextEvent(text="Intent and review complete."),
+                ResultEvent(structured_output={"issues": []}, continuation=None))
     )
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")
@@ -59,7 +60,8 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
 ) -> None:
     """Shallow review without --stack retains detected Python scope and emits no skill token."""
     backend = ScriptedBackend(
-        events=(TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
+        events=(TextEvent(text="Intent and review complete."),
+                ResultEvent(structured_output={"issues": []}, continuation=None))
     )
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")

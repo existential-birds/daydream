@@ -1840,13 +1840,12 @@ def _make_intent_backend(summary: str) -> ScriptedBackend:
 @pytest.mark.parametrize(("summary", "visible"), [
     ("This change adds a login page with email and password authentication.",
      "This change adds a login page with email and password authentication."),
-    ("", "(the agent produced no intent summary)"),
 ])
 async def test_phase_understand_intent_renders_summary_before_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
     silence_console: Callable[..., None], summary: str, visible: str,
 ) -> None:
-    """Record the actual Understanding panel, including the empty-reply placeholder."""
+    """Record the actual Understanding panel before the intent confirmation gate."""
     silence_console("daydream.ui", keep=("console", "print_intent_summary"))
     recording = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.agent.console", recording)
@@ -1873,9 +1872,11 @@ async def test_phase_alternative_review_returns_issues(
     structured_issues = {"issues": [{"id": 1, "title": "Use dependency injection",
                 "description": "Hard-coded dependencies make testing difficult",
                 "recommendation": "Use constructor injection", "severity": "high", "files": ["src/service.py"],
+                "confidence": "HIGH", "rationale": "Constructor dependencies are fixed", "evidence": "src/service.py:1",
             },
             {"id": 2, "title": "Missing error handling", "description": "No error handling for API calls",
                 "recommendation": "Add try/except with retries", "severity": "medium", "files": ["src/api.py"],
+                "confidence": "HIGH", "rationale": "Errors escape API calls", "evidence": "src/api.py:1",
             },
         ]
     }

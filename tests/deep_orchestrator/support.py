@@ -334,6 +334,7 @@ class _RejectingArbiterBackend(_StubBackend):
                             "confidence": entry.get("confidence") or "HIGH",
                             "description": f"ARBITRATED: {entry.get('description')}",
                             "rationale": "arbiter second opinion",
+                            "evidence": entry.get("evidence") or "api.py:1",
                         }
                         for entry in entries
                     ]
@@ -380,7 +381,8 @@ def _prime_source_uid_merge_resume(target: Path, *, structure: list[dict[str, An
         generic=[_record(description="docs issue", file="README.md", evidence="README.md:1", uid="generic:1",)],
         structure=(structure
             if structure is not None
-            else [_record(description="structural issue", line=5, evidence="api.py:5", uid="structure:1",)]
+            else [_record(description="structural issue", line=5, evidence="api.py:5",
+                          severity="high", uid="structure:1")]
         ),
     )
 
@@ -506,7 +508,7 @@ def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
         "generic": ("README.md", "generic finding"),
     }
     return {name: {
-            "severity": severities[name], "confidence": "high", "file": file, "line": 1, "description": description,
+            "severity": severities[name], "confidence": "HIGH", "file": file, "line": 1, "description": description,
         }
         for name, (file, description) in locations.items()
     }

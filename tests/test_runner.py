@@ -1098,13 +1098,32 @@ async def test_improve_inherited_storage_override_stops_before_model(
 # --- Deep fix-cycle hero is followed by Model: dim line --------------------
 
 def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
-    """Seed merged items with a matching diff-key and return the deep directory for resume tests."""
+    """Seed identity-bound completed shallow review evidence for fix-only tests."""
+    from daydream.deep.artifacts import persist_review_coverage
+    from daydream.deep.diff import _diff_changed_files
+    from daydream.deep.orchestrator import _prepare_review_stacks
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     base = _resolve_base(target, None, None)
-    diff = git_ops.diff(target, base)
-    diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
+    diff = git_ops.diff(target, base) or ""
+    head = git_ops.head_sha(target)
+    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
+    config = RunConfig(target=str(target), shallow=True)
+    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
+    coverage = ReviewCoverage("fix-resume-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
+                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
+                                            files=tuple(sorted(stack.files))) for stack in stacks],
+                              ("intent", "alternatives", "merge"))
+    for scope in coverage.planned_scopes:
+        coverage.record_scope(scope.scope_id, "complete")
+    coverage.record_phase("intent", "complete")
+    coverage.record_phase("alternatives", "complete", noop=True)
+    coverage.record_phase("merge", "complete")
+    diff_key_path(deep).write_text(diff_key(diff), encoding="utf-8")
     merged_items_path(deep).write_text(json.dumps({"items": items}))
+    persist_review_coverage(deep, coverage)
     return deep
 
 def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
@@ -1112,7 +1131,7 @@ def _fix_item(item_id: int = 1, *, severity: str = "medium") -> dict[str, Any]:
     return {
         "id": item_id, "lens": "per-stack", "file": "main.py", "line": 1, "severity": severity,
         "description": f"{severity} issue in main.py", "confidence": "MEDIUM", "rationale": "rationale",
-        "evidence": "main.py:1",
+        "evidence": "main.py:1", "source_uids": [f"python:{item_id}"], "related_files": None,
     }
 
 def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:

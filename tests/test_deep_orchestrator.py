@@ -155,7 +155,9 @@ def _go_quote_project(tmp_path: Path) -> Path:
 
 def _record(**overrides: Any) -> dict[str, Any]:
     """Build one on-disk per-stack record (the shape a merge resume reads back)."""
-    record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1}
+    record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1,
+                              "severity": "medium", "confidence": "MEDIUM",
+                              "rationale": "fixture defect", "evidence": "api.py:1"}
     record.update(overrides)
     return record
 
@@ -186,9 +188,31 @@ def _prime_merge_resume(
     _write_matching_diff_key(target, deep)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
-    for stack, records in (("python", python), ("react", react), ("generic", generic), ("structure", structure),):
+    from daydream.deep.artifacts import persist_review_coverage
+    from daydream.deep.diff import _diff_changed_files
+    from daydream.deep.orchestrator import _prepare_review_stacks
+    from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+
+    config = RunConfig(target=str(target), start_at="merge", cleanup=False)
+    base = _resolve_base(target, None, None)
+    diff = git_ops.diff(target, base) or ""
+    head = git_ops.head_sha(target)
+    merge_base = git_ops.resolve_diff_merge_base(target, base, head)
+    stacks, _, _ = _prepare_review_stacks(config, _diff_changed_files(diff), diff, target, "deep")
+    coverage = ReviewCoverage("primed-review-fixture", AnalyzedRevision(head, merge_base, diff_key(diff)),
+                              [PlannedScope(stack.stack_name, stack.stack_name.split("#", 1)[0],
+                                            files=tuple(sorted(stack.files))) for stack in stacks],
+                              ("intent", "alternatives", "merge"))
+    coverage.record_phase("intent", "complete")
+    coverage.record_phase("alternatives", "complete", noop=True)
+    for stack, records in (("python", python), ("react", react), ("generic", generic), ("structure", structure)):
         if records is not None:
-            (deep / f"stack-{stack}-records.json").write_text(json.dumps(records))
+            envelope = {"issues": records, "scope_id": stack, "analyzed_revision": coverage.revision.to_dict(),
+                        "originating_run_id": coverage.run_id}
+            (deep / f"stack-{stack}-records.json").write_text(json.dumps(envelope))
+            if stack in coverage.scopes:
+                coverage.record_scope(stack, "complete")
+    persist_review_coverage(deep, coverage)
     return deep
 
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
@@ -214,7 +238,7 @@ def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
         cwd=target, capture_output=True, text=True, check=True,
     ).stdout.strip()
     pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature", owner="o", repo="r",
-        url="https://example.invalid/pr/7",
+        url="https://example.invalid/pr/7", pr_base_sha=base,
     )
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda target_dir, n, **_kwargs: pr)
     return pr

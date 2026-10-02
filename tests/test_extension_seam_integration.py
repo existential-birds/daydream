@@ -37,6 +37,9 @@ InstallBackend = Callable[[object], object]
 
 # The no-op turn every non-dispatching stub in this file yielded: empty text plus
 # a terminal result.
+_REVIEW_TURN = (TextEvent(text="Intent and review complete."),
+                ResultEvent(structured_output={"issues": []}, continuation=None))
+
 _EMPTY_TURN = (TextEvent(text=""), ResultEvent(structured_output=None, continuation=None))
 
 
@@ -368,7 +371,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
         "    r.register_phase(FlowStep(name='ro_audit', run=_ro))\n"
         "    r.insert_after('deep', anchor='intent', step='ro_audit')\n"
     )
-    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
     install_backend(backend)
 
     rc = await runner.run(make_config(tiny_diff_target, output_mode="review"))
@@ -720,7 +723,7 @@ async def test_flow_review_routes_to_review_helper(
     tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
     """--flow review reaches structural review with the default design lens."""
-    backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
+    backend = ScriptedBackend(events=_REVIEW_TURN, model="mock-model")
     install_backend(backend)
 
     rc = await runner.run(make_config(tiny_diff_target, flow_name="review"))

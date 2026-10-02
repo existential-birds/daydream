@@ -93,7 +93,7 @@ class _DeepMockBackend(ScriptedBackend):
                                 "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
                                 "evidence": "api.py:1",
                             }
-                        ], "verdicts": [],
+                        ],
                     }, continuation=None,
                 ),
             ]

@@ -164,10 +164,14 @@ def _load_destination_records(transaction: Path, *, include_published: bool) -> 
 
 
 def _persist_live_destination_record(transaction: Path, updated: _DestinationRecord) -> None:
-    records = list(_load_destination_records(transaction, include_published=False))
+    registry = filesystem._load_json(transaction / "destinations.json")
+    includes_published = registry.get("includes_published")
+    if type(includes_published) is not bool:
+        raise ArtifactVisibilityError("artifact destination registry is malformed")
+    records = list(_load_destination_records(transaction, include_published=includes_published))
     for index, record in enumerate(records):
         if record.record_id == updated.record_id:
             records[index] = updated
-            _write_destination_records(transaction, records, include_published=False)
+            _write_destination_records(transaction, records, include_published=includes_published)
             return
     raise ArtifactVisibilityError("live external destination ledger identity is missing")

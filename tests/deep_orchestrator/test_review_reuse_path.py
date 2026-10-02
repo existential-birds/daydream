@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -66,35 +67,6 @@ def _reviewed_stacks(calls: list[dict[str, object]]) -> set[str]:
             if match is not None:
                 reviewed.add(match.group(1))
     return reviewed
-
-
-def _stack_bytes(deep: Path, names: set[str]) -> dict[str, bytes]:
-    """The current records bytes for ``names``, keyed by artifact basename."""
-    return {f"stack-{name}-records.json": (deep / f"stack-{name}-records.json").read_bytes() for name in names}
-
-
-def _origin_stack_bytes(deep: Path, names: set[str]) -> dict[str, bytes]:
-    """The origin run's records bytes for ``names``, read from the reuse store.
-
-    A recompute stores a second entry under a moved key, so the oldest
-    ``created_at`` for a unit is the byte-for-byte content a reuse would have
-    restored.
-    """
-    entries = deep.parent / "review-cache" / "entries"
-    origin: dict[str, bytes] = {}
-    for name in names:
-        artifact = f"stack-{name}-records.json"
-        candidates: list[tuple[float, Path]] = []
-        for entry in entries.iterdir():
-            try:
-                manifest = json.loads((entry / "manifest.json").read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                continue
-            if manifest.get("unit") == f"shard:{name}" and artifact in (manifest.get("payload") or {}):
-                candidates.append((float(manifest.get("created_at", 0.0)), entry))
-        if candidates:
-            origin[artifact] = min(candidates)[1].joinpath(artifact).read_bytes()
-    return origin
 
 
 def _entry_count_for_unit(deep: Path, unit: str) -> int:
@@ -213,10 +185,10 @@ async def test_exploration_provenance_is_recorded_in_the_store(
     record = json.loads(records[0].read_text(encoding="utf-8"))
     assert record["units"]["exploration"]["outcome"] in {"reused", "regenerated"}
 
-async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_misses_only_its_shard(
+async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_bound_coverage(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """An identical run reuses every shard; one assigned-file edit invalidates only its owner."""
+    """An identical run reuses every shard; changed diff invalidates the bound coverage inventory."""
     stub = install_stub_backend(monkeypatch, shard_many_python_target)
     run_config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
                              deep_shard_max_bytes=10**9)
@@ -231,7 +203,7 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_misses_only_its_
     target.write_text("def f0():\n    return 'edited'\n")
     stub.calls.clear()
     assert await run(run_config) == 0
-    assert _count_review_prompts(stub.calls) == 1          # only the shard owning mod0.py recomputes
+    assert _count_review_prompts(stub.calls) >= 2  # changed snapshot cannot reuse prior completion claims
 
 async def test_reused_shard_leaves_no_stale_companion_artifact(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -249,13 +221,10 @@ async def test_reused_shard_leaves_no_stale_companion_artifact(
     assert (deep / "per-stack-failures.json").exists() == fresh_failures
     assert _records_bytes(multi_stack_target) == fresh_records, "reused records must be byte-identical"
 
-async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it(
+async def test_editing_a_recorded_frontier_file_invalidates_snapshot_bound_coverage(
     sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A recorded frontier file invalidates every shard that named it, not just its primary owner.
-
-    Structural file content is grounding rather than keying, so that meta-stack still hits.
-    """
+    """Frontier edits move the analyzed diff, invalidating every previous completion claim."""
     stub = install_stub_backend(monkeypatch, sibling_frontier_target)
     config = make_config(sibling_frontier_target, deep_shard_enabled=True, deep_shard_max_files=1,
                          deep_shard_max_bytes=10**9)
@@ -283,21 +252,18 @@ async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it
         for name, rec in scopes.items()
         if "core.py" in rec["assigned_files"] and name != STRUCTURE_STACK_NAME
     }
-    origin_structure = _stack_bytes(deep, {STRUCTURE_STACK_NAME})
     (sibling_frontier_target / "core.py").write_text("SHARED = 'edited'\n")
     stub.calls.clear()
     assert await run(config) == 0
-    expected_miss = namers | owner
+    assert namers | owner
+    expected_miss = set(scopes) - {STRUCTURE_STACK_NAME}
     assert _reviewed_stacks(stub.calls) == expected_miss
-    assert _reused_stacks(deep) == set(scopes) - expected_miss
-    # A frontier namer recomputes under a moved key, so the store holds both the
-    # origin entry and this run's entry; the reused shard keeps exactly one and
-    # restores the origin bytes verbatim.
+    assert _reused_stacks(deep) == set()
+    # The captured full diff participates in coverage-bound keys, including
+    # the structural meta-stack whose completion also belongs to this snapshot.
     for name in namers:
         assert _entry_count_for_unit(deep, f"shard:{name}") == 2
-    assert _entry_count_for_unit(deep, f"shard:{STRUCTURE_STACK_NAME}") == 1
-    assert _stack_bytes(deep, {STRUCTURE_STACK_NAME}) == origin_structure
-    assert _origin_stack_bytes(deep, {STRUCTURE_STACK_NAME}) == origin_structure
+    assert _entry_count_for_unit(deep, f"shard:{STRUCTURE_STACK_NAME}") == 2
 
 
 _ARBITER_DISCRIMINATOR = "you are the arbiter"
@@ -337,13 +303,10 @@ async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_p
     # the group markers are read from the fresh run's own artifacts, not from the store.
     assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))
 
-async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_with_grounding(
+async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A real Daydream fix commit moves HEAD and refreshes pre-scan/intent.
-
-    Untouched shards reuse with provenance; affected shards and downstream aggregation recompute.
-    """
+    """A real Daydream fix commit moves HEAD and requires positive coverage of the new snapshot."""
     stub = install_stub_backend(monkeypatch, shard_many_python_target, enable_exploration=True)
     config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
                          deep_shard_max_bytes=10**9)
@@ -363,18 +326,16 @@ async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_w
     stub.calls.clear()
     assert await run(config) == 0
     deep = shard_many_python_target / ".daydream" / "deep"
-    assert len(_reviewed_stacks(stub.calls)) == 1              # exactly the shard owning mod0.py
+    assert len(_reviewed_stacks(stub.calls)) >= 2
     assert _count_arbiter_prompts(stub.calls) >= 1             # records changed -> arbiter recomputes
     assert _count_merge_prompts(stub.calls) >= 1               # merged set consumes records
     provenance = json.loads(reuse_store.provenance_path(
         shard_many_python_target / ".daydream" / "review-cache", _session_id_of(deep)).read_text())
     reused = [k for k, v in provenance["units"].items() if k.startswith("shard:") and v["outcome"] == "hit"]
-    assert reused, "sibling shards must still reuse after the fix commit"
-    for unit in reused:                                        # MH16, per reused unit
-        assert provenance["units"][unit]["grounding"]["settled_decisions"]["moved"] is True
-        assert provenance["units"][unit]["grounding_status"]["exploration"] == "regenerated"
+    assert not reused, "previous-head completion claims cannot establish current coverage"
+    assert all(value["outcome"] == "miss" for name, value in provenance["units"].items() if name.startswith("shard:"))
 
-async def test_run_reports_which_units_were_reused_and_that_their_grounding_moved(
+async def test_run_reports_snapshot_bound_reuse_misses_after_head_moves(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -389,8 +350,7 @@ async def test_run_reports_which_units_were_reused_and_that_their_grounding_move
         assert await run(config) == 0
     summary = [r.getMessage() for r in caplog.records if r.getMessage().startswith("Review reuse:")]
     assert summary, "the run must report its reuse outcome"
-    assert "hit" in summary[-1] and "shard:" in summary[-1]
-    assert "grounding moved" in summary[-1], "MH16: a reused unit's moved grounding must be reported"
+    assert "0 hit" in summary[-1] and "shard:" in summary[-1]
 
 async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_byte(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -468,3 +428,133 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
     assert any(v["outcome"] == "disabled" for v in units.values())
 
 
+@pytest.mark.parametrize("damage", ["legacy", "corrupt", "incomplete", "head", "diff", "scope", "origin",
+                                     "partial_payload", "malformed_payload"])
+async def test_legacy_cache_without_coverage_proof_recomputes_review(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    damage: str,
+) -> None:
+    """Pre-v2 completed bytes cannot establish complete current review coverage."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target)
+    assert await run(config) == 0
+    entries = multi_stack_target / ".daydream" / "review-cache" / "entries"
+    for manifest_path in entries.glob("*/manifest.json"):
+        manifest = json.loads(manifest_path.read_text())
+        if damage == "legacy":
+            manifest.pop("coverage", None)
+        elif damage == "corrupt":
+            manifest["coverage"] = "invalid proof"
+        elif damage == "incomplete":
+            manifest["coverage"]["status"] = "incomplete"
+        elif damage == "origin":
+            manifest["origin"] = "malformed lineage"
+        elif damage in {"partial_payload", "malformed_payload"}:
+            for name in manifest["payload"]:
+                if not name.startswith("stack-") or not name.endswith("-records.json"):
+                    continue
+                payload_path = manifest_path.parent / name
+                payload = json.loads(payload_path.read_text())
+                if damage == "partial_payload":
+                    payload["incomplete"] = True
+                else:
+                    payload["issues"] = ["invalid authored finding"]
+                payload_path.write_text(json.dumps(payload))
+                manifest["payload"][name] = hashlib.sha256(payload_path.read_bytes()).hexdigest()
+        elif damage in {"head", "diff"}:
+            field = "head_sha" if damage == "head" else "diff_key"
+            manifest["coverage"]["analyzed_revision"][field] = "f" * (40 if damage == "head" else 64)
+        else:
+            manifest["coverage"]["planned_scopes"][0]["files"] = ["foreign.py"]
+        manifest_path.write_text(json.dumps(manifest))
+    stub.calls.clear()
+    assert await run(config) == 0
+    assert _count_review_prompts(stub.calls) > 0
+    if damage not in {"partial_payload", "malformed_payload"}:
+        assert _count_merge_prompts(stub.calls) > 0
+    coverage = json.loads((multi_stack_target / ".daydream" / "deep" / "review-coverage.json").read_text())
+    assert all(outcome["status"] == "complete" for outcome in coverage["stack_outcomes"])
+
+
+@pytest.mark.parametrize("damage", ["missing", "corrupt", "head", "diff", "scope", "phase"])
+async def test_resume_rejects_missing_or_mismatched_coverage(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, damage: str, tmp_path: Path,
+) -> None:
+    """Resume requires a valid same-snapshot inventory; bytes alone are insufficient."""
+    from tests.test_deep_orchestrator import _pin_findings_pr
+
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    initial = tmp_path / "initial-review.json"
+    assert await run(make_config(multi_stack_target, findings_out=str(initial), pr_number=pr.number)) == 0
+    path = multi_stack_target / ".daydream" / "deep" / "review-coverage.json"
+    if damage == "missing":
+        path.unlink()
+    elif damage == "corrupt":
+        path.write_text("{broken")
+    else:
+        evidence = json.loads(path.read_text())
+        if damage in {"head", "diff"}:
+            field = "head_sha" if damage == "head" else "diff_key"
+            evidence["analyzed_revision"][field] = "f" * (40 if damage == "head" else 64)
+        elif damage == "scope":
+            evidence["planned_scopes"][0]["files"] = ["changed-assignment.py"]
+        else:
+            evidence["required_phases"].append("unknown-stage")
+        path.write_text(json.dumps(evidence))
+    stub.calls.clear()
+    output = tmp_path / "resume-review.json"
+    assert await run(make_config(multi_stack_target, start_at="merge", findings_out=str(output),
+                                pr_number=pr.number)) == 1
+    assert _review_surface_prompts(stub.calls) == []
+    assert not output.exists(), "rejected resume cannot manufacture version 2 coverage from unproven evidence"
+    assert initial.is_file()
+
+
+async def test_complete_reuse_rebinds_coverage_to_current_run(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+) -> None:
+    """Warm complete outputs retain positive evidence and receive a fresh run identity."""
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    config = make_config(multi_stack_target)
+    assert await run(config) == 0
+    path = multi_stack_target / ".daydream" / "deep" / "review-coverage.json"
+    first = json.loads(path.read_text())
+    stub.calls.clear()
+    assert await run(config) == 0
+    second = json.loads(path.read_text())
+    assert first["run_id"] != second["run_id"]
+    assert first["analyzed_revision"] == second["analyzed_revision"]
+    assert first["planned_scopes"] == second["planned_scopes"]
+    assert first["stack_outcomes"] == second["stack_outcomes"]
+    assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
+    assert _review_surface_prompts(stub.calls) == []
+
+
+async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """A failed scope stays incomplete until the real reviewer succeeds on resume."""
+    from daydream.findings import load_findings_artifact
+    from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
+    from tests.test_deep_orchestrator import _pin_findings_pr
+
+    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
+    backend = EmptyReviewBackend(multi_stack_target, fail_stack="python")
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    outputs = [tmp_path / "failed-sibling.json", tmp_path / "scope-rerun.json"]
+    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
+                                        findings_out=str(outputs[0]), pr_number=pr.number)) == 0
+    backend.fail_stack = None
+    assert await run(empty_review_config(multi_stack_target, tmp_path / "trajectory-resume.json", start_at="per-stack",
+                                        findings_out=str(outputs[1]), pr_number=pr.number)) == 0
+    artifacts = [load_findings_artifact(path, expected_repo="o/r", expected_pr_number=pr.number,
+                                        expected_head_sha=pr.head_sha) for path in outputs]
+    first, second = [artifact.terminal_result for artifact in artifacts]
+    assert first is not None and second is not None
+    assert first["analysis_state"] == "incomplete"
+    assert first["failed_stacks"] == ["python"]
+    assert second["analysis_state"] == "complete"
+    assert second["failed_stacks"] == []
+    assert "backend_failure" not in second["reason_codes"]
+    assert first["analyzed_revision"] == second["analyzed_revision"]

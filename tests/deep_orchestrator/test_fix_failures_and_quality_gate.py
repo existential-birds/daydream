@@ -32,10 +32,10 @@ from tests.test_deep_orchestrator import (
     _force_interactive,
     _install_stub_backend,
     _merge_item,
+    _prime_merge_resume,
     _read_quality_gate,
     _run_quality_gate_fixture,
     _silence,
-    _write_matching_diff_key,
 )
 
 
@@ -374,10 +374,14 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     """Real-path (#329/Finding 6): a malformed resume artifact can't silently disable the gate."""
 
     target = _build_gate_target(tmp_path, "gate_malformed_resume")
-    deep = target / ".daydream" / "deep"
-    deep.mkdir(parents=True, exist_ok=True)
-    _write_matching_diff_key(target, deep)
+    deep = _prime_merge_resume(target, python=[], structure=[])
     (deep / "merged-items.json").write_text(json.dumps({"items": [_merge_item(1, "api.py", "high")]}))
+    from daydream.deep.artifacts import persist_review_coverage, review_coverage_path
+    from daydream.review_result import ReviewCoverage
+
+    coverage = ReviewCoverage.from_dict(json.loads(review_coverage_path(deep).read_text()))
+    coverage.record_phase("merge", "complete", noop=True)
+    persist_review_coverage(deep, coverage)
     gate_p = deep / "fix-quality-gate.json"
     gate_p.write_text("[]")
 
@@ -443,14 +447,15 @@ async def test_fix_quality_gate_covers_authorized_secondary_edit(
     _force_interactive(monkeypatch)
     mute_side_effects()
     stub = _ExtraEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
-    # A single-stack run consumes parsed findings directly, without merge.
-    stub.parse_by_stack = {"python": {
-        "severity": "high", "confidence": "MEDIUM", "issue": {"related_files": ["helper.py"]},
-    }}
+    # Related-file authority belongs to the synthesis contract, rather than
+    # the reviewer's stricter per-stack record envelope.
+    stub.parse_by_stack = {"python": {"severity": "high", "confidence": "MEDIUM"}}
+    stub.merge_items = [{**_merge_item(1, "api.py", "high"), "related_files": ["helper.py"]}]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
-    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False))
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False,
+                                     shallow_fanout_threshold=0))
     assert exit_code == 0
 
     gate = _read_quality_gate(target)

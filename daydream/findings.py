@@ -7,6 +7,7 @@ checkout access. Dependencies flow from findings to pr_review.
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,9 +16,12 @@ from typing import Any
 import jsonschema
 
 from daydream import git_ops, pr_review
+from daydream.json_utils import atomic_write_bytes
 from daydream.pr_review import ParsedIssue, PRInfo
+from daydream.review_result import TERMINAL_RESULT_SCHEMA, validate_terminal_result
 
-FINDINGS_SCHEMA_VERSION = 1
+FINDINGS_SCHEMA_VERSION = 2
+LEGACY_FINDINGS_SCHEMA_VERSION = 1
 
 MAX_ARTIFACT_BYTES = 1_048_576
 
@@ -33,7 +37,7 @@ FINDINGS_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
     "required": ["schema_version", "repo", "pr_number", "head_sha", "findings"],
     "properties": {
-        "schema_version": {"const": FINDINGS_SCHEMA_VERSION},
+        "schema_version": {"const": LEGACY_FINDINGS_SCHEMA_VERSION},
         "repo": {"type": "string"},
         "pr_number": {"type": "integer"},
         "head_sha": {"type": "string"},
@@ -81,6 +85,31 @@ FINDINGS_SCHEMA: dict[str, Any] = {
 }
 
 
+FINDINGS_SCHEMA_V2 = copy.deepcopy(FINDINGS_SCHEMA)
+FINDINGS_SCHEMA_V2["required"].append("terminal_result")
+FINDINGS_SCHEMA_V2["properties"].update({
+    "schema_version": {"const": FINDINGS_SCHEMA_VERSION},
+    "kind": {"const": "review"},
+    "terminal_result": TERMINAL_RESULT_SCHEMA,
+})
+
+
+def _validate_artifact(data: Any) -> None:
+    """Dispatch supported versions explicitly, then check coverage semantics."""
+    version = data.get("schema_version") if isinstance(data, dict) else None
+    if type(version) is not int or version not in (1, 2):
+        raise FindingsValidationError(f"artifact failed schema validation: unsupported schema version {version!r}")
+    try:
+        jsonschema.validate(data, FINDINGS_SCHEMA if version == 1 else FINDINGS_SCHEMA_V2)
+        if version == 2:
+            validate_terminal_result(data["terminal_result"], expected_head_sha=data["head_sha"])
+            if not data["terminal_result"]["projection_valid"] and data["findings"]:
+                raise ValueError("untrustworthy projection must not contain findings")
+    except (jsonschema.ValidationError, ValueError) as exc:
+        message = exc.message if isinstance(exc, jsonschema.ValidationError) else str(exc)
+        raise FindingsValidationError(f"artifact failed schema validation: {message}") from exc
+
+
 class FindingsValidationError(Exception):
     """Artifact read/write size, parse, schema or event-binding validation failed."""
 
@@ -125,6 +154,22 @@ class FindingsArtifact:
     kind: str = "review"
     diagrams: dict[str, Any] | None = None
     review_warnings: tuple[str, ...] = ()
+    schema_version: int = LEGACY_FINDINGS_SCHEMA_VERSION
+    terminal_result: dict[str, Any] | None = None
+
+    @property
+    def analysis_complete(self) -> bool:
+        """Legacy artifacts have unknown coverage, never positive completeness."""
+        return self.terminal_result is not None and self.terminal_result["analysis_state"] == "complete"
+
+    @property
+    def coverage_notice(self) -> tuple[str, ...]:
+        """Human compatibility projection for typed incomplete/failed outcomes."""
+        if self.terminal_result is None or self.analysis_complete:
+            return ()
+        state = self.terminal_result["analysis_state"]
+        reasons = ", ".join(self.terminal_result["reason_codes"])
+        return (f"Review analysis is {state}; required coverage was not completed ({reasons}).",)
 
 
 def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> dict[str, Any]:
@@ -155,6 +200,8 @@ def build_findings_artifact(
     kind: str = "review",
     diagrams: dict[str, Any] | None = None,
     renderers: pr_review.ReviewRenderers | None = None,
+    terminal_result: dict[str, Any] | None = None,
+    snapshot_diff: str | None = None,
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> dict[str, Any]:
     """Classify against the PR diff before producing the handoff artifact.
@@ -163,7 +210,8 @@ def build_findings_artifact(
     Diagram-only callers provide empty issues and specs without stored Mermaid.
     Classification runs where PR Git objects are available, before privileged posting.
     """
-    classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers)
+    placement_options = {"snapshot_diff": snapshot_diff} if snapshot_diff is not None else {}
+    classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers, **placement_options)
     findings = [
         _finding_dict(issue, placement="inline", line=entry.line)
         for entry, issue in zip(classified.inline, classified.inline_issues, strict=True)
@@ -171,7 +219,7 @@ def build_findings_artifact(
     findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)
     findings.extend(_finding_dict(issue, placement="body", line=None) for issue in classified.body_only)
     return {
-        "schema_version": FINDINGS_SCHEMA_VERSION,
+        "schema_version": FINDINGS_SCHEMA_VERSION if terminal_result is not None else LEGACY_FINDINGS_SCHEMA_VERSION,
         "repo": f"{pr.owner}/{pr.repo}",
         "pr_number": pr.number,
         "head_sha": pr.head_sha,
@@ -180,16 +228,19 @@ def build_findings_artifact(
         "diagrams": diagrams,
         "findings": findings,
         **({"review_warnings": list(review_warnings)} if review_warnings else {}),
+        **({"terminal_result": copy.deepcopy(terminal_result)} if terminal_result is not None else {}),
     }
 
 
 def write_findings_artifact(path: Path, artifact: dict[str, Any]) -> None:
     """Write UTF-8 JSON with parent creation, enforcing the cap on exact output bytes."""
-    text = json.dumps(artifact, indent=2, ensure_ascii=False) + "\n"
-    size = len(text.encode("utf-8"))
-    _enforce_max_artifact_bytes(size)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    try:
+        _validate_artifact(artifact)
+        payload = (json.dumps(artifact, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+        _enforce_max_artifact_bytes(len(payload))
+        atomic_write_bytes(path, payload)
+    except (OSError, ValueError, TypeError, RecursionError) as exc:
+        raise FindingsValidationError(f"artifact write failed: {path}: {exc}") from exc
 
 
 def load_findings_artifact(
@@ -198,6 +249,7 @@ def load_findings_artifact(
     expected_repo: str,
     expected_pr_number: int,
     expected_head_sha: str,
+    expected_run_id: str | None = None,
 ) -> FindingsArtifact:
     """Validate untrusted output against event facts before privileged posting.
 
@@ -208,18 +260,15 @@ def load_findings_artifact(
         size = path.stat().st_size
         _enforce_max_artifact_bytes(size)
         raw = path.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
         raise FindingsValidationError(f"artifact read failed: {path}: {exc}") from exc
 
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError as exc:
+    except (ValueError, RecursionError) as exc:
         raise FindingsValidationError(f"artifact JSON parse failed: {exc}") from exc
 
-    try:
-        jsonschema.validate(data, FINDINGS_SCHEMA)
-    except jsonschema.ValidationError as exc:
-        raise FindingsValidationError(f"artifact failed schema validation: {exc.message}") from exc
+    _validate_artifact(data)
 
     for field_name, expected in (
         ("repo", expected_repo),
@@ -232,6 +281,13 @@ def load_findings_artifact(
                 f"artifact {field_name} {declared!r} does not match event-derived {field_name} {expected!r}"
             )
 
+    if expected_run_id is not None:
+        declared = data.get("terminal_result", {}).get("run_id")
+        if declared != expected_run_id:
+            raise FindingsValidationError(
+                f"artifact run_id {declared!r} does not match expected run_id {expected_run_id!r}"
+            )
+
     return FindingsArtifact(
         repo=data["repo"],
         pr_number=data["pr_number"],
@@ -241,4 +297,6 @@ def load_findings_artifact(
         kind=data.get("kind") or "review",
         diagrams=data.get("diagrams"),
         review_warnings=tuple(data.get("review_warnings", [])),
+        schema_version=data["schema_version"],
+        terminal_result=data.get("terminal_result"),
     )

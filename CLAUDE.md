@@ -361,3 +361,14 @@ Plain path overrides: `DAYDREAM_PRICES_FILE`, `DAYDREAM_ARCHIVE_DIR`, `PI_CODING
 ## Platform requirements
 
 Python ≥3.12.13 + uv; `git` and `gh` on `$PATH`; `codex`/`pi` CLIs only for their backends; pre-push hook via `make hooks`.
+
+### Terminal review result
+
+Review findings exports use strict schema version 2 and embed typed terminal
+coverage bound to the captured revision. Complete analysis requires positive
+scope/stage evidence; findings count, warnings, CLI success and archive success
+cannot establish it. Diagram exports remain version 1; legacy review completeness
+is unknown. Preserve atomic public installation and rollback, revision/scope-bound
+resume/cache proofs, and production runner/CLI regressions when modifying this
+contract. [README contract](README.md#terminal-review-findings-contract) documents
+states, reasons, consumer compatibility, caller freshness and absence semantics.

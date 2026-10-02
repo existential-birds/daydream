@@ -237,15 +237,21 @@ class StubBackend:
     def _apply_parse_by_stack_override(self, prompt: str, issue: dict[str, Any]) -> list[dict[str, Any]]:
         """Apply the named stack's override and optional same-location extra issue.
 
-        Review and parse dispatch share this contract; stack names come from
-        stack-<name>-review.md paths in the prompt.
+        Review and parse dispatch share this contract; native scope instructions
+        and legacy stack-<name>-review.md paths identify the stack.
         """
         if self.parse_by_stack is None:
             return [issue]
-        sm = re.search(r"stack-(\S+?)-review\.md", prompt)
-        if sm is None or sm.group(1) not in self.parse_by_stack:
+        sm = (re.search(r"you are reviewing the (\S+) stack", prompt, re.IGNORECASE)
+              or re.search(r"stack-(\S+?)-review\.md", prompt))
+        scope = sm.group(1) if sm is not None else (
+            "structure" if "you are the structural reviewer" in prompt.lower() else None
+        )
+        if scope == "generic-fallback":
+            scope = "generic"
+        if scope not in self.parse_by_stack:
             return [issue]
-        ov = self.parse_by_stack[sm.group(1)]
+        ov = self.parse_by_stack[scope]
         payload = ov.get("issue")
         if isinstance(payload, dict):
             issue.update(payload)
@@ -311,6 +317,8 @@ class StubBackend:
             yield ResultEvent(structured_output={"issues": [{"id": 1, "title": "Inconsistent greeting wording",
                             "description": "'universe' diverges from 'world' in docs", "recommendation": "align copy",
                             "severity": "low", "files": ["api.py", "README.md"],
+                            "confidence": "MEDIUM", "rationale": "repository copy diverges",
+                            "evidence": "api.py:1 and README.md:1 use different greetings",
                         }
                     ]
                 }, continuation=None,
@@ -387,6 +395,8 @@ class StubBackend:
         # Per-stack review -> write a markdown file + emit done.
         stack_match = re.search(r"you are reviewing the (\S+) stack", pl)
         stack_label = stack_match.group(1) if stack_match else None
+        if stack_label == "generic-fallback":
+            stack_label = "generic"
         if stack_label is None and "you are the structural reviewer" in pl:
             stack_label = "structure"
         if stack_label is not None:
@@ -437,6 +447,7 @@ class StubBackend:
                             "confidence": entry.get("confidence") or "HIGH",
                             "description": f"ARBITRATED: {entry.get('description')}",
                             "rationale": "arbiter second opinion",
+                            "evidence": entry.get("evidence") or "api.py:1",
                         }
                     )
             yield TextEvent(text="")
@@ -534,9 +545,12 @@ class StubBackend:
             input_items = json.loads(Path(in_match.group(1)).read_text()) if in_match else []
             verdicts = []
             for item in input_items:
-                verdict = (self.supervise_verdicts or {}).get(item["id"])
+                verdict = ({"action": "allow", "reason": "confirmed by supplied evidence"}
+                           if self.supervise_verdicts is None else self.supervise_verdicts.get(item["id"]))
                 if verdict is not None:
-                    verdicts.append({"id": item["id"], **verdict})
+                    verdicts.append({"id": item["id"], "action": "allow", "reason": "confirmed",
+                                     "severity": None, "confidence": None, "description": None,
+                                     "rationale": None, "evidence": None, **verdict})
             yield TextEvent(text="")
             yield ResultEvent(structured_output={"verdicts": verdicts}, continuation=None)
             return

@@ -80,3 +80,35 @@ async def test_primary_path_valid_structured_output_returned(tmp_path: Path) -> 
     backend = ScriptedBackend(events=[ResultEvent(structured_output=payload, continuation=None)], model="mock-model")
     result, _, _ = await run_agent(backend, tmp_path, "Parse", phase=DaydreamPhase.REVIEW, output_schema=schema)
     assert result == payload          # valid codex-shaped output returned unchanged
+
+async def test_strict_review_preserves_malformed_witness(tmp_path: Path) -> None:
+    from daydream.agent import StructuredOutputFailure
+    backend = ScriptedBackend(events=[ResultEvent(structured_output={"line": 3}, continuation=None)])
+    result, _, _ = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                                 output_schema=_FILE_SCHEMA, require_full_schema=True)
+    assert isinstance(result, StructuredOutputFailure)
+    assert result.reason == "malformed_output"
+
+async def test_strict_review_preserves_missing_witness(tmp_path: Path) -> None:
+    from daydream.agent import StructuredOutputFailure
+    backend = ScriptedBackend(events=[ResultEvent(structured_output=None, continuation=None)])
+    result, _, _ = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                                 output_schema=_FILE_SCHEMA, require_full_schema=True)
+    assert isinstance(result, StructuredOutputFailure)
+    assert result.reason == "missing_output"
+
+async def test_strict_review_accepts_valid_text_after_malformed_structured(tmp_path: Path) -> None:
+    backend = ScriptedBackend(events=[TextEvent(text='{"file": "src/a.py"}'),
+        ResultEvent(structured_output={"line": 3}, continuation=None)])
+    result, _, _ = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                                 output_schema=_FILE_SCHEMA, require_full_schema=True)
+    assert result == {"file": "src/a.py"}
+
+async def test_strict_review_preserves_public_incomplete_evidence(tmp_path: Path) -> None:
+    from daydream.backends import DiagnosticEvent
+    backend = ScriptedBackend(events=[DiagnosticEvent(code="codex_transport_coverage", message="tool unavailable",
+        metadata={"coverage": "incomplete"}), ResultEvent(structured_output={"file": "src/a.py"}, continuation=None)])
+    result, _, reason = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW,
+                                       output_schema=_FILE_SCHEMA, require_full_schema=True)
+    assert result == {"file": "src/a.py"}
+    assert reason == "evidence_incomplete"

@@ -12,7 +12,6 @@ from daydream.deep.artifacts import deep_dir
 from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
 from tests.deep_orchestrator.support import (
-    _capture_warnings,
     _fresh_uid_run,
     _high_record,
     _item_uids,
@@ -92,7 +91,7 @@ async def test_merge_resume_backfills_uids_onto_pre_uid_records(
     deep = _prime_uid_merge_resume(multi_stack_target,
         python=[_high_record(description="py first"), _record(description="py second", line=2, evidence="api.py:2")],
     )
-    primed = json.loads((deep / "stack-python-records.json").read_text())
+    primed = _record_issues(json.loads((deep / "stack-python-records.json").read_text()))
     assert all("uid" not in record for record in primed), "fixture must predate the uid field"
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
@@ -185,30 +184,25 @@ async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
     assert "tsx issue" not in descriptions
     assert "ARBITRATED: py issue" in descriptions
 
-async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
+async def test_unroutable_record_uid_rejected_before_merge(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1111 real-path: a record that routes outside the rewritten files is named."""
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.adjudication_steps.print_warning")
+    """A record claiming another scope's identity cannot establish valid coverage."""
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    deep = _prime_uid_merge_resume(multi_stack_target, python=[_high_record(description="py issue", uid="ghost:1")],)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_uid_merge_resume(multi_stack_target,
+                                   python=[_high_record(description="py issue", uid="ghost:1")])
 
-    assert await _run_deep(multi_stack_target, start_at="merge") == 0
-
-    unroutable = [w for w in warnings if "ghost:1" in w]
-    assert unroutable, f"the unroutable record was not named in any warning: {warnings!r}"
-    assert "stack-python-records.json" in unroutable[0], "the warning must name the record's source"
-    assert "stack-ghost-records.json" in unroutable[0], "the warning must name the dest it resolved to"
-    assert "will not reach disk" in unroutable[0]
-    # The warning is accurate, not decorative: the adjudication genuinely did not
-    # reach disk, and no phantom records file was created for the ghost stack.
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
     assert not (deep / "stack-ghost-records.json").exists()
-    assert _uid_records(deep, "python") == []
-    # Fail-open: every routable record's adjudication still landed.
-    assert _uid_list(deep, "react") == ["react:1"]
-    assert _uid_list(deep, "generic") == ["generic:1"]
-    assert _uid_list(deep, "structure") == ["structure:1"]
+    # Host salvage may finalize usable sibling records after stopping the flow.
+    if (deep / "merged-items.json").exists():
+        assert all("ghost:1" not in item.get("source_uids", []) for item in _merged_items(deep))
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
+    coverage = json.loads((deep / "review-coverage.json").read_text())
+    scope = next(row for row in coverage["stack_outcomes"] if row["scope_id"] == "python")
+    assert scope["status"] == "failed"
+    assert scope["reason_codes"] == ["malformed_artifact"]
 
 async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
@@ -340,7 +334,8 @@ async def test_structural_fold_survivor_inherits_both_provenances(
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target,
-        structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5", uid="structure:1")],
+        structure=[_record(description=_TWIN_DESCRIPTION, line=5, evidence="api.py:5",
+                           severity="high", uid="structure:1")],
     )
     stub.merge_items = [_provenance_item(
             1, _TWIN_DESCRIPTION, line=5, evidence="api.py:5" if base_evidenced else "", source_uids=["python:1"],

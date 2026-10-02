@@ -106,9 +106,12 @@ async def test_arbiter_prints_kept_dropped(
         for i in range(1, 4)
     ]
     findings = [
-        {"arb_id": 1, "keep": True, "severity": "high", "confidence": "HIGH", "description": "d1", "rationale": "r"},
-        {"arb_id": 2, "keep": True, "severity": "high", "confidence": "HIGH", "description": "d2", "rationale": "r"},
-        {"arb_id": 3, "keep": False, "severity": "low", "confidence": "LOW", "description": "d3", "rationale": "r"},
+        {"arb_id": 1, "keep": True, "severity": "high", "confidence": "HIGH", "description": "d1",
+         "rationale": "r", "evidence": "f.py:1"},
+        {"arb_id": 2, "keep": True, "severity": "high", "confidence": "HIGH", "description": "d2",
+         "rationale": "r", "evidence": "f.py:1"},
+        {"arb_id": 3, "keep": False, "severity": "low", "confidence": "MEDIUM", "description": "d3",
+         "rationale": "r", "evidence": "f.py:1"},
     ]
     backend = ScriptedBackend(
         events=[ResultEvent(structured_output={"findings": findings}, continuation=None)],

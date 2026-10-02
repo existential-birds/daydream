@@ -61,6 +61,8 @@ from daydream.phases import (
     phase_arbiter_review,
     phase_suppression_review,
 )
+from daydream.phases.adjudication import IncompleteVerdicts
+from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
 from daydream.supervision import revise_finding_fields
 from daydream.trajectory import (
     DaydreamPhase,
@@ -241,9 +243,12 @@ def _rewrite_stack_records(
                 "its adjudication will not reach disk (issue #1111).",
             )
     for dest_path, stack_records in by_stack.items():
-        incomplete = read_json_object(dest_path).get("incomplete") is True
+        previous = read_json_object(dest_path)
+        incomplete = previous.get("incomplete") is True
+        binding = {key: previous[key] for key in ("scope_id", "analyzed_revision", "originating_run_id")
+                   if key in previous}
         dest_path.write_text(
-            json.dumps({"issues": stack_records,
+            json.dumps({"issues": stack_records, **binding,
                         **({"incomplete": True} if incomplete else {})}, indent=2)
         )
 
@@ -437,12 +442,21 @@ async def _run_sharded_arbiter(
     failed_groups: list[str] = []
     pending: list[PlannedGroup] = []
     for group in plan.groups:
+        if deep_state.review_coverage is not None:
+            deep_state.review_coverage.require_phase(group.group_id)
         loaded = _load_group_verdicts(dd, group)
         if loaded is None:
             pending.append(group)
         else:
             group_verdicts[group.group_id] = loaded
             reused[group.group_id] = True
+            if deep_state.review_coverage is not None:
+                # Resumes restore matching versioned whole-run coverage before group reuse.
+                prior = deep_state.review_coverage.phases.get(group.group_id)
+                if prior is None or prior["status"] != "complete":
+                    pending.append(group)
+                    group_verdicts.pop(group.group_id, None)
+                    reused.pop(group.group_id, None)
 
     if pending:
         recorder = get_current_recorder()
@@ -488,6 +502,9 @@ async def _run_sharded_arbiter(
                                         )
                                 except Exception as exc:  # noqa: BLE001 -- per-group isolation; fail-open
                                     failed_groups.append(planned.group_id)
+                                    if deep_state.review_coverage is not None:
+                                        deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                                                                               reasons=(reason_for_exception(exc),))
                                     reused[planned.group_id] = False
                                     print_warning(
                                         console,
@@ -496,7 +513,33 @@ async def _run_sharded_arbiter(
                                         "remain unadjudicated.",
                                     )
                                     return
-                                _persist_group_verdicts(dd, planned, group_verdicts_call)
+                                if isinstance(group_verdicts_call, IncompleteVerdicts):
+                                    failed_groups.append(planned.group_id)
+                                    if deep_state.review_coverage is not None:
+                                        deep_state.review_coverage.record_phase(planned.group_id, "incomplete",
+                                            reasons=(reason_for_budget(group_verdicts_call.budget_reason),))
+                                    return
+                                expected_ids = set(range(1, len(targets_by_group.get(planned.group_id, ())) + 1))
+                                if set(group_verdicts_call) != expected_ids:
+                                    failed_groups.append(planned.group_id)
+                                    if deep_state.review_coverage is not None:
+                                        deep_state.review_coverage.record_phase(planned.group_id, "incomplete",
+                                                                               reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
+                                    group_verdicts[planned.group_id] = group_verdicts_call
+                                    return
+                                try:
+                                    _persist_group_verdicts(dd, planned, group_verdicts_call)
+                                except (OSError, ValueError) as exc:
+                                    failed_groups.append(planned.group_id)
+                                    if deep_state.review_coverage is not None:
+                                        deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                                                                               reasons=(ReasonCode.MALFORMED_ARTIFACT,))
+                                    print_warning(console,
+                                                  f"Arbiter group {planned.group_id} could not persist its verdicts "
+                                                  f"({type(exc).__name__}); its findings remain unadjudicated.")
+                                    return
+                                if deep_state.review_coverage is not None:
+                                    deep_state.review_coverage.record_phase(planned.group_id, "complete")
                                 group_verdicts[planned.group_id] = group_verdicts_call
                                 reused[planned.group_id] = False
 
@@ -620,6 +663,29 @@ def _try_reuse_arbiter(
 
 
 async def _step_arbiter(ctx: FlowContext) -> None:
+    coverage = DeepState(ctx.data).review_coverage
+    if ctx.pipeline().arbitration.enabled and coverage is not None:
+        coverage.require_phase("arbiter")
+    try:
+        await _step_arbiter_impl(ctx)
+    except Exception as exc:
+        if coverage is not None:
+            phase = ("suppression" if "suppression" in coverage.phases
+                     and coverage.phases["suppression"]["status"] == "uncovered" else "arbiter")
+            coverage.record_phase(phase, "failed", reasons=(reason_for_exception(exc),))
+            from daydream.deep.artifacts import persist_review_coverage
+            try:
+                persist_review_coverage(DeepState(ctx.data).dd, coverage)
+            except Exception as persistence_error:
+                exc.add_note(f"Review coverage persistence failed: {type(persistence_error).__name__}")
+        raise
+    else:
+        if coverage is not None:
+            from daydream.deep.artifacts import persist_review_coverage
+            persist_review_coverage(DeepState(ctx.data).dd, coverage)
+
+
+async def _step_arbiter_impl(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168).
 
     Two shapes: the unsharded path (forensic, or a selection that fits one
@@ -675,6 +741,8 @@ async def _step_arbiter(ctx: FlowContext) -> None:
         precision_mode = bool(
             ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode")
         )
+        if precision_mode and deep_state.review_coverage is not None:
+            deep_state.review_coverage.require_phase("suppression")
         # The reuse handles are populated only when there are arbiter targets;
         # the whole-unit store at the end of the block reads them back.
         arbiter_unit: ReviewReuseUnit | None = None
@@ -732,8 +800,13 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     identity=arbiter_identity,
                     grounding=_loop_grounding(deep_state),
                 )
-                arbiter_unit = ReviewReuseUnit(reuse, "arbiter", arbiter_identity, arbiter_payload)
+                arbiter_unit = ReviewReuseUnit(reuse, "arbiter", arbiter_identity, arbiter_payload,
+                                               coverage=deep_state.review_coverage)
                 if _try_reuse_arbiter(arbiter_unit, deep_state, plan):
+                    if deep_state.review_coverage is not None:
+                        deep_state.review_coverage.record_phase("arbiter", "complete")
+                        if precision_mode:
+                            deep_state.review_coverage.record_phase("suppression", "complete")
                     return
             if plan.sharded:
                 verdicts, reused, failed_groups = await _run_sharded_arbiter(
@@ -780,6 +853,19 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                 "verdicts_applied": len(verdicts),
                 "failed_groups": list(failed_groups),
             }
+        if deep_state.review_coverage is not None:
+            if not arbiter_targets:
+                deep_state.review_coverage.record_phase("arbiter", "complete", noop=True)
+            elif isinstance(verdicts, IncompleteVerdicts):
+                adjudication_complete = False
+                deep_state.review_coverage.record_phase("arbiter", "incomplete",
+                    reasons=(reason_for_budget(verdicts.budget_reason),))
+            elif not adjudication_complete or set(verdicts) != set(range(1, len(arbiter_targets) + 1)):
+                adjudication_complete = False
+                deep_state.review_coverage.record_phase("arbiter", "incomplete",
+                    reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
+            else:
+                deep_state.review_coverage.record_phase("arbiter", "complete")
         write_routing_record(dd, {"arbiter": arbiter_slice})
 
         # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
@@ -819,6 +905,19 @@ async def _step_arbiter(ctx: FlowContext) -> None:
                     dd, rewrite_paths, adjudicated, adjudicated_sources
                 )
                 record_provenance(dd, pass_name="suppression", outcomes=suppression_outcomes)
+            if deep_state.review_coverage is not None:
+                if not suppression_targets:
+                    deep_state.review_coverage.record_phase("suppression", "complete", noop=True)
+                elif isinstance(sup_verdicts, IncompleteVerdicts):
+                    adjudication_complete = False
+                    deep_state.review_coverage.record_phase("suppression", "incomplete",
+                        reasons=(reason_for_budget(sup_verdicts.budget_reason),))
+                elif set(sup_verdicts) != set(range(1, len(suppression_targets) + 1)):
+                    adjudication_complete = False
+                    deep_state.review_coverage.record_phase("suppression", "incomplete",
+                                                           reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
+                else:
+                    deep_state.review_coverage.record_phase("suppression", "complete")
         # Whole-block marker: written only when every planned group completed,
         # so an interrupted sharded fan-out forces the block to re-enter and
         # reruns only its incomplete groups (and the opt-in suppression pass).
