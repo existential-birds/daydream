@@ -42,6 +42,7 @@ from daydream.archive.scan import scan_run_dir
 from daydream.json_utils import atomic_write_json
 from daydream.redaction import redact_text
 from daydream.timeutil import now_iso_utc
+from daydream.training.exclusion import EXCLUSION_PATH
 from daydream.trajectory import RUN_DOCUMENT_NAME, RUNS_DIRNAME
 
 _FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -909,11 +910,6 @@ class DedupeResult:
     excluded: list[tuple[str, str]] = field(default_factory=list)  # (session_id, reason_code)
 
 
-_EXCLUSION_LIST_PATH = (
-    Path(__file__).resolve().parents[1] / "training" / "schema" / "exclusion.txt"
-)
-
-
 def _curated_dir(stage: Path, source_commit: str, binding: dict[str, Any] | None = None) -> Path:
     """Curated output prefix derived from the source and optional post-gate binding.
 
@@ -955,7 +951,7 @@ def _exclusions_digest() -> str:
     input, so editing the list changes the curation id."""
     codes = sorted(
         line.strip() for line in
-        _EXCLUSION_LIST_PATH.read_text(encoding="utf-8").splitlines() if line.strip()
+        EXCLUSION_PATH.read_text(encoding="utf-8").splitlines() if line.strip()
     )
     canonical = "".join(f"{code}\n" for code in codes)
     return hashlib.sha256(canonical.encode()).hexdigest()

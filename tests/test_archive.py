@@ -94,6 +94,7 @@ from tests.harness.git_helpers import configure_identity as _configure_identity,
 from tests.harness.improve_backend import install_improve_stub
 from tests.harness.review_result import review_coverage
 from tests.harness.trajectory import make_manifest, make_recorder
+from tests.test_extension_seam_integration import CUSTOM_FLOW_EXT
 
 MakeConfig = Callable[..., RunConfig]
 InstallBackend = Callable[[object], object]
@@ -370,19 +371,14 @@ async def test_custom_flow_archive_real_path_omits_fix_test_backend(
     so its pipeline has no fix/test step and the archive must not invent labels.
     """
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    ext_dir.write_module(
-        "from daydream.extensions import FlowStep\n"
-        "async def _audit(ctx):\n"
-        "    from daydream.agent import run_agent\n"
-        "    from daydream.trajectory import DaydreamPhase\n"
-        "    await run_agent(ctx.backend_for('ro_audit'), ctx.work.repo, 'CUSTOM-FLOW-PROMPT',\n"
-        "                    phase=DaydreamPhase.REVIEW)\n"
-        "def register(r):\n"
-        "    r.register_phase(FlowStep(name='ro_audit', run=_audit))\n"
-        "    r.set_flow('ro-audit', ['ro_audit'])\n"
-    )
-    install_backend(ScriptedBackend(
-            events=(TextEvent(text=""), ResultEvent(structured_output=None, continuation=None),), model="mock-model",
+    ext_dir.write_module(CUSTOM_FLOW_EXT)
+    install_backend(
+        ScriptedBackend(
+            events=(
+                TextEvent(text=""),
+                ResultEvent(structured_output=None, continuation=None),
+            ),
+            model="mock-model",
         )
     )
 

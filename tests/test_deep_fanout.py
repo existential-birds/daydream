@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import anyio
 import pytest
@@ -47,6 +47,25 @@ def _mk_context_files(tmp_path: Path) -> tuple[Path, Path, Path]:
     alts.write_text("[]")
     return diff, intent, alts
 
+
+async def _run_per_stack(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+    backend: Backend,
+    stacks: list[StackAssignment],
+) -> tuple[dict[str, Path], dict[str, str]]:
+    diff, intent, alts = _mk_context_files(tmp_path)
+    return await review_scopes(
+        backend,
+        make_work(tmp_path),
+        stacks,
+        diff_path=diff,
+        intent_path=intent,
+        alternatives_path=alts,
+        allow_standalone=True,
+    )
+
+
 async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -55,11 +74,7 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     async def checkpoint(*args: Any, **kwargs: Any) -> Any:
         return {"issues": [issue]}, None, "wall_budget_exceeded"
     monkeypatch.setattr("daydream.agent.run_agent", checkpoint)
-    diff, intent, alts = _mk_context_files(tmp_path)
-    _, failures = await review_scopes(
-        _review_backend(), make_work(tmp_path), _mk_stacks()[:1], diff_path=diff,
-        intent_path=intent, alternatives_path=alts, allow_standalone=True,
-    )
+    _, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks()[:1])
     assert "python" in failures
     saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
     assert saved["issues"][0]["description"] == issue["description"]
@@ -80,14 +95,10 @@ def _deep_dispatch(trajectory: dict[str, Any]) -> dict[str, Any]:
 async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """Successful per-stack reviews retain declared order and enclosure."""
-    diff, intent, alts = _mk_context_files(tmp_path)
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await review_scopes(
-            cast(Backend, _review_backend()), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
-            alternatives_path=alts, allow_standalone=True,
-        )
+        results, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks())
 
     assert set(results) == {"python", "react", "generic"}
     assert failures == {}
@@ -102,12 +113,7 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
 async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """D-17/D-18/D-38: fan-out preserves per-stack calls, paths, prompts, and isolation."""
     backend = _review_backend()
-    diff, intent, alts = _mk_context_files(tmp_path)
-
-    results, failures = await review_scopes(
-        cast(Backend, backend), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
-        alternatives_path=alts, allow_standalone=True,
-    )
+    results, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
 
     assert set(results.keys()) == {"python", "react", "generic"}
     assert failures == {}
@@ -160,16 +166,20 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
     monkeypatch.setattr(_prompts, "build_per_stack_prompt", _capture_per_stack)
 
     backend = _review_backend()
-    diff, intent, alts = _mk_context_files(tmp_path)
-
-    stacks = [StackAssignment(stack_name="python", files=["a.py"], is_docs_only=False,),
-        StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["a.py"], is_docs_only=False,),
+    stacks = [
+        StackAssignment(
+            stack_name="python",
+            files=["a.py"],
+            is_docs_only=False,
+        ),
+        StackAssignment(
+            stack_name=STRUCTURE_STACK_NAME,
+            files=["a.py"],
+            is_docs_only=False,
+        ),
     ]
 
-    await review_scopes(
-        backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent,
-        alternatives_path=alts, allow_standalone=True,
-    )
+    await _run_per_stack(tmp_path, make_work, backend, stacks)
 
     assert len(structural_calls) == 1
     assert len(per_stack_calls) == 1
@@ -191,14 +201,10 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
         return None
 
     backend = ScriptedBackend(events=_REVIEW_TURN, responder=_flaky_responder)
-    diff, intent, alts = _mk_context_files(tmp_path)
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await review_scopes(
-            cast(Backend, backend), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
-            alternatives_path=alts, allow_standalone=True,
-        )
+        results, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
 
     assert "python" in results
     assert "generic" in results
@@ -221,7 +227,6 @@ async def test_per_stack_prompts_are_skill_free(tmp_path: Path, make_work: Calla
     """M12: built-in stacks dispatch native per-stack prompts with no /skill: token."""
 
     backend = ScriptedBackend(events=_REVIEW_TURN)
-    diff, intent, alts = _mk_context_files(tmp_path)
 
     # Every built-in stack dispatches through the native profile strategy.
     stacks = [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False),
@@ -233,10 +238,7 @@ async def test_per_stack_prompts_are_skill_free(tmp_path: Path, make_work: Calla
         StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
-    _, failures = await review_scopes(
-        cast(Backend, backend), make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
-        allow_standalone=True,
-    )
+    _, failures = await _run_per_stack(tmp_path, make_work, backend, stacks)
 
     assert failures == {}
     assert len(backend.prompts) == 7
@@ -279,12 +281,7 @@ async def test_fanout_concurrency_limiter(
         assert not hasattr(backend, "fanout_concurrency")
     else:
         backend = _review_backend(fanout_concurrency=fanout_concurrency)
-    diff, intent, alts = _mk_context_files(tmp_path)
-
-    await review_scopes(
-        backend, make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent, alternatives_path=alts,
-        allow_standalone=True,
-    )
+    await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
 
     assert captured == expected
 

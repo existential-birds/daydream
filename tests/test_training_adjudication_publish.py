@@ -54,6 +54,23 @@ def _observation(*, record_id: str, observed_at: str, disposition: str, rational
     }
 
 
+def _append_observation(
+    state: Path,
+    record_id: str,
+    *,
+    observed_at: str = "2026-01-01T00:02:00Z",
+    rationale: str = "force CAS",
+) -> None:
+    observation = _observation(
+        record_id=record_id,
+        observed_at=observed_at,
+        disposition="accepted",
+        rationale=rationale,
+    )
+    with (state / "observations.jsonl").open("ab") as handle:
+        handle.write(_canonical_bytes(observation))
+
+
 def _manifest_data(*, snapshot_id: str = _SID, note: str = "base") -> dict[str, Any]:
     return {"curation_id": _CID, "snapshot_id": snapshot_id, "index_revision": INDEX_REVISION, "note": note}
 
@@ -169,11 +186,7 @@ def test_three_way_checkpoint_non_observation_files(name: str, mode: str, tmp_pa
         _, rival = _checkpoint_files(remote_payloads, manifest=rival_manifest)
         # Force a local commit attempt so the fixture can introduce the rival
         # after the publication's stable base read.
-        local_observation = _observation(
-            record_id="local-race", observed_at="2026-01-01T00:02:00Z", disposition="accepted", rationale="force CAS",
-        )
-        with (state / "observations.jsonl").open("ab") as handle:
-            handle.write(_canonical_bytes(local_observation))
+        _append_observation(state, "local-race")
     else:
         rival = {"unrelated/race.txt": mode.encode()}
     hub.queue_concurrent_commit("batch", rival)
@@ -198,13 +211,7 @@ def test_superseded_manifest_identity_fails_instead_of_repointing(tmp_path: Path
     remote["preview-manifest.json"] = _canonical_bytes(superseded)
     _, rival = _checkpoint_files(remote, manifest=superseded)
     hub.queue_concurrent_commit("batch", rival)
-    with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(_canonical_bytes(_observation(
-                    record_id="local-race", observed_at="2026-01-01T00:02:00Z", disposition="accepted",
-                    rationale="force CAS",
-                )
-            )
-        )
+    _append_observation(state, "local-race")
 
     with pytest.raises(HydrationError, match="superseded"):
         publish_annotation_state(hub, state, manifest=manifest)
@@ -232,13 +239,7 @@ def test_concurrent_checkpoint_pointer_deletion_is_not_recreated(tmp_path: Path)
     hub = PointerDeletingHub(repo_id="org/private-annotations")
     state, manifest = _state_v2(tmp_path)
     publish_annotation_state(hub, state, manifest=manifest)
-    with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(_canonical_bytes(_observation(
-                    record_id="local-race", observed_at="2026-01-01T00:02:00Z", disposition="accepted",
-                    rationale="force CAS",
-                )
-            )
-        )
+    _append_observation(state, "local-race")
     hub.delete_on_batch = True
 
     with pytest.raises(HydrationError, match="checkpoint pointer disappeared"):
@@ -431,14 +432,10 @@ def test_observation_only_concurrent_update_unions_remote_then_local_rows(tmp_pa
     concurrent = _observation(
         record_id="remote", observed_at="2026-01-01T00:01:00Z", disposition="rejected", rationale="remote",
     )
-    local = _observation(
-        record_id="local", observed_at="2026-01-01T00:02:00Z", disposition="accepted", rationale="local",
-    )
     remote["observations.jsonl"] += _canonical_bytes(concurrent)
     _, rival = _checkpoint_files(remote, manifest=manifest)
     hub.queue_concurrent_commit("batch", rival)
-    with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(_canonical_bytes(local))
+    _append_observation(state, "local", rationale="local")
 
     result = publish_annotation_state(hub, state, manifest=manifest)
     rows = [json.loads(line)
@@ -454,13 +451,7 @@ def test_optional_index_absence_is_a_three_way_state(tmp_path: Path, hub: Annota
     _, rival = _checkpoint_files(remote, manifest=manifest)
     hub.queue_concurrent_commit("batch", rival)
     (state / "index.db").unlink()
-    with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(_canonical_bytes(_observation(
-                    record_id="force", observed_at="2026-01-01T00:03:00Z", disposition="accepted",
-                    rationale="force CAS",
-                )
-            )
-        )
+    _append_observation(state, "force", observed_at="2026-01-01T00:03:00Z")
 
     with pytest.raises(HydrationError, match="concurrent state conflict for index.db"):
         publish_annotation_state(hub, state, manifest=manifest)
@@ -519,13 +510,7 @@ def test_publish_refuses_secret_from_concurrent_remote_observation(tmp_path: Pat
     )
     _, rival = _checkpoint_files(remote, manifest=manifest)
     hub.queue_concurrent_commit("batch", rival)
-    with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(_canonical_bytes(_observation(
-                    record_id="local", observed_at="2026-01-01T00:02:00Z", disposition="accepted",
-                    rationale="force CAS",
-                )
-            )
-        )
+    _append_observation(state, "local")
     before = len(hub.commit_order)
 
     with pytest.raises(PublicDestinationError, match="credential-shaped"):

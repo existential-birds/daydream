@@ -29,25 +29,23 @@ def test_continuation_token_fields() -> None:
     assert token.backend == "codex"
     assert token.data == {"thread_id": "abc"}
 
-def test_create_backend_claude_default_uses_config_constant() -> None:
-    backend = create_backend("claude")
-    assert isinstance(backend, ClaudeBackend)
-    assert backend.model == DEFAULT_CLAUDE_MODEL
 
-def test_create_backend_claude_custom_model() -> None:
-    backend = create_backend("claude", model="sonnet")
-    assert isinstance(backend, ClaudeBackend)
-    assert backend.model == "sonnet"
-
-def test_create_backend_codex_default_uses_config_constant() -> None:
-    backend = create_backend("codex")
-    assert isinstance(backend, CodexBackend)
-    assert backend.model == DEFAULT_CODEX_MODEL
-
-def test_create_backend_codex_custom_model() -> None:
-    backend = create_backend("codex", model="o3-pro")
-    assert isinstance(backend, CodexBackend)
-    assert backend.model == "o3-pro"
+@pytest.mark.parametrize(
+    ("name", "cls", "model", "expected"),
+    [
+        ("claude", ClaudeBackend, None, DEFAULT_CLAUDE_MODEL),
+        ("claude", ClaudeBackend, "sonnet", "sonnet"),
+        ("codex", CodexBackend, None, DEFAULT_CODEX_MODEL),
+        ("codex", CodexBackend, "o3-pro", "o3-pro"),
+    ],
+    ids=["claude-default", "claude-custom", "codex-default", "codex-custom"],
+)
+def test_create_backend_model_resolution(
+    name: str, cls: type, model: str | None, expected: str
+) -> None:
+    backend = create_backend(name) if model is None else create_backend(name, model=model)
+    assert isinstance(backend, cls)
+    assert backend.model == expected
 
 def test_create_backend_invalid_raises() -> None:
     with pytest.raises(ValueError, match="Unknown backend"):

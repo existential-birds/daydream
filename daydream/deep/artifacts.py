@@ -71,8 +71,6 @@ class DeepArtifact(StrEnum):
         return root / self.value
 
 
-# Reserved entry; resume loaders must not interpret it as a stack name.
-
 _DEEP_STAGE_PREREQS: dict[str, list[DeepArtifact]] = {
     "ttt": [],
     "per-stack": [DeepArtifact.INTENT, DeepArtifact.ALTERNATIVES],
