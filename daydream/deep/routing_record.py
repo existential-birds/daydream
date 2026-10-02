@@ -15,13 +15,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-from daydream.deep.artifacts import latency_routing_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.json_utils import read_json_object
 
 
 def read_routing_record(deep_dir_path: Path) -> dict[str, Any]:
     """Return the routing record, or ``{}`` when absent, non-object, or malformed."""
-    return read_json_object(latency_routing_path(deep_dir_path))
+    return read_json_object(DeepArtifact.LATENCY_ROUTING.at(deep_dir_path))
 
 
 def write_routing_record(deep_dir_path: Path, updates: Mapping[str, Any]) -> Path:
@@ -31,7 +31,7 @@ def write_routing_record(deep_dir_path: Path, updates: Mapping[str, Any]) -> Pat
     mappings, in which case their contents are merged one level deep (so a step
     can add ``arbiter`` without dropping the ``wonder`` slice already written).
     """
-    path = latency_routing_path(deep_dir_path)
+    path = DeepArtifact.LATENCY_ROUTING.at(deep_dir_path)
     merged = dict(read_routing_record(deep_dir_path))
     for key, value in updates.items():
         current = merged.get(key)

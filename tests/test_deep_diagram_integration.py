@@ -78,11 +78,16 @@ FLOWCHART_GOLDEN = """flowchart TD
 SEQUENCE_HEADING = "<details><summary><h3>Sequence Diagram</h3></summary>"
 FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
 
-def _legacy_sequence_builder(
+def _obsolete_sequence_builder(
     *, diff_path: Path, inline_diff: str | None, files_by_module: dict[str, list[str]], cwd: Path,
     exploration_dir: Path | None, schema: dict[str, Any],
 ) -> str:
     return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
+
+def _current_sequence_builder(**kwargs: Any) -> str:
+    assert kwargs["clone_mode"] is True
+    assert "inline_exploration" in kwargs and "inline_dependencies" in kwargs
+    return f"current: diff={kwargs['diff_path']} cwd={kwargs['cwd']} exploration={kwargs['exploration_dir']}"
 
 # --- Harness -----------------------------------------------------------------
 
@@ -897,23 +902,24 @@ def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> 
     body = summary.split("\n[exploration summary truncated]", 1)[0]
     assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
-def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("obsolete", [False, True], ids=["current-contract", "obsolete-rejected"])
+def test_diagram_author_prompt_requires_current_inline_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obsolete: bool
 ) -> None:
-    """Legacy fork overrides receive only documented kwargs in clone mode.
-
-    Extra inline kwargs would fail the turn; exploration_dir must be None
-    because the clone cannot read the host artifact path.
-    """
+    """Current overrides receive inline inputs; obsolete signatures fail explicitly."""
     registry = Registry()
-    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    registry.override_prompt("diagram_sequence", _obsolete_sequence_builder if obsolete else _current_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(
         tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b"
     )
+    if obsolete:
+        with pytest.raises(TypeError, match="clone_mode"):
+            deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
+        return
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
-    assert prompt.startswith("legacy:")
+    assert prompt.startswith("current:")
     assert "exploration=None" in prompt  # no dangling host path on a clone run
 
 @pytest.mark.parametrize("kind", ["sequence", "flowchart"])
@@ -1127,23 +1133,26 @@ def test_clone_mode_diff_block_includes_its_banner_and_marker_in_the_budget() ->
     assert "[diff truncated to fit the prompt budget]" in block
     assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
 
-async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("obsolete", [False, True], ids=["current-contract", "obsolete-rejected"])
+async def test_inline_prompt_contract_redacts_private_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, obsolete: bool
 ) -> None:
-    """Req 10 × req 4: a fork override written before the inline kwargs keeps its
-    documented kwarg set AND must not be handed a private host path to print."""
+    """Current inline inputs stay grounded without exposing private host pointers."""
 
     registry = Registry()
-    registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
+    registry.override_prompt("diagram_sequence", _obsolete_sequence_builder if obsolete else _current_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
     ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
 
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=SimpleNamespace(sandbox=True, model="fake"),
     )
-    assert prompts[0].startswith("legacy:")
+    if obsolete:
+        assert not prompts and result["status"] == "failed" and "TypeError" in result["reason"]
+        return
+    assert prompts[0].startswith("current:")
     assert str(ctx.data["diff_path"]) not in prompts[0]
     assert "exploration=None" in prompts[0]
 

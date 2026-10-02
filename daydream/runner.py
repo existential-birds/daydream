@@ -677,9 +677,9 @@ def _emit_findings_from_items(
     run_info: str,
     renderers: "pr_review.ReviewRenderers",
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-    captured_pr: "pr_review.PRInfo | None" = None,
-    terminal_result: dict[str, Any] | None = None,
-    snapshot_diff: str | None = None,
+    captured_pr: "pr_review.PRInfo",
+    terminal_result: dict[str, Any],
+    snapshot_diff: str,
 ) -> int:
     """Write canonical review items; grounded diagrams ride along for Phase B rendering."""
     parsed = pr_review.parsed_issues_from_items(items)

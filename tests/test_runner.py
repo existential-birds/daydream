@@ -11,6 +11,7 @@ import threading
 import time
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -41,7 +42,10 @@ from daydream.backends import (
 from daydream.cli import _signal_handler
 from daydream.config import DEFAULT_PI_MODEL, REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
-from daydream.deep.artifacts import diff_key, diff_key_path, merged_items_path
+from daydream.deep.artifacts import (
+    DeepArtifact,
+    diff_key,
+)
 from daydream.exploration import ExplorationContext
 from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
@@ -72,6 +76,7 @@ from tests.harness.claude_sdk import patch_claude_sdk
 from tests.harness.git_helpers import bare_remote, commit as _commit, git as _git, init_repo as _init_repo
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_exploration_profile
+from tests.harness.review_result import terminal_result
 from tests.harness.stub_backend import StubBackend, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_pr_comment_integration import (
@@ -250,7 +255,9 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     result = runner._write_findings_for_parsed(
         repo, RunConfig(pr_number=7, findings_out=str(private_path)), [],
         renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
-        run_info="Fixture run info",
+        run_info="Fixture run info", captured_pr=replace(_ARTIFACT_PR, head_sha=git_ops.head_sha(repo),
+                                                       base_sha=git_ops.head_sha(repo)),
+        terminal_result=terminal_result(head_sha=git_ops.head_sha(repo)), snapshot_diff="",
     )
     output = capsys.readouterr().out
     assert result == 0
@@ -258,8 +265,8 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     assert "Findings artifact prepared." in output
     assert str(private_path) not in output
 
-def test_findings_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing local PR objects keep artifact classification on the owning session."""
+def test_diagram_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Diagram target resolution without local PR objects uses the owning session."""
     repo = tmp_path / "repo"
     _init_repo(repo)
     auth = git_ops.StaticGitHubAuth({"PATH": "/usr/bin", "GH_TOKEN": "artifact-owner"})
@@ -276,7 +283,7 @@ def test_findings_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monke
     destination = tmp_path / "findings.json"
     assert (
         runner._write_findings_for_parsed(
-            repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth,
+            repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth, kind="diagram",
             renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
             run_info="Fixture run info",
         )
@@ -1102,6 +1109,7 @@ def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
     from daydream.deep.artifacts import persist_review_coverage
     from daydream.deep.diff import _diff_changed_files
     from daydream.deep.orchestrator import _prepare_review_stacks
+    from daydream.deep.records import stamp_item_uids
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
     deep = target / ".daydream" / "deep"
@@ -1121,8 +1129,9 @@ def _seed_fix_resume(target: Path, items: list[dict[str, Any]]) -> Path:
     coverage.record_phase("intent", "complete")
     coverage.record_phase("alternatives", "complete", noop=True)
     coverage.record_phase("merge", "complete")
-    diff_key_path(deep).write_text(diff_key(diff), encoding="utf-8")
-    merged_items_path(deep).write_text(json.dumps({"items": items}))
+    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff), encoding="utf-8")
+    stamp_item_uids(items)
+    DeepArtifact.MERGED_ITEMS.at(deep).write_text(json.dumps({"items": items}))
     persist_review_coverage(deep, coverage)
     return deep
 
@@ -1141,8 +1150,11 @@ def _silence_fix_cycle_ui(silence_console: Callable[..., None]) -> None:
     silence_console("daydream.deep.fix_steps")
     silence_console("daydream.ui", keep=("print_phase_hero", "print_dim"))
 
-async def _stub_verify(*_a: Any, **_k: Any) -> tuple[Path, dict[str, Any]]:
-    return Path("/nonexistent"), {"verdicts": []}
+async def _stub_verify(*_a: Any, **kwargs: Any) -> tuple[Path, dict[str, Any]]:
+    items = json.loads(kwargs["merged_items_path"].read_text())["items"]
+    return Path("/nonexistent"), {"verdicts": [], "selection": {"decisions": [
+        {"item_uid": item["item_uid"], "selected": True, "reason_code": "verify_all"} for item in items
+    ]}}
 
 async def _stub_fix_verify(
     _backend: Any, _work: Any, items: list[dict[str, Any]], *_args: Any, **_kwargs: Any,

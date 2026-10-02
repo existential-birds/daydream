@@ -27,6 +27,7 @@ from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, git as _git
 from tests.harness.phase_backend import PhaseDispatchBackend
+from tests.harness.review_result import review_coverage
 from tests.test_deep_orchestrator import _fix_prompts, _install_stub_backend, _silence, _StubBackend
 
 KEEP_ME = "KEEP_ME"
@@ -158,12 +159,18 @@ def _post_context(*, dd: Path, items_file: Path) -> FlowContext:
     registry = Registry()
     registry.override_renderer("finding", pr_review.default_render_finding)
     registry.override_renderer("summary", pr_review.default_render_summary)
+    coverage = review_coverage()
+    for scope in coverage.scopes:
+        coverage.record_scope(scope, "complete")
+    coverage.record_phase("merge", "complete", noop=True)
+    coverage.finalize("completed")
     return FlowContext(
         config=RunConfig(),
         work=WorkContext(
             repo=dd.parent, source=dd.parent, base_branch="main", base_sha="base", head_branch="feature",
             head_sha="head", is_ephemeral=False, run_id="test-run",
-        ), registry=registry, data={"dd": dd, "items_file": items_file}, run_context=RunContext(InteractionPolicy()),
+        ), registry=registry, data={"dd": dd, "items_file": items_file, "review_coverage": coverage},
+        run_context=RunContext(InteractionPolicy()),
     )
 
 

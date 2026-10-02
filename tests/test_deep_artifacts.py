@@ -7,10 +7,9 @@ import pytest
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import artifacts
 from daydream.deep.artifacts import (
+    DeepArtifact,
     check_deep_artifacts,
     deep_dir,
-    diagram_markdown_path,
-    diagram_path,
     diff_key,
     per_stack_review_path,
 )
@@ -152,9 +151,9 @@ def test_diff_key_is_content_addressed() -> None:
 
 def test_diagram_artifact_paths_live_in_the_deep_dir(tmp_path: Path) -> None:
     dd = deep_dir(tmp_path, allow_standalone=True)
-    assert diagram_path(dd) == dd / "diagram.json"
-    assert diagram_markdown_path(dd) == dd / "diagram.md"
-    assert diagram_path(dd).parent == diagram_markdown_path(dd).parent == dd
+    assert DeepArtifact.DIAGRAM.at(dd) == dd / "diagram.json"
+    assert DeepArtifact.DIAGRAM_MARKDOWN.at(dd) == dd / "diagram.md"
+    assert DeepArtifact.DIAGRAM.at(dd).parent == DeepArtifact.DIAGRAM_MARKDOWN.at(dd).parent == dd
 
 def test_merge_gate_ignores_stale_sweep_findings(deep_artifacts_dir: Path) -> None:
     (deep_artifacts_dir / "intent.md").write_text("x")

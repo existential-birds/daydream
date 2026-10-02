@@ -13,7 +13,10 @@ import pytest
 
 from daydream import git_ops
 from daydream.backends import AgentEvent
-from daydream.deep.artifacts import diff_key, diff_key_path
+from daydream.deep.artifacts import (
+    DeepArtifact,
+    diff_key,
+)
 from daydream.deep.records import record_issues
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
@@ -115,7 +118,7 @@ def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = No
     """Build a validated merged item (shape copied from the stub default)."""
     return {"id": item_id, "lens": "per-stack", "file": file, "line": 1, "severity": severity,
         "description": desc if desc is not None else f"{severity} issue in {file}", "confidence": "MEDIUM",
-        "rationale": "rationale", "evidence": f"{file}:1",
+        "rationale": "rationale", "evidence": f"{file}:1", "related_files": None, "source_uids": None,
     }
 
 def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
@@ -165,7 +168,7 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
     """Key primed resume artifacts to the current diff, matching the deep preamble."""
     base = _resolve_base(target, None, None)
     diff = git_ops.diff(target, base)
-    diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
+    DeepArtifact.DIFF_KEY.at(deep).write_text(diff_key(diff or ""), encoding="utf-8")
 
 def _record_issues(loaded: Any) -> list[dict[str, Any]]:
     """Use canonical record normalization; malformed non-list fixtures yield []."""
@@ -191,6 +194,7 @@ def _prime_merge_resume(
     from daydream.deep.artifacts import persist_review_coverage
     from daydream.deep.diff import _diff_changed_files
     from daydream.deep.orchestrator import _prepare_review_stacks
+    from daydream.deep.records import stamp_record_uids
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
     config = RunConfig(target=str(target), start_at="merge", cleanup=False)
@@ -207,6 +211,7 @@ def _prime_merge_resume(
     coverage.record_phase("alternatives", "complete", noop=True)
     for stack, records in (("python", python), ("react", react), ("generic", generic), ("structure", structure)):
         if records is not None:
+            stamp_record_uids(records, stack)
             envelope = {"issues": records, "scope_id": stack, "analyzed_revision": coverage.revision.to_dict(),
                         "originating_run_id": coverage.run_id}
             (deep / f"stack-{stack}-records.json").write_text(json.dumps(envelope))

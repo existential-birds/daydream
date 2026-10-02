@@ -14,9 +14,8 @@ from daydream.backends import (
     ContinuationToken,
 )
 from daydream.deep.artifacts import (
+    DeepArtifact,
     deep_dir,
-    merged_items_path,
-    merged_report_path,
 )
 from daydream.deep.records import (
     record_issues,
@@ -107,8 +106,8 @@ async def phase_cross_stack_merge(
         session=artifact_session,
         allow_standalone=allow_standalone,
     )
-    report_path = merged_report_path(dd)
-    items_path = merged_items_path(dd)
+    report_path = DeepArtifact.MERGED_REPORT.at(dd)
+    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
 
     # Clear stale outputs so a failed merge agent can't leave behind
     # outdated content that downstream stages would silently consume.
@@ -166,6 +165,7 @@ async def phase_cross_stack_merge(
         work.repo,
         prompt,
         output_schema=MERGED_ITEMS_SCHEMA,
+        require_full_schema=True,
         phase=DaydreamPhase.MERGE,
         continuation=continuation,
         review_limits=ReviewLimits(180, 60, 16, discovery=False),
@@ -186,14 +186,8 @@ async def phase_cross_stack_merge(
         run_context=run_context,
     )
 
-    # Accept item envelopes or bare lists. Unparseable results raise a structured
-    # error so the orchestrator can salvage completed stacks instead of silently
-    # publishing an empty report.
-    item_list: list[dict[str, Any]] | None = None
-    if isinstance(result, dict) and isinstance(result.get("items"), list):
-        item_list = result["items"]
-    elif isinstance(result, list):
-        item_list = result
+    # Invalid current envelopes trigger host salvage of completed reviewer records.
+    item_list = result.get("items") if isinstance(result, dict) else None
     if item_list is None or budget_reason is not None:
         # Use the UID owner's canonical source-name parser for error context.
         stack_context = [

@@ -250,6 +250,7 @@ async def test_start_at_fix_recovers_merged_items(
     (deep / "merged-items.json").write_text(json.dumps({"items": [{
                         "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "high",
                         "description": "recovered issue", "confidence": "HIGH", "rationale": "rationale",
+                        "item_uid": "item:1", "evidence": "api.py:1", "related_files": None, "source_uids": [],
                     }
                 ]
             }
@@ -636,3 +637,13 @@ async def test_precision_suppresses_low_sibling_sharing_high_finding_location(
     assert any("ARBITRATED" in d and "HIGH finding" in d for d in descriptions), (
         f"the HIGH finding at the shared location must survive:\n{descriptions}"
     )
+
+
+@pytest.mark.parametrize("decisions", [None, [], [{}],
+    [{"item_uid": "item:4", "selected": 1, "reason_code": "selected"}],
+    [{"item_uid": "item:4", "selected": True, "reason_code": "selected"}] * 2,
+])
+def test_verdict_buckets_reject_unchecked_or_missing_selection(decisions: Any) -> None:
+    payload = {"selection": {"decisions": decisions}}
+    with pytest.raises(ValueError):
+        fix_steps._verdict_buckets([{"id": 4, "item_uid": "item:4", "lens": "structural"}], payload)

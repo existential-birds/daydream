@@ -15,6 +15,7 @@ from daydream.review_budget import review_budget_path
 from daydream.review_profile import ResolvedProfile, build_default_profile
 from daydream.run_context import InteractionPolicy, RunContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.review_result import review_coverage
 
 
 def _context(
@@ -41,7 +42,8 @@ def _context(
     ctx = FlowContext(config=make_config(tmp_path, pr_number=7), work=make_work(tmp_path), registry=Registry(),
         review_profile=ResolvedProfile(profile=profile, source_kind="test"),
         run_context=RunContext(InteractionPolicy(interactive=variant == "interactive")),
-        data={"dd": dd, "diff": diff[:300], "diff_path": diff_path, "log": "abc Author commit\n",
+        data={"review_coverage": review_coverage(scope_ids=(), phases=("intent",)),
+              "dd": dd, "diff": diff[:300], "diff_path": diff_path, "log": "abc Author commit\n",
               "branch": "feature", "exploration_dir": None},
     )
     backend: Any = ScriptedBackend() if variant == "other_backend" else PiBackend(model="fixture-model")

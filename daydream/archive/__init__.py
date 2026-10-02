@@ -332,9 +332,9 @@ def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
     No recorded failures leaves run status unchanged.
     """
     # Keep deep imports lazy for non-deep runs.
-    from daydream.deep.artifacts import fix_failures_path
+    from daydream.deep.artifacts import DeepArtifact
 
-    data = _read_json_artifact(fix_failures_path(target_dir / ".daydream" / "deep"), dict)
+    data = _read_json_artifact(DeepArtifact.FIX_FAILURES.at(target_dir / ".daydream" / "deep"), dict)
     if data is None:
         return None
     return {str(k): str(v) for k, v in data.items()}
@@ -342,9 +342,9 @@ def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
 
 def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
     """Read paths left untracked by failed fix passes via `_read_json_artifact`."""
-    from daydream.deep.artifacts import fix_leftover_untracked_path
+    from daydream.deep.artifacts import DeepArtifact
 
-    data = _read_json_artifact(fix_leftover_untracked_path(target_dir / ".daydream" / "deep"), list)
+    data = _read_json_artifact(DeepArtifact.FIX_LEFTOVER_UNTRACKED.at(target_dir / ".daydream" / "deep"), list)
     if data is None:
         return None
     return [str(p) for p in data]
@@ -374,9 +374,9 @@ def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str
 
     The ``{enabled, session_id, rounds}`` payload holds per-file erosion and verbosity deltas.
     """
-    from daydream.deep.artifacts import fix_quality_gate_path
+    from daydream.deep.artifacts import DeepArtifact
 
-    return _read_session_bound_json_artifact(target_dir, session_id, fix_quality_gate_path)
+    return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.FIX_QUALITY_GATE.at)
 
 
 def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
@@ -384,9 +384,9 @@ def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[
 
     Its ``capture_point`` identifies which tree produced ``recommended.patch``.
     """
-    from daydream.deep.artifacts import recommended_capture_path
+    from daydream.deep.artifacts import DeepArtifact
 
-    return _read_session_bound_json_artifact(target_dir, session_id, recommended_capture_path)
+    return _read_session_bound_json_artifact(target_dir, session_id, DeepArtifact.RECOMMENDED_CAPTURE.at)
 
 
 def _project_documents(
@@ -442,9 +442,9 @@ def _copy_run_artifacts(
     daydream_dir = target_dir / ".daydream"
     deep_dir = daydream_dir / "deep"
     if diagram_only:
-        from daydream.deep.artifacts import diagram_markdown_path, diagram_path
+        from daydream.deep.artifacts import DeepArtifact
 
-        for source in (diagram_path(deep_dir), diagram_markdown_path(deep_dir)):
+        for source in (DeepArtifact.DIAGRAM.at(deep_dir), DeepArtifact.DIAGRAM_MARKDOWN.at(deep_dir)):
             if source.is_file():
                 destination = run_dir / "deep" / source.name
                 destination.parent.mkdir(parents=True, exist_ok=True)

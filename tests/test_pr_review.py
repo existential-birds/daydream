@@ -12,7 +12,7 @@ import pytest
 
 import daydream.hunk_index as hunk_index
 from daydream import git_ops, pr_comment_renderer, pr_review
-from daydream.deep.artifacts import per_stack_failures_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.extensions import Registry, SummaryContext
 from daydream.extensions.builtins import register_builtins
 from daydream.findings import ArtifactFinding, load_findings_artifact
@@ -49,6 +49,7 @@ from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import sample_pr
+from tests.harness.review_result import terminal_result
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 _gh_available = shutil.which("gh") is not None
@@ -599,14 +600,22 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
 
     output = tmp_path / "findings.json"
     config = RunConfig(findings_out=str(output), pr_number=7 if lookup == "number" else None)
-    assert _emit_findings_from_items(git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,) == 0
+    assert _emit_findings_from_items(
+        git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS, terminal_result=terminal_result(head_sha=head),
+        captured_pr=info, snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
+    ) == 0
     artifact = load_findings_artifact(output, expected_repo="o/r", expected_pr_number=7, expected_head_sha=head,)
     assert artifact.findings == []
 
-    # Compatibility fallback must not allow export with an unavailable PR head.
+    # Captured export identity still requires an available PR head.
     output.unlink()
     row["headRefOid"] = "f" * 40
-    assert _emit_findings_from_items(git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,) == 1
+    with pytest.raises(GitError, match="bad object"):
+        _emit_findings_from_items(
+            git_repo, config, [], run_info="", renderers=BUILTIN_RENDERERS,
+            terminal_result=terminal_result(head_sha="f" * 40), captured_pr=replace(info, head_sha="f" * 40),
+            snapshot_diff=git_ops.diff_paths(git_repo, base, head, ["."]),
+        )
     assert not output.exists()
 
 @pytest.mark.parametrize("value", [None, False, 7, " ", "fork/r/extra", "fork/", "/r"])
@@ -939,7 +948,8 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
     monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
     warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
     if failed_reviewer:
-        per_stack_failures_path(tmp_path).write_text(json.dumps({"python": "RuntimeError: provider unavailable"}))
+        failures = {"python": "RuntimeError: provider unavailable"}
+        DeepArtifact.PER_STACK_FAILURES.at(tmp_path).write_text(json.dumps(failures))
         warnings = review_warnings(tmp_path)
     status = await pr_review.post_review_to_pr_from_report(
         tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]

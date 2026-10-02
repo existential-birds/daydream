@@ -28,11 +28,15 @@ def _write_canonical(target: Path) -> None:
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "merged-items.json").write_text(json.dumps({"items": [
-                    {"id": 1, "lens": "generic", "file": "api.py", "line": 1,
-                     "description": CANONICAL_KEEP_INLINE, "severity": "high", "confidence": "HIGH", "rationale": "r"},
-                    {"id": 2, "lens": "structural", "file": "README.md", "line": 1,
+                    {"id": 1, "lens": "per-stack", "file": "api.py", "line": 1,
+                     "item_uid": "item:1",
+                     "description": CANONICAL_KEEP_INLINE, "severity": "high", "confidence": "HIGH",
+                     "rationale": "r", "evidence": "api.py:1",
+                     "source_uids": ["python:1"], "related_files": None},
+                    {"id": 2, "lens": "structural", "file": "README.md", "line": 1, "item_uid": "item:2",
                      "description": CANONICAL_KEEP_STRUCTURAL, "severity": "high",
-                     "confidence": "HIGH", "rationale": "r"},
+                     "confidence": "HIGH", "rationale": "r", "evidence": "README.md:1",
+                     "source_uids": ["structure:1"], "related_files": None},
                 ]
             }
         )

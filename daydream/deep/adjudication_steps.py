@@ -23,11 +23,12 @@ from daydream.deep.arbiter import (
     select_suppression_targets,
 )
 from daydream.deep.artifacts import (
-    adjudication_complete_path,
+    DeepArtifact,
     arbiter_group_complete_path,
     arbiter_group_input_path,
     arbiter_group_verdicts_path,
     per_stack_records_path,
+    review_stage,
 )
 from daydream.deep.latency import (
     FAIL_SAFE_LATENCY_PROFILE,
@@ -38,11 +39,9 @@ from daydream.deep.latency import (
 )
 from daydream.deep.records import (
     partition_record_sources,
-    record_issues_or_empty,
     record_uid,
     stack_name_from_records_source,
     stack_name_from_uid,
-    stamp_record_uids,
 )
 from daydream.deep.reuse_key import (
     arbiter_key_payload,
@@ -62,7 +61,8 @@ from daydream.phases import (
     phase_suppression_review,
 )
 from daydream.phases.adjudication import IncompleteVerdicts
-from daydream.review_result import ReasonCode, reason_for_budget, reason_for_exception
+from daydream.phases.review import valid_record_artifact
+from daydream.review_result import ReasonCode, ReviewCoverage, reason_for_budget, reason_for_exception
 from daydream.supervision import revise_finding_fields
 from daydream.trajectory import (
     DaydreamPhase,
@@ -213,21 +213,15 @@ def _rewrite_stack_records(
 ) -> None:
     """Persist revised records to every stack file, including empty issue lists.
 
-    Route by UID stack, falling back to source only for absent UIDs. Warn on
-    records outside the supplied paths; merge later reads these files.
+    Route by required durable UID stack. Warn on records outside the supplied
+    paths; merge later reads these files.
     """
     by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
     for record, source in zip(records, sources, strict=True):
-        # Route by the uid's stack half (issue #1111): the ``source`` string has
-        # two spellings and cannot be trusted. ``sources`` stays zipped in to
-        # assert alignment and name the source in the warning below.
         uid = record_uid(record)
-        if uid:
-            dest = per_stack_records_path(deep_dir_path, stack_name_from_uid(uid))
-        else:
-            # No uid: fall back to ``source`` rather than let the record be
-            # erased by the "unroutable" branch below.
-            dest = per_stack_records_path(deep_dir_path, stack_name_from_records_source(source))
+        if not uid:
+            raise ValueError("Adjudicated records require a durable UID")
+        dest = per_stack_records_path(deep_dir_path, stack_name_from_uid(uid))
         if dest in by_stack:
             by_stack[dest].append(record)
         else:
@@ -245,8 +239,10 @@ def _rewrite_stack_records(
     for dest_path, stack_records in by_stack.items():
         previous = read_json_object(dest_path)
         incomplete = previous.get("incomplete") is True
-        binding = {key: previous[key] for key in ("scope_id", "analyzed_revision", "originating_run_id")
-                   if key in previous}
+        keys = ("scope_id", "analyzed_revision", "originating_run_id")
+        if any(key not in previous for key in keys):
+            raise ValueError("Adjudicated records require persisted scope/revision/run identity")
+        binding = {key: previous[key] for key in keys}
         dest_path.write_text(
             json.dumps({"issues": stack_records, **binding,
                         **({"incomplete": True} if incomplete else {})}, indent=2)
@@ -418,6 +414,17 @@ def _review_context_kwargs(ctx: FlowContext, deep_state: DeepState, *, strategy:
     }
 
 
+def _record_verdict_coverage(coverage: ReviewCoverage, phase: str, target_count: int,
+                             verdicts: dict[int, dict[str, Any]], *, complete: bool = True) -> bool:
+    """All adjudication stages require one validated verdict for every target."""
+    reason = (reason_for_budget(verdicts.budget_reason) if isinstance(verdicts, IncompleteVerdicts)
+              else ReasonCode.EVIDENCE_INCOMPLETE
+              if not complete or set(verdicts) != set(range(1, target_count + 1)) else None)
+    coverage.record_phase(phase, "incomplete" if reason else "complete",
+                          reasons=(reason,) if reason else (), noop=target_count == 0 and reason is None)
+    return reason is None
+
+
 async def _run_sharded_arbiter(
     ctx: FlowContext,
     deep_state: DeepState,
@@ -442,21 +449,18 @@ async def _run_sharded_arbiter(
     failed_groups: list[str] = []
     pending: list[PlannedGroup] = []
     for group in plan.groups:
-        if deep_state.review_coverage is not None:
-            deep_state.review_coverage.require_phase(group.group_id)
+        deep_state.review_coverage.require_phase(group.group_id)
         loaded = _load_group_verdicts(dd, group)
         if loaded is None:
             pending.append(group)
         else:
             group_verdicts[group.group_id] = loaded
             reused[group.group_id] = True
-            if deep_state.review_coverage is not None:
-                # Resumes restore matching versioned whole-run coverage before group reuse.
-                prior = deep_state.review_coverage.phases.get(group.group_id)
-                if prior is None or prior["status"] != "complete":
-                    pending.append(group)
-                    group_verdicts.pop(group.group_id, None)
-                    reused.pop(group.group_id, None)
+            prior = deep_state.review_coverage.phases.get(group.group_id)
+            if prior is None or prior["status"] != "complete":
+                pending.append(group)
+                group_verdicts.pop(group.group_id, None)
+                reused.pop(group.group_id, None)
 
     if pending:
         recorder = get_current_recorder()
@@ -502,9 +506,8 @@ async def _run_sharded_arbiter(
                                         )
                                 except Exception as exc:  # noqa: BLE001 -- per-group isolation; fail-open
                                     failed_groups.append(planned.group_id)
-                                    if deep_state.review_coverage is not None:
-                                        deep_state.review_coverage.record_phase(planned.group_id, "failed",
-                                                                               reasons=(reason_for_exception(exc),))
+                                    deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                                                                           reasons=(reason_for_exception(exc),))
                                     reused[planned.group_id] = False
                                     print_warning(
                                         console,
@@ -513,33 +516,22 @@ async def _run_sharded_arbiter(
                                         "remain unadjudicated.",
                                     )
                                     return
-                                if isinstance(group_verdicts_call, IncompleteVerdicts):
+                                if not _record_verdict_coverage(deep_state.review_coverage, planned.group_id,
+                                        len(targets_by_group[planned.group_id]), group_verdicts_call):
                                     failed_groups.append(planned.group_id)
-                                    if deep_state.review_coverage is not None:
-                                        deep_state.review_coverage.record_phase(planned.group_id, "incomplete",
-                                            reasons=(reason_for_budget(group_verdicts_call.budget_reason),))
-                                    return
-                                expected_ids = set(range(1, len(targets_by_group.get(planned.group_id, ())) + 1))
-                                if set(group_verdicts_call) != expected_ids:
-                                    failed_groups.append(planned.group_id)
-                                    if deep_state.review_coverage is not None:
-                                        deep_state.review_coverage.record_phase(planned.group_id, "incomplete",
-                                                                               reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
-                                    group_verdicts[planned.group_id] = group_verdicts_call
+                                    if not isinstance(group_verdicts_call, IncompleteVerdicts):
+                                        group_verdicts[planned.group_id] = group_verdicts_call
                                     return
                                 try:
                                     _persist_group_verdicts(dd, planned, group_verdicts_call)
                                 except (OSError, ValueError) as exc:
                                     failed_groups.append(planned.group_id)
-                                    if deep_state.review_coverage is not None:
-                                        deep_state.review_coverage.record_phase(planned.group_id, "failed",
-                                                                               reasons=(ReasonCode.MALFORMED_ARTIFACT,))
+                                    deep_state.review_coverage.record_phase(planned.group_id, "failed",
+                                                                           reasons=(ReasonCode.MALFORMED_ARTIFACT,))
                                     print_warning(console,
                                                   f"Arbiter group {planned.group_id} could not persist its verdicts "
                                                   f"({type(exc).__name__}); its findings remain unadjudicated.")
                                     return
-                                if deep_state.review_coverage is not None:
-                                    deep_state.review_coverage.record_phase(planned.group_id, "complete")
                                 group_verdicts[planned.group_id] = group_verdicts_call
                                 reused[planned.group_id] = False
 
@@ -588,7 +580,7 @@ def _arbiter_store_payload(
                 arbiter_group_verdicts_path(dd, group.group_id),
                 arbiter_group_complete_path(dd, group.group_id),
             ))
-    paths.append(adjudication_complete_path(dd))
+    paths.append(DeepArtifact.ADJUDICATION_COMPLETE.at(dd))
     try:
         return {path.name: path.read_bytes() for path in paths}
     except OSError:
@@ -613,8 +605,10 @@ def _reload_adjudicated_records(deep_state: DeepState) -> bool:
                 loaded = json.loads(path.read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 return False
-            rows = record_issues_or_empty(loaded)
-            stamp_record_uids(rows, path.name)
+            if not valid_record_artifact(loaded, scope_id=stack_name_from_records_source(path.name),
+                                         analyzed_revision=deep_state.review_coverage.revision.to_dict()):
+                return False
+            rows = loaded["issues"]
             records.extend(rows)
             sources.extend(path.name for _ in rows)
         groups.append((records, sources))
@@ -663,29 +657,6 @@ def _try_reuse_arbiter(
 
 
 async def _step_arbiter(ctx: FlowContext) -> None:
-    coverage = DeepState(ctx.data).review_coverage
-    if ctx.pipeline().arbitration.enabled and coverage is not None:
-        coverage.require_phase("arbiter")
-    try:
-        await _step_arbiter_impl(ctx)
-    except Exception as exc:
-        if coverage is not None:
-            phase = ("suppression" if "suppression" in coverage.phases
-                     and coverage.phases["suppression"]["status"] == "uncovered" else "arbiter")
-            coverage.record_phase(phase, "failed", reasons=(reason_for_exception(exc),))
-            from daydream.deep.artifacts import persist_review_coverage
-            try:
-                persist_review_coverage(DeepState(ctx.data).dd, coverage)
-            except Exception as persistence_error:
-                exc.add_note(f"Review coverage persistence failed: {type(persistence_error).__name__}")
-        raise
-    else:
-        if coverage is not None:
-            from daydream.deep.artifacts import persist_review_coverage
-            persist_review_coverage(DeepState(ctx.data).dd, coverage)
-
-
-async def _step_arbiter_impl(ctx: FlowContext) -> None:
     """Scoped arbiter over high-severity/contested findings (#168).
 
     Two shapes: the unsharded path (forensic, or a selection that fits one
@@ -695,243 +666,228 @@ async def _step_arbiter_impl(ctx: FlowContext) -> None:
     resume reruns only the incomplete groups.
     """
     deep_state = DeepState(ctx.data)
-    config = ctx.config
-    dd = deep_state.dd
-    all_records: list[dict[str, Any]] = deep_state.records
-    record_sources: list[str] = deep_state.record_sources
-    # Adjudicate language and structural findings together, then restore their
-    # partition for dedup and merge.
-    structural_records: list[dict[str, Any]] = deep_state.structural_records
-    structural_sources: list[str] = deep_state.structural_record_sources
+    if ctx.pipeline().arbitration.enabled:
+        deep_state.review_coverage.require_phase("arbiter")
+    with review_stage(deep_state, lambda: ("suppression" if "suppression" in deep_state.review_coverage.phases
+        and deep_state.review_coverage.phases["suppression"]["status"] == "uncovered" else "arbiter"), persist=True):
+        config = ctx.config
+        dd = deep_state.dd
+        all_records: list[dict[str, Any]] = deep_state.records
+        record_sources: list[str] = deep_state.record_sources
+        # Adjudicate language and structural findings together, then restore their
+        # partition for dedup and merge.
+        structural_records: list[dict[str, Any]] = deep_state.structural_records
+        structural_sources: list[str] = deep_state.structural_record_sources
 
-    # A merge resume skips adjudication only with a whole-pass completion marker.
-    adjudication_marker = adjudication_complete_path(dd)
-    if (
-        ctx.pipeline().arbitration.enabled
-        and (config.start_at != "merge" or not adjudication_marker.is_file())
-    ):
-        structural_path: Path | None = deep_state.structural_records_path_or_none
-        adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range = (
-            _rejoin_structural_records(
-                all_records, record_sources, structural_records, structural_sources,
-                deep_state.records_paths, structural_path,
+        # A merge resume skips adjudication only with a whole-pass completion marker.
+        adjudication_marker = DeepArtifact.ADJUDICATION_COMPLETE.at(dd)
+        if (
+            ctx.pipeline().arbitration.enabled
+            and (config.start_at != "merge" or not adjudication_marker.is_file())
+        ):
+            structural_path: Path | None = deep_state.structural_records_path_or_none
+            adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range = (
+                _rejoin_structural_records(
+                    all_records, record_sources, structural_records, structural_sources,
+                    deep_state.records_paths, structural_path,
+                )
             )
-        )
 
-        arbiter_targets = select_arbiter_targets(
-            adjudicated, adjudicated_sources,
-            min_severity=ctx.pipeline().arbitration.min_severity,
-            contested_location=ctx.pipeline().arbitration.contested_location,
-            contested_only=structural_range,
-        )
-        # Suppression exclusions use durable UIDs; indices shift and locations can collide.
-        # Unidentified records are handled explicitly at the exclusion site.
-        arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
-        arbiter_slice: dict[str, Any] = {
-            "sharded": False,
-            "reason": "no arbiter targets selected",
-            "groups": [],
-            "verdicts_applied": 0,
-            "failed_groups": [],
-        }
-        adjudication_complete = True
-        # The resolved suppression opt-in is part of the arbiter unit's contract
-        # (MH8): a payload stored with it off must not be served to a run with it
-        # on, so it is keyed, not merely recorded.
-        precision_mode = bool(
-            ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode")
-        )
-        if precision_mode and deep_state.review_coverage is not None:
-            deep_state.review_coverage.require_phase("suppression")
-        # The reuse handles are populated only when there are arbiter targets;
-        # the whole-unit store at the end of the block reads them back.
-        arbiter_unit: ReviewReuseUnit | None = None
-        plan: ArbiterPlan | None = None
-        if arbiter_targets:
-            route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
-            # Only sharded routes partition; an unsharded route may have a zero group bound.
-            groups = (
-                partition_arbiter_targets(
-                    adjudicated,
-                    arbiter_targets,
-                    edges=deep_state.import_graph,
-                    max_targets=route.group_max_targets,
-                )
-                if route.arbiter_sharded
-                else [
-                    ArbiterGroup(
-                        "arbiter-group-0",
-                        tuple(arbiter_targets),
-                        tuple(record_uid(adjudicated[i]) for i in arbiter_targets),
-                    )
-                ]
+            arbiter_targets = select_arbiter_targets(
+                adjudicated, adjudicated_sources,
+                min_severity=ctx.pipeline().arbitration.min_severity,
+                contested_location=ctx.pipeline().arbitration.contested_location,
+                contested_only=structural_range,
             )
-            contested = (
-                contested_indices(
-                    adjudicated,
-                    adjudicated_sources,
-                    contested_only=structural_range,
-                )
-                if ctx.pipeline().arbitration.contested_location
-                else frozenset()
-            )
-            plan = arbiter_plan(route, groups, records=adjudicated, contested=contested)
-            deep_state.arbiter_plan = plan
-            targets_by_group = {
-                group.group_id: list(group.target_indices) for group in groups
+            # Suppression exclusions use durable UIDs; indices shift and locations can collide.
+            # Unidentified records are handled explicitly at the exclusion site.
+            arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
+            arbiter_slice: dict[str, Any] = {
+                "sharded": False,
+                "reason": "no arbiter targets selected",
+                "groups": [],
+                "verdicts_applied": 0,
+                "failed_groups": [],
             }
-            from daydream.run_config import _explicit_reasoning_effort_pin
-
-            effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
-            # Capture the key before adjudication mutates records, then reuse or store under it.
-            reuse = reuse_cache_for(ctx)
-            arbiter_identity = phase_identity_for(ctx, "arbiter")
-            if reuse is not None:
-                contributing = _records_bytes_by_basename(rewrite_paths)
-                arbiter_payload = arbiter_key_payload(
-                    contributing_records=contributing,
-                    structural_records=(
-                        contributing.get(structural_path.name)
-                        if structural_path is not None
-                        else None
-                    ),
-                    plan=_arbiter_plan_component(plan),
-                    precision_mode=precision_mode,
-                    identity=arbiter_identity,
-                    grounding=_loop_grounding(deep_state),
+            adjudication_complete = True
+            # The resolved suppression opt-in is part of the arbiter unit's contract
+            # (MH8): a payload stored with it off must not be served to a run with it
+            # on, so it is keyed, not merely recorded.
+            precision_mode = bool(
+                ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode")
+            )
+            if precision_mode:
+                deep_state.review_coverage.require_phase("suppression")
+            # The reuse handles are populated only when there are arbiter targets;
+            # the whole-unit store at the end of the block reads them back.
+            arbiter_unit: ReviewReuseUnit | None = None
+            plan: ArbiterPlan | None = None
+            if arbiter_targets:
+                route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
+                # Only sharded routes partition; an unsharded route may have a zero group bound.
+                groups = (
+                    partition_arbiter_targets(
+                        adjudicated,
+                        arbiter_targets,
+                        edges=deep_state.import_graph,
+                        max_targets=route.group_max_targets,
+                    )
+                    if route.arbiter_sharded
+                    else [
+                        ArbiterGroup(
+                            "arbiter-group-0",
+                            tuple(arbiter_targets),
+                            tuple(record_uid(adjudicated[i]) for i in arbiter_targets),
+                        )
+                    ]
                 )
-                arbiter_unit = ReviewReuseUnit(reuse, "arbiter", arbiter_identity, arbiter_payload,
-                                               coverage=deep_state.review_coverage)
-                if _try_reuse_arbiter(arbiter_unit, deep_state, plan):
-                    if deep_state.review_coverage is not None:
+                contested = (
+                    contested_indices(
+                        adjudicated,
+                        adjudicated_sources,
+                        contested_only=structural_range,
+                    )
+                    if ctx.pipeline().arbitration.contested_location
+                    else frozenset()
+                )
+                plan = arbiter_plan(route, groups, records=adjudicated, contested=contested)
+                deep_state.arbiter_plan = plan
+                targets_by_group = {
+                    group.group_id: list(group.target_indices) for group in groups
+                }
+                from daydream.run_config import _explicit_reasoning_effort_pin
+
+                effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
+                # Capture the key before adjudication mutates records, then reuse or store under it.
+                reuse = reuse_cache_for(ctx)
+                arbiter_identity = phase_identity_for(ctx, "arbiter")
+                if reuse is not None:
+                    contributing = _records_bytes_by_basename(rewrite_paths)
+                    arbiter_payload = arbiter_key_payload(
+                        contributing_records=contributing,
+                        structural_records=(
+                            contributing.get(structural_path.name)
+                            if structural_path is not None
+                            else None
+                        ),
+                        plan=_arbiter_plan_component(plan),
+                        precision_mode=precision_mode,
+                        identity=arbiter_identity,
+                        grounding=_loop_grounding(deep_state),
+                    )
+                    arbiter_unit = ReviewReuseUnit(reuse, "arbiter", arbiter_identity, arbiter_payload,
+                                                   coverage=deep_state.review_coverage)
+                    if _try_reuse_arbiter(arbiter_unit, deep_state, plan):
                         deep_state.review_coverage.record_phase("arbiter", "complete")
                         if precision_mode:
                             deep_state.review_coverage.record_phase("suppression", "complete")
-                    return
-            if plan.sharded:
-                verdicts, reused, failed_groups = await _run_sharded_arbiter(
-                    ctx,
-                    deep_state,
-                    plan,
-                    arbiter_targets,
-                    adjudicated,
-                    effort_pin=effort_pin,
-                    targets_by_group=targets_by_group,
-                )
-                adjudication_complete = not failed_groups
-            else:
-                failed_groups = []
-                reused = {plan.groups[0].group_id: False}
-                async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                    arbiter_backend = _unsharded_arbiter_backend(ctx, effort_pin=effort_pin)
-                    verdicts, arbiter_continuation = await phase_arbiter_review(
-                        arbiter_backend,
-                        ctx.work,
-                        selected_records=[adjudicated[i] for i in arbiter_targets],
-                        **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("arbitration")),
-                        intent_authoritative=deep_state.intent_authoritative,
+                        return
+                if plan.sharded:
+                    verdicts, reused, failed_groups = await _run_sharded_arbiter(
+                        ctx,
+                        deep_state,
+                        plan,
+                        arbiter_targets,
+                        adjudicated,
+                        effort_pin=effort_pin,
+                        targets_by_group=targets_by_group,
                     )
-                    # Identity gate: only resume when merge runs on the very same
-                    # backend instance. A per-phase override that resolves a
-                    # different backend gets the cold path.
-                    if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
-                        deep_state.arbiter_continuation = arbiter_continuation
-            adjudicated, adjudicated_sources, arbiter_outcomes = _apply_adjudication_verdicts(
-                adjudicated, adjudicated_sources, arbiter_targets, verdicts,
-                pass_name="arbiter",
-                id_field="arb_id",
-                fail_closed=False,
-            )
-            _rewrite_stack_records(
-                dd, rewrite_paths, adjudicated, adjudicated_sources
-            )
-            record_provenance(dd, pass_name="arbiter", outcomes=arbiter_outcomes)
-            arbiter_slice = {
-                "sharded": plan.sharded,
-                "reason": plan.reason,
-                "groups": _arbiter_groups_record(plan, effort_pin=effort_pin, reused=reused),
-                "verdicts_applied": len(verdicts),
-                "failed_groups": list(failed_groups),
-            }
-        if deep_state.review_coverage is not None:
-            if not arbiter_targets:
-                deep_state.review_coverage.record_phase("arbiter", "complete", noop=True)
-            elif isinstance(verdicts, IncompleteVerdicts):
-                adjudication_complete = False
-                deep_state.review_coverage.record_phase("arbiter", "incomplete",
-                    reasons=(reason_for_budget(verdicts.budget_reason),))
-            elif not adjudication_complete or set(verdicts) != set(range(1, len(arbiter_targets) + 1)):
-                adjudication_complete = False
-                deep_state.review_coverage.record_phase("arbiter", "incomplete",
-                    reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
-            else:
-                deep_state.review_coverage.record_phase("arbiter", "complete")
-        write_routing_record(dd, {"arbiter": arbiter_slice})
-
-        # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
-        # opinion on borderline (LOW-confidence / low-severity uncontested)
-        # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
-        # arbiter's targets; one batched call via the cheaper `suppression` key.
-        if precision_mode:
-            # Exclude structural records (high-conviction by construction,
-            # #1103) and any record with no uid: suppression is fail-CLOSED, so
-            # unidentifiable records must be kept rather than droppable.
-            suppression_exclude = [
-                i
-                for i, r in enumerate(adjudicated)
-                if not (uid := record_uid(r)) or uid in arbitrated_ids or uid in structural_ids
-            ]
-            suppression_targets = select_suppression_targets(
-                adjudicated,
-                suppression_exclude,
-                severity_classes=ctx.pipeline().suppression.severity_classes,
-                confidence_classes=ctx.pipeline().suppression.confidence_classes,
-            )
-            if suppression_targets:
-                async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
-                    sup_verdicts = await phase_suppression_review(
-                        ctx.backend_for("suppression"),
-                        ctx.work,
-                        selected_records=[adjudicated[i] for i in suppression_targets],
-                        **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
-                    )
-                adjudicated, adjudicated_sources, suppression_outcomes = _apply_adjudication_verdicts(
-                    adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
-                    pass_name="suppression",
-                    id_field="sup_id",
-                    fail_closed=True,
+                    adjudication_complete = not failed_groups
+                else:
+                    failed_groups = []
+                    reused = {plan.groups[0].group_id: False}
+                    async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
+                        arbiter_backend = _unsharded_arbiter_backend(ctx, effort_pin=effort_pin)
+                        verdicts, arbiter_continuation = await phase_arbiter_review(
+                            arbiter_backend,
+                            ctx.work,
+                            selected_records=[adjudicated[i] for i in arbiter_targets],
+                            **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("arbitration")),
+                            intent_authoritative=deep_state.intent_authoritative,
+                        )
+                        # Identity gate: only resume when merge runs on the very same
+                        # backend instance. A per-phase override that resolves a
+                        # different backend gets the cold path.
+                        if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
+                            deep_state.arbiter_continuation = arbiter_continuation
+                adjudicated, adjudicated_sources, arbiter_outcomes = _apply_adjudication_verdicts(
+                    adjudicated, adjudicated_sources, arbiter_targets, verdicts,
+                    pass_name="arbiter",
+                    id_field="arb_id",
+                    fail_closed=False,
                 )
                 _rewrite_stack_records(
                     dd, rewrite_paths, adjudicated, adjudicated_sources
                 )
-                record_provenance(dd, pass_name="suppression", outcomes=suppression_outcomes)
-            if deep_state.review_coverage is not None:
-                if not suppression_targets:
-                    deep_state.review_coverage.record_phase("suppression", "complete", noop=True)
-                elif isinstance(sup_verdicts, IncompleteVerdicts):
-                    adjudication_complete = False
-                    deep_state.review_coverage.record_phase("suppression", "incomplete",
-                        reasons=(reason_for_budget(sup_verdicts.budget_reason),))
-                elif set(sup_verdicts) != set(range(1, len(suppression_targets) + 1)):
-                    adjudication_complete = False
-                    deep_state.review_coverage.record_phase("suppression", "incomplete",
-                                                           reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
-                else:
-                    deep_state.review_coverage.record_phase("suppression", "complete")
-        # Whole-block marker: written only when every planned group completed,
-        # so an interrupted sharded fan-out forces the block to re-enter and
-        # reruns only its incomplete groups (and the opt-in suppression pass).
-        if adjudication_complete:
-            adjudication_marker.write_text("")
-            # Store only a completed whole-unit adjudication (every planned
-            # group's files present) under the pre-dispatch key; a partial entry
-            # must never be served as this unit's output.
-            if arbiter_unit is not None and plan is not None:
-                arbiter_unit.store(lambda: _arbiter_store_payload(dd, rewrite_paths, plan))
-        all_records, record_sources, structural_records, structural_sources = (
-            partition_record_sources(adjudicated, adjudicated_sources, structural_ids)
-        )
-    deep_state.records = all_records
-    deep_state.record_sources = record_sources
-    deep_state.structural_records = structural_records
-    deep_state.structural_record_sources = structural_sources
+                record_provenance(dd, pass_name="arbiter", outcomes=arbiter_outcomes)
+                arbiter_slice = {
+                    "sharded": plan.sharded,
+                    "reason": plan.reason,
+                    "groups": _arbiter_groups_record(plan, effort_pin=effort_pin, reused=reused),
+                    "verdicts_applied": len(verdicts),
+                    "failed_groups": list(failed_groups),
+                }
+            adjudication_complete = _record_verdict_coverage(
+                deep_state.review_coverage, "arbiter", len(arbiter_targets),
+                verdicts if arbiter_targets else {}, complete=adjudication_complete,
+            )
+            write_routing_record(dd, {"arbiter": arbiter_slice})
+
+            # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
+            # opinion on borderline (LOW-confidence / low-severity uncontested)
+            # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
+            # arbiter's targets; one batched call via the cheaper `suppression` key.
+            if precision_mode:
+                # Exclude structural records (high-conviction by construction,
+                # #1103) and any record with no uid: suppression is fail-CLOSED, so
+                # unidentifiable records must be kept rather than droppable.
+                suppression_exclude = [
+                    i
+                    for i, r in enumerate(adjudicated)
+                    if not (uid := record_uid(r)) or uid in arbitrated_ids or uid in structural_ids
+                ]
+                suppression_targets = select_suppression_targets(
+                    adjudicated,
+                    suppression_exclude,
+                    severity_classes=ctx.pipeline().suppression.severity_classes,
+                    confidence_classes=ctx.pipeline().suppression.confidence_classes,
+                )
+                if suppression_targets:
+                    async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
+                        sup_verdicts = await phase_suppression_review(
+                            ctx.backend_for("suppression"),
+                            ctx.work,
+                            selected_records=[adjudicated[i] for i in suppression_targets],
+                            **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
+                        )
+                    adjudicated, adjudicated_sources, suppression_outcomes = _apply_adjudication_verdicts(
+                        adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
+                        pass_name="suppression",
+                        id_field="sup_id",
+                        fail_closed=True,
+                    )
+                    _rewrite_stack_records(
+                        dd, rewrite_paths, adjudicated, adjudicated_sources
+                    )
+                    record_provenance(dd, pass_name="suppression", outcomes=suppression_outcomes)
+                adjudication_complete = _record_verdict_coverage(
+                    deep_state.review_coverage, "suppression", len(suppression_targets),
+                    sup_verdicts if suppression_targets else {},
+                ) and adjudication_complete
+            # Whole-block marker: written only when every planned group completed,
+            # so an interrupted sharded fan-out forces the block to re-enter and
+            # reruns only its incomplete groups (and the opt-in suppression pass).
+            if adjudication_complete:
+                adjudication_marker.write_text("")
+                # Store only a completed whole-unit adjudication (every planned
+                # group's files present) under the pre-dispatch key; a partial entry
+                # must never be served as this unit's output.
+                if arbiter_unit is not None and plan is not None:
+                    arbiter_unit.store(lambda: _arbiter_store_payload(dd, rewrite_paths, plan))
+            all_records, record_sources, structural_records, structural_sources = (
+                partition_record_sources(adjudicated, adjudicated_sources, structural_ids)
+            )
+        deep_state.records = all_records
+        deep_state.record_sources = record_sources
+        deep_state.structural_records = structural_records
+        deep_state.structural_record_sources = structural_sources

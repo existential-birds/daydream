@@ -108,8 +108,8 @@ def test_stamp_handles_an_empty_list() -> None:
     stamp_record_uids(records, "python")
     assert records == []
 
-def test_backfill_reproduces_the_uids_the_producing_run_minted() -> None:
-    """Deterministic stack/position identities backfill pre-UID artifacts."""
+def test_independent_producer_batches_mint_identical_record_uids() -> None:
+    """The same producer inventory deterministically mints the same identities."""
     at_birth: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {"id": 3}]
     stamp_record_uids(at_birth, "python")
     reloaded_without_uids: list[dict[str, Any]] = [{"id": 1}, {"id": 2}, {"id": 3}]

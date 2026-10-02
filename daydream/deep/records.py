@@ -133,25 +133,14 @@ def duplicate_record_uids(records: list[dict[str, Any]]) -> list[str]:
 
 
 def record_issues(records: Any) -> list[Any] | None:
-    """Normalize current {issues: [...]} and legacy bare-list record payloads.
-
-    None means malformed; callers retain their own failure policy.
-    """
-    if isinstance(records, dict):
-        issues = records.get("issues")
-        return issues if isinstance(issues, list) else None
-    return records if isinstance(records, list) else None
+    """Read the current issues envelope; malformed payloads return None."""
+    issues = records.get('issues') if isinstance(records, dict) else None
+    return issues if isinstance(issues, list) else None
 
 
 def record_issues_or_empty(records: Any) -> list[Any]:
-    """Normalize a loaded per-stack records file to a bare issues list.
-
-    A non-list load yields ``[]`` for a dict, otherwise the raw load.
-    """
-    issues = record_issues(records)
-    if issues is None:
-        return [] if isinstance(records, dict) else records
-    return issues
+    """Read current records, contributing no evidence for a malformed envelope."""
+    return record_issues(records) or []
 
 
 def partition_record_sources(

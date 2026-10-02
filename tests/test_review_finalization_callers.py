@@ -14,6 +14,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.review_budget import ReviewLimits
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.review_result import review_scopes
 
 
 def _stop_then_finalize(result: dict[str, Any]) -> ScriptedBackend:
@@ -32,7 +33,7 @@ async def test_structural_finalizer_captures_prioritized_diff_without_session(
     intent.write_text("PRESERVE_AUTHOR_INTENT")
     alternatives = tmp_path / "alternatives.json"
     alternatives.write_text("ADVISORY " * 4000)
-    results, failures = await phases.phase_per_stack_reviews(backend, make_work(tmp_path),
+    results, failures = await review_scopes(backend, make_work(tmp_path),
         [StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py"], is_docs_only=False)],
         diff_path=diff, intent_path=intent, alternatives_path=alternatives,
         intent_authoritative=True, allow_standalone=True,
@@ -82,7 +83,7 @@ async def test_ordinary_reviewer_rejects_invalid_envelope(
     intent.write_text("intent")
     alternatives = tmp_path / "alternatives.json"
     alternatives.write_text("[]")
-    results, failures = await phases.phase_per_stack_reviews(backend, make_work(tmp_path),
+    results, failures = await review_scopes(backend, make_work(tmp_path),
         [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False)],
         diff_path=diff, intent_path=intent, alternatives_path=alternatives, allow_standalone=True)
     assert results == {}

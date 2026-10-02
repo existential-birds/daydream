@@ -113,6 +113,8 @@ being rejected.
 
 ## Testing policy
 
+For the [terminal findings contract](README.md#terminal-review-findings-contract), exercise the production runner with real Git/public outputs, stub provider/GitHub seams, and inject filesystem faults at actual read/write/install operations.
+
 Every user-visible behavior must have at least one **real-path test**: a test
 that enters from the production entrypoint (`runner.run` / the CLI) with real
 dependencies — a real temp git worktree, a real filesystem, a real event loop —
@@ -209,16 +211,3 @@ in [CLAUDE.md](CLAUDE.md), which this guide deliberately links instead of
 duplicating. If your PR changes any contract described there, update it in the
 same PR. Before opening the PR, run through the checklist at the bottom of the
 [PR template](.github/PULL_REQUEST_TEMPLATE.md).
-
-### Terminal review result regressions
-
-The [findings contract](README.md#terminal-review-findings-contract) describes
-schema versions, state derivation, snapshot binding, budgets and hosted caller
-freshness. Changes to coverage must include a production `runner.run` regression
-with `findings_out`, a real Git checkout and public destination assertions; stub
-only provider/GitHub boundaries. Keep typed scope/stage evidence and validate
-loaded coverage against the exact revision and scope inventory. Version 1 review
-artifacts have unknown completeness; version 2 incomplete/failed artifacts cannot
-authorize approval or stale resolution even with empty warnings. Exercise atomic
-writer and public rollback failure paths, strict schema, posting, resume/cache
-migration, and run `make check` with normal Git hooks enabled.

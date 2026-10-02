@@ -837,7 +837,7 @@ def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
     records: list[dict[str, Any]] = [{"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
         for i in range(n)
     ]
-    (deep / f"stack-{stack_name}-records.json").write_text(json.dumps(records))
+    (deep / f"stack-{stack_name}-records.json").write_text(json.dumps({"issues": records}))
 
 
 def seed_review_output(deep: Path, *, count: int) -> None:

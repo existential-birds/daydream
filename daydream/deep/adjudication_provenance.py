@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from daydream.deep.artifacts import adjudication_provenance_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.json_utils import atomic_write_json, read_json_object
 from daydream.supervision import REVISABLE_FINDING_FIELDS
 
@@ -132,14 +132,14 @@ def record_provenance(
         merged[outcome.uid] = _merge_outcome(merged.get(outcome.uid), outcome, pass_name)
     records = {uid: merged[uid].as_dict() for uid in sorted(merged)}
     payload = {"format": PROVENANCE_FORMAT, "records": records}
-    path = adjudication_provenance_path(deep_dir)
+    path = DeepArtifact.ADJUDICATION_PROVENANCE.at(deep_dir)
     atomic_write_json(path, payload, indent=2, trailing_newline=True)
     return path
 
 
 def load_provenance(deep_dir: Path) -> dict[str, RecordProvenance]:
     """Read the typed ledger or {}; discard malformed records individually."""
-    raw = read_json_object(adjudication_provenance_path(deep_dir))
+    raw = read_json_object(DeepArtifact.ADJUDICATION_PROVENANCE.at(deep_dir))
     if raw.get("format") != PROVENANCE_FORMAT:
         return {}
     records = raw.get("records")

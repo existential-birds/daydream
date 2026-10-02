@@ -122,8 +122,8 @@ def review_warnings(deep_dir: Path) -> tuple[str, ...]:
     """Collect incomplete phases and stacks for reports and posting."""
     from daydream.deep.artifacts import (
         MERGE_FAILURE_KEY,
+        DeepArtifact,
         _load_failures,
-        per_stack_failures_path,
     )
 
     path = review_budget_path(deep_dir)
@@ -131,7 +131,7 @@ def review_warnings(deep_dir: Path) -> tuple[str, ...]:
     warnings = [f"{phase}: {reason}" for phase, reason in sorted(stops.items())]
     warnings.extend(
         f"{stack}: {redact_text(reason)}"
-        for stack, reason in sorted(_load_failures(per_stack_failures_path(deep_dir)).items())
+        for stack, reason in sorted(_load_failures(DeepArtifact.PER_STACK_FAILURES.at(deep_dir)).items())
         if isinstance(reason, str) and stack != MERGE_FAILURE_KEY
     )
     return tuple(warnings)

@@ -24,12 +24,10 @@ from daydream.config import (
 from daydream.deep import review_steps
 from daydream.deep.adjudication_steps import _step_arbiter
 from daydream.deep.artifacts import (
-    alternatives_path as _alternatives_path,
+    DeepArtifact,
     check_deep_artifacts,
     deep_dir,
     diff_key,
-    diff_key_path,
-    intent_path as _intent_path,
     per_stack_records_path,
 )
 from daydream.deep.dependency import build_import_graph
@@ -594,7 +592,7 @@ async def _run_review_spine(
         # against, or the staleness gate would self-heal and pass every time.
         shutil.rmtree(dd, ignore_errors=True)
         dd.mkdir(parents=True, exist_ok=True)
-        diff_key_path(dd).write_text(current_diff_sha, encoding="utf-8")
+        DeepArtifact.DIFF_KEY.at(dd).write_text(current_diff_sha, encoding="utf-8")
 
     async with _open_recorder(
         config=config, target_dir=target_dir, work=work, flow_kind=_flow_kind_for_mode(mode),
@@ -770,8 +768,8 @@ async def _run_review_spine(
                 # denies that rule; it never fails the run.
                 "import_graph": import_graph,
                 "single_stack_mode": single_stack_mode,
-                "intent_path": _intent_path(dd),
-                "alts_path": _alternatives_path(dd),
+                "intent_path": DeepArtifact.INTENT.at(dd),
+                "alts_path": DeepArtifact.ALTERNATIVES.at(dd),
                 "log": log,
                 "branch": branch,
                 "failed_stacks": {},

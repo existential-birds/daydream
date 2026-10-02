@@ -20,10 +20,10 @@ from daydream.deep.detection import StackAssignment
 from daydream.phases import (
     phase_arbiter_review,
     phase_cross_stack_merge,
-    phase_per_stack_reviews,
 )
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.review_result import merge_result, review_scopes
 
 
 def _rec(monkeypatch: Any) -> Console:
@@ -65,7 +65,7 @@ async def test_merge_prints_item_count(
         for i in range(1, 4)
     ]
     backend = ScriptedBackend(
-        events=[ResultEvent(structured_output={"items": items}, continuation=None)],
+        events=[ResultEvent(structured_output=merge_result(items), continuation=None)],
         model="mock-model",
     )
 
@@ -173,7 +173,7 @@ async def test_per_stack_failures_summarized_once(
     ]
     backend = _per_stack_backend({"stack-a", "stack-b"})
 
-    successes, failures = await phase_per_stack_reviews(
+    successes, failures = await review_scopes(
         cast(Backend, backend),
         work,
         stacks,

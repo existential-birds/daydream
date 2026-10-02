@@ -27,7 +27,7 @@ from daydream.backends import (
     TurnEndEvent,
 )
 from daydream.cli import _signal_handler
-from daydream.deep.artifacts import push_verdict_path, remote_ci_handoff_path, remote_ci_verdict_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.eval.analyzer import analyze_costs, load_trajectories
 from daydream.phases.publish import (
     _do_commit,
@@ -2190,9 +2190,9 @@ async def test_artifact_final_writer_failure_preserves_existing_primary_exceptio
 
 def test_remote_ci_artifact_paths_are_named_under_deep_dir(tmp_path: Path) -> None:
 
-    assert push_verdict_path(tmp_path) == tmp_path / "push-verdict.json"
-    assert remote_ci_verdict_path(tmp_path) == tmp_path / "remote-ci-verdict.json"
-    assert remote_ci_handoff_path(tmp_path) == tmp_path / "remote-ci-handoff.json"
+    assert DeepArtifact.PUSH_VERDICT.at(tmp_path) == tmp_path / "push-verdict.json"
+    assert DeepArtifact.REMOTE_CI_VERDICT.at(tmp_path) == tmp_path / "remote-ci-verdict.json"
+    assert DeepArtifact.REMOTE_CI_HANDOFF.at(tmp_path) == tmp_path / "remote-ci-handoff.json"
 
 async def test_do_commit_records_commit_phase_event(git_repo: Path, make_work: Any,) -> None:
     """Real-path: _do_commit's host-native commit emits a distinct ``commit``

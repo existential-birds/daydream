@@ -396,7 +396,9 @@ async def test_ac_merge_resume_on_tiny_diff(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural[0]["source_uids"] == ["structure:1"]
 
+@pytest.mark.parametrize("confidence", ["HIGH", "LOW"])
 async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+    confidence: str,
 ) -> None:
     """Issue #227 (AC2/AC3/AC6): the structural evidence gate keeps an evidenced finding but drops a speculative
     one before it reaches merged-items.json."""
@@ -408,13 +410,17 @@ async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path,
             "rationale": "verified against src/foo.py", "evidence": "src/foo.py:42",
         },
         {"id": 2, "lens": "per-stack", "file": "App.tsx", "line": 1, "severity": "low",
-            "description": "Speculative unfounded finding", "confidence": "LOW",
+            "description": "Speculative unfounded finding", "confidence": confidence,
             "rationale": "inferred from the diff alone, no exploration evidence", "evidence": "",
         },
     ]
 
     exit_code = await _run_deep(multi_stack_target)
-    assert exit_code == 0
+    assert exit_code == (1 if confidence == "LOW" else 0)
+    if confidence == "LOW":
+        failures = json.loads((multi_stack_target / ".daydream/deep/per-stack-failures.json").read_text())
+        assert "__merge__" in failures
+        return
 
     deep = multi_stack_target / ".daydream" / "deep"
     items = json.loads((deep / "merged-items.json").read_text())["items"]

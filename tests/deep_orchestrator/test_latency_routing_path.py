@@ -23,7 +23,7 @@ from tests.test_deep_orchestrator import MakeConfig, Mute
 #: is the one additive artifact issue #732 mandates (A12), so the gate subtracts it
 #: before comparing the two sides.
 _FORENSIC_BASELINE_DEEP_ARTIFACTS = frozenset({
-    "alternatives.json", "arbiter-complete.marker", "arbiter-input.json", "dedup-candidates.json", "diagram.json",
+    "alternatives.json", "adjudication-complete.marker", "arbiter-input.json", "dedup-candidates.json", "diagram.json",
     "diagram.md", "diff-key", "intent.md", "merged-items.json", "review-output.md", "stack-generic-records.json",
     "stack-generic-review.md", "stack-python-records.json", "stack-python-review.md", "stack-react-records.json",
     "stack-react-review.md", "stack-structure-records.json", "stack-structure-review.md",
@@ -128,7 +128,7 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
         parse_severity="high",
     )
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
     # A12: the profile work adds the routing record, and issue #735 adds the
     # adjudication provenance ledger; both are deliberate, so the gate subtracts
@@ -152,7 +152,7 @@ async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
         parse_severity="high",
     )
     assert json.loads((deep / "arbiter-input.json").read_text()) == _FORENSIC_BASELINE_ARBITER_INPUT
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     assert not list(deep.glob("arbiter-group-*-input.json"))
     record = read_routing_record(deep)
     assert record["arbiter"]["sharded"] is False
@@ -161,7 +161,7 @@ async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
 async def test_forensic_resume_from_the_whole_block_marker_runs_no_arbiter_call(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """The documented `--start-at merge` contract still trusts arbiter-complete.marker."""
+    """The documented `--start-at merge` contract still trusts adjudication-complete.marker."""
     stub, _ = await _run_profile(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="forensic",
         parse_severity="high",
@@ -187,7 +187,7 @@ async def test_multi_group_arbiter_applies_every_verdict_and_records_per_group_e
     groups = record["arbiter"]["groups"]
     assert len(groups) > 1
     assert all(group["effort"] in {"high", "xhigh"} for group in groups)
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     # ARBITRATED is the stub arbiter's revised description prefix: its presence
     # proves `_apply_adjudication_verdicts` reconciled every group's verdicts
     # back onto the run-wide target ordinals after the fan-out.
@@ -211,7 +211,7 @@ async def test_resumed_run_reruns_only_incomplete_groups(
     # Simulate an interruption: the whole-block marker and one group's marker
     # are gone, the other groups' verdict artifacts survive on disk.
     rerun = groups[0]["group_id"]
-    (deep / "arbiter-complete.marker").unlink()
+    (deep / "adjudication-complete.marker").unlink()
     (deep / f"{rerun}-complete.marker").unlink()
 
     stub.calls.clear()
@@ -225,7 +225,7 @@ async def test_resumed_run_reruns_only_incomplete_groups(
     arbiter_calls = [call for call in stub.calls if "you are the arbiter" in call["prompt"].lower()]
     assert len(arbiter_calls) == 1
     assert f"{rerun}-input.json" in arbiter_calls[0]["prompt"]
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()
     resumed_groups = {group["group_id"]: group for group in read_routing_record(deep)["arbiter"]["groups"]}
     assert resumed_groups[rerun]["reused"] is False
     for group in groups:
@@ -242,7 +242,7 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     )
     groups = read_routing_record(deep)["arbiter"]["groups"]
     failed = groups[0]["group_id"]
-    (deep / "arbiter-complete.marker").unlink()
+    (deep / "adjudication-complete.marker").unlink()
     (deep / f"{failed}-complete.marker").unlink()
     stub.arbiter_fail_group = failed
     stub.calls.clear()
@@ -257,7 +257,7 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     # The run continued (fail-open), but the block is not complete.
     failed_record = read_routing_record(deep)["arbiter"]
     assert failed_record["failed_groups"] == [failed]
-    assert not (deep / "arbiter-complete.marker").exists()
+    assert not (deep / "adjudication-complete.marker").exists()
 
     stub.arbiter_fail_group = None
     stub.calls.clear()
@@ -273,4 +273,4 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     assert f"{failed}-input.json" in retry_calls[0]["prompt"]
     retried = read_routing_record(deep)["arbiter"]
     assert retried["failed_groups"] == []
-    assert (deep / "arbiter-complete.marker").exists()
+    assert (deep / "adjudication-complete.marker").exists()

@@ -9,7 +9,7 @@ import os
 import re
 import stat
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -40,11 +40,6 @@ def _records_bytes(target: Path) -> dict[str, bytes]:
     if merged.is_file():
         paths.append(merged)
     return {path.name: path.read_bytes() for path in paths}
-
-
-def _stack_files(deep: Path) -> list[str]:
-    """The per-stack review artifacts this run actually left behind."""
-    return sorted(path.name for path in deep.glob("stack-*-records.json"))
 
 
 _PER_STACK_PROMPT = re.compile(r"you are reviewing the (\S+) stack", re.IGNORECASE)
@@ -109,11 +104,6 @@ def _latest_provenance(deep: Path) -> dict[str, object]:
     return record
 
 
-def _session_id_of(deep: Path) -> str:
-    """Return the newest provenance file stem: prior run records remain in the cache."""
-    return _newest_provenance_path(deep).stem
-
-
 _MERGE_DISCRIMINATOR = "cross-stack merge agent"
 
 
@@ -136,29 +126,61 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
             surface.append(call)
     return surface
 
-async def test_identical_rerun_reuses_intent_and_wonder_units(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+
+@pytest.mark.parametrize("unit", ["all-units", "merge", "companion", "rebound", "independent", "arbiter"])
+async def test_identical_rerun_restores_completed_units_and_current_run_evidence(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, unit: str,
 ) -> None:
-    """Moved pre-scan grounding does not change intent/wonder keys; reuse restores their exact bytes."""
+    """Every warm contract retains exact bytes, positive evidence, and no paid review calls."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    config = make_config(multi_stack_target, review_profile=independent_alternatives_profile())
+    options: dict[str, Any] = {}
+    if unit in {"independent", "arbiter"}:
+        options["review_profile"] = independent_alternatives_profile()
+    if unit == "arbiter":
+        options["latency_profile"] = "balanced"
+        stub.parse_by_stack = _arbiter_stacks({"python": "high", "react": "high", "generic": "high"})
+        stub.merge_echo_records = True
+    config = make_config(multi_stack_target, **options)
     assert await run(config) == 0
-    assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 1
-    assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 1
     deep = multi_stack_target / ".daydream" / "deep"
-    intent_bytes = (deep / "intent.md").read_bytes()
-    alternatives_bytes = (deep / "alternatives.json").read_bytes()
+    names = ["intent.md", "alternatives.json", "dedup-candidates.json"]
+    canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
+    failures = (deep / "per-stack-failures.json").exists()
+    first = json.loads((deep / "review-coverage.json").read_text())
+    if unit == "independent":
+        assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 1
+        assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 1
+    elif unit == "arbiter":
+        assert _count_arbiter_prompts(stub.calls) >= 1
     stub.calls.clear()
     assert await run(config) == 0
-    assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 0
-    assert _count_unit_prompts(stub.calls, _WONDER_DISCRIMINATOR) == 0
-    assert (deep / "intent.md").read_bytes() == intent_bytes
-    assert (deep / "alternatives.json").read_bytes() == alternatives_bytes
-    units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
-    assert units["intent"]["outcome"] == "hit"
-    assert set(cast(dict[str, object], units["intent"]["grounding_status"])) == {"exploration"}
-    assert units["alternatives"]["outcome"] == "hit"
-    assert set(cast(dict[str, object], units["alternatives"]["grounding_status"])) == {"intent", "exploration"}
+    assert _review_surface_prompts(stub.calls) == [], f"paid work on a warm run: {stub.calls}"
+    assert {name: (deep / name).read_bytes() for name in canonical} == canonical
+    assert (deep / "per-stack-failures.json").exists() == failures
+    second = json.loads((deep / "review-coverage.json").read_text())
+    assert first["run_id"] != second["run_id"]
+    assert all(first[field] == second[field] for field in ("analyzed_revision", "planned_scopes", "stack_outcomes"))
+    assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
+    units = cast(dict[str, Any], _latest_provenance(deep)["units"])
+    if unit == "independent":
+        for name, grounding in (("intent", {"exploration"}), ("alternatives", {"intent", "exploration"})):
+            assert units[name]["outcome"] == "hit" and set(units[name]["grounding_status"]) == grounding
+    elif unit == "arbiter":
+        assert units["arbiter"]["outcome"] == "hit"
+        assert set(units["arbiter"]["grounding_status"]) == {"intent", "alternatives", "exploration"}
+        assert sorted(path.name for path in deep.glob("arbiter-*-complete.marker"))
+    # A directory-fd lookup avoids this kernel's stale per-thread negative dentry
+    # after the artifact-session publication worker replaces the public report.
+    parent_fd = os.open(multi_stack_target, os.O_RDONLY)
+    try:
+        assert stat.S_ISREG(os.stat(".review-output.md", dir_fd=parent_fd).st_mode)
+        report_fd = os.open(".review-output.md", os.O_RDONLY, dir_fd=parent_fd)
+        try:
+            assert "## Coverage" not in os.read(report_fd, 1 << 20).decode("utf-8")
+        finally:
+            os.close(report_fd)
+    finally:
+        os.close(parent_fd)
 
 async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -205,21 +227,6 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_invalidates_boun
     assert await run(run_config) == 0
     assert _count_review_prompts(stub.calls) >= 2  # changed snapshot cannot reuse prior completion claims
 
-async def test_reused_shard_leaves_no_stale_companion_artifact(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """MH6: records, review sidecars and failure state agree with the fresh run."""
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    config = make_config(multi_stack_target)
-    assert await run(config) == 0
-    deep = multi_stack_target / ".daydream" / "deep"
-    fresh_failures = (deep / "per-stack-failures.json").exists()
-    fresh_records = _records_bytes(multi_stack_target)
-    stub.calls.clear()
-    assert await run(config) == 0
-    assert _count_review_prompts(stub.calls) == 0
-    assert (deep / "per-stack-failures.json").exists() == fresh_failures
-    assert _records_bytes(multi_stack_target) == fresh_records, "reused records must be byte-identical"
 
 async def test_editing_a_recorded_frontier_file_invalidates_snapshot_bound_coverage(
     sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -273,35 +280,6 @@ def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
     """How many captured calls carried the production arbiter prompt."""
     return _count_unit_prompts(calls, _ARBITER_DISCRIMINATOR)
 
-async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_per_group_when_one_is(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Unit content keys enable whole reuse; per-group markers still resume partial arbitration."""
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_by_stack = _arbiter_stacks({"python": "high", "react": "high", "generic": "high"})
-    stub.merge_echo_records = True
-    config = make_config(
-        multi_stack_target, latency_profile="balanced", review_profile=independent_alternatives_profile(),
-    )
-    assert await run(config) == 0
-    deep = multi_stack_target / ".daydream" / "deep"
-    assert _count_arbiter_prompts(stub.calls) >= 1
-    merged = (deep / "merged-items.json").read_bytes()
-    stub.calls.clear()
-    assert await run(config) == 0
-    assert _count_arbiter_prompts(stub.calls) == 0                  # whole-unit hit
-    assert (deep / "merged-items.json").read_bytes() == merged
-    # MH16: the arbiter's own key payload carries intent + alternatives +
-    # exploration as grounding, so its hit record must name a status for every
-    # one of them -- a two-input subset silently drops the alternatives input.
-    units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
-    assert units["arbiter"]["outcome"] == "hit"
-    assert set(cast(dict[str, object], units["arbiter"]["grounding_status"])) == {
-        "intent", "alternatives", "exploration",
-    }
-    # A partially completed earlier adjudication still resumes group-by-group:
-    # the group markers are read from the fresh run's own artifacts, not from the store.
-    assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))
 
 async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -330,7 +308,7 @@ async def test_fix_loop_commit_recomputes_every_snapshot_bound_scope(
     assert _count_arbiter_prompts(stub.calls) >= 1             # records changed -> arbiter recomputes
     assert _count_merge_prompts(stub.calls) >= 1               # merged set consumes records
     provenance = json.loads(reuse_store.provenance_path(
-        shard_many_python_target / ".daydream" / "review-cache", _session_id_of(deep)).read_text())
+        shard_many_python_target / ".daydream" / "review-cache", _newest_provenance_path(deep).stem).read_text())
     reused = [k for k, v in provenance["units"].items() if k.startswith("shard:") and v["outcome"] == "hit"]
     assert not reused, "previous-head completion claims cannot establish current coverage"
     assert all(value["outcome"] == "miss" for name, value in provenance["units"].items() if name.startswith("shard:"))
@@ -352,55 +330,6 @@ async def test_run_reports_snapshot_bound_reuse_misses_after_head_moves(
     assert summary, "the run must report its reuse outcome"
     assert "0 hit" in summary[-1] and "shard:" in summary[-1]
 
-async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_byte(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """A reused review makes no model calls and restores canonical artifact bytes."""
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    config = make_config(multi_stack_target)
-    assert await run(config) == 0
-    deep = multi_stack_target / ".daydream" / "deep"
-    canonical = {p.name: p.read_bytes() for p in deep.glob("stack-*-records.json")}
-    canonical["merged-items.json"] = (deep / "merged-items.json").read_bytes()
-    stub.calls.clear()
-    assert await run(config) == 0
-    assert _review_surface_prompts(stub.calls) == [], f"paid work on a warm run: {stub.calls}"
-    assert {p.name: p.read_bytes() for p in deep.glob("stack-*-records.json")} == \
-        {k: v for k, v in canonical.items() if k != "merged-items.json"}
-    assert (deep / "merged-items.json").read_bytes() == canonical["merged-items.json"]
-
-async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Restore merge items/dedup bytes without a merge call while still publishing the rendered report."""
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    config = make_config(multi_stack_target)
-    assert await run(config) == 0
-    deep = multi_stack_target / ".daydream" / "deep"
-    items, dedup = (deep / "merged-items.json").read_bytes(), (deep / "dedup-candidates.json").read_bytes()
-    stub.calls.clear()
-    assert await run(config) == 0
-    assert _count_merge_prompts(stub.calls) == 0
-    assert (deep / "merged-items.json").read_bytes() == items
-    assert (deep / "dedup-candidates.json").read_bytes() == dedup
-    # The run publishes the report from the artifact-session worker thread while
-    # this (main) thread keeps a stale negative dentry for the path across the
-    # rerun's detach/republish cycle, so a plain ``Path.is_file``/``read_text``
-    # can spuriously miss it on this kernel. A directory-fd lookup is the same
-    # observable claim -- the public report landed as a regular file -- without
-    # depending on that per-thread cache behaviour.
-    report_name = ".review-output.md"
-    parent_fd = os.open(str(multi_stack_target), os.O_RDONLY)
-    try:
-        assert stat.S_ISREG(os.stat(report_name, dir_fd=parent_fd).st_mode), ("the public report still lands")
-        report_fd = os.open(report_name, os.O_RDONLY, dir_fd=parent_fd)
-        try:
-            content = os.read(report_fd, 1 << 20).decode("utf-8")
-        finally:
-            os.close(report_fd)
-    finally:
-        os.close(parent_fd)
-    assert "## Coverage" not in content
 
 async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -509,26 +438,6 @@ async def test_resume_rejects_missing_or_mismatched_coverage(
     assert _review_surface_prompts(stub.calls) == []
     assert not output.exists(), "rejected resume cannot manufacture version 2 coverage from unproven evidence"
     assert initial.is_file()
-
-
-async def test_complete_reuse_rebinds_coverage_to_current_run(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
-) -> None:
-    """Warm complete outputs retain positive evidence and receive a fresh run identity."""
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    config = make_config(multi_stack_target)
-    assert await run(config) == 0
-    path = multi_stack_target / ".daydream" / "deep" / "review-coverage.json"
-    first = json.loads(path.read_text())
-    stub.calls.clear()
-    assert await run(config) == 0
-    second = json.loads(path.read_text())
-    assert first["run_id"] != second["run_id"]
-    assert first["analyzed_revision"] == second["analyzed_revision"]
-    assert first["planned_scopes"] == second["planned_scopes"]
-    assert first["stack_outcomes"] == second["stack_outcomes"]
-    assert all(scope["status"] == "complete" for scope in second["stack_outcomes"])
-    assert _review_surface_prompts(stub.calls) == []
 
 
 async def test_successful_scope_rerun_clears_prior_failure_for_same_revision(

@@ -375,11 +375,16 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
 
     target = _build_gate_target(tmp_path, "gate_malformed_resume")
     deep = _prime_merge_resume(target, python=[], structure=[])
-    (deep / "merged-items.json").write_text(json.dumps({"items": [_merge_item(1, "api.py", "high")]}))
-    from daydream.deep.artifacts import persist_review_coverage, review_coverage_path
+    (deep / "merged-items.json").write_text(json.dumps({
+        "items": [{**_merge_item(1, "api.py", "high"), "item_uid": "item:1"}],
+    }))
+    from daydream.deep.artifacts import (
+        DeepArtifact,
+        persist_review_coverage,
+    )
     from daydream.review_result import ReviewCoverage
 
-    coverage = ReviewCoverage.from_dict(json.loads(review_coverage_path(deep).read_text()))
+    coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
     coverage.record_phase("merge", "complete", noop=True)
     persist_review_coverage(deep, coverage)
     gate_p = deep / "fix-quality-gate.json"

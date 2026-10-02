@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -17,11 +17,11 @@ import jsonschema
 
 from daydream import git_ops, pr_review
 from daydream.json_utils import atomic_write_bytes
+from daydream.output_schema import strict_object
 from daydream.pr_review import ParsedIssue, PRInfo
 from daydream.review_result import TERMINAL_RESULT_SCHEMA, validate_terminal_result
 
 FINDINGS_SCHEMA_VERSION = 2
-LEGACY_FINDINGS_SCHEMA_VERSION = 1
 
 MAX_ARTIFACT_BYTES = 1_048_576
 
@@ -32,76 +32,38 @@ def _enforce_max_artifact_bytes(size: int) -> None:
             f"artifact size check failed: {size} bytes exceeds the {MAX_ARTIFACT_BYTES}-byte cap"
         )
 
-FINDINGS_SCHEMA: dict[str, Any] = {
-    "type": "object",
-    "additionalProperties": False,
-    "required": ["schema_version", "repo", "pr_number", "head_sha", "findings"],
-    "properties": {
-        "schema_version": {"const": LEGACY_FINDINGS_SCHEMA_VERSION},
-        "repo": {"type": "string"},
-        "pr_number": {"type": "integer"},
-        "head_sha": {"type": "string"},
-        "run_info": {"type": ["string", "null"]},
-        "review_warnings": {"type": "array", "items": {"type": "string"}},
-        # Optional for older artifacts; absent kind means review.
-        "kind": {"enum": ["review", "diagram"]},
-        # Envelope permits schema evolution; the poster strictly validates each
-        # model-authored spec_final before rendering.
-        "diagrams": {"type": ["object", "null"]},
-        "findings": {
-            "type": "array",
-            "items": {
-                "type": "object",
-                "additionalProperties": False,
-                "required": [
-                    "fingerprint",
-                    "path",
-                    "line",
-                    "placement",
-                    "title",
-                    "body",
-                    "severity",
-                    "confidence",
-                    "is_cross_stack",
-                ],
-                "properties": {
-                    "fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                    "path": {"type": "string"},
-                    "line": {"type": ["integer", "null"]},
-                    "placement": {"enum": ["inline", "file", "body"]},
-                    "title": {"type": "string"},
-                    "body": {"type": "string"},
-                    "severity": {"type": ["string", "null"]},
-                    "confidence": {"type": ["string", "null"]},
-                    "is_cross_stack": {"type": "boolean"},
-                    # Optional legacy defaults preserve approval-gate provenance.
-                    "location_distrust": {"type": "boolean"},
-                    "severity_off_vocabulary": {"type": "boolean"},
-                    "severity_before_demotion": {"type": ["string", "null"]},
-                },
-            },
-        },
-    },
+_FINDING_PROPERTIES = {
+    'fingerprint': {'type': 'string', 'pattern': '^[0-9a-f]{64}$'},
+    **{name: {'type': 'string'} for name in ('path', 'title', 'body')},
+    'line': {'type': ['integer', 'null']}, 'placement': {'enum': ['inline', 'file', 'body']},
+    **{name: {'type': ['string', 'null']} for name in ('severity', 'confidence', 'severity_before_demotion')},
+    **{name: {'type': 'boolean'} for name in ('is_cross_stack', 'location_distrust', 'severity_off_vocabulary')},
 }
-
-
-FINDINGS_SCHEMA_V2 = copy.deepcopy(FINDINGS_SCHEMA)
-FINDINGS_SCHEMA_V2["required"].append("terminal_result")
-FINDINGS_SCHEMA_V2["properties"].update({
-    "schema_version": {"const": FINDINGS_SCHEMA_VERSION},
-    "kind": {"const": "review"},
-    "terminal_result": TERMINAL_RESULT_SCHEMA,
+FINDINGS_SCHEMA: dict[str, Any] = strict_object({
+    'schema_version': {'const': FINDINGS_SCHEMA_VERSION}, 'repo': {'type': 'string'},
+    'pr_number': {'type': 'integer'}, 'head_sha': {'type': 'string'}, 'kind': {'enum': ['review', 'diagram']},
+    'run_info': {'type': ['string', 'null']},
+    'review_warnings': {'type': 'array', 'items': {'type': 'string'}},
+    'diagrams': {'type': ['object', 'null']},
+    'findings': {'type': 'array', 'items': strict_object(_FINDING_PROPERTIES)},
+    'terminal_result': TERMINAL_RESULT_SCHEMA,
 })
+FINDINGS_SCHEMA['required'].remove('terminal_result')
+FINDINGS_SCHEMA['allOf'] = [{
+    'if': {'properties': {'kind': {'const': 'review'}}},
+    'then': {'required': ['terminal_result']},
+    'else': {'not': {'required': ['terminal_result']}, 'properties': {'findings': {'maxItems': 0}}},
+}]
 
 
 def _validate_artifact(data: Any) -> None:
-    """Dispatch supported versions explicitly, then check coverage semantics."""
+    """Validate the current kind-specific envelope and its coverage semantics."""
     version = data.get("schema_version") if isinstance(data, dict) else None
-    if type(version) is not int or version not in (1, 2):
+    if type(version) is not int or version != FINDINGS_SCHEMA_VERSION:
         raise FindingsValidationError(f"artifact failed schema validation: unsupported schema version {version!r}")
     try:
-        jsonschema.validate(data, FINDINGS_SCHEMA if version == 1 else FINDINGS_SCHEMA_V2)
-        if version == 2:
+        jsonschema.validate(data, FINDINGS_SCHEMA)
+        if data["kind"] == "review":
             validate_terminal_result(data["terminal_result"], expected_head_sha=data["head_sha"])
             if not data["terminal_result"]["projection_valid"] and data["findings"]:
                 raise ValueError("untrustworthy projection must not contain findings")
@@ -118,7 +80,7 @@ class FindingsValidationError(Exception):
 class ArtifactFinding:
     """Validated finding with placement, identity and approval-gate provenance.
 
-    location_distrust and severity_off_vocabulary default false for older artifacts.
+    Location and severity provenance preserve the current approval gate inputs.
     severity_before_demotion preserves whether a demoted finding was blocking.
     Non-inline placements have no line; body remains raw until posting.
     """
@@ -142,7 +104,7 @@ class FindingsArtifact:
     """Event-bound findings and optional diagrams for the privileged poster.
 
     review_warnings block approval/stale resolution but permit surviving findings.
-    Older artifacts default to kind=review. Diagram payloads omit stored Mermaid;
+    Diagram payloads omit stored Mermaid;
     the poster validates and renders their final specs.
     """
 
@@ -154,17 +116,17 @@ class FindingsArtifact:
     kind: str = "review"
     diagrams: dict[str, Any] | None = None
     review_warnings: tuple[str, ...] = ()
-    schema_version: int = LEGACY_FINDINGS_SCHEMA_VERSION
+    schema_version: int = FINDINGS_SCHEMA_VERSION
     terminal_result: dict[str, Any] | None = None
 
     @property
     def analysis_complete(self) -> bool:
-        """Legacy artifacts have unknown coverage, never positive completeness."""
+        """Only explicit validated code review evidence establishes completeness."""
         return self.terminal_result is not None and self.terminal_result["analysis_state"] == "complete"
 
     @property
     def coverage_notice(self) -> tuple[str, ...]:
-        """Human compatibility projection for typed incomplete/failed outcomes."""
+        """Render typed incomplete/failed coverage for review notices."""
         if self.terminal_result is None or self.analysis_complete:
             return ()
         state = self.terminal_result["analysis_state"]
@@ -174,20 +136,9 @@ class FindingsArtifact:
 
 def _finding_dict(issue: ParsedIssue, *, placement: str, line: int | None) -> dict[str, Any]:
     """Map one classified issue onto an artifact finding entry."""
-    return {
-        "fingerprint": issue.fingerprint,
-        "path": issue.path,
-        "line": line,
-        "placement": placement,
-        "title": issue.title,
-        "body": issue.body,
-        "severity": issue.severity,
-        "confidence": issue.confidence,
-        "is_cross_stack": issue.is_cross_stack,
-        "location_distrust": issue.location_distrust,
-        "severity_before_demotion": issue.severity_before_demotion,
-        "severity_off_vocabulary": issue.severity_off_vocabulary,
-    }
+    finding = {field.name: getattr(issue, field.name) for field in fields(ArtifactFinding)
+               if field.name not in {'placement', 'line'}}
+    return {**finding, 'placement': placement, 'line': line}
 
 
 def build_findings_artifact(
@@ -210,6 +161,10 @@ def build_findings_artifact(
     Diagram-only callers provide empty issues and specs without stored Mermaid.
     Classification runs where PR Git objects are available, before privileged posting.
     """
+    if (kind == 'review') != (terminal_result is not None):
+        raise FindingsValidationError('review requires terminal_result; diagram forbids code coverage')
+    if kind == 'review' and snapshot_diff is None:
+        raise FindingsValidationError('review requires the captured snapshot diff')
     placement_options = {"snapshot_diff": snapshot_diff} if snapshot_diff is not None else {}
     classified = pr_review.classify(target_dir, pr, issues, auth=auth, renderers=renderers, **placement_options)
     findings = [
@@ -219,7 +174,7 @@ def build_findings_artifact(
     findings.extend(_finding_dict(issue, placement="file", line=None) for issue in classified.file_level)
     findings.extend(_finding_dict(issue, placement="body", line=None) for issue in classified.body_only)
     return {
-        "schema_version": FINDINGS_SCHEMA_VERSION if terminal_result is not None else LEGACY_FINDINGS_SCHEMA_VERSION,
+        "schema_version": FINDINGS_SCHEMA_VERSION,
         "repo": f"{pr.owner}/{pr.repo}",
         "pr_number": pr.number,
         "head_sha": pr.head_sha,
@@ -227,7 +182,7 @@ def build_findings_artifact(
         "kind": kind,
         "diagrams": diagrams,
         "findings": findings,
-        **({"review_warnings": list(review_warnings)} if review_warnings else {}),
+        "review_warnings": list(review_warnings),
         **({"terminal_result": copy.deepcopy(terminal_result)} if terminal_result is not None else {}),
     }
 
@@ -288,15 +243,5 @@ def load_findings_artifact(
                 f"artifact run_id {declared!r} does not match expected run_id {expected_run_id!r}"
             )
 
-    return FindingsArtifact(
-        repo=data["repo"],
-        pr_number=data["pr_number"],
-        head_sha=data["head_sha"],
-        run_info=data.get("run_info"),
-        findings=[ArtifactFinding(**f) for f in data["findings"]],
-        kind=data.get("kind") or "review",
-        diagrams=data.get("diagrams"),
-        review_warnings=tuple(data.get("review_warnings", [])),
-        schema_version=data["schema_version"],
-        terminal_result=data.get("terminal_result"),
-    )
+    return FindingsArtifact(**{**data, 'findings': [ArtifactFinding(**f) for f in data['findings']],
+                               'review_warnings': tuple(data['review_warnings'])})

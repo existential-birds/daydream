@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from daydream.deep.artifacts import merged_items_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.extensions import get_registry
 from daydream.pr_comment_renderer import render_run_info
 from daydream.pr_review import PostStatus, post_review_to_pr_from_report, resolve_review_renderers
@@ -22,7 +22,7 @@ from daydream.ui import create_console
 
 async def _run(target_dir: Path, pr_number: int, auto_yes: bool = False) -> None:
     deep_dir = target_dir / ".daydream" / "deep"
-    items_path = merged_items_path(deep_dir)
+    items_path = DeepArtifact.MERGED_ITEMS.at(deep_dir)
 
     if not items_path.is_file():
         print(f"No canonical merged-items.json found at {items_path}", file=sys.stderr)

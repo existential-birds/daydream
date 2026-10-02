@@ -37,18 +37,10 @@ from daydream.deep.reuse_key import (
     PhaseIdentity,
     blob_map_digest,
     digest_text,
-    grounding_digests,
     shard_key_payload,
-    unit_key,
 )
-from daydream.deep.reuse_store import (
-    ReuseCache,
-    lookup_reuse_entry,
-    record_absent_components,
-    record_reuse_hit,
-    reuse_grounding_statuses,
-)
-from daydream.deep.review_reuse import bind_reuse_coverage, scope_reuse_expectation, scope_reuse_proof
+from daydream.deep.reuse_store import ReuseCache
+from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
 from daydream.phases.inputs import (
@@ -345,30 +337,28 @@ async def phase_alternative_review(
 
 
 def valid_record_artifact(
-    value: Any, *, scope_id: str | None = None, analyzed_revision: dict[str, Any] | None = None,
+    value: Any, *, scope_id: str, analyzed_revision: dict[str, Any],
 ) -> bool:
     """Validate persisted provider records, permitting only host identity metadata."""
     if not isinstance(value, dict) or set(value) - {
         "issues", "incomplete", "scope_id", "analyzed_revision", "originating_run_id",
     }:
         return False
-    if analyzed_revision is not None:
-        if value.get("scope_id") != scope_id or value.get("analyzed_revision") != analyzed_revision:
-            return False
-        if not isinstance(value.get("originating_run_id"), str) or not value["originating_run_id"]:
-            return False
+    if value.get("scope_id") != scope_id or value.get("analyzed_revision") != analyzed_revision:
+        return False
+    if not isinstance(value.get("originating_run_id"), str) or not value["originating_run_id"]:
+        return False
     if "incomplete" in value and value["incomplete"] is not True:
         return False
     issues = value.get("issues")
     if not isinstance(issues, list) or any(not isinstance(issue, dict) for issue in issues):
         return False
-    if scope_id is not None:
-        for issue in issues:
-            uid = issue.get("uid")
-            if uid is not None and (not isinstance(uid, str) or not uid.startswith(scope_id + ":")
-                                    or not uid.removeprefix(scope_id + ":").isdigit()
-                                    or int(uid.removeprefix(scope_id + ":")) < 1):
-                return False
+    for issue in issues:
+        uid = issue.get("uid")
+        if (not isinstance(uid, str) or not uid.startswith(scope_id + ":")
+                                or not uid.removeprefix(scope_id + ":").isdigit()
+                                or int(uid.removeprefix(scope_id + ":")) < 1):
+            return False
     cleaned = [{key: field for key, field in issue.items() if key != "uid"} for issue in issues]
     return _validates_schema({"issues": cleaned}, PER_STACK_RECORD_SCHEMA)
 
@@ -426,7 +416,7 @@ async def phase_per_stack_reviews(
     run_context: RunContext | None = None,
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
-    coverage: ReviewCoverage | None = None,
+    coverage: ReviewCoverage,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
@@ -481,8 +471,7 @@ async def phase_per_stack_reviews(
                 backend, work, common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
                 capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
             )
-            stack_reuse_key: str | None = None
-            stack_payload: dict[str, Any] | None = None
+            reuse_unit: ReviewReuseUnit | None = None
             if reuse_cache is not None and phase_identity is not None:
                 stack_payload = shard_key_payload(
                     stack_name=stack.stack_name,
@@ -509,41 +498,25 @@ async def phase_per_stack_reviews(
                     components["hunk_slice"] = digest_text("")
                     components["assigned_blobs"] = blob_map_digest(work.repo, [])
                     components["frontier_blobs"] = blob_map_digest(work.repo, [])
-                bind_reuse_coverage(stack_payload, coverage)
-                unit_name = f"shard:{stack.stack_name}"
-                candidate_key = unit_key(stack_payload)
-                if candidate_key is None:
-                    record_absent_components(reuse_cache, unit_name, stack_payload)
-                else:
-                    stack_reuse_key = candidate_key
-                    hit = lookup_reuse_entry(
-                        reuse_cache,
-                        unit_name,
-                        candidate_key,
-                        deep_dir_path,
-                        expected_coverage=(scope_reuse_expectation(coverage, stack.stack_name)
-                                           if coverage is not None else None),
-                        on_restore_failure=lambda reason: ui.print_warning(
-                            agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"
-                        ),
-                    )
-                    if hit is not None:
-                        try:
-                            restored = json.loads(per_stack_records_path(deep_dir_path, stack.stack_name).read_text())
-                            cache_valid = valid_record_artifact(
-                                restored, scope_id=stack.stack_name,
-                                analyzed_revision=coverage.revision.to_dict() if coverage else None,
-                            ) and restored.get("incomplete") is not True
-                        except (OSError, ValueError):
-                            cache_valid = False
-                        if cache_valid:
-                            record_reuse_hit(reuse_cache, unit_name, candidate_key, hit, stack_payload)
-                            results[stack.stack_name] = output_path
-                            if coverage is not None:
-                                coverage.record_scope(stack.stack_name, "complete")
-                            return
-                        ui.print_warning(agent.console,
-                                         f"Cached records for {stack.stack_name} are invalid; rerunning review")
+                reuse_unit = ReviewReuseUnit(reuse_cache, f"shard:{stack.stack_name}", phase_identity,
+                                             stack_payload, coverage)
+                hit = reuse_unit.lookup(deep_dir_path, on_restore_failure=lambda reason: ui.print_warning(
+                    agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"))
+                if hit is not None:
+                    try:
+                        restored = json.loads(per_stack_records_path(deep_dir_path, stack.stack_name).read_text())
+                        cache_valid = valid_record_artifact(
+                            restored, scope_id=stack.stack_name, analyzed_revision=coverage.revision.to_dict(),
+                        ) and restored.get("incomplete") is not True
+                    except (OSError, ValueError):
+                        cache_valid = False
+                    if cache_valid:
+                        reuse_unit.record_hit(hit)
+                        results[stack.stack_name] = output_path
+                        coverage.record_scope(stack.stack_name, "complete")
+                        return
+                    ui.print_warning(agent.console,
+                                     f"Cached records for {stack.stack_name} are invalid; rerunning review")
             per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
             pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
             prompt_name, strategy_name = {
@@ -611,24 +584,21 @@ async def phase_per_stack_reviews(
                         )
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                     failures[stack_name] = redact_text(f"{type(e).__name__}: {e}")
-                    if coverage is not None:
-                        coverage.record_scope(stack_name, "failed",
-                            reasons=(reason_for_exception(e),), diagnostic=str(e))
+                    coverage.record_scope(stack_name, "failed",
+                        reasons=(reason_for_exception(e),))
                     return
                 if budget_reason:
                     failures[stack_name] = redact_text(f"budget exhausted: {budget_reason}")
-                    if coverage is not None:
-                        partial_valid = _validates_schema(structured, PER_STACK_RECORD_SCHEMA)
-                        status = ("uncovered" if budget_reason == "pipeline_budget_exceeded" and not partial_valid
-                                  else "incomplete")
-                        coverage.record_scope(stack_name, status, reasons=(reason_for_budget(budget_reason),),
-                                              partial_evidence=partial_valid)
+                    partial_valid = _validates_schema(structured, PER_STACK_RECORD_SCHEMA)
+                    status = ("uncovered" if budget_reason == "pipeline_budget_exceeded" and not partial_valid
+                              else "incomplete")
+                    coverage.record_scope(stack_name, status, reasons=(reason_for_budget(budget_reason),),
+                                          partial_evidence=partial_valid)
                 if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                     if not budget_reason:
                         error = ReviewOutputError(structured)
                         failures[stack_name] = str(error)
-                        if coverage is not None:
-                            coverage.record_scope(stack_name, "failed", reasons=(error.reason,))
+                        coverage.record_scope(stack_name, "failed", reasons=(error.reason,))
                     return
                 issues = [dict(issue) for issue in structured["issues"]]
                 # Uids are host-only fields, added after strict model validation.
@@ -637,53 +607,34 @@ async def phase_per_stack_reviews(
                     per_stack_records_path(deep_dir_path, stack_name).write_text(
                         json.dumps({"issues": issues,
                                     **({"incomplete": True} if budget_reason else {}),
-                                    **({"scope_id": stack_name,
+                                    "scope_id": stack_name,
                                         "analyzed_revision": coverage.revision.to_dict(),
-                                        "originating_run_id": coverage.run_id} if coverage is not None else {})},
+                                        "originating_run_id": coverage.run_id},
                                    indent=2)
                     )
                     write_review_markdown(output_path, issues)
                 except (OSError, ValueError, TypeError) as exc:
                     failures[stack_name] = redact_text(f"{type(exc).__name__}: {exc}")
-                    if coverage is not None:
-                        coverage.record_scope(stack_name, "failed",
-                            reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
-                            diagnostic=str(exc))
+                    coverage.record_scope(stack_name, "failed",
+                        reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
+                        )
                     return
                 results[stack_name] = output_path
-                if coverage is not None and budget_reason is None:
+                if budget_reason is None:
                     coverage.record_scope(stack_name, "complete")
-                if (
-                    reuse_cache is not None
-                    and phase_identity is not None
-                    and stack_payload is not None
-                    and stack_reuse_key is not None
-                    and budget_reason is None
-                ):
+                if reuse_unit is not None and budget_reason is None:
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
-                    reuse_cache.store(
-                        stack_reuse_key,
-                        unit=f"shard:{stack_name}",
-                        payload={
-                            records_path.name: records_path.read_bytes(),
-                            output_path.name: output_path.read_bytes(),
-                        },
-                        components=stack_payload["components"],
-                        identity=phase_identity,
-                        grounding=grounding_digests(stack_payload),
-                        grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
-                        coverage=(scope_reuse_proof(coverage, stack_name) if coverage is not None else None),
-                    )
+                    reuse_unit.store(lambda: {records_path.name: records_path.read_bytes(),
+                                             output_path.name: output_path.read_bytes()})
 
         async def _review_stack(stack: "StackAssignment") -> None:
             try:
                 await _review_stack_impl(stack)
             except Exception as exc:  # noqa: BLE001 -- isolate ordinary sibling failures; cancellation propagates
                 failures[stack.stack_name] = redact_text(f"{type(exc).__name__}: {exc}")
-                if coverage is not None:
-                    reason = (ReasonCode.MALFORMED_ARTIFACT if isinstance(exc, (OSError, ValueError, TypeError))
-                              else ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
-                    coverage.record_scope(stack.stack_name, "failed", reasons=(reason,), diagnostic=str(exc))
+                reason = (ReasonCode.MALFORMED_ARTIFACT if isinstance(exc, (OSError, ValueError, TypeError))
+                          else ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
+                coverage.record_scope(stack.stack_name, "failed", reasons=(reason,))
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:

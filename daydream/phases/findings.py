@@ -10,10 +10,7 @@ from daydream.artifact_visibility import (
     ArtifactSession,
     review_output_path_for,
 )
-from daydream.deep.artifacts import (
-    merged_items_path,
-    merged_report_path,
-)
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.dedup import (
     FOLD_SIM_THRESHOLD,
     bigrams,
@@ -29,7 +26,6 @@ from daydream.deep.records import (
     record_issues_or_empty,
     record_uid,
     stamp_item_uids,
-    stamp_record_uids,
     union_source_uids,
 )
 from daydream.deep.render import render_report
@@ -40,8 +36,8 @@ from daydream.severity import SEVERITY_RANK, normalize_severity, stronger_severi
 class CrossStackMergeError(ValueError):
     """Unparseable merge output carrying response_shape and input-order stack_context.
 
-    The orchestrator salvages completed records. Bare lists and {items: [...]} are
-    accepted inputs; other shapes cannot supply a parseable item list.
+    The orchestrator salvages completed records when the current items envelope
+    cannot supply a valid merged list.
     """
 
     def __init__(
@@ -88,7 +84,7 @@ _PLACEHOLDER_EVIDENCE: frozenset[str] = frozenset({"n/a", "none", "-"})
 
 def _is_evidenced(item: dict[str, Any]) -> bool:
     """Require concrete evidence and a grounded citation except for host-tagged structural items."""
-    # Treat legacy LOW confidence as speculative despite newer schema enums.
+    # Authored LOW confidence is speculative; location demotion runs after this gate.
     if str(item.get("confidence", "")).upper() == "LOW":
         return False
 
@@ -132,8 +128,7 @@ def _evidence_gate_then_validate(
 
     if dropped:
         sidecar_path = items_path.parent / "dropped-speculative.json"
-        # Reviewer IDs restart per stack. Retain them alongside UIDs because
-        # legacy findings may have no other identity.
+        # Reviewer display IDs restart per stack; durable UIDs retain the source identity.
         dropped_ids = [d.get("id") for d in dropped]
         # Only merge-bypass items retain a birth UID. Merge-agent items identify
         # sources separately; use "" for missing object UIDs so all three dropped
@@ -246,26 +241,13 @@ def _record_item(record: dict[str, Any], lens: str) -> dict[str, Any]:
 
 
 def _load_structural_items(path: Path | None) -> list[dict[str, Any]]:
-    if path is None or not path.is_file():
+    """Load current structural records; requested artifacts must remain readable."""
+    if path is None:
         return []
-    try:
-        records = record_issues(json.loads(path.read_text()))
-    except (json.JSONDecodeError, OSError) as exc:
-        ui.print_warning(agent.console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
-        return []
-    if records is None:
-        ui.print_warning(agent.console, "Skipping non-list structural records; expected a list")
-        return []
-    records = [record for record in records if isinstance(record, dict)]
-    # Backfill legacy artifacts by the same stack-name/position rule as review.
-    stamp_record_uids(records, path.name)
-    items = [_record_item(record, "structural") for record in records]
-    for item in items:
-        # Structural findings default to high conviction, but reported severity
-        # and confidence (including explicit nulls) always survive unchanged.
-        item.setdefault("confidence", "HIGH")
-        item.setdefault("severity", "high")
-    return items
+    records = record_issues(json.loads(path.read_text()))
+    if records is None or any(not isinstance(record, dict) or not record_uid(record) for record in records):
+        raise ValueError('Structural records require the current host identity envelope')
+    return [_record_item(record, 'structural') for record in records]
 
 
 def _append_structural_and_write_merged(
@@ -310,8 +292,8 @@ def _write_single_stack_merged_items(
         session=artifact_session,
         allow_standalone=allow_standalone,
     )
-    report_path = merged_report_path(deep_dir_path)
-    items_path = merged_items_path(deep_dir_path)
+    report_path = DeepArtifact.MERGED_REPORT.at(deep_dir_path)
+    items_path = DeepArtifact.MERGED_ITEMS.at(deep_dir_path)
 
     # The bypass must expose failed reviewers just as the merge prompt does.
     if failed_stacks:
@@ -347,8 +329,7 @@ def _validate_agent_source_uids(
     Unknown claims are discarded without dropping findings. Every dict item receives
     a source_uids list, possibly empty to honestly represent absent provenance.
     """
-    # Resume artifacts may be old or unreadable; failed loads contribute no
-    # UIDs instead of invalidating an otherwise completed merge.
+    # Unreadable records cannot establish model-owned provenance.
     pool: set[str] = set()
     records_paths = list(per_stack_records_paths)
     if structural_records_path is not None:

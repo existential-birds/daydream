@@ -52,7 +52,7 @@ async def test_merge_cold_when_arbiter_skipped_on_resume(multi_stack_target: Pat
         react=[_record(description="tsx issue", severity="high")],
         generic=[_record(description="md issue", severity="high")], structure=[],
     )
-    (deep / "arbiter-complete.marker").write_text("done")
+    (deep / "adjudication-complete.marker").write_text("done")
     # Fresh runs write the key before producing each prerequisite artifact.
     future = time.time() + 1
     for artifact in [deep / "intent.md", deep / "alternatives.json", *deep.glob("stack-*-records.json"),]:

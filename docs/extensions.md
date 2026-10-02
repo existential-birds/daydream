@@ -385,9 +385,9 @@ invokes the custom structural reviewer.
 Custom structural strategy text still supports alternatives folding when the
 prompt builder itself remains the built-in function.
 
-The 17 registered prompt names and the exact kwargs their builders receive
-(an override gets the same kwargs, except that on inline transports a legacy override predating the inline kwargs keeps the documented kwarg set with `exploration_dir` arriving as `None` — see `diagram_sequence`/`diagram_flowchart` below). All kwargs are keyword-only except where
-noted.
+The 17 registered prompt names and the exact kwargs their builders receive.
+Overrides receive the same kwargs and must accept the current contract. All
+kwargs are keyword-only except where noted.
 
 | Prompt | Kwargs |
 |--------|--------|
@@ -403,7 +403,7 @@ noted.
 | `merge` | `strategy`, `per_stack_records_paths`, `intent_path`, `alternatives_path`, `dedup_candidates_path`, `output_path`, `exploration_dir`, `failed_stacks`, `structural_records_path`, `intent_authoritative`, `resumed_from_arbiter` |
 | `verify` | `strategy`, `items`, `cwd`, `output_path` (accepted, ignored — the host writes the verdicts file) |
 | `fix-verify` | `items`, `changed_hunks`, `cwd`, `round_number` |
-| `diagram_sequence` | `diff_path`, `inline_diff`, `files_by_module`, `cwd`, `exploration_dir`, `schema`; on inline transports (resolved from the backend and cwd, not the disposable-clone flag) a builder that accepts them instead gets `exploration_dir=None`, `clone_mode`, `inline_exploration`, `inline_dependencies` |
+| `diagram_sequence` | `diff_path`, `inline_diff`, `files_by_module`, `cwd`, `exploration_dir`, `schema`; inline transports (resolved from the backend and cwd) require `exploration_dir=None`, `clone_mode`, `inline_exploration`, `inline_dependencies` |
 | `diagram_flowchart` | `diff_path`, `inline_diff`, `candidate_roots`, `forced`, `cwd`, `exploration_dir`, `schema`; inline kwargs as for `diagram_sequence` |
 | `audit` | `category`, `strategy`, `group`, `scope_note`, `recon_summary`, `cwd`, `tier` |
 | `vet` | `strategy`, `findings`, `cwd` |

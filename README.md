@@ -792,51 +792,17 @@ The `.daydream/exploration/` cache is reused on an exact key match. The key excl
 
 ### Terminal review findings contract
 
-Review runs using `--findings-out` emit findings schema version 2 with a required
-`terminal_result` (nested schema version 1). `analysis_state` is `complete` only
-when every planned reviewer and required review stage has positive completion or
-host no-op evidence. `incomplete` retains usable complete/validated partial
-analysis with unfinished coverage; `failed` has no usable analysis or no
-trustworthy findings projection. Empty findings and a successful CLI exit do not
-prove complete coverage. `pipeline_state` describes review processing through
-validated findings finalization, independently of analysis coverage and later
-fixes, publication, or archive upload.
+`--findings-out` emits schema version 2. Review artifacts require a `terminal_result` (nested version 1); diagram artifacts carry no code-review coverage. Readers reject older or unknown versions. Producer and poster must use the same reviewed version.
 
-The result records the current run ID, exact planned stack/shard scopes, outcomes,
-bounded reason codes, and the captured head, diff merge-base, initial PR base tip
-when available, and exact analyzed diff key. Model turn exhaustion is
-`model_budget_exhaustion`; host wall, tool, and pipeline limits have separate
-codes. Backend, authentication, invalid/missing output, evidence, and policy-veto
-failures remain typed even if human warning strings are absent. Valid partial
-findings survive normal finalization. Findings and result are validated together
-and installed as one atomic JSON envelope.
+Analysis is `complete` only with positive completion or host no-op evidence for every planned reviewer and required phase. Valid work with unfinished coverage is `incomplete`; unusable analysis or an invalid findings projection is `failed`. Findings count, warning absence, CLI success and archive status cannot establish completeness. `pipeline_state` covers review finalization independently of later fixes or publication.
 
-Commit-bound export requires a clean analyzed checkout. Dirty input produces a
-failed result and nonzero exit; interactive review without findings export keeps
-its existing dirty-review behavior. Export target identity and placement use the
-initial snapshot, without a later live PR metadata or diff lookup. Privileged
-posters still compare against the caller's independently trusted target.
+Coverage records run identity, exact stack/shard outcomes, captured head, diff merge base and diff key, plus initial PR base tip when available. Backend/authentication, missing/malformed output, evidence and policy failures remain typed; model-turn, host wall/tool and pipeline budgets have distinct reasons.
 
-Readers support strict findings versions 1 and 2; unknown versions and inconsistent
-results are rejected. Version 1 review completeness is unknown and cannot authorize
-approval or stale finding resolution; existing comments remain publishable.
-Diagram-only exports remain version 1 and never establish code-review completeness.
-Producer and poster workflow pins must upgrade together to a reviewed version
-supporting version 2: an older strict poster will reject the new envelope. Existing
-immutable template pins are retained until that reviewed release is available.
+Findings and coverage are validated and atomically published together. Valid partial findings survive normal finalization; incomplete/failed results publish COMMENT notices and cannot authorize approval or stale-thread resolution. Commit-bound exports require a clean checkout and use captured identity and diff for placement. Interactive dirty reviews remain supported; publishers validate the independently trusted target.
 
-Hosted callers must choose a unique, initially absent output path per invocation.
-If a path is reused, compare its run ID against an independently known expected
-invocation ID; reading the file's own opaque ID does not establish freshness.
-A previous complete file may survive a failed replacement. Missing files,
-truncated JSON, process destruction, and failed public installation provide no
-valid current terminal result; callers must never interpret them as clean analysis.
+Use a unique, initially absent output path for each invocation. Reusing a path requires an independently known expected run ID: failed replacement can preserve an old complete file. Missing/truncated output, process destruction and failed installation provide no valid current result.
 
-Resume and review-unit cache proofs bind the analyzed revision and exact planned
-scope inventory. Legacy entries without positive typed coverage, corrupt entries,
-and changed head/diff/shard inventories require fresh review. Same-revision
-partial merge resumes retain incomplete coverage; a successful rerun supersedes
-its scope failure. Valid complete reuse is rebound to the current run ID.
+Resume and cache proofs require typed coverage for the exact revision and scope inventory. Missing, damaged or mismatched proofs restart review; same-revision partial resumes preserve failures, successful scope reruns clear them, and complete reuse receives the current run ID.
 
 ## Development
 

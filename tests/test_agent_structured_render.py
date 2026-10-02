@@ -173,14 +173,16 @@ async def test_structured_fallback_salvages_partial_dict(rec: Console, tmp_path:
     assert result == partial  # the partial dict reaches the salvage path
     assert isinstance(result, dict)
 
-async def test_structured_fallback_bare_array_reaches_merge_shape(rec: Console, tmp_path: Path) -> None:
-    """Pass bare arrays to merge normalization despite its object schema; text fallback would abort."""
+@pytest.mark.parametrize("envelope", [False, True])
+async def test_structured_fallback_requires_merge_envelope(rec: Console, tmp_path: Path, envelope: bool) -> None:
+    """Object envelopes parse; bare arrays remain text and cannot establish structured output."""
     schema = {
         "type": "object", "required": ["items"],
         "properties": {"items": {"type": "array", "items": {"type": "object"}}},
     }
     items = [{"id": 1, "description": "x"}]
-    backend = _scripted([ TextEvent(text=json.dumps(items)), ])
+    payload = {"items": items} if envelope else items
+    backend = _scripted([TextEvent(text=json.dumps(payload))])
     result, _, _ = await run_agent(backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema)
-    assert result == items
-    assert isinstance(result, list)
+    assert result == (payload if envelope else json.dumps(items))
+    assert isinstance(result, dict if envelope else str)

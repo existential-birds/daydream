@@ -81,22 +81,20 @@ async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
     assert _uid_list(deep, "structure") == ["structure:1", "structure:2"]
     assert {issue["id"] for issue in _uid_records(deep, "python")} == {1, 2}
 
-async def test_merge_resume_backfills_uids_onto_pre_uid_records(
+async def test_merge_resume_routes_current_uids_to_their_owning_records(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1111 real-path: a resume over artifacts written before ``uid`` existed re-derives the identity the
-    producing run would have minted."""
+    """A current resume routes arbitration to stable stack identities and sibling positions."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     deep = _prime_uid_merge_resume(multi_stack_target,
         python=[_high_record(description="py first"), _record(description="py second", line=2, evidence="api.py:2")],
     )
     primed = _record_issues(json.loads((deep / "stack-python-records.json").read_text()))
-    assert all("uid" not in record for record in primed), "fixture must predate the uid field"
+    assert [record["uid"] for record in primed] == ["python:1", "python:2"]
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
 
-    # Backfilled by position, in the file that owns them -- not renumbered
-    # globally and not routed elsewhere.
+    # Persisted identities stay with their owning stack and sibling.
     assert _uid_list(deep, "python") == ["python:1", "python:2"]
     assert _uid_list(deep, "react") == ["react:1"]
     assert _uid_list(deep, "generic") == ["generic:1"]
@@ -277,26 +275,31 @@ async def test_hallucinated_merge_source_uid_is_dropped_and_reported(
         "1 of 2 merged item(s) now carry no record attribution." in out
     ), out
 
-async def test_unattributable_merge_source_uids_degrade_to_empty_list(
+@pytest.mark.parametrize("provenance", ["null", "missing", "string"])
+async def test_unattributable_merge_source_uids_require_current_schema(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    provenance: str,
 ) -> None:
-    """#1111 real-path: null / missing / wrong-typed provenance ships as ``[]``."""
+    """Null attribution ships honestly as []; missing and wrong-typed keys reject synthesis."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     _prime_source_uid_merge_resume(multi_stack_target)
-    stub.merge_items = [_provenance_item(1, "Explicit null provenance", source_uids=None),
-        _provenance_item(2, "Omitted provenance key", file="App.tsx", omit_source_uids=True),
-        _provenance_item(3, "Bare-string provenance", file="README.md", source_uids="python:1"),
-    ]
+    stub.merge_items = [_provenance_item(1, "Unattributable finding",
+        source_uids="python:1" if provenance == "string" else None, omit_source_uids=provenance == "missing")]
+    stub.merge_emit_str = json.dumps({"items": [{"related_files": None, **item} for item in stub.merge_items]})
 
-    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    assert await _run_deep(multi_stack_target, start_at="merge") == (0 if provenance == "null" else 1)
 
     deep = deep_dir(multi_stack_target, allow_standalone=True)
     by_description = _source_uids_by_description(deep)
-    for description in ("Explicit null provenance", "Omitted provenance key", "Bare-string provenance",):
-        assert description in by_description, f"an unattributable finding was lost: {sorted(by_description)}"
-        assert by_description[description] == [], by_description[description]
+    if provenance == "null":
+        assert "Unattributable finding" in by_description, f"finding was lost: {sorted(by_description)}"
+        assert by_description["Unattributable finding"] == []
+    else:
+        assert "Unattributable finding" not in by_description
+        assert by_description, "valid sibling records must survive invalid merge output"
+        assert "__merge__" in json.loads((deep / "per-stack-failures.json").read_text())
 
     # A null is a documented answer, not a bad claim: nothing was cited, so
     # nothing can have been invented, so the unknown-uid warning must stay quiet.
@@ -390,32 +393,23 @@ async def test_dropped_speculative_sidecar_records_item_provenance(
     assert dropped["dropped_uids"] == [""]
 
 @pytest.mark.anyio
-async def test_legacy_artifact_backfills_structural_provenance_consistently(
+async def test_merge_resume_rejects_structural_records_missing_host_identity(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A pre-uid artifact must not yield two different answers in one run (#1111)."""
+    """An old structural artifact cannot be promoted to current positive evidence."""
     _silence(monkeypatch)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-    # Prime WITHOUT uid on disk -- the shape a run from before the field existed
-    # left behind. Deliberately not `_prime_source_uid_merge_resume`, which primes
-    # uids precisely to avoid this condition.
-    _prime_merge_resume(multi_stack_target, python=[_record(description="py issue", evidence="api.py:1")],
-        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
-        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
-        structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
-    )
-    records_path = multi_stack_target / ".daydream" / "deep" / "stack-structure-records.json"
-    assert all("uid" not in rec for rec in _record_issues(json.loads(records_path.read_text()))), (
-        "fixture must start with no uid on disk or it proves nothing"
-    )
-
-    exit_code = await _run_deep(multi_stack_target, start_at="merge")
-
-    assert exit_code == 0
-    items = json.loads((multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_text())["items"]
-    structural = [item for item in items if item.get("lens") == "structural"]
-    assert structural, "the structural record must still reach the report"
-    assert structural[0]["source_uids"] == ["structure:1"]
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    deep = _prime_source_uid_merge_resume(multi_stack_target)
+    records_path = deep / "stack-structure-records.json"
+    envelope = json.loads(records_path.read_text())
+    for record in envelope["issues"]:
+        record.pop("uid")
+    records_path.write_text(json.dumps(envelope))
+    assert await _run_deep(multi_stack_target, start_at="merge") == 1
+    assert all("uid" not in record for record in json.loads(records_path.read_text())["issues"])
+    items = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert items and not any(item["lens"] == "structural" for item in items)
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in stub.calls)
 
 async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,

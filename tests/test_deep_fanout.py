@@ -14,9 +14,9 @@ from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep import prompts as _prompts, sharding
 from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
 from daydream.deep.detection import StackAssignment, detect_stacks
-from daydream.phases import phase_per_stack_reviews, phase_per_stack_reviews as _phase
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
+from tests.harness.review_result import review_scopes
 from tests.harness.trajectory import (
     dispatch_descriptors as _dispatch_descriptors,
     dispatch_encloses_children as _dispatch_encloses_children,
@@ -56,7 +56,7 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
         return {"issues": [issue]}, None, "wall_budget_exceeded"
     monkeypatch.setattr("daydream.agent.run_agent", checkpoint)
     diff, intent, alts = _mk_context_files(tmp_path)
-    _, failures = await phase_per_stack_reviews(
+    _, failures = await review_scopes(
         _review_backend(), make_work(tmp_path), _mk_stacks()[:1], diff_path=diff,
         intent_path=intent, alternatives_path=alts, allow_standalone=True,
     )
@@ -84,7 +84,7 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await phase_per_stack_reviews(
+        results, failures = await review_scopes(
             cast(Backend, _review_backend()), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
             alternatives_path=alts, allow_standalone=True,
         )
@@ -104,7 +104,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     backend = _review_backend()
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    results, failures = await phase_per_stack_reviews(
+    results, failures = await review_scopes(
         cast(Backend, backend), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
         alternatives_path=alts, allow_standalone=True,
     )
@@ -126,11 +126,13 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     # the records artifact exists and carries the declared issues.
 
     deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
-    declared: dict[str, list[Any]] = {"issues": []}
     for name in results:
         records = per_stack_records_path(deep_dir_path, name)
         assert records.is_file(), f"missing {records.name} for {name}"
-        assert json.loads(records.read_text()) == declared
+        saved = json.loads(records.read_text())
+        assert saved["issues"] == []
+        assert saved["scope_id"] == name and saved["originating_run_id"] == "scope-test"
+        assert saved["analyzed_revision"]["head_sha"] == "h" * 40
     prompts = backend.prompts
     assert any("python" in p for p in prompts)
     assert any("react" in p for p in prompts)
@@ -164,8 +166,9 @@ async def test_phase_per_stack_reviews_uses_structural_prompt_for_structure_stac
         StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["a.py"], is_docs_only=False,),
     ]
 
-    await _phase(backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
-        allow_standalone=True,
+    await review_scopes(
+        backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent,
+        alternatives_path=alts, allow_standalone=True,
     )
 
     assert len(structural_calls) == 1
@@ -192,7 +195,7 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await phase_per_stack_reviews(
+        results, failures = await review_scopes(
             cast(Backend, backend), make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent,
             alternatives_path=alts, allow_standalone=True,
         )
@@ -230,7 +233,7 @@ async def test_per_stack_prompts_are_skill_free(tmp_path: Path, make_work: Calla
         StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
-    _, failures = await phase_per_stack_reviews(
+    _, failures = await review_scopes(
         cast(Backend, backend), make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
         allow_standalone=True,
     )
@@ -278,7 +281,7 @@ async def test_fanout_concurrency_limiter(
         backend = _review_backend(fanout_concurrency=fanout_concurrency)
     diff, intent, alts = _mk_context_files(tmp_path)
 
-    await phase_per_stack_reviews(
+    await review_scopes(
         backend, make_work(tmp_path), _mk_stacks(), diff_path=diff, intent_path=intent, alternatives_path=alts,
         allow_standalone=True,
     )

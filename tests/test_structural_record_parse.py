@@ -12,6 +12,7 @@ from daydream.deep.review_steps import _per_stack_body, _step_per_stack_parse
 from daydream.extensions import Registry, get_registry
 from daydream.flows.engine import FlowContext
 from daydream.run_context import InteractionPolicy, RunContext
+from tests.harness.review_result import records_artifact, review_coverage
 
 
 @pytest.mark.parametrize("start_at", [None, "merge", "fix"])
@@ -21,16 +22,17 @@ async def test_parse_preserves_structural_partition_on_resume(
 ) -> None:
     dd = tmp_path / ".daydream/deep"
     dd.mkdir(parents=True)
-    primary: dict[str, Any] = {"issues": []}
+    coverage = review_coverage(files=("api.py",), phases=())
+    primary = records_artifact(coverage, "python")
     (dd / "stack-python-records.json").write_text(json.dumps(primary))
     issues = [{"id": 1, "uid": uid, "file": "api.py", "line": 1, "description": "Boundary mismatch",
                "severity": "high", "confidence": "HIGH", "rationale": "Shared contract", "evidence": "api.py:1"}
               for uid in uids]
-    structural = {"issues": issues}
+    structural = records_artifact(coverage, "structure", issues)
     path = dd / "stack-structure-records.json"
     path.write_text(json.dumps(structural))
     ctx = FlowContext(config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=Registry(),
-        data={"dd": dd, "stacks": [StackAssignment("python", ["api.py"]),
+        data={"dd": dd, "review_coverage": coverage, "stacks": [StackAssignment("python", ["api.py"]),
                                     StackAssignment("structure", ["api.py"])], "failed_stacks": {}},
     )
     assert await _step_per_stack_parse(ctx) is None
@@ -69,7 +71,8 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
         allow_standalone_artifacts=True, run_context=RunContext(InteractionPolicy(interactive=False)),
         _backend_factory=lambda *_: backend,
-        data={"dd": dd, "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
+        data={"dd": dd, "review_coverage": review_coverage(files=("api.py",), phases=()),
+              "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
               "alts_path": alternatives, "exploration_dir": None, "failed_stacks": {},
               "stacks": [StackAssignment("python", ["api.py"]), StackAssignment("structure", ["api.py"])]},
     )

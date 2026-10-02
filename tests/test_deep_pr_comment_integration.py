@@ -32,6 +32,7 @@ from tests.harness.claude_sdk import (
 )
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.review_result import merge_result
 
 FIXTURE_MODEL_ID = "fixture-model-id"
 _PARTIAL_MODEL = "partial-only-model-must-not-be-posted"
@@ -191,7 +192,7 @@ class _FakeSDKClient:
         if "cross-stack merge agent" in pl:
             return [MockAssistantMessage(content=[MockTextBlock(text="merging")], model=FIXTURE_MODEL_ID,),
                 MockResultMessage(
-                    structured_output={"items": [{**_REVIEW_FINDING, "lens": "per-stack"}]}, total_cost_usd=0.20,
+                    structured_output=merge_result([{**_REVIEW_FINDING, "lens": "per-stack"}]), total_cost_usd=0.20,
                     usage={"input_tokens": 4000, "output_tokens": 600, "cache_read_input_tokens": 1500,},
                 ),
             ]

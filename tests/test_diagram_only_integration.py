@@ -310,7 +310,7 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(tmp_path: Path, fake_gh: Fa
 
     artifact_path = tmp_path / "bad.json"
     write_findings_artifact(artifact_path,
-        {"schema_version": 1, "repo": "acme/widgets", "pr_number": 7, "head_sha": "h" * 40,
+        {"schema_version": 2, "review_warnings": [], "repo": "acme/widgets", "pr_number": 7, "head_sha": "h" * 40,
             "run_info": None, "kind": "diagram", "diagrams": {"eligibility": {"flowchart": {"eligible": True}},
                 "results": {"flowchart": {"status": "rendered",
                         # ``root`` must be an object with file/name/line.

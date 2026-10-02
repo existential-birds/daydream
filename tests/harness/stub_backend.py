@@ -20,6 +20,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
+from tests.harness.review_result import merge_result
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
@@ -508,10 +509,10 @@ class StubBackend:
                             }
                         )
                         next_id += 1
-                yield ResultEvent(structured_output={"items": echoed}, continuation=None)
+                yield ResultEvent(structured_output=merge_result(echoed), continuation=None)
                 return
             if self.merge_items is not None:
-                yield ResultEvent(structured_output={"items": self.merge_items}, continuation=None,)
+                yield ResultEvent(structured_output=merge_result(self.merge_items), continuation=None,)
                 return
             # Default items cite real record UIDs: per-stack items cite their named
             # stack and cross-stack items cite every stack. Collapsed generic runs
@@ -523,7 +524,7 @@ class StubBackend:
                 uid = leads_by_stack.get(stack) or (lead_uids[0] if lead_uids else "")
                 return [uid] if uid else []
 
-            yield ResultEvent(structured_output={"items": [{
+            yield ResultEvent(structured_output=merge_result([{
                             "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "medium",
                             "description": "Python issue", "confidence": "MEDIUM", "rationale": "rationale",
                             "evidence": "api.py:1", "source_uids": _lead("python"),
@@ -535,8 +536,7 @@ class StubBackend:
                             "confidence": "HIGH", "rationale": "rationale", "evidence": "api.py:1",
                             "source_uids": list(lead_uids),
                         },
-                    ]
-                }, continuation=None,
+                    ]), continuation=None,
             )
             return
 

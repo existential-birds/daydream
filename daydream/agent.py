@@ -259,12 +259,10 @@ def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
 def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
     """Accept full schema validity or a shape downstream consumers can salvage.
 
-    Bare arrays support merge normalization. Objects must contain required keys,
-    with lists in required array slots; nested records are validated downstream.
+    Objects must contain required keys, with lists in required array slots;
+    nested records are validated downstream by callers using this capability.
     """
     if _validates_schema(value, schema):
-        return True
-    if isinstance(value, list):
         return True
     if not isinstance(value, dict):
         return False

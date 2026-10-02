@@ -1,481 +1,408 @@
-"""Terminal review results through the production runner and public export."""
+"""Snapshot-bound terminal contracts through the real runner and Git."""
 from __future__ import annotations
 
 import json
 import os
-from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import git_ops, runner
-from daydream.backends import AgentEvent
-from daydream.findings import load_findings_artifact
+from daydream import git_ops, json_utils, runner
+from daydream.backends import MaxTurnsError, ResultEvent, TextEvent, ToolStartEvent
+from daydream.findings import FindingsValidationError, load_findings_artifact
+from daydream.phases import findings
+from daydream.phases.review import ReviewOutputError
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
-from tests.test_deep_orchestrator import _pin_findings_pr, _record
+from tests.harness.console import collapse_panel_text
+from tests.harness.fake_clock import FakeClock
+from tests.harness.git_helpers import git
+from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipeline, _record
 
 
-async def _export(target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-                  backend: EmptyReviewBackend, **overrides: Any) -> tuple[int, dict[str, Any]]:
-    pr = _pin_findings_pr(monkeypatch, target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "public-findings.json"
-    rc = await runner.run(empty_review_config(target, tmp_path / "trajectory.json",
-                                             findings_out=str(output), pr_number=pr.number, **overrides))
-    artifact = load_findings_artifact(output, expected_repo="o/r", expected_pr_number=7,
-                                     expected_head_sha=pr.head_sha)
-    assert artifact.head_sha == pr.head_sha
-    data = json.loads(output.read_text())
-    assert data["schema_version"] == 2
-    assert data["terminal_result"]["analyzed_revision"]["head_sha"] == pr.head_sha
-    assert data["terminal_result"]["analyzed_revision"]["merge_base_sha"] == pr.base_sha
-    return rc, data
+class ReviewRun:
+    def __init__(self, repo: Path, tmp: Path, patch: pytest.MonkeyPatch) -> None:
+        self.repo, self.tmp, self.patch = repo, tmp, patch
+        self.pr = _pin_findings_pr(patch, repo)
+        self.output = tmp / 'findings.json'
+        self.backend = EmptyReviewBackend(repo)
+        self.config = empty_review_config(repo, tmp / 'trajectory.json', findings_out=str(self.output), pr_number=7)
+        patch.setattr('daydream.runner.create_backend', lambda *_a, **_k: self.backend)
+
+    async def run(self, **overrides: Any) -> int:
+        return await runner.run(replace(self.config, **overrides))
+
+    def load(self) -> dict[str, Any]:
+        artifact = load_findings_artifact(self.output, expected_repo='o/r', expected_pr_number=7,
+                                         expected_head_sha=self.pr.head_sha)
+        assert artifact.schema_version == 2 and artifact.head_sha == self.pr.head_sha
+        data: dict[str, Any] = json.loads(self.output.read_text())
+        revision = data['terminal_result']['analyzed_revision']
+        assert (data['head_sha'], revision['head_sha'], revision['merge_base_sha']) == (
+            self.pr.head_sha, self.pr.head_sha, self.pr.base_sha)
+        return data
 
 
-def _scopes(data: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    return {outcome["scope_id"]: outcome for outcome in data["terminal_result"]["stack_outcomes"]}
+@pytest.fixture
+def review(multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ReviewRun:
+    return ReviewRun(multi_stack_target, tmp_path, monkeypatch)
 
 
-async def test_complete_empty_review_exports_complete_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend = EmptyReviewBackend(multi_stack_target)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["findings"] == []
-    assert data["terminal_result"]["analysis_state"] == "complete"
-    assert data["terminal_result"]["pipeline_state"] == "completed"
-    assert set(_scopes(data)) == {"python", "react", "generic", "structure"}
-    assert all(scope["status"] == "complete" for scope in _scopes(data).values())
-    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
-    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+def scopes(data: dict[str, Any]) -> dict[str, Any]:
+    return {s['scope_id']: s for s in data['terminal_result']['stack_outcomes']}
 
 
-class ProviderAuthError(RuntimeError):
-    category = "AUTH_CONFIG"
+def record(line: int = 2) -> dict[str, Any]:
+    return _record(description='Grounded defect', file='api.py', line=line, severity='medium', confidence='MEDIUM',
+                   rationale='Boundary evidence', evidence=f'api.py:{line}')
 
 
-@pytest.mark.parametrize(("error", "reason"), [
-    (RuntimeError("provider unavailable"), "backend_failure"),
-    (ProviderAuthError("provider authentication rejected"), "authentication_failure"),
+def reviewer(prompt: str) -> bool:
+    return 'you are reviewing the ' in prompt.lower() or 'you are the structural reviewer' in prompt.lower()
+
+
+class AuthError(RuntimeError):
+    category = 'AUTH_CONFIG'
+
+
+@pytest.mark.parametrize(('case', 'state', 'reason'), [
+    ('empty', 'complete', None), ('backend', 'incomplete', 'backend_failure'),
+    ('auth', 'incomplete', 'authentication_failure'), ('model', 'incomplete', 'model_budget_exhaustion'),
+    ('structural', 'complete', None), ('mixed', 'incomplete', 'backend_failure'),
+    ('total', 'failed', 'backend_failure'), ('demoted', 'complete', None),
+    ('language', 'complete', None), ('archive', 'incomplete', 'backend_failure'),
 ])
-async def test_mixed_empty_review_exports_incomplete_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, reason: str,
-) -> None:
-    backend = EmptyReviewBackend(multi_stack_target, fail_stack="python", stack_error=error)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["findings"] == []
-    assert data["terminal_result"]["analysis_state"] == "incomplete"
-    assert data["terminal_result"]["pipeline_state"] == "completed"
-    assert _scopes(data)["python"]["status"] == "failed"
-    assert all(value["status"] == "complete" for key, value in _scopes(data).items() if key != "python")
-    assert _scopes(data)["python"]["reason_codes"] == [reason]
-
-
-@pytest.mark.parametrize("failed", [False, True])
-async def test_mixed_nonempty_review_preserves_partial_findings(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failed: bool,
-) -> None:
-    record = _record(description="Boundary defect", file="api.py", line=2, severity="medium",
-                     confidence="MEDIUM", rationale="Boundary is inconsistent", evidence="api.py:2")
-    backend = EmptyReviewBackend(multi_stack_target, review_by_stack={"structure": [record]},
-                                 forbid_supervise=False, fail_stack="python" if failed else None)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert len(data["findings"]) == 1
-    assert data["findings"][0]["title"] == "Boundary defect"
-    assert data["terminal_result"]["analysis_state"] == ("incomplete" if failed else "complete")
-
-
-class FailedReviewBackend(EmptyReviewBackend):
-    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        if "you are reviewing the " in prompt.lower() or "you are the structural reviewer" in prompt.lower():
-            raise RuntimeError("all reviewers unavailable")
-        async for event in super().execute(cwd, prompt, *args, **kwargs):
-            yield event
-
-
-async def test_all_reviewers_failed_exports_failed_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    backend = FailedReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["findings"] == []
-    assert data["terminal_result"]["analysis_state"] == "failed"
-    assert all(scope["status"] == "failed" for scope in _scopes(data).values())
-
-
-async def test_analyzed_snapshot_survives_live_head_change(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    calls = 0
-    live = pr
-    def _live_pr(*_args: Any, **_kwargs: Any) -> Any:
-        nonlocal calls
-        calls += 1
-        return live
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", _live_pr)
-    class AdvancingBackend(EmptyReviewBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            nonlocal live
-            live = replace(pr, head_sha=pr.base_sha)
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-    record = _record(description="Head A defect", file="api.py", line=2, severity="medium",
-                     confidence="MEDIUM", rationale="A evidence", evidence="api.py:2")
-    backend = AdvancingBackend(multi_stack_target, forbid_supervise=False, review_by_stack={"structure": [record]})
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "public.json"
-    assert await runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
-                                               findings_out=str(output), pr_number=7)) == 0
-    data = json.loads(output.read_text())
-    assert git_ops.head_sha(multi_stack_target) == pr.head_sha
-    assert data["head_sha"] == pr.head_sha
-    assert data["terminal_result"]["analyzed_revision"]["head_sha"] == pr.head_sha
-    assert live.head_sha == pr.base_sha
-    assert git_ops.show(multi_stack_target, live.head_sha, "api.py")
-    assert data["findings"][0]["placement"] == "inline"
-    assert data["findings"][0]["line"] == 2
-    assert data["terminal_result"]["analyzed_revision"]["merge_base_sha"] == pr.base_sha
-    assert data["terminal_result"]["analyzed_revision"]["pr_base_sha"] == pr.base_sha
-    assert calls == 1
-
-
-async def test_dirty_commit_bound_export_rejected(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    (multi_stack_target / "api.py").write_text("DIRTY = True\n")
-    backend = EmptyReviewBackend(multi_stack_target)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 1
-    assert data["terminal_result"]["analysis_state"] == "failed"
-    assert "dirty_snapshot" in data["terminal_result"]["reason_codes"]
-    assert backend.calls == []
-
-
-async def test_no_diff_exports_complete_noop_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.harness.git_helpers import git as _git
-    _git(multi_stack_target, "checkout", "main")
-    backend = EmptyReviewBackend(multi_stack_target)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["terminal_result"]["analysis_state"] == "complete"
-    assert data["terminal_result"]["stack_outcomes"] == []
-    assert data["terminal_result"]["phase_outcomes"][0]["noop"] is True
-    assert data["terminal_result"]["run_id"]
-    assert backend.calls == []
-
-
-async def test_pipeline_budget_before_dispatch_exports_failed_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.test_deep_orchestrator import _profile_with_pipeline
-    backend = EmptyReviewBackend(multi_stack_target)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend,
-                             review_profile=_profile_with_pipeline(review_wall_budget_s=0))
-    assert rc == 0
-    assert backend.calls == []
-    result = data["terminal_result"]
-    assert result["analysis_state"] == "failed"
-    assert "host_pipeline_budget_exhaustion" in result["reason_codes"]
-    assert all(scope["status"] == "uncovered" for scope in _scopes(data).values())
-
-
-async def test_model_turn_budget_exports_explicit_reason(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from daydream.backends import MaxTurnsError
-    backend = EmptyReviewBackend(multi_stack_target, fail_stack="python", stack_error=MaxTurnsError("spent turns"))
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["terminal_result"]["analysis_state"] == "incomplete"
-    assert _scopes(data)["python"]["reason_codes"] == ["model_budget_exhaustion"]
-
-
-@pytest.mark.parametrize(("mode", "reason", "complete"), [
-    ("missing", "missing_output", False), ("malformed", "malformed_output", False),
-    ("invalid-record", "malformed_output", False), ("fallback", None, True),
-])
-async def test_output_validation_preserves_failure_category(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    mode: str, reason: str | None, complete: bool,
-) -> None:
-    from daydream.backends import ResultEvent, TextEvent
-    class OutputBackend(EmptyReviewBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            if "you are reviewing the python stack" in prompt.lower():
-                self.calls.append({"prompt": prompt, "model": self.model})
-                payload: Any = None if mode == "missing" else {"unexpected": []}
-                if mode == "invalid-record":
-                    payload = {"issues": [{"id": 1}, "invalid"]}
-                if mode == "fallback":
-                    yield TextEvent(text='{"issues": []}')
-                yield ResultEvent(structured_output=payload, continuation=None)
-                return
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, OutputBackend(multi_stack_target))
-    assert rc == 0
-    assert data["terminal_result"]["analysis_state"] == ("complete" if complete else "incomplete")
-    assert _scopes(data)["python"]["reason_codes"] == ([] if reason is None else [reason])
-
-
-async def test_archived_and_public_result_preserve_same_coverage(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
-) -> None:
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch,
-                             EmptyReviewBackend(multi_stack_target, fail_stack="python"), archive=True)
-    assert rc == 0
-    result = data["terminal_result"]
-    archived = archive_dir / "runs" / result["run_id"]
-    manifests = json.loads((archived / "manifest.json").read_text())
-    assert manifests["archive_status"] == "complete"
-    archived_result = json.loads((archived / "findings.json").read_text())
-    assert archived_result["terminal_result"] == result
-    assert archived_result == data
-    paths = list(archived.rglob("review-coverage.json"))
-    assert len(paths) == 1
-    saved = json.loads(paths[0].read_text())
-    assert saved["stack_outcomes"] == result["stack_outcomes"]
-    assert saved["analyzed_revision"] == result["analyzed_revision"]
-    assert json.loads((multi_stack_target / ".daydream/deep/review-coverage.json").read_text()) == saved
-
-
-@pytest.mark.parametrize(("phase", "malformed"), [("intent", False), ("alternatives", False), ("merge", True)])
-async def test_required_phase_failure_finalizes_terminal_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, malformed: bool,
-) -> None:
-    from tests.harness.review_profile import independent_alternatives_profile
-    class PhaseFailureBackend(EmptyReviewBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            lower = prompt.lower()
-            if (phase == "intent" and "present your understanding concisely" in lower) or (
-                phase == "alternatives" and "evaluate the implementation" in lower
-            ):
-                raise RuntimeError(f"{phase} unavailable")
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-    record = _record(description="Surviving defect", file="api.py", line=2, severity="medium",
-                     confidence="MEDIUM", rationale="Grounded inconsistency", evidence="api.py:2")
-    backend = PhaseFailureBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False,
-                                  review_by_stack={"python": [record]})
-    backend.merge_echo_records = True
-    backend.merge_emit_str = "invalid merge output" if malformed else None
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "public-findings.json"
-    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", findings_out=str(output),
-                                 pr_number=7, review_profile=independent_alternatives_profile())
-    if malformed:
-        assert await runner.run(config) == 1
+async def test_outcomes(review: ReviewRun, archive_dir: Path, case: str, state: str, reason: str | None) -> None:
+    nonempty = case in {'structural', 'mixed', 'demoted', 'language'}
+    errors = {'auth': AuthError('rejected'), 'model': MaxTurnsError('spent turns')}
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={'python' if case == 'language' else 'structure': [record(500 if case == 'demoted' else 2)]}
+        if nonempty else {}, fail_stack='python' if reason and case != 'total' else None,
+        stack_error=errors.get(case), responder=lambda p: [RuntimeError('unavailable')]
+        if case == 'total' and reviewer(p) else None)
+    review.backend.merge_echo_records = True
+    if case == 'language':
+        review.backend.merge_items = None
+    assert await review.run(archive=case == 'archive') == 0
+    data = review.load()
+    result, inventory = data['terminal_result'], scopes(data)
+    assert (result['analysis_state'], result['pipeline_state']) == (state, 'completed')
+    assert set(inventory) == {'python', 'react', 'generic', 'structure'}
+    assert bool(data['findings']) is nonempty
+    assert {name: s['status'] for name, s in inventory.items()} == {
+        name: 'failed' if case == 'total' or (name == 'python' and reason) else 'complete' for name in inventory}
+    if reason:
+        assert inventory['python']['reason_codes'] == [reason]
     else:
-        with pytest.raises(RuntimeError, match=f"{phase} unavailable"):
-            await runner.run(config)
-    data = json.loads(output.read_text())
-    assert data["head_sha"] == pr.head_sha
-    assert data["terminal_result"]["pipeline_state"] == "failed"
-    assert data["terminal_result"]["analysis_state"] == ("incomplete" if malformed else "failed")
-    if malformed:
-        assert len(data["findings"]) == 1
-        assert "synthesis_failure" in data["terminal_result"]["reason_codes"]
+        assert result['reason_codes'] == []
+    if nonempty:
+        assert len(data['findings']) == 1 and data['findings'][0]['title'] == 'Grounded defect'
+    if case == 'demoted':
+        assert (data['findings'][0]['confidence'], data['findings'][0]['location_distrust']) == ('LOW', True)
+    if case == 'language':
+        canonical = json.loads((review.repo / '.daydream/deep/merged-items.json').read_text())
+        assert canonical['items'][0]['source_uids'] == ['python:1']
+    if case == 'empty':
+        assert not any('cross-stack merge agent' in c['prompt'].lower() or
+                       'supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
+    if case == 'archive':
+        archived = archive_dir / 'runs' / result['run_id']
+        assert json.loads((archived / 'manifest.json').read_text())['archive_status'] == 'complete'
+        assert json.loads((archived / 'findings.json').read_text()) == data
+        paths = list(archived.rglob('review-coverage.json'))
+        assert len(paths) == 1
+        saved = json.loads(paths[0].read_text())
+        assert (saved['stack_outcomes'], saved['analyzed_revision']) == (result['stack_outcomes'],
+                                                                      result['analyzed_revision'])
+        assert json.loads((review.repo / '.daydream/deep/review-coverage.json').read_text()) == saved
 
 
-@pytest.mark.parametrize("prior", [False, True])
-async def test_public_install_failure_preserves_prior_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, prior: bool,
-) -> None:
-    backend = EmptyReviewBackend(multi_stack_target)
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "public-findings.json"
-    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
-                                 findings_out=str(output), pr_number=7)
-    if prior:
-        assert await runner.run(config) == 0
-    original = output.read_bytes() if prior else None
-    real_link = os.link
-    failed = False
-    def _link(source: Any, destination: Any, **kwargs: Any) -> None:
-        nonlocal failed
-        if Path(destination) == output and not failed:
-            failed = True
-            raise OSError("injected public findings install failure")
-        real_link(source, destination, **kwargs)
-    monkeypatch.setattr(os, "link", _link)
-    assert await runner.run(config) == 1
-    assert failed
-    assert output.read_bytes() == original if prior else not output.exists()
+@pytest.mark.parametrize(('mode', 'reason'), [('missing', 'missing_output'), ('malformed', 'malformed_output'),
+                                             ('invalid', 'malformed_output'), ('fallback', None)])
+async def test_schema_output(review: ReviewRun, mode: str, reason: str | None) -> None:
+    payload = {'missing': None, 'invalid': {'issues': [{'id': 1}, 'invalid']}}.get(mode, {'unexpected': []})
+    review.backend.responder = lambda p: [TextEvent(text='{"issues": []}' if mode == 'fallback' else ''),
+        ResultEvent(structured_output=payload, continuation=None)] if 'python stack' in p.lower() else None
+    assert await review.run() == 0
+    data = review.load()
+    assert data['terminal_result']['analysis_state'] == ('complete' if reason is None else 'incomplete')
+    assert scopes(data)['python']['reason_codes'] == ([] if reason is None else [reason])
 
 
-@pytest.mark.parametrize(("budget", "nonempty"), [("tool", False), ("tool", True), ("wall", False), ("wall", True)])
-async def test_host_budget_exports_valid_partial_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, budget: str, nonempty: bool,
-) -> None:
-    from daydream.backends import ResultEvent, ToolStartEvent
-    from tests.harness.fake_clock import FakeClock
-    from tests.test_deep_orchestrator import _profile_with_pipeline
-    fake = FakeClock().install(monkeypatch)
-    record = _record(description="Budget partial defect", file="api.py", line=2, severity="medium",
-                     confidence="MEDIUM", rationale="Grounded finding", evidence="api.py:2")
-    class PartialBackend(EmptyReviewBackend):
-        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-            lower = prompt.lower()
-            if "you are reviewing the " in lower or "you are the structural reviewer" in lower:
-                self.calls.append({"prompt": prompt, "model": self.model})
-                yield ResultEvent(structured_output={"issues": [record] if nonempty else []}, continuation=None)
+@pytest.mark.parametrize('case', ['live', 'dirty', 'no-diff', 'dirty-no-diff', 'interactive', 'mismatch',
+                                  'base-tip', 'shards', 'pipeline-budget'])
+async def test_snapshot_boundaries(review: ReviewRun, shard_many_python_target: Path, case: str) -> None:
+    overrides: dict[str, Any] = {}
+    live, calls = review.pr, []
+    if case in {'no-diff', 'dirty-no-diff', 'base-tip'}:
+        git(review.repo, 'checkout', 'main')
+        if case == 'base-tip':
+            (review.repo / 'base-only.txt').write_text('advanced\n')
+            git(review.repo, 'add', 'base-only.txt')
+            git(review.repo, 'commit', '-m', 'advance base')
+            tip = git_ops.head_sha(review.repo)
+            git(review.repo, 'checkout', 'feature')
+            live = replace(review.pr, pr_base_sha=tip)
+        else:
+            review.pr = _pin_findings_pr(review.patch, review.repo)
+            live = review.pr
+    if case in {'dirty', 'dirty-no-diff', 'interactive'}:
+        (review.repo / 'api.py').write_text('DIRTY = True\n')
+    if case == 'interactive':
+        overrides['findings_out'] = None
+    if case == 'shards':
+        review = ReviewRun(shard_many_python_target, review.tmp, review.patch)
+        overrides.update(deep_shard_enabled=True, deep_shard_max_files=1)
+    if case == 'pipeline-budget':
+        overrides['review_profile'] = _profile_with_pipeline(review_wall_budget_s=0)
+    if case in {'live', 'mismatch', 'base-tip'}:
+        def lookup(*_a: Any, **_k: Any) -> Any:
+            calls.append(live)
+            return replace(live, head_sha=live.base_sha) if case == 'mismatch' else live
+        review.patch.setattr('daydream.pr_review.find_pr_by_number', lookup)
+        def advance(_p: str) -> None:
+            nonlocal live
+            live = replace(review.pr, head_sha=review.pr.base_sha)
+        if case == 'live':
+            review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
+                review_by_stack={'structure': [record()]}, responder=advance)
+    assert await review.run(**overrides) == (1 if case in {'dirty', 'dirty-no-diff', 'mismatch'} else 0)
+    if case in {'interactive', 'mismatch'}:
+        assert not review.output.exists()
+        assert bool(review.backend.calls) is (case == 'interactive')
+        if case == 'interactive':
+            assert 'DIRTY = True' in (review.repo / '.daydream/diff.patch').read_text()
+        return
+    data = review.load()
+    result = data['terminal_result']
+    failed = case in {'dirty', 'dirty-no-diff', 'pipeline-budget'}
+    assert result['analysis_state'] == ('failed' if failed else 'complete')
+    if case in {'dirty', 'dirty-no-diff', 'no-diff', 'pipeline-budget'}:
+        assert review.backend.calls == []
+    if case.startswith('dirty'):
+        assert 'dirty_snapshot' in result['reason_codes']
+    if case == 'pipeline-budget':
+        assert 'host_pipeline_budget_exhaustion' in result['reason_codes']
+        assert all(s['status'] == 'uncovered' for s in scopes(data).values())
+    if case == 'no-diff':
+        assert result['stack_outcomes'] == [] and result['phase_outcomes'][0]['noop'] is True and result['run_id']
+    if case == 'live':
+        assert live.head_sha == review.pr.base_sha and git_ops.head_sha(review.repo) == review.pr.head_sha
+        assert git_ops.show(review.repo, live.head_sha, 'api.py') and len(calls) == 1
+        assert (data['findings'][0]['placement'], data['findings'][0]['line']) == ('inline', 2)
+        assert result['analyzed_revision']['pr_base_sha'] == review.pr.base_sha
+    if case == 'base-tip':
+        assert result['analyzed_revision']['pr_base_sha'] == tip != review.pr.base_sha
+    if case == 'shards':
+        assert set(scopes(data)) == {'python#0', 'python#1', 'python#2', 'generic', 'structure'}
+        assert all(s['status'] == 'complete' for s in scopes(data).values())
+        assert {f for n, s in scopes(data).items() if n != 'structure' for f in s['files']} == {
+            'mod0.py', 'mod1.py', 'mod2.py', 'README.md'}
+
+
+@pytest.mark.parametrize(('budget', 'fault'), [('tool', None), ('wall', None), ('model', None),
+                                              ('model', 'missing'), ('model', 'corrupt')])
+@pytest.mark.parametrize('nonempty', [False, True])
+async def test_partial_checkpoints(review: ReviewRun, budget: str, fault: str | None, nonempty: bool) -> None:
+    fake = FakeClock().install(review.patch)
+    def response(prompt: str) -> Any:
+        if reviewer(prompt):
+            yield ResultEvent(structured_output={'issues': [record()] if nonempty else []}, continuation=None)
+            if budget == 'model':
+                yield MaxTurnsError('spent turns')
+            else:
                 for index in range(3):
-                    if budget == "wall":
+                    if budget == 'wall':
                         fake.advance(601)
-                    yield ToolStartEvent(id=f"budget-{index}", name="Read", input={"file_path": "api.py"})
-                return
-            async for event in super().execute(cwd, prompt, *args, **kwargs):
-                yield event
-    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 1 if budget == "tool" else None)
-    backend = PartialBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False)
-    backend.merge_echo_records = True
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend,
-                             review_profile=_profile_with_pipeline(review_wall_budget_s=99999))
-    assert rc == 0
-    assert data["terminal_result"]["analysis_state"] == "incomplete"
-    assert data["terminal_result"]["completed_stacks"] == []
-    assert all(scope["partial_evidence"] for scope in _scopes(data).values())
-    assert all(scope["status"] == "incomplete" for scope in _scopes(data).values())
-    assert f"host_{budget}_budget_exhaustion" in data["terminal_result"]["reason_codes"]
-    assert bool(data["findings"]) is nonempty
+                    yield ToolStartEvent(id=f'budget-{index}', name='Read', input={'file_path': 'api.py'})
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+                                       responder=lambda p: response(p) if reviewer(p) else None)
+    review.backend.merge_echo_records = True
+    review.patch.setattr('daydream.config.DEFAULT_TOOL_CALL_BUDGET', 1 if budget == 'tool' else None)
+    if fault:
+        method = 'is_file' if fault == 'missing' else 'read_text'
+        original = getattr(Path, method)
+        review.patch.setattr(Path, method, lambda p, *a, **k: (False if fault == 'missing' else '{')
+            if p.name == 'stack-python-records.json' else original(p, *a, **k))
+    assert await review.run(review_profile=_profile_with_pipeline(review_wall_budget_s=99999)) == (1 if fault else 0)
+    data = review.load()
+    result = data['terminal_result']
+    reason = 'model_budget_exhaustion' if budget == 'model' else f'host_{budget}_budget_exhaustion'
+    assert result['analysis_state'] == 'incomplete' and result['completed_stacks'] == []
+    assert reason in result['reason_codes'] and bool(data['findings']) is nonempty
+    for name, scope in scopes(data).items():
+        damaged = name == 'python' and fault is not None
+        assert (scope['status'], scope['partial_evidence']) == ('failed' if damaged else 'incomplete', not damaged)
+        damage_reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
+        assert scope['reason_codes'] == sorted([reason] + ([damage_reason] if damaged else []))
 
 
-async def test_host_demoted_finding_remains_valid_projection(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    record = _record(description="Distant citation", file="api.py", line=500, severity="medium",
-                     confidence="MEDIUM", rationale="Grounded finding", evidence="api.py:500")
-    backend = EmptyReviewBackend(multi_stack_target, review_by_stack={"structure": [record]}, forbid_supervise=False)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["terminal_result"]["analysis_state"] == "complete"
-    assert len(data["findings"]) == 1
-    assert data["findings"][0]["confidence"] == "LOW"
-    assert data["findings"][0]["location_distrust"] is True
+@pytest.mark.parametrize('fault', ['missing', 'corrupt', 'revision', 'scope', 'origin'])
+async def test_loaded_artifact_faults(review: ReviewRun, fault: str) -> None:
+    write, read = Path.write_text, Path.read_text
+    def faulty_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
+        count = write(path, '{invalid' if path.name == 'stack-python-records.json' and fault == 'corrupt' else text,
+                      *args, **kwargs)
+        if path.name == 'stack-python-records.json' and fault == 'missing':
+            path.unlink()
+        return count
+    def faulty_read(path: Path, *args: Any, **kwargs: Any) -> str:
+        text = read(path, *args, **kwargs)
+        if path.name == 'stack-python-records.json' and fault in {'revision', 'scope', 'origin'}:
+            data = json.loads(text)
+            if fault == 'revision':
+                data['analyzed_revision']['head_sha'] = 'foreign-head'
+            elif fault == 'scope':
+                data['scope_id'] = 'foreign-scope'
+            else:
+                data.pop('originating_run_id')
+            return json.dumps(data)
+        return text
+    review.patch.setattr(Path, 'write_text', faulty_write)
+    review.patch.setattr(Path, 'read_text', faulty_read)
+    if fault in {'missing', 'corrupt'}:
+        review.backend.review_by_stack = {'react': [_record(
+            description='Surviving sibling defect', file='App.tsx', line=1)]}
+    assert await review.run() == 1
+    data = review.load()
+    result, inventory = data['terminal_result'], scopes(data)
+    reason = 'missing_artifact' if fault == 'missing' else 'malformed_artifact'
+    assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+        'failed', 'incomplete', True)
+    assert set(inventory) == {'python', 'react', 'generic', 'structure'} and reason in result['reason_codes']
+    assert {n: s['status'] for n, s in inventory.items()} == dict.fromkeys(inventory, 'complete') | {'python': 'failed'}
+    assert inventory['python']['reason_codes'] == [reason]
+    if fault in {'missing', 'corrupt'}:
+        assert [(f['title'], f['placement']) for f in data['findings']] == [('Surviving sibling defect', 'inline')]
+    else:
+        assert data['findings'] == []
+    assert not any('cross-stack merge agent' in c['prompt'].lower() for c in review.backend.calls)
 
 
-async def test_scheduled_shard_inventory_is_exported(
-    shard_many_python_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    rc, data = await _export(shard_many_python_target, tmp_path, monkeypatch,
-                             EmptyReviewBackend(shard_many_python_target), deep_shard_enabled=True,
-                             deep_shard_max_files=1)
-    assert rc == 0
-    assert set(_scopes(data)) == {"python#0", "python#1", "python#2", "generic", "structure"}
-    assert all(scope["status"] == "complete" for scope in _scopes(data).values())
-    files = {file for name, scope in _scopes(data).items() if name != "structure" for file in scope["files"]}
-    assert files == {"mod0.py", "mod1.py", "mod2.py", "README.md"}
-    assert data["terminal_result"]["analysis_state"] == "complete"
+@pytest.mark.parametrize(('phase', 'reason'), [('intent', 'backend_failure'), ('alternatives', 'backend_failure'),
+    ('merge', 'synthesis_failure'), ('missing', 'missing_output'), ('malformed', 'malformed_output'),
+    ('omitted', 'evidence_incomplete')])
+async def test_required_phase_faults(review: ReviewRun, phase: str, reason: str) -> None:
+    from tests.harness.review_profile import independent_alternatives_profile
+    def response(prompt: str) -> Any:
+        lower = prompt.lower()
+        if (phase == 'intent' and 'present your understanding concisely' in lower) or (
+                phase == 'alternatives' and 'evaluate the implementation' in lower):
+            return [RuntimeError(f'{phase} unavailable')]
+        if phase in {'missing', 'malformed', 'omitted'} and 'supervisor adjudication' in lower:
+            payload = None if phase == 'missing' else {'verdicts': [None] if phase == 'malformed' else []}
+            return [ResultEvent(structured_output=payload, continuation=None)]
+    review.backend = EmptyReviewBackend(review.repo, forbid_merge=False, forbid_supervise=False,
+        review_by_stack={'python' if phase == 'merge' else 'structure': [record()]}, responder=response)
+    review.backend.merge_echo_records = True
+    review.backend.merge_emit_str = 'invalid merge output' if phase == 'merge' else None
+    if phase in {'intent', 'alternatives', 'merge'}:
+        review.config = replace(review.config, review_profile=independent_alternatives_profile())
+    if phase in {'merge', 'omitted'}:
+        assert await review.run() == (1 if phase == 'merge' else 0)
+    else:
+        error_type = ReviewOutputError if phase in {'missing', 'malformed'} else RuntimeError
+        with pytest.raises(error_type, match=None if error_type is ReviewOutputError else f'{phase} unavailable'):
+            await review.run()
+    data = review.load()
+    result = data['terminal_result']
+    assert (result['pipeline_state'], result['analysis_state']) == (
+        'completed' if phase == 'omitted' else 'failed',
+        'failed' if phase in {'intent', 'alternatives'} else 'incomplete')
+    assert reason in result['reason_codes']
+    expected_titles = [] if phase in {'intent', 'alternatives'} else ['Grounded defect']
+    assert [f['title'] for f in data['findings']] == expected_titles
+    if phase in {'missing', 'malformed', 'omitted'}:
+        outcome = next(p for p in result['phase_outcomes'] if p['phase'] == 'supervision')
+        expected = 'incomplete' if phase == 'omitted' else 'failed'
+        assert (outcome['status'], outcome['reason_codes']) == (expected, [reason])
+        assert any('supervisor adjudication' in c['prompt'].lower() for c in review.backend.calls)
 
 
-async def test_dirty_interactive_review_remains_supported(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    (multi_stack_target / "api.py").write_text("DIRTY = True\n")
-    backend = EmptyReviewBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    assert await runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
-    assert backend.calls
-    assert "DIRTY = True" in (multi_stack_target / ".daydream/diff.patch").read_text()
-
-
-async def test_failure_before_snapshot_leaves_no_terminal_artifact(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_args, **_kwargs:
-                        replace(pr, head_sha=pr.base_sha))
-    backend = EmptyReviewBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "absent.json"
-    assert await runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
-                                               findings_out=str(output), pr_number=7)) == 1
-    assert not output.exists()
-    assert backend.calls == []
-
-
-async def test_terminal_writer_failure_surfaces_without_artifact(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from daydream import json_utils
-    _pin_findings_pr(monkeypatch, multi_stack_target)
-    backend = EmptyReviewBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "absent.json"
-    real_stage = json_utils._stage_bytes
-    def _stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+@pytest.mark.parametrize('fault', ['absent-install', 'prior-install', 'staging'])
+async def test_atomic_public_failure(review: ReviewRun, fault: str) -> None:
+    if fault == 'prior-install':
+        assert await review.run() == 0
+    prior = review.output.read_bytes() if review.output.exists() else None
+    link, stage = os.link, json_utils._stage_bytes
+    injected: list[bool] = []
+    def fail_link(source: Any, destination: Any, **kwargs: Any) -> None:
+        if Path(destination) == review.output and not injected:
+            injected.append(True)
+            raise OSError('public install failed')
+        link(source, destination, **kwargs)
+    def fail_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
         if b'"terminal_result"' in content:
-            raise OSError("injected findings staging failure")
-        return real_stage(path, content, **kwargs)
-    monkeypatch.setattr(json_utils, "_stage_bytes", _stage)
-    assert await runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
-                                               findings_out=str(output), pr_number=7)) == 1
-    assert not output.exists()
+            injected.append(True)
+            raise OSError('findings staging failed')
+        return stage(path, content, **kwargs)
+    review.patch.setattr(os, 'link', fail_link)
+    if fault == 'staging':
+        review.patch.setattr(json_utils, '_stage_bytes', fail_stage)
+    assert await review.run() == 1 and injected
+    assert review.output.read_bytes() == prior if prior else not review.output.exists()
 
 
-async def test_dirty_no_commit_diff_cannot_export_complete_noop(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.harness.git_helpers import git
-    git(multi_stack_target, "checkout", "main")
-    (multi_stack_target / "api.py").write_text("UNBOUND = True\n")
-    backend = EmptyReviewBackend(multi_stack_target)
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 1
-    assert data["terminal_result"]["analysis_state"] == "failed"
-    assert "dirty_snapshot" in data["terminal_result"]["reason_codes"]
-    assert backend.calls == []
-
-
-async def test_pr_base_tip_is_distinct_from_analyzed_merge_base(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from tests.harness.git_helpers import git
-    pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-    git(multi_stack_target, "checkout", "main")
-    (multi_stack_target / "base-only.txt").write_text("base advanced\n")
-    git(multi_stack_target, "add", "base-only.txt")
-    git(multi_stack_target, "commit", "-m", "advance base tip")
-    tip = git_ops.head_sha(multi_stack_target)
-    git(multi_stack_target, "checkout", "feature")
-    captured = replace(pr, pr_base_sha=tip)
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_args, **_kwargs: captured)
-    backend = EmptyReviewBackend(multi_stack_target)
-    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
-    output = tmp_path / "bound.json"
-    assert await runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json",
-                                               findings_out=str(output), pr_number=7)) == 0
-    revision = json.loads(output.read_text())["terminal_result"]["analyzed_revision"]
-    assert revision["merge_base_sha"] == pr.base_sha
-    assert revision["pr_base_sha"] == tip
-    assert revision["pr_base_sha"] != revision["merge_base_sha"]
-
-
-async def test_complete_nonempty_review_exports_complete_result(
-    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    record = _record(description="Language defect", file="api.py", line=2, severity="medium",
-                     confidence="MEDIUM", rationale="Grounded inconsistency", evidence="api.py:2")
-    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False,
-                                 review_by_stack={"python": [record]})
-    backend.merge_echo_records = True
-    rc, data = await _export(multi_stack_target, tmp_path, monkeypatch, backend)
-    assert rc == 0
-    assert data["terminal_result"]["analysis_state"] == "complete"
-    assert data["terminal_result"]["reason_codes"] == []
-    assert len(data["findings"]) == 1
-    assert data["findings"][0]["title"] == "Language defect"
-    canonical = json.loads((multi_stack_target / ".daydream/deep/merged-items.json").read_text())
-    assert canonical["items"][0]["source_uids"] == ["python:1"]
-    assert all(scope["status"] == "complete" for scope in _scopes(data).values())
+@pytest.mark.parametrize('fault', ['coverage', 'fix', 'salvage'])
+async def test_finalization_boundary(review: ReviewRun, capsys: pytest.CaptureFixture[str], fault: str) -> None:
+    error = RuntimeError('original provider error')
+    stage, write, salvage = json_utils._stage_bytes, Path.write_text, findings._write_single_stack_merged_items
+    state: dict[str, Any] = {'failed': False, 'merged': None, 'rejected': False, 'writes': []}
+    def observe_stage(path: Path, content: bytes, **kwargs: Any) -> Path:
+        if path.name == 'review-coverage.json':
+            state['writes'].append((state['failed'], content))
+            if fault == 'coverage':
+                raise OSError('coverage staging failed')
+        return stage(path, content, **kwargs)
+    def observe_write(path: Path, text: str, *args: Any, **kwargs: Any) -> int:
+        if path.name == 'merged-items.json':
+            state['merged'] = path
+        return write(path, text, *args, **kwargs)
+    def reject_salvage(*args: Any, **kwargs: Any) -> None:
+        if state['failed'] and fault == 'salvage':
+            state['rejected'] = True
+            raise ValueError('rejected projection')
+        salvage(*args, **kwargs)
+    def response(prompt: str) -> Any:
+        trigger = {'coverage': 'present your understanding concisely', 'fix': 'fix this issue',
+                   'salvage': 'supervisor adjudication'}[fault]
+        if trigger in prompt.lower() or (fault == 'fix' and prompt.lower().startswith('fix these')):
+            state['failed'] = True
+            if fault == 'salvage':
+                assert json.loads(state['merged'].read_text())['items']
+                state['merged'].unlink()
+            return [error]
+    review.patch.setattr(json_utils, '_stage_bytes', observe_stage)
+    review.patch.setattr(Path, 'write_text', observe_write)
+    review.patch.setattr(findings, '_write_single_stack_merged_items', reject_salvage)
+    review.backend = EmptyReviewBackend(review.repo, forbid_supervise=False,
+                                       review_by_stack={'structure': [record()]}, responder=response)
+    if fault == 'fix':
+        assert await review.run(output_mode='loop', findings_out=None) == 1
+        saved_path = review.repo / '.daydream/deep/review-coverage.json'
+        assert state['failed'] and state['writes'] and all(not after for after, _ in state['writes'])
+        assert saved_path.read_bytes() == state['writes'][-1][1]
+        saved = json.loads(saved_path.read_text())
+        assert all(s['status'] == 'complete' for s in saved['stack_outcomes'] + saved['phase_outcomes'])
+        assert 'pipeline' not in saved['required_phases']
+        return
+    with pytest.raises(RuntimeError) as raised:
+        await review.run()
+    assert raised.value is error
+    if fault == 'coverage':
+        assert state['writes'] and not review.output.exists()
+        assert 'Terminal review finalization failed: OSError' in collapse_panel_text(capsys)
+        with pytest.raises(FindingsValidationError):
+            review.load()
+    else:
+        data = review.load()
+        result = data['terminal_result']
+        assert state['rejected'] and data['findings'] == []
+        assert (result['pipeline_state'], result['analysis_state'], result['projection_valid']) == (
+            'failed', 'failed', False)
+        assert all(s['status'] == 'complete' for s in scopes(data).values())
+        phases = {p['phase']: p for p in result['phase_outcomes']}
+        assert phases['supervision']['status'] == phases['findings']['status'] == 'failed'
+        assert (phases['supervision']['reason_codes'], phases['findings']['reason_codes']) == (
+            ['backend_failure'], ['malformed_artifact'])

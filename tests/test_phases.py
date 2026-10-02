@@ -31,10 +31,8 @@ from daydream.backends.codex import CodexBackend
 from daydream.config import REVIEW_OUTPUT_FILE, STRUCTURE_STACK_NAME, TEST_WALL_BUDGET_S
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.artifacts import (
+    DeepArtifact,
     deep_dir,
-    evidence_reuse_path,
-    merged_items_path,
-    verdicts_path,
 )
 from daydream.deep.detection import StackAssignment
 from daydream.deep.prompts import build_per_stack_prompt
@@ -58,7 +56,6 @@ from daydream.phases import (
     phase_alternative_review,
     phase_commit_push,
     phase_cross_stack_merge,
-    phase_per_stack_reviews,
     phase_understand_intent,
     phase_verify_recommendations,
     publish,
@@ -127,6 +124,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_result import merge_result, review_scopes
 from tests.harness.trajectory import make_recorder, read_trajectory
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -135,6 +133,8 @@ _PASS_TURN: tuple[AgentEvent, ...] = (TextEvent(text="All 1 tests passed"), _RES
 _FIX_TURN: tuple[AgentEvent, ...] = (TextEvent(text="Applied fix attempt"), _RESULT)
 
 def _structured_turn(structured: object) -> tuple[AgentEvent, ...]:
+    if isinstance(structured, dict) and isinstance(structured.get("items"), list):
+        structured = merge_result(structured["items"])
     return (ResultEvent(structured_output=structured, continuation=None),)
 
 def _verdict(verdict: str, suggested_command: str | None, reason: str) -> dict[str, str | None]:
@@ -1357,7 +1357,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     alts.write_text("[]")
     stacks = [StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api/main.py"], is_docs_only=False,)]
 
-    results, failures = await phase_per_stack_reviews(
+    results, failures = await review_scopes(
         backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
         exploration_dir=exploration_dir, allow_standalone=True,
     )
@@ -3073,12 +3073,10 @@ def _setup_cross_stack_merge(tmp_path: Path) -> dict[str, object]:
     }
 
 # The host renders review-output.md from validated merge items.
-_MERGE_ITEMS = {"items": [{
-            "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
-            "confidence": "HIGH", "rationale": "r",
-        }
-    ]
-}
+_MERGE_ITEMS = merge_result([{
+    "id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "severity": "low", "description": "bug",
+    "confidence": "HIGH", "rationale": "r", "evidence": "a.py:1",
+}])
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("phase_name", "model", "events", "expected_hero", "setup"),
@@ -3133,7 +3131,9 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
     # Structural records file: the parsed FEEDBACK_SCHEMA shape produced upstream.
     struct_path = tmp_path / "stack-structure-records.json"
     struct_path.write_text(
-        json.dumps([{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1, "evidence": "big.py:1"}])
+        json.dumps({"issues": [{"id": 1, "description": "1k-line file", "file": "big.py", "line": 1,
+                                "evidence": "big.py:1", "uid": "structure:1", "severity": "medium",
+                                "confidence": "MEDIUM", "rationale": "fixture defect"}]})
     )
 
     report_path = await phase_cross_stack_merge(
@@ -3142,7 +3142,7 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
         structural_records_path=struct_path, allow_standalone=True,
     )
 
-    items = json.loads(merged_items_path(deep_dir(work.repo, allow_standalone=True)).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep_dir(work.repo, allow_standalone=True)).read_text())["items"]
     assert any(i["lens"] == "structural" for i in items)  # structural survives into canonical
     assert any(i["lens"] == "per-stack" for i in items)  # agent items kept too
     assert len({i["id"] for i in items}) == len(items)  # ids unique after normalize
@@ -3181,7 +3181,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
                                          "evidence": "base.py:1", "uid": "python:1"}]})
         python_records = _write_sized(deep / "python-records.json", records, 7_593)
         generic_records = _write_sized(deep / "generic-records.json", '{"issues": []}', 2_180)
-        structural = _write_sized(deep / "structural-records.json", "[]", 7_880)
+        structural = _write_sized(deep / "structural-records.json", '{"issues": []}', 7_880)
         exploration = deep / "exploration"
         exploration.mkdir()
         _write_sized(exploration / "summary.md", "summary", 613)
@@ -3330,7 +3330,7 @@ async def test_verifier_excludes_structural_lens(
             },
         ]
     }
-    items_path = merged_items_path(dd)
+    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
     items_path.write_text(json.dumps(items))
 
     # MockBackend returns a verdict ONLY for the per-stack id, mimicking an
@@ -3350,7 +3350,7 @@ async def test_verifier_excludes_structural_lens(
     assert "1k-line file" not in backend.last_prompt
     assert "bug" in backend.last_prompt
     # Verdicts file is written for downstream consumers.
-    assert verdicts_path(dd).is_file()
+    assert DeepArtifact.VERDICTS.at(dd).is_file()
     # The verifier diagnostic must use the read-only profile.
     assert backend.read_only_calls == [True]
 
@@ -3368,13 +3368,13 @@ async def test_phase_verify_writes_one_decision_per_item_and_prompts_only_the_se
         {"id": 2, "item_uid": "item:2", "lens": "structural", "file": "big.py", "line": 0, "severity": "high",
          "confidence": "HIGH", "description": "1k-line file", "rationale": "r", "evidence": "big.py"},
     ]}
-    merged_items_path(dd).write_text(json.dumps(items))
+    DeepArtifact.MERGED_ITEMS.at(dd).write_text(json.dumps(items))
     # No provenance ledger written: item:1 is unadjudicated, so MH7 selects it.
     backend = ScriptedBackend(events=_structured_turn({"verdicts": [
         {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []},
     ]}))
     _path, payload = await phase_verify_recommendations(
-        backend, work, merged_items_path=merged_items_path(dd), deep_dir=dd,
+        backend, work, merged_items_path=DeepArtifact.MERGED_ITEMS.at(dd), deep_dir=dd,
         selection=SelectionConfig(verify_all=False, extra_categories=()),
     )
     decisions = {d["item_uid"]: d for d in payload["selection"]["decisions"]}
@@ -3392,18 +3392,18 @@ async def test_zero_selection_makes_no_backend_call_and_still_writes_a_valid_art
     work = make_work(tmp_path)
     dd = deep_dir(work.repo, allow_standalone=True)
     dd.mkdir(parents=True, exist_ok=True)
-    merged_items_path(dd).write_text(json.dumps({"items": [
+    DeepArtifact.MERGED_ITEMS.at(dd).write_text(json.dumps({"items": [
         {"id": 1, "item_uid": "item:1", "lens": "structural", "file": "big.py", "line": 0,
          "severity": "high", "confidence": "HIGH", "description": "big", "rationale": "r", "evidence": "big.py"},
     ]}))
     backend = ScriptedBackend(events=())
     _path, payload = await phase_verify_recommendations(
-        backend, work, merged_items_path=merged_items_path(dd), deep_dir=dd,
+        backend, work, merged_items_path=DeepArtifact.MERGED_ITEMS.at(dd), deep_dir=dd,
         selection=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert backend.calls == []
     assert payload["verdicts"] == []
-    assert json.loads(verdicts_path(dd).read_text())["verdicts"] == []
+    assert json.loads(DeepArtifact.VERDICTS.at(dd).read_text())["verdicts"] == []
     assert len(payload["selection"]["decisions"]) == 1
 
 async def test_verifier_prompt_carries_gate_zero_protocol(
@@ -3421,7 +3421,7 @@ async def test_verifier_prompt_carries_gate_zero_protocol(
             }
         ]
     }
-    items_path = merged_items_path(dd)
+    items_path = DeepArtifact.MERGED_ITEMS.at(dd)
     items_path.write_text(json.dumps(items))
 
     structured = {"verdicts": [{"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": [],}]
@@ -4076,7 +4076,7 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
     ]
     _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
 
-    items = json.loads(merged_items_path(dd).read_text())["items"]
+    items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped
     assert "location_note" in items[0]  # demoted-with-annotation
     assert items[0]["severity"] == "low"  # demoted value (report-facing)
@@ -4348,7 +4348,7 @@ async def test_a_reuse_decision_is_reported_and_persisted(
         ), retained_tree_key=identity.output_tree_key,
     )
 
-    record = json.loads(evidence_reuse_path(deep).read_text())
+    record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())
     gate = record["gates"]["declined-commit"]
     assert gate["gate"] == "declined-commit"
     assert gate["result"] == "reused"
@@ -4378,7 +4378,7 @@ async def test_a_mismatch_record_names_the_component(
         ), retained_tree_key="stale",
     )
 
-    record = json.loads(evidence_reuse_path(deep).read_text())
+    record = json.loads(DeepArtifact.EVIDENCE_REUSE.at(deep).read_text())
     gate = record["gates"]["declined-commit"]
     assert gate["result"] == "identity-mismatch"
     assert gate["mismatched_components"] == ["tree_key"]

@@ -9,7 +9,7 @@ import hashlib
 import json
 import os
 import re
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -1204,16 +1204,4 @@ def post_findings_from_artifact(
 
 def _issue_from_artifact_finding(finding: ArtifactFinding) -> ParsedIssue:
     """Restore validated issue fields; artifact placement requires no local PR Git objects."""
-    return ParsedIssue(
-        path=finding.path,
-        line=finding.line,
-        title=finding.title,
-        body=finding.body,
-        is_cross_stack=finding.is_cross_stack,
-        confidence=finding.confidence,
-        severity=finding.severity,
-        fingerprint=finding.fingerprint,
-        location_distrust=finding.location_distrust,
-        severity_before_demotion=finding.severity_before_demotion,
-        severity_off_vocabulary=finding.severity_off_vocabulary,
-    )
+    return ParsedIssue(**{member.name: getattr(finding, member.name) for member in fields(ParsedIssue)})

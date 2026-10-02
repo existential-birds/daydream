@@ -28,6 +28,7 @@ from daydream.training.labeler_signals import (
 )
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend
 from tests.harness.fake_gh import FakeGh
+from tests.harness.review_result import findings_artifact
 from tests.harness.scripts import cli_main
 
 FILE_FINGERPRINT = "f" * 64
@@ -127,11 +128,7 @@ async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
 
 
 def _artifact(path: Path, findings: list[dict[str, Any]]) -> Path:
-    write_findings_artifact(path,
-        {"schema_version": 1, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
-            "run_info": "test run info", "findings": findings,
-        },
-    )
+    write_findings_artifact(path, findings_artifact(findings, run_info="test run info"))
     return path
 
 

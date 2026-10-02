@@ -11,11 +11,10 @@ import pytest
 
 from daydream.deep.arbiter import partition_arbiter_targets
 from daydream.deep.artifacts import (
-    adjudication_complete_path,
+    DeepArtifact,
     arbiter_group_complete_path,
     arbiter_group_input_path,
     arbiter_group_verdicts_path,
-    arbiter_input_path,
 )
 from daydream.deep.latency import (
     ARBITER_EFFORTS,
@@ -212,11 +211,11 @@ def test_one_group_or_forensic_stays_unsharded_at_todays_effort() -> None:
     assert fast.sharded is False and [g.effort for g in fast.groups] == ["xhigh"]
     assert "unsharded" in (fast.reason or "")
 
-def test_group_artifact_paths_are_group_scoped_and_backward_compatible(tmp_path: Path) -> None:
+def test_group_artifact_paths_are_group_scoped_and_distinct_from_whole_completion(tmp_path: Path) -> None:
     dd = tmp_path / "deep"
     dd.mkdir()
     assert arbiter_group_input_path(dd, "arbiter-group-1").name == "arbiter-group-1-input.json"
     assert arbiter_group_verdicts_path(dd, "arbiter-group-1").name == "arbiter-group-1-verdicts.json"
     assert arbiter_group_complete_path(dd, "arbiter-group-1").name == "arbiter-group-1-complete.marker"
-    assert arbiter_input_path(dd).name == "arbiter-input.json"       # unchanged, MH2
-    assert adjudication_complete_path(dd).name == "arbiter-complete.marker"   # unchanged, MH2
+    assert DeepArtifact.ARBITER_INPUT.at(dd).name == "arbiter-input.json"       # unchanged, MH2
+    assert DeepArtifact.ADJUDICATION_COMPLETE.at(dd).name == "adjudication-complete.marker"   # unchanged, MH2

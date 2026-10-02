@@ -9,7 +9,7 @@ from typing import Any
 import jsonschema
 
 from daydream.agent import console
-from daydream.deep.artifacts import merged_items_path
+from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.state import DeepState
 from daydream.flows.engine import FlowContext
 from daydream.json_utils import atomic_write_json
@@ -28,12 +28,10 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
 
     state = DeepState(ctx.data)
     coverage = state.review_coverage
-    if coverage is None:
-        return 0
     items: list[dict[str, Any]] = []
     projection_valid = no_diff
     recovery_failed = False
-    path = ctx.data.get("items_file", merged_items_path(state.dd))
+    path = ctx.data.get("items_file", DeepArtifact.MERGED_ITEMS.at(state.dd))
     if not no_diff and isinstance(path, Path) and not path.is_file() and "records" in ctx.data:
         from daydream.phases.findings import _write_single_stack_merged_items
         try:
@@ -73,7 +71,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     if pipeline_state == "completed" and projection_valid and "pipeline" in coverage.required_phases:
         coverage.record_phase("pipeline", "complete")
     result = coverage.finalize(pipeline_state, projection_valid=projection_valid)
-    atomic_write_json(state.dd / "review-coverage.json", coverage.to_dict())
+    atomic_write_json(DeepArtifact.REVIEW_COVERAGE.at(state.dd), coverage.to_dict())
     if ctx.config.findings_out is None:
         return 0
     pr = ctx.data.get("analyzed_pr")

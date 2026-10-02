@@ -103,22 +103,4 @@ fingerprint markers in each comment body:
 Comment format is unchanged from `daydream --comment` — these workflows add
 triggers and posting identity, not a new output format.
 
-## Terminal findings version compatibility
-
-Phase A review exports use strict findings schema version 2 with an embedded
-terminal result. Phase B supports versions 1 and 2; incomplete/failed version 2
-reviews publish a COMMENT notice even with zero findings and no warning strings,
-and never authorize approval or stale resolution. Legacy version 1 completeness
-is unknown; comments remain publishable. Diagram-only artifacts stay version 1.
-Both producer and poster immutable pins must upgrade together to a reviewed
-version supporting schema version 2. An older strict poster rejects the new
-envelope. The existing paired pins are retained until that reviewed release.
-
-Hosted callers should use a unique, initially absent output path per invocation.
-For a reused path, compare the run ID to an independently known expected ID; an
-old complete artifact can survive failed replacement. Missing or truncated output
-is no valid current result. Commit-bound review export requires a clean checkout,
-uses its captured head/merge-base/diff for target identity and finding placement,
-and preserves typed backend, authentication, output, evidence and budget failures.
-Pipeline completion and CLI/archive success do not imply complete analysis.
-See the [full contract](../../../README.md#terminal-review-findings-contract).
+Review artifacts require current findings schema version 2 with typed terminal coverage. Upgrade producer and poster pins together; older schemas are rejected. For states, invocation freshness and output absence, see the [terminal findings contract](../../../README.md#terminal-review-findings-contract).
