@@ -147,33 +147,28 @@ def test_http_vendor_json_success_ack_is_accepted_with_warning(monkeypatch: pyte
         assert len(receiver.requests) == 1  # never retried
 
 
+@pytest.mark.parametrize(
+    ("body", "leaked_text"),
+    [
+        (b'{"success": false, "error": "boom"}', "boom"),
+        (b'{"success": false}', ""),
+    ],
+    ids=["error-indication", "success-false"],
+)
 def test_http_json_ack_with_error_indication_is_terminal(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    with scripted_otlp_collector(
-        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false, "error": "boom"}')]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # terminal, never retried
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
-        assert "boom" not in caplog.text  # body text is never logged
-
-
-def test_http_json_ack_success_false_without_error_is_terminal(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    body: bytes,
+    leaked_text: str,
 ) -> None:
-    """The documented HoneyHive inverse {"success": false} is an explicit vendor failure.
+    """An explicitly falsy vendor ``success`` is a terminal OTLP_MALFORMED_ACK.
 
-    The accept path reads the vendor-documented "success" flag: an explicitly
-    falsy success with no "error" key is still error-indicating JSON and stays
-    terminal OTLP_MALFORMED_ACK — never recorded as delivered.
+    The documented HoneyHive inverse ``{"success": false}`` is an explicit
+    vendor failure even with no ``error`` key, so it is never delivered; body
+    text is never logged.
     """
     with scripted_otlp_collector(
-        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false}')]
+        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=body)]
     ) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -182,6 +177,8 @@ def test_http_json_ack_success_false_without_error_is_terminal(
         assert len(receiver.requests) == 1  # terminal, never retried
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
+        if leaked_text:
+            assert leaked_text not in caplog.text  # body text is never logged
 
 
 def test_http_vendor_json_ack_success_content_type_is_case_insensitive(

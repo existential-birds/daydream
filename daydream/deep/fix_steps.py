@@ -1881,22 +1881,24 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
     poll_count = 0
     verdict: RemoteCIVerdict | None = None
 
-    def persist(snapshot: RemoteCIVerdict) -> None:
-        deep_state = DeepState(ctx.data)
-        nonlocal poll_count, verdict
-        poll_count += 1
-        verdict = snapshot
+    def write_verdict(path: Path, snapshot: RemoteCIVerdict, count: int) -> None:
         write_remote_ci_verdict(
-            remote_ci_verdict_path(deep_state.dd),
+            path,
             snapshot,
             session_id=state.session_id,
-            poll_count=poll_count,
+            poll_count=count,
             started_at=started_at,
             updated_at=now_iso(),
             discovery_deadline=discovery_deadline,
             completion_deadline=completion_deadline,
             limits=limits,
         )
+
+    def persist(snapshot: RemoteCIVerdict) -> None:
+        nonlocal poll_count, verdict
+        poll_count += 1
+        verdict = snapshot
+        write_verdict(remote_ci_verdict_path(DeepState(ctx.data).dd), snapshot, poll_count)
 
     caught: BaseException | None = None
     cancelled_type = anyio.get_cancelled_exc_class()
@@ -1909,17 +1911,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                     reason="remote CI target identity is unavailable",
                     diagnostic=str(exc),
                 )
-                write_remote_ci_verdict(
-                    remote_ci_verdict_path(deep_state.dd),
-                    verdict,
-                    session_id=state.session_id,
-                    poll_count=0,
-                    started_at=started_at,
-                    updated_at=now_iso(),
-                    discovery_deadline=discovery_deadline,
-                    completion_deadline=completion_deadline,
-                    limits=limits,
-                )
+                write_verdict(remote_ci_verdict_path(deep_state.dd), verdict, 0)
             else:
                 # One monotonic start owns both the durable deadline metadata
                 # and the waiter's request budgets.  Resolution above is a
@@ -1929,17 +1921,7 @@ async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
                 monotonic_started = anyio.current_time()
                 discovery_deadline = monotonic_started + limits.discovery_seconds
                 completion_deadline = monotonic_started + limits.completion_seconds
-                write_remote_ci_verdict(
-                    remote_ci_verdict_path(deep_state.dd),
-                    pending_remote_ci_verdict(target),
-                    session_id=state.session_id,
-                    poll_count=0,
-                    started_at=started_at,
-                    updated_at=now_iso(),
-                    discovery_deadline=discovery_deadline,
-                    completion_deadline=completion_deadline,
-                    limits=limits,
-                )
+                write_verdict(remote_ci_verdict_path(deep_state.dd), pending_remote_ci_verdict(target), 0)
                 # The new target is durable before the previous attempt's
                 # guidance is retired. Do this before any CI request so a
                 # blocked or abruptly interrupted resume cannot expose it.

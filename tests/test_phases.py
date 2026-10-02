@@ -883,20 +883,30 @@ async def test_push_verification_failure_surfaces_even_when_push_succeeds(
         )
 
 
+@pytest.mark.parametrize(
+    ("created_file", "content"),
+    [("notes.txt", "user scratch\n"), ("generated.py", "created by fix\n")],
+    ids=["user-scratch", "fix-created"],
+)
 @pytest.mark.asyncio
 async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
     git_repo: Path,
     make_work: Callable[..., WorkContext],
+    created_file: str,
+    content: str,
 ) -> None:
     """When the pre-run untracked snapshot is None (legacy callers), the host
     path defensively computes it at commit time so user scratch files are
-    never swept into the commit."""
+    never swept into the commit. A NEW file created by the fix is
+    indistinguishable from user scratch via ``list_untracked`` and is excluded
+    (an under-commit); in-tree callers pass the pre-run snapshot, which avoids
+    it."""
 
     (git_repo / "app.py").write_text("x = 0\n")
     git(git_repo, "add", "app.py")
     git_commit(git_repo, "baseline app.py")
-    (git_repo / "app.py").write_text("x = 1\n")            # daydream change
-    (git_repo / "notes.txt").write_text("user scratch\n")  # untracked scratch
+    (git_repo / "app.py").write_text("x = 1\n")     # daydream change
+    (git_repo / created_file).write_text(content)    # untracked file
 
     ok = await _do_commit(
         ScriptedBackend(), make_work(git_repo), push=False,
@@ -907,36 +917,7 @@ async def test_do_commit_computes_untracked_protection_when_snapshot_missing(
     assert ok.push is None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
-    assert "notes.txt" not in committed
-
-
-async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
-    git_repo: Path,
-    make_work: Callable[..., WorkContext],
-) -> None:
-    """The legacy None-snapshot path computes untracked at commit time, so a
-    NEW file created by the fix is indistinguishable from user scratch via
-    ``list_untracked`` and is excluded (an under-commit). This codifies the
-    defensive path's documented limitation; in-tree callers pass the pre-run
-    snapshot, which avoids it."""
-
-    (git_repo / "app.py").write_text("x = 0\n")
-    git(git_repo, "add", "app.py")
-    git_commit(git_repo, "baseline app.py")
-    (git_repo / "app.py").write_text("x = 1\n")                    # daydream change
-    (git_repo / "generated.py").write_text("created by fix\n")     # fix-created NEW file
-
-    ok = await _do_commit(
-        ScriptedBackend(), make_work(git_repo), push=False,
-        interactive=False, items=[{"file": "app.py", "description": "fix app"}],
-        preexisting_untracked=None,
-    )
-    assert ok.committed is True
-    assert ok.push is None
-    committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
-    assert "app.py" in committed
-    # Fix-created new file is untracked at snapshot time and dropped.
-    assert "generated.py" not in committed
+    assert created_file not in committed
 
 
 

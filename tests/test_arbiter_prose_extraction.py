@@ -91,21 +91,31 @@ def _pi_like_backend(message: str) -> ScriptedBackend:
     return _split_text_backend(message, extract_json(message))
 
 
-async def test_arbiter_extracts_findings_from_prose_wrapped_message(
+async def _invoke_arbiter(
+    backend: ScriptedBackend,
     tmp_path: Path,
     make_work: Callable[..., WorkContext],
-) -> None:
-    """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
+    **overrides: Any,
+) -> tuple[dict[int, dict[str, Any]], Any]:
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
-    verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _pi_like_backend(ARBITER_MESSAGE)),
+    return await phase_arbiter_review(
+        cast(Backend, backend),
         make_work(tmp_path),
         selected_records=SELECTED_RECORDS,
         diff_path=diff_path,
         intent_path=intent_path,
         alternatives_path=alternatives_path,
         allow_standalone=True,
+        **overrides,
     )
+
+
+async def test_arbiter_extracts_findings_from_prose_wrapped_message(
+    tmp_path: Path,
+    make_work: Callable[..., WorkContext],
+) -> None:
+    """The fenced findings object wins over the stray prose bracket; verdicts are produced."""
+    verdicts, _ = await _invoke_arbiter(_pi_like_backend(ARBITER_MESSAGE), tmp_path, make_work)
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True
     assert verdicts[2]["keep"] is True
@@ -119,17 +129,8 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(
     make_work: Callable[..., WorkContext],
 ) -> None:
     """A message with no JSON yields no findings object; the phase raises, not papers over."""
-    diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     with pytest.raises(ValueError):
-        await phase_arbiter_review(
-            cast(Backend, _pi_like_backend(MALFORMED_MESSAGE)),
-            make_work(tmp_path),
-            selected_records=SELECTED_RECORDS,
-            diff_path=diff_path,
-            intent_path=intent_path,
-            alternatives_path=alternatives_path,
-            allow_standalone=True,
-        )
+        await _invoke_arbiter(_pi_like_backend(MALFORMED_MESSAGE), tmp_path, make_work)
 
 
 # Real run (`--log`, pi/glm reviewer): the arbiter streamed a long prose
@@ -204,16 +205,11 @@ async def test_arbiter_captures_structured_output_in_log_mode(
     phase received the prose-fallback string. Drives the real production path
     (phase_arbiter_review -> run_agent -> backend events) with log_mode on.
     """
-    diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
-    verdicts, _ = await phase_arbiter_review(
-        cast(Backend, _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)),
-        make_work(tmp_path),
-        selected_records=SELECTED_RECORDS,
-        diff_path=diff_path,
-        intent_path=intent_path,
-        alternatives_path=alternatives_path,
+    verdicts, _ = await _invoke_arbiter(
+        _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),
+        tmp_path,
+        make_work,
         run_context=RunContext(InteractionPolicy(log_mode=True)),
-        allow_standalone=True,
     )
     assert set(verdicts) == {1, 2}
     assert verdicts[1]["keep"] is True

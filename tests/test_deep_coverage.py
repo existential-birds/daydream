@@ -748,24 +748,30 @@ def test_resolve_per_stack_verdicts_downgrades_clean_without_read() -> None:
     assert by_path["lib/util.py"] == "not_reviewed"
 
 
-def test_clean_verdict_covers_without_finding(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("session", "path"),
+    [("sess-clean", "api.py"), ("sess-sc", "./api.py")],
+    ids=["clean", "dot-slash"],
+)
+def test_clean_verdict_covers_without_finding(tmp_path: Path, session: str, path: str) -> None:
     """Issue #740 AC1: a clean verdict (empty findings) covers the file for the sweep.
 
     A completed shard that read api.py and found nothing must still mark
     api.py covered -- a clean review is indistinguishable from an unreviewed
-    file only under the old findings-only gate.
+    file only under the old findings-only gate. A verdict path spelled with a
+    leading ``./`` must credit the same file (the canonical strip).
     """
-    daydream_dir, _ = _seed_coverage_run(tmp_path, "sess-clean", deep=True)
+    daydream_dir, _ = _seed_coverage_run(tmp_path, session, deep=True)
     deep = daydream_dir / "deep"
     write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
                                                 "inline_files": ["api.py"], "frontier_files": []}})
     # Clean review: EMPTY issues, evidence-gated clean verdict for api.py.
     _write_records(deep, "python#0", {
         "issues": [],
-        "verdicts": [{"path": "api.py", "lines_read": 30, "verdict": "clean", "n_findings": 0}],
+        "verdicts": [{"path": path, "lines_read": 30, "verdict": "clean", "n_findings": 0}],
     })
     receipts = json.loads(coverage_receipt_path(deep).read_text())
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-clean", receipts=receipts)
+    uncovered, stats = compute_uncovered_files(daydream_dir, session, receipts=receipts)
     assert "api.py" not in uncovered              # clean verdict -> covered, not swept
     assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
 
@@ -854,29 +860,6 @@ def test_strip_dot_slash_normalizes_once() -> None:
     assert strip_dot_slash("./api.py") == "api.py"
     assert strip_dot_slash("./dir/x.py") == "dir/x.py"
     assert strip_dot_slash("a/b/c.py") == "a/b/c.py"
-
-
-def test_strip_dot_slash_shared_by_both_record_loaders(tmp_path: Path) -> None:
-    """Issue #740: verdict-path and findings-fallback strips route through the helper.
-
-    Both ``_parsed_covered_files`` (verdict ``path`` entries) and the
-    findings fallback (``file`` fields) normalize a leading ``./`` the same
-    way, so a ``./x`` spelling credits the same file either way.
-    """
-    daydream_dir, _ = _seed_coverage_run(tmp_path, "sess-sc", deep=True)
-    deep = daydream_dir / "deep"
-    write_coverage_receipts(deep, {"python#0": {"assigned_files": ["api.py"],
-                                                "inline_files": ["api.py"], "frontier_files": []}})
-    # Verdict path spelled with a leading ./ -- must still credit api.py.
-    _write_records(deep, "python#0", {
-        "issues": [],
-        "verdicts": [{"path": "./api.py", "lines_read": 10, "verdict": "clean", "n_findings": 0}],
-    })
-    receipts = json.loads(coverage_receipt_path(deep).read_text())
-    uncovered, stats = compute_uncovered_files(daydream_dir, "sess-sc", receipts=receipts)
-    assert "api.py" not in uncovered
-    assert stats["coverage_by_evidence"]["inline_hunk_reviewed"] == 1
-
 
 
 def test_uncovered_sweep_prompt_carries_severity_rubric(tmp_path: Path) -> None:

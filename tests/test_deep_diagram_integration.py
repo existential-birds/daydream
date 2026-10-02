@@ -883,41 +883,31 @@ async def test_diagram_both_forces_both_kinds(
     assert len(_diagram_calls(stub, "flowchart")) == 1
 
 
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"diagram": "off"},
+        {"file_config": DaydreamFileConfig(diagram_mode="off")},
+    ],
+    ids=["cli-flag", "file-config"],
+)
 async def test_diagram_off_suppresses_a_complex_diff(
     tmp_path: Path,
     review_run: Callable[..., Any],
     captured_post: _CapturedPost,
+    overrides: dict[str, Any],
 ) -> None:
-    """``--diagram off`` writes no artifact at all and makes no diagram call."""
+    """``--diagram off`` (or a file-config off switch) writes no artifact or call."""
     target = dr.build_cross_module_repo(tmp_path)
 
     exit_code, stub = await review_run(
-        target, specs={"sequence": [dr.sequence_spec()]}, diagram="off"
+        target, specs={"sequence": [dr.sequence_spec()]}, **overrides
     )
 
     assert exit_code == 0
     assert not (target / ".daydream" / "deep" / "diagram.json").exists()
     assert _diagram_calls(stub, "sequence") == []
     assert SEQUENCE_HEADING not in captured_post.body()
-
-
-async def test_file_config_mode_off_suppresses_diagrams(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
-    """``[tool.daydream.diagram] mode = "off"`` suppresses without a CLI flag."""
-
-    target = dr.build_cross_module_repo(tmp_path)
-
-    exit_code, stub = await review_run(
-        target,
-        specs={"sequence": [dr.sequence_spec()]},
-        file_config=DaydreamFileConfig(diagram_mode="off"),
-    )
-
-    assert exit_code == 0
-    assert not (target / ".daydream" / "deep" / "diagram.json").exists()
-    assert _diagram_calls(stub, "sequence") == []
 
 
 async def test_cli_diagram_both_overrides_file_config_off(
