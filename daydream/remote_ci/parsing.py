@@ -94,7 +94,7 @@ def _parse_required_entry(
     )
     if app_id is not None and not _is_positive_int(app_id):
         raise ValueError("required status-check app id must be positive or null")
-    return RequiredContext(context=context, app_id=cast(int | None, app_id))
+    return RequiredContext(context=context, app_id=app_id)
 
 
 def _normalized_policy(contexts: Sequence[RequiredContext], strict: bool) -> RequiredPolicy:
@@ -171,14 +171,14 @@ def parse_active_workflows(rows: object) -> tuple[dict[str, str | int], ...]:
         row_id = _field(row, "id", "workflow")
         if not _is_positive_int(row_id) or row_id in seen_ids:
             raise ValueError("workflow id must be unique and positive")
-        seen_ids.add(cast(int, row_id))
+        seen_ids.add(row_id)
         name = _required_text(_field(row, "name", "workflow"), "workflow name")
         path = _required_text(_field(row, "path", "workflow"), "workflow path")
         state = _field(row, "state", "workflow")
         if not isinstance(state, str) or state not in _WORKFLOW_STATES:
             raise ValueError("workflow state is unsupported")
         if state == "active":
-            active.append({"id": cast(int, row_id), "name": name, "path": path, "state": state})
+            active.append({"id": row_id, "name": name, "path": path, "state": state})
     active.sort(key=lambda row: cast(int, row["id"]))
     return tuple(active)
 
@@ -232,7 +232,7 @@ def parse_observations(
         row_id = _field(row, "id", "check run")
         if not _is_positive_int(row_id) or row_id in seen_check_ids:
             raise ValueError("check-run id must be unique and positive")
-        seen_check_ids.add(cast(int, row_id))
+        seen_check_ids.add(row_id)
         name = _required_text(_field(row, "name", "check run"), "check-run name")
         if _require_sha(_field(row, "head_sha", "check run"), "check-run SHA") != expected_sha:
             raise ValueError("check-run evidence belongs to a different SHA")
@@ -254,7 +254,7 @@ def parse_observations(
         observation = CIObservation(
             source="check_run",
             context=name,
-            app_id=cast(int, app_id),
+            app_id=app_id,
             state=state,
             raw_state=raw_state,
             url=_optional_url(
@@ -262,17 +262,17 @@ def parse_observations(
             ),
             diagnostic=diagnostic,
         )
-        key = (name, cast(int, app_id))
+        key = (name, app_id)
         prior = checks_by_producer.get(key)
-        if prior is None or cast(int, row_id) > prior[0]:
-            checks_by_producer[key] = (cast(int, row_id), observation)
+        if prior is None or row_id > prior[0]:
+            checks_by_producer[key] = (row_id, observation)
 
     for raw in _sequence(statuses, "legacy statuses"):
         row = _mapping(raw, "legacy status")
         row_id = _field(row, "id", "legacy status")
         if not _is_positive_int(row_id) or row_id in seen_status_ids:
             raise ValueError("legacy status id must be unique and positive")
-        seen_status_ids.add(cast(int, row_id))
+        seen_status_ids.add(row_id)
         context = _required_text(_field(row, "context", "legacy status"), "status context")
         if _require_sha(_field(row, "sha", "legacy status"), "status SHA") != expected_sha:
             raise ValueError("legacy status evidence belongs to a different SHA")

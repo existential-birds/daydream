@@ -14,6 +14,8 @@ from daydream import git_ops
 from daydream.artifact_visibility import (
     PrivateWorkspaceOwner,
     operational_worktree_root,
+    private_root_locations,
+    resolve_private_workspace_owner,
     validate_private_workspace_owner,
 )
 from daydream.improve import plan_index
@@ -30,6 +32,7 @@ from daydream.improve.render import (
     plan_slug,
     render_plan,
 )
+from daydream.workspace import reject_public_operational_storage
 
 
 @dataclass(frozen=True)
@@ -76,12 +79,12 @@ class PlanWriteSession:
     ) -> None:
         self._plans_dir = plans_dir
         self._repo = plans_dir.parent
-        owner = private_workspace_owner
-        if owner is None:
-            self._worktrees_root = self._repo / ".daydream" / "worktrees"
-        else:
-            validate_private_workspace_owner(owner, source=owner.source, repo=self._repo)
-            self._worktrees_root = operational_worktree_root(owner)
+        owner = private_workspace_owner or resolve_private_workspace_owner(
+            self._repo, locations=private_root_locations(),
+        )
+        validate_private_workspace_owner(owner, source=owner.source, repo=self._repo)
+        reject_public_operational_storage(owner.source)
+        self._worktrees_root = operational_worktree_root(owner)
         self._planned_at = planned_at
         self._planned_on = date.today()
         self._run_session_id = run_session_id

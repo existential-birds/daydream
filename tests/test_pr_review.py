@@ -49,7 +49,7 @@ from daydream.run_context import InteractionPolicy, RunContext
 from daydream.runner import _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import sample_pr
-from tests.harness.review_result import terminal_result
+from tests.harness.review_result import review_coverage, terminal_result
 
 # gh-gated: tests that stub gh's subprocess are skipped when gh is not installed.
 _gh_available = shutil.which("gh") is not None
@@ -948,8 +948,10 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
     monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
     warnings: tuple[str, ...] = ("Alternatives: wall_budget_exceeded",)
     if failed_reviewer:
-        failures = {"python": "RuntimeError: provider unavailable"}
-        DeepArtifact.PER_STACK_FAILURES.at(tmp_path).write_text(json.dumps(failures))
+        coverage = review_coverage(scope_ids=("python",), phases=())
+        coverage.record_scope("python", "failed", reasons=("backend_failure",),
+                              diagnostic="RuntimeError: provider unavailable")
+        DeepArtifact.REVIEW_COVERAGE.at(tmp_path).write_text(json.dumps(coverage.to_dict()))
         warnings = review_warnings(tmp_path)
     status = await pr_review.post_review_to_pr_from_report(
         tmp_path, merged, console=_FakeConsole(),  # type: ignore[arg-type]

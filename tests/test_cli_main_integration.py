@@ -22,6 +22,11 @@ from typing import Any, Literal
 import pytest
 
 from daydream import cli, git_ops
+from daydream.artifact_visibility import (
+    operational_worktree_root,
+    private_root_locations,
+    resolve_private_workspace_owner,
+)
 from daydream.backends.codex import CodexError
 from daydream.phases import UnconfinedFindingError
 from tests.harness.backend import ScriptedBackend
@@ -156,7 +161,8 @@ def test_non_tty_auto_enables_non_interactive(multi_stack_target: Path, monkeypa
 def test_cli_main_prune_reanchor_removes_and_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     repo, _ = _repo(tmp_path)
-    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    owner = resolve_private_workspace_owner(repo, locations=private_root_locations())
+    target = operational_worktree_root(owner) / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
 
     _silence_all(monkeypatch)
@@ -179,7 +185,8 @@ def test_cli_main_prune_reanchor_rejects_name_exits_1(tmp_path: Path, monkeypatc
 def test_cli_main_list_reanchor_lists_and_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     repo, _ = _repo(tmp_path)
-    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    owner = resolve_private_workspace_owner(repo, locations=private_root_locations())
+    target = operational_worktree_root(owner) / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
 
     _silence_all(monkeypatch)

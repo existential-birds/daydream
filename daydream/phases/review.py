@@ -41,6 +41,7 @@ from daydream.deep.reuse_key import (
 )
 from daydream.deep.reuse_store import ReuseCache
 from daydream.deep.review_reuse import ReviewReuseUnit
+from daydream.diagnostics import exception_text
 from daydream.extensions import Registry, get_registry
 from daydream.hunk_index import load_hunk_index
 from daydream.phases.inputs import (
@@ -62,7 +63,6 @@ from daydream.prompts.authorial_intent import (
     AUTHORITATIVE_INTENT_BLOCK,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.redaction import redact_text
 from daydream.review_budget import (
     ReviewBudgetExceeded,
     ReviewLimits,
@@ -355,9 +355,10 @@ def valid_record_artifact(
         return False
     for issue in issues:
         uid = issue.get("uid")
-        if (not isinstance(uid, str) or not uid.startswith(scope_id + ":")
-                                or not uid.removeprefix(scope_id + ":").isdigit()
-                                or int(uid.removeprefix(scope_id + ":")) < 1):
+        if not isinstance(uid, str):
+            return False
+        scope, _, ordinal = uid.rpartition(':')
+        if scope != scope_id or not ordinal.isascii() or not ordinal.isdigit() or ordinal.startswith('0'):
             return False
     cleaned = [{key: field for key, field in issue.items() if key != "uid"} for issue in issues]
     return _validates_schema({"issues": cleaned}, PER_STACK_RECORD_SCHEMA)
@@ -435,7 +436,6 @@ async def phase_per_stack_reviews(
             "discovery.per_stack", "discovery.structural", "discovery.generic_fallback",
         )}
     results: dict[str, Path] = {}
-    failures: dict[str, str] = {}
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
     )
@@ -583,22 +583,21 @@ async def phase_per_stack_reviews(
                             run_context=run_context,
                         )
                 except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
-                    failures[stack_name] = redact_text(f"{type(e).__name__}: {e}")
                     coverage.record_scope(stack_name, "failed",
-                        reasons=(reason_for_exception(e),))
+                        reasons=(reason_for_exception(e),),
+                        diagnostic=f"{type(e).__name__}: {exception_text(e) or '(unavailable)'}")
                     return
                 if budget_reason:
-                    failures[stack_name] = redact_text(f"budget exhausted: {budget_reason}")
                     partial_valid = _validates_schema(structured, PER_STACK_RECORD_SCHEMA)
                     status = ("uncovered" if budget_reason == "pipeline_budget_exceeded" and not partial_valid
                               else "incomplete")
                     coverage.record_scope(stack_name, status, reasons=(reason_for_budget(budget_reason),),
-                                          partial_evidence=partial_valid)
+                                          partial_evidence=partial_valid,
+                                          diagnostic=f"budget exhausted: {budget_reason}")
                 if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                     if not budget_reason:
                         error = ReviewOutputError(structured)
-                        failures[stack_name] = str(error)
-                        coverage.record_scope(stack_name, "failed", reasons=(error.reason,))
+                        coverage.record_scope(stack_name, "failed", reasons=(error.reason,), diagnostic=str(error))
                     return
                 issues = [dict(issue) for issue in structured["issues"]]
                 # Uids are host-only fields, added after strict model validation.
@@ -614,10 +613,9 @@ async def phase_per_stack_reviews(
                     )
                     write_review_markdown(output_path, issues)
                 except (OSError, ValueError, TypeError) as exc:
-                    failures[stack_name] = redact_text(f"{type(exc).__name__}: {exc}")
                     coverage.record_scope(stack_name, "failed",
                         reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
-                        )
+                        diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
                     return
                 results[stack_name] = output_path
                 if budget_reason is None:
@@ -631,17 +629,18 @@ async def phase_per_stack_reviews(
             try:
                 await _review_stack_impl(stack)
             except Exception as exc:  # noqa: BLE001 -- isolate ordinary sibling failures; cancellation propagates
-                failures[stack.stack_name] = redact_text(f"{type(exc).__name__}: {exc}")
                 reason = (ReasonCode.MALFORMED_ARTIFACT if isinstance(exc, (OSError, ValueError, TypeError))
                           else ReasonCode.UNEXPECTED_ANALYSIS_FAILURE)
-                coverage.record_scope(stack.stack_name, "failed", reasons=(reason,))
+                coverage.record_scope(stack.stack_name, "failed", reasons=(reason,),
+                                      diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:
                 tg.start_soon(_review_stack, stack)
-        if dispatch is not None and failures:
+        if dispatch is not None and coverage.unfinished_scopes:
             finish_partial_or_failed(dispatch, results)
 
+    failures = coverage.unfinished_scopes
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
         ui.print_warning(

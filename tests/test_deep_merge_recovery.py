@@ -1,9 +1,9 @@
 """Recover malformed cross-stack merges into partial, resumable reports.
 
 Coverage includes current envelope validation and bare-list rejection, structured error context, surviving
-per-stack artifacts, reserved __merge__ failure records, and fix/merge resume.
-Salvage dedup uses host UIDs; legacy pairs without UIDs retain both findings
-with a warning. Phase tests mock only the backend; integration uses runner.run.
+per-stack artifacts, typed synthesis failure outcomes, and fix/merge resume.
+Salvage dedup uses host UIDs; malformed unbound pairs reject.
+Phase tests mock only the backend; integration uses runner.run.
 """
 from __future__ import annotations
 
@@ -17,7 +17,6 @@ import pytest
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.deep.artifacts import (
     DeepArtifact,
-    _load_failures,
     deep_dir,
 )
 from daydream.deep.merge_steps import _drop_cross_stack_duplicates, _step_cross_stack_merge, _step_load_items
@@ -25,18 +24,19 @@ from daydream.deep.reuse_store import ReuseCache, review_cache_dir
 from daydream.extensions import get_registry
 from daydream.flows.engine import FlowContext
 from daydream.phases import CrossStackMergeError, phase_cross_stack_merge
-from daydream.review_budget import record_review_budget_stop, review_budget_path
+from daydream.review_budget import review_warnings
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReasonCode, ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
+from tests.harness.review_result import record_pool, review_coverage
 from tests.harness.stub_backend import install_stub_backend, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
 # Reconstruct Pi's prose-without-JSON response shape from run
 # c48ca322-eb7d-4634-9fc3-fddbf349bacd. Original prose was not archived;
-# the exact recorded error below is pinned from per-stack-failures.json.
+# the exact recorded error below is pinned from the saved typed coverage diagnostic.
 ARCHIVED_MERGE_STR = ("I could not produce a JSON item list for the merged cross-stack findings. "
     "The per-stack reviews completed, but no consolidated item list was emitted."
 )
@@ -60,14 +60,16 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
     cache = ReuseCache(review_cache_dir(dd), run_id="empty-synthesis")
     coverage = ReviewCoverage("empty-synthesis", AnalyzedRevision("a" * 40, "b" * 40, "c" * 64),
         [PlannedScope("python", "python", ("api.py",)), PlannedScope("react", "react", ("App.tsx",))], ["merge"])
-    coverage.record_scope("python", "complete")
-    coverage.record_scope("react", "failed", reasons=(ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,))
+    coverage.record_scope("python", "incomplete", reasons=("host_tool_budget_exhaustion",),
+                          partial_evidence=True, diagnostic="review budget exhausted")
+    coverage.record_scope("react", "failed", reasons=(ReasonCode.HOST_WALL_BUDGET_EXHAUSTION,),
+                          diagnostic="budget exhausted: wall deadline")
     ctx = FlowContext(
         RunConfig(target=str(tmp_path), review_cache_enabled=True), make_work(tmp_path), get_registry(),
         data={
-            "dd": dd, "alts_path": alternatives, "intent_path": intent, "records": [], "record_sources": [],
-            "records_paths": [records], "failed_stacks": {"react": "budget exhausted: wall deadline"},
-            "structural_records_path": None, "exploration_dir": None, "reuse_cache": cache,
+            "dd": dd, "alts_path": alternatives, "intent_path": intent,
+            "record_pool": record_pool(dd, paths=[records]),
+            "exploration_dir": None, "reuse_cache": cache,
             "review_coverage": coverage,
         },
         allow_standalone_artifacts=True, _backend_factory=lambda *args: backend,
@@ -76,18 +78,15 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
     async with recorder:
         # Each successful synthesis must supersede its own stale salvage and
         # budget stop while retaining independent missing reviewer coverage.
-        DeepArtifact.PER_STACK_FAILURES.at(dd).write_text(json.dumps({
-            "react": "budget exhausted: wall deadline", "__merge__": {"message": "old"},
-        }))
-        record_review_budget_stop(dd, "Cross-stack merge", "old timeout")
-        record_review_budget_stop(dd, "python", "review budget exhausted")
+        coverage.record_phase('merge', 'failed', reasons=('synthesis_failure',), diagnostic='old timeout')
         assert await _step_cross_stack_merge(ctx) is None
         assert json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text()) == {"items": []}
         assert json.loads(DeepArtifact.DEDUP_CANDIDATES.at(dd).read_text()) == {
             "record_alt_pairs": [], "record_duplicate_pairs": [],
         }
-        assert _load_failures(DeepArtifact.PER_STACK_FAILURES.at(dd)) == {"react": "budget exhausted: wall deadline"}
-        assert json.loads(review_budget_path(dd).read_text()) == {"python": "review budget exhausted"}
+        assert coverage.unfinished_scopes == {"react": "budget exhausted: wall deadline",
+                                          "python": "review budget exhausted"}
+        assert review_warnings(dd) == ("python: review budget exhausted", "react: budget exhausted: wall deadline")
         manifests = list((cache.store_dir / "entries").glob("*/manifest.json"))
         assert len(manifests) == 1
         manifest = json.loads(manifests[0].read_text())
@@ -250,16 +249,13 @@ def _write_merge_inputs(tmp_path: Path) -> dict[str, Path]:
     inputs["records"].write_text(json.dumps([_salvage_record()]))
     return inputs
 
-@pytest.mark.parametrize("raw,expected", [
-    (None, {}), ("{ not json", {}), ("[1, 2]", {}),
-    (json.dumps({"s1": "boom", "__merge__": {"response_shape": "str", "message": "m"}}),
-     {"s1": "boom", "__merge__": {"response_shape": "str", "message": "m"}}),
-])
-def test_load_failures_defaults_and_filters(tmp_path: Path, raw: str | None, expected: dict[str, Any]) -> None:
-    path = tmp_path / "failures.json"
-    if raw is not None:
-        path.write_text(raw)
-    assert _load_failures(path) == expected
+@pytest.mark.parametrize('diagnostics', [None, [], {'scopes': {}, 'phases': {'extra': 'failure'}},
+                                       {'scopes': {'python': 'x' * 1025}, 'phases': {}}])
+def test_coverage_rejects_malformed_failure_diagnostics(diagnostics: Any) -> None:
+    payload = review_coverage().to_dict()
+    payload['diagnostics'] = diagnostics
+    with pytest.raises(ValueError):
+        ReviewCoverage.from_dict(payload)
 
 async def test_merge_salvage_applies_dedup_prefilter(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
@@ -357,7 +353,8 @@ async def test_merge_rejects_bare_list_and_salvages_bound_records(
     assert items["items"] and all(item["source_uids"] for item in items["items"])
     assert not {"store/cache.py", "cli/main.py"} & {item["file"] for item in items["items"]}
     assert items.get("partial") is not True
-    assert "__merge__" in json.loads(DeepArtifact.PER_STACK_FAILURES.at(deep).read_text())
+    coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(deep).read_text()))
+    assert coverage.phases["merge"]["status"] == "failed"
 
 @pytest.mark.parametrize("merge_str,resume", [
     ("All stacks reviewed. No JSON item list to emit.", "inspect"), (ARCHIVED_MERGE_STR, "inspect"),
@@ -377,9 +374,10 @@ async def test_merge_salvage_and_resume_preserve_findings_and_failure_context(
     items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())
     assert "partial" not in items and items["items"]
     assert DeepArtifact.MERGED_REPORT.at(dd).is_file() and list(dd.glob("stack-*-records.json"))
-    failure = json.loads(DeepArtifact.PER_STACK_FAILURES.at(dd).read_text())["__merge__"]
-    assert failure == {"response_shape": "StructuredOutputFailure", "message": CROSS_STACK_MERGE_ERR_MSG,
-                       "stack_context": ["generic", "python", "react"]}
+    coverage = ReviewCoverage.from_dict(json.loads(DeepArtifact.REVIEW_COVERAGE.at(dd).read_text()))
+    assert coverage.phases['merge']['status'] == 'failed'
+    assert coverage.phases['merge']['reason_codes'] == ['synthesis_failure']
+    assert coverage.diagnostics['phases']['merge'] == CROSS_STACK_MERGE_ERR_MSG
     if resume == "inspect":
         return
     stub.calls.clear()

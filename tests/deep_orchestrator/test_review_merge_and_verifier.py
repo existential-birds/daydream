@@ -30,6 +30,7 @@ from tests.deep_orchestrator.support import (
     _install_post_recorder,
 )
 from tests.harness.review_profile import default_strategy as _default_strategy, independent_alternatives_profile
+from tests.harness.review_result import saved_coverage
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -65,7 +66,7 @@ async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_re
     assert DeepArtifact.MERGED_REPORT.at(deep).is_file()
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).read_text() == DeepArtifact.MERGED_REPORT.at(deep).read_text()
     assert not (deep / "merge-failed.txt").exists()
-    assert not (deep / "per-stack-failures.json").exists()
+    assert not saved_coverage(deep).unfinished_scopes
     events = json.loads(trajectory.read_text())["extra"]["phase_events"]
     for phase, stage in (("merge", "cross-stack-agent"), ("deep", "supervise")):
         lifecycle = [event for event in events if event["phase"] == phase
@@ -119,7 +120,7 @@ async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
     assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
     deep = multi_stack_target / ".daydream" / "deep"
     assert json.loads(DeepArtifact.MERGED_ITEMS.at(deep).read_text()) == {"items": [], "held": []}
-    failures = json.loads((deep / "per-stack-failures.json").read_text())
+    failures = saved_coverage(deep).unfinished_scopes
     assert "python" in failures
     assert "python" in capsys.readouterr().out
     assert "Review incomplete" in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
@@ -319,7 +320,7 @@ def test_merge_prompt_emits_related_files_instruction() -> None:
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A per-stack agent failure must: 1) persist to per-stack-failures.json under .daydream/deep/, 2) appear in
+    """A per-stack agent failure must: 1) persist to typed review coverage under .daydream/deep/, 2) appear in
     the merge prompt under an 'Uncovered stacks' block, so the merge agent can call it out instead of silently
     ignoring the gap."""
     _silence(monkeypatch)
@@ -351,9 +352,7 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
-    failures_p = multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json"
-    assert failures_p.is_file(), "failures file should be persisted for merge-resume"
-    failures_payload = json.loads(failures_p.read_text())
+    failures_payload = saved_coverage(multi_stack_target / ".daydream/deep").unfinished_scopes
     assert "react" in failures_payload
     assert "simulated react failure" in failures_payload["react"]
 
@@ -386,7 +385,10 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     deep = _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")],
         react=[_record(description="tsx issue", file="App.tsx")], structure=[_record(description="structural issue")],
     )
-    (deep / "per-stack-failures.json").write_text(json.dumps({"generic": "simulated generic failure"}))
+    coverage = saved_coverage(deep)
+    coverage.record_scope("generic", "failed", reasons=("backend_failure",),
+                          diagnostic="simulated generic failure")
+    (deep / "review-coverage.json").write_text(json.dumps(coverage.to_dict()))
 
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0

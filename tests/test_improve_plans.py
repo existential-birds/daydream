@@ -14,6 +14,7 @@ from jsonschema import Draft202012Validator
 from daydream import git_ops
 from daydream.artifact_visibility import (
     ArtifactVisibilityError,
+    operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
 )
@@ -125,6 +126,9 @@ def private_locations(tmp_path: Path) -> Any:
 @pytest.fixture
 def owner(repo: Path, private_locations: Any) -> Any:
     return resolve_private_workspace_owner(repo, locations=private_locations)
+
+def _operational_root(repo: Path) -> Path:
+    return operational_worktree_root(resolve_private_workspace_owner(repo, locations=private_root_locations()))
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch, reason: str = "unexpected default lookup") -> None:
     """A supplied owner (or a rejected input) must never reach default storage."""
@@ -1019,7 +1023,8 @@ def test_head_change_after_planning_reanchors_into_new_worktree(repo: Path, head
 
     assert len(result["written"]) == 1
     landed = result["written"][0]["path"]
-    assert ".daydream/worktrees/" in landed
+    assert Path(landed).is_relative_to(_operational_root(repo))
+    assert not Path(landed).is_relative_to(repo)
     assert landed.endswith("daydream_plans/001-batch-catalog-queries.md")
     main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
     assert main_plan.is_file()
@@ -1127,7 +1132,7 @@ def test_reanchored_finding_is_not_replanned_on_a_later_run(repo: Path, head_sha
     assert len(later["skipped"]) == 1
 
 def test_stale_reanchor_worktrees_are_pruned_at_next_run(repo: Path,) -> None:
-    stale_dir = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    stale_dir = _operational_root(repo) / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(stale_dir), "HEAD")
     (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
     removed = prune_stale_reanchor_worktrees(repo)
@@ -1142,7 +1147,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(repo: Path,
     session_a = PlanWriteSession(repo / "daydream_plans", planned_at=head_sha, run_session_id="run-A",)
     reservations_a = session_a.reserve([_finding()])
     assert session_a.commit(reservations_a[0], _selection(repo)).status == "written"
-    worktree_a = repo / ".daydream" / "worktrees" / "run-A-reanchor"
+    worktree_a = _operational_root(repo) / "run-A-reanchor"
     assert worktree_a.is_dir()
     assert git_ops.worktree_lock_mtime(worktree_a) is not None  # live lock
 
@@ -1161,7 +1166,7 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(repo: Path,
     assert git_ops.worktree_lock_mtime(worktree_a) is None  # released
 
 def test_prune_named_reanchor_worktree_removes_valid_worktree(repo: Path) -> None:
-    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    target = _operational_root(repo) / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
     outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
     assert outcome.verdict == PRUNE_REMOVED
@@ -1169,7 +1174,7 @@ def test_prune_named_reanchor_worktree_removes_valid_worktree(repo: Path) -> Non
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 def test_prune_named_reanchor_worktree_reports_plan_count(repo: Path) -> None:
-    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    target = _operational_root(repo) / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(target), "HEAD")
     plans = target / "daydream_plans"
     plans.mkdir(parents=True, exist_ok=True)
@@ -1189,19 +1194,21 @@ def test_prune_named_reanchor_worktree_reports_plan_count(repo: Path) -> None:
 )
 def test_prune_named_reanchor_worktree_rejects_unsafe_names(monkeypatch: pytest.MonkeyPatch, repo: Path, bad_name: str,
 ) -> None:
+    root = _operational_root(repo)
     _forbid_default_private_base(monkeypatch, "unsafe name reached storage")
-    before = set((repo / ".daydream" / "worktrees").glob("*")) if (repo / ".daydream" / "worktrees").exists() else set()
+    before = set(root.iterdir())
     outcome = prune_named_reanchor_worktree(repo, bad_name)
     assert outcome.verdict == PRUNE_UNSAFE_NAME
-    after = set((repo / ".daydream" / "worktrees").glob("*")) if (repo / ".daydream" / "worktrees").exists() else set()
+    after = set(root.iterdir())
     assert before == after  # nothing reached the filesystem or git
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 def test_prune_named_reanchor_worktree_rejects_non_reanchor_name(repo: Path,) -> None:
-    before = set((repo / ".daydream" / "worktrees").glob("*")) if (repo / ".daydream" / "worktrees").exists() else set()
+    root = _operational_root(repo)
+    before = set(root.iterdir())
     outcome = prune_named_reanchor_worktree(repo, "run-abc")
     assert outcome.verdict == PRUNE_NOT_REANCHOR
-    after = set((repo / ".daydream" / "worktrees").glob("*")) if (repo / ".daydream" / "worktrees").exists() else set()
+    after = set(root.iterdir())
     assert before == after  # nothing reached the filesystem or git
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
@@ -1210,7 +1217,7 @@ def test_prune_named_reanchor_worktree_not_found(repo: Path) -> None:
     assert outcome.verdict == PRUNE_NOT_FOUND
 
 def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(repo: Path,) -> None:
-    target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
+    target = _operational_root(repo) / "run-abcd-reanchor"
     target.mkdir(parents=True, exist_ok=True)  # plain dir, NOT a git worktree
     outcome = prune_named_reanchor_worktree(repo, "run-abcd-reanchor")
     assert outcome.verdict == PRUNE_GIT_FAILURE
@@ -1220,53 +1227,36 @@ def test_prune_named_reanchor_worktree_unregistered_dir_is_git_failure(repo: Pat
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 def test_list_reanchor_worktrees_lists_only_reanchor_worktrees(repo: Path) -> None:
-    a = repo / ".daydream" / "worktrees" / "run-aaaa-reanchor"
-    b = repo / ".daydream" / "worktrees" / "run-bbbb-reanchor"
-    other = repo / ".daydream" / "worktrees" / "feature"
+    a = _operational_root(repo) / "run-aaaa-reanchor"
+    b = _operational_root(repo) / "run-bbbb-reanchor"
+    other = _operational_root(repo) / "feature"
     for w in (a, b, other):
         git(repo, "worktree", "add", "--detach", str(w), "HEAD")
     names = [p.name for p in list_reanchor_worktrees(repo)]
     assert sorted(names) == ["run-aaaa-reanchor", "run-bbbb-reanchor"]
     assert "feature" not in names
 
-def test_list_and_named_prune_cover_operational_and_legacy_roots(
-    monkeypatch: pytest.MonkeyPatch, repo: Path, tmp_path: Path, owner: Any,
+@pytest.mark.parametrize("public_name", ["run-public-reanchor", "run-private-reanchor"],
+                         ids=["distinct-old-name", "duplicate-old-name"])
+def test_reanchor_operations_reject_public_namespace_without_mutation(
+    repo: Path, owner: Any, public_name: str,
 ) -> None:
-
-    monkeypatch.setattr(artifact_ownership, "_default_private_base", lambda: tmp_path / "private",)
-    operational = owner.operational_state_root / "operational"
-    operational.mkdir(mode=0o700)
-    legacy = repo / ".daydream" / "worktrees" / "run-legacy-reanchor"
+    operational = operational_worktree_root(owner)
+    public = repo / ".daydream" / "worktrees" / public_name
     private = operational / "run-private-reanchor"
-    git_ops.worktree_add(repo, legacy, "main", detach=True)
+    git_ops.worktree_add(repo, public, "main", detach=True)
     git_ops.worktree_add(repo, private, "main", detach=True)
-    before_list = git(repo, "worktree", "list", "--porcelain")
-
-    assert {path.name for path in list_reanchor_worktrees(repo)} == {legacy.name, private.name,}
-    assert git(repo, "worktree", "list", "--porcelain") == before_list
-    assert legacy.is_dir() and private.is_dir()
-    outcome = prune_named_reanchor_worktree(repo, private.name)
-
-    assert outcome.verdict == PRUNE_REMOVED
-    assert not private.exists()
-    assert legacy.is_dir()
-
-def test_duplicate_reanchor_name_across_roots_fails_without_mutation(repo: Path, owner: Any,) -> None:
-    operational = owner.operational_state_root / "operational"
-    operational.mkdir(mode=0o700)
-    name = "run-duplicate-reanchor"
-    legacy = repo / ".daydream" / "worktrees" / name
-    private = operational / name
-    git_ops.worktree_add(repo, legacy, "main", detach=True)
-    git_ops.worktree_add(repo, private, "main", detach=True)
+    (public / "operator.bin").write_bytes(b"public operator bytes\x00")
     before = git(repo, "worktree", "list", "--porcelain")
-    with pytest.raises(git_ops.GitError, match="ambiguous re-anchor"):
-        list_reanchor_worktrees(repo, private_workspace_owner=owner)
-    outcome = prune_named_reanchor_worktree(repo, name, private_workspace_owner=owner)
-    assert outcome.verdict == PRUNE_GIT_FAILURE
+    for operation in (list_reanchor_worktrees, prune_stale_reanchor_worktrees):
+        with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
+            operation(repo, private_workspace_owner=owner)
+    with pytest.raises(ArtifactVisibilityError, match="Unsupported public operational storage"):
+        prune_named_reanchor_worktree(repo, private.name, private_workspace_owner=owner)
     assert git(repo, "worktree", "list", "--porcelain") == before
-    assert legacy.is_dir()
-    assert private.is_dir()
+    assert private.is_dir() and public.is_dir()
+    assert (public / "operator.bin").read_bytes() == b"public operator bytes\x00"
+
 
 def test_list_reanchors_rejects_symlinked_operational_root_without_following(repo: Path, tmp_path: Path, owner: Any,
 ) -> None:
@@ -1338,7 +1328,7 @@ def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     external, canary, unsafe_file = _unsafe_legacy_reanchor_namespace(repo, tmp_path, namespace_shape=namespace_shape,)
     before = git(repo, "worktree", "list", "--porcelain")
 
-    with pytest.raises(ArtifactVisibilityError, match="legacy re-anchor root"):
+    with pytest.raises(ArtifactVisibilityError, match="public operational storage"):
         scan(repo, private_workspace_owner=owner)
 
     assert external.is_dir()
@@ -1356,7 +1346,7 @@ def test_planned_at_still_matching_head_writes_in_place(repo: Path, head_sha: st
     assert plan_file.is_file()
     text = plan_file.read_text(encoding="utf-8")
     assert f"**Planned at**: commit `{head_sha[:7]}`" in text
-    assert not list((repo / ".daydream" / "worktrees").glob("*-reanchor"))
+    assert not list((_operational_root(repo)).glob("*-reanchor"))
 
 @pytest.mark.parametrize(
     "status", ["TODO", "IN PROGRESS", "DONE", "BLOCKED (tests failed after three executor attempts)",],
@@ -2616,7 +2606,7 @@ def test_reanchored_failure_releases_worktree_lock(repo: Path, head_sha: str, mo
     out = session.commit(reservations[0], _selection(repo))
     assert out.status == "blocked"
 
-    worktree = repo / ".daydream" / "worktrees" / "run-A-reanchor"
+    worktree = _operational_root(repo) / "run-A-reanchor"
     assert not worktree.exists()  # removed (fix #2)
     with pytest.raises(git_ops.GitError, match="Git directory"):
         git_ops.worktree_lock_mtime(worktree)
@@ -2647,7 +2637,7 @@ def test_failed_reanchor_frees_worktree_for_later_finding(repo: Path, head_sha: 
     assert len(result["written"]) == 1
 
 def test_stale_locked_reanchor_worktree_is_reclaimed(repo: Path) -> None:
-    stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
+    stale = _operational_root(repo) / "run-dead-reanchor"
     git_ops.worktree_add(repo, stale, "HEAD", lock_reason="run-dead")
     git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
     if not git_dir.is_absolute():

@@ -11,6 +11,7 @@ import pytest
 
 from daydream.backends import AgentEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
+from daydream.review_result import ReviewCoverage
 from daydream.run_config import RunConfig
 from daydream.runner import run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
@@ -36,7 +37,9 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
                 multi_stack_target, trajectory_path=tmp_path / "trajectory.json", assume="yes", output_mode="loop",
             )
         )
-    failures = json.loads((multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json").read_text())
+    coverage = ReviewCoverage.from_dict(json.loads(
+        (multi_stack_target / ".daydream/deep/review-coverage.json").read_text()))
+    failures = coverage.unfinished_scopes
     assert "python" in failures, failures
     assert "budget" in failures["python"].lower()
 
@@ -145,7 +148,7 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
         tiny_diff_target, pr_number=7, findings_out=str(out), review_profile=independent_alternatives_profile(),
     )) == 0
     artifact = json.loads(out.read_text())
-    assert artifact["review_warnings"] == ["Alternatives: tool_call_budget_exceeded"]
+    assert artifact["review_warnings"] == ["alternatives: tool_call_budget_exceeded"]
 
 async def test_partial_checkpoint_survives_publication_and_merge_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],

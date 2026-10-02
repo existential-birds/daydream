@@ -32,6 +32,7 @@ from tests.harness.git_helpers import (
     init_repo as _init_repo,
     work_context,
 )
+from tests.harness.review_result import saved_coverage
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -299,7 +300,7 @@ async def test_unattributable_merge_source_uids_require_current_schema(
     else:
         assert "Unattributable finding" not in by_description
         assert by_description, "valid sibling records must survive invalid merge output"
-        assert "__merge__" in json.loads((deep / "per-stack-failures.json").read_text())
+        assert saved_coverage(deep).phases["merge"]["status"] == "failed"
 
     # A null is a documented answer, not a bad claim: nothing was cited, so
     # nothing can have been invented, so the unknown-uid warning must stay quiet.

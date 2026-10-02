@@ -32,12 +32,12 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
     projection_valid = no_diff
     recovery_failed = False
     path = ctx.data.get("items_file", DeepArtifact.MERGED_ITEMS.at(state.dd))
-    if not no_diff and isinstance(path, Path) and not path.is_file() and "records" in ctx.data:
+    if not no_diff and isinstance(path, Path) and not path.is_file() and "record_pool" in ctx.data:
         from daydream.phases.findings import _write_single_stack_merged_items
         try:
             _write_single_stack_merged_items(
-                ctx.work.repo, state.dd, state.records, state.structural_records_path_or_none,
-                failed_stacks=state.failed_stacks_or_none, artifact_session=ctx.artifacts,
+                ctx.work.repo, state.dd, state.record_pool.language, state.record_pool.structural_path,
+                failed_stacks=state.unfinished_scopes or None, artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
             )
         except ValueError as exc:

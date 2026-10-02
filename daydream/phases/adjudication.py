@@ -14,7 +14,7 @@ from daydream.extensions import get_registry
 from daydream.phases.inputs import _prepare_existing_phase_inputs, append_extended_facts
 from daydream.phases.schemas import ARBITER_SCHEMA, SUPERVISE_SCHEMA, SUPPRESSION_SCHEMA
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
-from daydream.review_budget import ReviewLimits, clear_review_budget_stop, record_review_budget_stop
+from daydream.review_budget import ReviewLimits
 from daydream.review_evidence import FinalizationContext
 from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
 from daydream.test_execution import load_test_recipe
@@ -119,7 +119,6 @@ async def _adjudicate(
         mode is _SUPERVISOR and not records and builder is build_supervise_prompt
         and resolved_strategy == default_strategy
     ):
-        clear_review_budget_stop(dd, mode.label)
         return [], None
     prompt_args: dict[str, Any] = {
         "strategy": resolved_strategy,
@@ -168,10 +167,8 @@ async def _adjudicate(
         run_context=resolve_run_context(inputs.get("run_context")),
     )
     if budget_reason:
-        record_review_budget_stop(dd, mode.label, budget_reason)
         ui.print_warning(agent.console, f"{mode.label} budget exhausted; continuing with incomplete adjudication.")
         return _IncompleteAdjudication(budget_reason), None
-    clear_review_budget_stop(dd, mode.label)
     if not isinstance(result, dict) or not agent._validates_schema(result, mode.schema):
         from daydream.phases.review import ReviewOutputError
         raise ReviewOutputError(result)

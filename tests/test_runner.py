@@ -225,7 +225,7 @@ def test_run_write_capture_does_not_swallow_base_exception(
     capture = _RunWriteCapture(session_id="session")
     def interrupt(_payload: bytes) -> Any:
         raise KeyboardInterrupt
-    monkeypatch.setattr("daydream.run_artifacts.json.loads", interrupt)
+    monkeypatch.setattr("daydream.trajectory.types.json.loads", interrupt)
     with pytest.raises(KeyboardInterrupt):
         capture.retain(capture_recorder, _capture_snapshot(tmp_path, "partial", json_bytes=b"{}"))
     assert capture.partial is None
@@ -946,45 +946,32 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
 # --- Per-phase model resolution tests --------------------------------------
 
 class TestResolveBackendPhaseModel:
-    def test_explicit_phase_flag_wins_over_table(self) -> None:
-        config = RunConfig(backend="claude", review_model="claude-haiku-4-5")
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-haiku-4-5"
+    @pytest.mark.parametrize("options,phase,model", [
+        pytest.param({"backend": "claude", "review_model": "claude-haiku-4-5"}, "review", "claude-haiku-4-5",
+                     id="explicit-review-model"),
+        pytest.param({"backend": "claude"}, "review", "claude-opus-5", id="default-review"),
+        pytest.param({"backend": "claude"}, "wonder", "claude-opus-5", id="phase-without-model-flag"),
+        pytest.param({"backend": "codex"}, "parse", "gpt-5.6-luna", id="cheap-parse-tier"),
+        pytest.param({"backend": "claude", "review_backend": "codex"}, "review", "gpt-5.6-sol",
+                     id="overridden-backend-tier"),
+    ])
+    def test_model_resolution_precedence(self, options: dict[str, Any], phase: str, model: str) -> None:
+        assert runner._resolve_backend(RunConfig(**options), phase).model == model
 
-    def test_table_default_used_when_no_flag(self) -> None:
-        config = RunConfig(backend="claude")  # no review_model override
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-opus-5"  # claude REVIEW default
 
-    def test_table_default_for_phase_without_flag(self) -> None:
-        config = RunConfig(backend="claude")
-        backend = runner._resolve_backend(config, "wonder")
-        assert backend.model == "claude-opus-5"
 
-    def test_codex_table_default(self) -> None:
-        config = RunConfig(backend="codex")
-        backend = runner._resolve_backend(config, "parse")
-        assert backend.model == "gpt-5.6-luna"  # codex PARSE default (cheap tier)
 
-    def test_backend_override_uses_overridden_backends_table(self) -> None:
-        config = RunConfig(backend="claude", review_backend="codex")
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "gpt-5.6-sol"  # codex REVIEW default (heavy tier)
 
-    def test_cache_returns_same_instance_for_same_phase_and_backend(self) -> None:
+
+    @pytest.mark.parametrize("second_phase,same", [("review", True), ("parse", False)])
+    def test_cache_identity_tracks_resolved_phase(self, second_phase: str, same: bool) -> None:
         cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
         config = RunConfig(backend="claude")
-        b1 = runner._resolve_backend(config, "review", cache)
-        b2 = runner._resolve_backend(config, "review", cache)
-        assert b1 is b2
+        first = runner._resolve_backend(config, "review", cache)
+        second = runner._resolve_backend(config, second_phase, cache)
+        assert (first is second) is same
 
-    def test_cache_returns_distinct_instances_for_different_phases(self) -> None:
-        # Different models -> different backends, even on the same backend kind.
-        cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
-        config = RunConfig(backend="claude")
-        review_backend = runner._resolve_backend(config, "review", cache)
-        parse_backend = runner._resolve_backend(config, "parse", cache)
-        assert review_backend is not parse_backend
+
 
     def test_codex_backend_receives_resolved_reasoning_effort_and_cache_splits_on_it(self) -> None:
         cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}
@@ -1543,62 +1530,36 @@ def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) ->
         ), git_ctx=GitContext(), status="complete", archive_path=tmp_path,
     )
 
-def test_manifest_backend_is_general_default_not_per_stack_review(tmp_path: Path) -> None:
-    """Archive the general backend independently of per-phase review overrides.
-
-    General precedence is CLI global > file global > claude; review_backend retains
-    only the review-specific override marker.
-    """
-    config = RunConfig(
-        target=str(tmp_path / "project"), run_eval=False, review_backend="codex",
-        file_config=DaydreamFileConfig(phases={"per_stack_review": {"backend": "pi"}}),
-    )
-    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "claude"
-    assert m.review_backend == "codex"
-
-def test_manifest_normal_records_fix_and_test_backend(tmp_path: Path) -> None:
-    config = RunConfig(
-        target=str(tmp_path / "project"), run_eval=False, backend="codex", fix_backend="pi", test_backend="osprey",
-    )
-    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "codex"
-    assert m.review_backend is None
-    assert m.fix_backend == "pi"
-    assert m.test_backend == "osprey"
-    run = m.to_dict()["run"]
-    assert run["fix_backend"] == "pi"
-    assert run["test_backend"] == "osprey"
-
-@pytest.mark.parametrize("flow", [DaydreamRunFlow.TTT, DaydreamRunFlow.IMPROVE])
-def test_manifest_nonfix_flows_omit_fix_test_backend(tmp_path: Path, flow: DaydreamRunFlow) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, backend="codex")
+@pytest.mark.parametrize("flow,options,expected", [
+    pytest.param(DaydreamRunFlow.NORMAL,
+                 {"review_backend": "codex", "file_config": DaydreamFileConfig(phases={
+                     "per_stack_review": {"backend": "pi"}})},
+                 ("claude", "codex", "claude", "claude"), id="general-independent-of-per-stack"),
+    pytest.param(DaydreamRunFlow.NORMAL, {"backend": "codex", "fix_backend": "pi", "test_backend": "osprey"},
+                 ("codex", None, "pi", "osprey"), id="fix-and-test-overrides"),
+    pytest.param(DaydreamRunFlow.TTT, {"backend": "codex"}, ("codex", None, None, None), id="ttt-no-fix"),
+    pytest.param(DaydreamRunFlow.IMPROVE, {"backend": "codex"}, ("codex", None, None, None), id="improve-no-fix"),
+    pytest.param(DaydreamRunFlow.PR, {"review_backend": "codex"}, ("claude", "codex", "claude", None),
+                 id="pr-fixes-without-testing"),
+    pytest.param(DaydreamRunFlow.NORMAL, {}, ("claude", None, "claude", "claude"), id="claude-default"),
+])
+def test_manifest_backend_identity_and_phase_fields(
+    tmp_path: Path, flow: DaydreamRunFlow, options: dict[str, Any], expected: tuple[str | None, ...],
+) -> None:
+    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, **options)
     manifest = _build_manifest(config, flow, tmp_path)
-    assert manifest.backend == "codex"
-    assert manifest.review_backend is None
-    assert manifest.fix_backend is None
-    assert manifest.test_backend is None
-    run = manifest.to_dict()["run"]
-    assert "fix_backend" not in run
-    assert "test_backend" not in run
+    assert (manifest.backend, manifest.review_backend, manifest.fix_backend, manifest.test_backend) == expected
+    serialized = manifest.to_dict()["run"]
+    for field, backend in zip(("fix_backend", "test_backend"), expected[2:], strict=True):
+        if backend is None:
+            assert field not in serialized
+        else:
+            assert serialized[field] == backend
 
-def test_manifest_pr_flow_records_fix_omits_test_backend(tmp_path: Path) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False, review_backend="codex")
-    m = _build_manifest(config, DaydreamRunFlow.PR, tmp_path)
-    assert m.backend == "claude"
-    assert m.review_backend == "codex"
-    assert m.fix_backend == "claude"
-    assert m.test_backend is None
-    run = m.to_dict()["run"]
-    assert "test_backend" not in run
 
-def test_manifest_backend_falls_back_to_claude(tmp_path: Path) -> None:
-    config = RunConfig(target=str(tmp_path / "project"), run_eval=False)
-    m = _build_manifest(config, DaydreamRunFlow.NORMAL, tmp_path)
-    assert m.backend == "claude"
-    assert m.review_backend is None
-    assert m.fix_backend == "claude"
-    assert m.test_backend == "claude"
+
+
+
 
 @pytest.mark.parametrize("flow", list(DaydreamRunFlow))
 def test_manifest_identity_preserves_mode_capabilities(tmp_path: Path, flow: DaydreamRunFlow) -> None:

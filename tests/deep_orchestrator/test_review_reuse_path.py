@@ -28,6 +28,7 @@ from tests.harness.review_profile import (
     independent_alternatives_profile,
     independent_exploration_profile,
 )
+from tests.harness.review_result import saved_coverage
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_deep_orchestrator import MakeConfig
 
@@ -145,7 +146,7 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     deep = multi_stack_target / ".daydream" / "deep"
     names = ["intent.md", "alternatives.json", "dedup-candidates.json"]
     canonical = {**_records_bytes(multi_stack_target), **{name: (deep / name).read_bytes() for name in names}}
-    failures = (deep / "per-stack-failures.json").exists()
+    failures = saved_coverage(deep).unfinished_scopes
     first = json.loads((deep / "review-coverage.json").read_text())
     if unit == "independent":
         assert _count_unit_prompts(stub.calls, _INTENT_DISCRIMINATOR) == 1
@@ -156,7 +157,7 @@ async def test_identical_rerun_restores_completed_units_and_current_run_evidence
     assert await run(config) == 0
     assert _review_surface_prompts(stub.calls) == [], f"paid work on a warm run: {stub.calls}"
     assert {name: (deep / name).read_bytes() for name in canonical} == canonical
-    assert (deep / "per-stack-failures.json").exists() == failures
+    assert saved_coverage(deep).unfinished_scopes == failures
     second = json.loads((deep / "review-coverage.json").read_text())
     assert first["run_id"] != second["run_id"]
     assert all(first[field] == second[field] for field in ("analyzed_revision", "planned_scopes", "stack_outcomes"))

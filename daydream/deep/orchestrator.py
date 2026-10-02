@@ -772,7 +772,6 @@ async def _run_review_spine(
                 "alts_path": DeepArtifact.ALTERNATIVES.at(dd),
                 "log": log,
                 "branch": branch,
-                "failed_stacks": {},
             },
             allow_standalone_artifacts=allow_standalone,
         )

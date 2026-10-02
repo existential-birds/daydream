@@ -1,8 +1,11 @@
 """Current review-result and findings fixtures shared by unit and consumer tests."""
+import json
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from daydream.deep.detection import StackAssignment
+from daydream.deep.records import RecordPool, record_uid, stack_name_from_uid, stamp_record_uids
 from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
 
 
@@ -52,3 +55,26 @@ def records_artifact(coverage: ReviewCoverage, scope_id: str, issues: Iterable[d
     """Bind validated producer records to their current scope and captured revision."""
     return {"issues": list(issues), "scope_id": scope_id, "analyzed_revision": coverage.revision.to_dict(),
             "originating_run_id": coverage.run_id}
+
+
+def record_pool(root: Path, records: Iterable[dict[str, Any]] = (), structural: Iterable[dict[str, Any]] = (),
+                *, paths: Iterable[Path] = (), structural_path: Path | None = None) -> RecordPool:
+    """Build the current scoped state while sharing caller-owned record objects."""
+    path_map = {path.name.removeprefix("stack-").removesuffix("-records.json"): path for path in paths}
+    grouped: dict[str, list[dict[str, Any]]] = {scope: [] for scope in path_map}
+    for scope_hint, rows in ((next(iter(path_map), "python"), list(records)), ("structure", list(structural))):
+        stamp_record_uids(rows, scope_hint)
+        for row in rows:
+            scope = stack_name_from_uid(record_uid(row))
+            grouped.setdefault(scope, []).append(row)
+            path_map.setdefault(scope, root / f"stack-{scope}-records.json")
+    if structural_path is not None:
+        path_map["structure"] = structural_path
+        grouped.setdefault("structure", [])
+    coverage = review_coverage(scope_ids=grouped)
+    return RecordPool({scope: records_artifact(coverage, scope, rows) for scope, rows in grouped.items()}, path_map)
+
+
+def saved_coverage(root: Path) -> ReviewCoverage:
+    """Read checked current evidence from a real run's deep artifact directory."""
+    return ReviewCoverage.from_dict(json.loads((root / 'review-coverage.json').read_text()))

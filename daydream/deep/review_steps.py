@@ -15,9 +15,7 @@ from daydream.agent import _validates_schema, console
 from daydream.artifact_visibility import artifact_dir_for
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.artifacts import (
-    MERGE_FAILURE_KEY,
     DeepArtifact,
-    _load_failures,
     per_stack_records_path,
     review_stage,
 )
@@ -30,9 +28,8 @@ from daydream.deep.latency import (
     wonder_decision,
 )
 from daydream.deep.records import (
+    RecordPool,
     duplicate_record_uids,
-    partition_record_sources,
-    record_uid,
     stack_name_from_uid,
 )
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
@@ -61,7 +58,7 @@ from daydream.phases import (
 )
 from daydream.phases.review import valid_record_artifact
 from daydream.phases.schemas import ALTERNATIVE_REVIEW_SCHEMA
-from daydream.review_budget import ReviewBudgetExceeded, record_review_budget_stop, review_budget_path
+from daydream.review_budget import ReviewBudgetExceeded
 from daydream.review_result import ReasonCode, reason_for_budget
 from daydream.trajectory import (
     DaydreamPhase,
@@ -355,7 +352,6 @@ async def _step_intent(ctx: FlowContext) -> None:
         # the intent phase, so downstream reviewers can include the precedence rule.
         # Match build_intent_prompt: whitespace-only bodies are ignored after strip.
         deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
-        review_budget_path(deep_state.dd).unlink(missing_ok=True)
         intent_p = DeepArtifact.INTENT.at(deep_state.dd)
         # Intent keys its prompt subject; exploration is recorded grounding only.
         # Hits restore the original artifact bytes.
@@ -432,10 +428,9 @@ async def _step_intent(ctx: FlowContext) -> None:
                     )
             except ReviewBudgetExceeded as exc:
                 phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
-                record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
                 intent_complete = False
                 deep_state.review_coverage.record_phase("intent", "incomplete",
-                    reasons=(reason_for_budget(exc.reason),))
+                    reasons=(reason_for_budget(exc.reason),), diagnostic=exc.reason)
                 print_warning(console, f"{exc}; continuing with incomplete intent context.")
                 deep_state.intent_summary = (
                     "Intent analysis did not finish within its budget. Infer intent from the diff.\n"
@@ -532,11 +527,11 @@ async def _wonder(ctx: FlowContext) -> None:
                         )
                     except ReviewBudgetExceeded as exc:
                         phase.finish(LifecycleStatus.PARTIAL, LifecycleReasonCode.DOMAIN_FAILURE)
-                        record_review_budget_stop(deep_state.dd, exc.phase, exc.reason)
                         wonder_complete = False
                         wonder_usable = _validates_schema(exc.partial_result, ALTERNATIVE_REVIEW_SCHEMA)
                         deep_state.review_coverage.record_phase("alternatives", "incomplete",
-                            reasons=(reason_for_budget(exc.reason),), usable_evidence=wonder_usable)
+                            reasons=(reason_for_budget(exc.reason),), usable_evidence=wonder_usable,
+                            diagnostic=exc.reason)
                         print_warning(console, f"{exc}; continuing with completed reviewers' findings.")
                         alt_issues = (exc.partial_result["issues"]
                                       if _validates_schema(exc.partial_result, ALTERNATIVE_REVIEW_SCHEMA) else [])
@@ -608,6 +603,8 @@ async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
             deep_state.review_coverage.record_phase("alternatives", "complete", noop=True)
         else:
             deep_state.review_coverage.record_phase("alternatives", "failed", reasons=(ReasonCode.EVIDENCE_INCOMPLETE,))
+    from daydream.deep.artifacts import persist_review_coverage
+    persist_review_coverage(deep_state.dd, deep_state.review_coverage)
     if holder["exc"] is not None:
         raise holder["exc"]
 
@@ -619,7 +616,6 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
     dd = deep_state.dd
     stacks = deep_state.stacks
 
-    failed_stacks: dict[str, str] = deep_state.failed_stacks
     reuse_cache = reuse_cache_for(ctx)
     phase_identity = (
         phase_identity_for(ctx, "per_stack_review") if reuse_cache is not None else None
@@ -633,7 +629,7 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 structural_strategy += "\n\n" + FOLDED_ALTERNATIVES_INSTRUCTION
         print_stage_progress(console, 3, 5, _PIPELINE_STAGE_NAMES[2])
         async with phase_scope(DaydreamPhase.DEEP, stage="review"):
-            _, failed_stacks = await phase_per_stack_reviews(
+            await phase_per_stack_reviews(
                 ctx.backend_for("per_stack_review"),
                 ctx.work,
                 stacks,
@@ -657,30 +653,12 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
                 phase_identity=phase_identity,
                 coverage=deep_state.review_coverage,
             )
-        # Persist so a later `--start-at merge` resume can still surface
-        # uncovered stacks (the in-memory failure map otherwise dies here).
-        failures_p = DeepArtifact.PER_STACK_FAILURES.at(dd)
-        if failed_stacks:
-            failures_p.write_text(json.dumps(failed_stacks, indent=2, sort_keys=True))
-        elif failures_p.exists():
-            # Fresh successful run supersedes any stale failures record.
-            failures_p.unlink()
     else:
-        # Resume: resurrect any prior failure summary before reconstructing
-        # outputs, so failed stacks never re-enter the parse pipeline.
-        failures_p = DeepArtifact.PER_STACK_FAILURES.at(dd)
-        loaded = _load_failures(failures_p)
-        # Report prior merge failure separately from failed stacks: resumed partial
-        # findings must not appear to have completed cross-stack synthesis.
-        _warn_prior_merge_failure(loaded)
-        # Legacy entries are ``{stack_name: reason}`` str->str. Skip the
-        # structured merge-failure entry (``MERGE_FAILURE_KEY``, a dict)
-        # so it is never misread as a failed stack that would surface as
-        # a garbled "Uncovered stacks" line on a resume (issue #361).
-        failed_stacks = {
-            str(k): str(v) for k, v in loaded.items() if isinstance(v, str)
-        }
-    deep_state.failed_stacks = failed_stacks
+        prior = deep_state.review_coverage.phases.get('merge')
+        if prior is not None and prior['status'] in {'failed', 'incomplete'}:
+            print_warning(console, "Prior cross-stack synthesis failed; merged results are PARTIAL. "
+                          + deep_state.review_coverage.diagnostics['phases'].get(
+                              'merge', ', '.join(prior['reason_codes'])))
     from daydream.deep.artifacts import persist_review_coverage
     persist_review_coverage(dd, deep_state.review_coverage)
 
@@ -697,27 +675,24 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
     stacks = deep_state.stacks
-    failed_stacks: dict[str, str] = deep_state.failed_stacks
-
     print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
     # Fresh and resumed runs load the same on-disk per-stack records.
-    per_stack_records_paths: list[Path] = []
-    all_records: list[dict[str, Any]] = []
-    record_sources: list[str] = []
+    scopes: dict[str, dict[str, Any]] = {}
+    paths: dict[str, Path] = {}
     # Enumerate this run's detected reviewer scopes. Unrelated record files from
     # older runs must never enter the findings pool on resume.
     invalid_artifacts = False
     for stack in sorted(stacks, key=lambda scope: scope.stack_name):
         records_path = per_stack_records_path(dd, stack.stack_name)
-        failed = stack.stack_name in failed_stacks
+        outcome = deep_state.review_coverage.scopes[stack.stack_name]
+        failed = outcome["status"] != "complete" and outcome["reason_codes"] != ["coverage_unknown"]
         if not records_path.is_file():
             partial_expected = deep_state.review_coverage.scopes[stack.stack_name]["partial_evidence"]
             if not failed or partial_expected:
                 invalid_artifacts = True
-                failed_stacks[stack.stack_name] = "missing_artifact: reviewer records are absent"
                 deep_state.review_coverage.record_scope(stack.stack_name, "failed",
                     reasons=(*deep_state.review_coverage.scopes[stack.stack_name]["reason_codes"],
-                            ReasonCode.MISSING_ARTIFACT))
+                            ReasonCode.MISSING_ARTIFACT), diagnostic="Reviewer records are absent")
             continue
         try:
             loaded = json.loads(records_path.read_text())
@@ -726,29 +701,27 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         if not valid_record_artifact(loaded, scope_id=stack.stack_name,
                                      analyzed_revision=deep_state.review_coverage.revision.to_dict()):
             invalid_artifacts = True
-            failed_stacks[stack.stack_name] = "malformed_artifact: reviewer records are invalid"
             deep_state.review_coverage.record_scope(stack.stack_name, "failed",
                 reasons=(*deep_state.review_coverage.scopes[stack.stack_name]["reason_codes"],
-                        ReasonCode.MALFORMED_ARTIFACT))
+                        ReasonCode.MALFORMED_ARTIFACT), diagnostic="Reviewer records are invalid")
             continue
         # A failed reviewer can contribute only an explicitly validated checkpoint.
         if failed and loaded.get("incomplete") is not True:
             continue
-        records = loaded["issues"]
-        per_stack_records_paths.append(records_path)
-        source_name = records_path.name
-        all_records.extend(records)
-        record_sources.extend(source_name for _ in records)
-    deep_state.failed_stacks = failed_stacks
-    duplicate_uids = duplicate_record_uids(all_records)
+        scopes[stack.stack_name] = loaded
+        paths[stack.stack_name] = records_path
+    pool = RecordPool(scopes, paths)
+    deep_state.record_pool = pool
+    duplicate_uids = duplicate_record_uids(pool.records)
     if duplicate_uids:
+        del ctx.data["record_pool"]
         for stack in stacks:
             if any(stack_name_from_uid(uid) == stack.stack_name for uid in duplicate_uids):
                 deep_state.review_coverage.record_scope(stack.stack_name, "failed",
                                                        reasons=(ReasonCode.MALFORMED_ARTIFACT,))
         from daydream.deep.artifacts import persist_review_coverage
         persist_review_coverage(dd, deep_state.review_coverage)
-        loaded_names = ", ".join(sorted(path.name for path in per_stack_records_paths))
+        loaded_names = ", ".join(sorted(path.name for path in paths.values()))
         print_error(
             console,
             "Duplicate Record Identities",
@@ -761,30 +734,6 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         )
         return Stop(1)
 
-    structural_path_candidate = per_stack_records_path(dd, STRUCTURE_STACK_NAME)
-    structural_records: list[dict[str, Any]] = []
-    structural_record_sources: list[str] = []
-    if structural_path_candidate in per_stack_records_paths:
-        structural_records_path: Path | None = structural_path_candidate
-        per_stack_records_paths = [
-            p for p in per_stack_records_paths if p != structural_path_candidate
-        ]
-        structural_uids = {
-            uid for rec in all_records
-            if stack_name_from_uid(uid := record_uid(rec)) == STRUCTURE_STACK_NAME
-        }
-        all_records, record_sources, structural_records, structural_record_sources = (
-            partition_record_sources(all_records, record_sources, structural_uids)
-        )
-    else:
-        structural_records_path = None
-
-    deep_state.records_paths = per_stack_records_paths
-    deep_state.records = all_records
-    deep_state.record_sources = record_sources
-    deep_state.structural_records_path = structural_records_path
-    deep_state.structural_records = structural_records
-    deep_state.structural_record_sources = structural_record_sources
     from daydream.deep.artifacts import persist_review_coverage
     persist_review_coverage(dd, deep_state.review_coverage)
     _log_reuse_summary(ctx)
@@ -792,27 +741,3 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         print_error(console, "Invalid Per-Stack Records", "Re-run review to regenerate missing or malformed records.")
         return Stop(1)
     return None
-
-
-def _warn_prior_merge_failure(loaded: dict[str, Any]) -> None:
-    """Warn on resume that a prior cross-stack synthesis failed (issue #361).
-
-    The structured ``MERGE_FAILURE_KEY`` entry is deliberately excluded from
-    ``failed_stacks`` (see caller) so it can't be misread as a failed stack /
-    garbled "Uncovered stacks" line, but resuming into a *partial* review must
-    not look clean -- say so explicitly so a ``--start-at fix`` relaunch doesn't
-    fix + commit partial findings as if the cross-stack merge had succeeded.
-    """
-    merge_entry = loaded.get(MERGE_FAILURE_KEY)
-    if merge_entry is not None:
-        merge_message = (
-            merge_entry.get("message")
-            if isinstance(merge_entry, dict)
-            else str(merge_entry)
-        )
-        print_warning(
-            console,
-            "Prior cross-stack synthesis failed; merged results are PARTIAL. "
-            f"{merge_message} (issue #361) -- this resume fixes/verifies the "
-            "partial per-stack findings as-is.",
-        )

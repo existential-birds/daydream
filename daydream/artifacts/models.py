@@ -10,13 +10,13 @@ from typing import Literal
 _SCHEMA_VERSION = 1
 _DAYDREAM = ".daydream"
 _REVIEW_OUTPUT = ".review-output.md"
-#: Recognized legacy directory anchors. ``review-cache`` must survive public
+#: Recognized public directory anchors. ``review-cache`` must survive public
 #: .daydream publication and reopen without a per-run destination route.
-_LEGACY_DIRECTORY_ANCHORS = frozenset(
+_PUBLIC_DIRECTORY_ANCHORS = frozenset(
     ("runs", "deep", "exploration", "partial-fixes", "improve", "intents", "review-cache")
 )
-_LEGACY_FILE_ANCHORS = frozenset(("diff.patch", "hunk-index.json", "recommended.patch", ".DS_Store"))
-_LEGACY_ANCHORS = _LEGACY_DIRECTORY_ANCHORS | _LEGACY_FILE_ANCHORS
+_PUBLIC_FILE_ANCHORS = frozenset(("diff.patch", "hunk-index.json", "recommended.patch", ".DS_Store"))
+_PUBLIC_ANCHORS = _PUBLIC_DIRECTORY_ANCHORS | _PUBLIC_FILE_ANCHORS
 _OPERATIONAL_NAMES = frozenset(("worktrees", "audit"))
 
 

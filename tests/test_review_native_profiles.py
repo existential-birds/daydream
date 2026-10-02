@@ -8,8 +8,8 @@ from daydream.deep.prompts import (
     build_merge_prompt,
     build_supervise_prompt,
     build_suppression_prompt,
-    build_verification_prompt,
 )
+from daydream.deep.verification_prompts import build_verification_prompt
 from daydream.phases import build_alternative_review_prompt, build_intent_prompt
 from tests.harness.review_profile import default_strategy as _default_strategy
 

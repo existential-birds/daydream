@@ -1,8 +1,7 @@
 """Review and adjudication prompt builders for deep mode.
 
 Profile strategies own judgment policy; these builders add host-owned scope,
-context transport, grounding, and output instructions. Diagram and verification
-builders remain re-exported here for extension registry compatibility.
+context transport, grounding, and output instructions.
 """
 
 from __future__ import annotations
@@ -10,16 +9,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from daydream.deep.diagram_prompts import (
-    build_diagram_repair_prompt as build_diagram_repair_prompt,
-    build_flowchart_prompt as build_flowchart_prompt,
-    build_sequence_diagram_prompt as build_sequence_diagram_prompt,
-)
 from daydream.deep.diff import _full_diff_pointer, _hunk_index_authority
-from daydream.deep.verification_prompts import (
-    build_fix_verify_prompt as build_fix_verify_prompt,
-    build_verification_prompt as build_verification_prompt,
-)
 from daydream.phases.review_prompts import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,

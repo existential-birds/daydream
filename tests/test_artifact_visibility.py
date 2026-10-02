@@ -21,7 +21,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, AsyncIterator, Literal, cast
 
@@ -57,6 +57,7 @@ from daydream.artifacts import (
 )
 from daydream.deep.artifacts import check_deep_artifacts
 from daydream.json_utils import _fsync_directory, _fsync_file
+from daydream.run_artifacts import _RunWriteCapture
 from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
@@ -67,6 +68,7 @@ from daydream.trajectory import (
 )
 from daydream.workspace import WorkContext
 from tests.harness.git_helpers import git as _git
+from tests.harness.trajectory import make_recorder
 
 _TRANSITIONS = (
     "DETACH_STAGED", "DETACH_CANONICAL", "DETACH_REMOVING", "DETACHED", "PUBLISH_STAGED", "PUBLISH_BACKED_UP",
@@ -784,7 +786,7 @@ async def test_artifact_session_rejects_tracked_public_collision_untouched(sourc
 
     assert target.read_bytes() == b"tracked collision"
 
-async def test_artifact_session_rejects_unknown_legacy_tree(source: Path) -> None:
+async def test_artifact_session_rejects_unknown_public_tree(source: Path) -> None:
     unknown = source / ".daydream" / "extension-only" / "opaque.bin"
     unknown.parent.mkdir(parents=True)
     unknown.write_bytes(b"extension")
@@ -793,7 +795,7 @@ async def test_artifact_session_rejects_unknown_legacy_tree(source: Path) -> Non
             pass
     assert unknown.read_bytes() == b"extension"
 
-async def test_artifact_session_rejects_recognized_legacy_anchor_with_unknown_sibling(source: Path) -> None:
+async def test_artifact_session_rejects_registered_public_anchor_with_unknown_sibling(source: Path) -> None:
     daydream = source / ".daydream"
     (daydream / "runs").mkdir(parents=True)
     unknown = daydream / "extension-only" / "opaque.bin"
@@ -812,7 +814,7 @@ async def test_artifact_session_rejects_recognized_legacy_anchor_with_unknown_si
         pytest.param("recommended.patch", "file", id="patch"), pytest.param(".DS_Store", "file", id="ds-store"),
     ],
 )
-async def test_artifact_session_accepts_registered_legacy_anchor_format(source: Path, anchor: str, kind: str,) -> None:
+async def test_artifact_session_accepts_registered_public_anchor_format(source: Path, anchor: str, kind: str,) -> None:
     target = source / ".daydream" / anchor
     target.parent.mkdir()
     if kind == "directory":
@@ -820,7 +822,7 @@ async def test_artifact_session_accepts_registered_legacy_anchor_format(source: 
     else:
         target.write_bytes(b"diff bytes\n")
 
-    async with open_artifact_session(_work(source), session_id=f"legacy-{anchor}") as session:
+    async with open_artifact_session(_work(source), session_id=f"public-{anchor}") as session:
         private = session.daydream_dir / anchor
         assert private.is_dir() if kind == "directory" else private.read_bytes() == b"diff bytes\n"
 
@@ -833,14 +835,14 @@ async def test_artifact_session_accepts_registered_legacy_anchor_format(source: 
         pytest.param(".DS_Store", lambda path: path.mkdir(), id="ds-store-directory"),
     ],
 )
-async def test_artifact_session_rejects_registered_legacy_anchor_with_wrong_type(
+async def test_artifact_session_rejects_registered_public_anchor_with_wrong_type(
     source: Path, anchor: str, make_wrong_type: Callable[[Path], object],
 ) -> None:
     target = source / ".daydream" / anchor
     target.parent.mkdir()
     make_wrong_type(target)
 
-    with pytest.raises(ArtifactVisibilityError, match="legacy artifact anchor has the wrong filesystem type"):
+    with pytest.raises(ArtifactVisibilityError, match="public artifact anchor has the wrong filesystem type"):
         async with open_artifact_session(_work(source), session_id=f"wrong-{anchor}"):
             pass
 
@@ -848,10 +850,10 @@ async def test_artifact_session_rejects_registered_legacy_anchor_with_wrong_type
 
 @pytest.mark.parametrize(("mutation", "message"),
     [pytest.param("unknown-sibling", "unregistered artifact anchor", id="unknown-sibling"),
-        pytest.param("static-kind", "legacy artifact anchor has the wrong filesystem type", id="static-kind"),
+        pytest.param("static-kind", "public artifact anchor has the wrong filesystem type", id="static-kind"),
     ],
 )
-async def test_legacy_validation_classifies_the_exact_manifested_tree(
+async def test_public_validation_classifies_the_exact_manifested_tree(
     source: Path, monkeypatch: pytest.MonkeyPatch, mutation: str, message: str,
 ) -> None:
     daydream = source / ".daydream"
@@ -938,19 +940,20 @@ async def test_artifact_session_open_still_fails_closed_on_nonregular_public_nod
             pass
     assert (outside / "canary").read_bytes() == b"outside"
 
-async def test_artifact_session_succeeds_with_only_empty_operational_root(tmp_path: Path,) -> None:
-    """F1 cross-check: an EMPTY operational root is not an anchor blocker.
-
-    A wedged checkout can hold ``.daydream/worktrees`` (empty residue) with no other anchor; session open must
-    succeed rather than raising "legacy .daydream tree has no recognized artifact anchor"."""
+@pytest.mark.parametrize("namespace", ["worktrees", "audit"])
+async def test_artifact_session_rejects_empty_unsupported_operational_root(
+    tmp_path: Path, namespace: str,
+) -> None:
     source = tmp_path / "source"
     _init_repo(source)
-    (source / ".daydream" / "worktrees").mkdir(parents=True)
-
-    async with open_artifact_session(_work(source), session_id="empty-root") as session:
-        assert (session.daydream_dir / "worktrees").is_dir()
-
-    assert (source / ".daydream" / "worktrees").is_dir()
+    operational = source / ".daydream" / namespace
+    operational.mkdir(parents=True)
+    before = artifact_filesystem.manifest_tree(source)
+    with pytest.raises(ArtifactVisibilityError, match="unsupported operational workspace"):
+        async with open_artifact_session(_work(source), session_id="empty-root"):
+            pass
+    assert artifact_filesystem.manifest_tree(source) == before
+    assert operational.is_dir() and not list(operational.iterdir())
 
 @pytest.mark.parametrize("node_kind", ["root-symlink", "directory-symlink", "leaf-symlink", "fifo", "socket"],)
 async def test_artifact_session_rejects_nonregular_public_nodes_without_following(
@@ -1098,7 +1101,10 @@ async def test_artifact_session_freezes_snapshot_bytes_not_document_path_and_pub
 
     assert (source / ".daydream" / "runs" / session_id / "trajectory.json").read_bytes() == payload
 
-@pytest.mark.parametrize("problem", ["wrong-root", "wrong-session", "duplicate-path"])
+@pytest.mark.parametrize("problem", [
+    "wrong-root", "wrong-session", "duplicate-path", "missing-root", "empty-child-id",
+    "invalid-json", "non-object-json", "non-byte-document", "invalid-status", "invalid-cutoff",
+])
 async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path, problem: str) -> None:
     work = _work(source)
     session_id = "snapshot-session"
@@ -1109,6 +1115,24 @@ async def test_artifact_session_freeze_rejects_invalid_run_snapshot(source: Path
         snapshot = _snapshot(session_id, (document, document) if problem == "duplicate-path" else (document,),
             root_trajectory_id="other" if problem == "wrong-root" else session_id,
         )
+        if problem == "missing-root":
+            snapshot = replace(snapshot, documents=())
+        elif problem == "empty-child-id":
+            child = TrajectoryDocumentSnapshot("", path.with_name("child.json"), _payload(session_id, ""))
+            snapshot = replace(snapshot, documents=(document, child))
+        elif problem in {"invalid-json", "non-object-json", "non-byte-document"}:
+            content = {"invalid-json": b"{", "non-object-json": b"[]", "non-byte-document": "{}"}[problem]
+            snapshot = replace(snapshot, documents=(replace(document, json_bytes=cast(bytes, content)),))
+        elif problem == "invalid-status":
+            snapshot = replace(snapshot, status=cast(Any, "unfinished"))
+        elif problem == "invalid-cutoff":
+            snapshot = replace(snapshot, cutoff_at=cast(str, None))
+        with pytest.raises(ValueError):
+            snapshot.validate(session_id)
+        capture = _RunWriteCapture(session_id)
+        capture.retain(make_recorder(source, session_id=session_id), snapshot)
+        assert capture.validation_error is not None
+        assert capture.final is None and capture.partial is None
         with pytest.raises(ArtifactVisibilityError, match="snapshot"):
             session.freeze(snapshot)
 

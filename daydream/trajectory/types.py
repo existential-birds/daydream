@@ -1,10 +1,11 @@
 """Trajectory identity, lifecycle vocabulary, and immutable write snapshots."""
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 
 
 class DaydreamPhase(str, Enum):
@@ -88,6 +89,17 @@ class TrajectoryDocumentSnapshot:
     path: Path
     json_bytes: bytes
 
+    def validated_payload(self, session_id: str) -> dict[str, Any]:
+        """Decode the exact immutable bytes and verify their document/run identity."""
+        if type(self.trajectory_id) is not str or not self.trajectory_id or type(self.json_bytes) is not bytes:
+            raise ValueError("document is malformed")
+        payload = json.loads(self.json_bytes)
+        if not isinstance(payload, dict):
+            raise ValueError("JSON is malformed")
+        if payload.get("trajectory_id") != self.trajectory_id or payload.get("session_id") != session_id:
+            raise ValueError("identity is malformed")
+        return cast(dict[str, Any], payload)
+
 
 @dataclass(frozen=True)
 class RunWriteSnapshot:
@@ -97,3 +109,18 @@ class RunWriteSnapshot:
     cutoff_at: str
     root_trajectory_id: str
     documents: tuple[TrajectoryDocumentSnapshot, ...]
+
+    def validate(self, session_id: str) -> None:
+        """Validate one run-wide immutable cutoff before retaining or projecting it."""
+        if self.root_trajectory_id != session_id:
+            raise ValueError("root identity does not match the run")
+        if self.status not in ("complete", "partial") or type(self.cutoff_at) is not str or not self.cutoff_at:
+            raise ValueError("metadata is malformed")
+        identities: set[str] = set()
+        for document in self.documents:
+            document.validated_payload(session_id)
+            if document.trajectory_id in identities:
+                raise ValueError("contains duplicate document identity")
+            identities.add(document.trajectory_id)
+        if session_id not in identities:
+            raise ValueError("is missing its root document")

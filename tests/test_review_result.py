@@ -101,7 +101,9 @@ def test_corrupt_coverage_is_a_controlled_validation_failure(bad: Any) -> None:
 
 def test_checked_roundtrip_and_immutable_terminal() -> None:
     c = review_coverage(files=("a.py", "b.py"))
-    c.record_scope("python", "incomplete", reasons=["host_tool_budget_exhaustion"], partial_evidence=True)
+    c.record_scope("python", "incomplete", reasons=["host_tool_budget_exhaustion"], partial_evidence=True,
+                   diagnostic="budget stopped: OPENROUTER_API_KEY=secret")
+    assert "secret" not in c.diagnostics["scopes"]["python"]
     restored = ReviewCoverage.from_dict(c.to_dict())
     assert restored.to_dict() == c.to_dict()
     corrupted = c.to_dict()
@@ -116,6 +118,7 @@ def test_checked_roundtrip_and_immutable_terminal() -> None:
     result["analysis_state"] = "complete"
     restored.scopes["python"]["status"] = "uncovered"
     restored.run_id = "late-other-run"
+    restored.diagnostics["scopes"]["python"] = "late diagnostic"
     assert restored.is_finalized and restored.to_dict() == persisted
     with pytest.raises(AttributeError):
         setattr(restored, "is_finalized", False)

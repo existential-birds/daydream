@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from typing import Literal, Sequence
 
 from daydream.redaction import redact_structured_text
@@ -51,6 +51,48 @@ def required_context_matches(
     if observation.source == "check_run":
         return observation.context == item.context
     return observation.context.casefold() == item.context.casefold()
+
+
+@dataclass(frozen=True)
+class RequiredEvidence:
+    """The policy partition and required-context outcomes for one observation set."""
+
+    required: tuple[CIObservation, ...]
+    advisory: tuple[CIObservation, ...]
+    failing: tuple[str, ...]
+    pending: tuple[str, ...]
+    missing: tuple[str, ...]
+
+
+def partition_required_observations(
+    contexts: Sequence[RequiredContext], observations: Sequence[CIObservation]
+) -> RequiredEvidence:
+    required_observations: list[CIObservation] = []
+    matched_ids: set[int] = set()
+    failing: list[str] = []
+    pending: list[str] = []
+    missing: list[str] = []
+    for required in contexts:
+        matches = [
+            item for item in observations if required_context_matches(required, item)
+        ]
+        if not matches:
+            missing.append(required_context_label(required))
+            continue
+        required_observations.extend(matches)
+        matched_ids.update(id(item) for item in matches)
+        label = required_context_label(required)
+        if any(item.state == "fail" for item in matches):
+            failing.append(label)
+        elif any(item.state == "pending" for item in matches):
+            pending.append(label)
+    return RequiredEvidence(
+        required=tuple(dict.fromkeys(required_observations)),
+        advisory=tuple(item for item in observations if id(item) not in matched_ids),
+        failing=tuple(failing),
+        pending=tuple(pending),
+        missing=tuple(missing),
+    )
 
 
 def _verdict(
@@ -126,27 +168,7 @@ def evaluate_remote_ci(
 
     evidence_sha, observations = snapshot.evidence
 
-    required_observations: list[CIObservation] = []
-    matched_ids: set[int] = set()
-    failing: list[str] = []
-    pending: list[str] = []
-    missing: list[str] = []
-    for required in snapshot.policy.contexts:
-        matches = [
-            item for item in observations if required_context_matches(required, item)
-        ]
-        if not matches:
-            missing.append(required_context_label(required))
-            continue
-        required_observations.extend(matches)
-        matched_ids.update(id(item) for item in matches)
-        label = required_context_label(required)
-        if any(item.state == "fail" for item in matches):
-            failing.append(label)
-        elif any(item.state == "pending" for item in matches):
-            pending.append(label)
-    required_observations = list(dict.fromkeys(required_observations))
-    advisory = [item for item in observations if id(item) not in matched_ids]
+    evidence = partition_required_observations(snapshot.policy.contexts, observations)
 
     def make(status: RemoteCIStatus, reason: str) -> RemoteCIVerdict:
         return _verdict(
@@ -154,22 +176,22 @@ def evaluate_remote_ci(
             status=status,
             reason=reason,
             evidence_sha=evidence_sha,
-            required_observations=required_observations,
-            advisory_observations=advisory,
-            failing=failing,
-            pending=pending,
-            missing=missing,
+            required_observations=evidence.required,
+            advisory_observations=evidence.advisory,
+            failing=evidence.failing,
+            pending=evidence.pending,
+            missing=evidence.missing,
             stable_polls=stable_polls,
             elapsed=elapsed,
         )
 
-    if failing:
+    if evidence.failing:
         return make("failed", "a required CI producer failed")
-    if pending:
+    if evidence.pending:
         if elapsed >= limits.completion_seconds:
             return make("timed_out", "required CI remained pending")
         return make("pending", "required CI is pending")
-    if missing:
+    if evidence.missing:
         if elapsed >= limits.discovery_seconds:
             return make("missing", "required CI was not reported")
         return make("pending", "waiting for required CI")

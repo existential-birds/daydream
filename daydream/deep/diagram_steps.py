@@ -24,6 +24,7 @@ from daydream.config import (
 from daydream.deep.artifacts import DeepArtifact
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
+from daydream.deep.diagram_prompts import build_diagram_repair_prompt
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
 from daydream.deep.diagram_schema import (
     FLOWCHART_SPEC_SCHEMA,
@@ -34,7 +35,6 @@ from daydream.deep.diagram_schema import (
 from daydream.deep.diagram_trigger import Eligibility, decide_eligibility
 from daydream.deep.diagram_types import DiagramResult, DiagramThresholds
 from daydream.deep.diff import _ttt_diff_text
-from daydream.deep.prompts import build_diagram_repair_prompt
 from daydream.deep.render import insert_diagrams_section
 from daydream.deep.settings import _resolve_config_value
 from daydream.deep.state import DeepState

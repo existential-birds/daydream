@@ -6,6 +6,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -14,14 +15,17 @@ from daydream.backends.codex import CodexBackend
 from daydream.commands.improve import _parse_improve_args
 from daydream.commands.review import _parse_args
 from daydream.config_file import DaydreamFileConfig, load_file_config
-from daydream.deep.adjudication_steps import _unsharded_arbiter_backend
+from daydream.deep.adjudication_steps import _run_arbiter
 from daydream.deep.latency import (
     PROFILE_ROUTES,
+    ArbiterPlan,
     DiffSignals,
+    PlannedGroup,
     diff_signals,
     route_for,
     summarize_risk,
 )
+from daydream.deep.state import DeepState
 from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.run_config import (
@@ -37,6 +41,7 @@ from daydream.run_config import (
 from daydream.runner import _resolve_backend
 from daydream.test_execution import MissingTestCommandError, canonical_test_command
 from daydream.workspace import WorkContext
+from tests.harness.review_result import review_coverage
 
 
 def _routine_signals() -> DiffSignals:
@@ -293,19 +298,26 @@ def test_arbiter_effort_override_is_codex_only(tmp_path: Path) -> None:
     assert getattr(claude.backend_for_effort("arbiter", "xhigh"), "reasoning_effort") is None
     assert getattr(claude.backend_for_effort("arbiter", "medium"), "reasoning_effort") is None
 
-def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(tmp_path: Path) -> None:
-    """The unsharded Codex arbiter keeps its xhigh route pin unless the user overrides it.
+async def test_unsharded_arbiter_call_keeps_todays_xhigh_whatever_the_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Exercise actual unsharded dispatch with a default, explicit and non-Codex effort."""
+    observed: list[Any] = []
 
-    Claude retains its ambient default; the resolved call must match the recorded plan.
-    """
-    codex = _arbiter_flow_context(tmp_path, "codex")
-    codex.config.latency_route = PROFILE_ROUTES["balanced"]
-    pinned = _unsharded_arbiter_backend(codex, effort_pin=None)
-    assert getattr(pinned, "reasoning_effort") == "xhigh"
-    codex.config.reasoning_effort = "low"
-    explicit = _unsharded_arbiter_backend(codex, effort_pin=_explicit_reasoning_effort_pin(codex.config, "arbiter"))
-    assert getattr(explicit, "reasoning_effort") == "low"
+    async def adjudicate(backend: Any, *_args: Any, **_kwargs: Any) -> tuple[dict[int, dict[str, Any]], None]:
+        observed.append(getattr(backend, "reasoning_effort"))
+        return {}, None
 
-    claude = _arbiter_flow_context(tmp_path, "claude")
-    claude.config.latency_route = PROFILE_ROUTES["balanced"]
-    assert getattr(_unsharded_arbiter_backend(claude, effort_pin=None), "reasoning_effort") is None
+    monkeypatch.setattr("daydream.deep.adjudication_steps.phase_arbiter_review", adjudicate)
+    (tmp_path / "intent").write_text("intent")
+    plan = ArbiterPlan(False, (PlannedGroup("arbiter-group-0", (), "xhigh", "test"),), "test")
+    for backend, pin in (("codex", None), ("codex", "low"), ("claude", None)):
+        ctx = _arbiter_flow_context(tmp_path, backend)
+        ctx.config.latency_route = PROFILE_ROUTES["balanced"]
+        ctx.config.reasoning_effort = pin
+        ctx.data.update(dd=tmp_path, diff_path=tmp_path / "diff", intent_path=tmp_path / "intent",
+                        alts_path=tmp_path / "alternatives", exploration_dir=None,
+                        review_coverage=review_coverage())
+        await _run_arbiter(ctx, DeepState(ctx.data), plan, [], [], effort_pin=pin,
+                           targets_by_group={"arbiter-group-0": []})
+    assert observed == ["xhigh", "low", None]

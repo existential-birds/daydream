@@ -9,8 +9,10 @@ similar defects, whereas these UIDs identify particular records/items.
 from __future__ import annotations
 
 from collections import Counter
-from collections.abc import Callable
-from typing import Any
+from collections.abc import Callable, Iterable
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, cast
 
 RECORD_UID_KEY = "uid"
 RECORD_SOURCE_UIDS_KEY = "source_uids"
@@ -143,24 +145,62 @@ def record_issues_or_empty(records: Any) -> list[Any]:
     return record_issues(records) or []
 
 
-def partition_record_sources(
-    adjudicated: list[dict[str, Any]],
-    adjudicated_sources: list[str],
-    structural_ids: set[str],
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[str]]:
-    """Partition aligned records/sources by structural UID, preserving order and objects.
+@dataclass
+class RecordPool:
+    """Current scoped envelopes, ordered records and their authoritative file paths."""
 
-    Mismatched list lengths raise; UIDs outside structural_ids stay in language.
-    """
-    all_records: list[dict[str, Any]] = []
-    record_sources: list[str] = []
-    structural_records: list[dict[str, Any]] = []
-    structural_sources: list[str] = []
-    for rec, src in zip(adjudicated, adjudicated_sources, strict=True):
-        if record_uid(rec) in structural_ids:
-            structural_records.append(rec)
-            structural_sources.append(src)
-        else:
-            all_records.append(rec)
-            record_sources.append(src)
-    return all_records, record_sources, structural_records, structural_sources
+    scopes: dict[str, dict[str, Any]]
+    paths: dict[str, Path]
+
+    @property
+    def language(self) -> list[dict[str, Any]]:
+        return [record for scope, envelope in self.scopes.items() if scope != "structure"
+                for record in envelope["issues"]]
+
+    @property
+    def structural(self) -> list[dict[str, Any]]:
+        return cast(list[dict[str, Any]], self.scopes.get("structure", {}).get("issues", []))
+
+    @property
+    def records(self) -> list[dict[str, Any]]:
+        return self.language + self.structural
+
+    @property
+    def language_paths(self) -> list[Path]:
+        return [path for scope, path in self.paths.items() if scope != "structure"]
+
+    @property
+    def structural_path(self) -> Path | None:
+        return self.paths.get("structure")
+
+    def replace(self, records: Iterable[dict[str, Any]]) -> None:
+        by_scope: dict[str, list[dict[str, Any]]] = {scope: [] for scope in self.scopes}
+        for record in records:
+            scope = stack_name_from_uid(record_uid(record))
+            if scope not in by_scope:
+                raise ValueError(f"Record UID does not identify a loaded review scope: {record_uid(record)!r}")
+            by_scope[scope].append(record)
+        for scope, selected in by_scope.items():
+            self.scopes[scope]["issues"] = selected
+
+    def save(self) -> None:
+        from daydream.json_utils import atomic_write_json
+
+        for scope, envelope in self.scopes.items():
+            atomic_write_json(self.paths[scope], envelope)
+
+    def reload(self, analyzed_revision: dict[str, Any]) -> RecordPool:
+        import json
+
+        from daydream.phases.review import valid_record_artifact
+
+        scopes = {}
+        for scope, path in self.paths.items():
+            envelope = json.loads(path.read_text(encoding="utf-8"))
+            if not valid_record_artifact(envelope, scope_id=scope, analyzed_revision=analyzed_revision):
+                raise ValueError(f"Invalid restored records for scope {scope}")
+            scopes[scope] = envelope
+        restored = RecordPool(scopes, self.paths)
+        if duplicate_record_uids(restored.records):
+            raise ValueError("Restored records contain duplicate UIDs")
+        return restored

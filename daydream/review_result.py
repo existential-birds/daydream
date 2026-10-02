@@ -14,6 +14,7 @@ from typing import Any
 import jsonschema
 
 from daydream.output_schema import strict_object
+from daydream.redaction import redact_text
 from daydream.retry_policy import FailureClass, classify_failure
 
 
@@ -103,7 +104,12 @@ TERMINAL_RESULT_SCHEMA: dict[str, Any] = strict_object({
 
 _COVERAGE_FIELDS = ('schema_version', 'run_id', 'analyzed_revision', 'planned_scopes',
                     'required_phases', 'stack_outcomes', 'phase_outcomes')
-_COVERAGE_SCHEMA = strict_object({key: TERMINAL_RESULT_SCHEMA['properties'][key] for key in _COVERAGE_FIELDS})
+_COVERAGE_SCHEMA = strict_object({
+    **{key: TERMINAL_RESULT_SCHEMA['properties'][key] for key in _COVERAGE_FIELDS},
+    'diagnostics': strict_object({kind: {'type': 'object', 'maxProperties': 10000,
+        'additionalProperties': {'type': 'string', 'minLength': 1, 'maxLength': 1024}}
+        for kind in ('scopes', 'phases')}),
+})
 
 
 @dataclass(frozen=True)
@@ -252,7 +258,15 @@ class ReviewCoverage:
             phase: {'phase': phase, 'status': 'uncovered',
                     'reason_codes': [ReasonCode.COVERAGE_UNKNOWN.value], 'noop': False, 'usable_evidence': False}
             for phase in self.required_phases}
+        self.diagnostics: dict[str, dict[str, str]] = {"scopes": {}, "phases": {}}
         self._terminal: dict[str, Any] | None = None
+        self._frozen_evidence: dict[str, Any] | None = None
+
+    @property
+    def unfinished_scopes(self) -> dict[str, str]:
+        """Render current unfinished scope evidence for downstream review context."""
+        return {key: self.diagnostics['scopes'].get(key, ', '.join(outcome['reason_codes']))
+                for key, outcome in self.scopes.items() if outcome['status'] != 'complete'}
 
     @property
     def is_finalized(self) -> bool:
@@ -272,7 +286,7 @@ class ReviewCoverage:
                                   'noop': False, 'usable_evidence': False}
 
     def _record(self, outcomes: dict[str, dict[str, Any]], key: str, status: str,
-                reasons: Iterable[str], **fields: bool) -> None:
+                reasons: Iterable[str], diagnostic: str | None, **fields: bool) -> None:
         self._mutable()
         if key not in outcomes:
             raise ValueError(f'unknown planned scope or required phase: {key}')
@@ -281,26 +295,34 @@ class ReviewCoverage:
         phase = outcomes is self.phases
         jsonschema.validate(outcome, _PHASE_SCHEMA if phase else _STACK_SCHEMA)
         _validate_outcome(outcome, phase=phase)
+        if diagnostic is not None and not isinstance(diagnostic, str):
+            raise TypeError('review diagnostic must be a string or None')
+        diagnostics = self.diagnostics['phases' if phase else 'scopes']
+        diagnostics.pop(key, None)
+        if status != 'complete' and diagnostic:
+            diagnostics[key] = redact_text(diagnostic)[:1024]
         outcomes[key] = outcome
 
     def record_scope(self, scope_id: str, status: str, *, reasons: Iterable[str] = (),
-                     partial_evidence: bool = False) -> None:
-        self._record(self.scopes, scope_id, status, reasons, partial_evidence=partial_evidence)
+                     partial_evidence: bool = False, diagnostic: str | None = None) -> None:
+        self._record(self.scopes, scope_id, status, reasons, diagnostic, partial_evidence=partial_evidence)
 
     def record_phase(self, phase: str, status: str, *, reasons: Iterable[str] = (), noop: bool = False,
-                     usable_evidence: bool = False) -> None:
-        self._record(self.phases, phase, status, reasons, noop=noop, usable_evidence=usable_evidence)
+                     usable_evidence: bool = False, diagnostic: str | None = None) -> None:
+        self._record(self.phases, phase, status, reasons, diagnostic, noop=noop, usable_evidence=usable_evidence)
 
     def to_dict(self) -> dict[str, Any]:
         """Persist checked evidence, retaining the exact snapshot after finalization."""
         if self._terminal is not None:
-            return copy.deepcopy({name: self._terminal[name] for name in _COVERAGE_FIELDS})
+            assert self._frozen_evidence is not None
+            return copy.deepcopy(self._frozen_evidence)
         return copy.deepcopy({'schema_version': 1, 'run_id': self.run_id,
             'analyzed_revision': self.revision.to_dict(),
             'planned_scopes': sorted((s.to_dict() for s in self.planned_scopes), key=lambda s: s['scope_id']),
             'required_phases': sorted(self.required_phases),
             'stack_outcomes': [self.scopes[key] for key in sorted(self.scopes)],
-            'phase_outcomes': [self.phases[key] for key in sorted(self.phases)]})
+            'phase_outcomes': [self.phases[key] for key in sorted(self.phases)],
+            'diagnostics': self.diagnostics})
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> ReviewCoverage:
@@ -316,11 +338,18 @@ class ReviewCoverage:
                 data['required_phases'])
         c.scopes = {s['scope_id']: copy.deepcopy(s) for s in data['stack_outcomes']}
         c.phases = {p['phase']: copy.deepcopy(p) for p in data['phase_outcomes']}
+        c.diagnostics = copy.deepcopy(data['diagnostics'])
+        for kind, outcomes in [('scopes', c.scopes), ('phases', c.phases)]:
+            for key, diagnostic in c.diagnostics[kind].items():
+                if (key not in outcomes or outcomes[key]['status'] == 'complete'
+                        or redact_text(diagnostic) != diagnostic):
+                    raise ValueError('diagnostics require unfinished known outcomes and redacted text')
         # Validate the supplied inventory order too, before canonical serialization.
         validate_terminal_result(c._snapshot(dict(data), 'completed', True))
         return c
 
     def _snapshot(self, data: dict[str, Any], pipeline_state: str, projection_valid: bool) -> dict[str, Any]:
+        data.pop('diagnostics', None)
         result = {**data, 'pipeline_state': pipeline_state, 'projection_valid': projection_valid,
                   'completed_stacks': sorted(k for k, o in self.scopes.items() if o['status'] == 'complete'),
                   'failed_stacks': sorted(k for k, o in self.scopes.items() if o['status'] == 'failed'),
@@ -334,5 +363,6 @@ class ReviewCoverage:
             raise ValueError('review coverage is already frozen')
         result = self._snapshot(self.to_dict(), pipeline_state, projection_valid)
         validate_terminal_result(result)
+        self._frozen_evidence = self.to_dict()
         self._terminal = copy.deepcopy(result)
         return copy.deepcopy(result)

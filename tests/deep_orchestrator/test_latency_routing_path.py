@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import anyio
 import pytest
 
+from daydream.backends import AgentEvent, ResultEvent
 from daydream.deep.routing_record import read_routing_record, write_routing_record
 from daydream.eval.analyzer import analyze_routing
 from daydream.review_profile import ResolvedProfile
@@ -274,3 +276,55 @@ async def test_failed_group_fails_open_and_is_retried_on_resume(
     retried = read_routing_record(deep)["arbiter"]
     assert retried["failed_groups"] == []
     assert (deep / "adjudication-complete.marker").exists()
+
+
+async def test_resume_retains_confirmed_demoted_findings_without_second_suppression(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    silence(monkeypatch)
+    stub = install_stub_backend(monkeypatch, multi_stack_target)
+    stub.parse_severity, stub.merge_echo_records, stub.suppression_keep = 'high', True, False
+    execute = stub.execute
+
+    async def demote(cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
+        async for event in execute(cwd, prompt, *args, **kwargs):
+            if 'you are the arbiter' in prompt.lower() and isinstance(event, ResultEvent):
+                assert isinstance(event.structured_output, dict)
+                payload = {'findings': [{**row, 'severity': 'low', 'confidence': 'HIGH'}
+                                       for row in event.structured_output['findings']]}
+                event = replace(event, structured_output=payload)
+            yield event
+
+    monkeypatch.setattr(stub, 'execute', demote)
+    mute_side_effects()
+    config = make_config(multi_stack_target, latency_profile='balanced', precision_mode=True,
+                         review_profile=independent_alternatives_profile())
+    assert await run(config) == 0
+    deep = multi_stack_target / '.daydream/deep'
+    first = _merged_items(deep)
+    demoted = [row for row in first if row['description'].startswith('ARBITRATED:')]
+    assert demoted and all(row['severity'] == 'low' for row in demoted)
+    stub.calls.clear()
+    assert await run(replace(config, start_at='merge')) == 0
+    assert not any('you are the arbiter' in call['prompt'].lower() or
+                   'you are the suppression reviewer' in call['prompt'].lower() for call in stub.calls)
+    assert _merged_items(deep) == first
+
+
+async def test_no_target_completion_reruns_when_selection_policy_changes(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+) -> None:
+    base = independent_alternatives_profile()
+    pipeline = replace(base.profile.pipeline, arbitration=replace(
+        base.profile.pipeline.arbitration, min_severity='high', contested_location=False))
+    profile = replace(base, profile=replace(base.profile, pipeline=pipeline))
+    stub, deep = await _run_profile(monkeypatch, make_config, mute_side_effects, multi_stack_target,
+        latency_profile='balanced', review_profile=profile, parse_severity='medium')
+    assert not any('you are the arbiter' in call['prompt'].lower() for call in stub.calls)
+    assert json.loads((deep / 'adjudication-complete.marker').read_text())['plan'] is None
+    changed = replace(profile, profile=replace(profile.profile, pipeline=replace(
+        pipeline, arbitration=replace(pipeline.arbitration, min_severity='medium'))))
+    stub.calls.clear()
+    assert await run(make_config(multi_stack_target, start_at='merge', latency_profile='balanced',
+                                 review_profile=changed)) == 0
+    assert any('you are the arbiter' in call['prompt'].lower() for call in stub.calls)

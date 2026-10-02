@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 from jsonschema import ValidationError
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
+from daydream.diagnostics import exception_text
 from daydream.json_utils import atomic_write_json
 
 if TYPE_CHECKING:
@@ -42,7 +43,6 @@ class DeepArtifact(StrEnum):
     # Canonical merged JSON drives fixes and posting; markdown is a derived view.
     MERGED_REPORT = "review-output.md"
     MERGED_ITEMS = "merged-items.json"
-    PER_STACK_FAILURES = "per-stack-failures.json"
     # Resume evidence binds positive scope coverage to the analyzed revision.
     REVIEW_COVERAGE = "review-coverage.json"
     FIX_FAILURES = "fix-failures.json"
@@ -72,7 +72,6 @@ class DeepArtifact(StrEnum):
 
 
 # Reserved entry; resume loaders must not interpret it as a stack name.
-MERGE_FAILURE_KEY = "__merge__"
 
 _DEEP_STAGE_PREREQS: dict[str, list[DeepArtifact]] = {
     "ttt": [],
@@ -158,7 +157,8 @@ def review_stage(state: DeepState, phase: str | Callable[[], str], *, persist: b
         yield
     except Exception as exc:
         coverage.record_phase(phase if isinstance(phase, str) else phase(), "failed",
-                              reasons=(*reasons, reason_for_exception(exc)))
+                              reasons=(*reasons, reason_for_exception(exc)),
+                              diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
         if persist:
             persist_review_coverage(state.dd, coverage, error=exc)
         raise
@@ -261,17 +261,3 @@ def check_deep_artifacts(
                 f"Resuming would review stale findings against changed code.\n"
                 f"Re-run without --start-at to regenerate them."
             )
-
-
-def _load_failures(path: Path) -> dict[str, Any]:
-    """Load failures verbatim, including the reserved merge entry.
-
-    Missing files, malformed JSON and non-dict roots yield {}; other I/O errors propagate.
-    """
-    if not path.is_file():
-        return {}
-    try:
-        loaded = json.loads(path.read_text())
-    except json.JSONDecodeError:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}

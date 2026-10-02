@@ -551,11 +551,10 @@ class CodexBackend:
         last_agent_text: str | None = None
         structured_result: Any = None
 
-        # Pair idless starts/completions by FIFO, then raw content; misses get
+        # Pair idless starts/completions by FIFO; misses get
         # observable orphan ids. Accumulate item.updated text because completion
         # may contain no text. See _claim_tool_id for the correlation contract.
         pending_fifo: dict[str, list[str]] = {}  # item_type → [ids] in start order
-        pending_item_ids: dict[str, str] = {}  # "type:content" → generated id (legacy)
         updated_text: dict[str, list[str]] = {}  # item_id → [text deltas]
         parse_warnings: Counter[str] = Counter()  # persisted bounded reasons
         unknown_event_types: Counter[str] = Counter()
@@ -622,8 +621,8 @@ class CodexBackend:
                     changed.append(event)
             return changed
 
-        def _claim_tool_id(item_type: str, content_key: str) -> str:
-            """Correlate no-id completions by FIFO, then the legacy raw-content key.
+        def _claim_tool_id(item_type: str) -> str:
+            """Correlate no-id completions with unconsumed starts in FIFO order.
 
             On a miss, warn and assign a deterministic orphan id for unmatched_tool_results;
             a dangling source_call_id would fail trajectory validation.
@@ -631,8 +630,6 @@ class CodexBackend:
             nonlocal unmatched_seq
             fifo = pending_fifo.get(item_type, [])
             item_id = fifo.pop(0) if fifo else None
-            if item_id is None:
-                item_id = pending_item_ids.pop(content_key, None)
             if item_id is None:
                 _warn("unmatched_tool_result")
                 item_id = f"codex-unmatched-{unmatched_seq}"
@@ -817,9 +814,7 @@ class CodexBackend:
                         item_id = item.get("id")
                         if not item_id:
                             item_id = str(uuid.uuid4())
-                            content_field = "command" if item_type == "command_execution" else "tool"
                             pending_fifo.setdefault(item_type, []).append(item_id)
-                            pending_item_ids[f"{item_type}:{item.get(content_field, '')}"] = item_id
                     if item_type == "command_execution":
                         raw_cmd = item.get("command", "")
                         if not isinstance(raw_cmd, str):
@@ -877,8 +872,7 @@ class CodexBackend:
                     if item_type in ("command_execution", "mcp_tool_call"):
                         item_id = item.get("id")
                         if not item_id:
-                            content_field = "command" if item_type == "command_execution" else "tool"
-                            item_id = _claim_tool_id(item_type, f"{item_type}:{item.get(content_field, '')}")
+                            item_id = _claim_tool_id(item_type)
                             for diagnostic in _take_early_diagnostics():
                                 yield diagnostic
 

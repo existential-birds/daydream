@@ -26,6 +26,7 @@ from tests.deep_orchestrator.support import (
     _root_phase_events,
 )
 from tests.harness.git_helpers import commit as _commit, git as _git, init_repo as _init_repo
+from tests.harness.review_result import saved_coverage
 from tests.test_deep_orchestrator import (
     MakeConfig,
     Mute,
@@ -167,8 +168,8 @@ async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     deep = multi_stack_target / ".daydream" / "deep"
     salvage = json.loads((deep / "merged-items.json").read_text(encoding="utf-8"))
     assert isinstance(salvage.get("items"), list)
-    failures = json.loads((deep / "per-stack-failures.json").read_text(encoding="utf-8"))
-    assert isinstance(failures.get("__merge__"), dict)
+    failures = saved_coverage(deep).phases
+    assert failures["merge"]["status"] == "failed"
 
     trajectory = next((multi_stack_target / ".daydream" / "runs").glob("*/trajectory.json"))
     manifest = json.loads((archive_dir / "runs" / trajectory.parent.name / "manifest.json").read_text())
@@ -418,8 +419,8 @@ async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path,
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == (1 if confidence == "LOW" else 0)
     if confidence == "LOW":
-        failures = json.loads((multi_stack_target / ".daydream/deep/per-stack-failures.json").read_text())
-        assert "__merge__" in failures
+        coverage = saved_coverage(multi_stack_target / ".daydream/deep")
+        assert coverage.phases["merge"]["status"] == "failed"
         return
 
     deep = multi_stack_target / ".daydream" / "deep"

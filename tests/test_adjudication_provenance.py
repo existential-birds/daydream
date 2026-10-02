@@ -57,8 +57,8 @@ def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None
     verdicts: dict[int, dict[str, Any]] = {1: {"arb_id": 1, "keep": True, "severity": "low"},
         2: {"arb_id": 99, "keep": True},  # echoed id mismatch -> unconfirmed
     }
-    _kept, _sources, outcomes = _apply_adjudication_verdicts(
-        records, ["stack-python-records.json"] * 3, [0, 1, 2], verdicts, pass_name="arbiter", id_field="arb_id",
+    _kept, outcomes = _apply_adjudication_verdicts(
+        records, [0, 1, 2], verdicts, pass_name="arbiter", id_field="arb_id",
         fail_closed=False,
     )
 

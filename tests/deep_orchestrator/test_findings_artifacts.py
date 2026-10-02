@@ -115,87 +115,43 @@ async def test_cleanup_keeps_report_on_findings_out_run(
         "was asked to emit the report, so cleanup must not delete it"
     )
 
-async def test_test_verdict_artifact_written_on_passing_suite(
+@pytest.mark.parametrize("passed,ignored,exit_code,retries", [
+    pytest.param(True, False, 0, 0, id="passing-suite"),
+    pytest.param(False, False, 1, 1, id="permanently-red-bounded-retry"),
+    pytest.param(False, True, 0, 0, id="operator-ignore-records-failure"),
+])
+async def test_test_verdict_persists_actual_suite_outcome_and_operator_override(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    passed: bool, ignored: bool, exit_code: int, retries: int,
 ) -> None:
-
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.release", lambda: "25.1.0")
-    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.machine", lambda: "arm64")
-    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.python_implementation", lambda: "CPython")
-    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.python_version", lambda: "3.13.7")
-    _install_stub_backend(monkeypatch, tiny_diff_target)
-    mute_side_effects(heal=False)
-
-    rc = await run(make_config(tiny_diff_target, assume="yes", non_interactive=False))
-    assert rc == 0
-
-    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
-    assert verdict_file.is_file(), "passing run did not write test-verdict.json"
-    verdict = json.loads(verdict_file.read_text())
-    assert verdict["passed"] is True, verdict
-    assert verdict["retries"] == 0, "a green suite must not have consumed a heal retry"
-    assert verdict["local_host"] == {
-        "system": "Darwin", "release": "25.1.0", "machine": "arm64", "python_implementation": "CPython",
-        "python_version": "3.13.7",
-    }
-    assert "Linux" not in json.dumps(verdict)
-    assert "coverage" not in json.dumps(verdict).lower()
-
-async def test_test_verdict_artifact_written_on_failing_suite(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    stub.fail_all_test_runs = True  # suite never goes green, even after the heal fix
-    mute_side_effects(heal=False)
-
-    rc = await run(make_config(tiny_diff_target, assume="yes", non_interactive=False))
-    assert rc == 1, "a permanently-red suite must fail the run"
-
-    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
-    assert verdict_file.is_file(), "failing run lost test-verdict.json to the early-return"
-    verdict = json.loads(verdict_file.read_text())
-    assert verdict["passed"] is False, verdict
-    assert verdict["retries"] == 1, "--yes grants exactly one bounded auto fix-and-retry"
-
-async def test_test_verdict_records_failure_when_operator_ignores_it(
-    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite."""
-
     _silence(monkeypatch, prompts=False)
     _force_interactive(monkeypatch)
-
-    # The single gateway accepts intent and chooses ignore in the heal menu.
-    def _prompt(_console: Any, message: str, _default: str = "") -> str:
-        return "3" if "Choice" in message else "y"
-
-    monkeypatch.setattr("daydream.run_context._prompt_user", _prompt)
-
+    monkeypatch.setattr("daydream.run_context._prompt_user",
+                        lambda _console, message, *args, **kwargs: "3" if ignored and "Choice" in message else "y")
+    host = {"system": "Darwin", "release": "25.1.0", "machine": "arm64",
+            "python_implementation": "CPython", "python_version": "3.13.7"}
+    for name, value in host.items():
+        monkeypatch.setattr(f"daydream.remote_ci.artifacts.platform.{name}", lambda value=value: value)
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-    _add_bare_remote(tiny_diff_target)
-    stub.fail_all_test_runs = True
-
-    mute_side_effects(heal=False, commit=False)
-
+    stub.fail_all_test_runs = not passed
+    if ignored:
+        _add_bare_remote(tiny_diff_target)
+    mute_side_effects(heal=False, commit=not ignored)
     head_before = _git(tiny_diff_target, "rev-parse", "HEAD")
-    rc = await run(make_config(tiny_diff_target, non_interactive=False))
-    assert rc == 0, "choice '3' must continue the run, not abort it"
+    config = make_config(tiny_diff_target, assume=None if ignored else "yes", non_interactive=False)
+    assert await run(config) == exit_code
+    path = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
+    assert path.is_file(), "suite verdict must survive both successful completion and an early failure return"
+    verdict = json.loads(path.read_text())
+    assert verdict["passed"] is passed and verdict["retries"] == retries and verdict["ignored"] is ignored
+    assert verdict["local_host"] == host
+    assert "Linux" not in json.dumps(verdict) and "coverage" not in json.dumps(verdict).lower()
+    if ignored:
+        assert _git(tiny_diff_target, "rev-parse", "HEAD") == head_before
+        assert not (tiny_diff_target / ".fixed-api_py").exists()
+        assert stub.test_suite_calls == 1
 
-    verdict_file = tiny_diff_target / ".daydream" / "deep" / "test-verdict.json"
-    verdict = json.loads(verdict_file.read_text())
-    assert verdict["passed"] is False, f"an ignored failure was persisted as a green suite: {verdict}"
-    assert verdict["ignored"] is True, f"the operator override was not recorded: {verdict}"
-    assert _git(tiny_diff_target, "rev-parse", "HEAD") == head_before
-    assert not (tiny_diff_target / ".fixed-api_py").exists()
-    assert stub.test_suite_calls == 1, f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
+
 
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
@@ -209,136 +165,57 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
         assert "do NOT re-Read" in prompt, f"{name} prompt kept the read instruction"
     assert "Read the diff file at" not in intent_prompt
 
-async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("big_name,extra_lines,small_file,alternatives,oversize", [
+    pytest.param("0big.py", 0, None, True, True, id="leading-oversize-block-retained"),
+    pytest.param("zzz.py", 0, "aaa.py", True, False, id="trailing-block-dropped"),
+    pytest.param("big.py", 50, None, False, False, id="bounded-memory-full-disk"),
+])
+async def test_over_budget_diff_preserves_full_disk_evidence_and_uses_safe_prompt_transport(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, big_name: str, extra_lines: int,
+    small_file: str | None, alternatives: bool, oversize: bool,
 ) -> None:
-
-    # Push the diff over the byte budget with a large committed file.
-    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
-    (multi_stack_target / "0big.py").write_text(big + "\n")
-    _git(multi_stack_target, "add", "0big.py")
-    _git(multi_stack_target, "commit", "-m", "add big file")
-
+    """Whole-block bounding never lets a prompt silently inline only part of its required files."""
+    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10 + extra_lines))
+    (multi_stack_target / big_name).write_text(big + "\n")
+    files = [big_name]
+    if small_file is not None:
+        (multi_stack_target / small_file).write_text("SMALL_RETAINED_MARKER = 1\n")
+        files.append(small_file)
+    _git(multi_stack_target, "add", *files)
+    _git(multi_stack_target, "commit", "-m", "add over-budget diff")
     bounded_results: list[str] = []
-    _spy_bound_deep_diff(monkeypatch, bounded_results)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile()) == 0
-
-    # The pointer fallback only discriminates when 0big.py's block really sorts
-    # FIRST in git's byte-ordered diff AND the bound keeps it whole (leading
-    # oversize rule): verify both, so the "not inlined" assertions below cannot
-    # pass via an inline of small retained blocks instead of the pointer.
-    patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
-    assert patch.startswith("diff --git a/0big.py b/0big.py"), (
-        "0big.py must be the FIRST block in git's byte-ordered diff, "
-        f"got {patch.splitlines()[0] if patch else '<empty patch>'!r}"
-    )
-    assert len(bounded_results) == 1, "gather must bound the diff exactly once"
-    assert "line 500 of filler content" in bounded_results[0], "the bound must keep 0big.py's oversize block whole"
-    assert len(bounded_results[0].encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES, (
-        "the bounded diff must stay over the inline budget so the pointer fallback is exercised"
-    )
-
-    intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
-    wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
-
-    assert "Read the diff file at" in intent_prompt
-    # The wonder pointer clause is "in the diff at {diff_path}"; the inline
-    # clause ("do NOT re-Read {diff_path}") embeds the path too, so the bare
-    # "diff.patch" substring is not discriminating.
-    assert "in the diff at " in wonder_prompt
-    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
-        assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
-
-async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A multi-file over-budget diff whose trailing block is dropped keeps the diff.patch pointer in the
-    intent/wonder prompts."""
-
-    # aaa.py sorts FIRST in the byte-ordered git diff and its block is
-    # retained; zzz.py's block alone exceeds the budget and arrives after a
-    # retained block, so it is dropped whole.
-    (multi_stack_target / "aaa.py").write_text("SMALL_RETAINED_MARKER = 1\n")
-    big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
-    (multi_stack_target / "zzz.py").write_text(big + "\n")
-    _git(multi_stack_target, "add", "aaa.py", "zzz.py")
-    _git(multi_stack_target, "commit", "-m", "add small and big files")
-
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile()) == 0
-
-    intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
-    wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
-
-    assert "Read the diff file at" in intent_prompt
-    assert "diff.patch" in wonder_prompt
-    for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
-        assert "SMALL_RETAINED_MARKER" not in prompt, f"{name} inlined the bounded diff"
-        assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
-
-    # The python stack owns aaa.py (retained by the bound) AND zzz.py (dropped
-    # whole by the bound): the truncation marker names zzz.py as dropped, so
-    # ``_diff_blocks_for_files`` refuses a partial inline and the python
-    # per-stack prompt falls back to the diff.patch pointer instead of silently
-    # inlining aaa.py's hunk with zzz.py's hunks unreachable. The react stack
-    # (App.tsx only, fully retained) keeps its inline.
-    python_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
-    assert "Read it directly" in python_prompt, (
-        "a stack mixing retained and dropped blocks must fall back to the full diff.patch pointer"
-    )
-    assert "SMALL_RETAINED_MARKER" not in python_prompt, (
-        "must not inline the retained block while the dropped block is missing"
-    )
-    react_prompt = _matching_prompt(stub.calls, "you are reviewing the react stack")
-    assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
-
-async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
-
-    big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
-    (multi_stack_target / "big.py").write_text(big + "\n")
-    _git(multi_stack_target, "add", "big.py")
-    _git(multi_stack_target, "commit", "-m", "add big file")
-
     called_with: list[str] = []
-    bounded_results: list[str] = []
     _spy_bound_deep_diff(monkeypatch, bounded_results, called_with)
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    assert await _run_deep(multi_stack_target) == 0
-
-    # (a) the helper was invoked at gather with the full diff (gather wiring).
-    assert len(called_with) == 1 and called_with[0] == (multi_stack_target / ".daydream" / "diff.patch").read_text()
-    # (b) diff.patch on disk is FULL: the big committed file's content survives.
+    profile = independent_alternatives_profile() if alternatives else None
+    assert await _run_deep(multi_stack_target, review_profile=profile) == 0
     patch = (multi_stack_target / ".daydream" / "diff.patch").read_text()
-    assert "line 50 of filler content" in patch  # a line far into big.py is present
-    # (c) the helper's BOUNDED result -- not the full diff -- reaches
-    # ctx.data['diff'] and the prompt pipeline. The TTT (intent/wonder) phases
-    # deliberately re-read the FULL on-disk diff when truncation happened
-    # (``_ttt_diff_text``), so the per-stack reviewer is the bounded value's
-    # prompt consumer: big.py's block sorts LAST in git's byte-ordered diff,
-    # so the bound drops it. The python stack owns api.py AND big.py, so its
-    # wanted files span retained and dropped blocks: ``_diff_blocks_for_files``
-    # reads the truncation marker's dropped names, refuses the partial inline,
-    # and the python per-stack prompt carries the diff_path pointer instead of
-    # api.py's hunk alone. A gather bug that invokes the helper and discards
-    # the result (storing the full diff) would carry no marker and no dropped
-    # names -- the mixing guard could not fire.
-    assert len(bounded_results) == 1
-    assert "# daydream: deep diff truncated:" in bounded_results[0]
-    assert "line 50 of filler content" not in bounded_results[0]
-    per_stack_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
-    assert "Read it directly" in per_stack_prompt, (
-        "the python stack mixes retained (api.py) and dropped (big.py) blocks; "
-        "it must fall back to the full diff.patch pointer, never inline a "
-        "silent partial subset"
-    )
-    assert "diff --git" not in per_stack_prompt
-    assert "line 50 of filler content" not in per_stack_prompt
-    react_prompt = _matching_prompt(stub.calls, "you are reviewing the react stack")
-    assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
+    assert called_with == [patch] and len(bounded_results) == 1
+    bounded = bounded_results[0]
+    assert "line 50 of filler content" in patch
+    assert ("line 50 of filler content" in bounded) is oversize
+    assert ("line 500 of filler content" in bounded) is oversize
+    assert (len(bounded.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES) is oversize
+    if oversize:
+        assert patch.startswith("diff --git a/0big.py b/0big.py")
+    else:
+        assert "# daydream: deep diff truncated:" in bounded
+    if alternatives:
+        intent = _matching_prompt(stub.calls, "understand the intent of these changes")
+        wonder = _matching_prompt(stub.calls, "evaluate the implementation")
+        assert "Read the diff file at" in intent and "in the diff at " in wonder and "diff.patch" in wonder
+        for prompt in (intent, wonder):
+            assert "line 500 of filler content" not in prompt and "SMALL_RETAINED_MARKER" not in prompt
+    python_prompt = _matching_prompt(stub.calls, "you are reviewing the python stack")
+    assert "Read it directly" in python_prompt
+    assert "diff --git" not in python_prompt and "line 50 of filler content" not in python_prompt
+    assert "SMALL_RETAINED_MARKER" not in python_prompt
+    if not oversize:
+        # React's complete retained block remains inline while Python spans dropped evidence.
+        assert "diff --git" in _matching_prompt(stub.calls, "you are reviewing the react stack")
+
+
 
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

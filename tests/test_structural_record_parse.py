@@ -37,8 +37,8 @@ async def test_parse_preserves_structural_partition_on_resume(
     )
     assert await _step_per_stack_parse(ctx) is None
     assert json.loads(path.read_text()) == structural
-    assert ctx.data["structural_records"] == issues
-    assert ctx.data["records"] == []
+    assert ctx.data["record_pool"].structural == issues
+    assert ctx.data["record_pool"].language == []
 
 @pytest.mark.parametrize("start_at", [None, "per-stack"])
 async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
@@ -81,3 +81,13 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     assert json.loads(artifacts[0].read_text())["issues"] == []
     assert artifacts[1].read_text().startswith("# Review")
     assert ctx.data["failed_stacks"] == {}
+
+
+@pytest.mark.parametrize('ordinal', ['²', '١', '01', '0', '-1'])
+def test_record_artifact_rejects_noncanonical_ordinals(ordinal: str) -> None:
+    from daydream.phases.review import valid_record_artifact
+    from tests.harness.review_result import records_artifact, review_coverage
+
+    coverage = review_coverage()
+    artifact = records_artifact(coverage, 'python', [{'uid': f'python:{ordinal}'}])
+    assert not valid_record_artifact(artifact, scope_id='python', analyzed_revision=coverage.revision.to_dict())

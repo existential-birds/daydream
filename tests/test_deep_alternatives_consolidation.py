@@ -61,8 +61,9 @@ async def test_folded_structural_budget_failure_remains_incomplete(
                           failures={"structure": "budget exhausted: wall_budget_exceeded"})
     await _step_wonder_and_per_stack(ctx)
     assert not calls["alternatives"]
-    assert DeepArtifact.PER_STACK_FAILURES.at(ctx.data["dd"]).exists()
-    assert review_warnings(ctx.data["dd"]) == ("structure: budget exhausted: wall_budget_exceeded",)
+    assert DeepArtifact.REVIEW_COVERAGE.at(ctx.data["dd"]).exists()
+    assert review_warnings(ctx.data["dd"]) == ("alternatives: evidence_incomplete",
+                                              "structure: budget exhausted: wall_budget_exceeded")
 
 def _context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
     *, start_at: str = "review", custom_structure: bool = False,
@@ -92,8 +93,11 @@ def _context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, 
               "dd": dd, "stacks": stacks, "tier": "single", "single_stack_mode": False,
               "intent_summary": "Preserve behavior", "intent_path": dd / "intent.md",
               "alts_path": dd / "alternatives.json", "diff_path": diff_path,
-              "diff": diff_path.read_text(), "exploration_dir": None, "failed_stacks": {}},
+              "diff": diff_path.read_text(), "exploration_dir": None},
     )
+    coverage = ctx.data["review_coverage"]
+    for phase in ("intent", "merge"):
+        coverage.record_phase(phase, "complete")
     calls: dict[str, list[Any]] = {"alternatives": [], "reviews": []}
 
     async def alternative(*args: Any, **kwargs: Any) -> list[Any]:
@@ -102,7 +106,11 @@ def _context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, 
 
     async def reviews(*args: Any, **kwargs: Any) -> tuple[dict[str, Any], dict[str, str]]:
         calls["reviews"].append(kwargs)
-        return {}, failures or {}
+        for stack in stacks:
+            diagnostic = (failures or {}).get(stack.stack_name)
+            coverage.record_scope(stack.stack_name, "incomplete" if diagnostic else "complete",
+                reasons=("host_wall_budget_exhaustion",) if diagnostic else (), diagnostic=diagnostic)
+        return {}, coverage.unfinished_scopes
 
     monkeypatch.setattr(ctx, "backend_for", lambda _: None)
     monkeypatch.setattr("daydream.deep.review_steps.phase_alternative_review", alternative)
