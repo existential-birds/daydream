@@ -1,9 +1,7 @@
-"""Real separate-process/environment isolation test for the judge verifier.
+"""Run the packaged judge in an isolated subprocess against a loopback server.
 
-Runs the actual templates/tests/score_review.py entrypoint in a subprocess with
-a whitelisted env + a local loopback judge server, and proves the verifier
-cannot see host credentials, source, reviewer config, or agent outputs beyond
-the candidate artifact.
+Only the candidate artifact crosses from the host; credentials, source,
+reviewer configuration, and other agent outputs must remain private.
 """
 import hashlib
 import json
@@ -64,7 +62,6 @@ def _write_verifier_metadata(verifier_dir: Path) -> None:
 
 
 def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # host workspace carries credentials + source + reviewer config + agent outputs
     for name, val in _SENTINELS.items():
         monkeypatch.setenv(name, val)
     secret_file = tmp_path / "secrets" / "reviewer.toml"
@@ -78,17 +75,12 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
     agent_file.write_text('{"output": "AGENT_OUTPUT_SENTINEL_6b3a"}\n')
     pre = {p: p.read_bytes() for p in (secret_file, source_file, agent_file)}
 
-    # isolate the verifier in its own env dir
     verifier_dir = tmp_path / "verifier"
     verifier_dir.mkdir()
-    # the same template asset bundle asserted by test_generated_asset_tree_is_self_contained
     for rel in ("score_review.py", "judge_prompt.md", "golden-review.json"):
         (verifier_dir / rel).write_bytes((_TEMPLATES_TESTS / rel).read_bytes())
-    # verifier_core.py comes from the canonical host module (issue #1004)
+    # Deploy the canonical host module alongside the template assets.
     (verifier_dir / "verifier_core.py").write_bytes((_TEMPLATES_TESTS.parents[1] / "verifier_core.py").read_bytes())
-    # task-binding metadata: run_verifier binds the candidate to the immutable
-    # verifier-metadata.json beside the gold (case id + base/head refs + digest)
-    # case id tied to the shipped fixture via test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1
     _write_verifier_metadata(verifier_dir)
     artifact_path = tmp_path / "artifacts" / "review.json"
     artifact_path.parent.mkdir()
@@ -126,17 +118,13 @@ def test_entrypoint_in_isolation_cannot_see_secrets_or_source(tmp_path: Path, mo
         assert p.read_bytes() == digest             # host files untouched (no writes outside out_dir)
 
 def test_verifier_asset_set_never_includes_task_md() -> None:
-    """The verifier image/asset set is fixed and must not read Task.md (R12/R13 constraint)."""
-    # The fixed verifier asset set is exactly what templates/tests/Dockerfile COPYs:
-    # score_review.py verifier_core.py judge_prompt.md golden-review.json test.sh
     dockerfile = _TEMPLATES_TESTS / "Dockerfile"
     df = dockerfile.read_text()
     for forbidden in ("Task.md", "task_spec"):
         assert forbidden not in df, f"verifier Dockerfile must not reference {forbidden}"
     for rel in ("score_review.py", "judge_prompt.md", "golden-review.json", "test.sh"):
         assert (_TEMPLATES_TESTS / rel).exists()
-    # verifier_core.py is no longer a template twin: the build deploys the
-    # canonical host module directly (issue #1004).
+    # The build deploys the host module directly.
     assert not (_TEMPLATES_TESTS / "verifier_core.py").exists()
     assert (_TEMPLATES_TESTS.parents[1] / "verifier_core.py").exists()
 

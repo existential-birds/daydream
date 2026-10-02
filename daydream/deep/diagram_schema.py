@@ -1,36 +1,14 @@
-"""Output schemas and coercion for the grounded-diagram specs (issue #1113).
+"""Strict diagram schemas and tolerant per-entry coercion.
 
-The model never writes mermaid. For each eligible kind it returns a structured
-spec whose every element carries ``file``/``line`` (and where relevant
-``symbol``) evidence; the deterministic grounding pass verifies that evidence
-against the head tree and the renderer emits mermaid from what survived. These
-two schemas are the contract for that spec, and the two ``coerce_*`` functions
-are the tolerant front door in front of them.
+Models return evidence-bearing specs; deterministic grounding and rendering own
+mermaid output. Every object requires all its properties and rejects extras;
+optional values are required-and-nullable. Sub-schemas stay private so strict
+schema discovery only treats complete specs as roots.
 
-**Strict-mode encoding.** Both schemas are handed to backends as
-``output_schema=``, so they must satisfy OpenAI strict structured outputs (see
-``tests/test_output_schema_strict.py``, which discovers every public
-module-level ``*_SCHEMA`` here): ``"type": "object"`` at the root, every
-property key repeated in ``required``, and ``additionalProperties: false`` at
-*every* object node including array ``items``. Optional-in-spirit fields are
-therefore required-and-nullable (``{"type": ["string", "null"]}``), and the
-shared sub-schemas are underscore-named so the discovery pass does not scan
-them as roots of their own -- which is also why the repository-path schema is
-imported under an underscore alias.
-
-Deliberately *no* ``maxLength`` on labels. The spec's "<= 80 chars" message and
-"<= 60 chars" node budgets are prompt guidance enforced by the renderer's
-sanitizer, not schema constraints: strict mode does not constrain generation by
-``maxLength``, so declaring it would only give ``jsonschema.validate`` a reason
-to reject an otherwise well-grounded ``spec_final`` one CI job later.
-
-Coercion is per-entry tolerant, in the style of
-``exploration_runner._coerce_file_infos``: a malformed participant, message,
-block, branch, node or edge is dropped on its own rather than failing the
-whole spec, and a non-dict payload degrades to the empty spec. Dropping a
-message renumbers the collection, so block branch indices are remapped onto
-the surviving positions -- a coerced spec always keeps the "branch message
-indices are 0-based indices into ``messages``" invariant.
+Label length limits belong to renderer sanitization, not maxLength constraints.
+Coercion drops malformed entries individually and remaps branch message indices
+after drops. Non-object inputs produce empty specs; the empty flowchart's None
+root intentionally fails the schema and cannot ground as a real function.
 """
 
 from __future__ import annotations
@@ -148,15 +126,7 @@ def _empty_sequence_spec() -> dict[str, Any]:
 
 
 def _empty_flowchart_spec() -> dict[str, Any]:
-    """Return a fresh empty flowchart spec.
-
-    ``root`` is ``None`` because there is no such thing as an empty root, which
-    means this one sentinel deliberately does *not* validate against
-    :data:`FLOWCHART_SPEC_SCHEMA` (whose ``root`` is a required object). That is
-    the point: the diagram step branches on the empty spec to mean "the model
-    returned nothing usable", and a ``None`` root cannot be mistaken for a real
-    one by the grounding pass either.
-    """
+    """Return the unusable-spec sentinel; its None root intentionally fails the schema."""
     return {"root": None, "nodes": [], "edges": []}
 
 
@@ -175,12 +145,7 @@ def _choice(value: Any, allowed: tuple[str, ...]) -> str | None:
 
 
 def _index(value: Any, *, minimum: int) -> int | None:
-    """Return ``value`` as an int ``>= minimum``, else None.
-
-    Accepts a digit string as well as an ``int`` (a model that quotes a line
-    number should not lose an otherwise well-evidenced element). ``bool`` is
-    rejected explicitly -- it is an ``int`` subclass and ``True`` is not a line.
-    """
+    """Accept integers or digit strings at least minimum; reject booleans and other values."""
     if isinstance(value, bool):
         return None
     if isinstance(value, int):
@@ -193,13 +158,7 @@ def _index(value: Any, *, minimum: int) -> int | None:
 
 
 def _path(value: Any) -> str | None:
-    """Return ``value`` as a lexically valid repository-relative path, else None.
-
-    The same gate the other output schemas use, applied here so a coerced spec
-    can never carry a path that would later fail the schema's ``pattern`` --
-    ``spec_final`` is re-validated with ``jsonschema`` in the privileged
-    findings-posting job, one CI job away from where it was produced.
-    """
+    """Apply the shared lexical repository-path gate used by privileged schema validation."""
     text = _text(value)
     if text is None or not valid_repository_file_path(text):
         return None
@@ -219,14 +178,7 @@ def _paths(value: Any) -> list[str]:
 
 
 def _evidence(value: Any, *, symbol: Literal["required", "optional", "absent"]) -> dict[str, Any] | None:
-    """Coerce one evidence object, or None when it cannot be used.
-
-    Args:
-        value: Raw evidence payload from the model.
-        symbol: ``"required"`` drops the evidence when no symbol text is
-            present, ``"optional"`` keeps a ``None`` symbol, ``"absent"`` emits
-            no ``symbol`` key at all (the branch/loop evidence shape).
-    """
+    """Coerce a location; require, retain nullable, or omit symbol as requested."""
     if not isinstance(value, dict):
         return None
     file = _path(value.get("file"))
@@ -269,13 +221,7 @@ def _coerce_participants(value: Any) -> list[dict[str, Any]]:
 
 
 def _coerce_messages(value: Any) -> tuple[list[dict[str, Any]], dict[int, int]]:
-    """Coerce the message list.
-
-    Returns:
-        The surviving messages and a map from each entry's index in the raw
-        list to its index in the coerced list, which is what lets block branch
-        indices be remapped over a mid-list drop.
-    """
+    """Return surviving messages and old-to-new positions for branch-index remapping."""
     if not isinstance(value, list):
         return [], {}
     out: list[dict[str, Any]] = []
@@ -326,13 +272,7 @@ def _coerce_branch(value: Any, *, remap: dict[int, int]) -> dict[str, Any] | Non
 
 
 def _coerce_blocks(value: Any, *, remap: dict[int, int]) -> list[dict[str, Any]]:
-    """Coerce the block list, dropping blocks left without a single branch.
-
-    Branch-count arity (``alt`` needs >= 2 branches, ``opt``/``loop`` exactly
-    one) is a grounding rule, not a shape rule: JSON Schema cannot express it
-    per variant and coercion must not silently discard a block the grounding
-    report should be reporting on.
-    """
+    """Drop branchless blocks, leaving branch-count arity to the grounding report."""
     if not isinstance(value, list):
         return []
     out: list[dict[str, Any]] = []
@@ -356,14 +296,7 @@ def _coerce_blocks(value: Any, *, remap: dict[int, int]) -> list[dict[str, Any]]
 
 
 def coerce_sequence_spec(value: Any) -> dict[str, Any]:
-    """Coerce a raw model payload into a sequence spec.
-
-    Malformed participants, messages, blocks and branches are dropped
-    individually; a non-dict payload degrades to the empty spec
-    (``{"participants": [], "messages": [], "blocks": []}``). Block branch
-    message indices are remapped onto the surviving messages, so the result
-    always satisfies :data:`SEQUENCE_SPEC_SCHEMA`.
-    """
+    """Drop malformed entries and remap branch indices into a schema-valid sequence spec."""
     if not isinstance(value, dict):
         return _empty_sequence_spec()
     messages, remap = _coerce_messages(value.get("messages"))
@@ -387,13 +320,7 @@ def _coerce_root(value: Any) -> dict[str, Any] | None:
 
 
 def _coerce_nodes(value: Any) -> list[dict[str, Any]]:
-    """Coerce the node list, dropping malformed entries and duplicate ids.
-
-    A duplicate id is dropped rather than kept because every downstream
-    correlation -- edge endpoints, the evidence table, the grounding report's
-    ``ref`` -- keys on the node id, so two nodes sharing one id have no
-    well-defined meaning.
-    """
+    """Drop malformed nodes and duplicate IDs so downstream identity joins stay unambiguous."""
     if not isinstance(value, list):
         return []
     out: list[dict[str, Any]] = []
@@ -415,13 +342,7 @@ def _coerce_nodes(value: Any) -> list[dict[str, Any]]:
 
 
 def _coerce_edges(value: Any) -> list[dict[str, Any]]:
-    """Coerce the edge list, dropping entries without both endpoints.
-
-    Endpoints are *not* checked against the node list here: an edge pointing at
-    a node that does not exist is exactly what the grounding pass reports as
-    ``EDGE_ENDPOINT_UNGROUNDED``, and swallowing it at the coercion boundary
-    would hide it from the report.
-    """
+    """Drop missing endpoints; keep unknown node references for grounding to report."""
     if not isinstance(value, list):
         return []
     out: list[dict[str, Any]] = []
@@ -437,14 +358,7 @@ def _coerce_edges(value: Any) -> list[dict[str, Any]]:
 
 
 def coerce_flowchart_spec(value: Any) -> dict[str, Any]:
-    """Coerce a raw model payload into a flowchart spec.
-
-    Malformed nodes and edges are dropped individually and an unusable root
-    becomes ``None``; a non-dict payload degrades to the empty spec
-    (``{"root": None, "nodes": [], "edges": []}``). A ``None`` root is the one
-    result that does not validate against :data:`FLOWCHART_SPEC_SCHEMA` -- see
-    :func:`_empty_flowchart_spec`.
-    """
+    """Drop malformed entries; an unusable root becomes the schema-invalid None sentinel."""
     if not isinstance(value, dict):
         return _empty_flowchart_spec()
     return {

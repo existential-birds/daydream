@@ -1,15 +1,7 @@
-"""Pre-report finding-location validator (issue #745).
+"""Validate report citations against the persisted changed-line index.
 
-Every finding ``file:line`` must land on a real changed line before it reaches
-the report. This module validates a finding against the persisted hunk index
-(the run-time authority for changed file/line ranges) and returns a check, then
-snaps in-tolerance findings to the nearest hunk boundary and
-demotes-with-annotation beyond-tolerance ones. It owns authority; the posting
-time ``resolve_line``/``snap_to_hunk`` backstop in ``pr_review`` re-checks
-placement against the LIVE branch diff and is a no-op on a valid in-hunk line
--- ``resolve_line`` takes that diff's hunk ranges so it passes an
-already-validated line straight through instead of re-deriving it from the
-finding's prose (issue #1102).
+Snap nearby citations and demote distant ones without losing their originals.
+Posting separately rechecks placement against the live branch diff.
 """
 
 from __future__ import annotations
@@ -35,22 +27,9 @@ def validate_finding(
     file: str,
     line: int,
 ) -> LocationCheck:
-    """Validate one finding ``(file, line)`` against the hunk ``index``.
+    """Find the nearest persisted new-side hunk and boundary distance for a citation.
 
-    ``index`` is the persisted hunk index shape returned by
-    ``daydream.hunk_index.parse_hunks`` / ``load_hunk_index``: ``{path:
-    {"hunks": [{"new_start","new_end",...}], ...}}``.
-
-    Returns:
-        A :class:`LocationCheck` with:
-          - ``in_hunk``: ``line`` falls within any ``[new_start, new_end]``.
-          - ``nearest_hunk``: the ``(new_start, new_end)`` range minimizing
-            distance to ``line`` (distance to a range is 0 inside it, else the
-            min distance to either boundary).
-          - ``distance``: ``0`` when in-hunk, else the min boundary distance.
-
-        A missing file key yields a check with no hunk and no distance, never
-        raises.
+    Distance is zero inside a hunk. Missing files return no hunk or distance.
     """
     info = index.get(file)
     if info is None:
@@ -82,42 +61,15 @@ def validate_records(
     records: list[dict[str, Any]],
     tolerance: int = HUNK_TOLERANCE,
 ) -> list[dict[str, Any]]:
-    """Validate every finding record and snap/demote as needed.
+    """Snap nearby citations and demote distant ones in place, returning the same list.
 
-    For each record with a ``file`` + integer ``line``:
-      - Not in-hunk (either branch below): record the reviewer's original
-        citation in ``record["location_cited_line"]`` before anything is
-        rewritten, so the cited line stays recoverable and location accuracy
-        stays measurable post-hoc (issue #1106). Set on exactly the records
-        that are about to be snapped or demoted -- an in-hunk record never
-        carries the key, so its presence means "this citation was relocated or
-        distrusted".
-      - ``distance <= tolerance`` and not in-hunk: snap ``record["line"]`` to
-        the nearest hunk boundary (the record's ``nearest_hunk`` start or end)
-        and align the ``file:line`` citation in ``record["evidence"]`` to the
-        snapped line, so the evidence and snapped line never diverge.
-      - ``distance > tolerance``: demote the record non-destructively --
-        preserve the original severity in ``record["severity_before_demotion"]``,
-        set ``record["location_distrust"] = True`` (machine-readable demotion
-        mark, read by the approval gate and the report renderer), then lower
-        ``record["severity"]`` to ``"low"``, ``record["confidence"]`` to
-        ``"LOW"`` and set ``record["location_note"]`` to a demotion annotation
-        naming the file, cited line, nearest hunk and distance -- so the
-        unverified citation no longer reaches the report at full severity while
-        the originally adjudicated severity remains recoverable (issue #972 R2).
+    For relocated/distrusted records, preserve the original location_cited_line.
+    Snapping aligns both line and its evidence citation. Demotion preserves
+    severity_before_demotion, sets location_distrust, lowers severity/confidence,
+    and adds a location_note. In-hunk records and records without usable file/line
+    pass through unchanged.
 
-    The mutation surface is ``location_cited_line`` plus the snap (line +
-    evidence) and the demote
-    (severity_before_demotion/location_distrust/severity/confidence/location_note);
-    an in-hunk record is untouched.
-    Records without a file/line (or with a non-int line) pass through unchanged.
-
-    Not idempotent, in the same sense the existing ``severity_before_demotion``
-    is not: this is a single-pass pre-report validator, and a second pass over
-    an already-snapped record would overwrite ``location_cited_line`` with the
-    snapped line (just as a second pass over a demoted record would overwrite
-    ``severity_before_demotion`` with ``"low"``).
-    Never raises. Returns the (possibly mutated) record list.
+    This is a single-pass operation: reapplying can overwrite preserved originals.
     """
     for record in records:
         file = record.get("file")
@@ -168,14 +120,9 @@ def validate_records(
 def _align_evidence(
     record: dict[str, Any], file: str, old_line: int, new_line: int
 ) -> None:
-    """Realign the ``file:old_line`` citation in ``record["evidence"]`` to ``new_line``.
+    """Rewrite only this record's file:old_line citation; preserve all unrelated text.
 
-    Snapping ``record["line"]`` to a hunk boundary otherwise leaves a stale original
-    ``file:old_line`` citation in ``record["evidence"]``, so the merged item would
-    carry a snapped boundary line next to a mismatched evidence citation. Only the
-    citation for this record's own ``file`` and the pre-snap ``old_line`` is
-    rewritten; unrelated evidence text is preserved verbatim. Missing or
-    non-string evidence is left untouched.
+    Missing or non-string evidence is unchanged.
     """
     evidence = record.get("evidence")
     if not isinstance(evidence, str):

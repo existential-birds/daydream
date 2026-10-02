@@ -1,17 +1,8 @@
-"""Offline GenAI semantic-convention contract pin (P18 Task 0).
+"""Derive GenAI name/type/enum contracts from hash-verified pinned registry fixtures.
 
-Derives every allowed ``gen_ai.*`` name, type, and enum member from the pinned
-``registry.yaml`` bytes checked in under ``tests/fixtures/observability_semconv/``
-(OpenTelemetry semantic-conventions-genai commit ``94f432d7126f5884d30a2cdde6f4e89908ebb6fd``).
-The fixture bytes are verified against the SHA-256 manifest in
-``tests/fixtures/observability_contract/manifest.json`` before any derivation runs.
-
-This test intentionally contains NO duplicated hardcoded attribute allowlist:
-production literals are scanned from ``daydream/observability/`` and each must be
-provable from the parsed registry (name, scalar/array type, and enum membership).
-Requirement expressions come from the pinned ``spans.yaml`` semantic conventions
-downloaded into the same fixture directory at the same commit.
-"""
+The pin is recorded in observability_contract/manifest.json. Production attributes
+must match registry.yaml; required fields come from spans.yaml at the same revision.
+Keep the allowed vocabulary derived rather than copying it into the test."""
 
 from __future__ import annotations
 
@@ -163,10 +154,7 @@ def test_operation_name_enum_contains_daydream_operations() -> None:
     assert {"anthropic", "openai"} <= provider_members
 
 def test_client_invoke_agent_requires_provider_name() -> None:
-    """CLIENT invoke_agent spans MUST carry gen_ai.provider.name (spans.yaml).
-
-    Internal invoke_agent spans must NOT fabricate provider evidence: the required attribute only applies to the
-    client span class."""
+    """CLIENT invoke_agent requires provider.name; INTERNAL spans must not invent that evidence."""
     spans = yaml.safe_load((SEMCONV_DIR / "spans.yaml").read_text(encoding="utf-8"))
     span_defs: list[dict[str, Any]] = list(spans.get("spans", []))
     client = next((g for g in span_defs if g.get("type") == "gen_ai.invoke_agent.client"), None,)

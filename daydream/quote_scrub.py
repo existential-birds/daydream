@@ -1,12 +1,4 @@
-"""ASCII normalization for smart quotes on the fix-apply path (#687).
-
-Fix agents sometimes write typographic smart quotes (``”`` ``“`` ``’`` ``‘``)
-into code comments and string literals. Left alone, those bytes land in the
-committed tree and every later review re-surfaces the same typographic finding.
-This module provides a deterministic, backend-agnostic scrub: a pure
-``str.translate`` transform over the four smart-quote code points plus a
-changed-file driver that rewrites only the lines the fix pass added, in place.
-"""
+"""Normalize four smart-quote characters on agent-added lines in changed source files."""
 
 import stat
 from collections.abc import Iterable
@@ -44,27 +36,15 @@ _NON_HUNK_DIFF_LINES = (
 
 
 def normalize_smart_quotes(text: str) -> str:
-    """Replace the four smart-quote code points with ASCII straight quotes.
-
-    Pure transform: ``str.translate`` over a fixed mapping, byte-identical for
-    any input that already contains none of the four code points. Never
-    reformats or reflows the text.
-    """
+    """Translate four smart quotes to ASCII without reflowing or changing other text."""
     return text.translate(_SMART_QUOTE_TABLE)
 
 
 def _attribution_unusable(diff_text: str) -> bool:
-    """True when a non-empty *diff_text* carries no parseable unified-diff structure.
+    """Reject nonempty external diff output that cannot attribute added lines.
 
-    A working-tree diff restricted to real paths must contain ``+++`` file
-    headers; their absence means the text came from an external diff driver
-    rather than git's unified format, so added-line attribution is impossible —
-    and falling back to whole-file normalization would rewrite baseline smart
-    quotes in tracked files. Binary-only, rename-only, and mode-change-only
-    diffs (git's extended header lines, no hunks) are exempt: their files fail
-    UTF-8 decoding or carry no added lines, and untracked siblings still
-    normalize whole-file.
-    """
+    Git binary/rename/mode-only headers are valid exemptions. Missing attribution
+    must never widen normalization to baseline lines in tracked files."""
     lines = diff_text.splitlines()
     if not any(line.strip() for line in lines):
         return False
@@ -74,29 +54,16 @@ def _attribution_unusable(diff_text: str) -> bool:
 
 
 def _normalize_added_lines(text: str, added: set[int]) -> str:
-    """Normalize smart quotes only on the 1-based new-file lines in *added*.
-
-    Splits on ``\\n`` (matching git's line accounting; a trailing ``\\r`` in
-    CRLF files rides along as line content) and rejoins unchanged, so every
-    byte outside an added line is preserved exactly.
-    """
+    """Normalize only the 1-based added lines; preserve other bytes and CRLF endings."""
     parts = text.split("\n")
     return "\n".join(normalize_smart_quotes(part) if idx in added else part for idx, part in enumerate(parts, start=1))
 
 
 def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Write *data* to *path* without ever exposing a truncated file.
+    """Atomically replace content while retaining permissions and symlink targets.
 
-    ``Path.write_bytes`` opens ``wb`` (truncate-then-write), so a mid-write
-    failure (ENOSPC, ...) leaves the source file truncated. Instead, write to
-    a sibling temp file, preserve the original file's permission bits, and
-    ``os.replace`` it into place — the original bytes survive any write
-    failure and the final swap is atomic. The temp file is cleaned up on any
-    failure. The rename is made durable with a parent-directory fsync.
-
-    Raises:
-        OSError: On any write failure (after cleaning up the temp file).
-    """
+    A sibling temp prevents truncation on write failure; parent fsync persists the
+    rename. OSError propagates after best-effort temp cleanup."""
     if path.is_symlink():
         # The driver reads through the link (read_bytes/stat follow it), so
         # os.replace here would swap the link's directory entry for a regular
@@ -115,42 +82,13 @@ def scrub_smart_quotes_changed_files(
     *,
     pre_fix_ref: str | None = None,
 ) -> list[str]:
-    """Rewrite agent-written smart quotes to ASCII in changed, non-generated files.
+    """Normalize agent-added lines, returning rewritten paths in input order.
 
-    Best-effort normalization, never a gate: a missing file, a read or write
-    failure (``OSError``), or a non-UTF-8 (binary/undecodable) file skips that
-    file and the scrub continues — it must never abort a run or block a commit.
-    Files ``is_generated_file`` classifies as generated (glob patterns plus
-    ``@generated`` / ``DO NOT EDIT`` header markers) and anything under
-    ``.daydream/`` are excluded.
-
-    Only lines the fix pass added are rewritten, attributed from the working-
-    tree diff against *pre_fix_ref*: pre-existing smart quotes in baseline
-    string literals, doc examples, or fixture data are never touched, and the
-    rewrite can never turn an untouched single-quoted literal into a syntax
-    error. A path absent from that diff is a newly created (untracked) file,
-    every line of which is agent-authored, so it is normalized in full. When
-    *pre_fix_ref* is None no attribution is attempted and the whole file is
-    normalized — production callers always pass it. Writes are atomic (sibling
-    temp file + ``os.replace``) so a mid-write failure can never leave a
-    truncated source file.
-
-    Args:
-        repo: The git working directory (repo-relative paths resolve against it).
-        changed_files: Repo-relative paths the fix pass edited.
-        pre_fix_ref: Base ref the fix pass edited against; the working-tree
-            diff against it attributes the agent-added lines.
-
-    Returns:
-        The repo-relative paths whose bytes were rewritten (sorted by the
-        caller's responsibility; order here follows the input order).
-
-    Raises:
-        GitError: If the attribution diff cannot be computed — including when
-            the diff output contains non-UTF-8 bytes (a changed file with
-            binary/latin-1 content) and cannot be decoded; callers treat this
-            as fail-open (degrade to a warning, never abort a run).
-    """
+    Skip generated/.daydream files and per-file I/O or UTF-8 failures. With pre_fix_ref,
+    attribute tracked additions from the diff; paths absent from it are normalized
+    whole as untracked files. Without a ref, normalize whole files. Production passes
+    a ref. Unusable/non-UTF-8 attribution raises GitError for the caller’s warning
+    path. Atomic writes preserve source bytes on pre-publication failure."""
     changed = list(changed_files)
     if pre_fix_ref is None:
         added_lines: dict[str, set[int]] | None = None
@@ -182,27 +120,13 @@ def scrub_smart_quotes_changed_files(
             continue
         file_path = repo / path
         try:
-            content = file_path.read_bytes()
-        except OSError:
-            # Missing or unreadable: skip and continue.
-            continue
-        try:
-            decoded = content.decode("utf-8")
-        except UnicodeDecodeError:
-            # Binary / non-UTF-8 file: skip and continue.
+            decoded = file_path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
             continue
         if is_generated_file(path, decoded):
             continue
-        if added_lines is None:
-            normalized = normalize_smart_quotes(decoded)
-        else:
-            added = added_lines.get(path)
-            if added is None:
-                # Absent from the attribution diff: a newly created (untracked)
-                # file, so every line is agent-authored.
-                normalized = normalize_smart_quotes(decoded)
-            else:
-                normalized = _normalize_added_lines(decoded, added)
+        added = added_lines.get(path) if added_lines is not None else None
+        normalized = normalize_smart_quotes(decoded) if added is None else _normalize_added_lines(decoded, added)
         if normalized != decoded:
             try:
                 _atomic_write_bytes(file_path, normalized.encode("utf-8"))

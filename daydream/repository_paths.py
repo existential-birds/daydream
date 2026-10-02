@@ -1,16 +1,7 @@
-"""Canonical repository-path grammar and confinement validation (core).
+"""Shared path grammar, filesystem confinement, and lexical test-path detection.
 
-Model-produced ``file``/``path``/``working_directory`` fields are untrusted.
-This package-root module owns the lexical grammar (relative POSIX segments,
-no parent traversal, no absolute paths) and the filesystem confinement check
-(symlink-at-any-prefix walk plus resolved-root containment) that every
-consumer — core phases and the improve command contract — relies on. Living
-at package root keeps flow subpackages dependent on core, never the reverse.
-
-It also owns ``is_test_path``, the deterministic test-vs-production path
-classifier, for the same reason: two flows (improve plan gates and
-grounded-diagram eligibility) must answer that question identically.
-"""
+Model-produced paths are untrusted. Core review and improve share these rules;
+Git-observed paths have a separate grammar boundary."""
 
 from __future__ import annotations
 
@@ -64,11 +55,7 @@ _DIRECTORY_SCOPE = re.compile(DIRECTORY_SCOPE_PATTERN)
 
 
 class InvalidRepositoryFilePath(ValueError):
-    """Raised when a model-authored repository file path is unsafe.
-
-    The message deliberately does not reflect the rejected value. Model output
-    may contain terminal control characters or other untrusted text.
-    """
+    """Unsafe model-authored path; errors never reflect untrusted control characters."""
 
 
 def _valid_lexical(value: str, pattern: re.Pattern[str]) -> bool:
@@ -86,23 +73,15 @@ def valid_repository_file_path(value: str) -> bool:
 
 
 def strip_dot_slash(value: str) -> str:
-    """Normalize a leading ``./`` off a repo-relative path (issue #740).
-
-    ``./x`` is a legal spelling since the grammar relaxed (#572/#573) while
-    the reviewed-diff set and the receipt lists are always bare, so stripping
-    in one canonical place keeps a ``./x`` finding matching its assigned file
-    rather than failing every path-component match and getting swept.
-    """
+    """Normalize the one allowed ./ prefix to match reviewed paths and receipts."""
     return value[2:] if value.startswith("./") else value
 
 
 def canonicalize_repository_file_path(repo: Path, value: object) -> str:
-    """Validate and canonicalize one model-authored repository file path.
+    """Validate a model path and strip only its optional ./ prefix.
 
-    Only the schema's optional leading ``./`` is normalized. Absolute paths,
-    parent traversal, malformed values, and paths crossing a current symlink
-    boundary are rejected with a non-reflective error.
-    """
+    Reject absolute paths, traversal, malformed values, and current symlink crossings
+    with a non-reflective error."""
     if not isinstance(value, str) or not valid_repository_file_path(value):
         raise InvalidRepositoryFilePath("invalid repository file path")
     canonical = strip_dot_slash(value)
@@ -114,16 +93,10 @@ def canonicalize_repository_file_path(repo: Path, value: object) -> str:
 def git_observed_path_is_confined(
     repo: Path, value: str, *, allow_leaf_symlink: bool = False
 ) -> bool:
-    """Return whether an exact Git-observed path remains inside *repo*.
+    """Confine a Git-observed path without applying the narrower model-output grammar.
 
-    Git can track names outside the deliberately narrow model-output grammar
-    (newlines and shell metacharacters included), so this boundary performs no
-    schema validation. It rejects absolute paths, NUL, empty/dot/parent
-    components, and every current symlink component before checking resolved
-    containment. With ``allow_leaf_symlink`` the final component may be a
-    symlink: callers that inspect or replace the leaf itself (rather than
-    following it) walk only the parent components.
-    """
+    Reject absolute/NUL/empty/dot/parent components and current symlink crossings.
+    allow_leaf_symlink checks only parents for callers that inspect/replace the leaf."""
     if not isinstance(value, str) or not value or "\0" in value or value.startswith("/"):
         return False
     parts = value.split("/")
@@ -147,12 +120,7 @@ def valid_directory_scope_lexical(value: str) -> bool:
 def _repo_relative_parts(
     parts: tuple[str, ...], repo: Path, root: Path
 ) -> tuple[str, ...] | None:
-    """Return ``parts`` minus the repo prefix, trying unresolved then resolved.
-
-    ``root`` is ``repo.resolve()``; the second base strips absolute spellings
-    of a symlinked repo against its resolved spelling. None when neither base
-    prefixes ``parts``.
-    """
+    """Strip the unresolved or resolved repo prefix; return None if neither matches."""
     for base in (PurePosixPath(repo).parts, PurePosixPath(str(root)).parts):
         if parts[: len(base)] == base:
             return parts[len(base) :]
@@ -160,12 +128,9 @@ def _repo_relative_parts(
 
 
 def _walk_components(candidate: Path, parts: Sequence[str]) -> Path | None:
-    """Return ``candidate`` advanced through ``parts``, or None on a crossing.
+    """Walk until a nonexistent component; reject symlinks and inspection failures.
 
-    Stops at the first component that does not exist (the containment check
-    below settles it). None when a component is a symlink or cannot be
-    inspected — both are treated as an escape.
-    """
+    The caller’s final resolved-containment check handles the nonexistent suffix."""
     for part in parts:
         candidate /= part
         try:
@@ -185,18 +150,11 @@ def path_is_confined(
     directory_scope: bool = False,
     allow_absolute: bool = False,
 ) -> bool:
-    """Return whether a repository path crosses no symlink/root edge.
+    """Check path components for symlinks and resolve final root containment.
 
-    When ``allow_absolute`` is set and ``value`` starts with ``"/"``, the
-    relative-lexical gate is skipped and the confinement loop alone decides:
-    it walks the components at or below the repo root and settles containment
-    with the final ``is_relative_to`` check against the resolved repo root.
-    Components above the repo root are deliberately not symlink-tested — a
-    symlinked ancestor of the repo (e.g. ``/tmp`` on macOS) would otherwise
-    reject the absolute spelling of a path the identical relative spelling
-    accepts, and skipping that test cannot escape containment. Relative paths
-    and the default ``allow_absolute=False`` keep today's exact behavior.
-    """
+    Allowed absolute paths skip the relative grammar and inspect only components
+    at/below the repo root. Symlinked ancestors such as macOS /tmp remain valid;
+    final containment still prevents escape."""
     validator = (
         valid_directory_scope_lexical
         if directory_scope
@@ -240,12 +198,7 @@ def canonicalize_directory_scope(value: str) -> str:
 
 
 def canonicalize_working_directory(repo: Path, value: str) -> str:
-    """Return ``value`` as the repo-relative posix form (``"."`` for the root).
-
-    Absolute, ``./``-prefixed, and plain relative spellings of the same
-    directory collapse to one repo-relative key. Accepted values are already
-    confinement-checked (``path_is_confined``), so the transform is lossless.
-    """
+    """Normalize an already-confined absolute or relative directory to repo-relative POSIX."""
     if value.startswith("/"):
         parts = PurePosixPath(value.rstrip("/")).parts
         remainder = _repo_relative_parts(parts, repo, repo.resolve())
@@ -262,23 +215,11 @@ def canonicalize_working_directory(repo: Path, value: str) -> str:
 
 
 def is_test_path(path: str) -> bool:
-    """Return whether ``path`` names a test file by repository convention.
+    """Classify tests lexically; never trust an exploration model’s role annotation.
 
-    The single deterministic test-vs-production path classifier, shared by the
-    improve plan gates (which must not accept a production deletion as
-    self-justifying) and grounded-diagram eligibility (which counts changed
-    *production* code files, issue #1113). Deliberately deterministic and
-    lexical: the exploration pass's ``role == "test"`` is model output, not a
-    fact, so nothing that gates behavior may depend on it.
-
-    A path is a test path when any parent directory is a conventional test
-    directory (``__tests__``, ``spec``, ``specs``, ``test``, ``tests``, matched
-    case-insensitively), or when the file's own name follows a test-naming
-    convention: stem ``test``/``tests``, a ``test_`` prefix or ``_test`` suffix
-    (Python, Go, Rust), a ``Test``/``Tests`` camel-case suffix (JVM/Swift), or a
-    ``.test.``/``.spec.`` infix (JS/TS). Case-folded throughout except the
-    camel-case suffix, which is meaningful only in its original casing.
-    """
+    Match conventional test directories, test/tests stems, test_/_test names,
+    Test/Tests camel-case suffixes, and .test./.spec. infixes. Only camel-case suffixes
+    retain case sensitivity. Review and improve gates share this policy."""
     candidate = Path(path)
     parts = {part.casefold() for part in candidate.parts[:-1]}
     name = candidate.name.casefold()

@@ -28,12 +28,9 @@ from tests.test_benchmark_workspace import (
 
 
 def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
-    """The Task-2 curated fixture + evidence/finding bodies carrying a secret.
+    """Plant secret evidence in a ready workspace, then invalidate the import digest.
 
-    Plants ``SUPER_SECRET_EVIDENCE`` in the import's ``evidence[].body`` and in
-    the case doc's finding body, then corrupts the workspace (import file
-    rewritten so the ledger ``import_sha256`` no longer matches) so ``validate``
-    reports a failure whose diagnostics must never disclose the sentinel.
+    Validation diagnostics must report corruption without disclosing the sentinel.
     """
 
     root = _write_curated_workspace(tmp_path, "ready")
@@ -112,9 +109,6 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
     assert r3.returncode == 2  # fresh workspace: structurally valid but incomplete
 
 def test_legacy_bench_is_rejected_not_routed() -> None:
-    # The old `bench` verb is removed; it must exit non-zero with a clear error
-    # instead of falling through to the review path (issue-785). Assert the
-    # rejection rather than the former coexistence.
     r = subprocess.run(  # noqa: S603
         [sys.executable, "-m", "daydream", "bench", "--help"], capture_output=True, text=True
     )

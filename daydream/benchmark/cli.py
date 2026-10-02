@@ -1,14 +1,4 @@
-"""CLI helpers for the ``daydream benchmark`` subcommand.
-
-These helpers are called from :func:`daydream.cli.main` when ``benchmark`` is
-the first argv token. They live here rather than in the top-level ``daydream.cli``
-module to keep that file below the 1 000-line threshold and to co-locate the
-benchmark argument-parsing logic with the rest of the benchmark package.
-
-``benchmark`` carries the sub-verbs ``init``, ``status``, ``validate``,
-``build-harbor``, ``upgrade``, ``import-prs``, ``curate``, ``calibrate-judge``,
-``run``, ``clean``, ``objective``, and ``aggregate``.
-"""
+"""Argument parsing and command dispatch for daydream benchmark."""
 
 from __future__ import annotations
 
@@ -303,11 +293,8 @@ def _handle_benchmark_build_harbor(args: argparse.Namespace) -> int:
 
 
 def _handle_benchmark_upgrade(args: argparse.Namespace) -> int:
-    """Upgrade legacy cases and verify ready-snapshot base provenance in place.
-
-    Prints the per-case report plus any surfaced errors. Returns ``0`` on a
-    successful upgrade (including an idempotent no-op second run) and ``1``
-    when a case errored.
+    """Upgrade legacy cases and verify snapshot provenance; report per-case failures with
+    exit 1.
     """
     from daydream.benchmark import migrate
 
@@ -330,13 +317,8 @@ def _is_interactive_tty() -> bool:
 
 
 def _handle_benchmark_calibrate(args: argparse.Namespace) -> int:
-    """Diagnostic: measure the configured judge's agreement with the unverified fixture.
-
-    A passing result only means the judge agrees with this unverified labeled
-    fixture — it is not calibrated or correct. Requires ``--yes`` or an
-    interactive TTY before any paid judge call. Lazy imports the calibrate
-    module (mirroring the other handlers); build failures and refusals print to
-    stderr and return exit ``1`` — never a bare traceback.
+    """Run the unverified-fixture agreement diagnostic after --yes or TTY confirmation.
+    Expected failures and refusals report to stderr with exit 1.
     """
     if not args.yes and not _is_interactive_tty():
         return _fail(
@@ -377,13 +359,7 @@ def _handle_benchmark_calibrate(args: argparse.Namespace) -> int:
 
 
 def _handle_benchmark_run(args: argparse.Namespace) -> int:
-    """Supervise a Harbor run in the workspace behind the Oracle gate.
-
-    Threads the reviewer/judge env vars into the supervisor (mirroring
-    :func:`_handle_benchmark_calibrate`); expected supervisor errors already
-    print to stderr inside ``run_run`` and return a nonzero code — this
-    handler does not wrap them in a traceback.
-    """
+    """Pass control-plane reviewer/judge settings to the Oracle-gated Harbor supervisor."""
     from daydream.benchmark.harbor import run as run_mod
 
     env = {
@@ -421,13 +397,8 @@ def _handle_benchmark_run(args: argparse.Namespace) -> int:
 
 
 def _candidate_profile_digest() -> str | None:
-    """Canonical digest of the control-plane Harbor candidate (R12), or None.
-
-    Reads ``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` from the trusted control-plane
-    environment and resolves it exactly as the in-container entrypoint will,
-    so the ledger/receipt ``profile_digest`` matches the tested profile. No
-    candidate -> ``None`` (legacy default-profile runs stay byte-stable).
-    Raises ``ProfileError`` on an invalid candidate (fail-closed).
+    """Resolve the trusted profile candidate exactly as the container entrypoint does.
+    Absence preserves legacy None identity; invalid candidates raise ProfileError.
     """
     from daydream import review_profile as rp
 
@@ -438,15 +409,8 @@ def _candidate_profile_digest() -> str | None:
 
 
 def _handle_benchmark_clean(args: argparse.Namespace) -> int:
-    """Handle ``daydream benchmark clean <dir> [--cache] [--jobs] [...]``.
-
-    Resolves the ``--derived`` union into the three selection flags *before*
-    calling ``clean_workspace`` (the contract the routing test pins) and runs
-    contracted deletion entirely inside ``clean_workspace``. An explicit
-    ``--all`` without ``--yes`` needs a TTY (mirroring ``run --yes`` /
-
-    ``calibrate-judge``); expected ``RunError``/``WorkspaceCorrupt`` print to
-    stderr and return exit ``1`` — never a bare traceback.
+    """Resolve derived selections before cleanup; total deletion requires --yes or TTY
+    confirmation. Expected cleanup failures report to stderr with exit 1.
     """
     from daydream.benchmark.harbor import clean as clean_mod, run as run_mod
     from daydream.benchmark.storage import WorkspaceCorrupt
@@ -475,13 +439,8 @@ def _handle_benchmark_clean(args: argparse.Namespace) -> int:
 
 
 def _handle_benchmark_curate(args: argparse.Namespace) -> int:
-    """Curate a case: derive everything, never attests to ready.
-
-    On an interactive TTY, ``curate`` dispatches into the resumable terminal
-    client (:func:`daydream.benchmark.curate_tui.run_curate_tui`); otherwise it
-    requires ``--apply-gold <file>`` (a reviewed gold YAML draft) and routes
-    it through :func:`daydream.benchmark.curation.apply_gold_fragment`. Expected
-    workspace errors print to stderr and return exit ``1`` — never a bare traceback.
+    """Open interactive curation or require a reviewed --apply-gold draft. All mutations go
+    through curation services; errors return exit 1.
     """
     from pydantic import ValidationError
 
@@ -505,15 +464,8 @@ def _handle_benchmark_curate(args: argparse.Namespace) -> int:
 
 
 def _handle_benchmark_objective(args: argparse.Namespace) -> int:
-    """Resolve an exact completed run and emit its machine-readable objective.
-
-    ``--json`` serializes the opaque privacy-safe objective via
-    ``objective.objective_to_json`` and writes it through
-    ``storage.atomic_write_json`` (or prints it directly on ``-``); a parse/
-    compat failure leaves an existing output file byte-identical. Without
-    ``--json``, prints a concise local summary (run_id, comparison_eligible,
-    micro F1, task/infra counts) to stdout. Expected ``ObjectiveError`` prints
-    to stderr and returns exit ``1`` — never a bare traceback.
+    """Emit an exact completed run as a local summary or opaque JSON. Validation failures
+    preserve existing output bytes; successful file writes are atomic.
     """
     from daydream.benchmark.harbor import objective
     from daydream.benchmark.storage import atomic_write_json
@@ -548,14 +500,9 @@ def _handle_benchmark_objective(args: argparse.Namespace) -> int:
 
 
 def _suite_objective_to_json(suite: objective.SuiteObjective) -> dict[str, object]:
-    """Project a pooled ``SuiteObjective`` into opaque machine-readable JSON.
-
-    Produces the stable ``experiment_id``, the shared ``profile_digest``, the
-    full ``identity`` dict (identical across every pooled entry), and the
-    count-derived ``objective`` dict projected in the authoritative
-    ``aggregate_metrics`` key/shaper set. No repository slug, PR number, source
-    path, sample text, judge reasoning, or source code is emitted; only opaque
-    ids and counts pass through (privacy must-have).
+    """Project opaque experiment identity, shared compatibility, and canonical pooled
+    metrics. Repository paths, PR data, text, reasoning, and source code remain
+    excluded.
     """
     from daydream.benchmark.harbor import objective
 
@@ -570,17 +517,8 @@ def _suite_objective_to_json(suite: objective.SuiteObjective) -> dict[str, objec
 
 
 def _handle_benchmark_aggregate(args: argparse.Namespace) -> int:
-    """Pool a suite manifest of exact runs into one compatible objective JSON (issue #888).
-
-    Loads the manifest through ``storage.load_json_strict``, then drives
-    ``objective.aggregate_suite`` (which fails closed on any missing/incomplete/
-    incompatible/malformed/duplicated entry — never a silently-subsetted pool).
-    When ``--json`` is set, the strict suite objective is written through
-    ``storage.atomic_write_json`` (or printed on ``-``); an expected
-    ``ObjectiveError``/``WorkspaceCorrupt`` prints to stderr and returns exit
-    ``1`` without touching an existing output file — never a bare traceback.
-    The shared profile digest and full compatibility identity are always printed
-    to stdout.
+    """Strictly load and pool the entire compatible suite; failed entries abort without
+    replacing output. Emit shared identity/profile and optionally atomic JSON.
     """
     from daydream.benchmark.harbor import objective
     from daydream.benchmark.storage import WorkspaceCorrupt, atomic_write_json, load_json_strict
@@ -637,16 +575,8 @@ _HANDLERS: dict[str, Callable[[argparse.Namespace], int]] = {
 
 
 def _handle_benchmark_command(argv: list[str]) -> int:
-    """Handle the ``daydream benchmark`` subcommands.
-
-    Returns an exit code; ``daydream.cli.main`` translates it to a
-    process exit. Expected workspace errors (``InitError``/``WorkspaceCorrupt``/
-    ``ImportTargetError``/``PreflightError``/``CurationError``) are printed to
-    stderr and mapped to exit ``1`` — never a bare traceback. ``run`` dispatches
-    to :func:`_handle_benchmark_run` (the supervised Harbor runner),
-    ``objective`` to :func:`_handle_benchmark_objective` (the read-only
-    machine-readable run resolution), and ``aggregate`` to
-    :func:`_handle_benchmark_aggregate` (the pooled suite objective).
+    """Dispatch benchmark commands and translate expected workspace failures into stderr
+    plus exit 1.
     """
 
     parser = _build_benchmark_parser()

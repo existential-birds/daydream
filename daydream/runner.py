@@ -1,37 +1,18 @@
-"""Main orchestration logic for the review and fix loop.
+"""Workspace, extension registry, and flow dispatch for one run.
 
-The runner is unified around a single :func:`run` entry point. ``run`` opens
-the workspace via :func:`daydream.workspace.open_workspace` and then dispatches
-to the single deep flow, which now carries every PR-process mode (#330)::
-
-    flow_name set (--flow):
-        "review" / "shallow"  -> deep review / shallow mode
-        "deep"                -> deep (default)
-        "improve"             -> _run_improve    (repo-wide read-only advisor)
-        other registered      -> _run_custom_flow (fork-registered custom flow)
-    output_mode == "comment"  -> deep comment mode (posts inline, no fix cycle)
-    output_mode == "review"   -> deep review mode (report only, no fix cycle)
-    output_mode == "diagram"  -> diagram-only mode (grounded mermaid diagrams,
-                                 posts a standalone comment, no findings)
-    output_mode == "loop":
-        config.shallow        -> deep shallow mode (single-stack deep)
-        else                  -> deep (default)
-
-``run`` builds the per-run extension registry (builtins + optional
-``daydream_ext``) and sets it on the registry ContextVar before dispatch;
-the ``deep`` flow's preambles stay in :func:`daydream.deep.orchestrator.run_deep`
-and run the phase sequence through :func:`daydream.flows.run_flow` against the
-registered flow definition.
+``run`` binds the per-run registry and opens the workspace. Explicit ``review``,
+``shallow``, and ``deep`` aliases, plus review/comment/diagram/loop output modes,
+use ``deep.orchestrator.run_deep``. ``improve`` opens a read-only audit workspace;
+other registered flow names use the custom-flow preamble.
 """
 
-import json
 import os
 import sys
 import uuid
 from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any
 
 import anyio
 from rich.markup import escape as escape_markup
@@ -39,16 +20,12 @@ from rich.markup import escape as escape_markup
 from daydream import git_ops, github_app, pr_review
 from daydream.agent import console
 from daydream.artifact_visibility import (
-    ArtifactDisposition,
-    ArtifactSession,
     ArtifactVisibilityError,
     OutputLabel,
     PrivateRootLocations,
     PrivateWorkspaceOwner,
     RoutedDestination,
-    TrajectoryOutputRoute,
     artifact_dir_for,
-    artifact_session_active,
     open_artifact_session,
     private_root_locations,
     resolve_private_workspace_owner,
@@ -62,19 +39,11 @@ from daydream.backends import (
 )
 from daydream.config import (
     DEEP_PHASE_DEFAULT_EFFORT,
-    DEFAULT_PI_MODEL,
     EFFORT_TIERS,
-    PHASE_DEFAULT_EFFORT,
-    PHASE_DEFAULT_MODELS,
     REVIEW_OUTPUT_FILE,
 )
-from daydream.config_file import DaydreamFileConfig
-from daydream.deep.latency import LatencyRoute, ProfileResolution, resolve_latency_profile
-from daydream.exploration import ExplorationContext
 from daydream.extensions import (
     ExtensionError,
-    Registry,
-    UnresolvedExtensionError,
     build_registry,
     get_registry,
     set_registry,
@@ -89,26 +58,33 @@ from daydream.flows.engine import BackendCache, BackendFactory
 from daydream.git_ops import GitError
 from daydream.hunk_index import write_hunk_index
 from daydream.observability.config import (
-    ObservabilityConfig,
     ObservabilityError,
     resolve_observability_config,
 )
-from daydream.observability.runtime import associate_run_trajectory, trace_run
-from daydream.phases import (
+from daydream.observability.runtime import trace_run
+from daydream.phases.inputs import (
     _detect_default_branch,
     _git_branch,
     _git_log,
 )
-from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
+from daydream.run_artifacts import (
+    _finalize_run_artifacts,
+    _open_recorder,
+    _resolve_review_profile,
+    _RunArtifacts,
+    _RunWriteCapture,
+)
+from daydream.run_config import (
+    DEEP_FLOW_ALIASES,
+    RunConfig,
+    _file_config_or_empty,
+    _resolved_backend_name,
+    _resolved_model,
+    _resolved_reasoning_effort,
+)
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
-from daydream.run_snapshot import ArchiveRunSnapshot, ManifestRunIdentity, RunPhaseCapabilities, RunProfileIdentity
 from daydream.trajectory import (
     DaydreamRunFlow,
-    RunWriteSnapshot,
-    TrajectoryDocumentSnapshot,
-    TrajectoryRecorder,
-    default_trajectory_path,
-    get_current_recorder,
 )
 from daydream.ui import (
     phase_subtitle,
@@ -131,7 +107,6 @@ if TYPE_CHECKING:
 # Output mode: ``loop`` runs review→fix→test; ``comment`` posts inline PR
 # comments and exits; ``review`` writes a report and exits; ``diagram``
 # (issue #1113) runs the diagram-only flow and posts a standalone comment.
-OutputMode = Literal["loop", "comment", "review", "diagram"]
 
 
 @dataclass(frozen=True)
@@ -146,647 +121,6 @@ class RunnerExecutionInput:
     github: github_app.GitHubExecutionInput = field(repr=False, compare=False)
 
 
-@dataclass
-class RunConfig:
-    """Configuration for a run. Phase overrides take precedence over file defaults; see README for CLI fields."""
-
-    target: str | None = None
-    observability: ObservabilityConfig | None = None
-    stack: str | None = None  # "python", "react", "elixir", "go", "rust", "ios"
-    cleanup: bool | None = None
-    quiet: bool = True
-    start_at: str = "review"
-    pr_number: int | None = None
-    approved_head_sha: str | None = None
-    backend: str | None = None
-    model: str | None = None
-    reasoning_effort: str | None = None
-    # Issue #732: latency profile selecting the wonder/arbiter effort floor.
-    # CLI-tier override; falls through to the file-config scalar then the
-    # built-in default (``balanced``). An unrecognised value resolves fail-safe
-    # upward to ``forensic`` and is recorded, never raised.
-    latency_profile: str | None = None
-    # Resolved once at the composition root (the deep preamble) and consumed by
-    # the effort resolver; ``None`` until then.
-    latency_route: LatencyRoute | None = None
-    file_config: DaydreamFileConfig | None = None
-    review_backend: str | None = None
-    fix_backend: str | None = None
-    test_backend: str | None = None
-    review_model: str | None = None
-    parse_model: str | None = None
-    fix_model: str | None = None
-    test_model: str | None = None
-    exploration_context: ExplorationContext | None = None
-    exploration_model: str | None = None
-    ignore_paths: list[str] = field(default_factory=list)
-    trajectory_path: Path | None = None
-    pr_repo: str | None = None
-    archive: bool = True
-    run_eval: bool = True
-
-    branch: str | None = None
-    base: str | None = None
-    output_mode: OutputMode = "loop"
-    findings_out: str | None = None
-    dump_artifacts: str | None = None
-    trajectory_hub_repo: str | None = None
-    force_worktree: bool = False
-    shallow: bool = False
-    extra_copy: list[Path] = field(default_factory=list)
-    non_interactive: bool = False
-    assume: str | None = None  # forced gate answer: "yes" (--yes), "no", or None
-    log_mode: bool = False  # transitional internal name for the --verbose diagnostic mode
-    # (bypass Rich UI, emit plain text to stdout)
-    identity: str = "unknown"  # resolved GitHub identity; set once by run()
-    # Issue #172: tiny-diff short-circuit gate (max changed files). CLI-tier
-    # override; falls through to file-config scalar then the orchestrator
-    # default (DEFAULT_SHALLOW_FANOUT_THRESHOLD). ``0`` disables the gate.
-    shallow_fanout_threshold: int | None = None
-    # Issue #232: opt-in precision mode. When True, the deep pipeline runs a
-    # skeptical suppression pass over borderline (LOW-confidence / low-severity
-    # uncontested) findings after the arbiter, dropping any the suppression agent
-    # cannot confirm (fail-closed). Default False => byte-identical behavior; the
-    # suppression predicate is never called and arbiter output is unchanged.
-    precision_mode: bool = False
-    # Issue #343: opt-in approval of clean deep reviews. When True, a deep review
-    # with zero high/medium findings posts event: "APPROVE" (prepended approval
-    # line) instead of event: "COMMENT", satisfying a repo's
-    # required_approving_review_count without a human. Default False =>
-    # byte-identical behavior; the posted event stays COMMENT unless a repo
-    # explicitly opts in.
-    approve_on_clean: bool = False
-    # Issue #1056: opt-in filing of out-of-scope GitHub issues. When True, both
-    # filing paths (pre-fix findings and post-fix reverted edits) are enabled.
-    # Default False => byte-identical behavior; no out-of-scope issue is filed
-    # unless a repo explicitly opts in. Precedence: CLI --file-scope-issues >
-    # [tool.daydream] scope_issue_filing > default False (resolved by
-    # _resolve_opt_in(config, "scope_issue_filing")).
-    scope_issue_filing: bool = False
-    flow_name: str | None = None
-    improve_effort: str = "standard"
-    improve_focus: str | None = None
-    improve_scope: str | None = None
-    improve_plan_description: str | None = None
-    improve_prune_name: str | None = None
-    # Issue #731: deep-review sharding (split oversized per-language stacks into
-    # bounded, dependency-aware shards that ride the stack_name-keyed pipeline).
-    # CLI-tier overrides; ``None`` falls through to the file-config scalar then
-    # the orchestrator default. Default-off (DEFAULT_DEEP_SHARD_ENABLED=False)
-    # preserves the established single-agent-per-stack behavior.
-    deep_shard_enabled: bool | None = None
-    deep_shard_max_files: int | None = None
-    deep_shard_max_bytes: int | None = None
-    deep_shard_fanout_cap: int | None = None
-    deep_shard_frontier_max: int | None = None
-    # Issue #733: content-addressed reuse of completed deep review results.
-    # CLI-tier overrides; ``None`` falls through to the file-config scalar then
-    # the built-in default (reuse enabled). ``--no-review-cache`` sets
-    # ``review_cache_enabled=False`` for one forensic run. The three budget
-    # fields are independent of the enable flag and of each other.
-    review_cache_enabled: bool | None = None
-    review_cache_max_entries: int | None = None
-    review_cache_max_bytes: int | None = None
-    review_cache_max_age_days: int | None = None
-    # Issue #735: selection-gated recommendation verification. ``verify_all`` is
-    # the conservative toggle (today's "verify every non-exempt finding"
-    # behaviour); ``verify_extra_risk_categories`` additively widens the
-    # mandatory risk vocabulary and is validated fail-loud before the verify
-    # pass. Both are config-file-only keys (no CLI flag); ``None`` falls through
-    # to the file config then the built-in default in ``config.py``.
-    verify_all: bool | None = None
-    verify_extra_risk_categories: list[str] | None = None
-    # Issue #885: versioned benchmark-tunable review profile. The path field is
-    # the CLI/env-carried explicit source; the profile field is the resolved
-    # value (validated object + source kind + digest), set once by
-    # ``_resolve_review_profile`` at the composition root and threaded into
-    # every ``FlowContext``/``run_deep`` so no consumer re-reads a file.
-    review_profile_path: str | Path | None = None
-    review_profile: ResolvedProfile | None = None
-    # Issue #1113: grounded mermaid diagrams. ``None`` (not ``"auto"``) is the
-    # unset marker so a file-config ``[tool.daydream.diagram] mode = "off"`` can
-    # win over the built-in default while an explicit CLI value still overrides
-    # the file. Resolved by the orchestrator's ``_resolved_diagram_mode``.
-    diagram: str | None = None
-    test_command: str | None = None
-    # Issue #1408: suite ids the single configured ``test_command`` is the
-    # authoritative gate for. Declaration only (no second runner); resolved by
-    # ``resolve_test_recipe`` into the recipe's ``declared`` field. Nothing in
-    # the runner populates this field today, so it is always empty and the
-    # file-config value arrives through ``resolve_test_recipe``'s ``or``
-    # fallback; the field is the precedence slot for an explicit source. The
-    # recipe never invents a suite.
-    test_required_suites: list[str] = field(default_factory=list)
-
-
-class _RunSnapshotCaptureError(RuntimeError):
-    """A recorder callback supplied malformed run-wide immutable evidence."""
-
-
-@dataclass
-class _RunWriteCapture:
-    """Synchronous, non-raising retention boundary for P07 write snapshots."""
-
-    session_id: str
-    run_flow: DaydreamRunFlow | None = None
-    partial: RunWriteSnapshot | None = None
-    final: RunWriteSnapshot | None = None
-    validation_error: _RunSnapshotCaptureError | None = None
-    manifest_identity: ManifestRunIdentity | None = None
-
-    def retain(self, recorder: TrajectoryRecorder, snapshot: RunWriteSnapshot) -> None:
-        try:
-            if recorder.session_id != self.session_id:
-                raise _RunSnapshotCaptureError("recorder session identity mismatch")
-            if self.run_flow is not None and recorder.run_flow is not self.run_flow:
-                raise _RunSnapshotCaptureError("recorder run flow identity mismatch")
-            if snapshot.root_trajectory_id != self.session_id:
-                raise _RunSnapshotCaptureError("snapshot root identity mismatch")
-            if snapshot.status not in ("complete", "partial"):
-                raise _RunSnapshotCaptureError("snapshot write mode is malformed")
-            if type(snapshot.cutoff_at) is not str or not snapshot.cutoff_at:
-                raise _RunSnapshotCaptureError("snapshot cutoff is malformed")
-            roots = 0
-            identities: set[str] = set()
-            for document in snapshot.documents:
-                if (
-                    type(document.trajectory_id) is not str
-                    or not document.trajectory_id
-                    or type(document.json_bytes) is not bytes
-                    or document.trajectory_id in identities
-                ):
-                    raise _RunSnapshotCaptureError("snapshot document is malformed")
-                identities.add(document.trajectory_id)
-                roots += document.trajectory_id == self.session_id
-                payload = json.loads(document.json_bytes)
-                if not isinstance(payload, dict) or (
-                    payload.get("trajectory_id") != document.trajectory_id
-                    or payload.get("session_id") != self.session_id
-                ):
-                    raise _RunSnapshotCaptureError("snapshot document identity is malformed")
-            if roots != 1:
-                raise _RunSnapshotCaptureError("snapshot must contain exactly one root")
-            self.run_flow = recorder.run_flow
-            if snapshot.status == "complete":
-                self.final = snapshot
-                self.validation_error = None
-            else:
-                self.partial = snapshot
-        except Exception as exc:
-            self.validation_error = (
-                exc if isinstance(exc, _RunSnapshotCaptureError)
-                else _RunSnapshotCaptureError(f"snapshot validation failed ({type(exc).__name__})")
-            )
-
-
-@dataclass(frozen=True)
-class _RunArtifacts:
-    """One outer host session and its pre-model registered output routes."""
-
-    session: ArtifactSession
-    owner: PrivateWorkspaceOwner
-    trajectory: TrajectoryOutputRoute
-    capture: _RunWriteCapture
-    dump: RoutedDestination | None
-    execution_input: BackendExecutionInput | None = field(default=None, kw_only=True, repr=False, compare=False)
-
-    def write_trajectory_document(
-        self, document: TrajectoryDocumentSnapshot, status: Literal["complete", "partial"]
-    ) -> None:
-        """Write through the host sink and retain a closed failure disposition."""
-        try:
-            self.session.write_trajectory_document(self.trajectory, document, status)
-        except Exception as exc:
-            self.capture.validation_error = _RunSnapshotCaptureError(
-                f"trajectory {status} output failed ({type(exc).__name__})"
-            )
-            raise
-
-
-def _open_recorder(
-    *,
-    config: RunConfig,
-    target_dir: Path,
-    work: WorkContext | None,
-    flow_kind: DaydreamRunFlow,
-    run_artifacts: _RunArtifacts | None = None,
-    allow_standalone: bool = False,
-) -> TrajectoryRecorder:
-    """Construct the run's ``TrajectoryRecorder`` bound to the run's artifacts.
-
-    The single construction site for every flow's recorder. Centralizing it here
-    guarantees that centralized archival AND ``--dump-artifacts`` apply to every
-    flow — the four built-ins today and any future custom/extension flow tomorrow.
-    New flows MUST open their recorder through this factory rather than
-    constructing ``TrajectoryRecorder`` directly, so the snapshot retention that
-    feeds strict archive finalization can never be silently dropped. Session id
-    and trajectory path are resolved here identically for all flows.
-    A standalone direct caller passes ``allow_standalone=True`` with no
-    ``run_artifacts`` or active artifact session; it retains no snapshot and
-    therefore archives nothing.
-    """
-    if run_artifacts is None:
-        if not allow_standalone:
-            raise ArtifactVisibilityError("standalone recorder requires allow_standalone=True")
-        if artifact_session_active():
-            raise ArtifactVisibilityError("standalone recorder cannot run inside an active artifact session")
-        session_id = str(uuid.uuid4())
-        trajectory_path = config.trajectory_path or default_trajectory_path(target_dir, session_id)
-    else:
-        session_id = run_artifacts.session.layout.session_id
-        if (
-            work is None
-            or work.source != run_artifacts.owner.source
-            or work.source != run_artifacts.session.provenance.public_source
-            or session_id != run_artifacts.capture.session_id
-            or session_id != run_artifacts.session.provenance.session_id
-        ):
-            raise ArtifactVisibilityError("recorder artifact identity mismatch")
-        # The recorder's target is the public source once a session owns the run.
-        target_dir = work.source
-        if run_artifacts.trajectory.full.write_path is None:
-            raise ArtifactVisibilityError("trajectory route has no writable destination")
-        trajectory_path = run_artifacts.trajectory.full.write_path
-        if run_artifacts.capture.manifest_identity is not None:
-            raise ArtifactVisibilityError("manifest run identity was already captured")
-        _resolve_review_profile(config)
-        run_artifacts.capture.manifest_identity = capture_manifest_run_identity(
-            config, flow_kind, get_registry(), work.repo,
-            execution_input=run_artifacts.execution_input,
-        )
-    # Trajectory labels retain their representative per-flow phase mapping;
-    # manifest identity separately records the general default and capabilities.
-    names = _recorder_backend_names(config, flow_kind)
-    recorder = TrajectoryRecorder(
-        path=trajectory_path,
-        run_flow=flow_kind,
-        target_dir=target_dir,
-        artifact_run_dir=None if run_artifacts is None else run_artifacts.trajectory.run_dir,
-        document_writer=None if run_artifacts is None else run_artifacts.write_trajectory_document,
-        agent_model_name="",
-        session_id=session_id,
-        explicit_path=config.trajectory_path is not None,
-        pr_number=config.pr_number,
-        pr_repo=config.pr_repo,
-        backend_name=names.backend,
-        review_backend_name=names.backend,
-        fix_backend_name=names.fix,
-        test_backend_name=names.test,
-        on_write=None if run_artifacts is None else run_artifacts.capture.retain,
-    )
-    associate_run_trajectory(recorder.session_id)
-    return recorder
-
-
-def _file_config_or_empty(config: RunConfig) -> DaydreamFileConfig:
-    """Return ``config.file_config``, or an empty config when it is None.
-
-    A single accessor so resolution call sites never branch on ``None`` —
-    an absent file config behaves identically to one with no keys set.
-    """
-    return config.file_config if config.file_config is not None else DaydreamFileConfig()
-
-
-def _resolve_review_profile(config: RunConfig) -> None:
-    """Resolve and validate the review profile once at the runner composition root."""
-    if config.review_profile is None:
-        config.review_profile = resolve_from_runconfig(config)
-    _record_review_profile(config)
-
-
-def _record_review_profile(config: RunConfig) -> None:
-    """Record resolved review-profile provenance when a recorder is active (R12).
-
-    Populates the active recorder's ``profile_*`` trajectory extra keys
-    (schema version, name, source kind, canonical digest) so the trajectory of
-    a real run carries exactly the policy tested. No-op when the run has no
-    resolved profile or no recorder is open at the call site — both are
-    legitimate: ``--review-profile`` is optional, and deep-flow dispatch
-    resolves before its recorder exists (the deep spine re-enters
-    ``_resolve_review_profile`` from inside the recorder scope, which is what
-    lands the record here).
-    """
-    if config.review_profile is None:
-        return
-    recorder = get_current_recorder()
-    if recorder is None:
-        return
-    recorder.record_profile(
-        schema_version=config.review_profile.profile.schema_version,
-        name=config.review_profile.name,
-        source_kind=config.review_profile.source_kind,
-        digest=config.review_profile.digest,
-    )
-
-
-def _resolved_backend_name(config: RunConfig, phase: str) -> str:
-    """Resolve the backend kind for ``phase`` across all precedence tiers.
-
-    Order (highest first): explicit per-phase ``{phase}_backend``, global
-    ``config.backend`` (``--backend``), file-config phase override, then the
-    phase-agnostic terminal default (:func:`_default_backend_name`). Delegating
-    the final tier is exact: it is only reached when ``config.backend`` is
-    already falsy, at which point ``_default_backend_name`` collapses to the
-    same ``file_config.backend or "claude"`` fallback.
-    """
-    file_config = _file_config_or_empty(config)
-    return (
-        getattr(config, f"{phase}_backend", None)
-        or config.backend
-        or file_config.phase_backend(phase)
-        or _default_backend_name(config)
-    )
-
-
-class RecorderBackendNames(NamedTuple):
-    """Resolved backend identities for a run's trajectory and manifest.
-
-    Attributes:
-        backend: Representative backend kind for the run, resolved through the
-            phase that actually governs the flow (see
-            :func:`_recorder_backend_names`).
-        fix: Backend kind for the fix phase, or ``""`` when the flow never
-            runs fix (the key is omitted on serialization).
-        test: Backend kind for the test phase, or ``""`` when the flow never
-            runs test (the key is omitted on serialization).
-    """
-
-    backend: str
-    fix: str
-    test: str
-
-
-def _recorder_backend_names(
-    config: RunConfig, flow_kind: DaydreamRunFlow
-) -> RecorderBackendNames:
-    """Resolve the representative backend identities for the run's trajectory.
-
-    The representative backend resolves through the phase that actually governs
-    the flow: deep-flow runs (DEEP/NORMAL/TTT) fan out on ``per_stack_review``;
-    improve runs on its advisory phases with ``recon`` first; DIAGRAM runs on
-    ``diagram``, the only agent phase its flow executes (issue #1113);
-    other flows fall back to ``review``. Per-phase fix/test are recorded only
-    for flows that statically run those phases: improve/TTT/DIAGRAM never run
-    fix/test; PR runs fix but never test; CUSTOM composition is fork-defined and
-    independent of this static trajectory mapping, so labeling it unconditionally would
-    mislabel review-only forks. A flow that skips a phase yields an empty name
-    (the key is omitted on serialization) rather than a misleading label.
-    """
-    if flow_kind in (DaydreamRunFlow.DEEP, DaydreamRunFlow.NORMAL, DaydreamRunFlow.TTT):
-        representative_phase = "per_stack_review"
-    elif flow_kind == DaydreamRunFlow.IMPROVE:
-        representative_phase = "recon"
-    elif flow_kind == DaydreamRunFlow.DIAGRAM:
-        representative_phase = "diagram"
-    else:
-        representative_phase = "review"
-    backend = _resolved_backend_name(config, representative_phase)
-    fix = (
-        _resolved_backend_name(config, "fix")
-        if flow_kind
-        not in (
-            DaydreamRunFlow.TTT,
-            DaydreamRunFlow.IMPROVE,
-            DaydreamRunFlow.CUSTOM,
-            DaydreamRunFlow.DIAGRAM,
-        )
-        else ""
-    )
-    test = (
-        _resolved_backend_name(config, "test")
-        if flow_kind
-        not in (
-            DaydreamRunFlow.TTT,
-            DaydreamRunFlow.PR,
-            DaydreamRunFlow.IMPROVE,
-            DaydreamRunFlow.CUSTOM,
-            DaydreamRunFlow.DIAGRAM,
-        )
-        else ""
-    )
-    return RecorderBackendNames(backend=backend, fix=fix, test=test)
-
-
-def _default_backend_name(config: RunConfig) -> str:
-    """Resolve the phase-agnostic general default backend.
-
-    Order (highest first): global ``config.backend`` (``--backend``),
-    file-config global, then the terminal ``"claude"`` fallback. Deliberately
-    phase-agnostic: it must never consult any ``{phase}_backend`` attribute, so
-    a ``review_backend`` override can never surface here — the archive's
-    general ``backend`` field and the orchestrator's "Default backend" line
-    record the true general default, not a per-phase override.
-    """
-    file_config = _file_config_or_empty(config)
-    return config.backend or file_config.backend or "claude"
-
-
-def _resolved_review_backend_name(config: RunConfig) -> str | None:
-    """Resolve the review-specific backend override, or ``None`` when unset.
-
-    Returns the override only when a review-specific source is configured
-    (CLI ``review_backend``, then file-config review phase); ``None`` when no
-    override exists — the archive must distinguish "review used the general
-    backend" from "review was explicitly overridden", so this is never coerced
-    to a fallback string. The file-config review phase is consulted directly
-    rather than through :func:`_resolved_backend_name` because a CLI global
-    ``config.backend`` outranks the file phase there and would mask a
-    configured override.
-    """
-    file_config = _file_config_or_empty(config)
-    return config.review_backend or file_config.phase_backend("review")
-
-
-def _resolved_model(config: RunConfig, phase: str) -> str | None:
-    """Resolve the model for ``phase`` across all precedence tiers.
-
-    Order (highest first): explicit per-phase ``{phase}_model``, global
-    ``config.model`` (``--model``), file-config phase override, file-config
-    global, then ``PHASE_DEFAULT_MODELS[backend][phase]``. Returns ``None``
-    only when no source supplies a model (the backend then applies its own
-    default).
-
-    The per-backend table lookup keys off the backend kind resolved by
-    :func:`_resolved_backend_name`, so a config-selected backend still gets its
-    own phase tier defaults.
-    """
-    file_config = _file_config_or_empty(config)
-    backend_name = _resolved_backend_name(config, phase)
-    return (
-        getattr(config, f"{phase}_model", None)
-        or config.model
-        or file_config.phase_model(phase)
-        or file_config.model
-        or PHASE_DEFAULT_MODELS.get(backend_name, {}).get(phase)
-    )
-
-
-def capture_manifest_run_identity(
-    config: RunConfig, flow_kind: DaydreamRunFlow, registry: Registry, cwd: Path,
-    *, execution_input: BackendExecutionInput | None = None,
-) -> ManifestRunIdentity:
-    """Freeze manifest identity from resolved runner policy before model execution.
-
-    The registry is the run's resolved registry, including built-in overrides.
-    Mode and resume exceptions preserve the historical archive capabilities;
-    these labels do not evaluate each step's runtime predicate. Backend/model
-    precedence stays owned by the same helpers used to construct backends.
-    """
-    runtime_flow_name: str | None
-    if flow_kind is DaydreamRunFlow.IMPROVE:
-        runtime_flow_name = "improve"
-    elif flow_kind is DaydreamRunFlow.DIAGRAM:
-        runtime_flow_name = "diagram"
-    elif flow_kind is DaydreamRunFlow.CUSTOM:
-        runtime_flow_name = config.flow_name
-    else:
-        runtime_flow_name = "deep"
-    step_names: set[str] = set()
-    if runtime_flow_name:
-        try:
-            entries = registry.flow(runtime_flow_name)
-        except UnresolvedExtensionError:
-            entries = []
-        for entry in entries:
-            if isinstance(entry, str):
-                step_names.add(entry)
-            else:
-                step_names.update(entry.steps)
-
-    if flow_kind is DaydreamRunFlow.TTT:
-        runs_fix, runs_test = False, False
-    elif flow_kind is DaydreamRunFlow.PR:
-        runs_fix, runs_test = True, False
-    else:
-        runs_fix, runs_test = "fix" in step_names, "test" in step_names
-    if flow_kind in (DaydreamRunFlow.PR, DaydreamRunFlow.IMPROVE, DaydreamRunFlow.DIAGRAM):
-        runs_merge = False
-    elif flow_kind is DaydreamRunFlow.CUSTOM:
-        runs_merge = any("merge" in step for step in step_names)
-    else:
-        runs_merge = True
-    runs_per_stack_review = (
-        (config.flow_name is None or config.flow_name in _DEEP_FLOW_ALIASES)
-        and config.start_at not in ("merge", "fix")
-        and flow_kind is not DaydreamRunFlow.DIAGRAM
-    )
-    phases = RunPhaseCapabilities(
-        per_stack_review=runs_per_stack_review,
-        merge=runs_merge and config.start_at != "fix",
-        fix=runs_fix,
-        test=runs_test,
-        push=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "commit" in step_names,
-        remote_ci=flow_kind not in (DaydreamRunFlow.TTT, DaydreamRunFlow.PR) and "remote-ci" in step_names,
-    )
-    per_stack_backend: str | None = None
-    per_stack_model: str | None = None
-    if phases.per_stack_review:
-        per_stack_backend = _resolved_backend_name(config, "per_stack_review")
-        per_stack_model = _resolved_model(config, "per_stack_review")
-        if per_stack_model is None and per_stack_backend == "pi":
-            from daydream.backends.pi import _configured_pi_model
-
-            configured_model = (
-                _configured_pi_model(cwd) if execution_input is None
-                else _configured_pi_model(cwd, agent_dir=execution_input.pi_agent_dir)
-            )
-            per_stack_model = configured_model or DEFAULT_PI_MODEL
-    profile = config.review_profile
-    return ManifestRunIdentity(
-        skill=config.stack,
-        model=None,
-        backend=_default_backend_name(config),
-        review_backend=_resolved_review_backend_name(config),
-        fix_backend=_resolved_backend_name(config, "fix") if phases.fix else None,
-        test_backend=_resolved_backend_name(config, "test") if phases.test else None,
-        per_stack_review_backend=per_stack_backend,
-        per_stack_review_model=per_stack_model,
-        review_only=config.output_mode == "review",
-        deep=not config.shallow,
-        profile=None if profile is None else RunProfileIdentity(
-            schema_version=profile.profile.schema_version,
-            name=profile.name,
-            source_kind=profile.source_kind,
-            digest=profile.digest,
-        ),
-        phases=phases,
-    )
-
-
-def _resolved_latency_profile(config: RunConfig) -> ProfileResolution:
-    """Resolve the latency profile without ever raising.
-
-    Order (highest first): CLI ``config.latency_profile`` then the file-config
-    scalar. An unrecognised value resolves fail-safe upward to ``forensic`` and
-    is recorded on the result, so a typo can never route a run cheap. The
-    ``source`` on the result is ``"cli"``, ``"file"``, or ``"default"``.
-    """
-    if config.latency_profile is not None:
-        return resolve_latency_profile(config.latency_profile, source="cli")
-    file_config = _file_config_or_empty(config)
-    if file_config.latency_profile is not None:
-        return resolve_latency_profile(file_config.latency_profile, source="file")
-    return resolve_latency_profile(None, source="default")
-
-
-def _explicit_reasoning_effort_pin(config: RunConfig, phase: str) -> str | None:
-    """Return the user-pinned effort for ``phase``, or ``None`` when unpinned.
-
-    Covers only the three explicit tiers (global ``--reasoning-effort``,
-    file-config phase override, file-config global) — never the latency-route
-    tier and never the built-in table. The arbiter group fan-out uses this to
-    honour a deliberate pin (A4) rather than a profile-derived effort.
-    """
-    file_config = _file_config_or_empty(config)
-    return (
-        config.reasoning_effort
-        or file_config.phase_reasoning_effort(phase)
-        or file_config.reasoning_effort
-    )
-
-
-def _profile_phase_effort(config: RunConfig, backend_name: str, phase: str) -> str | None:
-    """Return the latency route's effort for ``wonder``/``arbiter``, else ``None``.
-
-    The route tier sits below the explicit user knobs and above the built-in
-    table. Only phases the route speaks to resolve here, and only on backends
-    the deep effort table contains (today: Codex) — a route can never move a
-    backend whose historical effort Daydream deliberately left untouched.
-    ``wonder == "skip"`` is not an effort, so it falls through to the table.
-    """
-    if phase not in ("wonder", "arbiter") or backend_name not in DEEP_PHASE_DEFAULT_EFFORT:
-        return None
-    route = config.latency_route
-    if route is None:
-        return None
-    if phase == "wonder":
-        return None if route.wonder == "skip" else route.wonder
-    return route.arbiter_effort
-
-
-def _resolved_reasoning_effort(config: RunConfig, phase: str) -> str | None:
-    """Resolve the reasoning effort for ``phase`` across all precedence tiers.
-
-    Order (highest first): global ``config.reasoning_effort``
-    (``--reasoning-effort``), file-config phase override, file-config global,
-    the run's latency route for ``wonder``/``arbiter``, then
-    ``PHASE_DEFAULT_EFFORT[backend][phase]``. There is no per-phase RunConfig
-    field. ``None`` means no source supplied one and the backend applies its
-    own ambient default (e.g. Codex reads ``model_reasoning_effort`` from
-    ``~/.codex/config.toml`` when daydream passes nothing).
-
-    Like :func:`_resolved_model`, the default-table lookup keys off the backend
-    kind resolved by :func:`_resolved_backend_name`. All three backends consume
-    the resolved value through their own native knob.
-    """
-    backend_name = _resolved_backend_name(config, phase)
-    return (
-        _explicit_reasoning_effort_pin(config, phase)
-        or _profile_phase_effort(config, backend_name, phase)
-        or PHASE_DEFAULT_EFFORT.get(backend_name, {}).get(phase)
-    )
-
-
 def _resolve_backend(
     config: RunConfig,
     phase: str,
@@ -797,15 +131,11 @@ def _resolve_backend(
     execution_input: BackendExecutionInput | None = None,
     effort_override: str | None = None,
 ) -> Backend:
-    """Resolve one phase backend from CLI, file, and built-in defaults, reusing the optional cache.
+    """Resolve and optionally cache a phase backend.
 
-    ``effort_override`` replaces the resolver's value for this one resolution;
-    it is the arbiter group fan-out's per-group effort, and it is honoured only
-    on backends the deep effort table tunes (today: Codex) -- the same gate
-    :func:`_profile_phase_effort` applies to the route tier, so a profile can
-    never move Claude's or Pi's historical deep-review effort. Because the cache
-    key already includes the resolved effort, an override never collides with
-    the phase default.
+    ``effort_override`` is a per-group arbiter override, gated by the same backend
+    support as latency profiles. The resolved effort participates in the cache key,
+    so a tuned arbiter cannot reuse the default-effort instance.
     """
     backend_name = _resolved_backend_name(config, phase)
     resolved_model = _resolved_model(config, phase)
@@ -852,13 +182,9 @@ _IMPROVE_MODEL_PHASES: tuple[str, ...] = ("recon", "audit", "vet", "plan_write")
 
 
 def _preflight_improve_backends(ctx: FlowContext) -> None:
-    """Resolve and validate every improve backend before the first model turn.
+    """Validate every Improve backend inside its bound audit workspace before model calls.
 
-    The production improve composition calls this only inside
-    :func:`open_audit_workspace`, after binding ``ctx.audit_workspace``. The
-    ``None`` guard is a fail-closed defense for unsupported direct/internal
-    construction of an improve context, not a reachable backend-selection
-    diagnostic in the runner flow.
+    Reject unsupported direct contexts without an audit workspace.
     """
     audit = ctx.audit_workspace
     if audit is None:
@@ -906,24 +232,14 @@ def _preflight_improve_backends(ctx: FlowContext) -> None:
 
 
 def _truthy(value: str | None) -> bool:
-    """Interpret an environment-variable string as a boolean.
-
-    Returns:
-        False for None and for ``""``/``"0"``/``"false"`` (case-insensitive);
-        True for any other non-empty value.
-    """
+    """Treat None, empty, 0, and false (case-insensitive) as false; other strings as true."""
     if value is None:
         return False
     return value.strip().lower() not in ("", "0", "false")
 
 
 def _stdin_isatty() -> bool:
-    """Report whether stdin is an interactive TTY.
-
-    Returns:
-        True if stdin is attached to a terminal. A detached or closed stdin
-        (raising ``AttributeError``/``ValueError``) is treated as not a TTY.
-    """
+    """Return whether stdin is a TTY; detached or closed stdin is noninteractive."""
     try:
         return sys.stdin.isatty()
     except (AttributeError, ValueError):
@@ -931,25 +247,14 @@ def _stdin_isatty() -> bool:
 
 
 def _resolve_interactive(config: "RunConfig") -> bool:
-    """Resolve whether this run may prompt the user, from three sources.
-
-    Precedence: an explicit ``--non-interactive`` flag forces False; otherwise
-    the run is interactive only when stdin is a TTY and ``CI`` is not truthy.
-
-    Returns:
-        True if prompts may read stdin; False for unattended/harness runs.
-    """
+    """Prompt only with TTY stdin, no truthy CI, and no explicit --non-interactive flag."""
     if config.non_interactive:
         return False
     return _stdin_isatty() and not _truthy(os.environ.get("CI"))
 
 
 def _compute_diff_ref(cwd: Path) -> str:
-    """Compute the diff ref to hand to exploration specialists.
-
-    Returns ``"{base_branch}...HEAD"`` when a default branch is detected, else
-    falls back to ``"HEAD"`` so specialists can still run ``git diff HEAD -- <file>``.
-    """
+    """Use base_branch...HEAD when detected, otherwise HEAD for exploration diffs."""
     base_branch = _detect_default_branch(cwd)
     if base_branch:
         return f"{base_branch}...HEAD"
@@ -1130,56 +435,6 @@ def _absolute_output_path(path: str | Path | None) -> Path | None:
     return requested if requested.is_absolute() else Path(os.path.abspath(requested))
 
 
-def _finalize_run_artifacts(
-    run_artifacts: _RunArtifacts, *, selected: RunWriteSnapshot, config: RunConfig,
-    work: WorkContext, successful: bool,
-) -> Exception | None:
-    """Freeze, strictly archive, and publish one joined run on a worker thread."""
-    from daydream.archive import ArchiveFinalizationError, finalize_archive_run
-    from daydream.archive.manifest import archive_recorder_provenance_from_snapshot
-
-    if run_artifacts.capture.run_flow is None:
-        raise ArtifactVisibilityError("run flow provenance was not retained")
-    identity = run_artifacts.capture.manifest_identity
-    if identity is None:
-        raise ArtifactVisibilityError("manifest run identity was not captured")
-    snapshot = run_artifacts.session.freeze(selected)
-    recorder_provenance = archive_recorder_provenance_from_snapshot(
-        write_snapshot=selected, run_flow=run_artifacts.capture.run_flow
-    )
-    dump_path = (
-        None
-        if run_artifacts.dump is None
-        else run_artifacts.session.finalization_merge_path(run_artifacts.dump, snapshot=snapshot)
-    )
-    archive_error: Exception | None = None
-    try:
-        finalize_archive_run(
-            run=ArchiveRunSnapshot(recorder_provenance, identity, selected), artifacts=snapshot,
-            artifact_provenance=run_artifacts.session.provenance, config=config,
-            work=work, upload=successful, dump_path=dump_path,
-        )
-    except ArchiveFinalizationError as exc:
-        archive_error = exc
-    disposition = (
-        ArtifactDisposition.ROLLBACK
-        if archive_error is not None
-        else ArtifactDisposition.COMPLETE if successful else ArtifactDisposition.PARTIAL_EVIDENCE
-    )
-    try:
-        run_artifacts.session.finalize_frozen(snapshot, disposition=disposition)
-    except Exception as exc:
-        if archive_error is not None:
-            # The rollback failure is what propagates and gets rendered, so the
-            # archive error the operator actually needs — which gate refused and
-            # which file tripped it — would otherwise be lost: ``add_note``
-            # carries only the type name and nothing renders notes (#1171).
-            print_error(console, "Artifact Finalization", str(archive_error))
-            exc.add_note(f"strict archive finalization also failed ({type(archive_error).__name__})")
-        raise
-    return archive_error
-
-
 async def _run_workspace(
     config: RunConfig, target_dir: Path, *, skip_tests: bool,
     private_owner: PrivateWorkspaceOwner, run_context: RunContext,
@@ -1288,12 +543,9 @@ async def _run_workspace(
 
 
 def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
-    """Raise WrongBranchError when a loop run has nothing to review against.
+    """Raise WrongBranchError when a base-branch loop would review itself.
 
-    A worktree on the base branch with no --branch/--worktree would review
-    itself. Raised for cli.main() to render the actionable panel. Extracted
-    from _dispatch so both the default loop path and --flow deep/shallow reuse
-    the identical guard.
+    cli.main renders the same actionable error for default, deep, and shallow flows.
     """
     if (
         config.branch is None
@@ -1314,7 +566,6 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
 # Built-in deep-flow mode aliases (review / shallow / deep all route to the
 # single deep flow in different modes, #330). Kept as a module constant so
 # downstream consumers (e.g. archive manifest tier gate) share the same list.
-_DEEP_FLOW_ALIASES = ("review", "shallow", "deep")
 
 
 async def _dispatch_selected_flow(
@@ -1323,22 +574,17 @@ async def _dispatch_selected_flow(
     github_execution: github_app.GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
 ) -> int:
-    """Route an explicit ``--flow <name>`` selection.
+    """Resolve built-in aliases before registered flows.
 
-    ``review`` / ``shallow`` / ``deep`` route to the single deep flow (as
-    review / shallow / default mode, #330) — these are not registered flow
-    names, so they are resolved before the registry lookup. ``improve`` runs
-    its own flow. Any other registered name runs the generic
-    :func:`_run_custom_flow`; unknown names raise
-    ``UnresolvedExtensionError``, which propagates to :func:`run`'s Extension
-    Error panel.
+    Review/shallow/deep aliases share the deep flow. Unknown names raise
+    ``UnresolvedExtensionError`` for ``run`` to render as an Extension Error.
     """
     name = config.flow_name
     assert name is not None
 
     # Built-in mode aliases: resolve before the registry lookup so the deep
     # routing wins over the "not registered" error.
-    if name in _DEEP_FLOW_ALIASES:
+    if name in DEEP_FLOW_ALIASES:
         if name in ("shallow", "deep"):
             _require_reviewable_branch(work, config)
         return await _run_loop_deep(
@@ -1623,12 +869,9 @@ async def _run_custom_flow(
     github_execution: github_app.GitHubExecutionInput,
     backend_factory: BackendFactory | None = None,
 ) -> int:
-    """Generic preamble for a fork-registered flow selected via ``--flow``.
+    """Seed a registered custom flow with diff/log/branch and a shared recorder.
 
-    Mirrors :func:`_run_review_or_comment`'s diff seed so custom flows composed
-    of built-in review steps work, but an empty/unavailable diff is a dim note
-    rather than an early return (a custom flow may not need a diff). Opens the
-    recorder through the shared factory so ``--dump-artifacts``/archival apply.
+    An unavailable diff becomes an empty seed: custom flows may not require one.
     """
     flow_name = config.flow_name
     assert flow_name is not None

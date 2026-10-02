@@ -1,13 +1,4 @@
-"""Git metadata capture for archived runs.
-
-Captures branch, commit SHA, remote URL, and repo slug from the target
-directory at archive time. Each ``git_ops`` call is independent with a
-5-second timeout so a single git failure doesn't block the others.
-
-Exports:
-    GitContext: Dataclass holding captured git metadata.
-    capture_git_context: Capture current git state from a directory.
-"""
+"""Capture target-repository identity with independent, five-second Git queries."""
 
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,19 +10,10 @@ from daydream.git_ops import BranchNotFoundError, GitError
 
 @dataclass
 class GitContext:
-    """Git metadata for an archived run.
+    """Credential-free repository identity at archive time.
 
-    Attributes:
-        remote_url: Origin remote URL (HTTPS or SSH).
-        repo_slug: ``owner/repo`` extracted from remote_url.
-        branch: Current branch name.
-        base_branch: Default branch (main/master).
-        head_sha: Full commit SHA of HEAD.
-        base_sha: Merge-base SHA between ``base_branch`` and HEAD; ``None``
-            when either side cannot be resolved.
-        changed_files: Repo-relative paths changed between ``base_sha`` and
-            ``head_sha``. Empty list when ``base_sha`` is ``None`` or the
-            diff cannot be computed.
+    Unresolved merge bases are None; changed_files is empty when the merge base
+    or diff is unavailable.
     """
 
     remote_url: str | None = None

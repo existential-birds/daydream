@@ -23,11 +23,7 @@ from daydream.ui.theme import (
 
 
 def print_error(console: Console, title: str, message: str) -> None:
-    """Print an error panel with red styling.
-
-    Creates a prominent error display with a warning icon
-    and double-edge border.
-    """
+    """Print an error in a red double-border panel."""
     panel = Panel(
         Text(message, style=STYLE_RED),
         title=f"⚠️  {title}",
@@ -71,14 +67,7 @@ def print_dim(console: Console, message: str) -> None:
 
 
 def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> None:
-    """Print a styled menu for user selection.
-
-    Displays numbered options with descriptions in a neon-styled panel.
-
-    Args:
-        options: List of (key, description) tuples.
-
-    """
+    """Print (key, description) choices in a selection panel."""
     menu_text = Text()
     for key, description in options:
         menu_text.append(f"  [{key}] ", style=STYLE_BOLD_CYAN)
@@ -96,17 +85,7 @@ def print_menu(console: Console, title: str, options: list[tuple[str, str]]) -> 
 
 
 def print_intent_summary(console: Console, text: str) -> None:
-    """Print the agent's intent understanding in a panel.
-
-    Rendered immediately before the confirm-or-correct gate so the user sees
-    exactly the understanding they are asked to confirm — never just the tail
-    of the live agent transcript.
-
-    Args:
-        text: The intent summary (markdown-ish agent prose). An empty summary
-            renders a placeholder rather than a blank panel.
-
-    """
+    """Show the full intent at the confirmation gate, or an empty-summary placeholder."""
     body: Markdown | Text
     if text.strip():
         body = Markdown(text)
@@ -124,15 +103,7 @@ def print_intent_summary(console: Console, text: str) -> None:
 
 
 def _read_user_input(console: Console, message: str, default: str) -> str:
-    """Display a styled input prompt and read stdin without policy lookup.
-
-    Args:
-        default: Default value if user enters nothing.
-
-    Returns:
-        User's input string, or default if empty.
-
-    """
+    """Read stdin without policy lookup; use the default for empty input or EOF."""
     prompt_text = Text()
     prompt_text.append("▶ ", style=STYLE_CYAN)
     prompt_text.append(message, style=STYLE_CYAN)

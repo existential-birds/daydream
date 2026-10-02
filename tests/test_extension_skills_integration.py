@@ -15,7 +15,7 @@ import pytest
 
 from daydream import review_profile as rp, runner
 from daydream.backends import ResultEvent, TextEvent
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.test_deep_orchestrator import _install_stub_backend, _silence

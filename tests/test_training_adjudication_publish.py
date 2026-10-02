@@ -3,6 +3,8 @@ import json
 import os
 import shutil
 import stat
+from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +21,7 @@ from daydream.training.adjudication.publish import (
 from tests.fixtures.training.build_hub_snapshot import AnnotationsHub
 from tests.harness.adjudication import policy_binding
 
-# M6: production manifests always pin index_revision (materialize writes it),
-# so the Hub-verified 40-hex branch — not the synthetic digest fallback — is
-# the path that must be exercised.
+# Use a 40-character hexadecimal pinned revision so Hub verification runs.
 INDEX_REVISION = "a" * 40
 
 
@@ -43,7 +43,6 @@ def _canonical_bytes(value: Any) -> bytes:
 
 def _download_final(hub: AnnotationsHub, curation_id: str, snapshot_id: str, revision: str, destination: Path,
 ) -> dict[str, Any]:
-    """Download a final bundle by exact snapshot id and pinned revision."""
     return download_final_annotation_bundle(
         hub, curation_id=curation_id, snapshot_id=snapshot_id, revision=revision, destination=destination,
     )
@@ -346,17 +345,6 @@ def test_publish_still_refuses_a_declared_symlink_state_root(tmp_path: Path, hub
 
     assert hub.info_revision_log == []
 
-def test_resume_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
-    state, manifest = _state_v2(tmp_path)
-    publish_annotation_state(hub, state, manifest=manifest)
-    actual = tmp_path / "actual"
-    actual.mkdir()
-    alias = tmp_path / "alias"
-    alias.symlink_to(actual, target_is_directory=True)
-
-    resume_annotation_state(hub, curation_id=_CID, destination=alias / "fresh")
-
-    assert (actual / "fresh" / "queue.json").is_file()
 
 @pytest.mark.parametrize("bad_name", ["../queue.json", "nested\\queue.json", "./queue.json", "queue.json/"])
 def test_resume_path_guard_rejects_malformed_pointer_names(bad_name: str, tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -394,6 +382,17 @@ def test_resume_failure_on_last_download_leaves_no_partial_install(tmp_path: Pat
     assert list(tmp_path.glob(".fresh.*")) == []
 
 
+def _published_installer(operation: str, root: Path, hub: AnnotationsHub) -> Callable[[Path], dict[str, Any]]:
+    """Publish through the real boundary and bind its matching installation call."""
+    if operation == "download":
+        bundle, curation_id = _final_bundle(root)
+        published = publish_final_annotation_bundle(hub, bundle)
+        return partial(_download_final, hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"])
+    state, manifest = _state_v2(root)
+    publish_annotation_state(hub, state, manifest=manifest)
+    return lambda destination: resume_annotation_state(hub, curation_id=_CID, destination=destination)
+
+
 def _fail_parent_fsync_after_rename(monkeypatch: pytest.MonkeyPatch, destination: Path, parent_identity: tuple[int, int]
 ) -> None:
     real_fsync = os.fsync
@@ -407,19 +406,6 @@ def _fail_parent_fsync_after_rename(monkeypatch: pytest.MonkeyPatch, destination
     monkeypatch.setattr(os, "fsync", fail_parent_after_rename)
 
 
-def test_resume_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: AnnotationsHub,
-) -> None:
-    state, manifest = _state_v2(tmp_path)
-    publish_annotation_state(hub, state, manifest=manifest)
-    destination = tmp_path / "fresh"
-    parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
-    _fail_parent_fsync_after_rename(monkeypatch, destination, parent_identity)
-    with pytest.raises(HydrationError, match="parent fsync failed"):
-        resume_annotation_state(hub, curation_id=_CID, destination=destination)
-
-    assert not destination.exists()
-    assert list(tmp_path.glob(".fresh.*")) == []
 
 @pytest.mark.parametrize("name", ["queue.json", "observations.jsonl", "preview-ledger.json", "index.db"])
 def test_publish_secret_in_every_state_payload_commits_nothing(name: str, tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -673,7 +659,6 @@ def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path, hu
 def test_final_publish_rejects_tampered_policy_binding(
     mutation: dict[str, Any], canonical: bool, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
-    """Publication reuses the construction-time v2 binding rules."""
     bundle, _curation_id = _final_bundle(tmp_path)
     path = bundle / "policy-binding.json"
     binding = json.loads(path.read_text())
@@ -741,8 +726,7 @@ def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement
             replaced = True
         return data
 
-    # Keep real filesystem reads and writes, but force a competing edit at the
-    # boundary where the old publisher separated hashing from payload capture.
+    # Replace the real file between the old-hash and capture boundaries.
     with monkeypatch.context() as patch:
         patch.setattr(Path, "read_bytes", read_then_replace)
         published = publish_final_annotation_bundle(hub, bundle)
@@ -926,31 +910,33 @@ def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path:
     assert all(revision is not None for _, revision in hub.downloaded_revision_log)
     assert list(tmp_path.glob(".download.*")) == []
 
-def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
-    bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
+@pytest.mark.parametrize("operation,required_file", [("download", "_SUCCESS"), ("resume", "queue.json")])
+def test_install_accepts_fresh_destination_under_symlinked_ancestor(
+    tmp_path: Path, hub: AnnotationsHub, operation: str, required_file: str,
+) -> None:
+    install = _published_installer(operation, tmp_path, hub)
     actual = tmp_path / "actual"
     actual.mkdir()
     alias = tmp_path / "alias"
     alias.symlink_to(actual, target_is_directory=True)
 
-    _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], alias / "download")
+    install(alias / "fresh")
 
-    assert (actual / "download" / "_SUCCESS").is_file()
+    assert (actual / "fresh" / required_file).is_file()
 
-def test_final_download_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: AnnotationsHub,
+@pytest.mark.parametrize("operation", ["download", "resume"])
+def test_install_parent_fsync_failure_removes_owned_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: AnnotationsHub, operation: str,
 ) -> None:
-    bundle, curation_id = _final_bundle(tmp_path)
-    published = publish_final_annotation_bundle(hub, bundle)
-    destination = tmp_path / "download"
+    install = _published_installer(operation, tmp_path, hub)
+    destination = tmp_path / "fresh"
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     _fail_parent_fsync_after_rename(monkeypatch, destination, parent_identity)
     with pytest.raises(HydrationError, match="parent fsync failed"):
-        _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
+        install(destination)
 
     assert not destination.exists()
-    assert list(tmp_path.glob(".download.*")) == []
+    assert list(tmp_path.glob(".fresh.*")) == []
 
 
 def _record_open_directory_fds(monkeypatch: pytest.MonkeyPatch) -> set[int]:
@@ -979,12 +965,7 @@ def _open_fd_identity(fd: int) -> tuple[int, int] | None:
 def test_final_download_cleanup_preserves_concurrent_destination_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, hub: AnnotationsHub,
 ) -> None:
-    if operation == "download":
-        bundle, curation_id = _final_bundle(tmp_path)
-        published = publish_final_annotation_bundle(hub, bundle)
-    else:
-        state, manifest = _state_v2(tmp_path)
-        publish_annotation_state(hub, state, manifest=manifest)
+    install = _published_installer(operation, tmp_path, hub)
     destination = tmp_path / "download"
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     real_fsync = os.fsync
@@ -1007,10 +988,7 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
 
     monkeypatch.setattr(os, "fsync", replace_then_fail)
     with pytest.raises(HydrationError, match="parent fsync failed"):
-        if operation == "download":
-            _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
-        else:
-            resume_annotation_state(hub, curation_id=_CID, destination=destination)
+        install(destination)
 
     assert (destination / "concurrent").read_text() == "keep"
     assert installed_inode_was_pinned == [True]
@@ -1022,19 +1000,11 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
 def test_successful_installation_closes_directory_descriptors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, hub: AnnotationsHub,
 ) -> None:
-    if operation == "download":
-        bundle, curation_id = _final_bundle(tmp_path)
-        published = publish_final_annotation_bundle(hub, bundle)
-    else:
-        state, manifest = _state_v2(tmp_path)
-        publish_annotation_state(hub, state, manifest=manifest)
+    install = _published_installer(operation, tmp_path, hub)
     destination = tmp_path / "installed"
     directory_fds = _record_open_directory_fds(monkeypatch)
 
-    if operation == "download":
-        _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
-    else:
-        resume_annotation_state(hub, curation_id=_CID, destination=destination)
+    install(destination)
 
     assert destination.is_dir()
     assert list(tmp_path.glob(".installed.*")) == []

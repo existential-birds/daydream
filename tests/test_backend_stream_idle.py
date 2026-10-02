@@ -1,14 +1,10 @@
-"""Idle-stall detection and teardown for the pi/codex subprocess backends. Deterministic by construction — no test
-here races two clocks. The stall, retry, wall-budget, and SIGKILL-escalation tests drive the real backend code
-(spawn call, readline loop, idle window, shielded teardown) against an in-process
-:class:`~tests.harness.fake_cli_process.FakeCliProcess` at the ``asyncio.create_subprocess_exec`` boundary. Silence
-is modeled as a ``readline()`` that never resolves, so a timer under test is the ONLY timer in the test: it may
-fire late under load, but the outcome cannot flip. The two wiring tests at the end spawn one REAL subprocess each
-to prove the production spawn plumbing (argv resolution, pipe wiring, decode, reap) against a fake CLI that
-unconditionally prints its stream and exits — no hang, no scripted cadence, no timeout in play, hence equally
-deterministic. Assertions are on observable outcomes: the exception that terminates the turn, whether the child was
-killed and reaped, how many children were launched, the written ATIF trajectory, and (for the wiring tests) the OS
-process table."""
+"""Test CLI stalls, retries, wall budgets, and shielded process cleanup.
+
+FakeCliProcess models permanent silence at the spawn boundary: only the timer
+under test can fire, so load cannot invert outcomes. Final wiring tests use
+real subprocesses that print and exit without timing races. Assert failures,
+spawn/reap counts, ATIF state, and the OS process table.
+"""
 
 from __future__ import annotations
 
@@ -71,13 +67,10 @@ CODEX_LINES = [
     json.dumps({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 4}}),
 ]
 
-# Small only for speed. Correctness never depends on the value: wherever a
-# test arms this window, the fake stream is PERMANENTLY silent, so the timer
-# firing late (a loaded host) cannot change the outcome — only delay it.
+# Short windows only accelerate permanent-silence cases; they must not create a timing race.
 TINY_WINDOW = "0.05"
 
 def assert_stalled_and_reaped(spawner: Any, *, expected_spawns: int = 1) -> FakeCliProcess:
-    """Assert exactly *expected_spawns* children ran and the last one was torn down."""
     assert len(spawner.procs) == expected_spawns, (
         f"expected {expected_spawns} subprocess launch(es), saw {len(spawner.procs)}"
     )
@@ -89,7 +82,6 @@ def assert_stalled_and_reaped(spawner: Any, *, expected_spawns: int = 1) -> Fake
 async def run_pi_wall_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, ignore_sigterm: bool = False
 ) -> FakeCliProcess:
-    """Drive the wall-budget abort against a permanently-silent pi fake."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True, ignore_sigterm=ignore_sigterm)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "3600")
     output, _, budget_reason = await run_agent(
@@ -128,7 +120,6 @@ async def test_silent_stream_trips_idle_timeout_and_reaps_subprocess(
     assert_stalled_and_reaped(spawner)
 
 async def test_pi_stalls_before_first_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A CLI that never writes anything at all is still caught (startup hang)."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=[], hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
     with pytest.raises(StreamStalledError):
@@ -136,10 +127,6 @@ async def test_pi_stalls_before_first_line(tmp_path: Path, monkeypatch: pytest.M
     assert_stalled_and_reaped(spawner)
 
 async def test_pi_response_stall_uses_shorter_default_window(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Silence after a completed tool result is a model-response stall. The archived failure this covers completed a
-    bounded source read and then emitted nothing for the rest of the 30-minute wall budget. Pi streams model
-    deltas, so once no tool is active its response-specific idle window should preempt the generic subprocess
-    window and surface a retryable stall."""
     lines = [
         json.dumps({"type": "session", "id": "sess-response-stall"}), json.dumps({"type": "agent_start"}),
         json.dumps({"type": "turn_start"}),
@@ -184,9 +171,7 @@ async def test_pi_active_tool_keeps_long_subprocess_window(tmp_path: Path, monke
     assert excinfo.value.timeout_s == pytest.approx(0.2)
     assert_stalled_and_reaped(spawner)
 
-# A stream with data flowing must NOT trip, however small the window. This is
-# the regression that keeps a genuinely slow-but-alive model from being killed
-# mid-turn: data availability, not elapsed time, is what feeds the window.
+# Available data resets the idle window independently of elapsed wall time.
 
 @pytest.mark.parametrize(
     ("cli", "backend_cls", "lines"),
@@ -203,9 +188,7 @@ async def test_flowing_stream_does_not_trip_a_tiny_window(
     assert spawner.procs[0].reaped
 
 async def test_idle_window_restarts_after_each_line() -> None:
-    """The window bounds each inter-line gap, not the total elapsed stream. Two successful reads through the same tiny
-    window, then the SAME window value trips on the first gap with no data — the window is re-armed per line, so
-    only full silence can trip it."""
+    """Re-arm the same timeout after each line: successful reads do not consume the next idle window."""
     reader = asyncio.StreamReader()
     window = float(TINY_WINDOW)
     reader.feed_data(b"one\n")
@@ -218,7 +201,6 @@ async def test_idle_window_restarts_after_each_line() -> None:
 # Operator configuration.
 
 async def test_zero_disables_idle_detection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``DAYDREAM_STREAM_IDLE_TIMEOUT_S=0`` opts out; the stream still completes."""
     install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, "0")
     assert stream_idle_timeout_s() is None
@@ -232,9 +214,9 @@ def test_malformed_override_falls_back_to_default(raw: str, monkeypatch: pytest.
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
 
 def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pi responses preempt the wall; tools and codex retain the long window. Pi's response stream is live while the
-    model generates, so ten minutes of silence is a stall. Codex generations and output-silent tools can
-    legitimately remain quiet much longer and must still be bounded by the phase wall budget."""
+    """Pi response silence must preempt the wall budget; output-silent tools and Codex generations retain a
+    longer idle window.
+    """
     monkeypatch.delenv(STREAM_IDLE_TIMEOUT_ENV, raising=False)
     assert stream_idle_timeout_s() == DEFAULT_STREAM_IDLE_TIMEOUT_S
     assert DEFAULT_PI_RESPONSE_IDLE_TIMEOUT_S == 600.0
@@ -244,13 +226,11 @@ def test_default_windows_straddle_the_wall_budget(monkeypatch: pytest.MonkeyPatc
         < DEFAULT_STREAM_IDLE_TIMEOUT_S
     )
 
-# Retryable — driven through run_agent, the production call site. A stalled
-# stream consumes the backend's bounded retry budget after the full idle window.
+# Exercise stalled retries through the real run_agent path.
 
 async def test_stall_retry_is_limited_below_backend_retry_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A persistent stall gets one fresh process, not every transport retry."""
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=PI_LINES[:2], hang=True)
     monkeypatch.setenv(STREAM_IDLE_TIMEOUT_ENV, TINY_WINDOW)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "3")
@@ -275,32 +255,25 @@ async def test_stall_retry_is_limited_below_backend_retry_budget(
 async def test_wall_budget_still_aborts_while_blocked_in_the_idle_window(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The wall budget must still fire while the read sits inside the idle window. The idle window is an
-    ``asyncio.timeout`` on the reading task; ``run_agent``'s wall budget is an anyio cancel scope around the same
-    task. This drives the nesting that matters — outer anyio cancel delivered while the inner asyncio timeout is
-    armed — and asserts the abort path stays intact: no exception escapes, the turn is marked aborted, and the
-    subprocess is still reaped. The wall budget is the only timer that can fire: the fake stream is permanently
-    silent and the idle window is far larger."""
+    """Outer AnyIO cancellation must abort an inner asyncio idle read and reap the child.
+
+    Only the wall timer can fire: the stream stays silent and idle timeout is much longer.
+    """
     proc = await run_pi_wall_budget(tmp_path, monkeypatch)
     assert proc.returncode == SIGTERM_RC, "a cooperative child needs no SIGKILL"
 
 async def test_cancelled_teardown_still_escalates_to_sigkill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child that ignores SIGTERM is still SIGKILLed when the wall budget fires. The subprocess is read inside the
-    backend generator, so a wall-budget cancel lands straight in the teardown ``finally`` with the parent scope
-    still cancelled. That teardown must run to completion regardless: SIGTERM, wait the grace, then SIGKILL. If it
-    is not shielded from the cancellation, the first await re-raises before the SIGKILL, and a SIGTERM-ignoring
-    child stays alive — a real leaked process. The grace is zero so the escalation is immediate: ``wait_for(...,
-    timeout=0)`` raises without sleeping on an unexited child."""
+    """A cancelled generator still shields SIGTERM/grace/SIGKILL/reap for an ignoring child.
+
+    Zero grace makes escalation immediate; an unshielded first await would leak the process.
+    """
     monkeypatch.setattr("daydream.backends._subprocess.TERMINATE_GRACE_S", 0.0)
     proc = await run_pi_wall_budget(tmp_path, monkeypatch, ignore_sigterm=True)
     assert proc.terminate_calls == 1
     assert proc.kill_calls == 1
     assert proc.returncode == SIGKILL_RC
 
-# Real-subprocess wiring. One test per backend proves the production spawn
-# plumbing — PATH resolution, pipe wiring, real byte decode, real wait/reap —
-# against a fake CLI that unconditionally prints its stream and exits. No
-# hang, no cadence, no timer in play: nothing here races anything.
+# A real printing CLI exercises PATH, pipes, decoding, and reaping without relying on timing races.
 
 _WIRING_CLI = textwrap.dedent(
     """\
@@ -318,8 +291,7 @@ def install_wiring_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name:
     bin_dir = tmp_path / "fakebin"
     bin_dir.mkdir(exist_ok=True)
     script = bin_dir / name
-    # Pin the shebang to the interpreter running the suite so PATH-resolved
-    # launcher shims (e.g. pyenv) never sit between the backend and the fake.
+    # Pin the interpreter to bypass PATH shims.
     script.write_text(_WIRING_CLI.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1), encoding="utf-8")
     script.chmod(0o755)
     lines_file = tmp_path / f"{name}-lines.jsonl"
@@ -331,8 +303,7 @@ def install_wiring_cli(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, name:
     return pid_log
 
 def assert_pid_reaped(pid_log: Path) -> int:
-    """Assert exactly one child ran and is already gone from the process table. No polling: the backend ``await``s the
-    child's exit before yielding its final events, so by the time ``drain`` returns the pid must be gone."""
+    """Require the child already gone when drain returns; polling would hide a missed reap."""
     pids = [int(line) for line in pid_log.read_text(encoding="utf-8").split() if line]
     assert len(pids) == 1, f"expected one subprocess, saw {pids}"
     with pytest.raises(ProcessLookupError):

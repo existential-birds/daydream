@@ -66,8 +66,6 @@ def test_run_curate_tui_queue_renders_index_and_quits(
     assert rc == 0
     out = capsys.readouterr().out
     assert "no case at row 9" in out
-    # discriminating: the real case_id (from list_cases) must be rendered to stdout,
-    # so a stub that ignores list_cases cannot pass
     assert case_id in out
 
 def test_render_case_shows_header_and_numbered_evidence(tmp_path: Path, fake_gh: FakeGh) -> None:
@@ -109,8 +107,6 @@ def test_render_case_shows_authoring_commit_and_fixed_reason(tmp_path: Path, fak
 def test_run_curate_tui_queue_bogus_case_id_reprompts(
     tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A non-digit selector that matches no known case_id reprompts (rc 0)
-    instead of letting get_case's CurationError kill the whole session."""
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     rc = run_curate_tui(ws, read_line=_scripted("bogus-id", "q"))
     assert rc == 0
@@ -262,7 +258,6 @@ def test_edit_author_prefills_selected_evidence_source_ids(
     run_curate_tui(ws, case_id, read_line=_scripted("e", "a", "4", "q"))
     f = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]["findings"][0]
     assert f["title"] == "From selected" and f["provenance"]["kind"] == "edited"
-    # verdict: the prefill in the editor buffer carried the selected source_id
     prefill = log.read_text()
     assert "source_ids" in prefill and "- github:review:100" in prefill
     assert "github:review:100" in prefill and "github:issue_comment:200" not in prefill
@@ -454,7 +449,6 @@ def test_resume_reflects_persisted_state(tmp_path: Path, fake_gh: FakeGh) -> Non
     run_curate_tui(ws, case_id, read_line=_scripted("a", "1", "r", "y", "q"))
     cur = load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["curation"]
     assert cur["state"] == "ready" and cur["snapshot_attested"] is True
-    # session 2 (resume): the index reflects the persisted ready state
     cases = cu.list_cases(ws)
     assert cases[0]["state"] == "ready"
     assert "ready" in render_index_table(cases)
@@ -479,7 +473,6 @@ def test_ready_declined_leaves_draft_and_no_digest(tmp_path: Path, fake_gh: Fake
     assert cur["state"] == "draft" and cur["snapshot_attested"] is False
     assert "task_spec_sha256" not in cur and "task_spec_approved_at" not in cur
 
-# prioritized sectioned render + captured view binding (issue #879)
 
 def _add_late_finding(cu_mod: Any, ws: Path, case_id: str) -> None:
     """A real post-render curator action: one authored finding, no sources."""
@@ -491,18 +484,14 @@ def test_render_case_shows_prioritized_sections_and_legend(tmp_path: Path, fake_
     ws, case_id, _h = _seed_ready_case_mixed(tmp_path, fake_gh)
     view = cu.get_case(ws, case_id)
     out = tui.render_case(view)
-    # band sections in fixed order, only non-empty ones rendered
     assert "-- review_first --" in out
     assert "-- context --" in out
     assert "-- decided --" not in out
     assert "-- withdrawn --" not in out
     assert "-- likely_actioned --" not in out
-    # section order follows BAND_RANK: review_first before context
     assert out.index("-- review_first --") < out.index("-- context --")
-    # reason codes appear beside entries and a legend decodes them
     assert "resolved" in out or "reasons:" in out
     assert "legend:" in out.lower()
-    # numbering is contiguous across sections through the captured binding
     binding = tui._view_binding(view)
     for n, sid in enumerate(binding, start=1):
         assert f"  {n}. " in out and sid in out
@@ -523,8 +512,6 @@ def test_number_action_resolves_through_captured_binding_not_fresh_order(
     bound_sid = binding[diverging - 1]
     paged: dict[str, str] = {}
     monkeypatch.setattr("daydream.benchmark.curate_tui._launch_pager", lambda body: paged.update(body=body))
-    # production number action: entry N pages the record the render numbered N
-    # through the captured binding, never a fresh re-derivation of raw order
     tui.run_curate_tui(ws, case_id, read_line=_scripted(str(diverging), "99", "q"))
     assert paged["body"] == by_sid[bound_sid]["body"]
     assert paged["body"] != by_sid[raw_order[diverging - 1]]["body"]
@@ -537,8 +524,6 @@ def test_stale_binding_prompts_rerender_instead_of_reinterpreting(
     path = ws / "cases" / f"{case_id}.yaml"
     view = cu.get_case(ws, case_id)
     binding = tui._view_binding(view)
-    # mutate the case after render -> the captured binding must read as stale,
-    # while a freshly derived binding reads fresh
     _add_late_finding(cu, ws, case_id)
     assert tui._binding_stale(ws, case_id, binding) is True
     assert tui._binding_stale(ws, case_id, tui._view_binding(cu.get_case(ws, case_id))) is False

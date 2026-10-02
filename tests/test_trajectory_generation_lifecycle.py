@@ -1,17 +1,8 @@
-"""Span lifecycle tests: pending generation drafts, timing, late billing ownership.
+"""Generation timing and billing through the public Invocation.observe seam.
 
-P18 Task 2 (binding decisions 1, 4, 5). Exercises the trajectory-layer
-pending-generation reducer through the public ``Invocation.observe`` seam
-using T1's frozen backend event types: drafts stay UNENDED until billing
-ownership resolves, immutable provider choice + timing seal at message_end
-before tools, each draft ends exactly once at its sealed historical end,
-bounds (512 drafts / 10 MiB retained choice bytes) drain with
-structural/unbilled-or-none diagnostics, no age limit rejects the
-395.332-second case, terminal/cancel paths drain, native timestamps are
-non-bool bounded int ms converted exactly (no clamping, no fake RFC3339),
-and the billing owner closes to one of
-``unresolved | generation_children | structural_attempt | none`` before any
-record is exported.
+Choices seal before tools; drafts end once at historical boundaries after
+billing resolves. Tests preserve strict native timestamps, late usage, terminal
+and cancellation drains, and the 512-draft/10-MiB fail-closed caps.
 """
 
 from __future__ import annotations
@@ -38,9 +29,7 @@ from daydream.backends import (
 from daydream.trajectory import DaydreamPhase, Invocation
 from tests.harness.trajectory import make_recorder
 
-# Pinned replay constants (Task 0 / resume notes): native request start
-# 1788690314289 ms and host provider message-end 1788690709621000000 ns
-# = 395.332 seconds. Sanitized values only — no credentials, no real payload.
+# Sanitized replay: native start to sealed host end spans exactly 395.332 seconds.
 NATIVE_START_MS = 1788690314289
 NATIVE_START_NS = 1788690314289000000
 HOST_END_NS = 1788690709621000000
@@ -124,8 +113,7 @@ class TestPendingDraftLifecycle:
 
     def test_seal_freezes_choice_and_timing_at_message_end_before_tools(self, tmp_path: Path) -> None:
         _, inv = _sealed_invocation(tmp_path)
-        # Tool execution starts AFTER message_end; it must not duplicate or
-        # alter the sealed choice parts.
+        # Tools cannot alter choices already sealed at message end.
         inv.observe(ToolStartEvent(id="call_001", name="read_file", input={"path": "src/example.py"}))
         inv.observe(ToolResultEvent(id="call_001", output='{"content": "FILE"}', is_error=False))
         draft = _summary(inv)["drafts"][0]
@@ -202,8 +190,7 @@ class TestNativeTimingValidation:
         assert draft["duration_ns"] is None
 
     def test_reversed_chronology_falls_back_explicitly(self, tmp_path: Path) -> None:
-        # Native start AFTER the sealed host end is an explicit incomplete
-        # boundary — never reordered, never clamped.
+        # Reversed native timing remains incomplete, never reordered or clamped.
         _, inv = _sealed_invocation(tmp_path, native_start_ms=2_000_000_000, ended_at_ns=1_000_000_000)
         draft = _summary(inv)["drafts"][0]
         assert draft["start_fallback"] == "reversed"
@@ -215,9 +202,7 @@ class TestBillingOwnerResolution:
     def test_zero_children_with_authoritative_total_bills_chain_once(self, tmp_path: Path) -> None:
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
-        # Opaque backends (Claude/Codex/Osprey) emit no generation events; a
-        # failed/opaque billed attempt with an authoritative total keeps its
-        # structural bill even with zero generations.
+        # An opaque attempt with no generations retains its authoritative structural bill.
         _total(recorder, inv, input_tokens=7, output_tokens=2)
         inv.finish()
         summary = _summary(inv)
@@ -374,11 +359,7 @@ class TestUnbilledOrNoneCapOwner:
         assert _summary(inv)["billing_owner"] == "structural_attempt"
 
     def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, tmp_path: Path) -> None:
-        """Cap drain locks ownership: matching usage sums must not bill children.
-
-        Post-cap drafts may carry late usage whose input/output sums equal the authoritative total. The documented
-        cap invariant (no native bill on cap-drained children) must win: the owner stays structural and every
-        draft remains custom/unbilled, never ``generation_children``."""
+        """Cap-drained children stay unbilled even when late usage matches terminal totals."""
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
         for i in range(513):

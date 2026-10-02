@@ -1,13 +1,4 @@
-"""Tests for daydream.eval.analyzer trajectory loading and finding analysis.
-
-Focused on session-id resolution semantics inside ``load_trajectories``:
-ambiguous prefixes must raise instead of silently picking one, exact
-matches must take precedence over prefix matches, and unique prefixes
-must still resolve.
-
-Also covers finding and location arithmetic, including the
-undefined (zero-findings) case, which must not report a perfect score.
-"""
+"""Trajectory resolution, finding/location arithmetic, and source-quality metrics."""
 import json
 import math
 import uuid
@@ -20,11 +11,10 @@ from daydream import _tree_sitter_safety as safety
 from daydream.artifact_visibility import ArtifactEvidenceProvenance
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
-from daydream.eval import analyzer as analyzer_mod
+from daydream.eval import quality as quality_mod
 from daydream.eval.analyzer import (
     _agent_label,
     _latest_main_trajectory,
-    _quality_python_parser,
     analyze_costs,
     analyze_findings,
     analyze_location,
@@ -37,6 +27,7 @@ from daydream.eval.analyzer import (
     collect_trajectory_paths,
     load_trajectories,
 )
+from daydream.eval.quality import _quality_python_parser
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
@@ -76,12 +67,7 @@ def test_analyze_timing_keeps_fork_inclusive_legacy_step_fallback() -> None:
 
 
 def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
-    """Create a minimal ``runs/<session_id>/trajectory.json`` fixture.
-
-    ``load_trajectories`` only reads the file with ``json.loads`` and
-    stuffs a ``_source_file`` key onto the returned dict, so any valid
-    JSON object is enough for the resolution path we're exercising.
-    """
+    """Write the minimal valid trajectory object needed for session resolution."""
     run_dir = daydream_dir / "runs" / session_id
     run_dir.mkdir(parents=True)
     traj = run_dir / "trajectory.json"
@@ -108,9 +94,7 @@ def test_unique_prefix_resolves(tmp_path: Path) -> None:
     assert result["forked"] == []
 
 def test_exact_match_takes_precedence(tmp_path: Path) -> None:
-    """An exact dir name must win even if a longer dir would also prefix-match."""
     daydream_dir = tmp_path / ".daydream"
-    # Exact id and a sibling whose name starts with the same string.
     _write_run(daydream_dir, "abcd1234", "exact")
     _write_run(daydream_dir, "abcd1234-extra", "prefix-only")
 
@@ -123,7 +107,6 @@ def test_exact_match_takes_precedence(tmp_path: Path) -> None:
 SESSION = "11111111-2222-3333-4444-555555555555"
 
 def test_analyzer_resolution_keys_off_the_owned_names(tmp_path: Path) -> None:
-    """Resolution, the main/forked split and the glob all come from the surface."""
     daydream_dir = tmp_path / ".daydream"
     run_dir = run_directory(daydream_dir, SESSION)
     run_document_path(run_dir).parent.mkdir(parents=True)
@@ -300,12 +283,7 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Pa
 
 
 def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict[str, Any]:
-    """Forked-trajectory fixture whose agent Read each of ``read_paths``.
-
-    Tool calls retain ``function_name``/``arguments``. ``_agent_label`` derives the
-    ``deep-<stack>`` key from ``_source_file``. With ``pi_style=True`` the
-    calls use the pi style ``read``/``arguments.path`` shape.
-    """
+    """Build a fork with Read calls; pi_style uses read/arguments.path instead."""
     steps = []
     for i, path in enumerate(read_paths):
         if pi_style:
@@ -353,9 +331,7 @@ def _seed_diff(daydream_dir: Path, *files: str) -> None:
     )
 
 
-# Owner-scoped artifact paths that belong to a DIFFERENT owner than the current
-# run's provenance: a different workspace key, and a different session under the
-# same key. Both must stay eligible repository reads.
+# Other workspaces and other sessions under the same key remain eligible repository reads.
 
 
 def _write_records(deep: Path, **overrides: Any) -> None:
@@ -377,7 +353,6 @@ def _root_trajectory(session_id: str) -> dict[str, Any]:
 _READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "pi": ("read", "path"), "osprey": ("read", "path")}
 
 def test_analyze_session_preserves_source_quality_without_read_metrics(tmp_path: Path,) -> None:
-    """Source quality and trajectory data remain available without read metrics."""
     public_source, _, provenance = _owned_source(tmp_path, session_id="session")
     (public_source / "src").mkdir(parents=True)
     (public_source / "src/api.py").write_text("def api(value):\n    return value\n", encoding="utf-8")
@@ -420,11 +395,7 @@ def _quality(tmp_path: Path, files: dict[str, str], *, name: str = "workspace", 
 
 
 def _big_function(max_x: int) -> str:
-    """A single-function if/elif chain reaching ``max_x``.
-
-    ``big`` has ``max_x + 1`` cyclomatic complexity (1 + the ``if`` + every
-    ``elif``) and ``2 * max_x + 2`` sloc lines.
-    """
+    """Build an if/elif chain with max_x+1 complexity and 2*max_x+2 SLOC."""
     lines = ["def big(x):", "    if x == 1:", "        return 1"]
     for i in range(2, max_x + 1):
         lines.append(f"    elif x == {i}:")
@@ -538,7 +509,6 @@ def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path) -> None:
     assert list(result["per_file"]) == ["app.py"]
 
 def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
-    """An eroding fix to an already-large function raises erosion (verbosity holds)."""
     clean = _quality(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)}, name="clean",)
     eroded = _quality(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(13)}, name="eroded",)
 
@@ -546,7 +516,6 @@ def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
     assert eroded["verbosity"] >= clean["verbosity"]
 
 def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path,) -> None:
-    """Real-path: analyze_session computes quality on the live workspace tree."""
     ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
     daydream_dir = ws / ".daydream"
     seed_run_trajectory(daydream_dir, "quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
@@ -587,10 +556,6 @@ def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Pa
     assert result["daydream_dir"] == str(public_source / ".daydream")
 
 def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(tmp_path: Path,) -> None:
-    """Blank rows inside a flagged span must not count toward the ratio.
-
-    A trivial wrapper's span covers the whole function, blank lines included; previously ``verbosity`` divided
-    those rows by non-blank LOC and could exceed 1.0, corrupting the per-file and workspace aggregates."""
     result = _quality(tmp_path, {"app.py": ("def outer(x, y):\n" "\n" "\n" "    return inner(x, y)\n")},)
 
     entry = result["per_file"]["app.py"]
@@ -635,10 +600,6 @@ def test_quality_verbosity_wrapper_cases(tmp_path: Path, source: str, verbosity:
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
 
 def test_quality_verbosity_flags_clones_across_files(tmp_path: Path) -> None:
-    """An exact block copied from ``a.py`` into ``b.py`` flags BOTH files.
-
-    Per-file clone detection alone never sees the duplicate — each per-file invocation observes a single
-    occurrence. The cross-file pass must index blocks across scoped files and attribute them back."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     result = _quality(tmp_path, {"a.py": "def a():\n" + block, "b.py": "def b():\n" + block},)
 
@@ -647,7 +608,6 @@ def test_quality_verbosity_flags_clones_across_files(tmp_path: Path) -> None:
     assert result["verbosity"] > 0
 
 def test_quality_candidate_scope_indexes_valid_peers_for_clones(tmp_path: Path,) -> None:
-    """Candidate mode indexes valid peer text for cross-file clone attribution."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     result = _quality(tmp_path,
         {
@@ -663,7 +623,6 @@ def test_quality_candidate_scope_indexes_valid_peers_for_clones(tmp_path: Path,)
     assert result["erosion"] is not None
 
 def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path,) -> None:
-    """An explicit ``candidate_paths=None`` preserves whole-workspace analysis."""
     ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},)
     default = analyze_quality(ws / ".daydream")
     explicit_none = analyze_quality(ws / ".daydream", candidate_paths=None)
@@ -671,12 +630,10 @@ def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path,
 
 def test_quality_candidate_empty_set_returns_empty_without_enumeration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An explicitly empty candidate set reports zero files without walking the workspace."""
-
     def _boom(_workspace: Path) -> None:
         raise AssertionError("workspace must not be enumerated for an empty candidate set")
 
-    monkeypatch.setattr(analyzer_mod, "_scoped_python_files", _boom)
+    monkeypatch.setattr(quality_mod, "_scoped_python_files", _boom)
     result = _quality(tmp_path, {"app.py": "def a():\n    return 1\n"}, candidate_paths=set())
 
     assert result["scoped_files"] == 0
@@ -685,7 +642,6 @@ def test_quality_candidate_empty_set_returns_empty_without_enumeration(tmp_path:
     assert result["verbosity"] is None
 
 def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
-    """A candidate that fails the generated-file eligibility rule is not reported."""
     result = _quality(tmp_path,
         {
             "app.py": "def a():\n    return 1\n",
@@ -696,7 +652,6 @@ def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
     assert set(result["per_file"]) == {"app.py"}
 
 def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path) -> None:
-    """A block present in only one file flags neither file."""
     result = _quality(tmp_path,
         {
             "a.py": "def a():\n    if x > 1:\n        return 1\n    return 0\n",
@@ -708,7 +663,6 @@ def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path) -> N
     assert result["per_file"]["b.py"]["verbosity"] == 0.0
 
 def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: Path,) -> None:
-    """Within-file duplicates keep counting now that the cross-file pass exists."""
     result = _quality(tmp_path,
         {"app.py": (
                 "def a():\n"
@@ -734,10 +688,7 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: 
     ],
 )
 def test_quality_erosion_comprehension_types_cc_parity(tmp_path: Path, comprehension: str, label: str) -> None:
-    """List/set/dict/generator comprehensions count generators + filters identically.
-
-    A comprehension's generators and filters are real branch paths: a function whose only decision points live
-    inside one must cross the CC>10 erosion threshold, which previously they were invisible to."""
+    """Comprehension generators and filters must all contribute to the CC>10 threshold."""
     result = _quality(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
 
     entry = result["per_file"]["app.py"]
@@ -745,17 +696,12 @@ def test_quality_erosion_comprehension_types_cc_parity(tmp_path: Path, comprehen
     assert entry["erosion"] == 1.0
 
 def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path,) -> None:
-    """``(x for x in items)`` is an identity comprehension, exactly like a list one."""
     result = _quality(tmp_path, {"app.py": "def f(items):\n    return (x for x in items)\n"})
 
     assert result["per_file"]["app.py"]["verbosity"] > 0
 
 def test_quality_excludes_generated_and_vendored_files(tmp_path: Path) -> None:
-    """Generated and vendored Python is out of metric scope (Finding #8).
-
-    Path-based generated files (``*_generated.py``, ``*.pb.py``, ``migrations/*.py``), the generated-file header
-    marker, and vendored trees (``vendor``/``third_party``) must not reach ``per_file``, ``scoped_files``, or the
-    aggregate denominators."""
+    """Generated paths/headers and vendored trees must be absent from files and denominators."""
     result = _quality(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
@@ -780,11 +726,6 @@ def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> N
     assert result["verbosity"] == 0.0
 
 def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path,) -> None:
-    """A malformed file's lines must never flag matching blocks in valid files.
-
-    ``analyze_quality`` indexes the cross-file clone pass over successfully parsed files only. A broken file
-    holding a block that also appears in a valid file would otherwise be a second occurrence and flag the valid
-    file, shifting its verbosity (Finding #1)."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     clean = _quality(tmp_path, {"app.py": "def a():\n" + block}, name="clean")
     dirty = _quality(tmp_path, {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block}, name="dirty",)
@@ -795,11 +736,6 @@ def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_pat
     assert clean["verbosity"] == dirty["verbosity"]
 
 def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones(tmp_path: Path,) -> None:
-    """Finding #1 holds in candidate mode: a malformed peer never flags a valid candidate.
-
-    Candidate mode indexes scoped peers as clone sources, but a peer that fails to parse must be excluded from the
-    cross-file clone index so its garbage lines cannot inflate a valid candidate's verbosity (regression #457
-    round 2)."""
     block = "    if x > 1:\n        return 1\n    return 0\n"
     clean = _quality(tmp_path, {"app.py": "def a():\n" + block}, name="clean", candidate_paths={"app.py"})
     dirty = _quality(tmp_path,
@@ -812,10 +748,7 @@ def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones
     assert clean["verbosity"] == dirty["verbosity"]
 
 def test_quality_per_file_erosion_none_without_functions(tmp_path: Path) -> None:
-    """A module with no functions has no mass, so its erosion ratio is None.
-
-    Zero is a meaningful value (no high-CC mass), so undefined must be None; the workspace aggregate pools mass
-    across files and stays numeric."""
+    """No function mass means undefined erosion, distinct from zero high-complexity mass."""
     result = _quality(tmp_path, {"m.py": "import os\nX = 1\n", "app.py": "def f(x):\n    return x\n"},)
 
     assert result["per_file"]["m.py"]["erosion"] is None
@@ -824,10 +757,7 @@ def test_quality_per_file_erosion_none_without_functions(tmp_path: Path) -> None
     assert result["erosion"] == 0.0
 
 def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> None:
-    """A file with no non-blank lines has an undefined verbosity ratio.
-
-    ``None`` signals the undefined denominator; the workspace aggregate keeps pooling the zero lines harmlessly
-    and stays ``None`` for verbosity too."""
+    """A zero nonblank denominator remains undefined in file and workspace verbosity."""
     result = _quality(tmp_path, {"blank.py": "\n\n\n"})
 
     assert result["per_file"]["blank.py"]["verbosity"] is None
@@ -838,10 +768,7 @@ def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> N
     [("        item = items.pop()\n", "pop"), ("        items.clear()\n", "clear")],
 )
 def test_quality_verbosity_guard_after_mutation_not_flagged(tmp_path: Path, mutation: str, label: str) -> None:
-    """A post-mutation empty check is a necessary termination guard.
-
-    ``while items:`` proves nonemptiness only at the header; once the body mutates the collection, ``if not
-    items:`` is meaningful and must not be counted as redundant slop (Finding #3)."""
+    """Mutation invalidates the loop-header nonempty proof, so its termination guard is needed."""
     result = _quality(tmp_path,
         {"app.py": "def f(items):\n    while items:\n" + mutation + "        if not items:\n            break\n"},
     )
@@ -849,10 +776,7 @@ def test_quality_verbosity_guard_after_mutation_not_flagged(tmp_path: Path, muta
     assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
 
 def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path,) -> None:
-    """A non-mutating statement between header and guard keeps it redundant.
-
-    ``while items: x = f(); if not items: break`` — nothing touches ``items``, so the header's nonemptiness proof
-    still holds at the guard, which stays flagged (Finding #3)."""
+    """An intervening non-mutating statement leaves the loop-header nonempty proof valid."""
     result = _quality(tmp_path,
         {"app.py": (
                 "def f(items):\n"
@@ -874,10 +798,6 @@ def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: 
 )
 def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(tmp_path: Path, wrapper_body: str, label: str,
 ) -> None:
-    """A leading docstring is not an executable statement for wrapper detection.
-
-    ``_trivial_wrapper`` must count only the real body statement, so a documented pass-through wrapper is flagged
-    exactly like an undocumented one (Finding #4)."""
     result = _quality(tmp_path,
         {"app.py": ("def inner(x, y):\n" "    return x + y\n" "\n" "def outer(x, y):\n" + wrapper_body)},
     )
@@ -885,10 +805,7 @@ def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(tmp_path: Pat
     assert result["per_file"]["app.py"]["verbosity"] > 0, label
 
 def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
-    """A vendored dir whose basename is not vendor/third_party is still excluded.
-
-    ``daydream/atif/`` is explicitly vendored from Harbor (see daydream/atif/NOTICE) but its basename ``atif`` is
-    not in the obvious vendored set — it must not reach ``per_file`` or the aggregates (Finding #5)."""
+    """The explicit atif vendor exclusion must work without a conventional vendor basename."""
     result = _quality(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
@@ -902,9 +819,7 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
     assert result["erosion"] == 0.0
 
 
-# Shipped-set findings metrics (issue #741): analyze_findings counts the
-# authoritative merged-items.json set, falling back to the merged review
-# regex count, then the pre-merge per-stack total.
+# Count authoritative merged items, falling back to review text, then pre-merge stack totals.
 
 def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
     """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
@@ -916,19 +831,9 @@ def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
-    """Write ``deep/stack-{stack_name}-records.json`` with *n* HIGH records.
+    """Seed HIGH records with host UIDs using 1-based birth ordinals.
 
-    Each record also carries the host-minted ``uid`` a real per-stack record is
-    stamped with at birth (issue #1111), so the fixture matches the production
-    artifact shape. Ordinals are 1-based, matching ``stamp_record_uids``, while
-    the reviewer-style ``id`` stays 0-based -- the two are deliberately not the
-    same numbering, which is part of why ``id`` cannot serve as an identity.
-
-    Args:
-        deep: The ``.daydream/deep`` directory to write into.
-        stack_name: Stack whose records file is written.
-        n: How many records to seed.
-    """
+    Reviewer ids deliberately remain 0-based: display ids are not record identity."""
     records: list[dict[str, Any]] = [{"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
         for i in range(n)
     ]
@@ -949,11 +854,8 @@ def test_shipped_count_wins_over_per_stack_records(tmp_path: Path) -> None:
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
 def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
-    # Issue #741: wonder-lens merged items are shipped findings and MUST count
-    # toward total_findings (they were dropped by the pre-fix renderer, inflating
-    # cost_per_finding ~2x). The analyzer counts every merged-items.json item.
+    # Wonder findings belong to the shipped denominator too; excluding them inflates cost per finding.
     dd, deep = _deep_dirs(tmp_path)
-    # 4 per-stack + 4 wonder = 8 shipped items.
     seed_shipped_items(deep, high=4, med=0)
     shipped = json.loads((deep / "merged-items.json").read_text())["items"]
     shipped += [_item(4 + i, file="w.py", line=i + 1, description=f"wonder-{i}", lens="wonder") for i in range(4)]
@@ -963,13 +865,10 @@ def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
 def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> None:
-    # ``_shipped_counts`` documents present-but-corrupt merged-items.json as a
-    # data-integrity error. A well-formed file with the wrong shape must surface
-    # that error too, not silently yield a bogus count behind the fallback.
+    # Present but malformed merged items are integrity failures, never fallback evidence.
     dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
-    # ``items`` present but a non-list, and a top-level list, are both wrong
-    # shapes, as is a missing ``items`` key -- the writer always emits it.
+    # A non-list items field, missing items key, or top-level list is an invalid writer shape.
     (deep / "merged-items.json").write_text(json.dumps({"items": {"a": 1}}))
     with pytest.raises(ValueError):
         analyze_findings(dd)
@@ -981,7 +880,6 @@ def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
         analyze_findings(dd)
 
 def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path,) -> None:
-    # A *syntax*-invalid merged-items.json surfaces, not the fallback.
     dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
     (deep / "merged-items.json").write_text("{not json")
@@ -1012,7 +910,6 @@ def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Pat
     assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "structure": 2}
 
 def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
-    # A malformed optional alternatives file must not take down analysis.
     dd, deep = _deep_dirs(tmp_path)
     (deep / "alternatives.json").write_text("{not json")
     out = analyze_findings(dd)
@@ -1064,8 +961,7 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.Monke
     """
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    # The factory is lru_cached; clear it so the guard inside the cached body
-    # runs against the monkeypatched (bad) install (see impl plan, assumption).
+    # Clear the parser cache so the bad-version guard sees the patched installation.
     _quality_python_parser.cache_clear()
     with pytest.raises(safety.TreeSitterBadVersionError):
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
@@ -1101,27 +997,18 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(monkeypatch: 
     assert quality["error"]
     assert quality["per_file"] == {}
     assert quality["scoped_files"] == 0
-    # Rest of the evaluation is intact -- the run is archived, not dropped.
     assert result["session_id"] == "quality-bad"
     assert result["trajectory_count"] == 1
 
 
-# Pattern B: real temp artifact dirs. These seed helpers write the REAL
-# production artifacts (`.daydream/diff.patch`, `.daydream/hunk-index.json`,
-# `.daydream/deep/merged-items.json`, `.daydream/deep/dedup-candidates.json`)
-# so the axes are exercised over the same bytes a live run leaves behind.
+# Seed the exact production artifact shapes for location and duplication analysis.
 
 WORKED_A = "New helper duplicates the existing loader"
 WORKED_B = "Config reading is implemented twice in this module"
 
 
 def seed_diff_patch(dd: Path, file: str = "svc/loader.py", *, start: int = 85, count: int = 8) -> None:
-    """Write ``.daydream/diff.patch`` with a single hunk on *file*.
-
-    ``parse_hunks`` derives the new-side range from the ``@@`` header, so the
-    hunk's inclusive range is ``[start, start + count - 1]`` -- the issue's
-    worked example ``(85, 92)`` at the defaults.
-    """
+    """Write one hunk with inclusive new-side range [start, start+count-1]."""
     dd.mkdir(parents=True, exist_ok=True)
     (dd / "diff.patch").write_text(
         f"diff --git a/{file} b/{file}\n"
@@ -1158,12 +1045,7 @@ def seed_merged_items(deep: Path, items: list[dict[str, Any]]) -> None:
 def seed_dedup_candidates(deep: Path, *, record_alt_pairs: list[dict[str, Any]] | None = None,
     record_duplicate_pairs: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write ``deep/dedup-candidates.json`` in the production shape.
-
-    Shape mirrors the writer (see ``tests/test_deep_merge_recovery.py``):
-    ``{"record_alt_pairs": [], "record_duplicate_pairs": []}``. These are the
-    PRE-MERGE candidate pairs handed to the merge agent -- inputs, not escapes.
-    """
+    """Write production-shaped pre-merge candidate pairs, which are inputs rather than escapes."""
     deep.mkdir(parents=True, exist_ok=True)
     (deep / "dedup-candidates.json").write_text(json.dumps(
             {"record_alt_pairs": record_alt_pairs or [], "record_duplicate_pairs": record_duplicate_pairs or []}
@@ -1172,16 +1054,9 @@ def seed_dedup_candidates(deep: Path, *, record_alt_pairs: list[dict[str, Any]] 
 
 
 def _provenance(*uids: str) -> dict[str, Any]:
-    """Keyword payload carrying an explicit ``source_uids`` claim (issue #1111).
+    """Provide a typed source_uids keyword payload for unpacking into _item.
 
-    Returns ``dict[str, Any]`` rather than an inline literal so ``**``-unpacking
-    into :func:`_item` type-checks. The key is a module constant, not a literal,
-    so mypy cannot tell which parameter it targets and matches it against every
-    keyword-only one -- a ``list[str]`` value then fails against ``file: str``.
-
-    Call with no arguments for the "merge agent declined to attribute this item"
-    case, which is a real answer and distinct from omitting the key entirely.
-    """
+    No arguments means explicit attribution refusal, distinct from an absent key."""
     return {RECORD_SOURCE_UIDS_KEY: list(uids)}
 
 
@@ -1205,15 +1080,10 @@ def _worked_example_dirs(tmp_path: Path) -> tuple[Path, Path]:
     return dd, deep
 
 def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_path: Path,) -> None:
-    """THE acceptance criterion of issue #1106.
+    """Distinguish a correct line-88 finding from its line-4 structural restatement.
 
-    The issue's worked example ships one defect twice over a diff whose only hunk is ``svc/loader.py`` ``(85,
-    92)``: a correct finding at line 88 and a structural restatement anchored at line 4, 81 lines outside the
-    hunk. Before this change both metrics reported the run as perfect (``grounding_rate: 1.0``, ``coverage_ratio:
-    1.0``) -- indistinguishable from a run that shipped only the correct finding.
-
-    Now the location axis separates them, and the duplication axis surfaces the same-file pair even though its
-    0.1538 similarity is far under the 0.5 bar."""
+    The sole hunk is lines 85–92; location must expose the 81-line miss, and duplication
+    must expose the pair even though similarity 0.1538 is below the 0.5 threshold."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88, description=WORKED_A),
@@ -1245,12 +1115,9 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_pat
     assert (pair["a_id"], pair["b_id"]) == ("1", "2")
     assert (pair["a_lens"], pair["b_lens"]) == ("per-stack", "structural")
     assert pair["same_file"] is True
-    # Both items here are merge-agent-authored and neither was attributed, so
-    # neither side has pre-merge provenance (issue #1111). The empty list is the
-    # expected value, not an error, and the axis still reports the pair.
+    # Unattributed merge-authored items keep empty provenance; the duplicate pair still counts.
     assert (pair["a_source_uids"], pair["b_source_uids"]) == ([], [])
 
-    # The clean run -- one correct finding only -- now scores strictly better.
     clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
     seed_merged_items(clean_deep, [_item(1, line=88, description=WORKED_A)])
     clean_location = analyze_location(clean_dd)
@@ -1272,10 +1139,6 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_pat
 def test_location_tiers_are_each_reachable(
     tmp_path: Path, file: str, line: int, expected_tier: str, expected_distance: int | None,
 ) -> None:
-    """Every tier is reachable over the real ``(85, 92)`` hunk.
-
-    ``within_tolerance`` uses distance 2, inside the shared ``HUNK_TOLERANCE`` of 3; ``beyond_tolerance`` uses the
-    worked example's 81."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep, [_item(1, file=file, line=line)])
 
@@ -1288,11 +1151,6 @@ def test_location_tiers_are_each_reachable(
     assert location["items"][0]["distance"] == expected_distance
 
 def test_location_scores_the_cited_line_not_the_snapped_line(tmp_path: Path) -> None:
-    """``location_cited_line`` wins over the post-snap ``line``.
-
-    The validator SNAPS an in-tolerance citation to the hunk boundary before ``merged-items.json`` is written, so
-    reading ``line`` alone would report ``in_hunk`` for a citation that was actually two lines out -- and
-    ``within_tolerance`` would be structurally almost always zero."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=92, location_cited_line=94)],  # snapped to 92, cited 94
@@ -1308,11 +1166,7 @@ def test_location_scores_the_cited_line_not_the_snapped_line(tmp_path: Path) -> 
     assert (row["line"], row["cited_line"], row["distance"]) == (92, 94, 2)
 
 def test_location_structural_whole_file_anchor_does_not_pollute_tiers(tmp_path: Path,) -> None:
-    """A structural ``line: 0`` item is a whole-file citation, not a line citation.
-
-    Mirrors the validator's own carve-out exactly: it is counted in ``whole_file_anchors`` and excluded from
-    ``scored_items``/``tiers``, so it is never scored ``file_absent``/``beyond_tolerance`` and cannot drag
-    ``in_hunk_rate`` down."""
+    """Structural line 0 counts as a whole-file anchor and never lowers scored-line rates."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88), _item(2, line=0, lens="structural", description=WORKED_B),
@@ -1331,10 +1185,7 @@ def test_location_structural_whole_file_anchor_does_not_pollute_tiers(tmp_path: 
     assert location["in_hunk_rate"] == 1.0        # the exemptions cost nothing
 
 def test_location_prefers_persisted_hunk_index_over_the_diff(tmp_path: Path) -> None:
-    """The persisted index is the run-time authority the validator itself read.
-
-    Seeded with a range the diff does NOT contain, so the assertion can only pass if the index -- not
-    ``diff.patch`` -- supplied the ranges."""
+    """Use ranges absent from the diff to prove the persisted index remains authoritative."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_hunk_index(dd, {"svc/loader.py": [(200, 210)]})
     seed_merged_items(deep, [_item(1, line=205)])
@@ -1371,14 +1222,10 @@ def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
     assert location["items"] == []
 
 def test_location_and_duplication_are_zeroed_when_merged_items_absent(tmp_path: Path,) -> None:
-    """An absent shipped set is not an error, but duplication's headline count stays undefined rather than becoming
-    an imputed zero.
+    """An existing deep directory does not prove merge produced a shipped set.
 
-    ``deep/`` exists (created by an earlier phase, e.g. coverage) but ``merged-items.json`` itself was never
-    written, i.e. merge never produced a shipped set. Location naturally scores nothing (there is nothing to
-    score), and duplication's ``near_duplicate_pairs`` is ``None`` for the same reason: an imputed ``0`` here
-    would be indistinguishable from a genuinely empty, merge-completed shipped set. ``deep/``'s mere existence is
-    not evidence merge ran -- only ``merged-items.json`` is."""
+    Absent merged-items keeps duplicate counts undefined; zero means merge completed
+    with a genuinely empty set."""
     dd, _deep = _worked_example_dirs(tmp_path)
 
     location = analyze_location(dd)
@@ -1396,12 +1243,6 @@ def test_location_and_duplication_are_zeroed_when_merged_items_absent(tmp_path: 
     assert duplication["pairs"] == []
 
 def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(tmp_path: Path,) -> None:
-    """No ``deep/`` directory at all is another way merge never produced a shipped set.
-
-    Same outcome as ``test_location_and_duplication_are_zeroed_when_merged_items_absent`` (what's actually checked
-    is ``merged-items.json``, not ``deep/``'s existence) via a different setup: here ``deep/`` itself was never
-    created, so the manifest-archived headline count must be ``None``, not an imputed zero (the same "undefined,
-    never 0.0" contract as ``location_in_hunk_rate``)."""
     dd = tmp_path / ".daydream"
     dd.mkdir(parents=True)
 
@@ -1415,16 +1256,11 @@ def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(tmp_path: 
     assert duplication["pairs"] == []
 
 def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(tmp_path: Path,) -> None:
-    """Pairwise comparison is O(n^2); a pathological shipped set must not turn a single eval pass into an unbounded
-    time/memory sink (issue #1106 R2).
+    """Place the only duplicate pair beyond the 200-item quadratic-comparison cap.
 
-    202 items: the first 200 fill the input cap with mutually distinct descriptions, and the last two -- both
-    beyond the cap -- are an exact-duplicate pair. An uncapped scan would report that pair as the escape; with the
-    cap applied it is never compared, so ``near_duplicate_pairs`` is 0 even though a genuine duplicate sits in the
-    tail. ``shipped_items`` still reports the true, uncapped total."""
+    It must remain uncounted while shipped_items still reports all 202 entries."""
     dd, deep = _worked_example_dirs(tmp_path)
-    # ``uuid4().hex`` descriptions share no common words/bigram structure, so
-    # none of the first 200 items accidentally clear the 0.5 similarity bar.
+    # Random hex descriptions avoid accidentally crossing the 0.5 similarity threshold.
     items = [_item(i, description=uuid.uuid4().hex) for i in range(200)]
     items.append(_item(200, description="the exact same duplicate description text"))
     items.append(_item(201, description="the exact same duplicate description text"))
@@ -1455,7 +1291,6 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
         analyze_shipped_duplication(dd)
 
 def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path,) -> None:
-    """A >= 0.5 pair that survived merge is an ESCAPE and is counted."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88, description="The loader does not validate its config path"),
@@ -1475,13 +1310,6 @@ def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path
     assert duplication["pairs"][0]["similarity"] == duplication["max_similarity"]
 
 def test_shipped_duplication_pairs_carry_the_item_source_uids(tmp_path: Path) -> None:
-    """A shipped duplicate is traceable to the records that produced it.
-
-    Merged items reach ``merged-items.json`` by two routes. The merge agent re-emits items from scratch and
-    attributes them via ``source_uids``; items that bypass it -- the single-stack path and the host-appended
-    structural items -- keep the ``uid`` they were born with and report it as a one-element list. Both routes
-    appear here in one shipped set, so the row names real records on both sides without the reader having to know
-    which route each item took."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88, description="The loader does not validate its config path", lens="structural",
@@ -1499,20 +1327,13 @@ def test_shipped_duplication_pairs_carry_the_item_source_uids(tmp_path: Path) ->
     assert (pair["a_id"], pair["b_id"]) == ("1", "2")
     assert pair["a_source_uids"] == ["structure:3"]
     assert pair["b_source_uids"] == ["python:4"]
-    # The lens columns still describe the right item after the pair is mapped
-    # back through the synthetic index ``sources`` channel.
+    # Remapping through the synthetic sources index must preserve each item's lens.
     assert (pair["a_lens"], pair["b_lens"]) == ("structural", "per-stack")
-    # The provenance columns are reporting-only: the numeric definitions are
-    # untouched.
+    # Provenance is reporting-only; numeric metrics remain unchanged.
     assert duplication["near_duplicate_pairs"] == 1
     assert duplication["same_file_pairs"] == 1
 
 def test_shipped_duplication_reports_every_consolidated_source_uid_in_order(tmp_path: Path,) -> None:
-    """A merge-agent item that consolidates two records names both, in order.
-
-    This is why the column is a list rather than a scalar: one shipped finding can be the synthesis of several
-    per-stack records, and collapsing that to a single handle would drop half the trail. Order is the merge
-    agent's own attribution order, preserved so the leading uid stays the one it credited first."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88, description="The loader does not validate its config path", lens="cross-stack",
@@ -1529,11 +1350,7 @@ def test_shipped_duplication_reports_every_consolidated_source_uid_in_order(tmp_
     assert pair["b_source_uids"] == ["python:7"]
 
 def test_shipped_duplication_reports_empty_provenance_rather_than_fabricating_one(tmp_path: Path,) -> None:
-    """An unattributed item reports ``[]`` -- a real answer, not a placeholder.
-
-    ``source_uids: []`` is the merge agent declining to attribute an item. The axis must say so rather than
-    substituting the item's ``id``, its lens, or any other handle that would read as a record uid without being
-    one."""
+    """Explicit [] attribution must not be replaced with a display id, lens, or invented UID."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88, description="The loader does not validate its config path", **_provenance(),),
@@ -1546,16 +1363,10 @@ def test_shipped_duplication_reports_empty_provenance_rather_than_fabricating_on
     pair = duplication["pairs"][0]
     assert pair["a_source_uids"] == []
     assert pair["b_source_uids"] == []
-    # The pair is still reported: an unattributed duplicate is still a
-    # duplicate, and dropping it would blank out the axis on a real run.
+    # Missing provenance cannot hide an otherwise known duplicate.
     assert duplication["near_duplicate_pairs"] == 1
 
 def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(tmp_path: Path,) -> None:
-    """An item carrying only ``uid`` reports ``[uid]``.
-
-    This is both the host-appended shape (structural items and the single-stack bypass never see the merge agent)
-    and the legacy shape (artifacts written before ``source_uids`` existed). Neither should read as unattributed
-    just because the newer key is missing."""
     dd, deep = _worked_example_dirs(tmp_path)
     legacy_items = [_item(
             1, line=88, description="The loader does not validate its config path", uid=mint_record_uid("python", 2),
@@ -1564,8 +1375,7 @@ def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(tmp
             2, line=90, description="The loader fails to validate the config path", uid=mint_record_uid("structure", 5),
         ),
     ]
-    # Guard the premise: the fallback is only under test if the newer key really
-    # is absent from the fixture.
+    # Require the newer key to be absent so the legacy fallback is actually exercised.
     assert all(RECORD_SOURCE_UIDS_KEY not in item for item in legacy_items)
     seed_merged_items(deep, legacy_items)
 
@@ -1576,10 +1386,7 @@ def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(tmp
     assert pair["b_source_uids"] == ["structure:5"]
 
 def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:
-    """The distribution -- not a threshold count -- is what reveals a mis-set bar.
-
-    A threshold-only metric would report zero for the worked example forever. The sub-threshold pair must still be
-    visible via ``same_file_pairs`` and ``max_similarity``, and the pair rows are ordered by similarity desc."""
+    """Keep subthreshold pairs and descending similarity visible so threshold mistakes are diagnosable."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep,
         [_item(1, line=88, description=WORKED_A), _item(2, line=4, description=WORKED_B, lens="structural"),
@@ -1598,10 +1405,6 @@ def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:
     assert similarities[0] == duplication["max_similarity"]
 
 def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(tmp_path: Path,) -> None:
-    """The pre-merge counter is renamed to say it counts INPUTS, not escapes.
-
-    ``record_duplicates`` read as an escape count; the escapes now live in the separate ``shipped_duplication``
-    axis. The old key is gone (it had no readers anywhere in ``daydream/`` or ``rl/``)."""
     dd, deep = _deep_dirs(tmp_path)
     seed_dedup_candidates(deep, record_alt_pairs=[{"similarity": 0.75}, {"similarity": 0.55}],
         record_duplicate_pairs=[{"similarity": 0.9}],
@@ -1625,7 +1428,6 @@ def _grounding_finding(**extra: Any) -> dict[str, Any]:
     return finding
 
 def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path,) -> None:
-    """The two new axes reach ``analyze_session``'s result under their own keys."""
     dd, deep = _deep_dirs(tmp_path)
     seed_diff_patch(dd)
     seed_hunk_index(dd, {"svc/loader.py": [(85, 92)]})

@@ -1,22 +1,5 @@
-"""Tests for the ``AgentEvent`` dataclasses in ``daydream/backends/__init__.py``.
-
-Field values, nullable defaults, and the union/export surface all live here;
-``tests/test_backends_init.py`` covers the ``Backend`` protocol and the
-``create_backend`` factory. The two files previously asserted the same event
-field defaults twice.
-
-Covers Plan 02-02 of phase 02-recorder-core-event-enrichment-mapping:
-- Every event dataclass carries a ``timestamp: str`` field defaulted via
-  ``now_iso()`` (Pitfall 2 single source of truth).
-- The ``MetricsEvent`` dataclass exists and uses the EVNT-02 verbatim
-  field names (``prompt_tokens``, ``completion_tokens``, NOT
-  ``input_tokens`` / ``output_tokens`` — those are the SDK boundary keys
-  that backends rename when emitting MetricsEvent).
-- ``CostEvent`` carries the ``cached_tokens`` field (default ``None``
-  for backward compatibility with the existing 3-positional-arg call sites
-  in ``backends/claude.py:124`` and ``backends/codex.py:310``).
-- ``MetricsEvent`` is part of the ``AgentEvent`` TypeAlias union and is
-  exported in ``__all__``.
+"""Event field values, nullable defaults, timestamps, and union/export membership. Backend protocol and
+factory tests live in test_backends_init.py.
 """
 from __future__ import annotations
 
@@ -57,7 +40,6 @@ from daydream.observability.spans import _admit_observed_identity_list
 
 
 def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
-    """Assert each expected field, by identity for ``None`` / bools."""
     for name, want in expected.items():
         got = getattr(event, name)
         if want is None or isinstance(want, bool):
@@ -116,7 +98,6 @@ def _assert_fields(event: Any, expected: dict[str, Any]) -> None:
     ],
 )
 def test_event_field_values(cls: type, kwargs: dict[str, Any], expected: dict[str, Any]) -> None:
-    """Each event dataclass exposes the constructed values on the documented field names."""
     _assert_fields(cls(**kwargs), expected)
 
 @pytest.mark.parametrize(
@@ -142,13 +123,11 @@ def test_event_field_values(cls: type, kwargs: dict[str, Any], expected: dict[st
     ],
 )
 def test_event_has_default_z_timestamp(cls: type, kwargs: dict[str, Any]) -> None:
-    """Every member of the AgentEvent union defaults ``timestamp`` to a Z-suffixed stamp."""
     event = cls(**kwargs)
     assert isinstance(event.timestamp, str)
     assert event.timestamp.endswith("Z"), f"timestamp must end with Z: {event.timestamp!r}"
 
 def test_result_event_carries_the_continuation_token() -> None:
-    """ResultEvent holds the exact ContinuationToken instance it was given."""
     token = ContinuationToken(backend="codex", data={})
     event = ResultEvent(structured_output={"key": "val"}, continuation=token)
     assert event.structured_output == {"key": "val"}
@@ -162,12 +141,10 @@ def test_metrics_event_in_all_export() -> None:
     assert "MetricsEvent" in backends.__all__
 
 def test_turn_end_event_is_in_agent_event_union() -> None:
-    """TurnEndEvent is a recognized AgentEvent so trajectory.py can dispatch."""
     ev = TurnEndEvent()
     ev2 = TurnEndEvent(message_id="msg_abc123")
     assert ev2.message_id == "msg_abc123"
     assert isinstance(ev.timestamp, str) and ev.timestamp.endswith("Z")
-    # Runtime confirmation that TurnEndEvent is part of the AgentEvent union.
     assert isinstance(ev, AgentEvent)
 
 def test_diagnostic_event_has_fresh_metadata_and_is_exported() -> None:
@@ -227,7 +204,6 @@ def _rejected_configs() -> list[tuple[type[Any], dict[str, Any], str]]:
 def test_admission_contract_construction_rejects_wrong_types(
     config_cls: type[Any], kwargs: dict[str, Any], field_name: str,
 ) -> None:
-    """Wrong booleans-as-ints, NaN, negatives, and invalid enums fail construction."""
     with pytest.raises(ValueError, match=field_name):
         config_cls(**kwargs)
 
@@ -268,13 +244,11 @@ def test_admission_contract_construction_rejects_wrong_types(
     ],
 )
 def test_admission_contract_accepts_exact_zero_and_boundaries(config_cls: type[Any], kwargs: dict[str, Any]) -> None:
-    """Zero, int64 boundary and closed-mode values construct and are preserved."""
     config = config_cls(**kwargs)
     for name, value in kwargs.items():
         assert getattr(config, name) == value
 
 def test_admission_contract_defaults_mean_absent_not_effective() -> None:
-    """Every defaulted field is None — absence never claims an effective value."""
     config = EffectiveRequestConfig()
     assert config.temperature is None
     assert config.max_turns is None
@@ -284,29 +258,21 @@ def test_admission_contract_defaults_mean_absent_not_effective() -> None:
     assert config.model_mode is None
 
 def test_osprey_hidden_temperature_stays_absent() -> None:
-    """Osprey's config-resolved temperature is hidden: only explicit admission."""
-    # A config that does not pass temperature (the adapter omits it when the
-    # flag was not emitted) must carry temperature=None — never a default.
     config = OspreyRequestConfig(sandbox=True)
     assert config.temperature is None
 
 def test_arbitrary_persona_and_toolset_labels_have_no_field() -> None:
-    """Persona/toolset labels never cross the config boundary (presence only)."""
     config = OspreyRequestConfig(persona_present=True, toolset_present=False)
     assert config.persona_present is True
     assert config.toolset_present is False
-    # No label-carrying field exists to accept the arbitrary value.
     assert not hasattr(config, "persona")
     assert not hasattr(config, "toolset")
 
 def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
-    """Model labels admit namespace slashes; reject controls/bidi/paths/secrets."""
-    # Ordinary namespace spellings pass unchanged.
     for safe in ("opus", "claude-opus-4-5-20250901", "nous/deepseek-v4", "openai/gpt-5.2",
                  "provider//model", "glm-4.6"):
         admitted, diagnostic = _admit_identity_label(safe, max_chars=256, context="model")
         assert admitted == safe and diagnostic is None, safe
-    # Controls, bidi, private paths, redaction-changed values, wrong types.
     for unsafe in (
         "/Users/ka/private/model",
         "C:\\repo\\model",
@@ -326,7 +292,6 @@ def test_identity_label_admission_rejects_unsafe_and_allows_namespace() -> None:
         )
 
 def test_provider_label_bound_is_128() -> None:
-    """Provider labels admit up to 128 scalar values and reject beyond."""
     admitted, diagnostic = _admit_identity_label("p" * 128, max_chars=128, context="provider")
     assert admitted == "p" * 128 and diagnostic is None
     admitted, diagnostic = _admit_identity_label("p" * 129, max_chars=128, context="provider")
@@ -334,12 +299,9 @@ def test_provider_label_bound_is_128() -> None:
     assert diagnostic is not None and diagnostic.code == "config_identity_too_long"
 
 def test_native_unix_ms_validation_bounds_and_conversion() -> None:
-    """Native ms: bool/float/string rejected, bounded, exact ns multiplication."""
-    # Exact producer shape converts by multiplication only.
     ms, diagnostic = _admit_native_unix_ms(1788690314289)
     assert ms == 1788690314289 and diagnostic is None
     assert unix_ms_to_ns(1788690314289) == 1788690314289000000
-    # Zero is a valid instant; the int64//1e6 bound is exact.
     ms, diagnostic = _admit_native_unix_ms(0)
     assert ms == 0 and diagnostic is None
     bound = (2**63 - 1) // 1_000_000
@@ -347,7 +309,6 @@ def test_native_unix_ms_validation_bounds_and_conversion() -> None:
     assert ms == bound and diagnostic is None
     ms, diagnostic = _admit_native_unix_ms(bound + 1)
     assert ms is None and diagnostic is not None
-    # Bool (True == 1) is never a timestamp; nor floats/strings/negatives.
     for bad in (True, False, 1.5, "123", -1, -(10**6)):
         ms, diagnostic = _admit_native_unix_ms(bad)
         assert ms is None and diagnostic is not None, repr(bad)
@@ -356,7 +317,6 @@ def test_native_unix_ms_validation_bounds_and_conversion() -> None:
     assert ms is None and diagnostic is None
 
 def test_observed_identity_lists_whole_overflow_omission() -> None:
-    """A 17-entry model list omits the entire list with a fixed overflow code."""
     admitted, diagnostic = _admit_observed_identity_list(
         [f"model-{i}" for i in range(16)], max_chars=256, context="models",
     )
@@ -378,12 +338,10 @@ def test_observed_identity_lists_whole_overflow_omission() -> None:
     assert diagnostic.split(":", 1)[0] == "config_list_member_unsafe"
 
 def test_pi_selected_tools_count_derives_from_read_only_tool_constant() -> None:
-    """The Pi read-only tool count derives from the argv tool list, not a copy."""
     assert len(_PI_READ_ONLY_TOOLS.split(",")) == 4
     assert _PI_READ_ONLY_TOOLS == "read,find,ls,grep"
 
 def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
-    """Choice-part arguments accept closed JSON and reject arbitrary objects."""
     part = ToolCallChoicePart(call_id="t1", name="read", arguments={"path": "/x", "n": 3, "ok": True, "f": 0.5})
     assert part.arguments == {"path": "/x", "n": 3, "ok": True, "f": 0.5}
     assert part.kind == "tool_call"
@@ -401,12 +359,10 @@ def test_tool_call_choice_part_json_arguments_are_schema_admitted() -> None:
         ToolCallChoicePart(call_id="t5", name="read", arguments=float("nan"))
 
 def test_tool_call_choice_part_never_echoes_private_tool_names() -> None:
-    """A path-shaped tool name is rejected, not truncated into an alias."""
     with pytest.raises(ValueError, match="name"):
         ToolCallChoicePart(call_id="t6", name="/Users/ka/bin/tool", arguments={})
 
 def test_generation_lifecycle_events_are_in_the_agent_event_union() -> None:
-    """GenerationStart/End participate in AgentEvent; timestamps default to Z."""
     start = GenerationStartEvent(generation_id="g-1", observed_at_unix_ns=1)
     end = GenerationEndEvent(
         generation_id="g-1", native_started_at_unix_ms=None, ended_at_unix_ns=2, end_source="fallback",
@@ -416,14 +372,12 @@ def test_generation_lifecycle_events_are_in_the_agent_event_union() -> None:
     assert start.timestamp.endswith("Z") and end.timestamp.endswith("Z")
 
 def test_generation_ids_are_host_invocation_local_uuids() -> None:
-    """Minted IDs are UUID-shaped and distinct per call (never provider IDs)."""
     first = _new_generation_id()
     second = _new_generation_id()
     assert first != second
     assert len(first) == 36 and first.count("-") == 4
 
 def test_request_event_defaults_preserve_backward_compatibility() -> None:
-    """Positional construction keeps its meaning; P18 fields default to absent."""
     legacy = RequestEvent("prompt only")
     assert legacy.prompt == "prompt only"
     assert legacy.config.model_mode is None
@@ -435,7 +389,6 @@ def test_request_event_defaults_preserve_backward_compatibility() -> None:
     assert provenanced.timestamp_source == "native"
 
 def test_turn_end_event_defaults_preserve_backward_compatibility() -> None:
-    """TurnEndEvent's new identity fields default to None/host_observed."""
     ev = TurnEndEvent()
     assert ev.message_id == ""
     assert ev.finish_reason is None
@@ -452,7 +405,6 @@ def test_turn_end_event_defaults_preserve_backward_compatibility() -> None:
     assert ev2.model_source == "native"
 
 def test_measurement_events_carry_closed_provenance() -> None:
-    """CostEvent/MetricsEvent provenance fields default None and accept closed values."""
     cost = CostEvent(cost_usd=0.01, input_tokens=10, output_tokens=5, measurement_source="terminal")
     assert cost.measurement_source == "terminal"
     assert cost.generation_id is None

@@ -66,7 +66,6 @@ def test_validate_records_snaps_and_demotes() -> None:
 # ---------------------------------------------------------------------------
 
 def test_snapped_record_preserves_the_cited_line_alongside_the_snapped_line() -> None:
-    """A snap is non-destructive: both the snapped and the cited line survive."""
     records: list[dict[str, object]] = [
         {"id": 1, "file": "orchestrator.py", "line": 2281, "evidence": "orchestrator.py:2281"},
     ]
@@ -76,7 +75,6 @@ def test_snapped_record_preserves_the_cited_line_alongside_the_snapped_line() ->
     assert out[0]["evidence"] == "orchestrator.py:2284"
 
 def test_demoted_record_preserves_the_cited_line_next_to_the_demotion_marks() -> None:
-    """Beyond tolerance: the cited line is machine-readable, not just prose."""
     records: list[dict[str, object]] = [
         {"id": 2, "file": "orchestrator.py", "line": 2272, "severity": "high", "confidence": "HIGH"},
     ]
@@ -96,7 +94,6 @@ def test_in_hunk_record_gets_no_cited_line_key() -> None:
     assert out[0] == {"id": 3, "file": "orchestrator.py", "line": 2285}
 
 def test_structural_whole_file_record_gets_no_cited_line_key() -> None:
-    """The ``lens="structural"`` / ``line: 0`` carve-out stays fully untouched."""
     records: list[dict[str, object]] = [
         {"id": 4, "file": "orchestrator.py", "line": 0, "lens": "structural", "severity": "high"},
     ]

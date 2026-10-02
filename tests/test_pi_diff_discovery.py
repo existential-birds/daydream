@@ -35,7 +35,7 @@ async def test_small_pi_review_keeps_structural_dispatch(
         calls.append(prompt)
         return {"issues": []}, None, None
 
-    monkeypatch.setattr("daydream.phases.run_agent", review)
+    monkeypatch.setattr("daydream.agent.run_agent", review)
     results, failures = await phase_per_stack_reviews(PiBackend(model="fixture"), make_work(tmp_path),
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,

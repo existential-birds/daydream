@@ -80,7 +80,6 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
     assert backend.reasoning_effort == effort
     assert final.config.finalization is True
     assert normal.config.finalization is False
-    # Neither CLI implements max_turns, including when finalizing.
     assert final.config.max_turns is None
     if kind == "pi":
         final_cmd = next(args for args in commands if "--no-tools" in args)

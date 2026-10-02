@@ -1,14 +1,8 @@
-"""Real-path integration tests for grounded diagrams in the review flows (#1113).
+"""Grounded-diagram integration through runner.run with real Git repositories.
 
-Every test enters through ``daydream.runner.run`` against a real temporary git
-repository, with the stub backend at the ``create_backend`` seam as the only
-mock. Assertions are on observable outcomes: the on-disk ``diagram.json``
-artifact, the bytes of the review comment GitHub would receive, the rendered
-``review-output.md``, the process exit code, and the backend call log.
-
-Spec test coverage (issue #1113 "Tests"): 1, 2, 3, 4, 5, 6, 7 (review half), 8,
-9, 10, 11 and 14 (review half). The ``--diagram-only`` halves of 7, 12, 13 and
-14 live in ``tests/test_diagram_only_integration.py``.
+Backend and GitHub seams provide fixtures; assertions cover artifacts, posted
+comment bytes, rendered reports, exit codes, and backend calls. Diagram-only
+mode has separate coverage in test_diagram_only_integration.py.
 """
 
 from __future__ import annotations
@@ -34,15 +28,16 @@ from daydream.backends import ToolResultEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import diagram_steps as deep
 from daydream.deep.diagram_grounding import RepoSymbols
+from daydream.deep.diagram_prompts import _candidate_roots_block, _diagram_diff_block, _files_by_module_block
 from daydream.deep.diagram_schema import SEQUENCE_SPEC_SCHEMA
 from daydream.deep.diagram_trigger import Eligibility, KindDecision
 from daydream.deep.diagram_types import DiagramThresholds
-from daydream.deep.prompts import _candidate_roots_block, _diagram_diff_block, _files_by_module_block
 from daydream.exploration import _BOUNDARY_BLOCKQUOTE
 from daydream.extensions import Registry
 from daydream.flows.engine import FlowContext
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, SanctionedInputUnavailable
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.workspace import WorkContext
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact
@@ -105,12 +100,7 @@ class _CapturedPost:
 
 @pytest.fixture
 def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _CapturedPost:
-    """Let the real ``build_payload`` run and capture the review it would POST.
-
-    Patches only the PR lookup and the ``gh`` review submission, so the summary
-    renderer, the diagram slot, and every marker are produced by production
-    code exactly as they would be on a live PR.
-    """
+    """Capture the real review payload, mocking only PR lookup and gh submission."""
     captured = _CapturedPost(fake_gh)
     fake_pr = pr_review.PRInfo(
         number=123, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature", owner="acme",
@@ -127,11 +117,10 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
 def review_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any], silence_console: Callable[..., None],
     captured_post: _CapturedPost,
 ) -> Callable[..., Any]:
-    """Run a full ``--comment`` deep review with a diagram-scripted stub backend.
+    """Run comment mode with a diagram-scripted backend and captured posting.
 
-    Depends on ``captured_post`` unconditionally: comment mode treats a failed
-    PR post as a run failure (exit 1), so a test that forgot the fixture would
-    be asserting on the wrong exit code for the wrong reason.
+    Always install captured_post: an unrelated posting failure would otherwise
+    change the exit code under assertion.
     """
     for module in ("daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.merge_steps",
         "daydream.deep.diagram_steps", "daydream.phases", "daydream.runner", "daydream.pr_review",
@@ -198,9 +187,7 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     assert len(calls) == 1
     assert _diagram_calls(stub, "flowchart") == []
 
-    # Wire contract: the author agent is read-only, answers the kind's schema,
-    # gets no ``max_turns`` (which would fail hard rather than soft), and runs
-    # under no fan-out ``agents=`` definition.
+    # Author contract: read-only, kind schema, no max_turns or SDK agents fan-out.
 
     assert calls[0]["read_only"] is True
     assert calls[0]["output_schema"] is SEQUENCE_SPEC_SCHEMA
@@ -758,13 +745,7 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any],
     silence_console: Callable[..., None], captured_post: _CapturedPost,
 ) -> None:
-    """``[tool.daydream.phases.diagram]`` reaches the author agent with zero glue.
-
-    The runner resolves a backend by phase-name string, so the new step gets
-    per-phase model/effort overrides for free -- but "for free" is only true if
-    the step's ``config_phase`` really is ``"diagram"``, which this proves at
-    the backend boundary rather than by reading the FlowStep.
-    """
+    """Diagram phase config selects the model observed at the backend boundary."""
     for module in ("daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.merge_steps",
         "daydream.deep.diagram_steps", "daydream.phases", "daydream.runner",
     ):
@@ -834,10 +815,7 @@ def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: 
     return ctx
 
 def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Path) -> None:
-    """Issue #1123 acceptance: a disposable-clone backend's diagram author prompt
-    carries inline exploration+dependency content, inlines the diff, and names
-    NO .daydream/exploration or diff.patch path — the author turn can complete
-    without reading any artifact the prompt references."""
+    """Clone prompts inline diff/exploration/dependencies without dangling artifact paths."""
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
@@ -868,10 +846,7 @@ def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -
     assert "diff --git a/a.py b/a.py" in prompt
 
 def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_path: Path) -> None:
-    """When the summary consumes the full shared budget, a pending non-empty
-    dependencies.md must not be rendered as a marker-only string: that would
-    assert 'Deterministic import edges' while carrying only the truncation
-    notice. It is omitted entirely."""
+    """Exhausted budgets omit dependencies instead of rendering a marker with no content."""
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
     (exploration_dir / "summary.md").write_text("x" * (INLINE_DIFF_BUDGET_BYTES + 1), encoding="utf-8")
@@ -882,10 +857,7 @@ def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_pa
     assert dependencies is None
 
 def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) -> None:
-    """Issue #336: the clone-mode inline summary must not name the sibling
-    artifacts that do not travel to the disposable clone (the
-    affected_files.md/conventions.md/dependencies.md rows and the embedded
-    blockquote the writer emits), while the prose is kept."""
+    """Clone summaries retain prose but remove sibling artifact rows and blockquotes."""
 
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
@@ -928,11 +900,11 @@ def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> 
 def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A fork override written against the documented extension contract (no
-    clone-mode inline kwargs) must not receive them on a disposable-clone run:
-    splatting them in would raise TypeError and degrade the kind to failed.
-    The override gets exactly the documented kwarg set and the run proceeds —
-    with exploration_dir=None on the clone run, never the dangling host path."""
+    """Legacy fork overrides receive only documented kwargs in clone mode.
+
+    Extra inline kwargs would fail the turn; exploration_dir must be None
+    because the clone cannot read the host artifact path.
+    """
     registry = Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
@@ -1014,9 +986,8 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     """Real path: a ~20,000-line PR writes a bounded files-by-module block and says so."""
 
     target = build_large_cross_module_repo(tmp_path)
-    # The committed fixture spans only two top-level modules, so its projection
-    # fits the shared budget. Add enough one-file packages to genuinely overflow
-    # the block while keeping every path a real, changed file the host groups.
+    # Add real changed packages until the files-by-module projection exceeds its
+    # shared budget; the fixture's original two modules would fit.
     for i in range(260):
         module = target / f"extra_{i:03d}"
         module.mkdir()
@@ -1024,9 +995,8 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     git(target, "add", ".")
     commit(target, "add extra modules")
 
-    # The diagram-only flow reaches the sequence author without the large PR's
-    # over-limit exact diff aborting an earlier TTT phase; the bounded
-    # files-by-module projection is the same one the full review author uses.
+    # Diagram-only reaches the same bounded projection without an earlier TTT
+    # phase rejecting this large exact diff.
     exit_code, stub = await review_run(
         target, specs={"sequence": [dr.sequence_spec()]}, output_mode="diagram", diagram="sequence"
     )
@@ -1037,15 +1007,10 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     assert "omitted to fit the prompt budget" in author_prompts[0]
 
 async def _session_test_ctx(tmp_path: Path) -> Any:
-    """A FlowContext on an ACTIVE artifact session with realistic artifact sizes.
+    """Create realistic artifacts on a FlowContext with an active session.
 
-    The #1123 clone tests build a FlowContext without ``artifacts``, which is why
-    the production failing branch was never exercised. This one does not.
-
-    It deliberately leaves the session open for the test's duration (the
-    ``await cm.__aenter__()`` form was verified against this repo while writing
-    the plan). A test that needs teardown should use the ``async with`` form
-    instead.
+    Keep the session open throughout the test to exercise production clone
+    paths; callers needing teardown should use async with instead.
     """
     repo = tmp_path / "repo"
     repo.mkdir()

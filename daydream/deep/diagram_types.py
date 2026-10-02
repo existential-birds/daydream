@@ -1,18 +1,4 @@
-"""Shared value types for the grounded-diagram pipeline (issue #1113).
-
-The diagram pipeline is four modules deep — eligibility (``diagram_trigger``),
-grounding (``diagram_grounding``), rendering (``diagram_render``) and the
-orchestrator step — and three of them need the same two dataclasses and the
-same result alias. They live here rather than in any one of those modules so
-none of them has to import another: ``diagram_trigger`` produces
-``CandidateRoot`` values that ``diagram_grounding`` consumes, and a direct
-import between the two would make the grounding pass depend on the eligibility
-pass it is meant to be independent of. ``diagram_trigger`` re-exports both
-dataclasses so ``from daydream.deep.diagram_trigger import CandidateRoot``
-reads naturally at the eligibility call sites.
-
-Pure data: no I/O, no imports outside the standard library.
-"""
+"""Shared diagram values keep eligibility, grounding, and rendering independent."""
 
 from __future__ import annotations
 
@@ -40,53 +26,27 @@ def as_optional_str(value: Any) -> str | None:
     return value if isinstance(value, str) and value else None
 
 
-# Diagram element kind vocabularies, shared by the strict schemas (enum order),
-# grounding (membership) and the renderer. Ordered tuples are the single source
-# of truth.
+# Ordered kind vocabularies shared by schema enums, grounding, and rendering.
 PARTICIPANT_KINDS = ("internal", "external")
 MESSAGE_KINDS = ("call", "reply", "self")
 BLOCK_KINDS = ("alt", "opt", "loop")
 NODE_KINDS = ("start", "end", "process", "decision", "subroutine", "io")
 
-# One kind's diagram outcome, as written to ``diagram.json``,
-# ``ctx.data["diagrams"]`` and the Phase A findings artifact::
-#
-#     {"status": "rendered" | "omitted" | "skipped" | "failed",
-#      "reason": str | None,          # why it was skipped or failed
-#      "spec_final": dict | None,     # pruned + capped; schema-valid
-#      "omit_reasons": list[str],
-#      "mermaid": str | None,        # dropped in the findings artifact
-#      "advisory": {                # the kind's input-omission diagnostic, or None
-#          "transport": "inline" | "exact_paths",
-#          "allowance_bytes": int,
-#          "admitted_bytes": int,
-#          "admitted": [{"label": str, "bytes": int}, ...],
-#          "omitted": [{"label": str, "bytes": int, "reason": str}, ...],
-#      } | None}
-#
-# Deliberately a plain ``dict[str, Any]`` rather than a ``TypedDict``: four
-# modules produce and consume it, several keys are meaningful only for some
-# statuses, and ``total=False`` would erase exactly the strictness a TypedDict
-# is for while adding friction at every construction site. The renderer
-# documents the precise subset of keys it may read.
+# Per-kind persisted outcome: status (rendered/omitted/skipped/failed), reason,
+# spec_final (pruned, capped, schema-valid), omit_reasons, mermaid, and advisory.
+# reason, spec_final, mermaid, and advisory may be None.
+# Findings omit mermaid. Optional advisory records transport, allowance_bytes,
+# admitted_bytes, admitted [{label, bytes}], and omitted [{label, bytes, reason}].
+# Optional fields depend on status; consumers document the subset they read.
 DiagramResult: TypeAlias = dict[str, Any]
 
 
 @dataclass(frozen=True)
 class DiagramThresholds:
-    """Deterministic eligibility thresholds for one run.
+    """Per-run thresholds resolved from file configuration over host defaults.
 
-    Resolved once from ``[tool.daydream.diagram]`` over the ``config.py``
-    defaults and then passed by value, so the eligibility decision is a pure
-    function of its arguments and is reproducible from ``diagram.json``.
-
-    Attributes:
-        min_code_files: Minimum changed non-test code files for the sequence
-            diagram's cross-module rule.
-        min_modules: Minimum distinct modules those files must span for the
-            cross-module rule.
-        min_branch_points: Minimum changed branch points inside a single
-            function for the flowchart rule.
+    Sequence eligibility counts changed non-test code files and distinct modules;
+    flowcharts count changed branch points within one function.
     """
 
     min_code_files: int = 3
@@ -96,23 +56,11 @@ class DiagramThresholds:
 
 @dataclass(frozen=True)
 class CandidateRoot:
-    """One changed function the flowchart may be rooted at.
+    """One tree-sitter function/method root, with a repository-relative POSIX file path.
 
-    The model picks its flowchart root only from the run's candidate list, so a
-    root always has a tree-sitter-derived range the grounding pass can check
-    every node against. ``end_line`` comes from the definition node, which
-    spans the function body — that range is what makes ``NODE_OUTSIDE_ROOT``
-    decidable.
-
-    Attributes:
-        file: Repository-relative POSIX path of the defining file.
-        name: Function/method name as tree-sitter reported it.
-        line: 1-based first line of the definition.
-        end_line: 1-based last line of the definition (inclusive).
-        branch_points: Count of branch statements inside the range that also
-            fall inside a head-side changed hunk. This is the number the
-            flowchart threshold is compared against, and the sort key that
-            orders candidates.
+    line/end_line are 1-based and inclusive, spanning the definition and body for
+    NODE_OUTSIDE_ROOT checks. branch_points counts branches inside both that range
+    and head-side changed hunks; it drives eligibility thresholds and candidate order.
     """
 
     file: str

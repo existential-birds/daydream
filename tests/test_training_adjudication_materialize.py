@@ -7,7 +7,7 @@ import pytest
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.archive.index import append_label_observation
-from daydream.training.adjudication.cli import _hydrated_identity_index
+from daydream.training.adjudication.import_local import _hydrated_identity_index
 from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly, run_materialize
 from daydream.trajectory import run_directory, run_document_path
 from tests.harness.adjudication import make_hydrated_sqlite_index, write_sessions_jsonl
@@ -35,7 +35,6 @@ def test_materialize_never_writes_canonical_state(tmp_path: Path) -> None:
     root = _index(tmp_path)
     out = tmp_path / "out"
     run_materialize(root, out, pin=_PIN)
-    # preview mode: no label_observations append, no resume-cache marker (AC 4)
     assert not (out / "harvest-resume.json").exists()
     assert not (out / "label_observations.jsonl").exists()
     assert not (root / "daydream.sqlite").exists()
@@ -44,12 +43,10 @@ def test_materialize_dry_run_validates_and_writes_nothing(tmp_path: Path) -> Non
     root = _index(tmp_path)
     out = tmp_path / "out"
     summary = run_materialize(root, out, pin=_PIN, dry_run=True)
-    # dry-run validates everything: same summary a real run would produce
     full = run_materialize(root, tmp_path / "real", pin=_PIN)
     assert summary["snapshot_id"] == full["snapshot_id"]
     assert summary["index_revision"] == "a" * 40
     assert summary["record_count"] == full["record_count"]
-    # ... and writes nothing: no out dir, no state side effects (AC 4)
     assert not out.exists()
     assert not (root / "daydream.sqlite").exists()
 
@@ -60,7 +57,6 @@ def test_materialize_missing_sessions_fails_closed(tmp_path: Path) -> None:
 def test_materialize_drift_yields_new_snapshot_id(tmp_path: Path) -> None:
     root = _index(tmp_path)
     r1 = run_materialize(root, tmp_path / "o1", pin=_PIN)
-    # mutate evidence => digest changes => new snapshot id (AC 8)
     sessions_path = root / "sessions.jsonl"
     s = json.loads(sessions_path.read_text().splitlines()[0])
     s["resolutions"][0]["evidence"][0]["body_sha256"] = "zzz"
@@ -115,10 +111,7 @@ def test_materialize_reads_resolutions_from_sqlite_not_trajectory(tmp_path: Path
 
 
 def _make_labels_only_rubric(root: Path) -> None:
-    """Rewrite the session's winning rubric_json to the pre-#1095 labels-only
-    shape (only ``per_finding_outcomes``, no ``per_finding_resolutions``) —
-    exactly what the import path appends verbatim from a surviving old archive
-    (``Rubric.to_dict`` before 7a2b580, ``docs`` commit 23c02d4)."""
+    """Model a legacy imported rubric with per_finding_outcomes but no per_finding_resolutions."""
 
     labels_only = json.dumps({"per_finding_outcomes": ["accepted"]})
     conn = sqlite3.connect(str(root / "index.db"))
@@ -128,11 +121,8 @@ def _make_labels_only_rubric(root: Path) -> None:
 
 
 def _seed_legacy_trajectory(root: Path, session_id: str = "s1") -> None:
-    """Legacy hydrated trajectory: the layout run directory's root document with
-    a ``resolutions`` key — the pre-#1095 materialization source.
-
-    Composes through the layout surface so the fixture addresses the run
-    exactly the way the readers under test do.
+    """Stage legacy trajectory resolutions through the same run-document layout surface as production
+    readers.
     """
     trajectory_path = run_document_path(run_directory(root, session_id))
     trajectory_path.parent.mkdir(parents=True)
@@ -145,11 +135,9 @@ def _seed_legacy_trajectory(root: Path, session_id: str = "s1") -> None:
 
 
 def test_materialize_serves_legacy_labels_only_rows_from_trajectory(tmp_path: Path) -> None:
-    """A pre-#1095 labels-only row (imported verbatim from a surviving old
-    archive) must not brick the session: materialize serves it from the
-    sanitized per-run trajectory — the pre-#1095 materialization source —
-    instead of failing closed, so preview/materialize/harvest keep working
-    after an import."""
+    """Legacy labels-only imports recover resolutions from the sanitized trajectory so
+    preview/materialize/harvest remain usable.
+    """
     root = _hydrated_sqlite_index(tmp_path)
     _make_labels_only_rubric(root)
     _seed_legacy_trajectory(root)
@@ -161,7 +149,6 @@ def test_materialize_serves_legacy_labels_only_rows_from_trajectory(tmp_path: Pa
     assert record["evidence_digest"] == "d" * 32
 
 def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> None:
-    """The hydrated-index readers address `<index_root>/runs/<sid>/trajectory.json` via the surface."""
 
     root = _hydrated_sqlite_index(tmp_path)
     _make_labels_only_rubric(root)
@@ -172,12 +159,9 @@ def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> No
     assert _hydrated_identity_index([{"session_id": "s1"}], root)["s1"]["record_id"] == "s1"
 
 def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(tmp_path: Path,) -> None:
-    """A legacy labels-only session with no trajectory anywhere has no
-    materializable resolutions: it contributes no records instead of failing
-    the whole curation -- the row is evidence-only (e.g. a session a runbook
-    step-3b import admitted from a backup root outside the curation: DB-only
-    runs row, labels-only observations, no runs/<sid> files), and one such
-    session must not brick every later preview/materialize/harvest pass."""
+    """A labels-only row without a trajectory is evidence-only and yields no resolutions; it must not abort
+    the rest of the curation.
+    """
     root = _hydrated_sqlite_index(tmp_path)
     _make_labels_only_rubric(root)
     summary = run_materialize(root, tmp_path / "out", pin=_PIN)
@@ -187,9 +171,9 @@ def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(tmp_pa
 
 
 def _hydrated_sqlite_index_agreeing_generations(tmp_path: Path) -> Path:
-    """Two agreeing ``s1`` generations whose dedup tuple splits only on
-    evidence_sha and policy version — what ``append_label_observation``
-    produces on a policy-version bump or an edited-reply digest change."""
+    """Agreeing generations differ only in policy version and evidence digest, as after a policy bump or
+    reply edit.
+    """
     return make_hydrated_sqlite_index(tmp_path,
         [("2026-01-02T00:00:00+00:00", '["finding-accepted"]', "e" * 64, "980-rubric-r1", "accepted"),
             ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "980-rubric-r2", "accepted"),
@@ -198,12 +182,9 @@ def _hydrated_sqlite_index_agreeing_generations(tmp_path: Path) -> Path:
 
 
 def test_materialize_serves_human_labeled_session_from_trajectory(tmp_path: Path) -> None:
-    """A human-sourced row (``daydream label`` / ``index.update_labels``
-    appends ``source='human'`` with a NULL ``rubric_json``) wins precedence but
-    must not brick the derivation: the NULL rubric falls back to the sanitized
-    trajectory like a legacy labels-only row (issue #336 item 1), and the
-    human row -- authoritative under the archive's human-wins precedence --
-    never flags the session conflicting (issue #336 item 3)."""
+    """A winning human row with NULL rubric recovers trajectory resolutions and never creates a session
+    conflict.
+    """
     root = _hydrated_sqlite_index(tmp_path)
     _seed_legacy_trajectory(root)
 
@@ -218,11 +199,9 @@ def test_materialize_serves_human_labeled_session_from_trajectory(tmp_path: Path
     assert record.get("conflicting") is None  # human override is not a disagreement
 
 def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
-    """Two generations with identical dispositions (same labels) split only on
-    non-disposition dedup members (evidence_sha, policy version) are agreeing
-    generations: the session must not be flagged conflicting so the next
-    canonical harvest keeps projecting its decisive finding-accepted label
-    instead of suppressing it."""
+    """Matching dispositions remain non-conflicting across policy/evidence generations and retain decisive
+    labels.
+    """
     root = _hydrated_sqlite_index_agreeing_generations(tmp_path)
     mat = tmp_path / "mat"
     run_materialize(root, mat, pin=_PIN)
@@ -232,8 +211,7 @@ def test_agreeing_generations_are_not_conflicting(tmp_path: Path) -> None:
 
 
 def _hydrated_sqlite_index_evolving(tmp_path: Path) -> Path:
-    """A pre-adjudication ``s1`` generation resolved by a later decisive one:
-    an evolution (resolved-unanswered -> accepted), not a disagreement."""
+    """A later accepted generation resolves an earlier unanswered one without creating a disagreement."""
     return make_hydrated_sqlite_index(tmp_path,
         [("2026-01-02T00:00:00+00:00", '["finding-unanswered"]', "e" * 64, "980-rubric-r2", "unanswered"),
             ("2026-01-03T00:00:00+00:00", '["finding-accepted"]', "f" * 64, "980-rubric-r2", "accepted"),
@@ -242,10 +220,7 @@ def _hydrated_sqlite_index_evolving(tmp_path: Path) -> Path:
 
 
 def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(tmp_path: Path,) -> None:
-    """A pre-adjudication generation (no decisive finding- label) resolved by a
-    later decisive generation is an evolution, never a harvester disagreement:
-    the session stays gold-eligible after re-materialization (issue #336
-    item 3)."""
+    """An unanswered-to-decisive evolution remains gold-eligible after materialization."""
     root = _hydrated_sqlite_index_evolving(tmp_path)
     mat = tmp_path / "mat"
     run_materialize(root, mat, pin=_PIN)
@@ -254,13 +229,11 @@ def test_resolved_unanswered_to_accepted_evolution_is_not_conflicting(tmp_path: 
     assert record["disposition"] == "accepted"
 
 def test_materialize_fails_loudly_on_uncheckpointed_wal(tmp_path: Path) -> None:
-    """A crashed/interrupted writer between commit and close leaves committed
-    rows in ``index.db-wal``; the ``immutable=1`` read-only adapters would
-    silently skip them and serve fewer sessions with no error — the guard must
-    fail loudly instead of serving a partial snapshot."""
+    """An uncheckpointed WAL contains committed rows that immutable SQLite reads would miss; refuse rather
+    than serve a partial snapshot.
+    """
     root = _hydrated_sqlite_index(tmp_path)
-    # Simulate the crash window: a fresh writer commits rows into the WAL but
-    # has not closed (checkpointed) yet.
+    # Leave a committed writer open in WAL mode to simulate a crash.
     conn = sqlite3.connect(str(root / "index.db"))
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) "

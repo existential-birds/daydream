@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.cli import _parse_args, _parse_improve_args
+from daydream.commands.improve import _parse_improve_args
+from daydream.commands.review import _parse_args
 from daydream.config_file import load_file_config
 from daydream.observability.config import ObservabilityConfig, ObservabilityError, resolve_observability_config
 

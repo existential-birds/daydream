@@ -1,13 +1,4 @@
-"""TEST-07: Subagent trajectory shape validation.
-
-Drives the recorder's fork() path across the parallel
-fan-out phases it must support: deep-mode per-stack reviews and exploration
-pre_scan specialists. Validates the resulting root + sibling trajectory file
-sets against the vendored ATIF validator.
-
-Per D-03, these tests exercise the real recorder code with fake backends.
-No pre-recorded fixture files.
-"""
+"""Validate real root/sibling recorder output for deep review and exploration fan-out."""
 
 from __future__ import annotations
 
@@ -68,10 +59,7 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
         assert agent_steps[0]["extra"]["daydream_run_flow"] == "deep"
 
 async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> None:
-    """Exploration fork: 3 specialist children produce 3 valid sibling files.
-
-    Also covers what the deleted fix-parallel test uniquely asserted: sibling trajectory files land in the per-run
-    trajectories/ subdir, and each child inherits the parent's session_id."""
+    """Three specialists produce valid siblings in the per-run directory, sharing the parent session."""
     recorder = make_recorder(tmp_path)
     children: list[TrajectoryRecorder] = []
     descriptors = ("explore-pattern-scanner", "explore-dependency-tracer", "explore-test-mapper")
@@ -147,10 +135,7 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
     assert all_child_ids[1][0] == 1
 
 async def test_parent_final_metrics_includes_sibling_steps(tmp_path: Path) -> None:
-    """Parent FinalMetrics.total_prompt_tokens folds in child contributions.
-
-    Supersedes the original SUBA-09 expectation: the root trajectory is whole-run truth, while the sibling file
-    keeps its own share."""
+    """Root metrics represent the whole run; sibling metrics retain only their own share."""
     recorder = make_recorder(tmp_path)
 
     async with recorder:

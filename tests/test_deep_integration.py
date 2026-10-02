@@ -27,19 +27,16 @@ from daydream.phases import (
     phase_understand_intent,
 )
 from daydream.prompts.wire_contract import WIRE_CONTRACT_GENERIC_INSTRUCTION, WIRE_CONTRACT_RUST_INSTRUCTION
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.conftest import silence_module_console
 from tests.harness.backend import ScriptedBackend
 
 
 class _DeepMockBackend(ScriptedBackend):
-    """Prompt-dispatching mock backend keyed on the prompt's stage wording.
+    """Dispatch by stage wording; ScriptedBackend records calls and prompts.
 
-    The dispatch itself lives in the ``ScriptedBackend`` responder seam, so the
-    harness owns call recording: ``calls`` (one dict per call, including
-    ``agents``) and the ``prompts`` observable come from the shared fake. This
-    subclass only records the stage tag of each dispatched prompt in ``stages``
-    -- naming it ``calls`` would collide with the harness's dict list.
+    Stage labels live in stages to avoid colliding with the harness's calls.
     """
 
     def __init__(self, *, cost_usd: float | None = 0.01, raise_on_agents: bool = False,) -> None:
@@ -72,9 +69,7 @@ class _DeepMockBackend(ScriptedBackend):
             events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None)]
             return events
 
-        # Checked before per-stack: the structural prompt lacks "you are reviewing the
-        # ... stack" but embeds the stack-structure-review.md path, so it would
-        # otherwise fall through to the "other" fallback and write no artifact.
+        # Structural review lacks the per-stack role opener and needs its own dispatch.
         if "structural reviewer" in pl:
             self.stages.append("structure")
             m = re.search(r"stack-(\S+?)-review\.md", prompt)
@@ -117,26 +112,6 @@ class _DeepMockBackend(ScriptedBackend):
             events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),]
             return events
 
-        # Parse-feedback prompt contains "Read the review output file at".
-        if "read the review output file" in pl or "extract only actionable issues" in pl:
-            self.stages.append("parse")
-            # Parsing the structural review yields a finding (tagged lens="structural"
-            # in merge, rendering the ## Structural Review section); other stacks yield none.
-            # Issue #742: the per-stack parse schema requires a ``verdicts`` property.
-            if "stack-structure-review.md" in prompt:
-                events += [TextEvent(text=""),
-                    ResultEvent(structured_output={"issues": [{
-                                    "id": 1, "description": "hello() leaks a god-object boundary", "file": "api.py",
-                                    "line": 1, "evidence": "api.py:1",
-                                }
-                            ], "verdicts": [],
-                        }, continuation=None,
-                    ),
-                ]
-            else:
-                events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),]
-            return events
-
         # Merge: return an empty item list (no language-stack issues in this fixture),
         # so the host's canonical report carries only the appended structural section.
         if "cross-stack merge agent" in pl:
@@ -150,13 +125,8 @@ class _DeepMockBackend(ScriptedBackend):
         return events
 
     def _review_output_path(self, prompt: str) -> Path | None:
-        """The review-file path the delivered prompt names.
-
-        The prompt names the session's live artifact tree. Writing there rather
-        than reconstructing the public path matches the sanctioned adapter
-        contract: the public ``.daydream`` tree is detached for the run's
-        duration, so a mid-run write to a reconstructed public path trips the
-        model-cwd artifact gate and fails the run.
+        """Use the prompt's live session path; reconstructed public paths are detached
+        and would trip the model-CWD artifact gate during the run.
         """
         m = re.search(r"Write your full review to (\S+\.md)\.", prompt)
         return Path(m.group(1)) if m else None
@@ -179,13 +149,7 @@ def _wire_mocks(monkeypatch: pytest.MonkeyPatch, backend: _DeepMockBackend) -> N
 async def _run_deep(target: Path, backend: _DeepMockBackend, monkeypatch: pytest.MonkeyPatch,
     shallow_fanout_threshold: int | None = None,
 ) -> int:
-    """Common driver: wire mocks and execute the full deep pipeline.
-
-    ``shallow_fanout_threshold`` is forwarded to :class:`RunConfig`. The #311
-    wire-contract test passes ``0`` so its 2-file fixture does not trigger the
-    tiny-diff collapse (which would absorb the generic bucket into the single
-    rust assignment and suppress the generic-fallback prompt).
-    """
+    """Run the deep pipeline with mocks and an explicit tiny-diff collapse threshold."""
     _wire_mocks(monkeypatch, backend)
 
     # Pre-populate exploration context to skip the safe_explore backend call.
@@ -201,10 +165,7 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), ("merged report missing after Claude-shape run")
-    # The default design lens shares structural review instead of a separate
-    # alternatives stage. Intent, language review and merge still run. The
-    # parse-<stack> stage was removed (issue #745) -- reviewers emit records
-    # directly.
+    # Design uses structural review; reviewers emit records directly.
     required = {"intent", "structure", "per-stack", "merge"}
     assert required.issubset(set(backend.stages)), (f"missing stages; saw only: {sorted(set(backend.stages))}")
     assert "alternatives" not in backend.stages
@@ -223,13 +184,7 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest
     )
 
 def test_phase_primitives_unmodified() -> None:
-    """D-39: existing phase primitives imported unchanged by run_deep.
-
-    Stage 3 renames the second positional parameter from ``cwd`` to ``work``
-    (a :class:`WorkContext`). The contract this test enforces is now:
-    ``backend`` first, ``work`` second — base resolution happens once at
-    workspace open time and is threaded through every phase.
-    """
+    """Phase primitives accept backend then WorkContext; workspace resolves the base."""
     # Other primitives: first two params are (backend, work).
     for fn in (phase_understand_intent, phase_alternative_review, phase_fix, phase_test_and_heal, phase_commit_push,):
         params = list(inspect.signature(fn).parameters.values())
@@ -247,7 +202,6 @@ def test_phase_primitives_unmodified() -> None:
 
 async def test_deep_default_backend_line_is_phase_agnostic(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#647: the 'Default backend' status line never shows a review override."""
 
     backend = _DeepMockBackend(cost_usd=0.0123)
     _wire_mocks(monkeypatch, backend)
@@ -266,23 +220,7 @@ async def test_deep_default_backend_line_is_phase_agnostic(multi_stack_target: P
 
 async def test_structural_meta_stack_flows_end_to_end(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """End-to-end smoke for the structural meta-stack pipeline (Tasks 2-7 composed).
-
-    Drives the deep orchestrator on a real multi-language diff (Python + TSX +
-    Markdown — a code diff, so NOT docs-only) and asserts the four observable
-    states the structural pipeline must produce:
-
-      1. ``detect_stacks`` returned ``structure`` as one of the stacks.
-      2. ``phase_per_stack_reviews`` produced a ``stack-structure-review.md``
-         artifact on disk.
-      3. The final merged report on disk carries a ``## Structural Review``
-         header.
-
-    These are real observable side effects (files on disk, the rendered report
-    header) — not dispatch bookkeeping. If any wire in Tasks 2-7 were broken
-    (structure stack not emitted, records not partitioned out and appended,
-    section not rendered) the corresponding assertion below fails.
-    """
+    """A multi-language run detects structure, writes its review, and renders its section."""
     detected_stacks: list[StackAssignment] = []
     real_detect = _detection.detect_stacks
 
@@ -319,32 +257,17 @@ async def test_structural_meta_stack_flows_end_to_end(multi_stack_target: Path, 
 async def test_310_prompt_gates_reach_built_prompts_in_real_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real-path coverage for the #310 prompt gates (PR #328, Finding 2).
+    """Inspect prompt gates delivered through runner.run to the backend.
 
-    The #310 unit tests call the prompt builders directly. This one drives a
-    deep run through ``runner.run`` with the stub backend and observes at the
-    backend seam: ``_DeepMockBackend.execute`` records the full ``prompt`` it
-    receives on every call, so the prompts actually delivered to the external
-    backend are classified by content -- no builder spies, no assumption that a
-    built prompt survives the trip from builder to ``Backend.execute``. The
-    gates are asserted on what the backend received:
-
-      - structural: cross-file symbol-existence + trust-model, NOT config-trace;
-      - per-stack (language): config-trace + trust-model, NOT cross-file;
-      - generic-fallback: config-trace + trust-model, NOT cross-file.
-
-    ``multi_stack_target`` (api.py + App.tsx + README.md) routes one file to
-    each of the three built-in stack builders, so
-    all three gate assignments are exercised in a single real run.
+    The Python/TSX/Markdown fixture exercises language, structural, and generic
+    builders. Structural prompts carry cross-file/trust gates; language and
+    generic prompts carry config-trace/trust gates.
     """
     backend = _DeepMockBackend(cost_usd=0.0123)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
 
-    # Classify the prompts the backend actually received by content. The
-    # per-stack predicate also matches the generic-fallback scope line ("You are
-    # reviewing the generic-fallback stack"), so structural + generic-fallback
-    # are excluded from the per-stack class to keep each class meaningful.
+    # Exclude generic fallback from the per-stack predicate it also matches.
     structural = [p for p in backend.prompts if "structural reviewer" in p]
     generic = [p for p in backend.prompts if "generic-fallback" in p]
     per_stack = [p
@@ -383,27 +306,11 @@ async def test_310_prompt_gates_reach_built_prompts_in_real_run(
 async def test_311_wire_contract_reaches_delivered_prompts_in_real_run(
     rust_wire_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real-path coverage for the #311 wire-contract instructions (R3/R4).
+    """Delivered Rust/generic prompts receive their distinct wire-contract rules.
 
-    Mirrors ``test_310_prompt_gates_reach_built_prompts_in_real_run``: drives a
-    deep run through ``runner.run`` with the stub backend and classifies the
-    prompts actually delivered to ``_DeepMockBackend.execute`` by content -- no
-    builder spies, no assumption that a built prompt survives the trip from
-    builder to backend. ``rust_wire_target`` (src/main.rs + README.md) routes
-    the rust file to the per-stack builder and README.md to the
-    generic-fallback bucket, so both wire-contract instructions are pinned on
-    the delivered prompts in one run:
-
-      - rust per-stack: serde/routing instruction present, URL instruction NOT;
-      - generic-fallback: URL/quoting instruction present, serde instruction NOT;
-      - structural: neither (out of scope per spec).
-
-    ``shallow_fanout_threshold=0`` disables the tiny-diff short-circuit
-    (``DEFAULT_SHALLOW_FANOUT_THRESHOLD`` = 2): with the default threshold a
-    2-file diff containing exactly one real language stack absorbs the generic
-    bucket into that stack, and the generic-fallback prompt would never be
-    delivered. Disabling the collapse restores the full pipeline so the rust
-    per-stack and generic-fallback prompts both reach the backend seam.
+    Rust gets serde/routing, generic gets URL/quoting, and structural gets
+    neither. Threshold zero prevents the two-file fixture's generic bucket
+    from collapsing into Rust before its prompt reaches the backend.
     """
     backend = _DeepMockBackend(cost_usd=0.0123)
     exit_code = await _run_deep(rust_wire_target, backend, monkeypatch, shallow_fanout_threshold=0)

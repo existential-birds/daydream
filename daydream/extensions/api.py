@@ -1,13 +1,6 @@
-"""Versioned extension API contract types.
+"""Versioned extension types: flows, control signals, stack rules and errors.
 
-The types a ``daydream_ext`` package programs against: the API version
-constant, the flow/step/stack dataclasses, the control signals steps return,
-and the extension error hierarchy.
-
-This module must not import from ``daydream.runner`` or ``daydream.phases``
-(import-cycle guard); ``FlowContext`` is referenced only under
-``TYPE_CHECKING``.
-"""
+Never import runner or phases here; FlowContext is type-only to avoid cycles."""
 
 from __future__ import annotations
 
@@ -76,14 +69,10 @@ class BreakLoop:
 
 @dataclass(frozen=True)
 class FlowStep:
-    """A named, registrable unit of a flow.
+    """A named async step returning a control signal or None.
 
-    Attributes:
-        name: Unique phase name; addresses the step in flow definitions.
-        run: Async step body; returns a control signal or None to continue.
-        config_phase: ``[tool.daydream.phases.<key>]`` key; None means ``name``.
-        enabled: Per-run gate; the step is skipped when it returns False.
-    """
+    config_phase selects its file-config key, defaulting to name; enabled is a
+    per-run predicate that skips the step when false."""
 
     name: str
     run: Callable[[FlowContext], Awaitable[Stop | BreakLoop | None]]
@@ -107,10 +96,7 @@ class LoopGroup:
 
 @dataclass(frozen=True)
 class CommentFinding:
-    """A single review finding, as passed to a ``"finding"`` renderer.
-
-    Mirrors the public fields of the internal ``ParsedIssue``.
-    """
+    """Public ParsedIssue fields passed to a "finding" renderer."""
 
     path: str
     line: int | None
@@ -124,20 +110,14 @@ class CommentFinding:
 
 @dataclass(frozen=True)
 class FindingRenderContext:
-    """Placement context passed alongside a finding to a ``"finding"`` renderer.
-
-    ``placement`` is one of ``"inline"``, ``"file_level"``, or ``"summary"``.
-    """
+    """Finding placement: inline, file_level, or summary."""
 
     placement: str
 
 
 @dataclass(frozen=True)
 class SummaryFinding:
-    """One entry in the summary findings section.
-
-    ``body_block`` is host-rendered with the finding marker already embedded.
-    """
+    """Summary entry whose host-rendered body_block already contains its finding marker."""
 
     finding: CommentFinding
     body_block: str
@@ -145,12 +125,8 @@ class SummaryFinding:
 
 @dataclass(frozen=True)
 class SummaryContext:
-    """Input to the ``"summary"`` renderer.
-
-    ``diagrams`` (issue #1113) carries the host-rendered grounded-diagram
-    blocks, or None when the run produced none. It is appended last so the
-    field is additive: an existing positional construction keeps working.
-    """
+    """Summary-renderer input with optional host-grounded diagram blocks.
+    The last, optional diagrams field preserves existing positional constructors."""
 
     findings: tuple[SummaryFinding, ...]
     agent_prompt: str

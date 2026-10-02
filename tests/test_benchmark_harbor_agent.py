@@ -44,7 +44,6 @@ def test_spike_task_toml_env_carries_case_key(tmp_path: Path, fake_gh: FakeGh) -
     # different reviewer policy)
     assert pkg.render_task_toml(key, reviewer_hosts=["h1.example.com"], judge_hosts=["h2.example.com"]
     ) == (case / "task.toml").read_bytes()
-    # Harbor validates the enriched task.toml (same-interpreter Task model)
     try:
         from harbor.models.task import Task  # noqa: PLC0415 - namespace fallback as in package.py
     except ImportError:  # Harbor exposes task as a namespace package in some wheels.
@@ -116,7 +115,6 @@ def test_artifact_caps_fail_closed_and_write_is_atomic(tmp_path: Path) -> None:
     loaded = json.loads(dest.read_text())
     assert loaded == art and loaded["findings"] == []      # clean review round-trips
     assert vc.validate_candidate_artifact(loaded) == []     # schema-valid
-    # no stray temp file is observable at the destination
     assert list(dest.parent.glob("review.json*")) == [dest]
 
 @pytest.mark.parametrize(("field", "value"),
@@ -168,10 +166,8 @@ def test_render_task_toml_host_policy_and_case_env() -> None:
     assert 'DAYDREAM_REVIEW_CASE_ID = "case-abc123def456"' in toml
     assert 'DAYDREAM_REVIEW_BASE_REF = "base"' in toml
     assert 'DAYDREAM_REVIEW_HEAD_REF = "head"' in toml
-    # deterministic
     assert pkg.render_task_toml("case-abc123def456", reviewer_hosts=["openrouter.ai"], judge_hosts=["openrouter.ai"],
     ) == pkg.render_task_toml("case-abc123def456", reviewer_hosts=["openrouter.ai"], judge_hosts=["openrouter.ai"])
-    # no judge vars or archive/target config reach the agent surface
     assert "DAYDREAM_JUDGE" not in toml and "HF_TOKEN" not in toml and "GITHUB_TOKEN" not in toml
 
 def test_render_task_toml_keeps_agent_verifier_host_boundaries() -> None:
@@ -247,7 +243,6 @@ def test_entrypoint_publish_failure_modes(tmp_path: Path) -> None:
         )
     assert over.value.kind == "over_limit"
 
-    # a clean review round-trips to a schema-valid empty artifact
     (deep / "merged-items.json").write_text(json.dumps({"items": []}))
     entrypoint.publish_review(repo_dir=tmp_path, artifact_path=tmp_path / "review.json", case_id="case-abc123def456")
     loaded = json.loads((tmp_path / "review.json").read_text())
@@ -288,8 +283,6 @@ def test_agent_setup_probe_branches_on_backend(tmp_path: Path) -> None:
     assert claude_agent.version() in claude_executed.setup          # version assert kept for both
 
 def test_agent_setup_nonzero_exec_fails(tmp_path: Path) -> None:
-    """A failed setup probe surfaces as a typed failure, never a silent pass."""
-
     pytest.importorskip("harbor")
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path)
@@ -540,22 +533,15 @@ def _capturing_env(executed: Executed) -> type:
 
 
 def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,) -> None:
-    """AC 5 gate: compile a real Harbor task with the custom agent, validate it
-    in the same interpreter, then execute a local fake-backend Harbor trial
-    end-to-end. The production :class:`DaydreamReviewAgent` ``setup()`` and
-    ``run()`` drive a fake Harbor environment whose ``exec`` injects the allow-
-    listed child env (``build_child_env``) into the entrypoint's ``os.environ``
-    and the real runner + publisher complete to a candidate artifact -- so the
-    env-injection, allowlist child-env traversal, and setup probe are all
-    executed, not skipped. Only the in-docker nftables sandbox itself needs a
-    Harbor-capable runtime this host does not provide; that half is
-    documented, but the runnable gate is a genuine executed pass."""
+    """Compile and run a local Harbor trial through the real agent and entrypoint.
+
+    The fake environment executes setup and passes the allowlisted child mapping
+    into the runner. Container nftables isolation requires a separate Harbor runtime.
+    """
 
     pytest.importorskip("harbor")
     from harbor.models.agent.context import AgentContext
 
-    # Compile the wheel + validate the compiled tree, including the custom-agent
-    # same-interpreter preflight.
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     wheel, _ = _stub_wheel(tmp_path)
     pkg.build_harbor(ws, wheel=wheel)
@@ -564,12 +550,9 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
     assert (ws / "harbor" / key / "task.toml").is_file()
     assert f'DAYDREAM_REVIEW_CASE_ID = "{key}"' in (ws / "harbor" / key / "task.toml").read_text()
 
-    # Freeze a real temp git repo (base/head) to review; the fake backend keeps
-    # the in-process runner deterministic.
     repo = _seed_defect_repo(tmp_path)
     install_stub_backend(monkeypatch, repo)
     task_env = _end_env(repo, tmp_path, key)
-    # Host secrets present in the parent env must never reach the child env.
     for banned in env_policy.HOST.banned_vars:
         monkeypatch.setenv(banned, "super-secret")
 
@@ -581,10 +564,8 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
     asyncio.run(agent.setup(env))
     asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
 
-    # setup() executed: the in-container probe asserts this packaged release + SDK.
     assert agent.version() in executed.setup
     assert "shutil.which('pi')" in executed.setup
-    # run() executed with the allowlisted child env traversing to the entrypoint only.
     assert "daydream.benchmark.harbor.entrypoint" in executed.command
     assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
     assert "--findings-out" not in executed.command  # no live-PR emission path
@@ -598,13 +579,9 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
     for prefix in env_policy.HOST.banned_prefixes:
         assert not any(k.startswith(prefix) for k in executed.child)
 
-    # The entrypoint consumes exactly the captured child mapping; no host
-    # credentials need to be removed or restored around this in-process run.
     rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
 
-    # The child env carried the per-case task key through to a genuinely
-    # completed review; the artifact is the exact frozen-snapshot candidate.
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
     parsed = vc.validate_candidate_artifact(artifact)
     assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
@@ -634,13 +611,9 @@ def test_local_harbor_task_with_fake_backend(tmp_path: Path, fake_gh: FakeGh, mo
     ] == [(f.finding_id, f.title, f.body, f.severity, f.path, f.start_line, f.end_line) for f in host_gold]
 
 def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A claude-backend trial keeps the ANTHROPIC_* credential in the child env
-    and the real entrypoint completes a review to a candidate artifact.
+    """Claude's allowed credential survives into a successful entrypoint review.
 
-    The captured child env feeds back into ``entrypoint.main`` exactly like the
-    pi sibling, so the credential passthrough is executed, not faked: with the
-    default ``backend="pi"`` scrub at the call site (the regression), the
-    in-container claude branch raises EntrypointError and rc != 0.
+    The captured child mapping is executed directly, exposing incorrect backend scrubbing.
     """
 
     pytest.importorskip("harbor")
@@ -670,12 +643,9 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeyp
     asyncio.run(agent.setup(env))
     asyncio.run(agent.run("review the frozen snapshot", env, AgentContext()))
 
-    # setup() executed: the in-container probe asserts this packaged release +
-    # the claude backend SDK (not the pi CLI).
     assert agent.version() in executed.setup
     assert "import claude_agent_sdk" in executed.setup
     assert "shutil.which('pi')" not in executed.setup
-    # run() executed with the allowlisted child env traversing to the entrypoint only.
     assert "daydream.benchmark.harbor.entrypoint" in executed.command
     assert executed.cwd == str(repo)  # cwd tracks DAYDREAM_REVIEW_REPO_DIR
     assert "--findings-out" not in executed.command  # no live-PR emission path
@@ -693,13 +663,9 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeyp
             continue  # exempted for backend="claude"
         assert not any(k.startswith(prefix) for k in executed.child)
 
-    # The entrypoint consumes exactly the captured child mapping; no host
-    # credentials need to be removed or restored around this in-process run.
     rc = asyncio.run(entrypoint.main(executed.child))
     assert rc == 0
 
-    # The child env carried the claude credential through to a genuinely
-    # completed review; the artifact is the exact frozen-snapshot candidate.
     artifact = json.loads((tmp_path / "logs" / "artifacts" / "review.json").read_text())
     parsed = vc.validate_candidate_artifact(artifact)
     assert [p.candidate_id for p in parsed] == [f["candidate_id"] for f in artifact["findings"]]
@@ -708,9 +674,6 @@ def test_agent_run_accepts_claude_and_invokes_entrypoint(tmp_path: Path, monkeyp
     assert artifact["base_ref"] == "base" and artifact["head_ref"] == "head"
 
 def test_agent_setup_refuses_unsupported_backend_before_probe(tmp_path: Path) -> None:
-    """setup() gates on the shared ``_SUPPORTED_BACKENDS`` allowlist before any
-    probe: an unsupported backend value must never probe a wrong SDK."""
-
     pytest.importorskip("harbor")
 
     agent = DaydreamReviewAgent(logs_dir=tmp_path, extra_env={"DAYDREAM_REVIEW_BACKEND": "codex"})

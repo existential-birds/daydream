@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
 from dataclasses import asdict
+from functools import singledispatchmethod
 from importlib.metadata import version
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,7 @@ from daydream.backends import (
     _MAX_ORDERED_IDENTITY_ENTRIES,
     _MAX_PROVIDER_NAME_CHARS,
     AgentEvent,
+    AssistantChoicePart,
     ClaudeRequestConfig,
     CodexRequestConfig,
     CostEvent,
@@ -44,6 +46,8 @@ from daydream.backends import (
     _admit_identity_label,
     unix_ms_to_ns,
 )
+from daydream.diagnostics import exception_text
+from daydream.observability.privacy import PrivacyPolicy
 from daydream.observability.runtime import current_session
 from daydream.trajectory import get_current_recorder
 
@@ -52,22 +56,16 @@ if TYPE_CHECKING:
 
 _logger = logging.getLogger(__name__)
 _scope_attributes: ContextVar[dict[str, Any]] = ContextVar("daydream_trace_attributes", default={})
-# Real agent-scope nesting depth for root/subagent attribution. Only an actual
-# enclosing agent scope marks a span subagent; sibling phases and retries never
-# change the depth (T4: root/subagent semantics on actual scopes only).
+# Only nested agent scopes create subagent attribution; retries and siblings do not.
 _agent_depth: ContextVar[int] = ContextVar("daydream_agent_depth", default=0)
 
 
 def _admit_observed_identity_list(
     values: list[str] | None, *, max_chars: int, context: str
 ) -> tuple[tuple[str, ...] | None, str | None]:
-    """Admit an ordered distinct observed-identity list capped at 16 entries.
+    """Admit ordered distinct identities; omit the whole list on unsafe values or overflow.
 
-    Task 1's whole-list-overflow rule applied to the observed emission side:
-    on any unsafe member or count overflow the whole list is omitted and one
-    fixed diagnostic (plus, for overflow, the total distinct count as the
-    diagnostic detail) is recorded — never a partial list that would look
-    authoritative.
+    Diagnostics contain fixed codes and, for overflow, the total distinct count.
     """
     if values is None:
         return None, None
@@ -81,8 +79,7 @@ def _admit_observed_identity_list(
         if admitted not in distinct:
             distinct.append(admitted)
     if len(distinct) > _MAX_ORDERED_IDENTITY_ENTRIES:
-        # Whole-list overflow: omit everything, record only the fixed code
-        # and the total distinct count (a count is metadata, not identity).
+        # A partial list would falsely claim complete identity evidence.
         return None, f"{_DIAG_LIST_OVERFLOW}:{len(distinct)}"
     return tuple(distinct), None
 
@@ -108,14 +105,7 @@ _INHERITED_ATTRIBUTES = frozenset(
 
 
 def associate_trajectory_identity(session_id: str) -> None:
-    """Propagate a late-bound trajectory identity to scopes opened afterwards.
-
-    ``associate_run_trajectory`` patches the root span, but scopes opened
-    after the association inherit from ``_scope_attributes``; without this
-    seed they would miss the session identity (only the live runner path has
-    an active recorder to supply it). The replay tool has no recorder, so the
-    seed is what keeps every descendant span in the same vendor session/tree.
-    """
+    """Seed inherited session identity for scopes opened after root trajectory association."""
     inherited = dict(_scope_attributes.get())
     inherited["daydream.session.id"] = session_id
     inherited["daydream.trajectory.id"] = session_id
@@ -199,12 +189,7 @@ class SpanScope:
             )
             self.span = self.session.tracer.start_span(
                 self.session.policy.text(self.name),
-                # Every Daydream scope — logical agents and retry attempts
-                # alike — is an in-process (local CLI/SDK) invocation, so no
-                # span here is a CLIENT remote-service boundary (binding
-                # decision 6: CLIENT requires a proven remote agent service
-                # with the exact provider known at creation). Only sealed
-                # provider generations below are CLIENT model spans.
+                # CLI/SDK scopes are local; only sealed provider generations are CLIENT spans.
                 kind=SpanKind.INTERNAL,
                 context=Context() if self.kind == "run" else None,
             )
@@ -213,9 +198,7 @@ class SpanScope:
             )
             self._context.__enter__()
             if self.kind == "agent":
-                # Root/subagent attribution uses only actual enclosing agent
-                # scopes: the outermost agent is root, a genuinely nested agent
-                # scope is subagent. Sibling phases and retries never nest.
+                # Agent role follows actual scope nesting.
                 depth = _agent_depth.get() + 1
                 self._depth_token = _agent_depth.set(depth)
                 common["daydream.agent.role"] = "root" if depth == 1 else "subagent"
@@ -228,9 +211,7 @@ class SpanScope:
                 }
             )
             if self.kind == "run":
-                # Owned OpenLLMetry compatibility aliases are authored explicitly
-                # here; the processor helper's ambient-context callback is not
-                # installed, so these values derive solely from Daydream's scope.
+                # Compatibility aliases derive from this scope, never ambient SDK context.
                 self.attrs(
                     {
                         "traceloop.workflow.name": self.session.policy.text(self.name),
@@ -239,9 +220,7 @@ class SpanScope:
                     }
                 )
             elif self.kind == "agent":
-                # The logical agent path keeps its Daydream namespace while the
-                # span/run name carries the standard invoke_agent shape; a
-                # foreign OpenLLMetry agent ID is never read.
+                # Keep the logical path in Daydream's namespace.
                 phase = self.attributes.get("daydream.phase")
                 path = f"daydream.agent.{phase}" if phase else self.name
                 self.attrs({"traceloop.entity.path": self.session.policy.text(path)})
@@ -305,10 +284,8 @@ class SpanScope:
     ) -> None:
         try:
             if exc is not None:
-                try:
-                    message = str(exc)
-                except Exception:
-                    message = "[UNSERIALIZABLE_ERROR]"
+                text = exception_text(exc)
+                message = text if text is not None else "[UNSERIALIZABLE_ERROR]"
                 self.finish(
                     1,
                     reason="cancelled" if not isinstance(exc, Exception) else "error",
@@ -376,6 +353,22 @@ _USAGE_ATTRIBUTES = {
 }
 
 
+def _usage_attributes(usage: dict[str, int | float]) -> dict[str, int | float]:
+    attributes = {_USAGE_ATTRIBUTES[name]: value for name, value in usage.items()}
+    if "input_tokens" in usage and "output_tokens" in usage:
+        attributes["gen_ai.usage.total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    return attributes
+
+
+def _choice_part_payload(part: AssistantChoicePart) -> dict[str, Any]:
+    payload = {"type": getattr(part, "kind", "text")}
+    if isinstance(part, (TextChoicePart, ReasoningChoicePart)):
+        payload["text"] = part.text
+    if isinstance(part, ToolCallChoicePart):
+        payload.update(id=part.call_id, name=part.name, arguments=part.arguments)
+    return payload
+
+
 class AttemptObserver:
     """Reconcile one backend invocation without inventing provider request spans."""
 
@@ -396,9 +389,7 @@ class AttemptObserver:
         self.providers: list[str] = []
         self.reason: str | None = None
         self.diagnostic_counts: dict[str, int] = {}
-        # T4: one pending SDK span per sealed provider generation, ended
-        # exactly once with the sealed historical end after the trajectory
-        # ledger has resolved the attempt's single billing owner.
+        # Pending spans await the trajectory ledger's final billing owner.
         self.generations: dict[str, dict[str, Any]] = {}
         self._saw_authoritative_total = False
 
@@ -438,50 +429,57 @@ class AttemptObserver:
         if self.scope.session is None:
             return
         try:
-            self._observe(event)
+            self._identity(event)
+            self._observe(event, self.scope.session.policy)
         except Exception:
             _logger.warning("Trace event could not be recorded; execution continues")
 
-    def _observe(self, event: AgentEvent) -> None:
-        self._identity(event)
-        policy = self.scope.session.policy if self.scope.session else None
-        if isinstance(event, DiagnosticEvent):
-            if policy is not None:
-                code = policy.text(event.code)
-                self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
-        elif isinstance(event, RequestEvent):
-            # Only the closed, validated native config types are admitted.
-            # Custom subclasses may carry arbitrary data, so do not serialize
-            # them or any raw SDK options/environment into telemetry.
-            if type(event.config) in (
-                EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig,
-                PiRequestConfig, OspreyRequestConfig,
-            ):
-                self.scope.attrs({
-                    f"daydream.request.config.{key}": value
-                    for key, value in asdict(event.config).items()
-                    if value is not None
-                })
-            self.scope.attrs(
+    @singledispatchmethod
+    def _observe(self, event: AgentEvent, policy: PrivacyPolicy) -> None:
+        """Ignore events without an observability projection."""
+
+    @_observe.register
+    def _observe_diagnostic(self, event: DiagnosticEvent, policy: PrivacyPolicy) -> None:
+        code = policy.text(event.code)
+        self.diagnostic_counts[code] = self.diagnostic_counts.get(code, 0) + 1
+
+    @_observe.register
+    def _observe_request(self, event: RequestEvent, policy: PrivacyPolicy) -> None:
+        # Only the closed, validated native config types are admitted.
+        # Custom subclasses may carry arbitrary data, so do not serialize
+        # them or any raw SDK options/environment into telemetry.
+        if type(event.config) in (
+            EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig,
+            PiRequestConfig, OspreyRequestConfig,
+        ):
+            self.scope.attrs({
+                f"daydream.request.config.{key}": value
+                for key, value in asdict(event.config).items()
+                if value is not None
+            })
+        self.scope.attrs(
+            {
+                "gen_ai.request.model": event.model_name,
+                "gen_ai.request.reasoning_effort": event.reasoning_effort,
+                "daydream.request.timestamp": event.timestamp,
+            }
+        )
+        if self.capture:
+            self.request = policy.value(
                 {
-                    "gen_ai.request.model": event.model_name,
-                    "gen_ai.request.reasoning_effort": event.reasoning_effort,
-                    "daydream.request.timestamp": event.timestamp,
+                    key: value
+                    for key, value in {
+                        "prompt": event.prompt,
+                        "system_prompt": event.system_prompt,
+                        "output_schema": event.output_schema,
+                    }.items()
+                    if value is not None
                 }
             )
-            if self.capture and policy is not None:
-                self.request = policy.value(
-                    {
-                        key: value
-                        for key, value in {
-                            "prompt": event.prompt,
-                            "system_prompt": event.system_prompt,
-                            "output_schema": event.output_schema,
-                        }.items()
-                        if value is not None
-                    }
-                )
-        elif isinstance(event, TextEvent) and self.capture and policy is not None:
+
+    @_observe.register
+    def _observe_text(self, event: TextEvent, policy: PrivacyPolicy) -> None:
+        if self.capture:
             safe_text = policy.text(event.text)
             self.text.append(safe_text)
             if (
@@ -492,63 +490,63 @@ class AttemptObserver:
                 self.messages[-1]["parts"][-1]["content"] += safe_text
             else:
                 self.messages.append({"role": "assistant", "parts": [{"type": "text", "content": safe_text}]})
-        elif isinstance(event, ThinkingEvent) and self.capture and policy is not None:
+
+    @_observe.register
+    def _observe_thinking(self, event: ThinkingEvent, policy: PrivacyPolicy) -> None:
+        if self.capture:
             self.reasoning.append(policy.text(event.text))
-        elif isinstance(event, ToolStartEvent):
-            self._start_tool(event)
-        elif isinstance(event, ToolResultEvent):
-            self._end_tool(event)
-        elif isinstance(event, MetricsEvent):
-            values = self._usage(event)
-            if event.generation_id:
-                # Late per-generation usage lands on the matching pending
-                # generation (custom evidence until the billing owner closes).
-                draft = self.generations.get(event.generation_id)
-                if draft is not None:
-                    draft_usage = draft.setdefault("usage", {})
-                    for name, value in values.items():
-                        if name not in draft_usage:
-                            draft_usage[name] = value
-            if event.usage_scope == "invocation":
-                self.invocation_usage.update(values)
-                self.scope.attrs({"daydream.started_at": event.started_at})
-            else:
-                key = event.message_id or f"anonymous:{len(self.message_usage)}"
-                self.message_usage[key] = values
-                self.usage_metadata[key] = {
-                    "message_id": event.message_id,
-                    "model": event.model_name,
-                    "provider": event.provider_name,
-                    "started_at": event.started_at,
-                    "timestamp": event.timestamp,
-                    "duration_ms": event.duration_ms,
-                    "usage": values,
-                }
-        elif isinstance(event, CostEvent):
-            self.final_usage.update(self._usage(event))
-            if event.measurement_source in ("terminal", "session"):
-                # Terminal (Pi/Claude end-of-call) and session (Osprey
-                # session_end) cost events carry the authoritative total that
-                # closes the billing owner (binding decision 5); when no
-                # generation evidence exists the structural attempt owns the
-                # complete bill.
-                self._saw_authoritative_total = True
-            if event.model_usage is not None:
-                self.scope.attrs(
-                    {"daydream.model_usage": {key: asdict(value) for key, value in event.model_usage.items()}}
-                )
-        elif isinstance(event, ResultEvent) and self.capture and policy is not None:
-            self.structured = policy.value(event.structured_output) if event.structured_output is not None else None
-        elif isinstance(event, GenerationStartEvent):
-            # T4: open an invocation-local pending generation. The SDK span is
-            # created at the sealed end (native start is only known there); the
-            # host observed receipt is the explicit non-provider fallback start.
-            self.generations.setdefault(
-                event.generation_id,
-                {"observed_at_unix_ns": event.observed_at_unix_ns, "span": None, "sealed_end_unix_ns": None},
+
+    @_observe.register
+    def _observe_metrics(self, event: MetricsEvent, policy: PrivacyPolicy) -> None:
+        values = self._usage(event)
+        if event.generation_id:
+            # Late per-generation usage lands on the matching pending
+            # generation (custom evidence until the billing owner closes).
+            draft = self.generations.get(event.generation_id)
+            if draft is not None:
+                draft_usage = draft.setdefault("usage", {})
+                for name, value in values.items():
+                    if name not in draft_usage:
+                        draft_usage[name] = value
+        if event.usage_scope == "invocation":
+            self.invocation_usage.update(values)
+            self.scope.attrs({"daydream.started_at": event.started_at})
+        else:
+            key = event.message_id or f"anonymous:{len(self.message_usage)}"
+            self.message_usage[key] = values
+            self.usage_metadata[key] = {
+                "message_id": event.message_id,
+                "model": event.model_name,
+                "provider": event.provider_name,
+                "started_at": event.started_at,
+                "timestamp": event.timestamp,
+                "duration_ms": event.duration_ms,
+                "usage": values,
+            }
+
+    @_observe.register
+    def _observe_cost(self, event: CostEvent, policy: PrivacyPolicy) -> None:
+        self.final_usage.update(self._usage(event))
+        if event.measurement_source in ("terminal", "session"):
+            # Terminal/session totals close billing; absent generations bill the attempt.
+            self._saw_authoritative_total = True
+        if event.model_usage is not None:
+            self.scope.attrs(
+                {"daydream.model_usage": {key: asdict(value) for key, value in event.model_usage.items()}}
             )
-        elif isinstance(event, GenerationEndEvent):
-            self._seal_generation(event)
+
+    @_observe.register
+    def _observe_result(self, event: ResultEvent, policy: PrivacyPolicy) -> None:
+        if self.capture:
+            self.structured = policy.value(event.structured_output) if event.structured_output is not None else None
+
+    @_observe.register
+    def _observe_generation_start(self, event: GenerationStartEvent, policy: PrivacyPolicy) -> None:
+        # Native start arrives at sealing; retain host receipt as an explicit fallback.
+        self.generations.setdefault(
+            event.generation_id,
+            {"observed_at_unix_ns": event.observed_at_unix_ns, "span": None, "sealed_end_unix_ns": None},
+        )
 
     @staticmethod
     def _usage(event: MetricsEvent | CostEvent) -> dict[str, int | float]:
@@ -560,7 +558,8 @@ class AttemptObserver:
                 values[name] = value
         return values
 
-    def _start_tool(self, event: ToolStartEvent) -> None:
+    @_observe.register
+    def _start_tool(self, event: ToolStartEvent, policy: PrivacyPolicy) -> None:
         session = self.scope.session
         if session is None:
             return
@@ -602,7 +601,8 @@ class AttemptObserver:
                 }
             )
 
-    def _end_tool(self, event: ToolResultEvent) -> None:
+    @_observe.register
+    def _end_tool(self, event: ToolResultEvent, policy: PrivacyPolicy) -> None:
         session = self.scope.session
         if session is None:
             return
@@ -641,14 +641,12 @@ class AttemptObserver:
                 }
             )
 
-    def _seal_generation(self, event: GenerationEndEvent) -> None:
-        """Seal one provider generation into a pending SDK span (T4).
+    @_observe.register
+    def _seal_generation(self, event: GenerationEndEvent, policy: PrivacyPolicy) -> None:
+        """Create a pending span at native start, falling back to host receipt time.
 
-        The span is created under the attempt with the historical native start
-        (or the explicit host-observed fallback), then retained WITHOUT ``end()``
-        until the trajectory ledger has resolved the attempt's single billing
-        owner. Standard aliases (late response ID, model/provider/finish reason,
-        usage) are written only when that owner bills this generation child.
+        End it only after the trajectory ledger freezes the billing owner. Standard
+        response/usage aliases appear only on the billed generation child.
         """
         session = self.scope.session
         draft = self.generations.get(event.generation_id)
@@ -670,11 +668,7 @@ class AttemptObserver:
         draft["model_name"] = event.model_name
         draft["provider_name"] = event.provider_name
         draft["finish_reason"] = event.finish_reason
-        # Session identity is a matrix ``All spans`` row: a sealed generation
-        # is an SDK span like any other kind, so it inherits the same
-        # identity/alias keys sibling scopes record. Without them the vendor
-        # destinations cannot route the generation into the run's session or
-        # trace tree (readback gate: generations were orphaned).
+        # Every generation inherits session identity for vendor tree routing.
         for key, value in _scope_attributes.get().items():
             if key in _INHERITED_ATTRIBUTES:
                 span.set_attribute(key, session.policy.value(value))
@@ -695,42 +689,15 @@ class AttemptObserver:
         if native_start_ns is not None and event.ended_at_unix_ns is not None:
             span.set_attribute("daydream.generation.duration_ns", event.ended_at_unix_ns - native_start_ns)
         if event.choice_parts and self.capture:
-            # Provider-choice content is full-capture evidence (field matrix:
-            # "Full content except counts/identity", full mode only) — metadata
-            # mode keeps the generation's counts/identity/timing but never the
-            # choice text/arguments on the wire.
-            parts = [
-                {
-                    **{
-                        "type": getattr(part, "kind", "text"),
-                        **(
-                            {"text": getattr(part, "text", "")}
-                            if isinstance(part, (TextChoicePart, ReasoningChoicePart))
-                            else {}
-                        ),
-                        **(
-                            {
-                                "id": part.call_id,
-                                "name": part.name,
-                                "arguments": part.arguments,
-                            }
-                            if isinstance(part, ToolCallChoicePart)
-                            else {}
-                        ),
-                    }
-                }
-                for part in event.choice_parts
-            ]
+            # Choice text/arguments require full capture; metadata mode excludes them.
+            parts = [_choice_part_payload(part) for part in event.choice_parts]
             span.set_attribute("gen_ai.output.messages", session.policy.json({"role": "assistant", "parts": parts}))
             span.set_attribute("daydream.generation.choice_parts", session.policy.json(parts))
 
     def _resolve_billing_owner(self) -> str:
-        """Resolve the closed billing owner exactly as the trajectory ledger does.
+        """Read frozen trajectory ownership, or bill the attempt on an authoritative total.
 
-        With generation evidence the trajectory subtrajectory carries the frozen
-        ``generation_lifecycle`` (T2); without it, the attempt owns the complete
-        authoritative bill exactly when a terminal authoritative total was
-        observed, mirroring the ledger's no-drafts disposition.
+        Absent generation evidence and absent authoritative total leave ownership unresolved.
         """
         lifecycle = self._generation_lifecycle()
         if lifecycle is not None:
@@ -738,11 +705,10 @@ class AttemptObserver:
         return "structural_attempt" if self._saw_authoritative_total else "unresolved"
 
     def _generation_lifecycle(self) -> dict[str, Any] | None:
-        """Read the current invocation's frozen generation lifecycle (T2).
+        """Read this attempt's frozen lifecycle after invocation finalization.
 
-        The invocation manager exits (finalizing the ledger and registering the
-        subtrajectory) before this attempt scope, so the LAST registered
-        subtrajectory is exactly this attempt's — never an earlier retry's.
+        The invocation exits before its attempt scope, so the final subtrajectory
+        belongs to this attempt, including when earlier retries exist.
         """
         try:
             recorder = get_current_recorder()
@@ -757,12 +723,9 @@ class AttemptObserver:
             return None
 
     def _end_generations(self, owner: str) -> None:
-        """End every pending generation span once with its sealed historical end.
+        """End pending spans once at sealed historical ends; only billed children get aliases.
 
-        Standard generation aliases (late response ID, model/provider/finish
-        reason, timing provenance and usage) are written only when the frozen
-        owner bills this child; otherwise the custom ``daydream.generation.*``
-        evidence stays explicitly non-billed (binding decision 5).
+        Unbilled children retain their custom generation evidence.
         """
         billed_by_id = {
             draft.get("generation_id"): bool(draft.get("billed"))
@@ -786,10 +749,7 @@ class AttemptObserver:
                     if value is not None:
                         span.set_attribute(key, session.policy.value(value))
                 usage = draft.get("usage") or {}
-                usage_attrs = {_USAGE_ATTRIBUTES[name]: value for name, value in usage.items()}
-                if "input_tokens" in usage and "output_tokens" in usage:
-                    usage_attrs["gen_ai.usage.total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-                for key, value in usage_attrs.items():
+                for key, value in _usage_attributes(usage).items():
                     span.set_attribute(key, value)
                 span.set_status(Status(StatusCode.OK))
             sealed_end = draft.get("sealed_end_unix_ns")
@@ -819,11 +779,7 @@ class AttemptObserver:
                     reason=self.reason
                     or ("cancelled" if exc is not None and not isinstance(exc, Exception) else "interrupted"),
                 )
-            # T4: resolve the one closed billing owner after the trajectory
-            # ledger has finalized (the invocation manager exits before the
-            # attempt scope), then end every generation span exactly once at
-            # its sealed historical end. The closed owner is recorded on the
-            # attempt aggregate so the vendor adapters bill exactly one span.
+            # Invocation finalization freezes one billing owner before generation spans end.
             owner = self._resolve_billing_owner()
             self.scope.attrs({"daydream.billing.owner": owner})
             self._end_generations(owner)
@@ -833,10 +789,7 @@ class AttemptObserver:
                     usage[name] = usage.get(name, 0) + value
             usage.update(self.invocation_usage)
             usage.update(self.final_usage)
-            attrs = {_USAGE_ATTRIBUTES[name]: value for name, value in usage.items()}
-            if "input_tokens" in usage and "output_tokens" in usage:
-                attrs["gen_ai.usage.total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
-            self.scope.attrs(attrs)
+            self.scope.attrs(_usage_attributes(usage))
             if self.usage_metadata:
                 self.scope.attrs({"daydream.message_usage": list(self.usage_metadata.values())})
             admitted_models, model_diagnostic = _admit_observed_identity_list(

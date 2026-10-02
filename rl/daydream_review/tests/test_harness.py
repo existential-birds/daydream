@@ -1,8 +1,4 @@
-"""Phase 4: what the harness actually launches, and how it classifies the exit.
-
-The full rollout (real interception server, real CLI, real scoring) lives in
-``test_harness_e2e.py``; these tests pin the contract that rollout depends on.
-"""
+"""Pin launch/exit contracts; test_harness_e2e covers complete intercepted rollouts."""
 
 from __future__ import annotations
 
@@ -31,8 +27,7 @@ MODEL = "some-org/some-policy-model"
 
 
 def _task(fixture_manifest_path: Path) -> DaydreamReviewTask:
-    # The load path refuses without a passed Stage-0 gate report (M4); tests
-    # here exercise launch/sealing, not the gate, so hand them a passed one.
+    # Supply passed gate evidence so these tests reach launch and sealing.
     with passed_gate_report() as gate_path:
         taskset = DaydreamReviewTaskset(
             DaydreamReviewConfig(id="daydream-review", manifest_path=fixture_manifest_path, gate_report_path=gate_path)
@@ -41,14 +36,7 @@ def _task(fixture_manifest_path: Path) -> DaydreamReviewTask:
 
 
 def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:
-    """A trace carrying *turns* captured model turns.
-
-    The harness refuses a rollout that captured none, so the default is one: a
-    real rollout always makes model calls, and a zero-turn one is the capture
-    loss the harness exists to catch. Nodes rather than `trace.calls`, so the
-    helper works under prime-rl's vendored verifiers too, which has no per-call
-    list.
-    """
+    """Build a node-based trace compatible with vendored verifiers; zero turns exercises capture loss."""
     trace: vf.Trace = vf.Trace(
         task=vf.TraceTask(type=type(task).__name__, data=task.data), agent=vf.AgentInfo(model=MODEL),
     )
@@ -105,8 +93,7 @@ async def test_launch_passes_the_selected_backend_to_the_cli(backend: str, fixtu
     assert argv[argv.index("--model") + 1] == MODEL
     assert argv[argv.index("--base") + 1] == task.data.base_sha
     assert argv[-1] == "/work/repo"
-    # --yes is what makes this a fix rollout rather than a review-only one, and
-    # --review with --yes is a parse error, so it must never appear.
+    # Fix rollouts require --yes; review/comment modes conflict with that path.
     assert "--yes" in argv and "--non-interactive" in argv
     assert "--review" not in argv and "--comment" not in argv
     assert env["DAYDREAM_ARCHIVE_DIR"] == "/rollout/archive"
@@ -141,11 +128,6 @@ async def test_launch_unsets_ambient_github_credentials(fixture_manifest_path: P
     ]
 
 async def test_launch_clears_operator_observability_env(fixture_manifest_path: Path) -> None:
-    """Operator-only destinations (tracing, trajectory upload) never leak into a
-    rollout: a host with DAYDREAM_TRACE_TO set must not make every rollout try
-    to initialize that exporter, and the subprocess runtime inherits
-    non-API-key variables, so clearing the destination is the only correct
-    answer — the rollout's own observability stays disabled."""
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = FakeRuntime(exit_code=0)
@@ -233,12 +215,7 @@ class _DockerLikeRuntime(FakeRuntime):
 
 
 class _OrderingDockerRuntime(_DockerLikeRuntime):
-    """A docker-shaped FakeRuntime that records one shared call sequence.
-
-    FakeRuntime keeps ``run`` and ``run_program`` calls in separate lists with
-    no cross-list ordering, so the handoff-before-launch contract cannot be
-    asserted from it. This records every argv in call order.
-    """
+    """Record run and run_program together to prove handoff-before-launch ordering."""
 
     def __init__(self, *, exit_code: int = 0, failed_argv: list[str] | None = None) -> None:
         super().__init__(exit_code=exit_code)
@@ -257,22 +234,10 @@ class _OrderingDockerRuntime(_DockerLikeRuntime):
 
 
 async def test_launch_uses_run_as_agent_wrapper_under_docker(fixture_manifest_path: Path) -> None:
-    """Container launches drop to the non-root agent identity via run-as-agent.
+    """Docker launches through the root-owned wrapper and actually drops to the agent uid.
 
-    The image's default user is root and the root-owned run-as-agent wrapper is
-    the agent-launch privilege-drop seam, so a container rollout must launch
-    daydream through it — every backend CLI subprocess then inherits the agent
-    uid. The sealed run dir is re-chowned root-owned read-only at seal time
-    (rundir.seal_archived_run), so no rollout process can rewrite the sealed
-    artifacts once the agent's write window closes; and the suite re-run runs
-    under the distinct non-root verifier identity against a separate
-    root-owned read-only checkout — never the agent-mutable tree. The local
-    subprocess smoke path has no wrapper (no root boundary to cross).
-
-    Beyond argv, the wrapper itself must actually deliver the drop — the
-    property it exists for, not just the prefix it is named with — so a
-    wrapper that cannot leave root (or a harness that merely names one) fails
-    this container contract.
+    Local subprocess runs need no privilege boundary. Later sealing makes artifacts
+    root-owned/read-only, and suite verification uses its separate non-root identity.
     """
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
@@ -287,13 +252,10 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(fixture_manifest_pa
     assert argv[argv.index("--backend") + 1] == "claude"
 
 async def test_docker_launch_preflights_writability_before_run_as_agent(fixture_manifest_path: Path) -> None:
-    """The docker deep flow's first write succeeds because the image bakes both
-    trees agent-owned (repo.Dockerfile's combined chown layer covers /work/repo
-    and /srv/mirror.git). The harness therefore performs no recursive chown at
-    launch; instead a constant-size writability preflight runs before the
-    privilege drop and fails closed if the image was not built with the
-    ownership layer, naming the paths and the rebuild entry point
-    (images/build_images.py)."""
+    """Preflight both baked agent-owned trees before dropping privileges; never repair ownership.
+
+    Failures name the paths and image rebuild entrypoint.
+    """
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _OrderingDockerRuntime(exit_code=0)
@@ -325,9 +287,7 @@ async def test_preflight_quotes_repo_path(fixture_manifest_path: Path) -> None:
     assert "test -d '/data/repo with spaces & $dollar'" in argv[2]
 
 async def test_docker_launch_fails_closed_when_trees_not_agent_writable(fixture_manifest_path: Path) -> None:
-    """A non-agent-writable repo or mirror is a rebuild signal, never a runtime
-    repair: launch raises RuntimeError naming both paths and the rebuild entry
-    point, and no run-as-agent launch attempt follows."""
+    """Unwritable agent trees require an image rebuild; never repair them or launch run-as-agent."""
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _OrderingDockerRuntime(exit_code=1,
@@ -344,15 +304,9 @@ async def test_docker_launch_fails_closed_when_trees_not_agent_writable(fixture_
     assert runtime.programs == [], "no launch attempt may follow a failed preflight"
 
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
-    """The privilege-drop seam must actually run, not just be argv[0].
+    """Execute the wrapper: it must reject non-root callers or successfully leave root.
 
-    The docker-path test above pins that the harness prefixes the wrapper; this
-    pins the wrapper itself by executing it. On a non-root host (the normal
-    dev/CI case) the wrapper must refuse — it exists to leave root, never to
-    run the payload as root. On a root host that can satisfy setpriv/agent
-    (i.e. the built image) a successful run must land off root; anywhere else
-    it must fail closed. A missing, non-executable, or silently-passing wrapper
-    is exactly the rollout-time failure this pins at build time.
+    Missing setpriv/agent prerequisites fail closed; merely naming a wrapper is insufficient.
     """
     wrapper = PROJECT_ROOT / "images" / "run-as-agent"
     result = subprocess.run([str(wrapper), "id", "-u"], capture_output=True, text=True)
@@ -363,10 +317,8 @@ def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
     elif result.returncode == 0:
         assert result.stdout.strip() != "0", "run-as-agent must drop off root"
     else:
-        # Root host where the wrapper failed (broken wrapper or missing agent
-        # user): fail-closed means the payload must never run as root, even on
-        # the failure path — a non-zero exit that still emitted the root uid
-        # would be a silent fail-open.
+        # A failed wrapper must never execute the payload as root, even when agent prerequisites are
+        # missing.
         assert result.stdout.strip() != "0", "a failing wrapper must not run the payload as root"
 
 
@@ -379,14 +331,7 @@ class _ArchivingDockerRuntime(_SessionsListingRuntime, _DockerLikeRuntime):
 
 
 async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(fixture_manifest_path: Path) -> None:
-    """The sealed run dir is re-chowned root-owned read-only at seal time.
-
-    base.Dockerfile documents that the supervisor re-chowns the sealed run dir
-    root-owned read-only at seal time (rundir.seal_archived_run) — the
-    mechanism that keeps the sealed artifacts agent-inaccessible once the
-    agent's write window closes. The docker runtime execs as the container
-    root, so the chown lands there and the local path is untouched.
-    """
+    """Docker sealing reclaims artifacts as root-owned/read-only without touching the local path."""
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _ArchivingDockerRuntime(exit_code=0)
@@ -399,13 +344,9 @@ async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(fixture_manife
     assert any(path.endswith("/seal.json") for path in runtime.writes), "seal.json must be written"
 
 async def test_seal_failure_is_fail_closed_and_recorded(fixture_manifest_path: Path) -> None:
-    """A seal-production failure is fail-closed, never silently unsealed.
+    """A sealing exception leaves an invalid marker and a recorded failure on the trace.
 
-    seal_archived_run swallows every exception, but not fail-open: it overwrites
-    seal.json with an unvalidatable marker so verify_seal reads a failed seal
-    (seal_verified 0.0, zero reward) instead of a missing-seal full trust, and
-    the harness records the outcome on the trace instead of discarding the
-    bool — an operator can tell "sealed and verified" from "sealing failed".
+    Scoring must yield seal_verified=0 and zero reward, never legacy unsealed trust.
     """
 
     class ExplodingGit(_ArchivingDockerRuntime):

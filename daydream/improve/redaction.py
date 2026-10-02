@@ -1,9 +1,4 @@
-"""Single owner of improve's ``redact_model_value`` model-value redaction policy.
-
-The policy does not live in ``render.py`` because that module is a declared pure
-Markdown renderer; privacy policy owned there is invisible authority at every
-call site.
-"""
+"""Redact nested model-authored values before durable Improve output."""
 
 from __future__ import annotations
 

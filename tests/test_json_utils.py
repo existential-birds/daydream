@@ -1,12 +1,4 @@
-"""Tests for the shared :mod:`daydream.json_utils` helpers.
-
-``extract_json`` is shared by the backends (structured-output extraction) and
-``run_agent`` (raw-text fallback) — it is not a Pi-specific concern. The tests
-target the canonical functions directly so they remain valid regardless of any
-backend-private wrapper aliases. ``atomic_write_bytes``/``atomic_write_json``
-are the shared crash-safe write primitives that the #1162 consolidation
-routes the previously duplicated copies through.
-"""
+"""Backend-neutral JSON extraction and shared crash-safe write primitives."""
 
 import json
 import os
@@ -20,8 +12,6 @@ from daydream.json_utils import atomic_write_bytes, atomic_write_json, extract_j
 
 
 class TestExtractJson:
-    """Verify extract_json handles clean JSON, fenced JSON, and prose-wrapped JSON."""
-
     @pytest.mark.parametrize(("text", "expected"),
         [pytest.param('{"findings": [], "ok": true}', {"findings": [], "ok": True}, id="clean-json-object",),
             pytest.param("[1, 2, 3]", [1, 2, 3], id="clean-json-array"),
@@ -64,7 +54,6 @@ class TestExtractJson:
         ],
     )
     def test_extract_json(self, text: str, expected: Any) -> None:
-        """Extract supported JSON wrappers while preserving expected Python values."""
         assert extract_json(text) == expected
 
     def test_stray_prose_bracket_does_not_beat_the_real_object(self) -> None:
@@ -85,8 +74,6 @@ class TestExtractJson:
         assert [f["arb_id"] for f in result["findings"]] == [1, 2]
 
 class TestAtomicWritePrimitives:
-    """The shared crash-safe write primitive and its knobs (#1162 Item A)."""
-
     def test_bytes_roundtrip_and_replaces_prior_content(self, tmp_path: Path) -> None:
         target = tmp_path / "nested" / "data.bin"
         atomic_write_bytes(target, b"first")

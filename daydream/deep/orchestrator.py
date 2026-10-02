@@ -22,6 +22,7 @@ from daydream.config import (
     STRUCTURE_STACK_NAME,
 )
 from daydream.deep import review_steps
+from daydream.deep.adjudication_steps import _step_arbiter
 from daydream.deep.artifacts import (
     alternatives_path as _alternatives_path,
     check_deep_artifacts,
@@ -34,20 +35,18 @@ from daydream.deep.artifacts import (
 from daydream.deep.dependency import build_import_graph
 from daydream.deep.detection import GENERIC_STACK, StackAssignment, detect_stacks
 from daydream.deep.diagram_steps import _diagram_mode_for, _resolved_diagram_mode, _step_diagram, _step_post_diagram
-from daydream.deep.diff import _diff_changed_files
+from daydream.deep.diff import _diff_changed_files, bound_deep_diff
 from daydream.deep.fix_steps import (
     _perform_cleanup,
     _step_commit,
     _step_fix,
     _step_fix_gate,
     _step_fix_verify,
-    _step_remote_ci,
     _step_test,
     _step_verify,
 )
 from daydream.deep.latency import diff_signals, route_for, summarize_risk
 from daydream.deep.merge_steps import (
-    _step_arbiter,
     _step_cross_stack_merge,
     _step_findings_out,
     _step_load_items,
@@ -56,7 +55,7 @@ from daydream.deep.merge_steps import (
     _step_supervise,
     _supervisor_mode,
 )
-from daydream.deep.prompts import bound_deep_diff
+from daydream.deep.remote_ci_steps import _step_remote_ci
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
 from daydream.deep.reuse_store import build_reuse_cache
 from daydream.deep.review_steps import (
@@ -92,57 +91,29 @@ from daydream.ui import print_error, print_info, print_preflight_notice, print_w
 from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig, _RunArtifacts
+    from daydream.run_artifacts import _RunArtifacts
+    from daydream.run_config import RunConfig
 
 
 def total_agent_count(stack_count: int) -> int:
-    """Return the D-30 agent count formula.
+    """Estimate two TTT calls, review/parse per stack, merge and conditional arbiter.
 
-    Formula: 2 (TTT intent + alternative-review) + N per-stack reviews
-    + N per-stack parse passes + 1 cross-stack merge + 1 conditional
-    arbiter (Opus pass over findings at or above the profile's
-    ``Arbitration.min_severity`` — default high — plus contested findings). The
-    arbiter fires when qualifying findings exist; the pre-flight estimate
-    always includes it so users aren't surprised by the extra Opus call.
-    The fix-gate agents are user-gated and excluded from the estimate.
-
-    Args:
-        stack_count: Number of detected stack assignments (including the
-            generic-fallback bucket when present).
+    Always budget the arbiter in preflight; user-gated fix agents are excluded.
     """
     return 2 + stack_count + stack_count + 1 + 1
 
 
-# Issue #172 — tiny-diff short-circuit. A diff with at most this many changed
-# files collapses the per-language fan-out to a single combined assignment and
-# skips the merge agent + arbiter (a tiny diff has nothing to cross-stack-merge
-# and nothing contested to arbitrate). A 1-file single-language diff is already
-# only 2 stacks (lang + structure), so the collapse is a no-op there and the
-# count reduction for that case comes entirely from skipping merge+arbiter
-# (lever 2); see ``_single_stack_agent_count``.
+# Tiny diffs collapse language fan-out and bypass merge/arbiter.
 DEFAULT_SHALLOW_FANOUT_THRESHOLD = 2
 
 
 def _single_stack_agent_count(stack_count: int) -> int:
-    """Return the agent count for a tiny-diff single-stack run (issue #172).
-
-    Single-stack mode runs 2 TTT + N per-stack reviews + N parse passes but
-    skips the merge agent and the arbiter (lever 2). The surviving stack list
-    after collapse is at most ``[combined-or-single, structure]`` (≤2).
-
-    Args:
-        stack_count: Number of stack assignments AFTER the tiny-diff collapse.
-    """
+    """Estimate two TTT calls plus review/parse per surviving stack, without merge or arbiter."""
     return 2 + stack_count + stack_count
 
 
 def _config_pipeline(config: RunConfig) -> Pipeline:
-    """Return the resolved profile pipeline for a ``RunConfig`` (pre-context).
-
-    Thin wrapper over :func:`daydream.review_profile.resolve_pipeline` for the
-    pre-flight preamble (printed before the FlowContext is constructed) and any
-    config-only call site; ``FlowContext.pipeline()`` is the in-flow accessor.
-    """
+    """Resolve the profile pipeline before a FlowContext exists."""
     return resolve_pipeline(config.review_profile)
 
 
@@ -160,14 +131,7 @@ def _supervise_enabled(ctx: FlowContext) -> bool:
 
 
 def _deep_shard_enabled(config: RunConfig, *, diff: str = "") -> bool:
-    """Resolve the deep-review sharding toggle (issue #731).
-
-    Precedence mirrors ``_resolve_config_value``: 1)
-    ``RunConfig.deep_shard_enabled`` (CLI tier), 2)
-    ``DaydreamFileConfig.deep_shard_enabled`` (file-config scalar), 3) built-in
-    built-in default. Large diffs turn the default on, while either explicit
-    tier still wins, including False.
-    """
+    """Resolve CLI-over-file sharding; absent overrides enable the default for large diffs."""
     explicit = config.deep_shard_enabled
     if explicit is None and config.file_config is not None:
         explicit = config.file_config.deep_shard_enabled
@@ -188,37 +152,11 @@ def _collapse_stacks_for_tiny_diff(
     *,
     threshold: int,
 ) -> tuple[list[StackAssignment], bool]:
-    """Collapse the per-language fan-out for a tiny diff (issue #172, Fix A lever 1).
+    """Collapse language fan-out when 0 < changed-file count <= threshold.
 
-    When ``0 < len(changed_files) <= threshold``:
-
-      - If ≥2 distinct *non-structural* stacks exist, merge them into one
-        combined assignment. A code+docs/config diff (exactly one *real*
-        language stack plus the ``generic`` bucket) absorbs the generic files
-        into the language stack so its scope survives; only ≥2 *real* language
-        stacks fall back to ``generic`` (a single agent cannot cover two
-        per-language scopes).
-      - The ``STRUCTURE_STACK_NAME`` meta-stack stays as its own assignment so
-        structural findings remain correctly tagged ``lens="structural"``
-        downstream (AC6).
-      - If only one non-structural stack exists (the common 1-file case), it is
-        preserved unchanged.
-
-    Built-in stacks carry no skill-invocation field (M2): the combined
-    assignment is scope metadata only.
-
-    Returns ``(stacks, single_stack_mode)`` where ``single_stack_mode`` reports
-    whether the tiny-diff gate is active (caller uses it to skip merge+arbiter).
-    When the gate is inactive, ``stacks`` is returned unchanged.
-
-    Args:
-        stacks: Stack assignments returned by ``detect_stacks``.
-        changed_files: Changed file list used to compute the gate.
-        threshold: Resolved threshold from ``_shallow_fanout_threshold``. ``0``
-            disables the short-circuit (returns inputs unchanged).
-
-    Returns:
-        Tuple of ``(possibly_collapsed_stacks, single_stack_mode)``.
+    Keep structure separate. One real language absorbs generic/docs files; multiple
+    real languages collapse to generic. A sole non-structural assignment is unchanged.
+    Return the stacks and whether the gate is active; threshold 0 disables it.
     """
     if not (0 < len(changed_files) <= threshold):
         return stacks, False
@@ -226,15 +164,7 @@ def _collapse_stacks_for_tiny_diff(
     non_structural = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
 
-    # When ≥2 distinct non-structural stacks exist, merge them into one combined
-    # assignment. The combined scope depends on how many *real* language stacks
-    # are present:
-    #   - exactly one real language stack + the generic bucket (a code+docs/config
-    #     tiny diff, e.g. api.py + README.md): absorb the generic files into the
-    #     language stack so its scope survives.
-    #   - ≥2 real language stacks (e.g. python + react): a single agent cannot
-    #     cover two per-language scopes, so fall back to generic.
-    #
+    # Absorb generic files into a sole language; multiple languages collapse to generic.
     if len(non_structural) >= 2:
         combined_files = sorted({f for s in non_structural for f in s.files})
         real_language = [s for s in non_structural if s.stack_name != GENERIC_STACK]
@@ -312,19 +242,10 @@ def _single_stack_merge_enabled(ctx: FlowContext) -> bool:
 
 
 def _diagram_enabled(ctx: FlowContext) -> bool:
-    """Whether the grounded-diagram step runs (issue #1113).
+    """Run diagram eligibility checks unless mode is off or this is a fix-only resume.
 
-    Off on a ``--start-at fix`` resume (the diff-derived signals and the report
-    the blocks land in both belong to the earlier run) and off when the
-    resolved mode is ``"off"``. Note this is a WEAKER gate than "some kind is
-    eligible": when the step runs it always records its eligibility decision in
-    ``diagram.json``, which is what makes "why did this PR get no diagram?"
-    answerable. Nothing is eligible costs zero agent calls.
-
-    The same ``FlowStep`` object backs the ``diagram`` flow, where this must
-    return True: ``start_at`` defaults to ``"review"`` there (the CLI rejects
-    ``--start-at`` with ``--diagram-only``) and diagram mode's resolved mode is
-    never ``"off"`` (``off`` is not an accepted ``--diagram-only`` value).
+    No eligible diagram means zero agent calls, but the step still records why.
+    Diagram-only flows always pass this gate.
     """
     return _before_fix_resume(ctx) and _resolved_diagram_mode(ctx) != "off"
 
@@ -410,11 +331,8 @@ def _flow_name_for_mode(mode: str) -> str:
     return "diagram" if mode == "diagram" else "deep"
 
 
-# Terminal cleanup (#330) is NOT a step: it is a success-path helper invoked by
-# ``_run_review_spine`` after ``run_flow`` returns. Tying it to the run's exit
-# code (rather than the end of this tuple) means an early successful ``Stop(0)``
-# -- the fix gate declining -- still honors ``--cleanup``, while any non-zero
-# (failure) exit skips it to keep evidence (#335).
+# Cleanup follows every successful flow exit, including an early declined gate.
+# Failures retain evidence.
 STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="exploration", run=_step_exploration),
     FlowStep(name="intent", run=_step_intent, enabled=_fresh_ttt),
@@ -446,12 +364,8 @@ STEPS: tuple[FlowStep, ...] = (
 )
 
 
-# The diagram-only flow's own steps (issue #1113). Deliberately NOT appended to
-# :data:`STEPS`: ``builtins._register_builtin_flows`` derives the ``deep`` flow
-# definition FROM ``STEPS``, so appending ``post-diagram`` there would splice a
-# GitHub write into every deep review. The ``diagram`` flow is
-# ``exploration -> diagram -> post-diagram``; the first two steps are the same
-# objects the deep flow registers.
+# Keep diagram-only publication outside STEPS: builtins derives the ordinary deep
+# flow from that tuple, where post-diagram would cause an unintended GitHub write.
 DIAGRAM_STEPS: tuple[FlowStep, ...] = (
     FlowStep(name="post-diagram", run=_step_post_diagram),
 )
@@ -468,31 +382,12 @@ async def run_deep(
     backend_factory: BackendFactory | None = None,
     allow_standalone: bool = False,
 ) -> int:
-    """Execute the deep-review pipeline (D-07) across every PR-process mode.
+    """Prepare and execute the registered deep flow for review, comment, shallow or loop.
 
-    The single ``deep`` flow (#330) handles ``review`` and ``comment`` through
-    the review spine, ``shallow`` through single-stack mode, and the unchanged
-    default ``loop`` mode.
-
-    Runs the preamble (diff computation, stack detection, tiny-diff collapse,
-    trajectory recorder, pre-flight notice) and delegates the pipeline to the
-    registered ``deep`` flow (:data:`STEPS`) via ``run_flow``. Supports
-    stage-granular resume via
-    ``config.start_at in ("ttt", "per-stack", "merge", "fix")``.
-
-    Args:
-        config: Run configuration; ``config.shallow`` / ``config.output_mode``
-            select the mode. ``config.identity`` carries the GitHub identity
-            set by :func:`daydream.runner.run`.
-        work: Resolved working environment for the run.
-        run_artifacts: The composition root's artifact session and its
-            pre-registered output routes, or ``None`` for a standalone caller.
-        allow_standalone: Intentional direct callers without ``run_artifacts``
-            must pass ``True`` and have no active artifact session.
-            Runner-managed calls always keep this false.
-
-    Returns:
-        Exit code (0 on success, 1 on failure).
+    Resolve diff, stacks, routing and preflight before dispatch. start_at supports
+    TTT, per-stack, merge and fix resumes. Runner-managed calls supply run_artifacts;
+    standalone calls require explicit allow_standalone=True and no active session.
+    Return the pipeline exit code.
     """
     run_context = resolve_run_context(run_context)
     if run_artifacts is None and not allow_standalone:
@@ -517,23 +412,11 @@ def _collapse_stacks_for_shallow(
     changed_files: list[str],
     config: RunConfig,
 ) -> tuple[list[StackAssignment], bool]:
-    """Force the single-stack assignment for shallow mode (#330).
+    """Combine non-structural files into one assignment, retaining structure separately.
 
-    Collapses every non-structural stack into one combined assignment and keeps
-    the structural meta-stack separate, so structural findings stay correctly
-    tagged ``lens="structural"`` downstream. Returns ``(stacks, True)``.
-
-    The combined assignment's stack, in precedence order:
-
-    - an explicit ``--stack`` (CLI) wins — the combined stack is named by it;
-    - otherwise a *sole* detected non-structural stack preserves its name,
-      absorbing any generic/docs files — so ``daydream --shallow <repo>``
-      without ``--stack`` uses the language reviewer instead of the native
-      generic fallback (#6);
-    - otherwise (multiple real-language stacks — one agent cannot review two
-      per-language scopes — or no real language at all) the combined assignment
-      uses the native generic-fallback scope.
-
+    An explicit stack wins; otherwise preserve a sole real language (absorbing
+    generic/docs files), or use generic for multiple/no real languages.
+    Return the assignments and True for single-stack mode.
     """
     structural = [s for s in stacks if s.stack_name == STRUCTURE_STACK_NAME]
     combined_files = sorted({f for s in stacks for f in s.files}) or changed_files
@@ -571,19 +454,10 @@ def _prepare_review_stacks(
     # registry-independent (M1); fork stack rules still resolve via the
     # registry inside detect_stacks.
     stacks = detect_stacks(changed_files)
-    # Structural gating (M8): ``detect_stacks`` still emits the structural
-    # meta-stack; a profile that disables ``structural_enabled`` removes only
-    # that assignment/call here, before collapse/sharding publish the list.
-    # This pre-context call reads the same resolved pipeline that
-    # ``FlowContext.pipeline()`` resolves in-flow.
+    # Apply the resolved structural gate before collapsing or sharding assignments.
     if not _config_pipeline(config).structural_enabled:
         stacks = [s for s in stacks if s.stack_name != STRUCTURE_STACK_NAME]
-    # Issue #172 — tiny-diff short-circuit. When the diff is small enough
-    # (≤ SHALLOW_FANOUT_THRESHOLD files), collapse the per-language fan-out
-    # to a single combined assignment and skip merge+arbiter downstream.
-    # ``single_stack_mode`` is recomputed here (top of run_deep) so a
-    # ``--start-at merge``/``--start-at fix`` resume on a tiny diff re-enters
-    # the same bypass branch rather than routing to the absent merge agent.
+    # Recompute tiny-diff collapse on resumes so they follow the same merge/arbiter bypass.
     stacks, single_stack_mode = _collapse_stacks_for_tiny_diff(
         stacks, changed_files, threshold=_shallow_fanout_threshold(config)
     )
@@ -592,26 +466,13 @@ def _prepare_review_stacks(
     if mode == "shallow":
         stacks, single_stack_mode = _collapse_stacks_for_shallow(stacks, changed_files, config)
 
-    # Issue #731: deep-review sharding. Runs AFTER the tiny-diff/shallow
-    # collapse passes (which must stay byte-identical) and BEFORE
-    # ``ctx.data["stacks"]`` is published below. Skipped whenever
-    # ``single_stack_mode`` is True (tiny-diff or shallow collapse already
-    # folded everything into one stack) and off by default (sharding-off
-    # passes the stack list through untouched). ``build_import_graph`` is
-    # fail-open (never raises; returns ``{}`` on any failure); byte sizing
-    # uses the FULL on-disk ``diff``, not the bounded in-memory value.
+    # Shard after collapse and before publishing scopes; use full persisted diff bytes.
+    # Single-stack and sharding-off runs retain their assignments.
     import_graph: dict[str, set[str]] = {}
     sharding_enabled = _deep_shard_enabled(config, diff=diff)
     shard_this_run = sharding_enabled and not single_stack_mode
-    # Issue #1113: the sequence diagram's cross-module rule needs the
-    # changed-file import graph, but the sharding gate builds it only when
-    # sharding is enabled (off by default) AND the run is not in
-    # single_stack_mode -- so in practice essentially never. The diagram step
-    # publishes the graph on ``ctx.data`` when it can run. ``build_import_graph``
-    # is deterministic and fail-open, so both needs share one build. The bare
-    # ``except Exception`` is required, not defensive: ``build_import_graph``
-    # documents itself as never raising, but its ``get_parser`` call reaches
-    # ``assert_tree_sitter_safe()``, which raises ``TreeSitterBadVersionError``.
+    # Build one import graph for sharding and diagram eligibility. The guard also
+    # catches unsafe tree-sitter versions that can escape the fail-open builder.
     diagram_needs_graph = (
         config.start_at != "fix" and _diagram_mode_for(config, mode) != "off"
     )
@@ -654,13 +515,12 @@ async def _run_review_spine(
     # Late imports to avoid circular dependency with runner.
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.hunk_index import write_hunk_index
-    from daydream.phases import _git_branch, _git_log
-    from daydream.runner import (
-        _default_backend_name,
-        _open_recorder,
-        _resolve_review_profile,
-        _resolved_latency_profile,
+    from daydream.phases.inputs import (
+        _git_branch,
+        _git_log,
     )
+    from daydream.run_artifacts import _open_recorder, _resolve_review_profile
+    from daydream.run_config import _default_backend_name, _resolved_latency_profile
 
     target_dir = work.repo
 
@@ -709,13 +569,8 @@ async def _run_review_spine(
         allow_standalone=allow_standalone,
     )
     current_diff_sha = diff_key(diff)
-    # Issue #1113: a diagram-only run must NEVER clear ``.daydream/deep/``. It
-    # produces none of the artifacts ``diff-key`` attests, and wiping the
-    # directory would destroy a previous deep review's intent, alternatives,
-    # per-stack records and merged items -- breaking any later ``--start-at
-    # merge``/``fix``. Consequence, accepted: diagram mode writes no
-    # ``diff-key``, which is correct for a run that produces nothing it could
-    # attest. ``deep_dir`` already created ``dd``, so it stays a valid path.
+    # Diagram-only runs preserve prior deep-review artifacts and write no diff-key,
+    # because they do not produce the review artifacts that key attests.
     if mode != "diagram" and config.start_at not in ("per-stack", "merge", "fix"):
         # Fresh run only: a resume must NOT rewrite the key it is checked
         # against, or the staleness gate would self-heal and pass every time.
@@ -797,16 +652,8 @@ async def _run_review_spine(
                 exploration_available=review_steps.EXPLORATION_AVAILABLE,
             )
 
-        # Flow context owns the per-run backend cache shared by all steps;
-        # steps communicate through ctx.data.
-        # Issue #644 — the in-memory diff is bounded at gather time to
-        # ``INLINE_DIFF_BUDGET_BYTES`` via whole-block retention (``diff.patch``
-        # above stays FULL on disk for the archival/eval/training
-        # consumers; tiering / ``diff_key`` / ``changed_files`` above already
-        # ran on the full ``diff``; the exploration pre-scan reads the FULL
-        # on-disk patch at step time, never this bounded
-        # value). ``bound_deep_diff`` is infallible and runs
-        # after the full diff is persisted, so the disk copy is never bounded.
+        # The context shares backends and bounded inline diff text. The full patch is
+        # already persisted and remains the source for exploration, keys, and archival.
         bounded_diff, bound_info = bound_deep_diff(diff)
         if bound_info.truncated:
             dropped = (
@@ -826,13 +673,8 @@ async def _run_review_spine(
                 f"({bound_info.retained_blocks}/{bound_info.total_blocks} blocks retained"
                 f"{dropped}{oversize})",
             )
-        # Issue #732: resolve the latency profile once at the composition root,
-        # record the diff's mandatory escalation signals, and pick the route as
-        # the monotone max of the profile floor and the risk floors. Published
-        # on ``config.latency_route`` and ``ctx.data`` BEFORE ``run_flow``, so
-        # every later effort lookup sees the same route. The profile/risk slice
-        # is the routing record's first write; the wonder and arbiter steps
-        # append their own slices through the same write-merge owner.
+        # Publish one risk-escalated route before any phase resolves effort. Later stages
+        # append their decisions through the same routing-record writer.
         latency_resolution = _resolved_latency_profile(config)
         latency_signals = diff_signals(
             diff=bounded_diff, changed_files=len(changed_files), stack_count=len(stacks)
@@ -871,12 +713,8 @@ async def _run_review_spine(
             data={
                 "mode": mode,
                 "diff": bounded_diff,
-                # Issue #336 — fix-loop scope bound. The reviewed diff's file
-                # set threads through ctx.data so the fix gate can partition
-                # out-of-scope findings (Task 3) and the fix step can both
-                # forward it into the fix prompt (Task 2) and run a post-fix
-                # residual check (Task 4). Recomputable from "diff" via
-                # ``_diff_changed_files``; a missing key never crashes.
+                # Carry reviewed origins for footprint enforcement; resumes can recover them
+                # from the diff. Canonical finding paths have independent authorization.
                 "changed_files": set(changed_files),
                 "diff_path": diff_path,
                 "diff_truncated": bound_info.truncated,
@@ -903,18 +741,11 @@ async def _run_review_spine(
             allow_standalone_artifacts=allow_standalone,
         )
 
-        # Issue #733: publish the run's content-addressed reuse store handle
-        # beside the latency route, before ``run_flow``. Every review unit
-        # reaches the store through ``reuse_cache_for`` -- this one handle --
-        # and the store root is published back into the tree so the next run
-        # can read it.
+        # Publish one cache handle and its root so the next run can reuse completed units.
         ctx.data["reuse_cache"] = build_reuse_cache(ctx)
 
-        # Issue #1408: resolve the run's test recipe exactly once here, persist
-        # it under the run's deep dir (a resumed run reconstructs the same
-        # facts), and publish it so every host call site and prompt consumer
-        # reads this one value. Resolution is fail-open: a confinement failure
-        # publishes no recipe and every consumer keeps today's behaviour.
+        # Resolve and persist one test recipe for all host and prompt consumers.
+        # Confinement failure leaves no recipe and preserves the unresolved fallback.
         try:
             test_recipe = resolve_test_recipe(
                 getattr(config, "file_config", None), config, repo_root=work.repo
@@ -929,13 +760,8 @@ async def _run_review_spine(
                 print_warning(console, f"Could not persist the resolved test recipe: {exc}")
             ctx.data["test_recipe"] = test_recipe
 
-        # Nothing is torn down after the flow. .daydream/exploration/ is a
-        # content-keyed cache (see ``exploration_cache_key``) the next run reuses
-        # on an exact head+diff+tier match and rewrites on a miss, and
-        # .daydream/deep/ is preserved per RESEARCH.md Open Question 1 so
-        # subsequent --start-at resumes can find the artifacts they need.
-        #
-        # Cleanup is success-path only (#335); a non-zero exit returns before the guard so evidence survives.
+        # Preserve exploration/deep artifacts for reuse and resumes. Cleanup is success-only;
+        # failed runs retain their evidence.
         with review_deadline_scope(
             ctx.pipeline().review_wall_budget_s,
             diff=diff,

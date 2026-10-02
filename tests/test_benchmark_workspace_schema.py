@@ -626,13 +626,6 @@ def test_historical_daydream_marker_cannot_be_gold() -> None:
         CaseDocument.model_validate(raw)
 
 def test_legacy_ready_without_task_spec_digest_backfills_and_validates() -> None:
-    """A pre-approval ready case is backfilled with its spec digest by _schema_ready.
-
-    A ready curation persisted before the task-spec approval field existed
-    carries no ``task_spec_sha256``; the strict-load preprocessor backfills the
-    deterministic render digest so the legacy case validates (and later
-    compiles) instead of surfacing as corrupt.
-    """
     raw = _valid_case_dict()
     del raw["curation"]["task_spec_sha256"]                # legacy pre-approval workspace
     prepared = schema._schema_ready(raw)

@@ -1,20 +1,8 @@
-"""Stack detection and file routing for deep-review mode.
+"""Deterministic stack routing for changed files.
 
-Pure-logic classifier that maps a list of changed files to StackAssignment records
-per D-11..D-16 (see .planning/phases/05-deep-review-mode/05-CONTEXT.md).
-
-The routing order is significant (Pitfall 6 in 05-RESEARCH.md):
-    0. Fork StackRule globs       -> fork stack, first match wins (per-file)
-    1. .md pinning (D-14)         -> generic unconditionally
-    2. Extension lookup (D-11)    -> stack by _EXT_TO_STACK
-    3. Config promotion (D-13)    -> promote only on co-change
-    4. Ambiguous nearest-ancestor (D-12)
-    5. Equal-depth fallthrough (D-12c) -> generic
-
-The detection is registry-independent for built-in stacks: the same changed
-files produce the same ordered stack scopes whether a plugin registry is
-present or not. Stack identity is routing metadata, and fork-registered stacks
-contribute only their names and changed-file patterns.
+Order: first matching fork rule, Markdown pinning, extension lookup, co-change
+config promotion, nearest ancestor, then generic on equal-depth ambiguity.
+Built-in scopes are registry-independent; extensions contribute names and globs.
 """
 
 from __future__ import annotations
@@ -66,15 +54,7 @@ GENERIC_STACK = "generic"
 
 @dataclass
 class StackAssignment:
-    """Routing result for one detected stack.
-
-    Attributes:
-        stack_name: Lower-case stack key, e.g. "python" or "generic".
-        files: Files routed to this stack. Never empty for entries in the returned list.
-        is_docs_only: True when this assignment represents a docs-only diff (triggers D-20
-            notice). Only set on the ``generic`` bucket, and only when no non-generic stacks
-            were detected in the whole diff. Non-generic buckets never have a docs-only mix.
-    """
+    """Nonempty file scope; only generic may mark an entirely docs-only diff."""
 
     stack_name: str
     files: list[str] = field(default_factory=list)
@@ -154,25 +134,11 @@ def detect_stacks(
     *,
     registry: Registry | None = None,
 ) -> list[StackAssignment]:
-    """Route changed files to stacks per D-11..D-16.
+    """Route changed POSIX paths, consulting the registry only for fork rules.
 
-    Detection is registry-independent for built-in stacks: the same changed
-    files produce the same ordered scopes whether a plugin registry is present
-    or not. The registry is consulted only for fork stack rules.
-
-    Args:
-        changed_files: Paths (POSIX-style, repo-relative) of files that changed in the diff.
-        registry: Extension registry for fork stack rules only. Defaults to the
-            current context's registry (``get_registry()``).
-
-    Returns:
-        One StackAssignment per distinct stack that received at least one file,
-        plus a synthetic ``structure`` meta-stack appended last whenever the diff
-        contains at least one file and is not docs-only. The structure stack
-        carries the full set of changed files (union across languages).
-        Ordering: non-generic language stacks alphabetical, then generic,
-        then structure last. Ordering is informational only -- the orchestrator
-        iterates the full list in parallel.
+    Return nonempty language scopes alphabetically, then generic, then structure.
+    The structure meta-stack contains all changed files unless the diff is docs-only.
+    An omitted registry resolves from the current context.
     """
     if registry is None:
         registry = get_registry()

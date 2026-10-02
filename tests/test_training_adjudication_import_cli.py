@@ -1,10 +1,5 @@
-"""Real-path tests for ``corpus adjudicate import-local-observations`` (KD6).
-
-Every test enters from the production CLI entrypoint
-(``daydream.cli._handle_corpus_command`` / ``handle_adjudicate``) with real
-temp archive roots (real SQLite ``index.db`` files written through the
-production archive writer). No backend or Hub mocking — Task 10 owns the
-publish wiring.
+"""Drive adjudication CLI import against real SQLite archives written by production writers. Publication
+tests replace only the external Hub client.
 """
 
 from __future__ import annotations
@@ -12,15 +7,16 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from daydream import cli
 from daydream.archive.hydrate import PublicDestinationError
 from daydream.archive.importer import REDACTED_PATH
 from daydream.archive.index import _get_connection, append_label_observation, readonly_connection, upsert_run
+from daydream.commands.corpus import _handle_corpus_command
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.publish import publish_annotation_state, resume_annotation_state
@@ -34,12 +30,8 @@ _VALID_AT = "2026-04-29T00:00:00+00:00"
 
 def _seed_session(root: Path, session_id: str, *, evidence_sha: str, labels: list[str], **observation_kwargs: Any,
 ) -> None:
-    """One archived run + one auto label observation, via the real writer.
-
-    The run gets per-session base/head SHAs so the identity fallback lookup
-    (repo_slug, base_sha, head_sha) -> session_id never collides. Extra
-    keyword arguments forward to ``append_label_observation`` (e.g.
-    ``rubric_json``).
+    """Seed a run and automatic observation through real writers. Session-specific base/head SHAs prevent
+    identity-fallback collisions; extra kwargs extend the observation.
     """
     head = hashlib.sha256(session_id.encode()).hexdigest()
     base = hashlib.sha256(("base-" + session_id).encode()).hexdigest()
@@ -54,11 +46,8 @@ def _seed_session(root: Path, session_id: str, *, evidence_sha: str, labels: lis
 def _source_row_count(roots: list[Path]) -> int:
     total = 0
     for root in roots:
-        conn = readonly_connection(root)
-        try:
+        with closing(readonly_connection(root)) as conn:
             total += int(conn.execute("SELECT COUNT(*) FROM label_observations").fetchone()[0])
-        finally:
-            conn.close()
     return total
 
 
@@ -81,11 +70,8 @@ def _import_args(
         for source in roots:
             if not (source / "index.db").is_file():
                 continue
-            conn = readonly_connection(source)
-            try:
+            with closing(readonly_connection(source)) as conn:
                 source_runs = conn.execute("SELECT * FROM runs").fetchall()
-            finally:
-                conn.close()
             for row in source_runs:
                 upsert_run(index_root, make_manifest(session_id=row["session_id"], repo_slug=row["repo_slug"],
                     base_sha=row["base_sha"], head_sha=row["head_sha"],
@@ -104,9 +90,7 @@ def _import_args(
 
 
 def _materialized_snapshot(root: Path, session: str, fingerprint: str) -> Path:
-    """A materialized snapshot root (``sessions.jsonl`` in the hydrated-index
-    session shape) with one projected finding for *session* — the projector
-    shape the import links per-finding evidence against."""
+    """Materialize one session/finding in the hydrated-index shape used for import identity matching."""
     root.mkdir(parents=True, exist_ok=True)
     upsert_run(root, make_manifest(
         session_id=session, repo_slug="org/repo", head_sha=hashlib.sha256(session.encode()).hexdigest(),
@@ -133,20 +117,17 @@ def test_cli_import_writes_report_dry_run(tmp_path: Path, capsys: pytest.Capture
     assert total == 3
 
     state = tmp_path / "state"
-    rc = cli._handle_corpus_command(
+    rc = _handle_corpus_command(
         ["adjudicate", *_import_args(*roots, state_dir=state, extra=["--dry-run", "--json"])]
     )
     assert rc == 0
     report = json.loads(capsys.readouterr().out)
     assert report["dry_run"] is True
-    # Full reason-coded accounting: every source row lands in exactly one
-    # import bucket (M7).
     assert sum(report["accounting"].values()) == total
     assert report["sources"] == [
         {"archive_root": str(root_a), "row_count": 2, "source_digest": _digest(root_a / "index.db")},
         {"archive_root": str(root_b), "row_count": 1, "source_digest": _digest(root_b / "index.db")},
     ]
-    # Dry-run writes no state at all (S2).
     assert not state.exists()
 
 def test_cli_real_path_real_archive(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -157,13 +138,11 @@ def test_cli_real_path_real_archive(tmp_path: Path, capsys: pytest.CaptureFixtur
 
     state = tmp_path / "state"
     archive = tmp_path / "archive"
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])])
+    rc = _handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])])
     assert rc == 0
     capsys.readouterr()  # drain the human-readable run before the --json re-run
-    # Read-only sources: byte-identical after a full (non-dry-run) import (M1).
     assert (src / "index.db").read_bytes() == before
 
-    # Digest-stable report + hydrate-shaped ledger written into --state-dir.
     report = json.loads((state / "import-report.json").read_text(encoding="utf-8"))
     assert report["dry_run"] is False
     assert sum(report["accounting"].values()) == 2
@@ -173,38 +152,25 @@ def test_cli_real_path_real_archive(tmp_path: Path, capsys: pytest.CaptureFixtur
     assert ledger["accounting"] == report["accounting"]
     assert {entry["session_id"] for entry in ledger["observations"]} == {"sess-1", "sess-2"}
 
-    # The merge appended the imported observations into the hydrated
-    # --archive-dir archive; the state-dir index.db is never written.
-    conn = sqlite3.connect(f"file:{archive / 'index.db'}?mode=ro", uri=True)
-    try:
+    with closing(sqlite3.connect(f"file:{archive / 'index.db'}?mode=ro", uri=True)) as conn:
         rows = conn.execute("SELECT session_id, evidence_sha FROM label_observations ORDER BY session_id").fetchall()
-    finally:
-        conn.close()
     assert rows == [("sess-1", "e" * 64), ("sess-2", "f" * 64)]
     assert not (state / "index.db").exists()
 
-    # Idempotent re-import (M4): identical sources, nothing new appended,
-    # byte-identical report.
-    rc = cli._handle_corpus_command(
+    rc = _handle_corpus_command(
         ["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=["--json"])]
     )
     assert rc == 0
     assert json.loads(capsys.readouterr().out)["merge"]["appended"] == 0
-    # Digest-stable (S1): once the state archive has absorbed the import, an
-    # identical re-import produces a byte-identical report.
     report_bytes = (state / "import-report.json").read_bytes()
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])])
+    rc = _handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])])
     assert rc == 0
     assert (state / "import-report.json").read_bytes() == report_bytes
     assert (src / "index.db").read_bytes() == before
 
 def test_cli_import_seeds_every_eligible_hydrated_run_for_checkpoint_resume(tmp_path: Path,) -> None:
-    """The checkpoint archive must retain the complete hydrated run inventory.
-
-    Only ``sess-a`` has a surviving backup observation to import.  ``sess-b``
-    is nevertheless an eligible run in the pinned hydrated index and must be
-    present in the checkpoint ``index.db`` so a fresh-VM canonical harvest can
-    append its observation without manufacturing history during resume.
+    """Keep all eligible hydrated runs in the checkpoint, including sessions without surviving backup
+    observations, so fresh-VM harvest can append without inventing history.
     """
     stage = tmp_path / "hydrated"
     for session_id in ("sess-a", "sess-b"):
@@ -228,36 +194,30 @@ def test_cli_import_seeds_every_eligible_hydrated_run_for_checkpoint_resume(tmp_
     _seed_session(backup, "sess-a", evidence_sha=sess_a_head, labels=["accepted"])
     target = tmp_path / "checkpoint-state"
 
-    assert cli._handle_corpus_command(
+    assert _handle_corpus_command(
         ["adjudicate", *_import_args(backup, state_dir=target, index_root=stage, archive_dir=target, extra=[])]
     ) == 0
 
-    conn = sqlite3.connect(f"file:{target / 'index.db'}?mode=ro", uri=True)
-    try:
+    with closing(sqlite3.connect(f"file:{target / 'index.db'}?mode=ro", uri=True)) as conn:
         run_ids = {str(row[0]) for row in conn.execute("SELECT session_id FROM runs ORDER BY session_id")}
         observation_ids = {str(row[0])
             for row in conn.execute("SELECT DISTINCT session_id FROM label_observations ORDER BY session_id")
         }
-    finally:
-        conn.close()
     assert run_ids == {"sess-a", "sess-b"}
     assert observation_ids == {"sess-a"}
 
 def test_cli_reimport_does_not_displace_newer_target_runs_state(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """An overlapping re-import of an older backup must not displace newer
-    target runs state (status/archived_at/profile_*/cost metrics, plus the
-    writer-owned cache mirrors): the run-row seeding is no-displacement like
-    the observation merge, so append-only holds for both tables (M3)."""
+    """An older backup cannot displace newer target run fields or writer-owned cache mirrors; both runs and
+    observations remain append-only.
+    """
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
     state = tmp_path / "state"
     archive = tmp_path / "archive"
-    assert cli._handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])]
+    assert _handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])]
     ) == 0
 
-    # Newer target state: a later archive refresh rewrites the same session
-    # with a newer timestamp, evolved profile, and updated cost metrics.
     head = hashlib.sha256("sess-1".encode()).hexdigest()
     base = hashlib.sha256(("base-" + "sess-1").encode()).hexdigest()
     upsert_run(archive,
@@ -265,38 +225,29 @@ def test_cli_reimport_does_not_displace_newer_target_runs_state(tmp_path: Path, 
             archived_at="2026-05-01T00:00:00+00:00", status="partial", profile_name="profile-v2", total_cost_usd=99.5,
         ),
     )
-    conn = sqlite3.connect(f"file:{archive / 'index.db'}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        newer = dict(conn.execute("SELECT archived_at, status, profile_name, total_cost_usd, "
-                "outcome_labels, labeled_at FROM runs WHERE session_id = 'sess-1'"
-            ).fetchone()
-        )
-    finally:
-        conn.close()
+    def target_run() -> dict[str, Any]:
+        with closing(readonly_connection(archive)) as conn:
+            return dict(conn.execute(
+                "SELECT archived_at, status, profile_name, total_cost_usd, "
+                "outcome_labels, labeled_at, cost_per_finding_usd FROM runs WHERE session_id = 'sess-1'"
+            ).fetchone())
 
-    # Re-import the (older) source backup overlapping the same session: every
-    # populated target column must survive untouched (only NULL columns may be
-    # filled from the source snapshot).
-    assert cli._handle_corpus_command(
-        ["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=["--json"])]
-    ) == 0
+    newer = target_run()
+    args = _import_args(src, state_dir=state, archive_dir=archive, extra=["--json"])
+    # Pinned inventory fills a NULL target value; populated target values win.
+    conn = _get_connection(tmp_path / "idx")
+    conn.execute("UPDATE runs SET cost_per_finding_usd = 2.5 WHERE session_id = 'sess-1'")
+    conn.commit()
+    conn.close()
+    assert _handle_corpus_command(["adjudicate", *args]) == 0
     capsys.readouterr()
-    conn = sqlite3.connect(f"file:{archive / 'index.db'}?mode=ro", uri=True)
-    conn.row_factory = sqlite3.Row
-    try:
-        after = dict(conn.execute("SELECT archived_at, status, profile_name, total_cost_usd, "
-                "outcome_labels, labeled_at FROM runs WHERE session_id = 'sess-1'"
-            ).fetchone()
-        )
-    finally:
-        conn.close()
+    after = target_run()
     populated = {key: value for key, value in newer.items() if value is not None}
     assert {key: after[key] for key in populated} == populated
+    assert newer["cost_per_finding_usd"] is None
+    assert after["cost_per_finding_usd"] == 2.5
 
 def test_cli_overlapping_backups_dedupe_accounting(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    # Two backups of the same archive: the shared rows dedupe, the accounting
-    # still covers every source row across both roots (M4 + M7).
     root_a = tmp_path / "backup-a"
     root_b = tmp_path / "backup-b"
     _seed_session(root_a, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -304,33 +255,26 @@ def test_cli_overlapping_backups_dedupe_accounting(tmp_path: Path, capsys: pytes
     for session_id, sha in (("sess-1", "e" * 64), ("sess-2", "f" * 64)):
         _seed_session(root_b, session_id, evidence_sha=sha, labels=["accepted" if sha[0] == "e" else "rejected"])
     state = tmp_path / "state"
-    rc = cli._handle_corpus_command(
+    rc = _handle_corpus_command(
         ["adjudicate", *_import_args(root_a, root_b, state_dir=state, extra=["--dry-run", "--json"])]
     )
     assert rc == 0
     report = json.loads(capsys.readouterr().out)
     assert report["deduped_count"] == 2
-    # Every source row is either accounted in a bucket or dropped as a
-    # byte-identical duplicate (M4 + M7).
     assert (sum(report["accounting"].values()) + report["deduped_count"]
         == _source_row_count([root_a, root_b])
     )
 
 
 def _seed_publishable_state(tmp_path: Path) -> tuple[Path, Path]:
-    """Produce the publishable adjudication state files via the real pipeline.
-
-    ``queue.json`` comes from the real ``build`` verb over an empty hydrated
-    index (empty ``sessions.jsonl`` -> empty queue). ``observations.jsonl``
-    and ``preview-ledger.json`` are the empty-state defaults that publish's
-    fixed payload set requires — their production-by-verb behavior is the
-    publish/label/export verbs' own tested contract, not this test's subject.
+    """Build an empty queue through the real CLI and seed the required empty observation/preview payloads
+    for checkpoint publication.
     """
     index_root = tmp_path / "index-root"
     index_root.mkdir()
     (index_root / "sessions.jsonl").write_text("", encoding="utf-8")
     state = tmp_path / "state"
-    assert cli._handle_corpus_command(
+    assert _handle_corpus_command(
         ["adjudicate", "build", "--index-root", str(index_root), "--state-dir", str(state)]
     ) == 0
     (state / "observations.jsonl").touch()
@@ -347,9 +291,9 @@ def _write_manifest(tmp_path: Path) -> Path:
 def test_publish_then_resume_reproduces_queue_and_report(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--publish composes publish_annotation_state after the merge + redaction
-    gate (M8), and a fresh-VM resume from the Hub checkpoint reproduces the
-    identical queue + report (AC5). Only the Hub client is faked."""
+    """Fake only the Hub client; publishing after merge/redaction and resuming on a fresh VM must reproduce
+    the queue and report.
+    """
 
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -359,7 +303,7 @@ def test_publish_then_resume_reproduces_queue_and_report(
     hub = build_annotations_hub(curation_id="cur-import", snapshot_id="e" * 64)
 
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
-    rc = cli._handle_corpus_command(["adjudicate",
+    rc = _handle_corpus_command(["adjudicate",
             *_import_args(src, state_dir=state, index_root=index_root,
                 archive_dir=tmp_path / "archive",  # distinct dir: publish stages the merged --archive-dir index
                 extra=["--json", "--publish", "--manifest", str(manifest), "--hub-repo", "org/priv-ds"],
@@ -373,15 +317,11 @@ def test_publish_then_resume_reproduces_queue_and_report(
     pointer_path = "annotations/cur-import/checkpoints/batch-latest.json"
     pointer = json.loads(hub.download_file(pointer_path, revision))
     batch_prefix = pointer["batch_prefix"]
-    # The checkpoint is always written on --publish: it is the fresh-VM
-    # resume anchor (AC5). The archive index (where the import's rows live)
-    # is byte-published with the adjudication payload, so a fresh-VM resume
-    # restores the import itself, not just the queue/report.
+    # Checkpoint the archive index as well as the queue so resume restores history.
     for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "preview-manifest.json", "index.db"):
         assert batch_prefix + name in hub.files
     assert pointer_path in hub.files
 
-    # Fresh-VM resume: empty stage dir, restore from the Hub checkpoint.
     resumed_dir = tmp_path / "resumed"
     resumed = resume_annotation_state(
         hub, curation_id="cur-import", destination=resumed_dir, expected_snapshot_id="e" * 64,
@@ -392,10 +332,8 @@ def test_publish_then_resume_reproduces_queue_and_report(
     for name in ("queue.json", "observations.jsonl", "preview-ledger.json", "index.db"):
         assert (resumed_dir / name).read_bytes() == (state / name).read_bytes()
 
-    # Identical queue + report (AC5): the report verb over the resumed state
-    # reproduces the pre-publish report byte-for-byte.
     def _report(state_dir: Path) -> str:
-        assert (cli._handle_corpus_command(
+        assert (_handle_corpus_command(
                 ["adjudicate", "report", "--index-root", str(index_root), "--state-dir", str(state_dir)]
             )
             == 0
@@ -409,9 +347,6 @@ def test_publish_then_resume_reproduces_queue_and_report(
 def test_publish_refuses_non_private_before_any_write(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A non-private destination is refused before any byte is written (M17):
-    exit 1, the refusal named on stderr/stdout, and zero uploads (the hub
-    keeps only its seeded manifest)."""
 
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -421,7 +356,7 @@ def test_publish_refuses_non_private_before_any_write(
     hub = build_annotations_hub(curation_id="cur-import", snapshot_id="e" * 64, private=False)
 
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda repo_id: hub)
-    rc = cli._handle_corpus_command(["adjudicate",
+    rc = _handle_corpus_command(["adjudicate",
             *_import_args(src, state_dir=state, index_root=index_root,
                 archive_dir=tmp_path / "archive",  # distinct dir: publish stages the merged --archive-dir index
                 extra=["--publish", "--manifest", str(manifest), "--hub-repo", "org/public-ds"],
@@ -435,8 +370,6 @@ def test_publish_refuses_non_private_before_any_write(
     assert hub.uploaded_paths == []
     assert set(hub.files) == {prefix + "preview-manifest.json"}
 
-    # The composition seam itself hard-fails with the typed error, not a
-    # swallowed warning.
     with pytest.raises(PublicDestinationError):
         publish_annotation_state(hub, state, manifest=manifest)
 
@@ -451,9 +384,7 @@ def test_publish_rejects_dry_run_and_missing_manifest() -> None:
     assert exc.value.code == 2
 
 def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The merge commits the redaction scan's payload, never the unredacted
-    originals: a credential-bearing rubric_json (absolute local path) reaches
-    the state archive only in its redacted form (M9)."""
+    """Persist the redaction scan's sanitized payload, never the credential-bearing original rubric."""
 
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"],
@@ -462,14 +393,11 @@ def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.Captur
 
     state = tmp_path / "state"
     archive = tmp_path / "archive"
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])])
+    rc = _handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, archive_dir=archive, extra=[])])
     assert rc == 0
     capsys.readouterr()
-    conn = sqlite3.connect(f"file:{archive / 'index.db'}?mode=ro", uri=True)
-    try:
+    with closing(sqlite3.connect(f"file:{archive / 'index.db'}?mode=ro", uri=True)) as conn:
         rows = conn.execute("SELECT rubric_json FROM label_observations").fetchall()
-    finally:
-        conn.close()
     assert len(rows) == 1
     assert rows[0][0] is not None
     assert "/Users/k" not in rows[0][0]
@@ -478,14 +406,13 @@ def test_cli_import_persists_redacted_rows(tmp_path: Path, capsys: pytest.Captur
     assert rubric["note"] == "ok"
 
 def test_cli_import_reports_full_source_inventory(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The success message reports the full source row inventory (bucketed +
-    deduped), not just the bucket sum (M7)."""
+    """The success count includes deduped source rows as well as bucketed observations."""
     root_a = tmp_path / "backup-a"
     root_b = tmp_path / "backup-b"
     _seed_session(root_a, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
     _seed_session(root_b, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
     state = tmp_path / "state"
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(root_a, root_b, state_dir=state, extra=[])])
+    rc = _handle_corpus_command(["adjudicate", *_import_args(root_a, root_b, state_dir=state, extra=[])])
     assert rc == 0
     captured = capsys.readouterr()
     report = json.loads((state / "import-report.json").read_text(encoding="utf-8"))
@@ -494,24 +421,19 @@ def test_cli_import_reports_full_source_inventory(tmp_path: Path, capsys: pytest
     assert f"{total} source row(s)" in " ".join(captured.out.split())
 
 def test_cli_import_non_iso_stamp_fails_closed(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A hand-edited non-ISO observed_at aborts at the pre-write gate: exit 1
-    and no state archive at all (no seeded runs, no partial appends)."""
     src = tmp_path / "src"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
-    # Corrupt the stamp in place (the trigger requires a hand-edited/corrupt
-    # source db; writer-produced values are always ISO-8601).
+    # Corrupt SQL directly because the production writer always emits ISO timestamps.
     write = sqlite3.connect(src / "index.db")
     write.execute("UPDATE label_observations SET observed_at = ? WHERE session_id = 'sess-1'", ("2026-04-30 00:00:00",))
     write.commit()
     write.close()
 
     state = tmp_path / "state"
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, extra=[])])
+    rc = _handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, extra=[])])
     assert rc == 1
     captured = capsys.readouterr()
     assert "observed_at" in captured.out + captured.err
-    # Fail-closed before any state write: no archive, no seeded runs, no
-    # partial appends, no placeholder success report.
     assert (state / "index.db").exists() is False
     assert not (tmp_path / "archive" / "index.db").exists()
 
@@ -529,13 +451,10 @@ def test_cli_inventory_failure_exits_1(tmp_path: Path, capsys: pytest.CaptureFix
     broken = tmp_path / "broken"
     broken.mkdir()
     state = tmp_path / "state"
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(broken, state_dir=state, extra=[])])
+    rc = _handle_corpus_command(["adjudicate", *_import_args(broken, state_dir=state, extra=[])])
     assert rc == 1
     captured = capsys.readouterr()
-    # The rich panel may elide the long tmp path, but the fail-closed reason
-    # (naming the missing index.db) is always present; no placeholder success.
-    # Assert the single token so Rich's fold (word-boundary wrapping) cannot
-    # split the reason on an 80-col non-TTY console.
+    # Assert the token independently of Rich wrapping or path elision.
     assert "index.db" in captured.out + captured.err
     assert not state.exists()  # no placeholder success
     assert not (tmp_path / "archive" / "index.db").exists()  # no archive write either
@@ -543,10 +462,9 @@ def test_cli_inventory_failure_exits_1(tmp_path: Path, capsys: pytest.CaptureFix
 def test_cli_import_links_against_hydrated_index_and_merges_into_archive_dir(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Empty-literal identity maps are gone: the importer links sessions
-    against the pinned hydrated index, validates exact finding identity
-    against the projected findings, and appends into the hydrated
-    --archive-dir index.db — never the state-dir index."""
+    """Link against pinned hydrated and projected identities, then merge into archive-dir/index.db rather
+    than state-dir.
+    """
 
     src = tmp_path / "backup"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
@@ -557,30 +475,23 @@ def test_cli_import_links_against_hydrated_index_and_merges_into_archive_dir(
     )
     conn.commit()
     conn.close()
-    # a materialized snapshot with one finding for sess-1 (project_findings shape)
     mat = _materialized_snapshot(tmp_path / "mat", session="sess-1", fingerprint="fp-1")
 
     state = tmp_path / "state"
-    rc = cli._handle_corpus_command(
+    rc = _handle_corpus_command(
         ["adjudicate", *_import_args(src, state_dir=state, index_root=mat, archive_dir=index, extra=[])]
     )
     assert rc == 0
-    # row landed in the hydrated archive, keyed to the Hub session id
     conn = _get_connection(index)
     rows = conn.execute("SELECT session_id, source FROM label_observations").fetchall()
     conn.close()
-    # Provenance survives the merge verbatim (source stays the source row's
-    # own 'auto', never rewritten).
     assert [tuple(r) for r in rows] == [("sess-1", "auto")]
-    # state-dir index.db was never created
     assert not (state / "index.db").exists()
 
 def test_cli_import_report_shows_mapping_summary(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The import report carries a per-session mapping summary (matched_by,
-    validation outcome) so operators can audit identity resolution. A
-    harvest-produced row's evidence anchor is the run's ``head_sha`` (what
-    ``training/harvest.py`` stores in ``label_observations.evidence_sha``), so
-    the per-finding identity match actually fires for it (issue #336 item 4)."""
+    """Report per-session identity validation. Use the harvester's head_sha evidence anchor so the per-
+    finding identity match actually executes.
+    """
     src = tmp_path / "backup"
     head = hashlib.sha256("sess-1".encode()).hexdigest()
     _seed_session(src, "sess-1", evidence_sha=head, labels=["accepted"])
@@ -593,17 +504,15 @@ def test_cli_import_report_shows_mapping_summary(tmp_path: Path, capsys: pytest.
 
     state = tmp_path / "state"
     index = tmp_path / "hydrated"
-    rc = cli._handle_corpus_command(
+    rc = _handle_corpus_command(
         ["adjudicate", *_import_args(src, state_dir=state, index_root=mat, archive_dir=index, extra=["--json"])]
     )
     assert rc == 0
     report = json.loads(capsys.readouterr().out)
     summary = report["identity_summary"]["sess-1"]
     assert summary["matched_by"] == "session_id"
-    # The row's evidence anchor (head_sha) matches the pinned session's run
-    # anchor exactly, so the exact-identity match fires and the run-level row
-    # routes to the per-finding bucket -- ``matched``, never the stale/
-    # ambiguous fallback.
+    # Match the row evidence head to the pinned run anchor exactly, routing the run-level row to its
+    # per-finding bucket.
     assert summary["validation_outcome"] == "matched"
 
 def test_cli_import_missing_identity_flags_exit_2() -> None:
@@ -617,13 +526,11 @@ def test_cli_import_missing_identity_flags_exit_2() -> None:
     assert exc.value.code == 2
 
 def test_cli_import_unreadable_index_root_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """A missing --index-root index fails closed: exit 1 via the derive
-    failure path, no empty-literal fallback anywhere."""
     src = tmp_path / "backup"
     _seed_session(src, "sess-1", evidence_sha="e" * 64, labels=["accepted"])
     state = tmp_path / "state"
     missing = tmp_path / "no-such-index"
-    rc = cli._handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, index_root=missing,
+    rc = _handle_corpus_command(["adjudicate", *_import_args(src, state_dir=state, index_root=missing,
                                      archive_dir=tmp_path / "archive", extra=[])]
     )
     assert rc == 1

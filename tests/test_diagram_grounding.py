@@ -1,12 +1,7 @@
-"""Deterministic-grounding tests for the diagram pipeline (issue #1113).
+"""Ground diagrams against real committed Git files and tree-sitter parses.
 
-Every test runs against a **real** git repository on disk with committed files:
-the grounder reads the head tree, parses it with tree-sitter and shells out to
-``git grep`` for its symbol fallback, so a mocked filesystem would exercise
-none of the behavior that matters. Fixture line numbers below are pinned by
-``test_fixture_definition_ranges_are_pinned`` -- if a grammar's definition range
-ever shifts, that test fails first and explains every other failure.
-"""
+Fixture ranges are pinned separately so grammar drift has a clear failure.
+Git-backed symbol fallback requires tracked content."""
 
 from __future__ import annotations
 
@@ -116,12 +111,7 @@ def _big_py() -> str:
 
 @pytest.fixture(scope="module")
 def repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A committed git repo holding every grounding fixture file.
-
-    Committed, not merely written: ``git grep`` -- the symbol fallback behind
-    ``SUBROUTINE_NOT_DEFINED`` and the token-strength path -- only sees tracked
-    content.
-    """
+    """Commit grounding fixtures so the Git symbol fallback can read them."""
     root = tmp_path_factory.mktemp("grounding-repo")
     init_repo(root)
     (root / "pkg").mkdir()
@@ -228,7 +218,6 @@ def run_flowchart(
 # --- Fixture pinning ---------------------------------------------------------
 
 def test_fixture_definition_ranges_are_pinned(repo: Path) -> None:
-    """The candidate ranges every other test hardcodes come from tree-sitter."""
     flow = {record["name"]: record for record in definitions_in_file(repo, "pkg/flow.py")}
     assert (flow["resolve_identity"]["line"], flow["resolve_identity"]["end_line"]) == (
         FLOW_ROOT.line, FLOW_ROOT.end_line,
@@ -314,11 +303,23 @@ def test_spec_final_key_sets_match_the_schemas(repo: Path, symbols: RepoSymbols)
 
 # --- Shared reason codes, sequence side --------------------------------------
 
-def test_sequence_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
+@pytest.mark.parametrize("index, evidence, reason", [
+    pytest.param(1, {"file": "../outside/secrets.py"}, "PATH_ESCAPES_REPO", id="path-escapes"),
+    pytest.param(1, {"line": 999}, "LINE_OUT_OF_RANGE", id="line-range"),
+    pytest.param(1, {"file": "pkg/service.py", "line": 1, "symbol": "resolve"},
+                 "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT", id="wrong-source"),
+    # handle is defined by the caller rather than the Service participant.
+    pytest.param(1, {"file": "pkg/api.py", "line": 4, "symbol": "handle"},
+                 "CALLEE_NOT_DEFINED_IN_TARGET", id="wrong-callee"),
+    pytest.param(2, {"line": 1}, "NOT_A_REPLY_STATEMENT", id="reply-without-return"),
+])
+def test_sequence_message_evidence_failures(
+    repo: Path, symbols: RepoSymbols, index: int, evidence: dict[str, Any], reason: str,
+) -> None:
     spec = base_sequence()
-    spec["messages"][1]["evidence"]["file"] = "../outside/secrets.py"
+    spec["messages"][index]["evidence"].update(evidence)
     report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "message", "1").reason == "PATH_ESCAPES_REPO"
+    assert check_for(report, "message", str(index)).reason == reason
 
 def test_sequence_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -336,11 +337,6 @@ def test_sequence_file_missing(repo: Path, symbols: RepoSymbols) -> None:
     lone = run_sequence(repo, symbols, spec)
     assert check_for(lone, "message", "1").reason == "FILE_MISSING"
 
-def test_sequence_line_out_of_range(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
-    spec["messages"][1]["evidence"]["line"] = 999
-    report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "message", "1").reason == "LINE_OUT_OF_RANGE"
 
 def test_sequence_symbol_not_on_line_beyond_snap_range(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -380,26 +376,8 @@ def test_sequence_branch_not_a_branch_statement(repo: Path, symbols: RepoSymbols
 
 # --- Sequence-specific reason codes ------------------------------------------
 
-def test_sequence_evidence_not_in_source_participant(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
-    spec["messages"][1]["evidence"] = {"file": "pkg/service.py", "line": 1, "symbol": "resolve"}
-    report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "message", "1").reason == "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"
 
-def test_sequence_callee_not_defined_in_target(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
-    # "handle" is on the cited line but is defined in the caller, not in Service.
-    spec["messages"][1]["evidence"] = {"file": "pkg/api.py", "line": 4, "symbol": "handle"}
-    report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "message", "1").reason == "CALLEE_NOT_DEFINED_IN_TARGET"
 
-def test_sequence_reply_requires_a_return_statement(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
-    spec["messages"][2]["evidence"]["line"] = 1
-
-    report = run_sequence(repo, symbols, spec)
-
-    assert check_for(report, "message", "2").reason == "NOT_A_REPLY_STATEMENT"
 
 def test_sequence_reply_requires_a_reversed_preceding_call(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -443,23 +421,20 @@ def test_sequence_participant_no_files(repo: Path, symbols: RepoSymbols) -> None
     assert check_for(report, "message", "1").reason == "CALLEE_NOT_DEFINED_IN_TARGET"
     assert check_for(report, "message", "2").reason == "EVIDENCE_NOT_IN_SOURCE_PARTICIPANT"
 
-def test_sequence_participant_file_missing(repo: Path, symbols: RepoSymbols) -> None:
+@pytest.mark.parametrize("index, files, ref, reason", [
+    pytest.param(2, ["pkg/vanished.py"], "Service", "PARTICIPANT_FILE_MISSING", id="missing-file"),
+    pytest.param(2, ["../elsewhere/service.py"], "Service", "PATH_ESCAPES_REPO", id="path-escapes"),
+    pytest.param(0, ["pkg/api.py"], "Client", "EXTERNAL_MISUSED", id="external-declares-files"),
+])
+def test_sequence_participant_file_failures(
+    repo: Path, symbols: RepoSymbols, index: int, files: list[str], ref: str, reason: str,
+) -> None:
     spec = base_sequence()
-    spec["participants"][2]["files"] = ["pkg/vanished.py"]
+    spec["participants"][index]["files"] = files
     report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "participant", "Service").reason == "PARTICIPANT_FILE_MISSING"
+    assert check_for(report, "participant", ref).reason == reason
 
-def test_sequence_participant_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
-    spec["participants"][2]["files"] = ["../elsewhere/service.py"]
-    report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "participant", "Service").reason == "PATH_ESCAPES_REPO"
 
-def test_sequence_external_misused_by_declaring_files(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_sequence()
-    spec["participants"][0]["files"] = ["pkg/api.py"]
-    report = run_sequence(repo, symbols, spec)
-    assert check_for(report, "participant", "Client").reason == "EXTERNAL_MISUSED"
 
 def test_sequence_external_misused_by_sourcing_a_later_message(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_sequence()
@@ -504,7 +479,6 @@ def test_sequence_token_strength_fallback_for_a_language_without_a_grammar(repo:
     assert report.omit_reasons == ["TOO_FEW_MESSAGES"]
 
 def test_repo_symbols_survives_a_repo_without_git_history(tmp_path: Path) -> None:
-    """No commits (and no git dir at all) must degrade to "not found", never raise."""
     plain = tmp_path / "plain"
     (plain / "pkg").mkdir(parents=True)
     (plain / "pkg" / "mod.py").write_text("def helper():\n    return 1\n")
@@ -678,10 +652,6 @@ def test_sequence_block_cap_truncates_the_tail(repo: Path, symbols: RepoSymbols)
     assert len(report.spec_final["blocks"]) == DIAGRAM_MAX_BLOCKS
 
 def test_sequence_cap_can_push_a_kind_below_its_floor(repo: Path, symbols: RepoSymbols) -> None:
-    """The floor is evaluated on the capped spec, so a cap drop cannot hide.
-
-    The only two interactions inside a changed hunk sit past the message cap. Trimming them must omit the kind,
-    since no changed interaction survives."""
     spec = _wide_sequence(3)
     unchanged, changed = spec["messages"][0], spec["messages"][1]
     spec["messages"] = [{**unchanged, "evidence": dict(unchanged["evidence"]), "label": f"step {index}"}
@@ -719,29 +689,29 @@ def test_flowchart_root_must_still_overlap_a_changed_hunk(repo: Path, symbols: R
 
 # --- Flowchart node reason codes ---------------------------------------------
 
-def test_flowchart_node_path_escapes_repo(repo: Path, symbols: RepoSymbols) -> None:
+@pytest.mark.parametrize("index, evidence, reason", [
+    pytest.param(6, {"file": "../outside/flow.py"}, "PATH_ESCAPES_REPO", id="path-escapes"),
+    pytest.param(6, {"file": "pkg/ghost.py"}, "FILE_MISSING", id="missing-file"),
+    pytest.param(6, {"line": 9999}, "LINE_OUT_OF_RANGE", id="line-range"),
+    pytest.param(6, {"symbol": "resolve_identity"}, "SYMBOL_NOT_ON_LINE", id="symbol-location"),
+    pytest.param(7, {"line": 8}, "NOT_A_TERMINAL_STATEMENT", id="assignment-not-terminal"),
+    pytest.param(3, {"line": 5}, "NOT_A_BRANCH_STATEMENT", id="call-not-branch"),
+    pytest.param(4, {"symbol": "nonexistent_helper"}, "SUBROUTINE_NOT_CALLED_HERE", id="uncalled-symbol"),
+    # ValueError occurs at the call site but has no definition in this repository.
+    pytest.param(4, {"file": "pkg/flow.py", "line": 3, "symbol": "ValueError"},
+                 "SUBROUTINE_NOT_DEFINED", id="undefined-subroutine"),
+    pytest.param(4, {"symbol": None}, "MALFORMED_ELEMENT", id="subroutine-without-symbol"),
+])
+def test_flowchart_node_evidence_failures(
+    repo: Path, symbols: RepoSymbols, index: int, evidence: dict[str, Any], reason: str,
+) -> None:
     spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["file"] = "../outside/flow.py"
+    spec["nodes"][index]["evidence"].update(evidence)
     report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "PATH_ESCAPES_REPO"
+    assert check_for(report, "node", f"N{index + 1}").reason == reason
 
-def test_flowchart_node_file_missing(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["file"] = "pkg/ghost.py"
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "FILE_MISSING"
 
-def test_flowchart_node_line_out_of_range(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["line"] = 9999
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "LINE_OUT_OF_RANGE"
 
-def test_flowchart_node_symbol_not_on_line(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][6]["evidence"]["symbol"] = "resolve_identity"
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N7").reason == "SYMBOL_NOT_ON_LINE"
 
 def test_flowchart_node_symbol_snap_stays_inside_the_root(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -765,11 +735,6 @@ def test_flowchart_node_outside_root(repo: Path, symbols: RepoSymbols) -> None:
     other_file["nodes"][6]["evidence"] = {"file": "pkg/api.py", "line": 5, "symbol": None}
     assert (check_for(run_flowchart(repo, symbols, other_file), "node", "N7").reason == "NODE_OUTSIDE_ROOT")
 
-def test_flowchart_not_a_terminal_statement(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][7]["evidence"]["line"] = 8  # an assignment, not a return
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N8").reason == "NOT_A_TERMINAL_STATEMENT"
 
 def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symbols: RepoSymbols) -> None:
     spec = {"root": {"file": "pkg/non_executable.py", "name": "classify", "line": 1},
@@ -797,31 +762,9 @@ def test_flowchart_executable_nodes_reject_non_executable_lines(repo: Path, symb
     assert {check_for(report, "node", node_id).reason for node_id in ("N1", "N2", "N3")
     } == {"NOT_AN_EXECUTABLE_STATEMENT"}
 
-def test_flowchart_decision_not_a_branch_statement(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][3]["evidence"]["line"] = 5  # a call, not a branch
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N4").reason == "NOT_A_BRANCH_STATEMENT"
 
-def test_flowchart_subroutine_not_called_here(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][4]["evidence"]["symbol"] = "nonexistent_helper"
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N5").reason == "SUBROUTINE_NOT_CALLED_HERE"
 
-def test_flowchart_subroutine_not_defined(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    # "ValueError" really is on line 3, but this repository defines no such
-    # symbol -- being on the call-site line is not being defined.
-    spec["nodes"][4]["evidence"] = {"file": "pkg/flow.py", "line": 3, "symbol": "ValueError"}
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N5").reason == "SUBROUTINE_NOT_DEFINED"
 
-def test_flowchart_subroutine_without_a_symbol_is_malformed(repo: Path, symbols: RepoSymbols) -> None:
-    spec = base_flowchart()
-    spec["nodes"][4]["evidence"]["symbol"] = None
-    report = run_flowchart(repo, symbols, spec)
-    assert check_for(report, "node", "N5").reason == "MALFORMED_ELEMENT"
 
 def test_flowchart_malformed_nodes_and_edges(repo: Path, symbols: RepoSymbols) -> None:
     spec = base_flowchart()
@@ -954,12 +897,7 @@ def test_flowchart_unlabeled_decision_edges_cascade_into_an_omission(repo: Path,
 
 
 def _tall_flowchart(*, end_last: bool) -> dict[str, Any]:
-    """A single-root flowchart with more nodes than the render cap allows.
-
-    ``end_last`` puts the only terminal node at the end of spec order, where the
-    node cap will trim it -- the case that must reach the floor as ``NO_END``
-    instead of rendering an endless diagram.
-    """
+    """Exceed the node cap; end_last makes trimming remove the sole terminal node."""
     process_lines = list(range(4, _BIG_LAST_STATEMENT + 1))[: DIAGRAM_MAX_NODES + 1]
     end_node = {"id": "NEND", "kind": "end", "label": "return",
         "evidence": {"file": "pkg/big.py", "line": _BIG_RETURN_LINE, "symbol": None},
@@ -1021,7 +959,6 @@ def test_flowchart_node_cap_never_trims_the_start_node(repo: Path, symbols: Repo
 # --- Vocabulary contracts ----------------------------------------------------
 
 def test_every_emitted_reason_code_is_declared(repo: Path, symbols: RepoSymbols) -> None:
-    """Nothing may leak a reason code that is not in the published vocabulary."""
     specs: list[GroundingReport] = []
     broken_sequence = base_sequence()
     broken_sequence["participants"][0]["files"] = ["pkg/api.py"]

@@ -19,16 +19,13 @@ def test_report_separates_outcome_bearing_from_task_only_and_flags_as_of() -> No
     ]
     report = build_report(items)
     cov = report["outcome_coverage"]
-    # outcome-bearing only counts pr_review gold (C5): r1 counts; r2 is
-    # task-only and never counts; r3 is flagged evidence-after-as_of and excluded
+    # Only eligible pr_review gold counts, excluding after-as-of and task-only records.
     assert cov["adjudicated"] == 1
     assert cov["total"] == 1  # r3 can never adjudicate, so it never feeds the denominator
     assert report["evidence_after_as_of"] == ["r3"]
     gate = report["admission_gate"]
     assert gate["outcome_bearing_total"] == 1
-    # 100% of the outcome-bearing subset (just r1) is adjudicated: the gate is
-    # not blocked forever by those records that can never count (gold
-    # non-posterior_eligible / evidence-after-as_of).
+    # Non-posterior-eligible or after-as-of records cannot block the outcome denominator.
     assert gate["passes_80pct"] is True
     assert gate["class_balance_ok"] is False  # sole outcome-bearing record is accepted-only
 
@@ -77,9 +74,8 @@ def test_model_suggested_observations_never_count_as_human_raters() -> None:
         _item("b" * 64, "accepted", raters=(("model-suggested", "accepted"), ("rater", "rejected"))),
     ]
     report = build_report(items)
-    # C5/M9 outcome-bearing counting is tier/eligibility-based, not
-    # human-decision-based: both decisive gold pr_review records count toward
-    # the numerator; the model-suggested-only one is still *unresolved*.
+    # The standalone report counts eligible decisive gold even when model-only judgments remain
+    # unresolved; final human-coverage gating is separate.
     assert report["outcome_coverage"] == {"adjudicated": 2, "total": 2}
     assert report["unresolved"] == 1
     assert report["inter_rater"] == {"items": 0, "agreeing": 0}  # no second human in the dispute

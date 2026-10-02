@@ -92,8 +92,7 @@ def test_loader_resolves_sibling_verifier_core() -> None:
     sr = calibrate._load_judge_template()
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
-    # issue #1004: the template twin is gone -- the asset's bare `import
-    # verifier_core` resolves to the canonical host module.
+    # The asset's bare import must resolve to the canonical host module.
     assert sr.verifier_core is canonical_vc
 
     verdict = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "known verifier call"})
@@ -213,11 +212,7 @@ def test_receipt_has_no_credentials_or_source() -> None:
 
 @pytest.fixture
 def ws_factory() -> Any:
-    """Build a workspace with ``127.0.0.1`` on the judge host allowlist.
-
-    Pass ``judge_allowed_hosts`` to allowlist a different judge host (e.g. the
-    claude-cli provider's ``api.anthropic.com``).
-    """
+    """Build a workspace allowlisting localhost or the requested judge hosts."""
 
     def _build(tmp_path: Path, *, judge_allowed_hosts: tuple[str, ...] = ("127.0.0.1",)) -> Any:
         ws = tmp_path / "ws"
@@ -258,11 +253,7 @@ def _scripted_http(responses: Any) -> tuple[Any, ...]:
 
 
 def _scripted_responses(pairs: Any, *, mislabel_count: Any=0) -> Any:
-    """Build the 72-response scripted verdict list (3 calls per pair).
-
-    ``mislabel_count`` match pairs (from the front) are flipped to nonmatch.
-
-    """
+    """Repeat each verdict three times, flipping the first ``mislabel_count`` match pairs."""
     responses = []
     wrong = 0
     for p in pairs:
@@ -276,12 +267,7 @@ def _scripted_responses(pairs: Any, *, mislabel_count: Any=0) -> Any:
 
 
 def _scripted_cli_runner(responses: Any) -> tuple[Any, Any]:
-    """Fake ClaudeCliJudgeClient's subprocess seam: one scripted verdict per call.
-
-    Each call returns a fake proc with ``returncode`` 0 and one CLI-style
-    stdout payload (``{"result": "<verdict json>"}``); responses are consumed
-    in order, matching ``_judge_pairs``' deterministic pair-by-pair driver.
-    """
+    """Return CLI result envelopes in the judge's deterministic pair order."""
 
     class FakeProc:
         returncode = 0
@@ -299,11 +285,7 @@ def _scripted_cli_runner(responses: Any) -> tuple[Any, Any]:
 
 
 class TestCalibrateAcceptance:
-    """The six acceptance-mandated fake-endpoint calibration cases.
-
-    Each drives the full packaged judge path with an injected fake http client;
-    none opens a socket or makes a paid call.
-    """
+    """Exercise the packaged judge with injected HTTP responses and no sockets."""
 
     def test_run_calibration_pass_writes_receipt(self, tmp_path: Path, ws_factory: Any) -> None:
         responses = _scripted_responses(_load_fixture())
@@ -406,13 +388,7 @@ def test_calibrate_judge_handler_threads_claude_oauth_token(
 
 def test_calibrate_judge_claude_cli_composed_path(tmp_path: Path, ws_factory: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Composed real path: handler -> run_calibration -> _build_client -> CLI.
-
-    The only seam faked is the Claude Code CLI subprocess runner; the threaded
-    ``CLAUDE_CODE_OAUTH_TOKEN`` is exercised through the packaged judge's own
-    fail-closed presence gate (``score_review._build_client``) -- the behavior
-    the env threading exists to enable -- not by stubbing run_calibration.
-    """
+    """Fake only the CLI subprocess; exercise OAuth admission through the real handler and judge."""
 
     ws = ws_factory(tmp_path, judge_allowed_hosts=("api.anthropic.com",))
     monkeypatch.delenv("DAYDREAM_JUDGE_ALLOWED_HOSTS", raising=False)
@@ -431,13 +407,7 @@ def test_calibrate_judge_claude_cli_composed_path(tmp_path: Path, ws_factory: An
 def test_calibrate_judge_claude_cli_missing_token_fails_closed(
     tmp_path: Path, ws_factory: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """No ambient token: the composed path fails closed before any CLI call.
-
-    Entered through the production handler with the claude-cli provider and no
-    ``CLAUDE_CODE_OAUTH_TOKEN``; the packaged judge's presence gate refuses the
-    run (exit 1, bounded stderr diagnostic, no receipt) instead of shelling the
-    real ``claude`` binary unpaid.
-    """
+    """Exercise the real presence gate before it can launch the Claude CLI."""
 
     ws = ws_factory(tmp_path, judge_allowed_hosts=("api.anthropic.com",))
     monkeypatch.delenv("DAYDREAM_JUDGE_ALLOWED_HOSTS", raising=False)

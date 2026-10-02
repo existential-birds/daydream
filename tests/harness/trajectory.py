@@ -1,9 +1,4 @@
-"""Shared trajectory/manifest test builders.
-
-One canonical copy of the recorder, trajectory-read, invocation-observe,
-manifest and unified-diff builders that were copy-pasted across the trajectory,
-archive and training test modules.
-"""
+"""Shared recorder, trajectory, manifest, and unified-diff test builders."""
 
 from __future__ import annotations
 
@@ -29,11 +24,7 @@ from daydream.trajectory import (
 def make_recorder(tmp_path: Path, *, run_flow: DaydreamRunFlow = DaydreamRunFlow.NORMAL, agent_model_name: str = "opus",
     on_write: Any = None, path: Path | None = None, session_id: str = "test", **overrides: Any,
 ) -> TrajectoryRecorder:
-    """Construct a TrajectoryRecorder rooted in tmp_path.
-
-    ``path``/``session_id`` and any ``overrides`` (backend identity fields)
-    replace the shared defaults without rebuilding the common kwargs.
-    """
+    """Build a tmp_path recorder with explicit identity/path and field overrides."""
     return TrajectoryRecorder(
         path=path if path is not None else tmp_path / ".daydream" / "trajectory.json", run_flow=run_flow,
         target_dir=tmp_path, agent_model_name=agent_model_name, session_id=session_id, on_write=on_write, **overrides,
@@ -77,13 +68,9 @@ def dispatch_encloses_children(step: dict[str, Any], target_dir: Path) -> bool:
 
 def assert_dispatch_children(target_dir: Path, dispatch: dict[str, Any], phase: str, descriptors: list[str],
 ) -> list[dict[str, Any]]:
-    """Prove one exact child document and invocation per dispatch result.
+    """Assert exact counts, ordered child refs, invocation identity, and time enclosure.
 
-    Loads the single root run trajectory under *target_dir*, then walks the
-    dispatch's per-child refs, summaries and documents asserting the planned/
-    attempted/completed counts, the 1:1 descriptor/ref/summary ordering, the
-    child-invocation identity set, and the dispatch's timestamp enclosure of
-    every child run window. Returns the loaded child documents.
+    Read the root and referenced child documents; return the validated children.
     """
     expected_count = len(descriptors)
     assert dispatch["extra"]["planned_count"] == expected_count
@@ -136,26 +123,14 @@ def assert_dispatch_children(target_dir: Path, dispatch: dict[str, Any], phase: 
 
 
 def step_token_sum(traj: dict[str, Any], key: str) -> int:
-    """Sum ``metrics[key]`` across agent steps that carry it.
-
-    Reconciliation invariant: the step-level rollup's per-dimension sum must
-    equal the recorder's final_metrics total (``Σ steps == final``). Steps
-    whose ``metrics`` block is absent, or which lack the requested key, are
-    skipped so a phantom all-zero residual step can never contribute a zero
-    line item to the sum.
-    """
+    """Sum present nonzero step metrics for comparison with recorder final totals."""
     return sum(s["metrics"][key] for s in traj["steps"] if s.get("metrics") and s["metrics"].get(key))
 
 
 def observe_claude_shape(inv: Invocation) -> None:
-    """Observe a Claude-shaped stream: 5 per-message single-digit MetricsEvents
-    (one per turn) + the authoritative session-total CostEvent + ResultEvent.
+    """Emit five understated message metrics followed by an authoritative session total.
 
-    Shared by the token-reconciliation and renderer tests so a future token
-    dimension is added in exactly one place (issue #747). The per-message
-    completion is a near-constant single digit (SDK bug shape) while the
-    CostEvent carries the authoritative whole-call session total — the exact
-    shape that exercises the reconciliation delta.
+    This SDK-shaped discrepancy exercises residual token reconciliation.
     """
     for i, c in enumerate((12, 9, 11, 8, 10)):
         inv.observe(TextEvent(text=f"turn {i}"))
@@ -187,12 +162,7 @@ def observe_metrics_and_result(
 
 
 def make_manifest(session_id: str = "sess-0001", **overrides: Any) -> Manifest:
-    """Build a minimal indexed manifest.
-
-    ``pr_number``/``pr_repo`` are plain ``Manifest`` fields (see
-    ``daydream/archive/manifest.py``), so PR-attached rows are produced by
-    passing them through ``overrides``.
-    """
+    """Build a minimal indexed manifest with optional field overrides, including PR identity."""
     defaults: dict[str, Any] = {
         "session_id": session_id, "archived_at": "2026-04-29T00:00:00+00:00", "status": "complete",
         "run_flow": "normal", "skill": "python", "model": "opus", "backend": "claude",

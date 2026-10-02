@@ -11,13 +11,8 @@ from verifiers.v1.runtimes.subprocess import SubprocessRuntime
 from daydream_review.rundir import RUN_DIR_FILES, fetch_run_dir, verify_seal
 from daydream_review.verifier import seal_artifacts
 
-#: The RUN_DIR_FILES allowlist members the projection must include for the
-#: golden run. The deep/stack-*-records.json glob members are collected too,
-#: but their names depend on which stacks the router detected in the golden
-#: run, so they are checked structurally (glob shape) in the test body instead
-#: of pinned here. trajectory.json and any per-fork trajectories/*.json are
-#: deliberately NOT in the projection — untrusted, model-directed, test-only
-#: data that must never reach model context through the collector.
+# Forward only the exact allowlist and stack-record glob. Trajectories contain untrusted
+# model-directed data and must never reach model context through this collector.
 _REQUIRED_SCORING_FILES: frozenset[str] = frozenset({
         "manifest.json", "review-output.md", "deep/review-output.md", "deep/recommendation-verdicts.json",
         "deep/merged-items.json", "deep/test-verdict.json",
@@ -28,18 +23,13 @@ _REQUIRED_SCORING_FILES: frozenset[str] = frozenset({
 async def test_fetch_run_dir_excludes_fixture_trajectories(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime: SubprocessRuntime, rundir_golden: Path,
 ) -> None:
-    """The collector's projection excludes trajectory payloads from the golden run.
-
-    Stage the real golden archive, install a guarded read that raises on any
-    trajectory path, and prove fetch_run_dir forwards only allowlist files plus
-    deep/stack-*-records.json glob members — so captured operational text can
-    never be forwarded into model context through the run-dir collector.
+    """A guarded read rejects every trajectory path. The real golden archive may forward only allowlisted
+    files and stack-record globs into scoring.
     """
     archive = tmp_path / "archive"
     staged = _stage_run(archive, rundir_golden, session_id="session-1")
     assert staged.name == "session-1"
 
-    # The sole remaining untrusted trajectory shape in the fixture is staged.
     assert (staged / "trajectory.json").is_file()
 
     saved_read = runtime.read
@@ -56,12 +46,8 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
 
     assert selected is not None
     projected = {p.relative_to(selected).as_posix() for p in selected.rglob("*") if p.is_file()}
-    # Every projected member must be an allowlist file or a stack-record glob
-    # member, and all the required allowlist members must be present. Exact set
-    # equality is deliberately avoided: the stack-record names depend on which
-    # stacks the router detected for this golden run, so a different detection
-    # would fail the build for reasons unrelated to the exclusion guard (same
-    # convention as tests.test_rewards::test_rundir_golden_user_messages_are_inert).
+    # Require every allowlist member and reject unrelated files. Stack-record names vary with router
+    # detection, so exact set equality would couple this guard to stack discovery.
     for rel in projected:
         assert rel in RUN_DIR_FILES or (rel.startswith("deep/stack-") and rel.endswith("-records.json")
         ), rel
@@ -72,12 +58,8 @@ async def test_fetch_run_dir_excludes_fixture_trajectories(
 async def test_verify_seal_fails_closed_when_diff_cannot_be_re_derived(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path,
 ) -> None:
-    """verify_seal must fail closed when the candidate diff cannot be re-derived.
-
-    A git failure at verify time must return False, never hash b"" and verify
-    True on a run whose diff was never re-derived (the empty-diff collision).
-    This is a focused unit guard on verify_seal, complementing the scoring-level
-    test_git_failure_at_verify_time_fails_closed.
+    """A failed diff re-derivation must not verify by hashing empty bytes; that would collide with an empty
+    sealed diff.
     """
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)

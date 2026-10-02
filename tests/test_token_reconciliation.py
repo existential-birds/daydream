@@ -1,14 +1,5 @@
-"""Correct completion-token accounting & real turn granularity (issue #747).
-
-Fix A: the recorder reconciles each CostEvent's totals against the
-invocation's per-message sum (per-dimension take-max delta), so the recorded
-final metrics reflect the authoritative session value instead of the
-collapsed per-message single digits, and fresh CostEvent steps carry only the
-residual so ``Σ steps == final`` holds.
-
-Fix B: run_agent's normal loop forwards TurnEndEvent so each turn's already-
-emitted MetricsEvent lands on its own Step.
-"""
+"""Authoritative session usage must reconcile onto steps so their sum equals
+final metrics. run_agent must forward turn boundaries to preserve granularity."""
 
 from __future__ import annotations
 
@@ -40,8 +31,7 @@ from tests.harness.trajectory import (
 
 
 async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
-    """Real-path run_agent with a Write-heavy tool call: a 16 KB content payload
-    in the tool arguments (like _run_tool_agent, one turn)."""
+    """One real run_agent call with a 16 KB Write argument to exercise the token floor."""
     events: list[AgentEvent] = [TextEvent(text="turn 0"),
         ToolStartEvent(id="w1", name="Write", input={"file_path": "/tmp/f.txt", "content": content}),
         ToolResultEvent(id="w1", output="ok", is_error=False),
@@ -59,9 +49,8 @@ async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
 
 
 async def _run_tool_agent(tmp_path: Path, *, turns: int, tools_per_turn: int) -> dict[str, Any]:
-    """Real-path run_agent: per turn a TextEvent, tools_per_turn tool pairs, a
-    MetricsEvent (single-digit completion), and a TurnEndEvent; then a CostEvent
-    carrying the authoritative session total and a ResultEvent."""
+    """Emit per-turn tools, single-digit completion and turn boundaries, then
+    authoritative session usage before the result."""
     events: list[AgentEvent] = []
     for turn in range(turns):
         events.append(TextEvent(text=f"turn {turn}"))
@@ -83,8 +72,6 @@ async def _run_tool_agent(tmp_path: Path, *, turns: int, tools_per_turn: int) ->
 
 @pytest.mark.asyncio
 async def test_claude_shape_final_reflects_session_total(tmp_path: Path) -> None:
-    """Claude-shaped stream: per-message single-digit completion + authoritative CostEvent session total ->
-    final.total_completion_tokens == session total, not the collapsed sum of per-message digits."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -94,8 +81,6 @@ async def test_claude_shape_final_reflects_session_total(tmp_path: Path) -> None
 
 @pytest.mark.asyncio
 async def test_claude_shape_step_sum_equals_final(tmp_path: Path) -> None:
-    """The whole-run session total is distributed so SUM(steps) == final, keeping
-    the final == Σ steps invariant after per-turn steps + reconciliation."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -108,8 +93,6 @@ async def test_claude_shape_step_sum_equals_final(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_multi_turn_turns_each_own_step(tmp_path: Path) -> None:
-    """run_agent forwards TurnEndEvent (fix B): a 24-tool-call, 3-turn agent
-    records >2 steps and one metrics-bearing step per turn (not one collapsed)."""
     traj = await _run_tool_agent(tmp_path, turns=3, tools_per_turn=8)
     assert traj["final_metrics"]["total_steps"] > 2
     # One metrics-bearing step per turn: the per-message single-digit (10)
@@ -122,8 +105,6 @@ async def test_multi_turn_turns_each_own_step(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_pi_shape_no_step_level_double_count(tmp_path: Path) -> None:
-    """Pi-shaped stream (per-turn MetricsEvent w/ cost + restated final CostEvent)
-    must not double-count at the step level once per-turn steps are enabled."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -155,12 +136,11 @@ def _tool_argument_floor(traj: dict[str, Any]) -> Any:
 
 @pytest.mark.asyncio
 async def test_tool_argument_invariant_holds_real_path(tmp_path: Path) -> None:
-    """total_completion_tokens >= floor on a real-path Write-heavy run (passes post-fix)."""
     traj = await _run_write_agent(tmp_path, content="y" * 16_000)
     assert traj["final_metrics"]["total_completion_tokens"] >= _tool_argument_floor(traj)
 
 def test_tool_argument_invariant_fails_pre_fix_bundle() -> None:
-    """The gate is non-trivial: a hand-built pre-fix bundle (collapsed total) FAILS it."""
+    """The pre-fix collapsed total must fail the floor, proving the gate is effective."""
     traj = _pre_fix_bundle()   # total_completion_tokens=50, one Write call with 16KB args
     completion = traj["final_metrics"]["total_completion_tokens"]
     assert completion < _tool_argument_floor(traj)
@@ -178,9 +158,8 @@ def _pre_fix_bundle() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_metrics_no_agent_step_folds_to_minted_step(tmp_path: Path) -> None:
-    """Round-2 #747: a MetricsEvent arriving with no open Step and no existing agent Step (self.steps contains only a
-    user/context step) must fold onto a minted agent Step so the recorder-level tally still sums to final (Sigma
-    steps == final), instead of silently dropping the metrics."""
+    """With only a user/context step, mint an agent step for metrics so the
+    step sum still equals the final total."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:

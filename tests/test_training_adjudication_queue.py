@@ -30,7 +30,6 @@ def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> No
 
     complete = build_queue(sessions, include_decisive=True)
     assert sorted(str(i["disposition"]) for i in complete) == ["accepted", "unanswered"]
-    # decisive entries carry the same record_id derivation as materialize
     assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
 
 def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
@@ -51,19 +50,15 @@ def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
         "labeler": "alice", "observed_at": "2026-08-30T10:00:00+00:00",
         "review_required": True,  # e.g. a stored model-suggested label
     }
-    # Same digest: judgment stands, item stays open with no prior disposition.
     fresh = build_queue([_session("s1", "fp-a", "ambiguous", "d" * 64)], prior_observations={record_id_val: prior})
     assert fresh[0]["status"] == "open" and fresh[0]["prior_disposition"] is None
     assert fresh[0]["review_required"] is True  # stored flag propagates to the queue item
-    # Digest drift: item reopens, prior disposition carried as provenance.
     drifted = build_queue([_session("s1", "fp-a", "ambiguous", "e" * 64)], prior_observations={record_id_val: prior})
     assert drifted[0]["status"] == "reopened" and drifted[0]["prior_disposition"] == "accepted"
     assert drifted[0]["review_required"] is True
-    # Automatic (non-human) prior never reopens.
     auto = dict(prior, role="automatic")
     auto_item = build_queue([_session("s1", "fp-a", "ambiguous", "e" * 64)], prior_observations={record_id_val: auto})
     assert auto_item[0]["status"] == "open"
-    # A fresh evidence entry without evidence_digest fails closed, naming the fingerprint.
     session = _session("s1", "fp-a", "ambiguous", "e" * 64)
     del session["resolutions"][0]["evidence_digest"]  # type: ignore[index]
     with pytest.raises(ValueError, match="fp-a"):
@@ -73,9 +68,7 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
     session = _session("s1", "fp-a", "ambiguous", "d1")
 
     def _forge_decisive(s: dict[str, object], **_kw: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        # The real projector routes only task-only dispositions to the
-        # adjudication set; forge a decisive entry to prove the queue
-        # builder's own fail-closed disposition guard holds.
+        # Forge a decisive record outside the projector to prove the queue guard is independent.
         _, adjudication = project_findings(s, return_adjudication=True)
         return [], [dict(e, disposition="accepted") for e in adjudication]
 

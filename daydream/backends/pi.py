@@ -1,25 +1,10 @@
 # daydream/backends/pi.py
-"""Pi CLI subprocess backend for daydream.
+"""Translate pi --mode json (@earendil-works/pi-coding-agent) into AgentEvent.
 
-Spawns ``pi --mode json`` (the ``@earendil-works/pi-coding-agent`` TypeScript
-coding agent) as an async subprocess, reads the JSONL event stream from stdout,
-and translates it into the unified :data:`daydream.backends.AgentEvent` stream.
-
-Pi is a subprocess + JSONL backend — the same proven shape as
-:mod:`daydream.backends.codex`. The Pi backend is a second instance of that
-pattern; it emits the same event vocabulary so the existing
-:class:`daydream.trajectory.TrajectoryRecorder` produces valid ATIF v1.7
-trajectories indistinguishable in shape from the other two backends.
-
-Nous research wiring (DeepSeek models) is configured via pi's
-``~/.pi/agent/`` provider registry (``models.json`` custom ``nous`` provider
-pointing at ``https://inference-api.nousresearch.com/v1``, key in
-``auth.json``). When no model is selected by daydream, Pi's configured
-``defaultModel`` is respected; only when Pi has no configured model does
-daydream pass ``deepseek/deepseek-v4-flash-0731`` with provider
-``nous`` as its fallback. Explicit model and ``PI_PROVIDER`` / ``PI_API_KEY`` /
-``PI_THINKING`` values remain CLI overrides. Daydream never fabricates a base
-URL or writes a models.json override.
+Respect Pi's project/global defaultModel. Without one, use DEFAULT_PI_MODEL
+with the nous provider; explicit model and PI_PROVIDER/API_KEY/THINKING
+remain overrides. Provider endpoints and credentials belong to Pi's registry
+and auth files under ~/.pi/agent; Daydream never writes a models.json override.
 """
 
 from __future__ import annotations
@@ -136,12 +121,7 @@ _AMBIENT_AGENT_DIR = object()
 def _configured_pi_model(
     cwd: Path, *, agent_dir: Path | None | object = _AMBIENT_AGENT_DIR
 ) -> str | None:
-    """Return the effective Pi settings default, if one is configured.
-
-    Pi merges project settings over global settings. We mirror only the
-    ``defaultModel`` field because that is the setting daydream must not replace
-    with its DeepSeek fallback.
-    """
+    """Resolve defaultModel with project settings taking precedence over global settings."""
     if agent_dir is _AMBIENT_AGENT_DIR:
         resolved_agent_dir: Path | None = Path(
             os.environ.get("PI_CODING_AGENT_DIR", Path.home() / ".pi" / "agent")
@@ -159,13 +139,8 @@ def _configured_pi_model(
     return None
 
 
-# Pi CLI ships only a minimal built-in system prompt. Claude Code and Codex
-# inject rich guidance (tool efficiency, exploration strategy, conciseness) at
-# the CLI layer; Pi does not, so the default DeepSeek model burns its
-# tool-call budget on exploratory reads during LISTEN. This preamble is
-# appended (via ``--append-system-prompt``) to Pi's built-in coding-assistant
-# prompt to mirror that guidance. Keep it concise — the model re-reads it
-# every turn.
+# Pi's minimal built-in prompt needs explicit exploration/tool guidance.
+# Append this preamble each turn; keep it concise to limit repeated context.
 _PI_SYSTEM_PREAMBLE = """\
 You are an efficient coding agent operating under a strict tool-call budget.
 Honor the invocation's time and tool allowance. Each call must resolve a
@@ -257,15 +232,8 @@ def _pi_retry_max_delay() -> float:
     )
 
 
-# Shared error-taxonomy tokens. The permanent set is deliberately checked
-# first by _pi_error_category so a permanent condition (an unreachable model, a
-# rejected credential, a schema violation) wins over a transient token in the
-# same message: "model not found: gpt-5 (503)" is AUTH_CONFIG, not SERVER_ERROR.
-# A bare "provider" is deliberately absent: it is a generic noun that also
-# appears in transient failures ("provider rate limit"), so naming a provider is
-# not evidence of a permanent condition (see daydream/retry_policy.py). Provider
-# credential faults still land here through "auth"/"credential"/"api key"/
-# "configuration"/"not configured".
+# Permanent conditions precede transient matches. Bare "provider" is too
+# broad ("provider rate limit"); credential/configuration tokens still match.
 _PERMANENT_TOKENS = (
     "auth",
     "credential",
@@ -320,12 +288,9 @@ def _is_retryable_exit_code(code: int | None) -> bool:
 
 
 def _pi_error_category(message: str) -> str:
-    """Classify Pi failures into stable host-owned diagnostic categories.
+    """Classify failures with permanent conditions taking precedence over transient tokens.
 
-    Permanent conditions are tested before the transient token sets: when one
-    message carries both (``"model not found: gpt-5 (503)"``) the permanent
-    condition decides, matching the shared classifier's permanent-beats-
-    transient rule in :mod:`daydream.retry_policy`.
+    For example, model not found with HTTP 503 remains AUTH_CONFIG.
     """
     lower = message.casefold()
     if any(token in lower for token in _PERMANENT_TOKENS):
@@ -358,12 +323,7 @@ class _PiFailureFacts(Exception):
 
 
 def _pi_retryable_for(*, category: str, message: str) -> bool:
-    """Return the shared classifier's retry verdict for a Pi failure.
-
-    Uses the same :func:`daydream.retry_policy.classify_failure` path the retry
-    branch of :func:`daydream.agent.run_agent` uses, so the backend's
-    ``retryable`` attribute and the agent's decision cannot disagree.
-    """
+    """Use run_agent's shared failure classifier to keep retryability consistent."""
     return classify_failure(_PiFailureFacts(message, category)).retries_allowed
 
 
@@ -385,12 +345,7 @@ class PiError(Exception):
 
 
 def _render_tool_result(result: Any) -> str:
-    """Render a Pi ``AgentToolResult`` into a flat string for ``ToolResultEvent``.
-
-    Plain text-only responses stay readable. Structured details and mixed
-    content blocks are serialized as JSON so image/resource blocks and their
-    accompanying text remain available to consumers.
-    """
+    """Flatten plain text; preserve details and mixed/image/resource blocks as JSON."""
     if not isinstance(result, dict):
         return result if isinstance(result, str) else ("" if result is None else json.dumps(result))
     content = result.get("content")
@@ -400,11 +355,7 @@ def _render_tool_result(result: Any) -> str:
     ):
         return json.dumps(result, ensure_ascii=False)
     if isinstance(content, list):
-        parts: list[str] = []
-        for block in content:
-            if isinstance(block, dict) and block.get("type") == "text":
-                parts.append(block.get("text", ""))
-        joined = "".join(parts)
+        joined = "".join(block.get("text", "") for block in content)
         if joined:
             return joined
     if isinstance(content, str) and content:
@@ -431,12 +382,7 @@ def _extract_usage(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _schema_instruction(schema: dict[str, Any]) -> str:
-    """Build the prompt appendix emulating ``--output-schema``.
-
-    Pi has no wire-level schema mechanism, so the schema is described in the
-    prompt and the final assistant text is parsed as JSON at ``agent_end``
-    (mirroring Codex's structured-output fallback).
-    """
+    """Append a schema instruction; Pi has no native schema flag and parses at agent_end."""
     return (
         "\n\nRespond with ONLY a single valid JSON object matching this JSON "
         "schema. Do not include any prose, explanations, or markdown fences "
@@ -456,11 +402,7 @@ def _write_prompt_attachment(text: str, attachments: ExitStack) -> Path:
 
 
 class PiBackend:
-    """Backend that wraps the Pi CLI subprocess.
-
-    Translates the Pi JSONL event stream into the unified ``AgentEvent`` stream
-    so trajectory recording (ATIF v1.7) works identically to Claude/Codex.
-    """
+    """Translate the Pi JSONL event stream into normalized AgentEvent records."""
 
     supports_finalization = True
     supports_tools_disabled = True
@@ -475,15 +417,7 @@ class PiBackend:
         reasoning_effort: str | None = None,
         execution_input: BackendExecutionInput | None = None,
     ):
-        """Initialize the backend with an optional explicit model override.
-
-        Args:
-            reasoning_effort: Resolved per-phase reasoning level, forwarded as
-                ``--thinking <level>``. When None, ``PI_THINKING`` is used
-                instead — the env var is Pi's ambient default, the same role
-                ``model_reasoning_effort`` in ``~/.codex/config.toml`` plays for
-                Codex, so an explicitly resolved per-phase level outranks it.
-        """
+        """Resolve the model before recording; explicit reasoning_effort overrides PI_THINKING."""
         self._model_override = model
         self.reasoning_effort = reasoning_effort
         self._execution_input = execution_input
@@ -532,39 +466,18 @@ class PiBackend:
         review_instructions: str | None = None,
         tools_disabled: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Execute a prompt via the Pi CLI and yield unified events.
+        """Yield Pi events; a turn error raises PiError and nonempty agents are unsupported.
 
-        Args:
-            output_schema: Optional JSON schema for structured output. Pi has no
-                native schema flag, so the schema is appended to the prompt and
-                the final assistant text is parsed as JSON at ``agent_end``.
-            continuation: Optional token for session resumption. When present
-                and ``backend == "pi"``, ``--session-id <id>`` resumes that
-                session when ``persist_session`` is True.
-            agents: Optional subagent mapping. Pi does not support non-empty
-                subagent maps and will raise if provided.
-            max_turns: NOT enforced by Pi (no direct turn-count flag). Documented
-                gap; the argument is accepted for protocol parity only.
-            read_only: When True, restricts Pi's tools to the read-only subset
-                (``read,find,ls,grep``) so the agent cannot write/edit/bash.
-            finalization: Disable tools with ``--no-tools``, replace the system
-                preamble with serialization guidance, and cap thinking at low
-                while preserving explicitly lower settings. max_turns remains
-                unsupported; the caller must enforce its absolute deadline.
-            tools_disabled: Disable tools independently of finalization while
-                preserving configured thinking and normal review instructions.
-                Send the prompt through stdin to support large evidence packets.
-            persist_session: When False, pass ``--no-session`` and return no
-                continuation. The default preserves resumable sessions.
+        Schemas are appended to the prompt and final assistant text is parsed at
+        agent_end. Pi tokens resume via --session-id when persistence is enabled;
+        persist_session=False uses --no-session and suppresses continuation.
 
-        Raises:
-            PiError: If a Pi turn ends with ``stopReason == "error"``.
-            StreamStalledError: If the ``pi`` subprocess emits nothing on stdout
-                for the idle window (see
-                :func:`daydream.backends._subprocess.stream_idle_timeout_s`).
-                Retryable — ``run_agent`` re-arms a fresh subprocess and retries.
-            NotImplementedError: If ``agents`` is non-empty (Pi backend does not
-                support exploration subagents).
+        read_only allows read/find/ls/grep. finalization disables tools, substitutes
+        serialization instructions, and caps thinking at low while preserving lower
+        settings. tools_disabled keeps normal instructions/thinking and uses stdin.
+        Pi cannot enforce max_turns: callers must enforce an absolute deadline.
+        Stdout silence raises retryable StreamStalledError; run_agent starts a fresh
+        subprocess for each retry.
         """
         if agents:
             raise NotImplementedError(
@@ -574,33 +487,7 @@ class PiBackend:
         args: list[str] = ["pi", "--mode", "json"]
 
         configured_model = None
-        provider: str | None = None
-        if self._model_override is not None:
-            self.model = self._model_override
-            args.extend(["--model", self.model])
-            provider = (
-                self._execution_input.pi_provider
-                if self._execution_input is not None
-                else os.environ.get("PI_PROVIDER")
-            )
-            if provider is None:
-                provider = _PI_DEFAULT_PROVIDER
-                if self.model.casefold().startswith("glm-"):
-                    # The default provider moved zai -> nous; a pinned z.ai
-                    # GLM model silently loses its provider and fails at
-                    # runtime unless the user opts back in explicitly.
-                    _warn_migration_mismatch_once(
-                        f"glm-pin:{self.model}",
-                        "Explicit model %r is a z.ai-hosted GLM model, but the "
-                        "Pi backend now defaults to the %s provider and "
-                        "PI_PROVIDER is unset; the pinned model will fail at "
-                        "runtime unless PI_PROVIDER=zai is set or the model is "
-                        "migrated to the %s registry.",
-                        self.model,
-                        _PI_DEFAULT_PROVIDER,
-                        _PI_DEFAULT_PROVIDER,
-                    )
-        else:
+        if self._model_override is None:
             if self._configured_cache is not None and self._configured_cache[0] == cwd:
                 configured_model = self._configured_cache[1]
             else:
@@ -612,34 +499,45 @@ class PiBackend:
                         else _AMBIENT_AGENT_DIR
                     ),
                 )
-            self.model = configured_model or DEFAULT_PI_MODEL
-            if configured_model is None:
-                args.extend(["--model", self.model])
-            provider = (
-                self._execution_input.pi_provider
-                if self._execution_input is not None
-                else os.environ.get("PI_PROVIDER")
-            )
-            if provider is None and configured_model is None:
-                provider = _PI_DEFAULT_PROVIDER
-            elif configured_model is None and provider and provider != _PI_DEFAULT_PROVIDER:
-                # The previous default paired the zai provider with a GLM
-                # model; an explicit PI_PROVIDER from that setup now pairs
-                # with the DeepSeek fallback model and fails at runtime
-                # unless the provider actually serves it.
+        self.model = self._model_override if self._model_override is not None else configured_model or DEFAULT_PI_MODEL
+        if self._model_override is not None or configured_model is None:
+            args.extend(["--model", self.model])
+        provider = (
+            self._execution_input.pi_provider
+            if self._execution_input is not None
+            else os.environ.get("PI_PROVIDER")
+        )
+        if provider is None and configured_model is None:
+            provider = _PI_DEFAULT_PROVIDER
+            if self._model_override is not None and self.model.casefold().startswith("glm-"):
                 _warn_migration_mismatch_once(
-                    f"fallback-provider:{provider}",
-                    "PI_PROVIDER=%r is set with no configured model, so the Pi "
-                    "backend falls back to %r, which is served by the %s "
-                    "provider; if %r does not serve that model the run will "
-                    "fail at runtime. Unset PI_PROVIDER or set it to %s to "
-                    "adopt the new default, or configure a model explicitly.",
-                    provider,
+                    f"glm-pin:{self.model}",
+                    "Explicit model %r is a z.ai-hosted GLM model, but the "
+                    "Pi backend now defaults to the %s provider and "
+                    "PI_PROVIDER is unset; the pinned model will fail at "
+                    "runtime unless PI_PROVIDER=zai is set or the model is "
+                    "migrated to the %s registry.",
                     self.model,
                     _PI_DEFAULT_PROVIDER,
-                    provider,
                     _PI_DEFAULT_PROVIDER,
                 )
+        elif (
+            self._model_override is None and configured_model is None
+            and provider and provider != _PI_DEFAULT_PROVIDER
+        ):
+            _warn_migration_mismatch_once(
+                f"fallback-provider:{provider}",
+                "PI_PROVIDER=%r is set with no configured model, so the Pi "
+                "backend falls back to %r, which is served by the %s "
+                "provider; if %r does not serve that model the run will "
+                "fail at runtime. Unset PI_PROVIDER or set it to %s to "
+                "adopt the new default, or configure a model explicitly.",
+                provider,
+                self.model,
+                _PI_DEFAULT_PROVIDER,
+                provider,
+                _PI_DEFAULT_PROVIDER,
+            )
 
         child_env = (
             self._execution_input.child_environment()
@@ -1028,11 +926,8 @@ class PiBackend:
                             cache_creation_tokens=created if isinstance(created, int) else None,
                             measurement_source="turn_end",
                         )
-                    # P18: per-turn identity where the Pi stream actually
-                    # exposes it (stopReason on turn_end.message; response
-                    # model/provider already tracked). Pi supplies no native
-                    # message id, so message_id stays "" with configured/
-                    # absent provenance; timing stays host-observed.
+                    # Use native stopReason/model/provider when exposed. Pi has no message
+                    # id; keep it empty and retain host-observed timing.
                     yield TurnEndEvent(
                         message_id="",
                         finish_reason=stop_reason if stop_reason is not None else None,
@@ -1100,9 +995,5 @@ class PiBackend:
                 attachments.close()
 
     async def cancel(self) -> None:
-        """Cancel all running Pi processes.
-
-        Sends SIGTERM, waits briefly, then SIGKILL if still running (mirrors
-        ``CodexBackend.cancel``).
-        """
+        """Terminate and reap every active Pi transport."""
         await CliTransport.cancel_all(self._transports)

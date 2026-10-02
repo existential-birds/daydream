@@ -15,7 +15,8 @@ from daydream.extensions import (
     UnresolvedExtensionError,
 )
 from daydream.flows.engine import FlowContext, run_flow
-from daydream.runner import RunConfig, _resolve_backend
+from daydream.run_config import RunConfig
+from daydream.runner import _resolve_backend
 from daydream.workspace import AuditWorkspace, WorkContext
 
 

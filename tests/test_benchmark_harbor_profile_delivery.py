@@ -1,9 +1,7 @@
-"""Task 10 (R10): Harbor explicit-only profile resolver mode.
+"""Harbor accepts only the control plane's explicit profile candidate.
 
-The Harbor control plane supplies the candidate through a dedicated
-``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` var; the resolver must NEVER read the
-normal-run ``DAYDREAM_REVIEW_PROFILE`` env, the operator's file config, or any
-target-repo profile. No candidate -> packaged default.
+Ignore normal-run environment, operator config, and target-repo profiles;
+without a candidate, use the packaged default.
 """
 import asyncio
 from pathlib import Path
@@ -30,7 +28,6 @@ def _judge_env(**extra: str) -> dict[str, str]:
 
 
 def test_harbor_resolver_ignores_user_env_and_repo_config(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Malicious target config / ambient env must NOT change the Harbor candidate.
     monkeypatch.setenv("DAYDREAM_REVIEW_PROFILE", "/tmp/user-evil.toml")
     malicious = DaydreamFileConfig(review_profile=Path("/tmp/repo-evil.toml"))
     resolved = rp.resolve_harbor_profile(file_config=malicious)  # no candidate requested
@@ -45,8 +42,6 @@ def test_harbor_resolver_accepts_only_explicit_control_plane_candidate(monkeypat
     resolved = rp.resolve_harbor_profile(env={"DAYDREAM_REVIEW_PROFILE_CANDIDATE": str(p)})
     assert resolved.profile.name == "candidate"
 
-# Task 11 (R11): controlled Harbor delivery -- entrypoint validation + no
-# artifact on failure.
 def test_entrypoint_parses_and_validates_candidate_before_runconfig(tmp_path: Path, ) -> None:
     good = tmp_path / "good.toml"
     good.write_text('schema_version = 1\nname = "g"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
@@ -61,7 +56,6 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path: Path,
     bad.write_text('schema_version = 99\nname = "bad"')
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
     artifact.parent.mkdir(parents=True)
-    # main() is async and RETURNS exit code 1 on EntrypointError (it does not raise).
     rc = asyncio.run(entrypoint.main({
         "DAYDREAM_REVIEW_CASE_ID": "case-x", "DAYDREAM_REVIEW_ARTIFACT_PATH": str(artifact),
         "DAYDREAM_REVIEW_REPO_DIR": str(tmp_path), "DAYDREAM_REVIEW_API_KEY": "sk-or-test",
@@ -71,7 +65,6 @@ def test_entrypoint_invalid_candidate_fails_and_writes_no_review(tmp_path: Path,
     assert not artifact.exists()  # no candidate review artifact written
 
 def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path: Path,) -> None:
-    # target repo .daydream.toml tries to point at its own profile
     evil = tmp_path / ".daydream.toml"
     evil.write_text('review_profile = "/tmp/evil.toml"')
     good = tmp_path / "good.toml"
@@ -82,7 +75,6 @@ def test_malicious_target_config_cannot_change_harbor_candidate(tmp_path: Path,)
     assert cfg.review_profile is not None
     assert cfg.review_profile.name == "g"  # candidate wins; target config ignored
 
-# Task 12 (R12): Harbor ledger/receipt provenance.
 def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
@@ -96,36 +88,24 @@ def test_ledger_entry_records_candidate_digest(tmp_path: Path) -> None:
     assert entry["profile_digest"] == "abc123"
 
 def test_receipt_invalidation_inputs_include_candidate_digest() -> None:
-    # calibrate._invalidation_inputs is the single source of truth for the
-    # receipt contract (run.py's former duplicating helper is gone).
     sr = calibrate._load_judge_template()
     inputs = calibrate._invalidation_inputs(_judge_env(DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST="xyz"), pairs=[], sr=sr)
     assert "profile_digest" in inputs and inputs["profile_digest"] == "xyz"
 
-# Issue #885 R2 finding 4 (HIGH): the calibration RECEIPT WRITE side
-# (calibrate._invalidation_inputs) must fold the candidate digest too, so a
-# candidate-scoped receipt is producible from the single shared producer.
-# Legacy default runs (no digest) stay byte-stable. Without this the oracle
-# preflight always fails under a candidate.
+# Candidate-scoped receipts must satisfy oracle preflight; defaults retain the legacy shape.
 def test_calibrate_invalidation_inputs_folds_candidate_digest() -> None:
     sr = calibrate._load_judge_template()
-    # With a candidate digest -> receipt contract includes profile_digest.
     inputs = calibrate._invalidation_inputs(_judge_env(DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST="abc"), pairs=[], sr=sr)
     assert inputs["profile_digest"] == "abc"
     # Without a candidate digest -> legacy contract stays byte-stable.
     legacy = calibrate._invalidation_inputs(_judge_env(), pairs=[], sr=sr)
     assert "profile_digest" not in legacy
 
-# Issue #885 R1 items 2/10: the control-plane benchmark handler must thread the
-# candidate profile digest into the env dict it hands to run_run, because run.py
-# reads DAYDREAM_REVIEW_PROFILE_CANDIDATE_DIGEST from that env dict and the
-# in-container entrypoint runs in a different process (after the ledger row).
+# The supervisor records provenance before the separate container entrypoint starts.
 def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    # No candidate -> digest key is None (legacy default runs stay byte-stable).
     monkeypatch.delenv("DAYDREAM_REVIEW_PROFILE_CANDIDATE", raising=False)
     assert bc._candidate_profile_digest() is None
 
-    # A candidate -> the control-plane resolver produces its canonical digest.
     cand = tmp_path / "candidate.toml"
     cand.write_text(
         'schema_version = 1\nname = "candidate"\n[strategies.intent]\n'
@@ -135,7 +115,6 @@ def test_benchmark_run_threads_candidate_digest_to_supervisor(monkeypatch: pytes
     digest = bc._candidate_profile_digest()
     assert digest and isinstance(digest, str) and len(digest) == 64  # sha256
 
-    # _handle_benchmark_run passes it through into the supervisor env.
 
     captured = {}
 

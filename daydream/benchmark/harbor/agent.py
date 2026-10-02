@@ -1,12 +1,7 @@
-"""Harbor ``BaseAgent`` that reviews a frozen private-PR snapshot in-container (issue #780).
-
-``DaydreamReviewAgent`` runs host-side: it guarantees the Pi/OpenRouter backend, builds
-a fail-closed allowlist child environment, and invokes the controlled
-in-container entrypoint (``daydream.benchmark.harbor.entrypoint``) via
-``environment.exec``. The entrypoint runs the real Daydream runner in-process
-against the frozen snapshot, then publishes the candidate artifact and ATIF
-trajectory. Harbor is an optional extra: this module imports it lazily so a host
-without the ``benchmark`` extra can still import the package.
+"""Host-side Harbor agent that launches the controlled reviewer entrypoint in-container. An
+allowlisted child environment carries reviewer configuration. The entrypoint runs
+Daydream against the frozen snapshot and publishes candidates/trajectory. Harbor imports
+stay lazy so the base package works without the optional extra.
 """
 
 from __future__ import annotations
@@ -52,12 +47,7 @@ def _require_exec_ok(result: Any, label: str) -> None:
 
 
 class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
-    """Harbor agent driving the in-container, privacy-safe Daydream reviewer.
-
-    Attributes:
-        SUPPORTS_ATIF: This agent writes an ATIF trajectory and backfills
-            ``AgentContext`` metrics from it.
-    """
+    """Harbor reviewer writing ATIF trajectories and backfilling AgentContext metrics."""
 
     SUPPORTS_ATIF = True
 
@@ -74,20 +64,13 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         return __version__
 
     async def setup(self, environment: Any) -> None:
-        """Network-free setup: confirm the container installs this exact Daydream
-        release and the backend SDK for the selected reviewer backend (the Pi
-        CLI for ``pi``, ``claude_agent_sdk`` for ``claude``). A backend outside
-        the shared ``_SUPPORTED_BACKENDS`` allowlist is refused here, before
-        any probe (an unsupported value must never probe a wrong SDK).
+        """Without network access, probe the exact Daydream release and selected backend.
 
-        A single ``environment.exec`` runs an in-container Python probe; a
-        non-zero exec return (missing exact version or missing backend SDK)
-        raises :class:`AgentError` -- never a silent pass.
+        Validate the shared backend allowlist before probing Pi CLI or Claude SDK presence.
+        A missing probe or nonzero container probe result raises ``AgentError``.
         """
         backend = _supported_backend(self.extra_env)
-        # The allowlist can grow before a probe exists; never KeyError on an
-        # allowlisted-but-unprobed backend (and never probe a wrong SDK) --
-        # refuse with a typed error instead.
+        # An allowlisted backend still needs its own probe; reject incomplete additions.
         backend_probe = {
             "pi": "assert shutil.which('pi') is not None;",
             "claude": "import claude_agent_sdk;",
@@ -112,13 +95,10 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         environment: Any,
         context: Any,
     ) -> None:
-        """Review the frozen snapshot in-container.
+        """Review the frozen snapshot through the controlled container entrypoint.
 
-        Fail-closed: refuses any backend outside the shared
-        ``_SUPPORTED_BACKENDS`` allowlist *before* any reviewing (never
-        installs tools or widens network access), maps the allowlist child
-        environment, and invokes the controlled entrypoint. A non-zero
-        entrypoint return raises :class:`AgentError`.
+        Validate the backend before exec and pass only the allowlisted child environment.
+        Do not install tools or widen network access; nonzero exit raises ``AgentError``.
         """
         if not _HARBOR:
             raise AgentError("Harbor is not installed; install 'daydream[benchmark]'")
@@ -134,12 +114,8 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
         _require_exec_ok(result, "entrypoint review failed")
 
     def populate_context_post_run(self, context: Any) -> None:
-        """Backfill ``AgentContext`` cost/token metrics from the ATIF trajectory.
-
-        Reads ``<logs_dir>/agent/trajectory.json`` (Harbor syncs the container's
-        ``/logs/agent/`` there after a trial). When present with ``final_metrics``,
-        fills the corresponding ``AgentContext`` fields. A missing or malformed
-        trajectory leaves metrics unset -- no fabricated zeros.
+        """Read synced ATIF final metrics into AgentContext; absent/malformed trajectories
+        leave values unset.
         """
         traj = Path(self.logs_dir) / "agent" / "trajectory.json"
         try:
@@ -162,24 +138,11 @@ class DaydreamReviewAgent(BaseAgent):  # type: ignore[misc]
 
 
 def build_child_env(parent_env: Mapping[str, str], *, backend: str = "pi") -> dict[str, str]:
-    """Build the fail-closed allowlist child environment.
-
-    Keeps only ``DAYDREAM_REVIEW_*`` reviewer config/credential plus the required
-    process variables, then explicitly drops the banned variables (GitHub/HF/judge/
-    archive and raw provider vars) so any future secret-holding variable not in
-    the keep-set still cannot leak by default. Never passes the parent env wholesale.
-
-    Backend-conditional credential handling: for ``backend="claude"`` exactly
-    the control-plane ``ANTHROPIC_*`` keep-set declared in ``env_policy.HOST``
-    survives so the Claude Agent SDK / claude CLI in the container has
-    credentials; any other host-ambient ``ANTHROPIC_*`` var is scrubbed like
-    any other raw credential. For ``pi`` (default) and any other value, the
-    ``ANTHROPIC_*`` scrub is exactly today's fail-closed behavior.
-
-    The review-profile candidate (``DAYDREAM_REVIEW_PROFILE_CANDIDATE``, issue
-    #885/R11) rides the ``DAYDREAM_REVIEW_*`` allowlist to the entrypoint; the
-    verifier env is isolated to ``DAYDREAM_JUDGE_*`` (render_job_config), so the
-    candidate never reaches the judge.
+    """Pass only declared reviewer/process configuration, never the parent environment
+    wholesale. Claude additionally receives the exact HOST policy Anthropic credential
+    allowlist; other backends scrub those credentials. Judge, GitHub, Hub, and archive
+    secrets stay excluded. Review-profile candidates reach the reviewer entrypoint but
+    never the independently configured judge.
     """
     host = env_policy.HOST
     keep_anthropic = backend == "claude"

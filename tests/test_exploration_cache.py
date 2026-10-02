@@ -1,13 +1,7 @@
-"""Cross-run reuse of the deep pipeline's exploration pre-scan.
+"""Cross-run exploration reuse through the real runner and a stub backend.
 
-``.daydream/exploration/`` now survives a run and is keyed by
-``head sha + diff + tier + format version``
-(``daydream.exploration.exploration_cache_key``).
-A second run with an identical key reuses the directory verbatim and fires zero
-specialist agents; any key change re-runs the pre-scan and rewrites the files.
-
-Every test drives the real ``runner.run`` -> deep orchestrator path with only the
-backend seam stubbed.
+An exact exploration_cache_key hit reuses published files without specialists;
+a changed key rebuilds them. The owner includes head, diff, tier, version, and strategies.
 """
 
 from __future__ import annotations
@@ -18,9 +12,10 @@ from pathlib import Path
 import pytest
 
 from daydream import exploration as exploration_mod
-from daydream.artifact_visibility import _atomic_json, _manifest, _manifest_payload
+from daydream.artifacts.filesystem import _atomic_json, _manifest_payload, manifest_tree
 from daydream.exploration import exploration_cache_key
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import independent_exploration_profile
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
@@ -40,14 +35,10 @@ def _count_specialist_calls(stub: StubBackend) -> int:
 
 def _drift_cached_key_between_runs(artifact_runtime_root: Path, target: Path, *, drop: bool = False, content: str = "",
 ) -> None:
-    """Drift the cached exploration key between two runs, consistently.
+    """Drift both public and private recovery copies, then refresh the manifest.
 
-    Published artifacts live in two synchronized copies: the public tree, and
-    the canonical recovery copy under the private state root that the next run
-    seeds its live tree from (where the exploration cache is actually read).
-    Artifact sessions fail closed when those two disagree, so a staleness
-    simulation must drift BOTH and refresh the canonical manifest — leaving a
-    consistent state the next run reads as a stale/corrupt/missing cache key.
+    Sessions reject disagreeing copies; consistent drift is needed to exercise an
+    ordinary stale/corrupt/missing cache key on the next run.
     """
 
     roots = [entry for entry in artifact_runtime_root.iterdir() if entry.is_dir()]
@@ -60,7 +51,7 @@ def _drift_cached_key_between_runs(artifact_runtime_root: Path, target: Path, *,
             key.unlink()
         else:
             key.write_text(content)
-    _atomic_json(state_root / "canonical-manifest.json", _manifest_payload(_manifest(canonical)))
+    _atomic_json(state_root / "canonical-manifest.json", _manifest_payload(manifest_tree(canonical)))
 
 
 async def _run_deep(target: Path, *, custom_exploration: bool = True) -> int:

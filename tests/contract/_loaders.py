@@ -1,12 +1,6 @@
-"""Backend loaders for the canonical-script contract test.
-
-Each loader is an async generator that drives one ``Backend.execute`` against
-a synthesized message stream equivalent to the canonical script and yields the
-resulting ``AgentEvent`` instances.
-
-The backends consume different low-level message shapes, but must produce the
-same observable ``AgentEvent`` and trajectory Step shapes. Each loader
-synthesizes its native message format from the same canonical dict.
+"""Backend loaders translate one canonical script into native SDK/JSONL messages, then yield real
+Backend.execute events. The backends must preserve the same observable event and trajectory-step
+shapes.
 """
 
 from __future__ import annotations
@@ -41,21 +35,13 @@ from tests.harness.pi_replay import make_mock_process as make_mock_process_pi
 
 
 def _tool_results_by_id(script: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """Index the canonical script's tool results by tool-call id."""
     return {tr["id"]: tr for tr in script.get("tool_results", [])}
 
 
 def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
-    """Translate the canonical script into a Claude SDK message sequence.
-
-    Order (verified against ``ClaudeBackend.execute``):
-
-    1. AssistantMessage for turn 1 (text, thinking, tool_use blocks).
-    2. UserMessage carrying ToolResultBlock(s) for the script's tool_results.
-    3. AssistantMessage for turn 2 (text only). Carries ``usage`` so the
-       backend emits a ``MetricsEvent``.
-    4. ResultMessage with the same ``usage`` so the backend emits a
-       ``CostEvent`` mirroring Codex's ``turn.completed``.
+    """Emit assistant text/thinking/tool-use, then matching user tool results for each turn. Only the
+    final assistant message carries usage; ResultMessage repeats it so metrics and terminal cost
+    match the other loaders.
     """
     turns = script["turns"]
     tool_results_by_id = _tool_results_by_id(script)
@@ -70,16 +56,13 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
             blocks.append(MockThinkingBlock(thinking=turn["thinking"]))
         for tc in turn.get("tool_calls", []):
             blocks.append(MockToolUseBlock(id=tc["id"], name=tc["name"], input=tc.get("input") or {}))
-        # Per-turn usage only on the final turn so MetricsEvent is emitted
-        # exactly once (same cardinality as Codex's single turn.completed).
         usage = final_usage if idx == len(turns) - 1 else None
         messages.append(MockAssistantMessage(
                 content=blocks, model="claude-test-model", message_id=turn["message_id"], usage=usage,
             )
         )
 
-        # Inject a UserMessage with the matching tool results immediately
-        # after the assistant turn that issued the tool calls.
+        # Place matching user tool results immediately after the assistant turn that issued them.
         result_blocks: list[Any] = []
         for tc in turn.get("tool_calls", []):
             tr = tool_results_by_id.get(tc["id"])
@@ -97,7 +80,6 @@ def _build_claude_messages(script: dict[str, Any]) -> list[Any]:
 
 
 async def claude_loader(script: dict[str, Any], *, read_only: bool = False) -> AsyncIterator[AgentEvent]:
-    """Drive ``ClaudeBackend.execute`` against the canonical script."""
     messages = _build_claude_messages(script)
     client = scripted_client(messages)
     with pytest.MonkeyPatch.context() as monkeypatch:
@@ -111,21 +93,10 @@ async def claude_loader(script: dict[str, Any], *, read_only: bool = False) -> A
 
 
 def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
-    """Translate the canonical script into Codex JSONL event lines.
-
-    Each turn becomes:
-
-    - One reasoning ``item.completed`` carrying the thinking text (when set).
-    - One ``mcp_tool_call`` ``item.started`` + ``item.completed`` pair per
-      tool call, where the completed event's ``result.content`` carries the
-      matching ``tool_results`` entry's output. ``mcp_tool_call`` is the only
-      Codex item shape that supports an arbitrary tool name + arguments dict,
-      so it's the natural mapping for the canonical script's "Read" call.
-    - One agent_message ``item.completed`` with the turn's text.
-
-    The final ``turn.completed`` carries ``final_usage`` so Codex emits one
-    ``MetricsEvent`` + ``CostEvent`` — same cardinality as Claude's
-    ``ResultMessage`` carrying the same usage dict.
+    """Translate each turn to reasoning, tool-call/result pairs, and agent text. mcp_tool_call supports
+    the canonical arbitrary tool names and argument dictionaries; result.content carries the
+    matching output. The final turn.completed supplies one MetricsEvent and CostEvent from
+    final_usage.
     """
     turns = script["turns"]
     tool_results_by_id = _tool_results_by_id(script)
@@ -187,7 +158,6 @@ def _build_codex_jsonl(script: dict[str, Any]) -> list[str]:
 
 
 async def codex_loader(script: dict[str, Any], *, read_only: bool = False) -> AsyncIterator[AgentEvent]:
-    """Drive ``CodexBackend.execute`` against the canonical script."""
     lines = _build_codex_jsonl(script)
     mock_proc = make_mock_process(lines)
     backend = CodexBackend(model="codex-test-model")
@@ -200,31 +170,11 @@ async def codex_loader(script: dict[str, Any], *, read_only: bool = False) -> As
 
 
 def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
-    """Translate the canonical script into Pi JSONL event lines.
-
-    Pi's event vocabulary (plan §4) is turn-oriented: a ``message_end`` carries
-    the full assistant content blocks (text / thinking / toolCall), then
-    ``tool_execution_start``/``tool_execution_end`` pairs carry each tool's
-    result, then ``turn_end`` carries usage + closes the turn. ``agent_end``
-    carries no payload of interest here.
-
-    Mapping per turn:
-
-    - ``turn_start``
-    - ``message_start`` + ``message_end`` with text / thinking / toolCall
-      blocks (toolCall blocks present for completeness; the authoritative
-      tool-call/result comes from the ``tool_execution_*`` events).
-    - ``tool_execution_start`` + ``tool_execution_end`` per tool call, with the
-      ``tool_results`` entry's output on the ``end`` event's
-      ``result.content[0].text``.
-    - ``turn_end`` carrying the assistant message. Only the final turn's
-      message carries ``usage`` so Pi emits exactly one ``MetricsEvent``
-      (matching Codex's single-``turn.completed`` cardinality).
-
-    ``final_usage`` is also aggregated onto the ``agent_end``-derived
-    ``CostEvent``, but since the parity test compares message / reasoning /
-    tool_calls / observation results (not metrics), the exact token split does
-    not affect Step parity.
+    """Emit turn_start, message_start/message_end, tool_execution_start/tool_execution_end pairs, and
+    turn_end. Message toolCall blocks describe the calls; tool_execution events own their results.
+    Only the final turn carries usage, matching the other loaders' single MetricsEvent. agent_end
+    supplies aggregate cost; exact token splits do not affect the message/reasoning/tool/observation
+    step-parity assertions.
     """
     turns = script["turns"]
     tool_results_by_id = _tool_results_by_id(script)
@@ -290,7 +240,6 @@ def _build_pi_jsonl(script: dict[str, Any]) -> list[str]:
 
 
 async def pi_loader(script: dict[str, Any], *, read_only: bool = False) -> AsyncIterator[AgentEvent]:
-    """Drive ``PiBackend.execute`` against the canonical script."""
     lines = _build_pi_jsonl(script)
     mock_proc = make_mock_process_pi(lines)
     backend = PiBackend(model="pi-test-model")

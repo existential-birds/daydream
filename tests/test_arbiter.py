@@ -1,18 +1,8 @@
-"""Unit tests for the scoped-arbiter selection predicate (issue #168).
+"""Arbiter and suppression selection over mixed-stack review records.
 
-``select_arbiter_targets`` decides which parsed per-stack records reach the
-expensive Opus arbiter: every high-severity record, plus every record at a
-``(file, line)`` location *contested* across >=2 stacks with divergent severity.
-Low/medium uncontested findings must never be selected — that is the cost split.
-
-These tests drive the predicate against the structural shape it exists to
-handle: a mixed-severity, multi-stack, same-``file:line`` collision, alongside
-the near-miss shapes (same location but one stack; same location but agreeing
-severity) that must NOT trip contested selection.
-
-Issue #1111 adds the "distinct stacks" half of that predicate: ``_stack_name``
-resolves each record to ONE spelling of its owning stack, so a single stack
-tagged two ways cannot masquerade as a contest.
+Arbitration selects high severity or divergent severity at a shared location
+across distinct stacks. Canonical stack identity prevents alternate source
+spellings from creating a false contest.
 """
 
 from __future__ import annotations
@@ -23,12 +13,8 @@ from daydream.deep.arbiter import select_arbiter_targets, select_suppression_tar
 
 
 def _rec(file: str, line: int, severity: str, uid: str | None = None) -> dict[str, object]:
-    """Build a parsed per-stack record.
-
-    ``uid`` is the host-minted ``stack:ordinal`` identity (issue #1111). It is
-    optional because most tests here drive selection off the parallel ``sources``
-    list alone, which is also the shape a record written by a pre-``uid`` run has
-    on disk; the stack-normalization tests pass it explicitly.
+    """Build a record with an optional host UID; omission exercises legacy artifacts
+    whose stack identity comes from the parallel sources list.
     """
     record: dict[str, object] = {
         "id": 1, "description": f"{severity} finding at {file}:{line}", "file": file, "line": line,
@@ -90,10 +76,7 @@ def test_high_severity_always_selected_even_when_alone() -> None:
     assert select_arbiter_targets(records, sources) == [1]
 
 def test_missing_severity_only_selectable_via_contested() -> None:
-    # A record with no severity field (the legacy FEEDBACK_SCHEMA shape) is never
-    # "high", so it can only be pulled in by a contested collision. Here both
-    # records at x.py:1 lack severity -> severities collapse to {""} -> not
-    # contested -> nothing selected.
+    # Missing severity cannot select a record or diverge when both values are absent.
     bare = {"id": 1, "description": "d", "file": "x.py", "line": 1}
     assert select_arbiter_targets([dict(bare), dict(bare)], ["python", "react"]) == []
 
@@ -103,12 +86,7 @@ def test_length_mismatch_raises() -> None:
         select_arbiter_targets([_rec("a.py", 1, "high")], ["python", "react"])
 
 
-# Issue #232: precision-mode suppression selection predicate.
-#
-# ``select_suppression_targets`` picks the borderline, uncontested findings the
-# arbiter never sees: LOW-confidence and/or low-severity records NOT in the
-# arbiter's exclusion set. High/contested records (the arbiter's job) must never
-# be selected here.
+# Suppression selects borderline severity/confidence outside arbiter exclusions.
 
 def test_suppression_selects_low_confidence_and_low_severity_uncontested() -> None:
     # Index map (no exclusions):
@@ -130,9 +108,7 @@ def test_suppression_excludes_arbiter_targets() -> None:
     assert select_suppression_targets(records, arbiter_targets) == [1]
 
 def test_suppression_excludes_contested_low_finding() -> None:
-    # A low-severity finding that is CONTESTED (same loc, 2 stacks, divergent
-    # severity) reaches the arbiter, so it must be excluded from suppression even
-    # though it is low severity.
+    # Contested low-severity records belong to arbitration, not suppression.
     records = [
         _rec_conf("api.py", 10, "high", "HIGH"),  # 0 contested + high
         _rec_conf("api.py", 10, "low", "LOW"),    # 1 contested (excluded despite low)
@@ -184,30 +160,20 @@ def test_suppression_rejects_unknown_confidence_class() -> None:
         select_suppression_targets(records, confidence_classes=("LOW", "GUESSED"))
 
 def test_contested_only_records_skip_the_severity_branch() -> None:
-    """``contested_only`` indices are invisible to the severity branch (#1103).
-
-    The deep pipeline passes the structural meta-stack's records here so they can contest a language finding
-    without every high-severity structural finding also being pulled into arbitration on its own."""
+    """Structural records marked contested_only require a contest even at high severity."""
     records = [_rec("api.py", 10, "high"), _rec("api.py", 20, "high")]
     sources = ["python", "structure"]
     assert select_arbiter_targets(records, sources) == [0, 1]
     assert select_arbiter_targets(records, sources, contested_only=[1]) == [0]
 
 def test_contested_only_record_is_still_selected_when_contested() -> None:
-    """Issue #1103 case A: exempting the severity branch does not exempt contest.
-
-    Same file, same line, two distinct stacks, divergent severity -- the pair the contested branch exists for. The
-    structural side must come back even though it opted out of severity-based selection."""
+    """Severity exemption still permits a genuine cross-stack location contest."""
     records = [_rec("svc/config.yaml", 29, "medium"), _rec("svc/config.yaml", 29, "high")]
     sources = ["python", "structure"]
     assert select_arbiter_targets(records, sources, contested_only=[1]) == [0, 1]
 
 def test_whole_file_record_contests_every_line_in_that_file() -> None:
-    """Issue #1103 case B: ``line: 0`` is a whole-file anchor, not line zero.
-
-    A whole-file finding is about the entire file, so it co-locates with each line reported in that file. Grouping
-    strictly by ``(file, line)`` filed it under its own key and the contested branch could never fire against the
-    line-anchored twin."""
+    """A whole-file line:0 anchor contests any line-anchored twin in the same file."""
     records = [_rec("svc/loader.py", 88, "medium"), _rec("svc/loader.py", 0, "high")]
     sources = ["python", "structure"]
     assert select_arbiter_targets(records, sources, contested_only=[1]) == [0, 1]
@@ -219,10 +185,7 @@ def test_whole_file_record_does_not_reach_across_files() -> None:
     assert select_arbiter_targets(records, sources, contested_only=[1]) == []
 
 def test_two_whole_file_records_contest_each_other() -> None:
-    """Two ``line: 0`` findings from different stacks still form one group.
-
-    Routing whole-file records out of the ``(file, line)`` grouping must not lose the case where a file has
-    nothing BUT whole-file findings."""
+    """Whole-file records can contest one another without any line-anchored finding."""
     records = [_rec("svc/loader.py", 0, "medium"), _rec("svc/loader.py", 0, "high")]
     sources = ["python", "structure"]
     assert select_arbiter_targets(records, sources, contested_only=[1]) == [0, 1]
@@ -247,55 +210,33 @@ def test_select_arbiter_targets_honors_contested_location_knob() -> None:
     assert select_arbiter_targets(records, sources, min_severity="medium", contested_location=False) == [0, 1]
 
 
-# Issue #1111: "two or more DISTINCT stacks" needs one canonical spelling per
-# stack. ``source`` has two -- the ``stack-<name>-records.json`` filename used by
-# every path that loads records off disk, and a bare stack name supplied by
-# standalone callers -- so comparing raw ``source`` strings made
-# one stack count as two and marked uncontested locations contested, routing
-# low/medium findings to the expensive Opus arbiter that the cost split exists to
-# keep away from it. ``_stack_name`` prefers the stack half of the record's
-# ``uid`` and normalizes ``source`` only as the uid-less fallback.
+# Stack identity prefers birth UID, falling back to normalized source names.
+# Bare names and stack-<name>-records.json paths can identify the same stack.
 
 def test_one_stack_spelled_two_ways_is_not_contested() -> None:
-    """A single stack tagged both ways must not fake a cross-stack contest.
-
-    Same location, divergent severity, neither record high: the ONLY thing that could select either is the
-    contested branch, and it must not fire -- both records are ``python``, however the pipeline happened to tag
-    them."""
+    """Different source spellings cannot make one stack's divergent severities a contest."""
     records = [_rec("api.py", 10, "medium", uid="python:1"), _rec("api.py", 10, "low", uid="python:2")]
     sources = ["stack-python-records.json", "python"]
     assert select_arbiter_targets(records, sources) == []
 
 def test_genuine_cross_stack_contest_survives_normalization() -> None:
-    """Normalizing the spelling must not also erase real contests.
-
-    The mirror of the test above with the same two ``source`` spellings, but the records belong to different
-    stacks -- the case the contested branch exists for. Collapsing every record onto one key would silently
-    disable it."""
+    """Source normalization preserves genuinely distinct stacks and their contest."""
     records = [_rec("api.py", 10, "medium", uid="python:1"), _rec("api.py", 10, "low", uid="react:1")]
     sources = ["stack-python-records.json", "react"]
     assert select_arbiter_targets(records, sources) == [0, 1]
 
 def test_uid_less_records_fall_back_to_normalized_source() -> None:
-    """A record with no ``uid`` is grouped by its normalized ``source``.
+    """Legacy UID-less records use normalized sources instead of an empty pseudo-stack.
 
-    Records written by a run from before ``uid`` existed reach the predicate without one.
-    ``stack_name_from_uid("")`` is ``""``, so without the ``source`` fallback every such record would collapse
-    onto one empty pseudo-stack and the contested branch would UNDER-count -- silently dropping real cross-stack
-    contests out of arbitration. Both spellings still normalize, so the one-stack-two-ways case stays uncontested
-    here too."""
+    Both real cross-stack contests and one-stack alternate spellings must work.
+    """
     two_stacks = [_rec("api.py", 10, "medium"), _rec("api.py", 10, "low")]
     assert select_arbiter_targets(two_stacks, ["stack-python-records.json", "react"]) == [0, 1]
     one_stack = [_rec("api.py", 10, "medium"), _rec("api.py", 10, "low")]
     assert select_arbiter_targets(one_stack, ["stack-python-records.json", "python"]) == []
 
 def test_uid_outranks_the_source_tag() -> None:
-    """The ``uid`` wins when the two disagree, because it is minted at birth.
-
-    ``source`` is re-derived from whichever file a record was loaded out of; ``uid`` is stamped once, when the
-    record is created, and travels with the record through the structural partition, adjudication drops and record
-    rewrites. Two records sharing a ``source`` tag but carrying uids from different stacks are two stacks, and the
-    contest must fire."""
+    """Birth UIDs outrank re-derived source tags when determining distinct stacks."""
     records = [_rec("api.py", 10, "medium", uid="python:1"), _rec("api.py", 10, "low", uid="react:1")]
     sources = ["stack-python-records.json", "stack-python-records.json"]
     assert select_arbiter_targets(records, sources) == [0, 1]

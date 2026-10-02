@@ -1,10 +1,4 @@
-"""Evidence-reuse gates: the finalized test evidence reaches the commit gate.
-
-The pure decision predicate is covered by ``tests/test_evidence_reuse.py``.
-These tests drive the production deep flow and assert that the identity
-produced by ``finalize_retained_tree_after_test`` is the same offer the commit
-phase receives (issue #1408, tasks 10/12).
-"""
+"""Real deep-flow tests binding finalized host-test evidence to the commit gate."""
 
 from __future__ import annotations
 
@@ -32,13 +26,7 @@ from tests.test_deep_orchestrator import MakeConfig, _silence
 async def _run_real_fix_flow(
     tmp_path: Path, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch, *, test_command: str = "true",
 ) -> int:
-    """Drive the real deep review -> fix -> test -> commit flow to its commit gate.
-
-    A single Python finding is fixed by the stub and the host test command is
-    configured green, so the fix cycle reaches ``_step_commit``. The caller
-    installs the ``phase_commit_push`` spy so the offer that reaches the commit
-    phase is observable.
-    """
+    """Run a real fix and green host test to the caller's commit-evidence spy."""
     repo = tmp_path / "evidence-reuse-flow"
     _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})
 
@@ -106,13 +94,9 @@ async def test_a_tree_key_mismatch_is_refused(tmp_path: Path, make_work: Any, ma
 async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig
 ) -> None:
-    """Real flow with an executable pre-push hook: the finalized evidence
-    matches the retained tree, so the proactive hook-run suite execution is
-    skipped, while the hook itself still fires and the real push still lands.
+    """Reuse skips the redundant proactive suite run while the hook and real push execute.
 
-    The host-command counter is the SH3 measurement: exactly one execution
-    (the TEST phase) proves the commit gate removed its redundant run; without
-    reuse the same hook-present flow pays a second one.
+    The host-command counter must show exactly one TEST-phase execution.
     """
     repo = tmp_path / "hook-reuse-flow"
     _seed_feature_branch(repo, base={"api.py": "A = 1\n"}, feature={"api.py": "A = 2\n"})

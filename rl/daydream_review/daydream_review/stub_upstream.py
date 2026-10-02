@@ -1,10 +1,6 @@
-"""A canned upstream for the local smoke rollout.
-
-The interception server forwards to the eval client's upstream, so pointing that
-at this server gives a full rollout — env injection, dialect, secret auth, trace
-capture, scoring — with no provider account and no model quality. The replies are
-deliberately useless; the rollout is expected to score near zero. What is being
-proven is the plumbing.
+"""Canned upstream for account-free smoke rollouts through interception: exercise environment
+injection, dialect, secret auth, trace capture, and scoring. Replies are intentionally useless and
+should score near zero.
 
     python -m daydream_review.stub_upstream --port 8399
 """
@@ -67,13 +63,8 @@ def _anthropic_message(model: str, reply: str) -> dict[str, Any]:
 
 
 class StubUpstreamHandler(BaseHTTPRequestHandler):
-    """Answer a completion POST in the shape its own dialect requires.
-
-    One canned payload for all three would not do: each dialect parses the
-    upstream response with its own strict model, so a merged blob fails
-    validation and the rollout exercises an error branch while still looking
-    like it completed. Routing on the upstream path is what makes the smoke run
-    prove the dialect rather than the retry logic.
+    """Return the upstream path's dialect-specific completion shape. A merged payload fails strict
+    response validation and would exercise retries instead of the intended dialect.
     """
 
     reply: str = CANNED_REPLY

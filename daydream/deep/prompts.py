@@ -1,46 +1,34 @@
-"""Prompt builders for deep-review mode.
+"""Review and adjudication prompt builders for deep mode.
 
-Pure keyword-only functions that assemble prompt strings from context pointers.
-All context passes via filesystem paths (D-09) -- no full file contents embedded in
-prompts. Per-stack agents only see their own stack's files + TTT context (D-10).
-
-Public builders:
-    - build_per_stack_prompt: per-language stack scoped review.
-    - build_structural_prompt: repo-wide structural-maintainability meta-stack.
-    - build_arbiter_prompt: scoped Opus arbiter for cross-stack conflict resolution.
-    - build_merge_prompt: cross-stack merge into a unified report.
-    - build_verification_prompt: pre-fix recommendation-verifier agent prompt.
-    - build_fix_verify_prompt: post-fix (fix-verify) read-only round verifier.
-    - build_generic_fallback_prompt: fallback for files without a dedicated stack.
-    - build_sequence_diagram_prompt: grounded sequence-diagram spec author.
-    - build_flowchart_prompt: grounded flowchart spec author.
-    - build_diagram_repair_prompt: the single diagram repair turn.
+Profile strategies own judgment policy; these builders add host-owned scope,
+context transport, grounding, and output instructions. Diagram and verification
+builders remain re-exported here for extension registry compatibility.
 """
 
 from __future__ import annotations
 
 import json
-import re
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
 
-from daydream.phases import (
+from daydream.deep.diagram_prompts import (
+    build_diagram_repair_prompt as build_diagram_repair_prompt,
+    build_flowchart_prompt as build_flowchart_prompt,
+    build_sequence_diagram_prompt as build_sequence_diagram_prompt,
+)
+from daydream.deep.diff import _full_diff_pointer, _hunk_index_authority
+from daydream.deep.verification_prompts import (
+    build_fix_verify_prompt as build_fix_verify_prompt,
+    build_verification_prompt as build_verification_prompt,
+)
+from daydream.phases.review_prompts import (
     _confidence_and_convention_instructions,
     _dependency_impact_instructions,
     _exploration_pointer,
-    _render_bash_allowlist,
     _settled_decisions_block,
 )
-from daydream.prompt_budget import (  # noqa: F401
-    INLINE_DIFF_BUDGET_BYTES,
-    fits_inline_diff_budget,
-    inline_context_file,
-    truncate_utf8_to_budget,
-)
+from daydream.prompt_budget import inline_context_file
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_BLOCK
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION, UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.prompts.schema_block import schema_block
 from daydream.prompts.wire_contract import (
     WIRE_CONTRACT_GENERIC_INSTRUCTION,
     WIRE_CONTRACT_RUST_INSTRUCTION,
@@ -53,11 +41,8 @@ DOC_REVIEW_NOTICE = (
     "generic-fallback agent (D-20)."
 )
 
-# Repo-wide cross-file symbol existence check (issue #310). All rubric
-# constants below are embedded inline as instruction text because reviewers run
-# with cwd set to the reviewed repo, so a bare skill-file read resolves against
-# that repo and silently drops the gate. Demands Gate-2 evidence (``rg`` the
-# definition) before flagging any symbol referenced outside the diff.
+# Rubrics are inline because agents run in the reviewed repository: a bare
+# skill-file pointer would resolve there and could silently omit the policy.
 CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "Cross-file symbol existence check (apply before flagging anything about a "
     "symbol defined OUTSIDE the diff):\n"
@@ -73,9 +58,6 @@ CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION = (
     "the missing definition is real, never when you simply failed to locate it."
 )
 
-# Per-stack config-flow trace (issue #310). Targets the plumbed-config bug
-# class: a field parsed but silently dropped, or the same value read twice at
-# different points with the source able to change between reads (TOCTOU).
 CONFIG_FLOW_TRACE_INSTRUCTION = (
     "Config/env flow trace (apply to every config field or env var plumbed "
     "through layers):\n"
@@ -90,9 +72,6 @@ CONFIG_FLOW_TRACE_INSTRUCTION = (
     "with the source able to change between reads (TOCTOU)."
 )
 
-# Trust-model check (issue #310). Targets security-relevant markers by demanding
-# an explicit trust-model sentence before a finding is reported: cache-control
-# injection across a trust boundary, escaping, credential forwarding.
 TRUST_MODEL_INSTRUCTION = (
     "Trust-model check (apply to every security-relevant marker: cache-control "
     "injection, trust boundaries, escaping, credential forwarding):\n"
@@ -103,11 +82,6 @@ TRUST_MODEL_INSTRUCTION = (
     "cache-control directive, or credentials passed through an intermediate hop."
 )
 
-# Shared verification-protocol instruction for structural and generic-fallback
-# builders (issue #229). Both reviewers are language-agnostic, so the protocol's
-# language-specific valid-pattern tables add little; the gate discipline is
-# self-contained below. Mirrors the inline gate-0 embedding in
-# ``build_verification_prompt``.
 VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Before writing findings, apply the verification gates "
     "(stated inline here — no skill file read is required):\n"
@@ -127,12 +101,6 @@ VERIFICATION_PROTOCOL_INSTRUCTION = (
     "Do NOT report a finding that fails any gate."
 )
 
-# Per-stack test-quality rubric (issue #308). Embedded inline as instruction text
-# for the same reason as ``VERIFICATION_PROTOCOL_INSTRUCTION``: per-stack
-# reviewers run with cwd set to the reviewed repo, so a bare skill-file read
-# resolves against that repo and silently drops the gates. The rubric targets
-# test hunks in the diff: vacuous assertions, internal-field/pointer-identity
-# assertions, nondeterminism, canonical-path bypasses, and portability breaks.
 TEST_QUALITY_RUBRIC_INSTRUCTION = (
     "Apply the test-quality rubric to every test hunk in the diff "
     "(stated inline here — no skill file read is required):\n"
@@ -156,12 +124,6 @@ TEST_QUALITY_RUBRIC_INSTRUCTION = (
     "behavior the test claims to cover."
 )
 
-# Per-stack + structural anti-slop review rubric (issue #314). Embedded inline as
-# instruction text for the same reason as ``TEST_QUALITY_RUBRIC_INSTRUCTION``:
-# per-stack and structural reviewers run with cwd set to the reviewed repo, so a
-# bare skill-file read resolves against that repo and silently drops the rubric.
-# Require a concrete consequence or an established repository convention;
-# function size alone is not a maintainability defect.
 ANTI_SLOP_RUBRIC_INSTRUCTION = (
     "Apply the maintainability rubric to code changed by this diff "
     "(stated inline here -- no skill file read is required):\n"
@@ -184,16 +146,10 @@ def _context_pointers(
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
 ) -> str:
-    """Reference pointers for TTT stage outputs (D-09/D-19 context bus).
+    """Reference TTT artifacts, inlining captured intent when available.
 
-    When ``intent_authoritative`` is True, the intent pointer is upgraded: the
-    pointer to ``intent_path`` is accompanied by a provenance sentence and the
-    ``AUTHORITATIVE_INTENT_RULE`` precedence rule, since the intent was grounded
-    by a fresh, head-matched PR description (issue #279).
-
-    ``include_alternatives=False`` omits exactly the alternatives paragraph and
-    nothing else — for callers running concurrently with the wonder pass, whose
-    ``alternatives.json`` does not exist yet.
+    Authoritative intent carries PR provenance and the precedence rule. Omit
+    alternatives while the concurrent wonder pass has not written its artifact.
     """
     captured_intent = inline_context_file(intent_path)
     if captured_intent is not None:
@@ -217,7 +173,7 @@ def _context_pointers(
         head = (
             f"TTT intent summary is at {intent_path}. Read it before starting your "
             f"review -- it records the author's stated intent from the pull-request "
-            f"description."  # provenance sentence
+            f"description."
             f"\n{AUTHORITATIVE_INTENT_BLOCK}"
         )
         return f"{head}\n{alternatives_paragraph}" if include_alternatives else head
@@ -239,7 +195,8 @@ def _review_context_parts(
     prior_commits: str | None = None,
 ) -> list[str]:
     """Shared context block for the review/adjudication prompts: exploration
-    pointer, settled-decisions block, CWD grounding, and TTT context pointers."""
+    pointer, settled-decisions block, CWD grounding, and TTT context pointers.
+    """
     parts: list[str] = []
     pointer = _exploration_pointer(exploration_dir)
     if pointer:
@@ -267,13 +224,7 @@ def _artifact_footer(output_path: Path) -> str:
 
 
 def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
-    """Host-owned scope envelope for a reviewed stack scope.
-
-    Carries only runtime scope metadata (stack name, assigned files, the
-    parallel-review boundary). The judgment
-    policy is the profile-owned ``discovery.per_stack`` strategy, rendered by
-    the caller.
-    """
+    """Name the assigned files and the boundary of parallel stack reviews."""
     joined = ", ".join(files)
     return (
         f"You are reviewing the {stack_name} stack. Assigned files: {joined}\n"
@@ -285,269 +236,16 @@ def _stack_scope_instruction(stack_name: str, files: list[str]) -> str:
     )
 
 
-# Per-file block splitter (splits the unified diff at each `diff --git` header).
-_DIFF_BLOCK_SPLIT = re.compile(r"^(?=diff --git )", re.MULTILINE)
-# `+++ ` and `--- ` file headers inside a single block.
-_DIFF_PLUS_HEADER = re.compile(r"^\+\+\+ (.+)$", re.MULTILINE)
-_DIFF_MINUS_HEADER = re.compile(r"^--- (.+)$", re.MULTILINE)
-# Fallback header for binary / mode-only diffs that lack `--- / +++`.
-_DIFF_GIT_HEADER = re.compile(r"^diff --git a/(\S+) b/(\S+)")
-# Truncation marker emitted by ``bound_deep_diff``; carries the same dropped
-# names as ``DeepDiffBoundInfo.dropped_paths`` so consumers of the bounded text
-# alone (``_diff_blocks_for_files``) can tell a dropped block from a file
-# simply absent from the diff. Parse-safe for every block consumer: the line
-# carries no ``diff --git`` / ``---`` / ``+++`` header, so ``_diff_block_path``
-# returns None and the block splitters skip it.
-_DIFF_TRUNCATION_MARKER = re.compile(
-    r"^# daydream: deep diff truncated: \d+ -> \d+ bytes "
-    r"\(\d+/\d+ blocks retained(?:; dropped: (?P<dropped>[^)]+))?\)\n"
-)
-
-
-def _diff_block_path(block: str) -> str | None:
-    """Resolve the single changed path for one ``diff --git`` block.
-
-    Shared unified-diff block-parsing contract used by both
-    ``_diff_blocks_for_files`` (here) and ``orchestrator._diff_changed_files``
-    so the post-state / pre-state / header fallback order and ``/dev/null``
-    handling live in exactly one place.
-
-    Prefers the post-state path (``+++ b/<path>``) so renames produce only the
-    destination. Falls back to the pre-state path for deletions
-    (``+++ /dev/null``) and to the ``diff --git`` header for binary / mode-only
-    diffs that lack ``---``/``+++`` lines. ``/dev/null`` sentinels are skipped
-    at every layer. Returns ``None`` for blocks that are not ``diff --git``
-    headers or where no path can be resolved.
-    """
-
-    def _strip_prefix(path: str, prefix: str) -> str:
-        return path[len(prefix) :] if path.startswith(prefix) else path
-
-    if not block.startswith("diff --git "):
-        return None
-    plus = _DIFF_PLUS_HEADER.search(block)
-    if plus and plus.group(1) != "/dev/null":
-        return _strip_prefix(plus.group(1), "b/")
-    minus = _DIFF_MINUS_HEADER.search(block)
-    if minus and minus.group(1) != "/dev/null":
-        return _strip_prefix(minus.group(1), "a/")
-    git = _DIFF_GIT_HEADER.match(block)
-    if git:
-        return git.group(2)
-    return None
-
-
-def _diff_blocks_for_files(diff: str, files: list[str]) -> str | None:
-    """Return the concatenated diff blocks for ``files`` (issue #172, Fix B).
-
-    Reuses the existing per-file block splitter (``_DIFF_BLOCK_SPLIT`` regex)
-    plus ``_diff_block_path`` (which applies the post-state header regexes
-    ``_DIFF_PLUS_HEADER`` / ``_DIFF_MINUS_HEADER`` / ``_DIFF_GIT_HEADER``) to
-    select the ``diff --git`` blocks whose post-state path matches a file in
-    ``files``. The blocks are concatenated as-is (unified-diff text, including
-    headers / hunks).
-
-    Byte-bounded: when the concatenated result would exceed
-    ``INLINE_DIFF_BUDGET_BYTES`` the helper returns ``None`` so the caller
-    falls back to the diff_path pointer (keeps prompt size bounded). Also
-    returns ``None`` when no blocks match (e.g. files absent from the diff).
-
-    Args:
-        diff: Full unified diff text.
-        files: Repo-relative paths to select blocks for.
-
-    Returns:
-        The concatenated diff blocks (with a trailing newline), or ``None``
-        when the result would exceed the byte budget, no blocks match, or the
-        ``diff`` is a bounded value whose truncation marker names one of
-        ``files`` as dropped whole (a stack that mixes retained and dropped
-        blocks must fall back to the diff_path pointer rather than inline a
-        silently partial hunk set).
-    """
-    wanted = set(files)
-    if not wanted:
-        return None
-
-    # Issue #644 follow-up: ``bound_deep_diff`` drops whole blocks over budget
-    # and names them in the leading truncation marker. A wanted file absent
-    # from the bounded text is only a problem when the marker names it as
-    # dropped -- a scope file never changed in this PR has no hunks to inline.
-    marker = _DIFF_TRUNCATION_MARKER.match(diff)
-    if marker is not None and marker.group("dropped") is not None:
-        dropped = {p.strip() for p in marker.group("dropped").split(",") if p.strip()}
-        if wanted & dropped:
-            return None
-
-    selected: list[str] = []
-    for block in _DIFF_BLOCK_SPLIT.split(diff):
-        if _diff_block_path(block) in wanted:
-            selected.append(block if block.endswith("\n") else block + "\n")
-
-    if not selected:
-        return None
-    result = "".join(selected)
-    if not fits_inline_diff_budget(result):
-        return None
-    return result
-
-
-@dataclass
-class DeepDiffBoundInfo:
-    """Truncation statistics for one ``bound_deep_diff`` call.
-
-    ``retained_bytes`` excludes the marker line; ``oversize_paths`` names the
-    files whose single block exceeded the cap and was kept whole;
-    ``dropped_paths`` names the files whose blocks were dropped whole by the
-    bound (``marker`` carries the same names inline, so a consumer of the
-    bounded text alone -- e.g. ``_diff_blocks_for_files`` -- can tell a
-    dropped block from a file simply absent from the diff). Only a LEADING
-    oversize block (one that arrives before any retained block) is kept
-    whole and recorded; an oversize block arriving after a retained block is
-    dropped whole, so it is absent from ``oversize_paths`` but present in
-    ``dropped_paths``.
-    """
-
-    truncated: bool
-    original_bytes: int = 0
-    retained_bytes: int = 0
-    total_blocks: int = 0
-    retained_blocks: int = 0
-    oversize_paths: list[str] = field(default_factory=list)
-    dropped_paths: list[str] = field(default_factory=list)
-    marker: str | None = None
-
-
-def bound_deep_diff(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> tuple[str, DeepDiffBoundInfo]:
-    """Bound ``diff`` to ``budget`` bytes using whole ``diff --git``-block retention.
-
-    Issue #644: the deep-flow gather stores this bounded value in
-    ``ctx.data["diff"]`` so a pathological PR never feeds an oversized
-    in-memory diff into the prompt pipeline. Reuses the shared
-    ``_DIFF_BLOCK_SPLIT`` / ``_diff_block_path`` parse contract -- a retained
-    block is byte-identical to its source block and no block is ever split
-    mid-stream.
-
-    At/under ``budget`` the input is returned unchanged with no marker
-    (byte-for-byte identical to today, Must-have #4). Over ``budget`` whole
-    blocks are retained while ``retained_bytes + block_bytes <= budget``; a
-    single block that alone exceeds the cap is kept whole with its path
-    recorded in ``oversize_paths`` -- but only when it is the leading block
-    (no retained block yet). An oversize block arriving after a retained
-    block is dropped whole and omitted from ``oversize_paths`` (block
-    integrity outranks the soft bound; the prompt-inline budget already keeps
-    it out of an oversized prompt). The
-    returned value carries a leading ``# daydream: deep diff truncated:``
-    marker line only when truncated; ``retained_bytes`` excludes the marker.
-    When blocks were dropped the marker names them (``; dropped: <paths>``),
-    mirroring ``dropped_paths`` in the info object.
-
-    Blocks that fail to resolve a path via ``_diff_block_path`` (the leading
-    empty split fragment, non-``diff --git`` elements) are skipped exactly as
-    ``_diff_changed_files`` / ``_diff_blocks_for_files`` do.
-
-    Returns:
-        ``(bounded_diff, DeepDiffBoundInfo)``.
-    """
-    original_bytes = len(diff.encode("utf-8"))
-    if original_bytes <= budget:
-        return diff, DeepDiffBoundInfo(truncated=False, original_bytes=original_bytes, marker=None)
-
-    retained: list[str] = []
-    retained_bytes = 0
-    total_blocks = 0
-    oversize_paths: list[str] = []
-    dropped_paths: list[str] = []
-    for block in _DIFF_BLOCK_SPLIT.split(diff):
-        block_path = _diff_block_path(block)
-        if block_path is None:
-            # Leading empty fragment / non-``diff --git`` element: never a block.
-            continue
-        total_blocks += 1
-        block_bytes = len(block.encode("utf-8"))
-        if retained_bytes + block_bytes <= budget:
-            retained.append(block)
-            retained_bytes += block_bytes
-        elif not retained:
-            # A single block larger than the cap is kept whole (block
-            # integrity outranks the soft byte bound); the prompt-inline
-            # budget keeps it out of an oversized prompt.
-            retained.append(block)
-            retained_bytes += block_bytes
-            oversize_paths.append(block_path)
-        else:
-            # Block dropped whole; never split mid-stream. The path is
-            # recorded so per-stack extraction can refuse a silently partial
-            # inline when a stack mixes retained and dropped blocks.
-            dropped_paths.append(block_path)
-
-    dropped_clause = f"; dropped: {', '.join(dropped_paths)}" if dropped_paths else ""
-    marker = (
-        f"# daydream: deep diff truncated: {original_bytes} -> {retained_bytes} bytes "
-        f"({len(retained)}/{total_blocks} blocks retained{dropped_clause})\n"
-    )
-    bounded = marker + "".join(retained)
-    return bounded, DeepDiffBoundInfo(
-        truncated=True,
-        original_bytes=original_bytes,
-        retained_bytes=retained_bytes,
-        total_blocks=total_blocks,
-        retained_blocks=len(retained),
-        oversize_paths=oversize_paths,
-        dropped_paths=dropped_paths,
-        marker=marker,
-    )
-
-
-def _full_diff_pointer(diff_path: Path) -> str:
-    """Shared paragraph pointing agents at the on-disk full PR diff."""
-    return (
-        f"The full PR diff (base..HEAD) is at {diff_path}. Read it directly; "
-        "do NOT run `git diff` without a base ref -- on a clean branch that "
-        "returns empty and hides committed changes."
-    )
-
-
-# Shared changed-line authority paragraph embedded by _diff_instruction in both
-# the inline-hunk branch and the path-pointer fallback (AC#1: reviewers must not
-# re-derive changed-file/line ranges with git diff -- the hunk index is the
-# single persisted source).
-def _hunk_index_authority(diff_path: Path) -> str:
-    """Name the hunk index adjacent to the routed full-diff artifact."""
-    return (
-        f"Changed line ranges are authoritative in `{diff_path.parent / 'hunk-index.json'}` "
-        "— do not re-derive them with `git diff` (the index is written once at "
-        "gather and is the single persisted source of changed-file/line ranges)."
-    )
-
-
 def _diff_instruction(
     diff_path: Path,
     files: list[str],
     *,
     inline_diff: str | None = None,
 ) -> str:
-    """Diff context for a per-stack / generic-fallback reviewer.
+    """Inline complete stack hunks or point to the full diff artifact.
 
-    Issue #172 Fix B (read-once):
-      - When ``inline_diff`` is supplied (the relevant hunks already extracted
-        by ``_diff_blocks_for_files`` and under the byte bound), the hunks are
-        inlined and the ``Read it directly`` instruction is DROPPED. The agent
-        has what it needs without a tool-call round-trip for the static
-        ``diff.patch`` file. The inline text additionally names
-        `.daydream/hunk-index.json` as the authoritative changed-line source
-        (AC#1: reviewers must not re-derive ranges with ``git diff``).
-      - When ``inline_diff`` is ``None`` (byte budget exceeded / no matching
-        blocks / caller had no diff text), today's path-pointer text is used
-        unchanged so the agent can still locate the full diff for whole-file
-        context. ``diff_path`` stays a required param either way.
-
-    Args:
-        diff_path: Path to the full diff on disk.
-        files: Files this stack owns (used in the fallback path-pointer text).
-        inline_diff: Pre-extracted hunks to inline, or ``None`` for the fallback.
-
-    Returns:
-        The diff-context section for the prompt.
+    Both forms name the persisted hunk index as changed-line authority. Inline
+    hunks do not replace the source reads required to substantiate findings.
     """
     if inline_diff:
         return (
@@ -560,10 +258,6 @@ def _diff_instruction(
             "hunks are not a substitute for reading the file."
         )
     joined = ", ".join(files)
-    # Point agents at diff_path directly. A bare `git diff -- <files>` command
-    # only surfaces uncommitted workspace changes; on a clean PR branch it
-    # would return empty and hide every committed change. diff_path already
-    # contains the full base..HEAD diff.
     return (
         f"{_full_diff_pointer(diff_path)}\n"
         f"{_hunk_index_authority(diff_path)}\n\n"
@@ -572,11 +266,7 @@ def _diff_instruction(
 
 
 def _frontier_read_instruction(frontier_files: list[str]) -> str:
-    """Cross-shard interface read instruction for a sharded stack (issue #731).
-
-    Names the sibling-shard files a shard's review depends on and instructs the
-    agent to read them for cross-shard context.
-    """
+    """Name sibling-shard interface files permitted as supporting context."""
     joined = ", ".join(frontier_files)
     return (
         f"Cross-shard interface file(s): this shard's review targets reference "
@@ -603,26 +293,7 @@ def build_per_stack_prompt(
     include_alternatives: bool = True,
     frontier_files: list[str] | None = None,
 ) -> str:
-    """Assemble the per-stack review prompt.
-
-    Args:
-        strategy: The profile-owned ``discovery.per_stack`` strategy content.
-        stack_name: Lower-case stack key for scope messaging.
-        files: Files this stack owns.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        output_path: Where the agent must write its review.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory (if available).
-        prior_commits: Oneline log of prior daydream commits on this branch.
-        inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
-            to inline (skips the ``Read it directly`` instruction). ``None``
-            falls back to the diff_path pointer.
-        intent_authoritative: Issue #279. When True, the context pointers
-            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
-            the intent phase was grounded by a fresh, head-matched PR description.
-    """
+    """Assemble a language review with profile policy and a host-owned file scope."""
     parts = _review_context_parts(
         exploration_dir, cwd, intent_path, alternatives_path,
         intent_authoritative=intent_authoritative, include_alternatives=include_alternatives,
@@ -661,29 +332,10 @@ def build_structural_prompt(
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
 ) -> str:
-    """Assemble the structural-maintainability meta-stack prompt.
+    """Assemble a structural review of the full change.
 
-    Mirrors ``build_per_stack_prompt`` but covers the full PR rather than a
-    single language's files. The structural rubric judges repo-wide concerns
-    (canonical helpers, file-size budgets, layering, branching shape), so the
-    reviewer must be free to read any file in the codebase via Read/Grep/Bash
-    instead of being scoped to a stack subset.
-
-    Args:
-        strategy: The profile-owned ``discovery.structural`` strategy content.
-        files: Full union of changed files across every stack. Used to anchor
-            the scope statement; the reviewer is still free to read beyond.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        output_path: Where the agent must write its review.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: When present, points the reviewer at the deterministic
-            structural/import index in ``affected_files.md``.
-        prior_commits: Oneline log of prior daydream commits on this branch.
-        intent_authoritative: Issue #279. When True, the context pointers
-            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
-            the intent phase was grounded by a fresh, head-matched PR description.
+    The changed-file list anchors the review but does not restrict source reads:
+    structural findings may require tracing shared helpers or layering elsewhere.
     """
     joined = ", ".join(files)
     parts: list[str] = []
@@ -726,26 +378,9 @@ def build_arbiter_prompt(
     exploration_dir: Path | None = None,
     intent_authoritative: bool = False,
 ) -> str:
-    """Assemble the scoped Opus arbiter prompt (issue #168).
+    """Adjudicate selected high-severity or contested findings, echoing each arb_id.
 
-    The arbiter re-reviews ONLY the high-severity / contested findings that the
-    cheaper Sonnet per-stack reviewers surfaced. It is an adjudicator, not a
-    discoverer: it may downgrade, confirm, sharpen, or reject each finding, but
-    it must not invent new ones (new discovery is the per-stack reviewers' job;
-    the arbiter can only re-rank what they found).
-
-    Args:
-        arbiter_input_path: JSON file of the selected findings. Each entry
-            carries an ``arb_id`` the arbiter must echo back, plus the original
-            ``file``/``line``/``severity``/``confidence``/``description``.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory (if available).
-        intent_authoritative: Issue #279. When True, the context pointers
-            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
-            the intent phase was grounded by a fresh, head-matched PR description.
+    The arbiter may refine or reject existing findings, but may not discover new ones.
     """
     parts = _review_context_parts(
         exploration_dir, cwd, intent_path, alternatives_path, intent_authoritative=intent_authoritative
@@ -789,18 +424,7 @@ def build_supervise_prompt(
     cwd: Path,
     exploration_dir: Path | None = None,
 ) -> str:
-    """Assemble the batched canonical findings supervisor prompt.
-
-    Args:
-        strategy: The profile-owned ``supervision`` strategy content, rendered
-            with the runtime ``supervise_input_path`` placeholder filled.
-        supervise_input_path: JSON file of the canonical findings to adjudicate.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory (if available).
-    """
+    """Adjudicate canonical findings using the profile supervision strategy."""
     parts = _review_context_parts(exploration_dir, cwd, intent_path, alternatives_path)
     parts.append(_full_diff_pointer(diff_path))
     parts.append(strategy.format(supervise_input_path=supervise_input_path))
@@ -825,30 +449,10 @@ def build_suppression_prompt(
     cwd: Path,
     exploration_dir: Path | None = None,
 ) -> str:
-    """Assemble the skeptical precision-mode suppression prompt (issue #232).
+    """Re-examine borderline findings with a default-drop evidence requirement.
 
-    The suppression reviewer re-examines ONLY the borderline (LOW-confidence /
-    low-severity uncontested) findings the arbiter never scrutinizes. Its default
-    stance is the inverse of the arbiter's: a finding is DROPPED unless the
-    reviewer can point at confirming evidence in the actual code. This trims
-    evidenced-but-immaterial false positives on precision-sensitive runs without
-    the arbiter's fail-open protection (which exists to guard high-severity /
-    contested findings -- exactly the ones this pass never sees).
-
-    Like the arbiter it is an adjudicator, not a discoverer: it may confirm or
-    reject each input finding, but must not invent new ones.
-
-    Args:
-        strategy: The profile-owned ``suppression`` strategy content, rendered
-            with the runtime ``suppression_input_path`` placeholder filled.
-        suppression_input_path: JSON file of the selected borderline findings.
-            Each entry carries a ``sup_id`` the reviewer must echo back, plus the
-            original ``file``/``line``/``severity``/``confidence``/``description``.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory (if available).
+    This pass sees low-confidence or uncontested low-severity findings, distinct
+    from the high-severity findings protected by the arbiter's fail-open behavior.
     """
     parts = _review_context_parts(exploration_dir, cwd, intent_path, alternatives_path)
     parts.append(_full_diff_pointer(diff_path))
@@ -887,44 +491,11 @@ def build_merge_prompt(
     intent_authoritative: bool = False,
     resumed_from_arbiter: bool = False,
 ) -> str:
-    """Assemble the cross-stack merge prompt (D-23..D-27).
+    """Merge parsed records and dedup candidates into canonical findings.
 
-    ``resumed_from_arbiter`` appends a stale-context warning: the resumed
-    session replays pre-adjudication records, but the files on disk were
-    rewritten after that turn. Every cold path leaves it False and produces
-    today's prompt byte-identically — the prompt is fully self-sufficient
-    without a resumed session.
-
-    The merge agent returns a schema-validated JSON item list
-    (``MERGED_ITEMS_SCHEMA``) -- NOT markdown. Each item is one actionable
-    finding tagged with ``lens`` (``per-stack`` | ``cross-stack`` | ``wonder``) and
-    ``severity``. The host (``phase_cross_stack_merge``) appends structural
-    findings tagged ``lens="structural"`` in Python, normalizes ids, writes the
-    canonical ``merged-items.json``, and renders ``review-output.md`` from it.
-    This prompt therefore does NOT ask the agent for markdown, a structural
-    section, or a write-to-file step.
-
-    Each emitted item MUST:
-      - carry a ``lens`` of ``per-stack``, ``cross-stack`` (D-26 — cross-stack
-        for concerns spanning multiple stacks), or ``wonder`` (alternatives.json-
-        sourced findings)
-      - carry a ``severity`` of ``high`` | ``medium`` | ``low`` (D-25 ordering)
-      - collapse duplicates per dedup candidate adjudication (D-27)
-
-    Args:
-        per_stack_records_paths: Parsed per-stack record JSON paths (D-22 inputs).
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        dedup_candidates_path: Path to dedup-candidates.json (D-27 pre-filter output).
-        exploration_dir: Pre-scan exploration directory (if available).
-        failed_stacks: Optional stack_name -> failure reason for stacks whose
-            per-stack agent raised. The merge prompt includes an explicit
-            "Uncovered stacks" block so missing coverage is surfaced instead of
-            silently pretending the run was complete.
-        intent_authoritative: Issue #279. When True, the context lines include
-            the ``AUTHORITATIVE_INTENT_RULE`` precedence rule immediately after
-            the TTT intent summary line, because the intent phase was grounded
-            by a fresh, head-matched PR description.
+    The host appends structural findings after merge, stamps contiguous IDs, and
+    validates source_uids against input records. Failed stacks remain explicit;
+    resuming an arbiter session requires re-reading its rewritten input records.
     """
     records_block = "\n".join(f"  - {p}" for p in per_stack_records_paths)
     parts: list[str] = []
@@ -1018,10 +589,6 @@ def build_merge_prompt(
         "  - Do not invent findings not supported by the source records.\n\n" + SEVERITY_RUBRIC
     )
     if resumed_from_arbiter:
-        # Resuming the arbiter's session replays ITS context, which holds the
-        # PRE-adjudication records. The files on disk were rewritten after that
-        # turn, so the resumed context is stale for exactly the inputs that
-        # matter most.
         parts.append(
             "NOTE: this conversation is resumed from the arbitration turn. The "
             "per-stack record files listed above were REWRITTEN on disk after "
@@ -1030,198 +597,6 @@ def build_merge_prompt(
             "records held in the resumed context are pre-adjudication and are "
             "no longer authoritative."
         )
-    return "\n\n".join(parts)
-
-
-def _read_only_contract(*, depth: bool = False) -> str:
-    """The shared read-only/allowlist guard for verification prompts.
-
-    Single-sources the allowed-tool and state-changing-command rules so the
-    recommendation and fix-verify prompts cannot drift. ``depth`` adds the
-    fix-verify bullet scoping inspection to the retained patch.
-    """
-    parts = [
-        "Read-only contract (MANDATORY):\n"
-        "  - Allowed tools: Read, Grep, Glob, Bash.\n"
-        f"  - Bash is restricted to non-mutating commands only: {_render_bash_allowlist()}.\n"
-        "  - Do NOT write, edit, or move files. Do NOT run `git commit`, "
-        "`git add`, `git checkout`, `git reset`, `git stash`, or any other "
-        "state-changing command."
-    ]
-    if depth:
-        parts.append(
-            "  - Depth: inspect the retained patch's files, but do not roam the whole "
-            "tree; prefer Grep/Glob to narrow."
-        )
-    return "\n".join(parts)
-
-
-def build_verification_prompt(
-    *,
-    strategy: str,
-    items: list[dict[str, Any]],
-    cwd: Path,
-    output_path: Path,
-) -> str:
-    """Assemble the recommendation-verifier prompt.
-
-    The verifier audits each numbered language-lens item against the codebase:
-    trait/interface specs, sibling implementations, and any transitive
-    properties the recommendation asserts about functions it does not modify.
-    Verdicts are advisory -- the verifier does not block fixes; it warns the fix
-    agent inline and surfaces a count to the user.
-
-    Structural items are filtered out by the caller
-    (``phase_verify_recommendations``) before this builder runs, so the rendered
-    item list embedded here is non-structural by construction.
-
-    Hard contract:
-      - Read-only tools only: Read, Grep, Glob, and Bash restricted to
-        non-mutating commands (see `_render_bash_allowlist()`). The verifier writes nothing —
-        the host persists the verdicts it returns as structured output.
-      - The non-structural finding list is rendered inline below.
-      - Empty issue list yields an empty verdict list (no error).
-
-    The verdict schema is NOT dumped into the prompt: it reaches every backend
-    through ``output_schema`` (claude natively, codex via a temp file, pi by
-    appending its own instruction), so an inline copy is a duplicate the model
-    pays for twice.
-
-    Args:
-        strategy: The profile-owned ``verification`` strategy content.
-        items: The non-structural (per-stack / cross-stack) canonical items to
-            verify. Rendered inline into the prompt; verdicts are keyed by each
-            item's canonical ``id`` (the verdict ``issue_id``).
-        cwd: Absolute working directory the verifier runs in (grounds path resolution).
-        output_path: Accepted and ignored — kept because dropping a prompt kwarg
-            is a breaking extension change. The host writes the verdicts file.
-    """
-    from daydream.deep.render import render_report
-
-    parts: list[str] = []
-    parts.append(
-        strategy + "\n\n"
-        f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
-        "The numbered findings to verify (each `issue_id` in your output MUST "
-        "match the leading number `N.` of the finding it verifies):\n\n"
-        + render_report(items)
-        + "\nDo NOT re-run any reviews."
-    )
-    parts.append(_read_only_contract())
-    parts.append(
-        "Turn budget: cap your investigation at 25 turns total. Prefer Grep/Glob "
-        "to narrow the search before opening files with Read."
-    )
-    parts.append(
-        "Gate-0 anti-confabulation (MANDATORY — applies before any verdict):\n"
-        "  Before issuing ANY verdict (consistent/contradicts/uncertain), you MUST "
-        "echo the exact artifact you are judging, quoted from a source read in THIS "
-        "turn:\n"
-        "    - The file:line plus the cited code, read freshly now (not recalled "
-        "from earlier in the session).\n"
-        "  The artifact is the only source of truth. A verdict issued without a "
-        "same-turn echo of its target is INVALID — emit the echo first, or do not "
-        "emit the verdict."
-    )
-    parts.append(
-        "For EACH numbered issue in the merged report, perform these five steps:\n\n"
-        "  1. Locate the `impl` / interface / protocol declaration the changed "
-        "code participates in. If absent, set `verdict=consistent` only if no "
-        "sibling implementations exist.\n"
-        "  2. Locate every sibling implementation using the Grep tool "
-        "(e.g. search for `impl <Trait> for` or `class X(<Iface>)`).\n"
-        "  3. Locate the trait/interface doc-comment that specifies the behavior "
-        "being changed.\n"
-        "  4. Compare the recommendation against those. Verdicts:\n"
-        "     - `consistent` -- recommendation aligns with the trait doc and at "
-        "least one sibling. Cite one line of evidence.\n"
-        "     - `contradicts` -- recommendation would make this impl diverge "
-        "from the trait doc OR from a sibling that the trait doc agrees with. "
-        "Cite the conflicting line.\n"
-        "     - `uncertain` -- cannot decide from the codebase. List the "
-        "assumption that would need to hold.\n"
-        "  5. Additionally: list any *transitive properties* the recommendation "
-        "asserts about functions it does not modify (`unverified_assumptions`). "
-        'Example: "assumes `osprey_home()` always returns an absolute path."'
-    )
-    parts.append(
-        "Empty-input rule: if the merged report contains no numbered issues "
-        "under `## Issues` or `## Cross-Stack Issues`, emit an empty `verdicts` "
-        "array. This is NOT an error."
-    )
-    parts.append(
-        "Every verdict entry MUST include all four required fields, even when "
-        "`unverified_assumptions` is an empty array."
-    )
-    return "\n\n".join(parts)
-
-
-def build_fix_verify_prompt(
-    *,
-    items: list[dict[str, Any]],
-    changed_hunks: str,
-    cwd: Path,
-    round_number: int = 1,
-) -> str:
-    """Assemble the read-only post-fix fix-verify prompt (issue #744).
-
-    Audits the complete current retained patch against every canonical finding.
-    For each finding listed below the verifier returns EXACTLY one verdict
-    from the four-value enum: ``resolved`` (the named defect is gone),
-    ``unresolved`` (still present, wholly or partly), ``wrong_target`` (the
-    defect lives in a file the finding did not name -- carry ``path``), or
-    ``regressed`` (the round introduced a new instance of the named defect --
-    carry ``path``).
-
-    The verdict schema is NOT dumped into the prompt: it reaches every backend
-    through ``output_schema`` (claude natively, codex via a temp file, pi by
-    appending its own instruction), so an inline copy is a duplicate the model
-    pays for twice.
-
-    Args:
-        items: All canonical items, rendered inline into the
-            prompt; verdicts are keyed by each item's canonical ``id``.
-        changed_hunks: The complete retained patch the verifier audits. May be
-            empty when the retained tree matches the stable base.
-        cwd: Absolute working directory the verifier runs in (grounds path resolution).
-    """
-    from daydream.deep.render import render_report
-
-    hunks_block = changed_hunks if changed_hunks.strip() else "(no hunks provided)"
-    parts: list[str] = []
-    parts.append(
-        "You are the post-fix fix-verifier agent (the `fix-verify` step). The "
-        "fix cycle is stabilizing this "
-        "worktree; your job is to audit the complete retained result and return "
-        "EXACTLY one verdict per finding below. This is a READ-ONLY pass: you "
-        "inspect the diff and the code, you do not edit anything.\n\n"
-        f"Verification pass {round_number}.\n\n"
-        f"{CWD_GROUNDING_INSTRUCTION.format(cwd=cwd)}\n"
-        "Audit this complete current retained patch:\n"
-        "\n"
-        "<changed-hunks>\n"
-        f"{hunks_block}\n"
-        "</changed-hunks>\n\n"
-        "Audit all canonical findings (each `issue_id` in your "
-        "output MUST match the leading number `N.` of the finding it "
-        "verifies):\n\n"
-        + render_report(items)
-        + "\nDo NOT re-run reviews; do NOT re-dispatch anything."
-    )
-    parts.append(
-        "Verdict semantics (MANDATORY):\n"
-        "  - `resolved` -- the named defect is gone from the retained result.\n"
-        "  - `unresolved` -- the defect is still present, wholly or partly.\n"
-        "  - `wrong_target` -- the defect lives in a file the finding did NOT "
-        "name; emit `path` with the corrected repo-relative file.\n"
-        "  - `regressed` -- the retained result contains a NEW instance of the named "
-        "defect; emit `path` with the file where it now appears.\n"
-        "  - `wrong_target` and `regressed` verdicts MUST carry `path`; the "
-        "other two never carry it.\n"
-        "  - Emit one verdict entry for EVERY numbered finding. A finding you "
-        "omit is treated as `unresolved`; there is no skip verdict."
-    )
-    parts.append(_read_only_contract(depth=True))
     return "\n\n".join(parts)
 
 
@@ -1242,27 +617,7 @@ def build_generic_fallback_prompt(
     include_alternatives: bool = True,
     frontier_files: list[str] | None = None,
 ) -> str:
-    """Assemble the generic-fallback review prompt (no skill invocation).
-
-    When is_docs_only=True, prepends the D-20 documentation-review notice.
-
-    Args:
-        files: Files this bucket owns.
-        diff_path: Path to the full diff on disk.
-        intent_path: Path to TTT intent.md.
-        alternatives_path: Path to TTT alternatives.json.
-        output_path: Where the agent must write its review.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory (if available).
-        is_docs_only: Whether the whole diff is docs-only (D-20).
-        prior_commits: Oneline log of prior daydream commits on this branch.
-        inline_diff: Issue #172 Fix B. Pre-extracted diff hunks for ``files``
-            to inline (skips the ``Read it directly`` instruction). ``None``
-            falls back to the diff_path pointer.
-        intent_authoritative: Issue #279. When True, the context pointers
-            include the ``AUTHORITATIVE_INTENT_RULE`` precedence rule, because
-            the intent phase was grounded by a fresh, head-matched PR description.
-    """
+    """Review files without a dedicated stack; prepend the notice for documentation."""
     parts: list[str] = []
     if is_docs_only:
         parts.append(DOC_REVIEW_NOTICE)
@@ -1287,466 +642,4 @@ def build_generic_fallback_prompt(
     parts.append(TRUST_MODEL_INSTRUCTION)
     parts.append(WIRE_CONTRACT_GENERIC_INSTRUCTION)
     parts.append(_artifact_footer(output_path))
-    return "\n\n".join(parts)
-
-
-# =============================================================================
-# Diagram phase (issue #1113)
-# =============================================================================
-
-# Role sentences the diagram builders open with. They are the phase's stable
-# discriminator: the test stub backend dispatches on them, so a reword here is
-# a wire change, not a copy edit.
-SEQUENCE_DIAGRAM_ROLE = "You are the sequence-diagram author for this pull request."
-FLOWCHART_ROLE = "You are the flowchart author for this pull request."
-
-# Keep the source-validation contract inline: diagram agents run in the reviewed
-# repository, where a skill-file pointer would refer to the target's files.
-DIAGRAM_GROUNDING_INSTRUCTION = (
-    "Grounding contract for this diagram (stated inline here — no skill file "
-    "read is required):\n"
-    "  Inspect the source for every element and cite its exact file:line and "
-    "code. The source is the only truth; never infer an interaction, a branch, "
-    "a call, or a component from the branch name, cwd, or memory.\n"
-    "  The host verifies every file:line you emit deterministically, with no "
-    "second model in the loop: the path must exist at HEAD and resolve inside "
-    "this repository, the line must be within the file, the cited `symbol` must "
-    "appear on that line (a ±3-line snap is attempted first), and a line cited "
-    "as a branch, a terminal statement, or a call site must really be one for "
-    "that file's language. Anything unverifiable is dropped from the rendered "
-    "diagram, and a diagram left with too little to say is omitted entirely.\n"
-    "  You never write mermaid. Return ONLY the JSON spec; a deterministic "
-    "renderer draws the diagram from the elements that survive verification, so "
-    "no drawing syntax, HTML, or markdown belongs in any label.\n"
-    "  Prefer fewer, fully grounded elements over a complete-looking diagram "
-    "resting on invented evidence: a small verified diagram ships, a large "
-    "unverifiable one does not."
-)
-
-
-def _diagram_diff_block(diff_path: Path, inline_diff: str | None, *, clone_mode: bool = False) -> str:
-    """Inline the diff when it fits the shared byte budget, else point at it.
-
-    The budget check happens here rather than in the caller so an oversized
-    ``inline_diff`` degrades to the on-disk pointer instead of blowing the
-    prompt past ``INLINE_DIFF_BUDGET_BYTES`` — unless ``clone_mode`` is set,
-    in which case there is no on-disk fallback: an over-budget diff is inlined
-    truncated with an explicit marker, and a missing diff is omitted entirely.
-    The banner, truncated text, and marker together stay within the budget.
-    """
-    if inline_diff and fits_inline_diff_budget(inline_diff):
-        head = (
-            "The PR diff (base..HEAD) is inlined below; do NOT re-Read "
-            "diff.patch for it:\n\n"
-            if not clone_mode
-            else "The PR diff (base..HEAD) is inlined below:\n\n"
-        )
-        if clone_mode:
-            return f"{head}{inline_diff.rstrip()}\n\n"
-        return f"{head}{inline_diff.rstrip()}\n\n{_hunk_index_authority(diff_path)}"
-    if clone_mode:
-        if not inline_diff:
-            return ""
-        head = "The PR diff (base..HEAD) is inlined below:\n\n"
-        marker = "\n[diff truncated to fit the prompt budget]\n\n"
-        truncated = truncate_utf8_to_budget(
-            inline_diff.rstrip(), INLINE_DIFF_BUDGET_BYTES - len(head.encode("utf-8")), marker
-        )
-        return f"{head}{truncated}"
-    return f"{_full_diff_pointer(diff_path)}\n{_hunk_index_authority(diff_path)}"
-
-
-def _diagram_exploration_block(
-    exploration_dir: Path | None,
-    inline_exploration: str | None = None,
-    inline_dependencies: str | None = None,
-    *,
-    clone_mode: bool = False,
-) -> str:
-    """Exploration pointers for the diagram phase, or the bare content boundary.
-
-    ``_exploration_pointer`` already carries
-    ``UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY``; when there is no exploration
-    directory the boundary is emitted on its own so the diff and the repository
-    files the agent reads are always fenced as untrusted data.
-
-    In ``clone_mode`` (read-only disposable clone backends) the host-side
-    directory dangles, so instead of a pointer the exploration summary and
-    dependency edges are inlined under the boundary, with no exploration path
-    named. Missing content is omitted, never faked.
-    """
-    if clone_mode:
-        blocks = [UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY]
-        if inline_exploration:
-            blocks.append(inline_exploration.rstrip())
-        if inline_dependencies:
-            blocks.append(
-                "Deterministic import edges between changed files (use to place component "
-                "and module boundaries, never as a substitute for reading the source):\n"
-                f"{inline_dependencies.rstrip()}"
-            )
-        return "\n\n".join(blocks)
-    pointer = _exploration_pointer(exploration_dir)
-    if not pointer:
-        return UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-    return (
-        f"{pointer}\n"
-        f"{exploration_dir}/dependencies.md lists the deterministic import edges between changed files — "
-        "use it to place component and module boundaries, never as a substitute for reading the source."
-    )
-
-
-def _bounded_projection(
-    full_text: str,
-    lines: list[str],
-    render: Callable[[list[str], str], str],
-    count_entry: Callable[[str], bool],
-    noun: str,
-    budget_bytes: int,
-) -> str:
-    """Bound a prompt projection to ``budget_bytes`` with an exact omission count.
-
-    Returns ``full_text`` byte-identically when it already fits. Otherwise the
-    emitted body is a prefix of ``lines`` in declared order (never a sample and
-    never a re-sort) and the first line that would push the block past the
-    budget ends the body; the final notice names exactly how many entries were
-    dropped. ``count_entry`` decides which lines are counted in that notice
-    (structural module headers are not files). Pure and deterministic.
-    """
-    if len(full_text.encode("utf-8")) <= budget_bytes:
-        return full_text
-    total = sum(1 for line in lines if count_entry(line))
-    kept_entries = 0
-    best_text: str | None = None
-    for keep in range(len(lines) + 1):
-        if keep > 0 and count_entry(lines[keep - 1]):
-            kept_entries += 1
-        dropped = total - kept_entries
-        notice = f"- ({dropped} more {noun} omitted to fit the prompt budget)" if dropped else ""
-        text = render(lines[:keep], notice)
-        if len(text.encode("utf-8")) <= budget_bytes:
-            best_text = text
-        else:
-            break
-    if best_text is not None:
-        return best_text
-    # Even an empty body cannot carry the header plus the notice: keep the
-    # notice truncated so the caller still learns why the projection is empty.
-    return truncate_utf8_to_budget(
-        f"- ({total} more {noun} omitted to fit the prompt budget)", budget_bytes
-    )
-
-
-def _files_by_module_block(
-    files_by_module: dict[str, list[str]],
-    *,
-    budget_bytes: int = INLINE_DIFF_BUDGET_BYTES,
-) -> str:
-    """Render the changed code files grouped by module/service.
-
-    The prompt-side projection is bounded: the emitted body stays inside
-    ``budget_bytes`` and a truncated body ends with an exact omitted-file
-    count. The complete grouping stays host-side in the eligibility artifact,
-    so grounding is unaffected.
-    """
-    lines: list[str] = []
-    for module in sorted(files_by_module):
-        lines.append(f"- {module}")
-        for path in files_by_module[module]:
-            lines.append(f"    - {path}")
-    body = "\n".join(lines) or "- (no changed code files)"
-    header = (
-        "Changed code files grouped by module/service. Participants must align "
-        "with these real boundaries: every `internal` participant owns at least "
-        "one of these paths, and no participant may be invented for a component "
-        "that owns none of them.\n"
-    )
-    return _bounded_projection(
-        f"{header}{body}",
-        lines,
-        lambda kept, notice: header + "\n".join(kept) + (f"\n{notice}" if notice else ""),
-        lambda line: line.startswith("    - "),
-        "changed files",
-        budget_bytes,
-    )
-
-
-def _candidate_roots_block(
-    candidate_roots: list[dict[str, Any]],
-    *,
-    forced: bool,
-    budget_bytes: int = INLINE_DIFF_BUDGET_BYTES,
-) -> str:
-    """Render the flowchart candidate-root list with ranges and branch counts.
-
-    The prompt-side projection is bounded like :func:`_files_by_module_block`:
-    the model may only pick a root it was shown, while ``ground_flowchart``
-    still validates against the full ``eligibility.candidate_roots``.
-    """
-    lines = [
-        f"- `{root.get('name')}` in {root.get('file')}, lines {root.get('line')}-{root.get('end_line')}, "
-        f"{root.get('branch_points')} changed branch point(s)"
-        for root in candidate_roots
-    ]
-    body = "\n".join(lines) or "- (none)"
-    header = (
-        "Candidate root functions. The `root` you return MUST be one of these, "
-        "with `file`, `name` and `line` copied verbatim from the entry you pick "
-        "— a root outside this list is rejected outright. Every node's evidence "
-        "line must fall inside the chosen root's line range shown here."
-    )
-    if forced:
-        header += (
-            " This flowchart was explicitly requested, so the list is every "
-            "changed function rather than only those meeting the branch-point "
-            "threshold; pick the one whose control flow is most worth reading, "
-            "and if none of them has a real decision point, return the nodes you "
-            "can actually ground rather than inventing branches to fill the shape."
-        )
-    return _bounded_projection(
-        f"{header}\n{body}",
-        lines,
-        lambda kept, notice: f"{header}\n" + "\n".join(kept) + (f"\n{notice}" if notice else ""),
-        lambda line: True,
-        "candidate roots",
-        budget_bytes,
-    )
-
-
-_SEQUENCE_SPEC_RULES = (
-    "Sequence spec rules:\n"
-    "  - `participants`: 3 to 10 entries. Each has `name` (the component as a "
-    "human reader would name it), `kind` (`internal` | `external`), `files` "
-    "(repo-relative paths that exist at HEAD — at least one for `internal`, "
-    "empty for `external`), and `service` (the owning service/app name, or null "
-    "when the repo has no service boundaries).\n"
-    "  - `messages`: the interaction in order. Each has `from` and `to` "
-    "(participant names, exactly as spelled in `participants`), `label` (≤ 80 "
-    "characters, what actually happens), `kind` (`call` | `reply` | `self`), "
-    "`changed` (true when this diff adds or modifies the interaction), and "
-    "`evidence` = {`file`, `line`, `symbol`}.\n"
-    "  - Evidence per message kind: for `call` and `self`, cite the call-site "
-    "line in one of the `from` participant's files and set `symbol` to the "
-    "callee name on that line. For `reply`, cite a `return` line in one of the "
-    "`from` participant's files, set `symbol` to the enclosing function name, and "
-    "place it immediately after the reversed `call`. For a call to an `external` "
-    "participant, cite the in-repo line "
-    "that makes the outbound call and set `symbol` to the client method token on "
-    "that line. For an internal target, `symbol` must be defined in one of the "
-    "`to` participant's files.\n"
-    "  - An `external` participant may only be the source of the FIRST message "
-    "(the entrypoint) or the target of a reply. The entrypoint message's "
-    "evidence is the handler definition line in a `to` participant file.\n"
-    "  - `blocks` (may be `[]`): `alt` (2 or more branches), `opt` (exactly 1), "
-    "`loop` (exactly 1). Each branch has `condition` text, `evidence` = "
-    "{`file`, `line`} pointing at the branch or loop statement itself, and "
-    "`messages`, the 0-based indices into `messages` that the branch contains. "
-    "An index must appear in at most one branch.\n"
-    "  - Floor: the diagram renders only with at least 3 grounded messages, at "
-    "least 2 participants, and at least 1 message whose evidence line falls "
-    "inside a changed hunk. Anchor the interaction on the diff, not on "
-    "untouched surrounding plumbing."
-)
-
-_FLOWCHART_SPEC_RULES = (
-    "Flowchart spec rules:\n"
-    "  - `root` = {`file`, `name`, `line`}, copied verbatim from one candidate "
-    "root entry.\n"
-    "  - `nodes`: 4 to 25 entries. Each has `id` (unique within the spec), "
-    "`kind` (`start` | `end` | `process` | `decision` | `subroutine` | `io`), "
-    "`label` (≤ 60 characters) and `evidence` = {`file`, `line`, `symbol`} "
-    "(`symbol` may be null except on a `subroutine`). Every evidence line must "
-    "be inside the root's line range.\n"
-    "  - Evidence per node kind: `start` cites the root's definition line. `end` "
-    "cites a `return`/`raise`/`throw`/`panic`/exit statement inside the root "
-    "range. `process` and `io` cite a statement inside the root range. "
-    "`decision` cites an actual branch or loop statement (`if`/`elif`/`else`/"
-    "`match`/`case`/`switch`/`for`/`while`/`try`/`except`/`catch`) inside the "
-    "root range. `subroutine` cites the CALL SITE inside the root range and sets "
-    "`symbol` to the called function, which must be defined somewhere in this "
-    "repository and must appear on the cited line.\n"
-    "  - `edges`: each has `from` and `to` (node ids) and `label` (null when "
-    "unlabeled). Every edge leaving a `decision` node must carry a label, and a "
-    "`decision` must have at least 2 outgoing edges with distinct labels — "
-    "otherwise it is not a decision and the host demotes it to a plain step.\n"
-    "  - Exactly one `start` node; at least one `end` node. Nodes unreachable "
-    "from `start` are dropped.\n"
-    "  - Floor: the diagram renders only with at least 4 grounded nodes "
-    "including the `start`, at least 1 `end`, and at least 1 grounded "
-    "`decision`. Show the control flow the diff actually changed, not the "
-    "function's every statement."
-)
-
-
-def build_sequence_diagram_prompt(
-    *,
-    diff_path: Path,
-    inline_diff: str | None,
-    inline_exploration: str | None = None,
-    inline_dependencies: str | None = None,
-    clone_mode: bool = False,
-    files_by_module: dict[str, list[str]],
-    cwd: Path,
-    exploration_dir: Path | None,
-    schema: dict[str, Any],
-) -> str:
-    """Assemble the sequence-diagram author prompt (issue #1113).
-
-    Args:
-        diff_path: Path to the full diff on disk (used when the diff is not inlined).
-        inline_diff: Diff text to inline, or ``None``. Text over
-            ``INLINE_DIFF_BUDGET_BYTES`` degrades to the ``diff_path`` pointer.
-        files_by_module: Changed code files keyed by module/service, so the
-            proposed participants align with real repository boundaries.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory, or ``None``. In
-            ``clone_mode`` it is ignored and the inline exploration kwargs are
-            rendered instead (no host path is named).
-        inline_exploration: Exploration summary text to inline under the
-            untrusted boundary (clone mode). ``None`` omits it.
-        inline_dependencies: Dependency-edge text to inline (clone mode).
-            ``None`` omits it.
-        clone_mode: True when the agent runs on a read-only disposable clone;
-            forces the diff inline (truncated with a marker if over budget)
-            and renders exploration inline instead of via host-only pointers.
-        schema: The sequence-spec JSON Schema the response must match. Passed in
-            rather than imported so this module stays independent of
-            ``deep/diagram_schema.py``.
-    """
-    parts: list[str] = [
-        f"{SEQUENCE_DIAGRAM_ROLE} Propose a sequence diagram of the interaction "
-        "this change is about, as a structured JSON spec in which every element "
-        "carries file:line evidence.",
-        _diagram_exploration_block(
-            exploration_dir, inline_exploration, inline_dependencies, clone_mode=clone_mode
-        ),
-        CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
-        _diagram_diff_block(diff_path, inline_diff, clone_mode=clone_mode),
-        _files_by_module_block(files_by_module),
-        _SEQUENCE_SPEC_RULES,
-        DIAGRAM_GROUNDING_INSTRUCTION,
-        schema_block(schema),
-    ]
-    return "\n\n".join(parts)
-
-
-def build_flowchart_prompt(
-    *,
-    diff_path: Path,
-    inline_diff: str | None,
-    inline_exploration: str | None = None,
-    inline_dependencies: str | None = None,
-    clone_mode: bool = False,
-    candidate_roots: list[dict[str, Any]],
-    forced: bool,
-    cwd: Path,
-    exploration_dir: Path | None,
-    schema: dict[str, Any],
-) -> str:
-    """Assemble the flowchart author prompt (issue #1113).
-
-    Args:
-        diff_path: Path to the full diff on disk (used when the diff is not inlined).
-        inline_diff: Diff text to inline, or ``None``. Text over
-            ``INLINE_DIFF_BUDGET_BYTES`` degrades to the ``diff_path`` pointer.
-        candidate_roots: The only roots the model may pick, as plain dicts with
-            ``file``/``name``/``line``/``end_line``/``branch_points``.
-        forced: True when the kind was explicitly requested and the candidate
-            list is therefore every changed function rather than only those
-            meeting the branch-point threshold.
-        cwd: Absolute working directory the agent runs in (grounds path resolution).
-        exploration_dir: Pre-scan exploration directory, or ``None``. In
-            ``clone_mode`` it is ignored and the inline exploration kwargs are
-            rendered instead (no host path is named).
-        inline_exploration: Exploration summary text to inline under the
-            untrusted boundary (clone mode). ``None`` omits it.
-        inline_dependencies: Dependency-edge text to inline (clone mode).
-            ``None`` omits it.
-        clone_mode: True when the agent runs on a read-only disposable clone;
-            forces the diff inline (truncated with a marker if over budget)
-            and renders exploration inline instead of via host-only pointers.
-        schema: The flowchart-spec JSON Schema the response must match.
-    """
-    parts: list[str] = [
-        f"{FLOWCHART_ROLE} Propose a flowchart of the control flow inside ONE "
-        "changed function, as a structured JSON spec in which every element "
-        "carries file:line evidence.",
-        _diagram_exploration_block(
-            exploration_dir, inline_exploration, inline_dependencies, clone_mode=clone_mode
-        ),
-        CWD_GROUNDING_INSTRUCTION.format(cwd=cwd),
-        _diagram_diff_block(diff_path, inline_diff, clone_mode=clone_mode),
-        _candidate_roots_block(candidate_roots, forced=forced),
-        _FLOWCHART_SPEC_RULES,
-        DIAGRAM_GROUNDING_INSTRUCTION,
-        schema_block(schema),
-    ]
-    return "\n\n".join(parts)
-
-
-def _diagram_failure_lines(failures: list[dict[str, Any]]) -> str:
-    """Render one line per rejected element: element, ref, and reason code."""
-    lines = [
-        f"- {failure.get('element')} `{failure.get('ref')}`: {failure.get('reason')}"
-        for failure in failures
-    ]
-    return "\n".join(lines) or "- (none)"
-
-
-def build_diagram_repair_prompt(
-    *,
-    kind: str,
-    failures: list[dict[str, Any]],
-    candidate_roots: list[dict[str, Any]] | None,
-    schema: dict[str, Any],
-) -> str:
-    """Assemble the single diagram repair turn (issue #1113, spec section 4).
-
-    Sent as one continuation turn on the kind's own session, so the diff, the
-    exploration pointers and the spec rules are already in context; this prompt
-    carries only the verdicts, the repair contract, and the schema.
-
-    Args:
-        kind: ``"sequence"`` or ``"flowchart"`` -- named in the opening line so
-            the phase is identifiable from the prompt alone.
-        failures: ``ElementCheck.to_dict()`` dicts for the ungrounded elements;
-            each is listed with its ``element``, ``ref`` and reason code.
-        candidate_roots: The flowchart candidate list, repeated so a
-            ``ROOT_NOT_CANDIDATE`` verdict can be repaired without scrolling
-            back; ``None`` for the sequence kind.
-        schema: The same JSON Schema as the first turn -- the reply is a full
-            spec, not a patch.
-    """
-    parts: list[str] = [
-        f"Diagram repair turn ({kind}): the deterministic grounding pass "
-        "rejected the element(s) below. Nothing about the repository changed "
-        "between the two turns, so re-sending the same evidence cannot pass.",
-        "Rejected elements (element, reference, reason code):\n" + _diagram_failure_lines(failures),
-        "For EACH rejected element do exactly one of two things:\n"
-        "  1. Correct its evidence — read the file in THIS turn, then cite a "
-        "real file:line that satisfies the reason code (right file, right line, "
-        "the cited symbol actually on that line, the right kind of statement).\n"
-        "  2. Remove the element from the spec entirely, along with anything "
-        "that only existed to support it (a participant left with no messages, "
-        "an edge whose node is gone, a branch left with no messages).\n"
-        "Removing an element you cannot ground is the correct answer, not a "
-        "failure. Do not substitute a different invented element for it.",
-    ]
-    if candidate_roots is not None:
-        parts.append(
-            "A `ROOT_NOT_CANDIDATE` verdict means the root you chose is not in "
-            "the candidate list. Re-pick a root from the list below, copying "
-            "`file`, `name` and `line` verbatim, and re-anchor every node inside "
-            "the new root's line range."
-        )
-        parts.append(_candidate_roots_block(candidate_roots, forced=False))
-    parts.append(
-        "Return the FULL corrected spec in the same JSON shape — not a patch, "
-        "not only the elements you changed. Elements you are not repairing must "
-        "be repeated verbatim, with their indices/ids kept consistent. This is "
-        "the ONLY repair turn: after it, every still-ungrounded element is "
-        "dropped, and the diagram is omitted if too little survives."
-    )
-    parts.append(DIAGRAM_GROUNDING_INSTRUCTION)
-    parts.append(schema_block(schema))
     return "\n\n".join(parts)

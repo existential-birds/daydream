@@ -1,15 +1,7 @@
-"""Shared real-git subprocess helpers for the test suite.
+"""Real Git helpers and deterministic seed repositories.
 
-Consolidates the ``_git`` helper (and its repo-building family) that was
-previously duplicated across tests/conftest.py and several test modules.
-tests/test_workspace.py builds on these too, keeping only the extra plumbing
-its bare-origin push semantics genuinely need.
-
-The seed family (``SEED_ENV`` + :func:`write_and_stage` +
-:func:`seeded_commit`) is the single source of truth for deterministic
-test seed repositories. Deliberate exceptions are migrate's dateless
-identity, ``harbor_build``'s bundle identity, and the identities in
-production ``daydream/benchmark/snapshot.py`` and RL ``fixture.py``.
+SEED_ENV fixes seed identity and timestamps. Migrate's dateless identity,
+Harbor bundle identity, and production snapshot/RL fixtures remain distinct.
 """
 
 from __future__ import annotations
@@ -57,10 +49,6 @@ def work_context(repo: Path, *, run_id: str) -> WorkContext:
 
 
 def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:
-    """Write *name* under *repo* and stage it (``str`` or ``bytes``).
-
-    Half of the deterministic seed family — see the module docstring.
-    """
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(content, bytes):
@@ -118,12 +106,7 @@ def init_repo(repo: Path) -> None:
 def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, str], base_message: str = "base",
     feature_message: str = "feature",
 ) -> str:
-    """Seed *repo* with a base commit on ``main`` then a feature commit on ``feature``.
-
-    *base* and *feature* map repo-relative paths to the exact content each commit
-    stages; the branch is created from the base commit. Returns the feature HEAD
-    SHA. Part of the deterministic seed family (see module docstring).
-    """
+    """Create main and feature commits from path/content maps; return feature HEAD."""
     init_repo(repo)
     for name, content in base.items():
         write_and_stage(repo, name, content)
@@ -135,11 +118,7 @@ def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, 
 
 
 def refreshing_session(name: str, refresh_calls: dict[str, int]) -> git_ops.RefreshingGitHubAuth:
-    """An expired-token session that mints ``ghs_<name>_fresh_token_...`` on refresh.
-
-    Bumps ``refresh_calls[name]`` each time so callers can assert per-session
-    credential isolation without rebuilding the closure.
-    """
+    """Create an expired session whose refresh increments its counter and returns a fresh token."""
 
     def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
         refresh_calls[name] += 1

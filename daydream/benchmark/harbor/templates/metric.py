@@ -1,15 +1,8 @@
 #!/usr/bin/env -S uv run --script
-"""Self-contained corpus micro-metric aggregation for the Harbor verifier image.
-
-Stdlib only, never imports ``daydream``: the aggregation contract is loaded at
-startup from the canonical ``verifier_core.py`` colocated next to this file in
-the compiled stage root (written by the build). Reads one JSONL line per task
-— a reward dict or ``null`` (unscored infrastructure failure) — and writes the
-pooled micro metrics to the ``-o`` path. Invocation matches Harbor 0.22's
-``uv run metric.py -i <rewards.jsonl> -o <metric.json>``; a missing input
-raises ``FileNotFoundError`` (uncaught -> nonzero exit, no output written —
-fail-closed, never partial). A missing or unloadable ``verifier_core.py``
-fails closed the same way, never with a placeholder result.
+"""Standalone JSONL micro-metric entrypoint using colocated canonical verifier_core. Each
+input row is a reward object or null for unscored infrastructure failure. Missing input
+or unavailable scorer fails without output or placeholder metrics; the CLI accepts -i
+and -o paths.
 """
 # /// script
 # requires-python = ">=3.12"
@@ -28,14 +21,9 @@ from typing import Callable
 
 
 def _load_aggregate_metrics() -> Callable[[list[dict[str, object] | None]], dict[str, float | int]]:
-    """Load ``aggregate_metrics`` from the colocated canonical ``verifier_core.py``.
-
-    The module must be registered in ``sys.modules`` *before* ``exec_module``:
-    ``@dataclass`` decoration inside the canonical module resolves
-    ``cls.__module__`` through ``sys.modules``, and would otherwise raise
-    ``AttributeError``. The registration is removed again in ``finally``, so a
-    later bare import of ``verifier_core`` anywhere in the same process cannot
-    silently resolve to this compiled copy.
+    """Load the colocated scorer with temporary sys.modules registration required by
+    dataclasses. Restore the registration afterward so later bare imports cannot resolve
+    to this compiled copy.
     """
     path = Path(__file__).resolve().parent / "verifier_core.py"
     spec = importlib.util.spec_from_file_location("verifier_core", path)

@@ -1,9 +1,4 @@
-"""Tests for :mod:`daydream.workspace`.
-
-These tests build real git repositories with a real bare-origin remote and
-exercise :func:`daydream.workspace.open_workspace` end-to-end.  No subprocess
-mocking — every code path runs against actual git.
-"""
+"""Exercise workspace opening against real Git repositories and bare remotes."""
 
 from __future__ import annotations
 
@@ -24,7 +19,7 @@ import anyio
 import pytest
 from rich.console import Console
 
-from daydream import artifact_visibility, git_ops
+from daydream import git_ops
 from daydream.artifact_visibility import (
     ArtifactVisibilityError,
     PrivateWorkspaceOwner,
@@ -32,6 +27,7 @@ from daydream.artifact_visibility import (
     private_root_locations,
     resolve_private_workspace_owner,
 )
+from daydream.artifacts import ownership as artifact_ownership
 from daydream.git_ops import BranchNotFoundError, GitError
 from daydream.workspace import (
     WorkContext,
@@ -51,7 +47,7 @@ from tests.harness.git_helpers import (
 
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(artifact_visibility, "_default_private_base",
+    monkeypatch.setattr(artifact_ownership, "_default_private_base",
         lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
     )
 
@@ -200,7 +196,7 @@ async def test_open_workspace_without_owner_resolves_default_once(monkeypatch: p
         lookups += 1
         return private_base
 
-    monkeypatch.setattr(artifact_visibility, "_default_private_base", default_private_base)
+    monkeypatch.setattr(artifact_ownership, "_default_private_base", default_private_base)
     async with open_workspace(repo, branch=None, base="main", force_ephemeral=True, extra_copy=[], skip_tests=True,
     ) as work:
         assert work.repo.is_relative_to(private_base / "workspaces")
@@ -320,13 +316,9 @@ async def test_open_workspace_refuses_unsafe_legacy_entry_without_mutation(
 async def test_open_workspace_refuses_registry_listed_broken_chain_worktree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """A registered worktree whose .git chain is broken fails closed, not retired.
+    """A broken .git chain remains operator-owned while its worktree registry entry exists.
 
-    ``assert_is_worktree`` raises ``NotAWorktreeError`` when the checkout's
-    ``.git`` link/admin chain is broken, but the worktree is still listed in
-    the git registry — destroying it would lose uncommitted operator work.
-    The retire gate cross-checks ``git worktree list --porcelain`` and refuses
-    with "registry-listed but unprobeable".
+    Refuse as registry-listed but unprobeable; deleting it could lose uncommitted work.
     """
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
@@ -351,15 +343,9 @@ async def test_open_workspace_refuses_registry_listed_broken_chain_worktree(
 async def test_open_workspace_refuses_live_registered_worktree_with_nonpattern_name(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """A live-locked registered worktree whose name is NOT the legacy -reanchor
-    shape must still fail closed, never be silently deleted by the name gate.
+    """Probe every real directory before applying legacy name rules.
 
-    The retire gate used to skip the ownership/lock probe for directories
-    whose name did not match the legacy pattern, so a registered worktree
-    (e.g. created with a custom name in the daydream-managed namespace) that
-    was live-locked mid-write was rmtree'd without the probe. Every real
-    directory is probed first now; only provably-unregistered residue is
-    retired with a warning.
+    A live registered worktree with a custom name may hold uncommitted work.
     """
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
@@ -379,13 +365,7 @@ async def test_open_workspace_refuses_live_registered_worktree_with_nonpattern_n
 async def test_open_workspace_retires_unregistered_legacy_directory_without_mutation_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A pattern-matching but unregistered legacy dir is residue: retired, not fatal.
-
-    (Formerly the ``[unknown]`` parametrization of the refusal test: the card
-    changes that contract from fail-closed to retire-with-warning, because a
-    crashed ``git worktree add`` or stray directory must not wedge every
-    subsequent run on the repository.)
-    """
+    """Retire provably unregistered residue with a warning so interrupted creation cannot block future runs."""
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
     legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
@@ -420,13 +400,7 @@ async def test_open_workspace_retires_stale_legacy_audit_worktree(monkeypatch: p
 async def test_open_workspace_removes_emptied_legacy_roots_after_migration(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """F1 wedge: the migration must not leave residue that blocks the next open.
-
-    After moving the unlocked legacy reanchor worktree into the private
-    operational root, the emptied ``.daydream/worktrees`` root itself must be
-    gone, so a session opened immediately after migration succeeds instead of
-    failing with "legacy operational workspace blocks artifact detach".
-    """
+    """Remove the empty legacy root after migration so the next artifact session can detach."""
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
     legacy = repo / ".daydream" / "worktrees" / "run-old-reanchor"
@@ -517,14 +491,9 @@ async def test_open_workspace_still_refuses_different_ownership_worktree(monkeyp
 async def test_open_workspace_still_refuses_registered_worktree_when_lock_probe_fails(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A probe GitError on a VERIFIED registered worktree fails closed, never retires.
+    """A failed lock probe leaves ownership unresolved and must preserve registered worktree data.
 
-    A registered, same-owner worktree whose ownership/lock probe raises a
-    plain ``GitError`` (transient git failure, unsafe lock metadata) poses an
-    UNANSWERED safety question — it may be live-locked with uncommitted
-    operator work. The retire path must destroy only residue it can PROVE is
-    unregistered (``NotAWorktreeError``); any other probe failure fails
-    closed with the worktree and its data intact.
+    Only a proven NotAWorktreeError permits residue retirement; ordinary GitError fails closed.
     """
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
@@ -552,13 +521,7 @@ async def test_open_workspace_still_refuses_registered_worktree_when_lock_probe_
     assert _git(repo, "worktree", "list", "--porcelain") == before
 
 async def test_legacy_preflight_retires_unknown_after_moving_registered_entry(tmp_path: Path,) -> None:
-    """Unrecognized residue is retired (not fatal) AFTER the registered move.
-
-    The registered legacy worktree is migrated into the private operational
-    root; the stray non-worktree directory is retired with a warning so one
-    piece of junk cannot wedge every subsequent run. The registered entry is
-    moved before any residue is destroyed.
-    """
+    """Move the registered worktree before deleting positively identified residue."""
     repo, _ = _make_repo_with_origin(tmp_path)
     owner = _private_owner(repo, tmp_path)
     registered = repo / ".daydream" / "worktrees" / "run-known-reanchor"

@@ -64,7 +64,6 @@ async def test_merge_cold_when_arbiter_skipped_on_resume(multi_stack_target: Pat
     assert "re-read" not in merge_call["prompt"].lower()
 
 def test_merge_prompt_cold_path_is_byte_identical(tmp_path: Path) -> None:
-    """resumed_from_arbiter=False reproduces today's prompt exactly."""
     kwargs: dict[str, Any] = dict(
         strategy=_default_strategy("merge"), per_stack_records_paths=[tmp_path / "stack-python-records.json"],
         intent_path=tmp_path / "intent.md", alternatives_path=tmp_path / "alternatives.json",

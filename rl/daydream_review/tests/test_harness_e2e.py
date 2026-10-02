@@ -1,16 +1,8 @@
-"""Phase 4: whole rollouts, through the real verifiers entrypoint.
+"""Run complete rollouts through real interception, CLI, archive, and scoring boundaries.
 
-``test_stub_rollout_scores_without_crash`` is the resilience path: everything
-real except the model. A canned upstream answers every request with the same
-useless sentence, so the rewards are meaningless — what it proves is the
-plumbing, and it proves all of it at once. Env injection reaches the CLI, the CLI
-speaks the Anthropic dialect to the interception server and authenticates with
-the rollout secret, every turn lands in the trace DAG, daydream archives a run,
-the run dir comes back out of the sandbox, and the single intrinsic reward
-scores alongside the suite_non_regression metric.
-
-``test_live_rollout`` is the only test that needs a real model, and it is the
-only one whose reward values mean anything.
+The canned upstream proves environment injection, authentication, trace capture,
+artifact retrieval, intrinsic reward, and suite telemetry wiring; its reward
+values carry no quality evidence. Only the opt-in live rollout uses a real model.
 """
 
 from __future__ import annotations
@@ -31,7 +23,6 @@ REQUIRED_REWARDS = {"intrinsic_composite"}
 
 
 def _stage(root: Path) -> dict[str, Path]:
-    """Lay out the three directories the harness config points at."""
     repo = root / "repo"
     build_fixture_repo(repo)
     archive = root / "archive"
@@ -55,7 +46,6 @@ def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None, backe
 
 
 def _assert_reward_bounds(trace: dict[str, Any]) -> None:
-    """Shared intrinsic-composite and suite metric floor for both rollouts."""
     assert REQUIRED_REWARDS <= set(trace["rewards"]), trace["rewards"]
     reward = trace["rewards"]["intrinsic_composite"]
     score = reward["score"] if isinstance(reward, dict) else reward
@@ -70,7 +60,6 @@ def _sole_trace(paths: dict[str, Path]) -> dict[str, Any]:
     assert traces, f"no traces.jsonl under {out}"
     lines = traces[0].read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1, f"expected one rollout, got {len(lines)}"
-    # json.loads yields Any; we only need a shallow dict view.
     return dict(json.loads(lines[0]))
 
 
@@ -82,22 +71,16 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     assert result.returncode == 0, result.stdout[-4000:] + result.stderr[-4000:]
 
     episode = _sole_trace(paths)
-    # 0.2.1 writes the raw trace per line: a completed, error-free rollout is
-    # `is_completed` with no `errors` entries.
     assert episode["is_completed"] is True, episode.get("errors")
     assert episode["errors"] == []
     trace = episode
-    # Sampled assistant nodes exist only when a model turn went through the
-    # interception server AND the dialect parsed the reply. A harness that
-    # reached a provider directly records nothing; a stub whose payload fails the
-    # dialect's strict model records calls but no sampled turns, which would let
-    # the run exercise the retry path while claiming to prove the dialect.
+    # Sampled turns prove both interception and the expected tool dialect; request counts alone
+    # cannot establish either.
     sampled = [node for node in trace["nodes"] if node.get("sampled")]
     assert sampled, "no sampled assistant turns — endpoint injection or the dialect did not work"
     _assert_reward_bounds(trace)
     assert trace["info"]["daydream_backend"] == "claude"
     assert trace["info"]["daydream_exit_code"] == 0
-    # Scoring really read daydream's archived run dir out of the sandbox.
     assert trace["info"]["reward_breakdown"]["reward_version"]
     assert list((paths["archive"] / "runs").iterdir()), "daydream archived nothing"
 
@@ -112,8 +95,7 @@ def test_live_rollout(tmp_path: Path) -> None:
     upstream the interception server forwards to.
     """
     paths = _stage(tmp_path)
-    # No default: a model id baked into this repo would be exactly the hardcoding
-    # SPEC C1 forbids, and a wrong one silently bills the wrong endpoint.
+    # Require an explicit live model to avoid sending billed traffic to a guessed endpoint.
     model = os.environ["DAYDREAM_RL_LIVE_MODEL"]
     base_url = os.environ.get("DAYDREAM_RL_LIVE_BASE_URL")
     backend = os.environ.get("DAYDREAM_RL_LIVE_BACKEND", "claude")

@@ -1,12 +1,5 @@
-"""Code-review benchmark harness for daydream.
-
-Hosts the private PR benchmark workspace (`daydream benchmark
-init|status|validate|import-prs|curate`) — strict schemas, the mode-safe
-storage/journal layer, the snapshot-freeze orchestration, and the UI-independent
-curation service (``curate --apply-gold``, the issue-#5 seam).
-
-The stable schema + workspace-service + snapshot-freeze types are exported for
-consumers and future issues.
+"""Private PR benchmark schemas, journaled workspace services, snapshots, and curation.
+Stable service and model types are re-exported here.
 """
 
 from daydream.benchmark.curation import (  # noqa: F401 - stable service surface

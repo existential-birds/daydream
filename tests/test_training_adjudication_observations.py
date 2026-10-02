@@ -33,18 +33,12 @@ def test_reappend_identical_observation_is_idempotent(tmp_path: Path) -> None:
     append_observation(store, o)  # re-run of an interrupted labeling session
     assert len(load_observations(store)) == 1
 
-def test_observation_missing_required_field_raises(tmp_path: Path) -> None:
+@pytest.mark.parametrize("field", ["evidence_digest", "evidence"])
+def test_observation_missing_required_field_raises(tmp_path: Path, field: str) -> None:
+    # Reject evidence-less rows here, before the resolver can fail during harvest.
     o = _obs(R1, "alice")
-    del o["evidence_digest"]
-    with pytest.raises(ValueError, match="evidence_digest"):
-        append_observation(tmp_path / "o.jsonl", o)
-
-def test_observation_missing_evidence_raises(tmp_path: Path) -> None:
-    # The resolver hard-requires evidence, so the store must reject
-    # evidence-less rows up front (fail-closed, not a late harvest crash).
-    o = _obs(R1, "alice")
-    del o["evidence"]
-    with pytest.raises(ValueError, match="evidence"):
+    del o[field]
+    with pytest.raises(ValueError, match=field):
         append_observation(tmp_path / "o.jsonl", o)
 
 def test_invalid_disposition_raises(tmp_path: Path) -> None:
@@ -61,11 +55,8 @@ def test_model_suggested_label_is_review_required_and_rejected_as_human(tmp_path
     obs = load_observations(store)
     assert obs[0]["role"] == "model-suggested"
     assert obs[0]["review_required"] is True
-    # Stored rubric_version stays pinned to the canonical version axis.
     assert obs[0]["rubric_version"] == ADJUDICATION_LABELER_VERSION
 
 def test_role_adjudicator_with_model_labeler_raises(tmp_path: Path) -> None:
-    # An unreviewed LLM classifier is never a human labeler: an observation
-    # claiming adjudicator authority under a model-shaped labeler is rejected.
     with pytest.raises(ValueError, match="labeler"):
         append_observation(tmp_path / "o.jsonl", _obs(R1, "claude-classifier", role="adjudicator"))

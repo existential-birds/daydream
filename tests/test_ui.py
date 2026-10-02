@@ -17,7 +17,7 @@ from rich.text import Text
 
 import daydream.agent as agent_mod
 import daydream.ui.tools as ui_tools
-from daydream.agent import _summarize_input, run_agent
+from daydream.agent import run_agent
 from daydream.backends import ResultEvent, TextEvent, ToolResultEvent, ToolStartEvent
 from daydream.exploration import Convention, Dependency, ExplorationContext, FileInfo
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
@@ -29,6 +29,7 @@ from daydream.ui import (
     prompt_user,
     render_exploration_summary,
 )
+from daydream.ui.agent_stream import _summarize_input
 from daydream.ui.colorize import render_segments
 from daydream.ui.panels import LiveToolPanelRegistry
 from daydream.ui.theme import _TASK_PROMPT_MAX_LINES
@@ -159,17 +160,13 @@ def test_render_exploration_summary_empty_is_quiet() -> None:
 def test_prompt_user_returns_default_on_eof(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
-
     monkeypatch.setattr("builtins.input", Mock(side_effect=EOFError("EOF when reading a line")))
-    # Issue #126 exact repro expectation:
     console = Console(file=StringIO(), record=True)
     assert prompt_user(console, "Apply fixes now?", default="n") == "n"
-    # Operator must receive a visible signal that EOF caused the decline.
     output = console.export_text()
     assert "EOF" in output, f"expected EOF warning in output, got: {output!r}"
 
 def test_prompt_user_non_interactive_skips_stdin(monkeypatch: pytest.MonkeyPatch) -> None:
-
 
 
     sentinel = Mock(side_effect=AssertionError("input() must not be called"))
@@ -184,6 +181,30 @@ def test_prompt_user_returns_typed_value_interactively(monkeypatch: pytest.Monke
 
     monkeypatch.setattr("builtins.input", lambda: "y")
     assert prompt_user(Console(), "Confirm?", default="n") == "y"
+
+def test_panel_refresh_survives_a_tool_finishing_mid_render() -> None:
+    registry = LiveToolPanelRegistry(Console(file=StringIO()))
+    first = registry.create("first", "Read", {"file_path": "one.py"})
+    second = registry.create("second", "Read", {"file_path": "two.py"})
+    rendering = registry.iter_active_panels()
+    assert next(rendering) is first
+    registry.remove("first")
+    assert list(rendering) == [second]
+    registry.finish_all()
+
+
+def test_panel_discard_allows_tool_id_reuse_without_a_live_leak() -> None:
+    console = Console(file=StringIO())
+    registry = LiveToolPanelRegistry(console)
+    registry.create("reused", "Task", {"description": "discarded"})
+    registry.discard_all()
+
+    panel = registry.create("reused", "Read", {"file_path": "next.py"})
+    assert list(registry.iter_active_panels()) == [panel]
+    registry.remove("reused")
+    assert list(registry.iter_active_panels()) == []
+    assert not console._live_stack
+
 
 def test_parse_background_task_id_from_launch_string() -> None:
 
@@ -210,15 +231,12 @@ def test_bash_panel_shows_command_drops_mechanical_keys() -> None:
     assert "block" not in out and "timeout" not in out
 
 def test_bash_panel_command_truncation_shows_ellipsis() -> None:
-    """A >200-char Bash command is cut with an explicit marker, never silently."""
-
     header = _build_tool_header("Bash", {"command": "x" * 250}, quiet_mode=False)
     text = header.plain
     assert "x" * 200 in text
     assert "x" * 201 not in text
     assert text.rstrip().endswith("...")
 
-    # Short commands are never marked.
     short_header = _build_tool_header("Bash", {"command": "true"}, quiet_mode=False)
     assert not short_header.plain.rstrip().endswith("...")
 
@@ -280,8 +298,7 @@ def test_tasklist_header_omits_empty_id_suffix() -> None:
 def test_taskoutput_result_shows_output_snippet() -> None:
 
 
-    # quiet_mode=False so the result body renders (quiet mode suppresses result
-    # output entirely); R8 is about the rendered TaskOutput result snippet.
+    # Use normal mode to render the TaskOutput result body.
     reg = LiveToolPanelRegistry(Console(file=StringIO(), record=True), quiet_mode=False)
     reg.create("c2", "TaskOutput", {"task_id": "a066168", "block": True, "timeout": 1})
     result = (Path(__file__).parent / "fixtures/task_tools/taskoutput_result.txt").read_text()
@@ -318,9 +335,6 @@ def _taskoutput_backend() -> Any:
     )
 
 async def test_run_agent_renders_taskoutput_with_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Render TaskOutput with its task label while hiding mechanical arguments."""
-
-
     rec = Console(file=StringIO(), record=True, width=120)
     monkeypatch.setattr(agent_mod, "console", rec)
     backend = _taskoutput_backend()
@@ -342,9 +356,6 @@ async def test_run_agent_callback_path_labels_taskoutput(tmp_path: Path) -> None
     assert "TaskOutput a066168" not in joined  # opaque bare-id dump form is gone
 
 async def test_run_agent_callback_coalesces_streaming_text_deltas(tmp_path: Path) -> None:
-    """Token-sized text deltas render as one parallel-fix narration line."""
-
-
     backend = ScriptedBackend(events=[TextEvent("B"), TextEvent("ash"), TextEvent(" is"), TextEvent(" blocked."),
             ResultEvent(structured_output=None, continuation=None),
         ], model="mock-model",
@@ -377,12 +388,9 @@ async def test_run_agent_callback_path_edit_shows_file_not_bool(tmp_path: Path) 
     assert "Edit False" not in joined  # the stray-boolean dump is gone
 
 def test_primary_tool_value_bash_prefers_command() -> None:
-    """Bash primary arg is `command` (required, always present) over `description`."""
-
     value, key = _primary_tool_value("Bash", {"command": "git diff --stat", "description": "Show changes"})
     assert (value, key) == ("git diff --stat", "command")
 
-    # description-less call still resolves via the table, not the mechanical fallback.
     value, key = _primary_tool_value("Bash", {"command": "ls -la /tmp"})
     assert (value, key) == ("ls -la /tmp", "command")
 
@@ -391,7 +399,6 @@ def test_format_callback_progress_bash_shows_command() -> None:
 
     The command is redacted before the width slice — the same redact-before-truncate invariant the panel header
     and --log summary hold, so the callback line cannot print a secret the other surfaces would redact."""
-
 
 
     line = format_callback_progress("Bash", {"command": "git diff --stat", "description": "Show changes"}, None)
@@ -447,10 +454,6 @@ def test_format_callback_progress_redacts_only_bash_commands() -> None:
     assert "[REDACTED" in bash_line.plain
 
 def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
-    """Issue #1108 acceptance oracle: same input renders the command on all three surfaces."""
-
-
-
     args: dict[str, object] = {"command": "git diff --stat"}
     header = _build_tool_header("Bash", args, quiet_mode=True)
     c = Console(file=StringIO(), force_terminal=True, width=120, record=True)
@@ -468,9 +471,7 @@ def test_bash_primary_field_consistent_across_three_render_surfaces() -> None:
     assert "git diff --stat" in line_text
     assert log_summary == "git diff --stat"
 
-    # Cap equality: the three surfaces truncate at the shared constant, so the
-    # panel and --log copies can never silently desync (the #1108 oracle pins
-    # key consistency; this pins cap consistency too).
+    # All command-display surfaces must share the owner's truncation cap.
 
     long_command = "b" * (_BASH_COMMAND_MAX_CHARS + 25)
     long_header = _build_tool_header("Bash", {"command": long_command}, quiet_mode=True)
@@ -490,25 +491,17 @@ def test_bash_header_preserves_operator_cd_prefix() -> None:
     assert "cd /app && echo hello" in header.plain
 
 def test_shell_header_shows_cd_stripped_display_variant() -> None:
-    """S1: Codex ('shell') renders the cd-stripped display variant, not the stored replayable value."""
-
     header = _build_tool_header("shell", {"command": "cd /app && echo hello"})
     assert "echo hello" in header.plain
     assert "cd /app" not in header.plain  # the stored replayable value must not leak through
 
 def test_log_summary_shows_cd_stripped_display_variant() -> None:
-    """S1 parity: --log (_summarize_input) shows the cd-stripped variant for Codex ('shell')."""
-
     assert _summarize_input({"command": "cd /app && echo hello"}, "shell") == "echo hello"
 
 def test_log_summary_preserves_operator_cd_prefix() -> None:
-    """--log keeps the operator-authored cd prefix for Claude/Pi Bash commands (issue #336)."""
-
     assert _summarize_input({"command": "cd /app && echo hello"}, "Bash") == "cd /app && echo hello"
 
 def test_callback_progress_cd_split_matches_live_surfaces() -> None:
-    """format_callback_progress splits the same way: cd-strip Codex 'shell' only."""
-
     bash_line = format_callback_progress("Bash", {"command": "cd /app && echo hello"}, None)
     assert "cd /app && echo hello" in bash_line.plain
     shell_line = format_callback_progress("shell", {"command": "cd /app && echo hello"}, None)
@@ -541,7 +534,6 @@ def test_redacted_bash_command_redacts_before_the_cap(token: str) -> None:
     assert len(displayed) == _BASH_COMMAND_MAX_CHARS
 
 def test_redacted_bash_command_strip_is_codex_only_and_precedes_redaction() -> None:
-    """The strip applies to Codex 'shell' only, and before the redaction (issue #1227)."""
     command = _straddling_command(_AKIA_TOKEN)
     wrapped = '/bin/zsh -lc "cd /srv/app && ' + command + '"'
     shell_displayed = _redacted_bash_command("shell", wrapped)
@@ -554,7 +546,6 @@ def test_redacted_bash_command_strip_is_codex_only_and_precedes_redaction() -> N
 @pytest.mark.parametrize("token", [_AKIA_TOKEN, _JWT_TOKEN], ids=["akia", "jwt"])
 @pytest.mark.parametrize("name", ["Bash", "shell"])
 def test_command_display_surfaces_redact_straddling_credential(token: str, name: str) -> None:
-    """The real summary, callback, and panel renderers share order and caps."""
     cd_prefix = "cd /srv/app && "
     command = (_straddling_command(token, prefix=cd_prefix)
         if name == "Bash"
@@ -579,7 +570,6 @@ def test_command_display_surfaces_redact_straddling_credential(token: str, name:
 async def test_run_agent_command_display_preserves_replayable_input(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
 ) -> None:
-    """Rendering a Codex tool event never rewrites its stored command."""
     command = "cd /srv/app && " + _straddling_command(_AKIA_TOKEN)
     tool_event = ToolStartEvent(id="command-1", name="shell", input={"command": command})
     backend = ScriptedBackend(

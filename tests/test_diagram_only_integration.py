@@ -1,20 +1,8 @@
-"""Real-path tests for the ``--diagram-only`` flow (issue #1113).
+"""Run diagram-only review and Phase B posting against real temporary Git data.
 
-Every test enters through ``daydream.runner.run`` (or, for Phase B,
-``daydream.cli.main``) against a real temporary git repository. The only mocks
-are the stub backend at the ``create_backend`` seam and the in-process ``gh``
-fake at the ``subprocess.run`` boundary, so ``git_ops``, the ``gh api``
-tempfile path, the marker round trip and the GraphQL minimize mutation all run
-for real.
-
-Spec test coverage: 7 (the diagram-only half), 12, 13, 14 (the diagram-only
-half), plus the plan's regression tests (a) prior deep artifacts survive,
-(b) the recorder/manifest label a diagram run honestly, (d) an empty diff exits
-0, (e) a base-branch invocation is not a wrong-branch error, and (f) a
-diagram-only run posts an issue comment and never a review. Regression (c)
-(``--start-at`` rejection) is a CLI-level check and lives in
-``tests/test_cli.py``.
-"""
+Mock only the backend and gh subprocess boundaries. Cover preserved deep
+artifacts, honest manifest labels, empty/base-branch runs, and issue-comment
+publication. CLI --start-at rejection is covered in test_cli.py."""
 
 from __future__ import annotations
 
@@ -266,11 +254,7 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
 async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Issue #1167: the shipped post workflow holds the token, never the code.
-
-    Phase B runs from a directory that is not a repository at all, so head
-    evidence for every citation comes from the contents API at the same SHA.
-    """
+    """Without a checkout, Phase B reads all citation evidence from the head-SHA API."""
     target, artifact_path, artifact = await _render_flowchart_artifact(diagram_run, tmp_path, fake_gh)
 
     expected = _artifact(target)["results"]["flowchart"]["mermaid"]
@@ -405,13 +389,10 @@ async def test_agent_error_in_diagram_only_mode_exits_one(
 async def test_advisory_overflow_in_diagram_only_mode_exits_zero(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any]
 ) -> None:
-    """Advisory context was lost, but the diagram was authored: exit 0.
+    """Advisory loss permits success even when grounding omits the authored diagram.
 
-    ``dr.sequence_spec()`` cites the canonical ``build_cross_module_repo`` paths
-    and does not ground against this generated fixture, so the kind records
-    ``omitted`` rather than ``rendered``. That is not a failure, which is exactly
-    what this test is about — do not assert on the rendered mermaid here.
-    """
+    The canonical spec does not match this generated fixture: assert successful
+    completion, not rendered Mermaid."""
 
     target = build_large_cross_module_repo(tmp_path)
     fake_gh.serve_open_pr(target)
@@ -559,12 +540,7 @@ async def test_pr_lookup_failure_in_diagram_only_mode_exits_one_with_diagnostic(
 async def test_diagram_only_run_preserves_prior_deep_artifacts(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any],
 ) -> None:
-    """A diagram-only run must not clear ``.daydream/deep/``.
-
-    ``start_at`` defaults to ``"review"``, which is the spine's fresh-run
-    branch, so without the mode guard the run would ``rmtree`` the previous
-    deep review's resumable artifacts.
-    """
+    """Diagram mode must bypass the default fresh-review cleanup of prior deep artifacts."""
     target = _diagram_target(tmp_path, fake_gh)
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True)
@@ -588,13 +564,9 @@ async def test_diagram_only_run_preserves_prior_deep_artifacts(
 async def test_diagram_run_flow_label_and_manifest_backends(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], archive_dir: Path,
 ) -> None:
-    """Every step is stamped ``daydream_run_flow: "diagram"``; no fix/test backend.
+    """Record diagram flow labels and omit fix/test backends.
 
-    Reusing the ``TTT`` label would have been worse than wrong: the archive's
-    ``_flow_runs_merge`` returns True for TTT, so a diagram run would inherit a
-    previous deep review's ``merged-items.json`` as its own pipeline state --
-    and regression (a) guarantees that file is still on disk.
-    """
+    Mislabeling as TTT would make archive capture inherit stale merged items."""
     target = _diagram_target(tmp_path, fake_gh)
 
     exit_code, _ = await diagram_run(target, diagram="sequence", specs={"sequence": [dr.sequence_spec()]}, archive=True,
@@ -662,11 +634,7 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any],
     silence_console: Callable[..., None],
 ) -> None:
-    """A ``--findings-out`` deep review ships its diagrams; Phase B posts them.
-
-    Without this the blocks would exist in ``review-output.md`` but silently
-    vanish from the PR whenever the two-phase CI path is used.
-    """
+    """Deep findings-out carries diagrams through two-phase CI publication."""
 
     for module in ("daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.merge_steps",
         "daydream.deep.diagram_steps", "daydream.phases", "daydream.runner", "daydream.pr_review",

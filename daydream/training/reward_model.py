@@ -1,33 +1,9 @@
-"""Stage-0 two-class learned outcome reward model (M1, C9, S2).
+"""Learn a deterministic two-class outcome model from gold labels.
 
-Trains a small two-class classifier on **gold accepted/rejected** evidence and
-scores a finished comment to a ``[0, 1]`` outcome term for the Stage-0 rubric
-(:mod:`daydream.training.rubric`). This is the *learned* outcome term —
-a sibling of the intrinsic composite in :mod:`daydream.training.reward`, never
-a rewrite of it.
-
-Contract points:
-
-- **C9**: training input must contain **both** classes; a labels file with
-  only one admitted class raises :class:`ValueError` naming the missing
-  class. A positive-only model cannot rank.
-- **Gold admission**: input admission reuses the gold-outcome gate
-  (``daydream.training.corpus._is_admitted_outcome_gold`` semantics) via the
-  corpus loading path: a row is admitted only when its label is an accepted-
-  or rejected-class gold label, it carries posterior evidence, the
-  reply-classifier policy version is known, and its rubric is decisive-only.
-  Legacy rows (no ``labeler_policy_version``) are refused — the guard
-  working, never a silent fallback.
-- **S2**: the actual accepted/rejected ratio at training time is computed
-  from the admitted rows and reported on the model
-  (:attr:`OutcomeModel.label_ratio_reported`). No stored/stale figure is
-  ever consulted.
-- **Determinism**: the frozen split (fractions + seed) and the training pass
-  are fully deterministic for a given labels file and seed.
-- **Failure propagation**: an unreadable row raises :class:`ValueError`
-  naming the row id. There is no skip-and-warn and no default label.
-
-This module returns the in-memory model plus a serializable state dict.
+Admission requires accepted/rejected labels, posterior evidence, a policy
+version, and decisive-only data. Both classes are mandatory, and reported
+ratios are measured from admitted rows. Malformed or refused rows raise with
+their identity. This learned outcome term remains separate from intrinsic reward.
 """
 
 from __future__ import annotations
@@ -36,7 +12,7 @@ import hashlib
 import json
 import math
 import random
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -62,23 +38,11 @@ _CHAR_NGRAM_WEIGHT = 0.3
 
 @dataclass(frozen=True)
 class OutcomeModel:
-    """A trained two-class outcome model (frozen; mirror of the
-    ``RewardWeights`` fingerprint discipline in ``reward.py``).
+    """Frozen classifier state and measured train/holdout evidence.
 
-    Attributes:
-        weights: Token → weight mapping learned on the train split.
-        bias: Scalar bias term.
-        split_digest: SHA-256 digest of the frozen split (seed + sorted
-            held-out row ids) — the same payload the Stage-0 gate hashes, so
-            a score's provenance reconciles with the manifest's
-            ``run_identity.split_digest``.
-        label_ratio_reported: The **actual** accepted fraction among admitted
-            training rows, computed at training time (S2).
-        train_rows / held_out_rows: Admitted row counts per split.
-        held_out_accuracy: Accuracy of the trained model on the held-out
-            split (diagnostic evidence for the Stage-0 gate).
-        model_fingerprint: Stable 8-char digest of the model state, stamped
-            on scores (analogous to ``_weights_fingerprint``).
+    split_digest matches the gate's frozen partition. label_ratio_reported is the
+    accepted fraction of admitted training input; held_out_accuracy measures the
+    held-out partition. model_fingerprint is the first eight digest characters.
     """
 
     weights: dict[str, float]
@@ -96,16 +60,7 @@ class OutcomeModel:
 
     def state_dict(self) -> dict[str, Any]:
         """Serializable state dict for the coordinator's checkpoint writer."""
-        return {
-            "weights": dict(self.weights),
-            "bias": self.bias,
-            "split_digest": self.split_digest,
-            "label_ratio_reported": self.label_ratio_reported,
-            "train_rows": self.train_rows,
-            "held_out_rows": self.held_out_rows,
-            "held_out_accuracy": self.held_out_accuracy,
-            "model_fingerprint": self.model_fingerprint,
-        }
+        return asdict(self)
 
 
 def _model_fingerprint(weights: dict[str, float], bias: float) -> str:
@@ -147,25 +102,11 @@ def _sigmoid(z: float) -> float:
 
 
 def _read_admitted_rows(labels_path: str | Path) -> list[dict[str, Any]]:
-    """Read and admit gold outcome rows, failing closed.
+    """Read and admit gold accepted/rejected JSONL rows; refuse malformed or legacy rows.
 
-    Admission reuses ``_is_admitted_outcome_gold`` semantics: an
-    accepted/rejected gold label backed by posterior evidence, a known
-    reply-classifier policy version, and a decisive-only rubric. Rows carry
-    these as fields (``has_posterior``, ``labeler_policy_version``,
-    ``decisive_mix``, ``decisive_only``). Labels may be written as
-    ``label``/``text``/``comment_id`` (the coordinator's Stage-0 labels
-    emission) or ``outcome_label``/``review_output``/``session_id`` (the
-    v1 records export shape). An absent
-    ``labeler_policy_version`` refuses the row — a legacy row is refused,
-    never silently given a fallback version; the guard is working, never a
-    silent admission. Any *explicit* failing value is honored and refuses.
-
-    Raises:
-        ValueError: On a row that is not a JSON object, missing
-            ``comment_id``/``session_id``, ``text``/``review_output``, or
-            ``label``/``outcome_label``, an unknown label, or a row refused
-            by the gold-outcome gate. The row id is always named.
+    Accept label/text/comment_id and outcome_label/review_output/session_id spellings.
+    Missing policy versions never receive a fallback. Explicit admission failures
+    remain failures; normalize admitted rows to canonical keys for training.
     """
     rows: list[dict[str, Any]] = []
     with Path(labels_path).open("r", encoding="utf-8") as fh:
@@ -260,25 +201,11 @@ def train_outcome_model(
     lr: float = 0.5,
     l2: float = 1e-4,
 ) -> OutcomeModel:
-    """Train the two-class outcome model on gold accepted/rejected evidence.
+    """Train on the frozen partition, measuring class balance and held-out accuracy.
 
-    Args:
-        labels_path: JSONL labels file (one JSON object per line with
-            ``comment_id``, ``text``, ``label``; optional gold-gate fields).
-        split: The frozen train/held-out partition produced by
-            :func:`daydream.training.gate.freeze_split` — the single author
-            of the split and its digest.
-        seed: Seed for the SGD training pass (the split shuffle's own seed is
-            already frozen in ``split``).
-        epochs / lr / l2: Training hyperparameters (deterministic given seed).
-
-    Returns:
-        The frozen :class:`OutcomeModel`.
-
-    Raises:
-        ValueError: When the file yields fewer than two classes (C9 — the
-            missing class is named), or a row is unreadable or refused by the
-            gold-outcome gate.
+    Both classes must exist after admission or ValueError names the missing one.
+    The split is supplied by the gate; seed controls only the deterministic SGD
+    shuffle. Unreadable or refused input propagates before training.
     """
     rows = _read_admitted_rows(labels_path)
     if not rows:
@@ -307,28 +234,16 @@ def train_outcome_model(
     train_examples = [(_features(str(r["text"])), label_to_y[str(r["label"])]) for r in train_rows]
     weights, bias = _train_logistic(train_examples, epochs=epochs, lr=lr, l2=l2, seed=seed)
 
-    eval_model = OutcomeModel(
+    model = OutcomeModel(
         weights=weights, bias=bias, split_digest=split_digest,
-        label_ratio_reported=0.0, train_rows=0, held_out_rows=0, held_out_accuracy=0.0,
+        label_ratio_reported=n_accepted / len(rows), train_rows=len(train_rows),
+        held_out_rows=len(held_out_rows), held_out_accuracy=0.0,
     )
-    correct = 0
-    for row in held_out_rows:
-        y = label_to_y[str(row["label"])]
-        pred = 1.0 if score_comment(eval_model, str(row["text"])) >= 0.5 else 0.0
-        if pred == y:
-            correct += 1
-    held_out_accuracy = correct / len(held_out_rows)
-
-    label_ratio_reported = n_accepted / len(rows)
-    return OutcomeModel(
-        weights=weights,
-        bias=bias,
-        split_digest=split_digest,
-        label_ratio_reported=label_ratio_reported,
-        train_rows=len(train_rows),
-        held_out_rows=len(held_out_rows),
-        held_out_accuracy=held_out_accuracy,
+    correct = sum(
+        (1.0 if score_comment(model, str(row["text"])) >= 0.5 else 0.0) == label_to_y[str(row["label"])]
+        for row in held_out_rows
     )
+    return replace(model, held_out_accuracy=correct / len(held_out_rows))
 
 
 def score_comment(model: OutcomeModel, text: str) -> float:

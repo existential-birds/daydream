@@ -13,6 +13,7 @@ from daydream import cli
 from daydream.archive import hydrate, license_enrich
 from daydream.archive.hydrate_client import FakeHub
 from daydream.archive.license_enrich import EnrichedEvidence
+from daydream.commands import hydrate as cli_hydrate
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from tests.fixtures.training.build_hub_snapshot import (
     SNAPSHOT_REVISION,
@@ -24,7 +25,7 @@ from tests.fixtures.training.build_hub_snapshot import (
 
 @dataclass
 class _FakeSummary:
-    """Default HydrateHubSummary-shaped result for a monkeypatched `_run_hydrate_hub`."""
+    """Default HydrateHubSummary-shaped result for a monkeypatched hydration orchestrator."""
 
     curation_id: str = "cur-" + "0" * 16
     output_commit_sha: str = "b" * 40
@@ -58,26 +59,26 @@ def _run_dry_hydrate(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, hu
     """Run the private dry-run hydrate command against a fake hub."""
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
-    return cli._handle_hydrate_hub_command(_hydrate_args(
+    return cli_hydrate._handle_hydrate_hub_command(_hydrate_args(
             tmp_path, source_repo="org/private-ds", revision=SNAPSHOT_REVISION, destination_repo="org/private-ds",
             dry_run=True,
         )
     )
 
 def test_hydrate_hub_requires_explicit_args(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = cli._handle_hydrate_hub_command([])
+    rc = cli_hydrate._handle_hydrate_hub_command([])
     assert rc == 1
     assert "--source-repo" in capsys.readouterr().out
 
 def test_hydrate_hub_rejects_moving_branch_without_optin(capsys: pytest.CaptureFixture[str]) -> None:
-    rc = cli._handle_hydrate_hub_command(["--source-repo", "org/ds", "--source-revision", "main",
+    rc = cli_hydrate._handle_hydrate_hub_command(["--source-repo", "org/ds", "--source-revision", "main",
          "--destination-repo", "org/ds", "--stage-dir", "/tmp/x"])
     assert rc == 1
     assert "exploratory" in capsys.readouterr().out
 
 def test_hydrate_hub_missing_token_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("HF_TOKEN", raising=False)
-    rc = cli._handle_hydrate_hub_command(["--source-repo", "org/ds", "--source-revision", "a" * 40,
+    rc = cli_hydrate._handle_hydrate_hub_command(["--source-repo", "org/ds", "--source-revision", "a" * 40,
          "--destination-repo", "org/ds", "--stage-dir", "/tmp/x"])
     assert rc == 1
 
@@ -93,10 +94,10 @@ def test_success_path_drives_orchestrator(monkeypatch: pytest.MonkeyPatch, tmp_p
         return _FakeSummary()
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
+    monkeypatch.setattr(hydrate, "run_hydrate_hub", fake_run, raising=False)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
-    rc = cli._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy))
+    rc = cli_hydrate._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy))
     assert rc == 0
     assert calls and calls[0].source_revision == "a" * 40
 
@@ -114,10 +115,12 @@ def test_cli_wires_license_policy_into_hydration(
         )
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setattr(cli, "_run_hydrate_hub", fake_run, raising=False)
+    monkeypatch.setattr(hydrate, "run_hydrate_hub", fake_run, raising=False)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
-    rc = cli._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy, allow_copyleft="Owner/Gpl-Repo"))
+    rc = cli_hydrate._handle_hydrate_hub_command(
+        _hydrate_args(tmp_path, policy=policy, allow_copyleft="Owner/Gpl-Repo")
+    )
     assert rc == 0
     assert calls and calls[0].license_policy_path == str(policy)
     assert calls[0].allow_copyleft == frozenset({"owner/gpl-repo"})
@@ -129,14 +132,14 @@ def test_success_path_surfaces_incomplete_manifests(
 ) -> None:
     monkeypatch.setenv("HF_TOKEN", "t")
     monkeypatch.setenv("GITHUB_TOKEN", "t")
-    monkeypatch.setattr(cli, "_run_hydrate_hub",
+    monkeypatch.setattr(hydrate, "run_hydrate_hub",
         lambda _config: _FakeSummary(
             dry_run_discovered=2, dry_run_incomplete_manifests=("sess-a (missing trajectory.json)",),
         ),
     )
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "1", "spdx_decisions": {}}')
-    rc = cli._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy))
+    rc = cli_hydrate._handle_hydrate_hub_command(_hydrate_args(tmp_path, policy=policy))
     assert rc == 0
     output = " ".join(capsys.readouterr().out.split())
     assert "hydration yield reduced" in output
@@ -201,14 +204,14 @@ def test_hydrate_hub_refuses_non_dry_run_without_policy(
     refuse before any Hub access; the dry-run path still works without one."""
     monkeypatch.setenv("HF_TOKEN", "t")
     argv = _hydrate_args(tmp_path / "stage")
-    rc = cli._handle_hydrate_hub_command(argv)
+    rc = cli_hydrate._handle_hydrate_hub_command(argv)
     assert rc == 1
     out = capsys.readouterr().out + capsys.readouterr().err
     assert "license policy" in out.lower()
 
     # The dry-run path still works without a policy (planning affordance): it
     # must not refuse with the policy message (it fails later, at Hub access).
-    rc = cli._handle_hydrate_hub_command([*argv, "--dry-run"])
+    rc = cli_hydrate._handle_hydrate_hub_command([*argv, "--dry-run"])
     output = capsys.readouterr().out + capsys.readouterr().err
     assert rc != 1 or "license policy" not in output.lower()
 
@@ -260,18 +263,13 @@ def run_dry_run_capture(
     monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path, capsys: pytest.CaptureFixture[str], *, hub: FakeHub,
     resolver: Any,
 ) -> tuple[int, dict[str, Any]]:
-    """Run the real CLI dry-run path and parse the printed report.
-
-    Returns ``(rc, report)`` where ``report["per_repository"]`` maps repo slug
-    to the four license-admission buckets parsed from the printed per-repo
-    lines, and ``report["discovered"]`` is the discovered-candidate count.
-    """
+    """Run CLI dry-run and return its exit code, discovered count, and per-repo license buckets."""
     monkeypatch.setenv("HF_TOKEN", "test-token")
     monkeypatch.setattr(hydrate, "_make_client", lambda _repo: hub)
     monkeypatch.setattr(license_enrich, "_make_license_resolver", lambda: resolver)
     policy = tmp_path / "license-policy.json"
     policy.write_text('{"policy_version": "test", "spdx_decisions": {"MIT": "accepted"}}')
-    rc = cli._handle_hydrate_hub_command(_hydrate_args(
+    rc = cli_hydrate._handle_hydrate_hub_command(_hydrate_args(
             tmp_path / "stage", source_repo="org/private-ds", revision=SNAPSHOT_REVISION,
             destination_repo="org/private-ds", policy=policy, dry_run=True,
         )

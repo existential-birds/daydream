@@ -9,7 +9,7 @@ import pytest
 
 from daydream import git_ops
 from daydream.deep.artifacts import deep_dir
-from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
+from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.fix_footprint import AuthorizedFixFootprint
 from tests.deep_orchestrator.support import (
     _capture_warnings,
@@ -48,7 +48,6 @@ from tests.test_deep_orchestrator import (
 async def test_fresh_multi_stack_run_stamps_record_uid_at_birth(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """#1111 real-path: every record a fresh deep run writes is born identified."""
     _silence(monkeypatch)
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -113,7 +112,6 @@ async def test_merge_resume_backfills_uids_onto_pre_uid_records(
 async def test_merge_resume_preserves_existing_non_contiguous_uid(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1111 real-path: a uid already on disk is never re-minted by position."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     deep = _prime_uid_merge_resume(multi_stack_target, python=[_high_record(description="py survivor", uid="python:4")],
@@ -127,7 +125,6 @@ async def test_merge_resume_preserves_existing_non_contiguous_uid(
 async def test_duplicate_record_uid_stops_the_run_before_merge(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1111 real-path: two records sharing one uid is fatal, not a warning."""
     errors: list[tuple[str, str]] = []
     monkeypatch.setattr("daydream.deep.review_steps.print_error",
         lambda console, title, message, *a, **k: errors.append((title, message)),
@@ -153,7 +150,6 @@ async def test_duplicate_record_uid_stops_the_run_before_merge(
 async def test_arbiter_drop_removes_only_the_named_record_across_stack_files(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1111 real-path: an arbiter rejection deletes one record and only that one."""
     _silence(monkeypatch)
     stub = _RejectingArbiterBackend(multi_stack_target, "react:1")
     # Echo the on-disk records as merged items so the report reflects what
@@ -193,7 +189,7 @@ async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#1111 real-path: a record that routes outside the rewritten files is named."""
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.merge_steps.print_warning")
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.adjudication_steps.print_warning")
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     deep = _prime_uid_merge_resume(multi_stack_target, python=[_high_record(description="py issue", uid="ghost:1")],)
@@ -217,7 +213,6 @@ async def test_unroutable_record_uid_warns_instead_of_erasing_silently(
 async def test_every_merged_item_carries_source_uids_on_a_multi_stack_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """#1111 real-path: every shipped item names the records it derives from."""
     deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
     items = _merged_items(deep)
     pool = _run_uid_pool(deep)
@@ -317,7 +312,6 @@ async def test_unattributable_merge_source_uids_degrade_to_empty_list(
 async def test_single_stack_bypass_attributes_items_to_their_own_records(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """#1111 real-path: the tiny-diff bypass attributes items to their records."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
@@ -372,7 +366,6 @@ async def test_structural_fold_survivor_inherits_both_provenances(
 async def test_dropped_speculative_sidecar_records_item_provenance(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#1111 real-path: the evidence gate's sidecar records what it deleted."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -432,7 +425,6 @@ async def test_legacy_artifact_backfills_structural_provenance_consistently(
 async def test_every_shipped_item_carries_a_unique_item_uid_on_a_multi_stack_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """#1111 real-path: every merged item ships with a distinct durable handle."""
     deep = await _fresh_uid_run(multi_stack_target, monkeypatch, mute_side_effects)
     items = _merged_items(deep)
     assert len(items) > 1, f"fixture must ship several items or uniqueness proves nothing: {items}"

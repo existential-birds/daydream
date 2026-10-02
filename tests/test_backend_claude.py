@@ -1,4 +1,3 @@
-"""Tests for ClaudeBackend."""
 import hashlib
 import json
 import sys
@@ -89,7 +88,6 @@ async def test_artifact_visibility_protocol_sdk_query_observes_exact_options_and
 
 @pytest.fixture
 def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> Any:
-    """Return a function that patches the SDK imports in claude.py."""
     def _patch(client_class: Any) -> None:
         patch_claude_sdk(monkeypatch, client_class)
     return _patch
@@ -227,7 +225,6 @@ async def test_claude_backend_injected_environment_reaches_sdk_options_and_polic
 async def _drive_claude_backend_to_list(
     *, messages: list[Any], patch_sdk_fn: Any, output_schema: Any = None, prompt: str = "go",
 ) -> list[Any]:
-    """Drive ClaudeBackend.execute with a scripted SDK message sequence."""
     patch_sdk_fn(scripted_client(messages))
     backend = ClaudeBackend(model="opus")
     events: list[Any] = []
@@ -322,10 +319,7 @@ async def test_execute_structured_output(patch_sdk: Any) -> None:
     }
 
 async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any) -> None:
-    """An is_error ResultMessage must raise after exposing terminal metadata. Regression guard for the sandbox
-    acceptance failure: an invalid API key run streamed the error text and a ResultMessage(is_error=True), and the
-    backend yielded a clean ResultEvent — the review then exited 0 with "no issues found" despite the agent never
-    running."""
+    """An SDK error raises after terminal metadata, never becoming a clean empty review."""
     patch_sdk(
         scripted_client(
             [
@@ -339,15 +333,11 @@ async def test_error_result_raises_instead_of_clean_empty_result(patch_sdk: Any)
     with pytest.raises(ClaudeAgentError, match="Invalid API key"):
         async for event in backend.execute(Path("/tmp"), "Review this"):
             events.append(event)
-    # A terminal metadata event does not turn the failed stream into success.
     result = next(e for e in events if isinstance(e, ResultEvent))
     assert result.continuation is None
 
 async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
-    """error_max_turns must raise the typed MaxTurnsError carrying the subtype. A generic ClaudeAgentError left
-    callers (and the trajectory) unable to distinguish a turn-cap failure from a real backend error. Mirrors the
-    real SDK shape: a ResultMessage with ``is_error=True`` and ``subtype="error_max_turns"`` (``result`` is None,
-    so the detail falls back to the subtype)."""
+    """A turn-cap error preserves its subtype even when SDK result text is absent."""
     patch_sdk(
         scripted_client(
             [
@@ -360,7 +350,6 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     with pytest.raises(MaxTurnsError) as excinfo:
         async for _ in backend.execute(Path("/tmp"), "Review this"):
             pass
-    # Subtype is carried for trajectory recording; still a ClaudeAgentError.
     assert excinfo.value.subtype == "error_max_turns"
     assert isinstance(excinfo.value, ClaudeAgentError)
 
@@ -395,19 +384,16 @@ async def test_max_turns_result_raises_typed_error(patch_sdk: Any) -> None:
     ("", False),                          # empty → fail closed
 ])
 def test_read_only_bash_guard_decision(cmd: Any, allowed: Any) -> None:
-    """The read-only Bash allowlist predicate allows inspection, denies mutation/chains."""
     assert _is_read_only_command(cmd) is allowed
 
 @pytest.mark.parametrize("cmd, dangerous", [
     ("find / -path '*x*'", True), ("find / -name y", True), ("grep -r pattern /", True), ("rm -rf /", True),
-    # F2: catastrophic wipe shapes the old `-rf?` literal missed.
     ("rm -fr /", True),                       # reversed flags
     ("rm -rf /*", True),                      # root glob
     ("rm --recursive --force /", True),       # long-form flags
     ("rm -Rf /", True),                       # capital-R recursive
     ("rm -rf foo /", True),                   # trailing root arg
-    # Recursive flag NOT first: a non-recursive option token preceding it must
-    # not let the wipe slip past the guard (CodeRabbit #185).
+    # Reordering recursive flags must not evade the ownership guard.
     ("rm --force --recursive /", True),       # long-form, recursive second
     ("rm -f -r /", True),                     # short-form, recursive second
     ("rm -i -r /*", True),                    # recursive second, root glob
@@ -422,11 +408,10 @@ def test_is_dangerous_command(cmd: Any, dangerous: Any) -> None:
     assert _is_dangerous_command(cmd) is dangerous
 
 async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> None:
-    """read_only=True wires a fail-closed PreToolUse guard onto the SDK options. The contract is behavioral, not a
-    matcher-string shape: under ``bypassPermissions`` the hook is the *only* enforcement, so the guard must fire
-    for every tool and deny-by-default. We assert that by driving the callback that was actually registered on the
-    options — denying Write and mutating Bash, allowing inspection (read-only Bash + allowlisted tools), and
-    denying an unknown/future tool (the fail-closed property a narrow matcher would silently lose)."""
+    """Drive registered guards: bypassPermissions needs all-tool, deny-by-default enforcement.
+
+    Mutation and unknown tools deny; inspection remains available.
+    """
     backend, captured = _capturing_backend(patch_sdk)
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=True):
         pass
@@ -453,14 +438,11 @@ async def test_read_only_execute_registers_pretooluse_guard(patch_sdk: Any) -> N
     # Fail-closed: a narrow deny-list matcher would never present an unknown tool to the guard.
     deny_unknown = await _decide(matcher, {"tool_name": "FutureMutator", "tool_input": {}})
     assert deny_unknown["hookSpecificOutput"]["permissionDecision"] == "deny"
-    # read_only=True also composes the always-on dangerous-command guard: a root scan denies.
     deny_find_root = await _decide(matcher, {"tool_name": "Bash", "tool_input": {"command": "find / -name x"}})
     assert deny_find_root["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk: Any) -> None:
-    """read_only=False (default) still wires the always-on dangerous-command guard. The guard is registered
-    unconditionally (all phases). Drive the callback that was actually built onto the production options: a ``find
-    /`` root scan denies, a scoped ``find core/...`` allows."""
+    """Registered guards deny root scans and permit scoped finds in mutating mode."""
     backend, captured = _capturing_backend(patch_sdk)
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=False):
         pass
@@ -478,69 +460,49 @@ async def test_non_read_only_execute_registers_dangerous_command_hook(patch_sdk:
     )
     assert "hookSpecificOutput" not in allow_find_scoped
 
-async def test_read_only_guard_denies_mutation_allows_inspection() -> None:
-    """The registered guard callback denies Write and non-read-only Bash, allows read-only Bash."""
-    deny_write = cast(dict[str, Any], await _read_only_guard(
-        {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {},
-    ))
-    assert deny_write["hookSpecificOutput"]["permissionDecision"] == "deny"
-    deny_bash = cast(dict[str, Any], await _read_only_guard(
-        {"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, None, {},
-    ))
-    assert deny_bash["hookSpecificOutput"]["permissionDecision"] == "deny"
-    allow_bash = await _read_only_guard({"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, None, {})
-    assert "hookSpecificOutput" not in allow_bash
-    # Malformed input → fail closed (deny)
-    deny_malformed = cast(dict[str, Any], await _read_only_guard({"tool_name": "Bash"}, None, {}))
-    assert deny_malformed["hookSpecificOutput"]["permissionDecision"] == "deny"
+@pytest.mark.parametrize("payload,denied", [
+    ({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, True),
+    ({"tool_name": "Bash", "tool_input": {"command": "git commit -m x"}}, True),
+    ({"tool_name": "Bash", "tool_input": {"command": "git log -n 5"}}, False),
+    ({"tool_name": "Bash"}, True),
+])
+async def test_read_only_guard_denies_mutation_allows_inspection(payload: Any, denied: bool) -> None:
+    result = cast(dict[str, Any], await _read_only_guard(payload, None, {}))
+    if denied:
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    else:
+        assert "hookSpecificOutput" not in result
 
-async def test_read_only_guard_deny_reason_uses_shared_guard_wording() -> None:
-    """The guard is shared (diagnostic subagents, failure summarizer, exploration
-    specialists), so its deny reasons must say 'read-only guard', not the stale
-    'read-only summarizer'."""
-    deny_bash = cast(
-        dict[str, Any], await _read_only_guard({"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}}, None, {}),
-    )
-    bash_reason = deny_bash["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "read-only guard" in bash_reason
-    assert "read-only summarizer" not in bash_reason
-    deny_tool = cast(
-        dict[str, Any],
-        await _read_only_guard({"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}}, None, {}),
-    )
-    tool_reason = deny_tool["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "read-only guard" in tool_reason
-    assert "read-only summarizer" not in tool_reason
+@pytest.mark.parametrize("payload", [
+    {"tool_name": "Bash", "tool_input": {"command": "rm -rf x"}},
+    {"tool_name": "Write", "tool_input": {"file_path": "x", "content": "y"}},
+])
+async def test_read_only_guard_deny_reason_uses_shared_guard_wording(payload: Any) -> None:
+    result = cast(dict[str, Any], await _read_only_guard(payload, None, {}))
+    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+    assert "read-only guard" in reason
+    assert "read-only summarizer" not in reason
 
-async def test_execute_passes_agents_dict_to_options(patch_sdk: Any) -> None:
-    """Agents dict must reach ClaudeAgentOptions with original keys preserved verbatim."""
+@pytest.mark.parametrize("with_agents", [False, True])
+async def test_execute_preserves_agents_in_sdk_options(patch_sdk: Any, with_agents: bool) -> None:
     backend, captured = _capturing_backend(patch_sdk)
-    pattern_scanner = AgentDefinition(
-        description="pattern scanner", prompt="scan patterns", tools=["Read", "Grep"], model="sonnet",
-    )
-    dependency_tracer = AgentDefinition(
-        description="dependency tracer", prompt="trace deps", tools=["Read", "Grep"], model="sonnet",
-    )
-    agents = {"pattern-scanner": pattern_scanner, "dependency-tracer": dependency_tracer}
-    events = []
-    async for event in backend.execute(Path("/tmp"), "Go", agents=agents):
-        events.append(event)
-    opts = captured["options"]
-    assert opts is not None
-    assert opts.agents == {"pattern-scanner": pattern_scanner, "dependency-tracer": dependency_tracer}
-    assert "explorer-0" not in opts.agents
-    assert "explorer-1" not in opts.agents
+    agents = {
+        "pattern-scanner": AgentDefinition(
+            description="pattern scanner", prompt="scan patterns", tools=["Read", "Grep"], model="sonnet",
+        ),
+        "dependency-tracer": AgentDefinition(
+            description="dependency tracer", prompt="trace deps", tools=["Read", "Grep"], model="sonnet",
+        ),
+    } if with_agents else None
+    async for _ in backend.execute(Path("/tmp"), "Go", agents=agents):
+        pass
+    options = captured["options"]
+    assert options is not None
+    assert options.agents == agents
+    if agents:
+        assert "explorer-0" not in options.agents
+        assert "explorer-1" not in options.agents
 
-async def test_execute_passes_none_when_no_agents(patch_sdk: Any) -> None:
-    """When agents=None, ClaudeAgentOptions should not carry an agents dict."""
-    backend, captured = _capturing_backend(patch_sdk)
-    events = []
-    async for event in backend.execute(Path("/tmp"), "Go"):
-        events.append(event)
-    opts = captured["options"]
-    assert opts is not None
-    agents_val = getattr(opts, "agents", None)
-    assert agents_val is None
 
 # Helpers for TurnEndEvent tests (Task 6)
 
@@ -581,7 +543,6 @@ async def test_structured_output_tool_result_is_suppressed(patch_sdk: Any) -> No
     assert result_events[0].structured_output == {"data": 1}
 
 async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: Any) -> None:
-    """One TurnEndEvent per AssistantMessage, after that message's events."""
     events = await _drive_claude_backend_to_list(
         messages=[
             _assistant_message(text="turn-1", message_id="msg_1"),
@@ -599,18 +560,13 @@ async def test_claude_backend_emits_turn_end_per_assistant_message(patch_sdk: An
     assert first_text_idx < turn_ends[0][0] < second_text_idx
     assert second_text_idx < turn_ends[1][0]
 
-async def test_reasoning_effort_reaches_sdk_options_as_effort(patch_sdk: Any) -> None:
-    """The resolved per-phase effort arrives as ClaudeAgentOptions.effort."""
-    backend, captured = _capturing_backend(patch_sdk, reasoning_effort="max")
+@pytest.mark.parametrize("effort", [None, "max"])
+async def test_reasoning_effort_reaches_sdk_options(patch_sdk: Any, effort: str | None) -> None:
+    backend, captured = _capturing_backend(patch_sdk, reasoning_effort=effort)
     async for _ in backend.execute(Path("/tmp"), "go"):
         pass
-    assert captured["options"].effort == "max"
+    assert captured["options"].effort == effort
 
-async def test_no_reasoning_effort_leaves_sdk_effort_unset(patch_sdk: Any) -> None:
-    backend, captured = _capturing_backend(patch_sdk)
-    async for _ in backend.execute(Path("/tmp"), "go"):
-        pass
-    assert captured["options"].effort is None
 
 def test_unsupported_reasoning_effort_fails_at_construction() -> None:
     with pytest.raises(ValueError, match="does not support reasoning effort"):
@@ -939,51 +895,31 @@ async def test_continuation_token_controls_resume(
         pass
     assert captured["options"].resume == expected_resume
 
-async def test_result_event_mints_session_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The terminal ResultMessage's session_id is minted into the ResultEvent."""
-    patch_claude_sdk(monkeypatch, scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-9")]))
-    backend = ClaudeBackend(model="opus")
-    results = [
-        e
-        async for e in backend.execute(Path("/tmp"), "p")
-        if isinstance(e, ResultEvent)
-    ]
-    assert len(results) == 1
-    assert results[0].continuation is not None
-    assert results[0].continuation.backend == "claude"
-    assert results[0].continuation.data["session_id"] == "sess-9"
-
-async def test_no_token_without_persist_session(monkeypatch: pytest.MonkeyPatch) -> None:
-    """persist_session=False disables SDK session persistence and suppresses the token."""
+@pytest.mark.parametrize("persist_session", [False, True])
+@pytest.mark.parametrize("session_id", [None, "sess-9"])
+async def test_result_continuation_requires_persisted_native_session(
+    monkeypatch: pytest.MonkeyPatch, persist_session: bool, session_id: str | None,
+) -> None:
     captured: dict[str, Any] = {}
     patch_claude_sdk(
-        monkeypatch, scripted_client([MockResultMessage(total_cost_usd=0.01, session_id="sess-9")], captured=captured),
+        monkeypatch,
+        scripted_client([MockResultMessage(total_cost_usd=0.01, session_id=session_id)], captured=captured),
     )
     backend = ClaudeBackend(model="opus")
-    results = [
-        e
-        async for e in backend.execute(Path("/tmp"), "p", persist_session=False)
-        if isinstance(e, ResultEvent)
-    ]
-    assert results[0].continuation is None
-    assert captured["options"].extra_args == {"no-session-persistence": None}
+    results = [event async for event in backend.execute(Path("/tmp"), "p", persist_session=persist_session)
+               if isinstance(event, ResultEvent)]
+    assert len(results) == 1
+    assert captured["options"].extra_args == ({} if persist_session else {"no-session-persistence": None})
+    if persist_session and session_id:
+        assert results[0].continuation is not None
+        assert results[0].continuation.backend == "claude"
+        assert results[0].continuation.data["session_id"] == session_id
+    else:
+        assert results[0].continuation is None
 
-async def test_no_session_id_mints_no_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ResultMessage without a session id yields continuation=None."""
-    patch_claude_sdk(monkeypatch, scripted_client([MockResultMessage(total_cost_usd=0.01, session_id=None)]))
-    backend = ClaudeBackend(model="opus")
-    results = [
-        e
-        async for e in backend.execute(Path("/tmp"), "p")
-        if isinstance(e, ResultEvent)
-    ]
-    assert results[0].continuation is None
+
 
 async def test_execute_disables_cli_background_tasks_and_lifts_bash_ceiling(patch_sdk: Any) -> None:
-    """The CLI subprocess env switches background tasks off and raises the Bash timeout ceiling. daydream reads a
-    turn's final text as the phase result and stops consuming the session when the turn ends, at which point the
-    CLI kills its background tasks -- so a backgrounded ``make test`` can never report. The ceiling is lifted to
-    the host's largest per-turn wall budget so a slow suite has no reason to be backgrounded in the first place."""
     backend, captured = _capturing_backend(patch_sdk)
     async for _ in backend.execute(Path("/tmp"), "Go"):
         pass
@@ -995,10 +931,10 @@ async def test_execute_disables_cli_background_tasks_and_lifts_bash_ceiling(patc
 
 @pytest.mark.parametrize("read_only", [False, True])
 async def test_execute_registers_background_bash_guard(patch_sdk: Any, read_only: bool) -> None:
-    """Every execute() wires an always-on PreToolUse guard denying ``Bash(run_in_background=True)``. Drive the
-    callbacks actually registered on the production options, in both the default and the read-only profile: a
-    backgrounded read-only command is denied with a reason that tells the agent to rerun in the foreground; the
-    same command in the foreground is allowed; a non-Bash tool carrying the key is not the guard's business."""
+    """Registered guards block background Bash in both profiles with foreground guidance.
+
+    Foreground commands and non-Bash tools with the same key remain allowed.
+    """
     backend, captured = _capturing_backend(patch_sdk)
     async for _ in backend.execute(Path("/tmp"), "Go", read_only=read_only):
         pass
@@ -1039,24 +975,19 @@ def test_is_background_bash(payload: Any, background: bool) -> None:
 # --- P18 Task 1: effective request-config admission at the Claude SDK seam ---
 
 async def _request_event(apply_patch: Any, prompt: str, **execute_kwargs: Any) -> RequestEvent:
-    """Drive execute against a capturing client and return its RequestEvent."""
     backend, _ = _capturing_backend(apply_patch)
     events = [event async for event in backend.execute(Path("/tmp"), prompt, **execute_kwargs)]
     return next(e for e in events if isinstance(e, RequestEvent))
 
 async def test_request_event_carries_typed_config_from_exact_sdk_options(patch_sdk: Any) -> None:
-    """RequestEvent.config mirrors the options the SDK client actually received."""
     request = await _request_event(patch_sdk, "capture config")
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
-    # Common subset: max_turns not passed -> None (never an effective claim).
     assert config.max_turns is None
     assert config.read_only is False
     assert config.persist_session is True
     assert config.continuation_mode == "fresh"
-    # Claude main-model-only surface is single-model-capable.
     assert config.model_mode == "single"
-    # Backend-specific: exact implemented facts (never guessed defaults).
     assert config.permission_mode == "bypassPermissions"
     assert config.allowed_tools_count == 6
     assert config.allowed_tools_present is True
@@ -1066,7 +997,6 @@ async def test_request_event_carries_typed_config_from_exact_sdk_options(patch_s
     assert config.native_output_format is False
     assert config.buffer_limit_bytes == 10 * 1024 * 1024
     assert config.hooks_enabled is True
-    # Provenance: configured model, no claimed provider, host-observed stamp.
     assert request.model_name == "opus"
     assert request.model_source == "configured"
     assert request.provider_name is None
@@ -1086,12 +1016,10 @@ async def test_request_event_requires_multi_or_dynamic_for_nonempty_agents(patch
     # any specialist leaks into the admitted config.
     assert not hasattr(config, "agents")
     assert not hasattr(config, "agent_definitions")
-    # The exact main-model Daydream provenance is preserved.
     assert request.model_name == "opus"
     assert request.model_source == "configured"
 
 async def test_request_event_read_only_and_max_turns_are_admitted(patch_sdk: Any) -> None:
-    """Actually-passed max_turns/read_only appear; accepted-but-ignored do not exist."""
     request = await _request_event(patch_sdk, "go", max_turns=7, read_only=True)
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)
@@ -1101,7 +1029,6 @@ async def test_request_event_read_only_and_max_turns_are_admitted(patch_sdk: Any
     assert config.hooks_enabled is True
 
 async def test_request_event_resume_provenance_is_host_generated(patch_sdk: Any) -> None:
-    """A resumed claude session is continuation_mode=resume with host provenance."""
     token = ContinuationToken(backend="claude", data={"session_id": "sess-42"})
     request = await _request_event(patch_sdk, "again", continuation=token)
     config = request.config
@@ -1111,7 +1038,6 @@ async def test_request_event_resume_provenance_is_host_generated(patch_sdk: Any)
     assert request.session_source == "host_generated"
 
 async def test_request_event_output_schema_sets_native_output_format(patch_sdk: Any) -> None:
-    """A schema request admits native_output_format=True at the SDK options."""
     request = await _request_event(patch_sdk, "structured", output_schema={"type": "object"})
     config = request.config
     assert isinstance(config, ClaudeRequestConfig)

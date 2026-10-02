@@ -1,40 +1,8 @@
-"""Configuration constants for daydream.
+"""Shared model/effort defaults, budgets, artifact names, and rendering limits.
 
-Provide centralized configuration values used throughout the daydream package.
-This module contains constants for stack metadata, file paths, and defaults used
-by the review and fix loop system.
-
-Exports:
-    AUDIT_CATEGORIES: tuple[str, ...] - Improve audit categories.
-    EffortTier: Frozen improve audit effort-tier configuration.
-    EFFORT_TIERS: dict[str, EffortTier] - Improve audit effort tiers.
-    PLAN_WRITE_MAX_CONCURRENCY: int - Improve plan-writer concurrency ceiling.
-    VET_BATCH_MAX_FINDINGS: int - Candidate findings per improve vetting batch.
-    REVIEW_OUTPUT_FILE: str - Default filename for storing review results.
-    DEFAULT_CLAUDE_MODEL: str - Default Claude model id when no override is given.
-    DEFAULT_CODEX_MODEL: str - Default Codex model id when no override is given.
-    DEFAULT_PI_MODEL: str - Default Pi model id when no override is given (Nous
-        research DeepSeek V4 Flash default).
-    PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] - Per-backend per-phase default
-        model mapping. Outer key is backend name,
-        inner key is the phase name (lowercase, e.g. "review", "parse", "fix"),
-        value is the concrete model id.
-    PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] - Per-backend per-phase default
-        reasoning effort, same key shape as PHASE_DEFAULT_MODELS.
-    STRUCTURE_STACK_NAME: str - Stack identifier emitted by detect_stacks for the
-        structural meta-stack assignment.
-    DIAGRAM_KINDS: tuple[str, ...] - Grounded-diagram kinds, render order.
-    DIAGRAM_MODES: tuple[str, ...] - Accepted ``--diagram`` / ``[tool.daydream.diagram]``
-        mode vocabulary.
-    DEFAULT_DIAGRAM_MIN_CODE_FILES: int - Sequence cross-module eligibility floor on
-        changed code files.
-    DEFAULT_DIAGRAM_MIN_MODULES: int - Sequence cross-module eligibility floor on
-        distinct modules.
-    DEFAULT_DIAGRAM_MIN_BRANCH_POINTS: int - Flowchart eligibility floor on changed
-        branch points in one function.
-    DIAGRAM_MAX_PARTICIPANTS / DIAGRAM_MAX_MESSAGES / DIAGRAM_MAX_BLOCKS /
-        DIAGRAM_MAX_NODES / DIAGRAM_MAX_EDGES: int - Render caps per collection.
-    DIAGRAM_LABEL_CAP_PARTICIPANT / _MESSAGE / _NODE / _EDGE: int - Label length caps.
+PHASE_DEFAULT_MODELS and PHASE_DEFAULT_EFFORT map backend names to phase-keyed
+values. Improve categories/effort tiers and grounded-diagram vocabulary/caps
+are declared alongside their defaults so consumers share one policy.
 """
 
 from dataclasses import dataclass
@@ -53,67 +21,38 @@ DEFAULT_WALL_BUDGET_S = 1800.0
 # bounds; exhaustion produces a partial review. Fix turns retain the default above.
 REVIEW_WALL_BUDGET_S = 3600.0
 
-# Unlimited outside bounded review stages: a tool-call count is a poor proxy for a runaway turn, and
-# 50 truncated legitimately exploratory phases (wonder/per-stack review) mid-pass,
-# failing the run. The wall budget above is the real bound on the time tail; every
-# call site still accepts an explicit ceiling.
+# Use wall time to bound exploratory turns; tool counts can truncate valid
+# investigation. Each call site may still supply an explicit ceiling.
 DEFAULT_TOOL_CALL_BUDGET: int | None = None
 
-# Wall budget for the test-run turn. Deliberately larger than
-# DEFAULT_WALL_BUDGET_S: it bounds the TARGET repo's own test suite, not an LLM
-# long tail, and a legitimately slow suite must not be truncated. It still
-# bounds a hung turn.
+# Allow target test suites more wall time than ordinary turns while bounding hangs.
 TEST_WALL_BUDGET_S = 3600.0
 
-# Bounded post-expiry cleanup grace (issue #734). When a spent deadline aborts
-# an invocation, the backend event-stream teardown can hang (a subprocess that
-# never exits). Cleanup runs inside a shielded ``move_on_after`` bounded by this
-# grace, so it can never extend or abort the already-captured partial result.
-# Deliberately not configurable; mirrors the observability trace cleanup grace.
+# Fixed shielded cleanup grace after deadline expiry. Hanging backend teardown
+# must neither extend the budget indefinitely nor discard captured partial results.
 BUDGET_CLEANUP_GRACE_S = 10.0
 
-# Run-scoped outage circuit (issue #734). After this many consecutive retryable
-# failures the circuit opens and suppresses further retry dispatches until the
-# probe interval elapses, at which point exactly one half-open probe is
-# admitted. The probe interval is deliberately shorter than the 120 s maximum
-# backoff so a coordinated circuit is never slower to recover than a lone
-# ladder. Deliberately not configuration keys (mirrors BUDGET_CLEANUP_GRACE_S).
+# Open the run-scoped circuit after consecutive retryable failures; admit one
+# probe after the interval. Keep this fixed interval below maximum backoff
+# so coordinated recovery cannot lag a single retry ladder.
 RETRY_CIRCUIT_FAILURE_THRESHOLD = 3
 RETRY_CIRCUIT_PROBE_INTERVAL_S = 30.0
 
-# Cumulative retry-recovery allowance for one invocation (issue #734). A retry
-# may spend only the recovery budget it was given, never the invocation's
-# useful-work time: once the first retryable failure activates it, every backoff
-# sleep and every retry attempt is charged against it, and a spent allowance
-# re-raises the current failure without dispatching again. Overridable via
-# ``[tool.daydream] retry_recovery_allowance_s`` (file config) or the ambient
-# ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var; ``0`` is the sanctioned
-# "no retry recovery" value.
+# Charge every backoff and retry attempt to a separate recovery allowance,
+# activated by the first retryable failure. Exhaustion re-raises without dispatch.
+# File/environment overrides are supported; zero disables recovery.
 DEFAULT_RETRY_RECOVERY_ALLOWANCE_S = 300.0
 
-# Per-file-group aggregate budget for the fix phase (issue #201). The
-# per-invocation guards above bound each individual run_agent turn; these bound
-# the *cumulative* cost of all fix turns targeting a single file group, so one
-# runaway file (the #186 pattern: 9 serial fix calls on one file) cannot
-# silently dominate a run. Enforced mid-call: ``phase_fix_parallel`` threads
-# the group deadline into every fix turn, so a spent deadline aborts the call
-# itself (batched turns and the retry ladder included). Overridable via
-# ``[tool.daydream]``.
+# Bound cumulative fix cost/time per file group across all turns and retries.
+# Thread the group deadline into each call for mid-call enforcement; configurable
+# through [tool.daydream].
 DEFAULT_GROUP_MAX_WALL_S = 600.0  # 10 min of wall-clock across one file group
 DEFAULT_GROUP_MAX_SERIAL_ITEMS = 6  # max per-finding fix calls in one group
 
-# Issue #315: anti-degradation quality gate. Fail-open: flags and surfaces
-# erosion/verbosity growth on files the fix phase edited; never aborts the run
-# (the test gate stays the hard gate). Deltas are per-file before/after ratios
-# from ``analyze_quality``; a file whose delta exceeds a threshold is flagged in
-# ``deep/fix-quality-gate.json`` and the run manifest. The *_ABSOLUTE defaults
-# are the yardstick for the undefined-baseline fallback: a BEFORE metric that
-# is ``None`` (e.g. a file with no functions pre-fix) has no delta to compare,
-# so the AFTER value is checked against the absolute knob, never the delta one
-# (#329 / CodeRabbit Finding D). Overridable via ``[tool.daydream]``
-# (``quality_gate_enabled`` / ``quality_gate_erosion_delta`` /
-# ``quality_gate_verbosity_delta`` / ``quality_gate_erosion_absolute`` /
-# ``quality_gate_verbosity_absolute``); resolved in ``_step_fix``.
+# Report per-file erosion/verbosity regressions without blocking the run.
+# Use before/after deltas, or absolute after-values when the baseline is undefined.
+# Record flags in fix-quality-gate.json and the manifest. _step_fix resolves
+# [tool.daydream] quality_gate_* overrides; the test gate remains mandatory.
 DEFAULT_QUALITY_GATE_ENABLED = True
 DEFAULT_QUALITY_GATE_EROSION_DELTA = 0.05
 DEFAULT_QUALITY_GATE_VERBOSITY_DELTA = 0.05
@@ -129,94 +68,31 @@ PLAN_WRITE_MAX_CONCURRENCY = 2
 # what keeps one vet turn readable at monorepo audit volume.
 VET_BATCH_MAX_FINDINGS: int = 20
 
-# Per-backend per-phase default model table. The phase resolver in
-# ``daydream.runner._resolve_backend`` looks up
-# ``PHASE_DEFAULT_MODELS[backend_name][phase_name]`` when no explicit per-phase
-# flag is supplied. Phase names are lowercase and match the strings passed by
-# every call site (``"review"``, ``"parse"``, ``"fix"``, ``"test"``,
-# ``"exploration"``, ``"intent"``, ``"wonder"``, ``"merge"``,
-# ``"diagram"``, ``"recon"``, ``"audit"``, ``"vet"``,
-# ``"plan_write"``).
-#
-# ``PHASE_DEFAULT_EFFORT`` supplies the matching per-phase reasoning-effort
-# defaults; see its own docstring below.
-#
-# Pi's ``DEFAULT_PI_MODEL`` is resolved by ``PiBackend`` after Pi's own settings
-# have had a chance to select a model. It is a backend fallback, not a
-# per-phase override, so it intentionally does not appear in this table.
+# Phase model fallback after explicit CLI/file resolution. Define shared phase
+# tiers once so backends cannot drift when a phase is added. Pi is absent because
+# PiBackend first honors Pi's own settings, then DEFAULT_PI_MODEL.
+_MODEL_PHASE_TIERS = (
+    ("parse",),
+    ("fix", "test", "verify", "exploration", "per_stack_review", "suppression",
+     "supervise", "diagram", "intent", "recon", "audit"),
+    ("review", "arbiter", "wonder", "merge", "vet", "plan_write"),
+)
 PHASE_DEFAULT_MODELS: dict[str, dict[str, str]] = {
-    "claude": {
-        "parse": "claude-haiku-4-5",
-        "fix": "claude-sonnet-5",
-        "test": "claude-sonnet-5",
-        "verify": "claude-sonnet-5",
-        "exploration": "claude-sonnet-5",
-        "per_stack_review": "claude-sonnet-5",
-        "review": "claude-opus-5",
-        "arbiter": "claude-opus-5",
-        "suppression": "claude-sonnet-5",
-        "supervise": "claude-sonnet-5",
-        "diagram": "claude-sonnet-5",
-        "wonder": "claude-opus-5",
-        "merge": "claude-opus-5",
-        "intent": "claude-sonnet-5",
-        "recon": "claude-sonnet-5",
-        "audit": "claude-sonnet-5",
-        "vet": "claude-opus-5",
-        "plan_write": "claude-opus-5",
-    },
-    "codex": {
-        "parse": "gpt-5.6-luna",
-        "fix": "gpt-5.6-terra",
-        "test": "gpt-5.6-terra",
-        "verify": "gpt-5.6-terra",
-        "exploration": "gpt-5.6-terra",
-        "per_stack_review": "gpt-5.6-terra",
-        "review": "gpt-5.6-sol",
-        "arbiter": "gpt-5.6-sol",
-        "suppression": "gpt-5.6-terra",
-        "supervise": "gpt-5.6-terra",
-        "diagram": "gpt-5.6-terra",
-        "wonder": "gpt-5.6-sol",
-        "merge": "gpt-5.6-sol",
-        "intent": "gpt-5.6-terra",
-        "recon": "gpt-5.6-terra",
-        "audit": "gpt-5.6-terra",
-        "vet": "gpt-5.6-sol",
-        "plan_write": "gpt-5.6-sol",
-    },
+    backend: {phase: model for phases, model in zip(_MODEL_PHASE_TIERS, models, strict=True) for phase in phases}
+    for backend, models in {
+        "claude": ("claude-haiku-4-5", "claude-sonnet-5", DEFAULT_CLAUDE_MODEL),
+        "codex": ("gpt-5.6-luna", "gpt-5.6-terra", DEFAULT_CODEX_MODEL),
+    }.items()
 }
 
-# Per-backend per-phase default reasoning effort, resolved by
-# ``daydream.runner._resolved_reasoning_effort`` as the lowest precedence tier
-# (below ``--reasoning-effort`` and both config-file tiers). A backend absent
-# from this table, or a phase absent from its sub-table, resolves to ``None`` —
-# the backend then applies its own ambient default.
-#
-# All three backends consume the resolved value through their own native knob:
-# Claude via ``ClaudeAgentOptions.effort``, Codex via
-# ``-c model_reasoning_effort=...``, Pi via ``--thinking``. The five levels
-# below are the intersection of the three drivers' vocabularies, so any value
-# in this table is valid for any backend.
-#
-# The table is composed from two independently-owned halves so tuning one flow
-# never moves the other. Both are merged into ``PHASE_DEFAULT_EFFORT``, which
-# is what the resolver reads.
 
-# Half one: the review/fix pipeline (deep, shallow, review).
-#
-# Codex-only, and deliberately so — this is the historical table and its values
-# are tuned against Codex's own ambient default. Claude and Pi have no entry
-# here, so those phases resolve to ``None`` and each driver keeps applying the
-# default it already had. Adding a backend here changes deep-review behavior
-# for every existing user of that backend; do that as its own change, on its
-# own evidence, not as a side effect of improve work.
-#
-# Tiering follows OpenAI's guidance: ``low`` for latency-sensitive mechanical
-# work, ``medium`` as the balanced baseline, ``high``/``xhigh`` where more
-# reasoning buys measured quality. ``arbiter`` gets ``xhigh`` because it is the
-# scoped quality-first pass over only high-severity/contested findings, so the
-# extra reasoning is bounded to a small input.
+# Lowest-precedence reasoning effort; missing backend/phase entries leave the
+# driver's ambient default. Each backend forwards through its native effort knob.
+# Merge deep and Improve tables independently so tuning one flow cannot move the other.
+
+# Deep review/fix effort remains Codex-only; Claude/Pi retain ambient defaults.
+# Mechanical phases use lower effort, while bounded quality-focused arbitration
+# gets xhigh. Expanding backend coverage requires separate behavioral evidence.
 DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     "codex": {
         "parse": "low",
@@ -236,17 +112,8 @@ DEEP_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     },
 }
 
-# Half two: the improve advisor (recon, audit, vet, plan_write).
-#
-# All three backends, because the improve flow runs unattended on a cadence and
-# nothing about its output is reviewed in the moment.
-#
-# ``plan_write`` is pinned to ``max`` everywhere. It covers plan authoring and
-# plan repair; those plans are executed later by much
-# weaker agents with no context beyond the plan file, so it is the one place
-# where spending the most reasoning available is unconditionally correct — a
-# handful of calls per run, and every ambiguity left in a plan is paid for by
-# the executor.
+# Improve tiers cover all backends. Plan authoring/repair uses max because
+# later executors depend on the plan alone and cannot recover missing context.
 IMPROVE_PHASE_DEFAULT_EFFORT: dict[str, dict[str, str]] = {
     backend: {
         "recon": "low",
@@ -319,48 +186,32 @@ EFFORT_TIERS: dict[str, EffortTier] = {
 # Output file for review results
 REVIEW_OUTPUT_FILE = ".review-output.md"
 
-# Issue #731: deep-review sharding.
-# Splits oversized per-language stacks into bounded, dependency-aware shards
-# that ride the existing ``stack_name``-keyed pipeline. Default-off preserves
-# the established single-agent-per-stack behavior unless explicitly enabled.
+# Opt-in dependency-aware review shards retain the stack-keyed pipeline;
+# disabled mode preserves one reviewer per stack.
 DEFAULT_DEEP_SHARD_ENABLED: bool = False
 DEFAULT_DEEP_SHARD_MAX_FILES: int = 5
 DEFAULT_DEEP_SHARD_MAX_BYTES: int = 12288  # == INLINE_DIFF_BUDGET_BYTES
 DEFAULT_DEEP_SHARD_FANOUT_CAP: int = 16
 DEFAULT_DEEP_SHARD_FRONTIER_MAX: int = 8
 
-# Issue #733: content-addressed reuse of completed deep review results.
-# Reuse is on by default; ``--no-review-cache`` (MH13) disables the store and
-# the exploration pre-scan cache for one forensic run. The three retention
-# bounds (MH12) are entries, bytes, and age since last use — whichever binds
-# first evicts the oldest-last-used entries.
+# Review reuse defaults on. --no-review-cache also disables exploration caching.
+# Evict least-recently-used entries when count, bytes, or idle age exceeds a bound.
 DEFAULT_REVIEW_CACHE_ENABLED: bool = True
 DEFAULT_REVIEW_CACHE_MAX_ENTRIES: int = 1024
 DEFAULT_REVIEW_CACHE_MAX_BYTES: int = 1024**3
 DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS: int = 30
 
-# Issue #735: selection-gated recommendation verification. The optimised,
-# selection-gated mode is the default as of the evidence gate going green:
-# ``uv run python -m daydream.eval.latency_report --corpus
-# tests/fixtures/latency_profiles/manifest.json`` emits ``flip_allowed: true``
-# on the contradiction-counter and recall-anchor axes (latency is reported, not
-# gated). ``verify_all = true`` in either config file restores the conservative
-# "verify every non-exempt finding" behaviour exactly; ``extra_risk_categories``
-# only adds to the mandatory risk vocabulary, never removes from it. Both are
-# config-file keys with no CLI flag.
+# Selective verification is the evidence-approved default; latency is reported,
+# not gated. Config verify_all=true restores every non-exempt finding, while
+# extra_risk_categories may only widen mandatory verification. Neither has a CLI flag.
 DEFAULT_VERIFY_ALL: bool = False
 DEFAULT_EXTRA_RISK_CATEGORIES: tuple[str, ...] = ()
 
-# Structural-maintainability meta-stack. Deep mode appends a synthetic
-# ``StackAssignment`` with ``stack_name=STRUCTURE_STACK_NAME`` so the structural
-# reviewer always runs alongside per-language reviewers. It is a scope metadata
-# name, not a skill string, and is never selectable from the CLI.
+# Synthetic scope metadata for structural review alongside language stacks;
+# never a CLI-selectable skill name.
 STRUCTURE_STACK_NAME: str = "structure"
 
-# Self-hosted review-bot setup constants — single source of truth shared by the
-# ``daydream setup`` orchestrator, the packaged workflow YAML, and the browser
-# guide. Drift between these names and the workflow templates is guarded by
-# ``tests/test_templates_packaging.py``.
+# Bot setup names shared with workflow templates; packaging tests guard drift.
 SETUP_SECRET_NAMES: tuple[str, ...] = (
     "DAYDREAM_APP_ID",
     "DAYDREAM_APP_PRIVATE_KEY",
@@ -380,18 +231,13 @@ APP_PERMISSIONS: dict[str, str] = {
 # rendered in this order when both are eligible.
 DIAGRAM_KINDS: tuple[str, ...] = ("sequence", "flowchart")
 
-# Accepted diagram-mode vocabulary. ``auto`` renders every kind the
-# deterministic eligibility rule admits; the three kind names force those kinds
-# eligible (forcing changes eligibility, never verification); ``off`` suppresses
-# both. ``--diagram`` accepts all five; ``[tool.daydream.diagram] mode`` accepts
-# only ``auto``/``off`` (a repo config file may not force a kind on every run);
-# ``--diagram-only`` accepts all but ``off``.
+# auto uses deterministic eligibility; explicit kinds force eligibility only,
+# never skip verification. off suppresses diagrams. File config permits auto/off;
+# --diagram permits every mode, and --diagram-only permits all except off.
 DIAGRAM_MODES: tuple[str, ...] = ("auto", "sequence", "flowchart", "both", "off")
 
-# Sequence-diagram cross-module eligibility floors: the change must touch at
-# least this many non-test code files spanning at least this many modules, with
-# at least one cross-module import edge. Overridable via
-# ``[tool.daydream.diagram] min_code_files`` / ``min_modules``.
+# Sequence eligibility requires these non-test file/module floors plus a cross-module
+# import edge. [tool.daydream.diagram] may override min_code_files/min_modules.
 DEFAULT_DIAGRAM_MIN_CODE_FILES: int = 3
 DEFAULT_DIAGRAM_MIN_MODULES: int = 2
 
@@ -400,11 +246,8 @@ DEFAULT_DIAGRAM_MIN_MODULES: int = 2
 # ``[tool.daydream.diagram] min_branch_points``.
 DEFAULT_DIAGRAM_MIN_BRANCH_POINTS: int = 3
 
-# Render caps. Enforced in the grounding pass (after pruning ungrounded
-# elements, before the omission floor) so a cap-induced drop can never leave a
-# rendered diagram below its floor, and asserted again by the renderers as
-# defense in depth. Every drop is counted in the result's ``capped`` map and
-# reported in the rendered ``<sub>`` line.
+# Apply caps after grounding/pruning and before omission floors; renderers recheck.
+# Count every dropped element in capped and report it in the rendered footer.
 DIAGRAM_MAX_PARTICIPANTS: int = 10
 DIAGRAM_MAX_MESSAGES: int = 40
 DIAGRAM_MAX_BLOCKS: int = 8

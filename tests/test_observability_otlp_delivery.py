@@ -1,19 +1,15 @@
-"""HTTP/gRPC acknowledgment, retry, configuration and lifecycle tests (P18 T4A Step 2).
+"""Real HTTP/gRPC protobuf delivery against scripted loopback collectors.
 
-Drives the production destination factories against bounded local collectors
-with scripted responses; only clock/jitter and external failure seams are
-patched, never the Daydream decision code. The one-deadline architecture
-(HTTPX/AnyIO portal, gRPC pinned bridge), the acknowledgment matrix, retry
-policy and the delivery outcome ledger are all exercised through real
-protobuf requests/responses on loopback transports.
-"""
+Exercise acknowledgment, retry, whole-operation deadlines, and outcome accounting;
+patch clocks and external failure seams rather than production decisions."""
 
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Iterator
+from contextlib import contextmanager
 from email.utils import formatdate
-from typing import Any, cast
+from typing import cast
 
 import grpc
 import pytest
@@ -35,8 +31,15 @@ from daydream.observability.exporters import (
     langsmith_exporter,
     otlp_exporter,
 )
-from daydream.observability.otlp_compat import classify_http_ack
-from tests.harness.otlp import ScriptedResponse, TrickleServer, otlp_collector, scripted_otlp_collector
+from daydream.observability.otlp_compat import GrpcBridge, HttpxOtlpTransport, classify_http_ack
+from tests.harness.otlp import (
+    GrpcReceiver,
+    ScriptedResponse,
+    TrickleServer,
+    grpc_trace_server,
+    otlp_collector,
+    scripted_otlp_collector,
+)
 
 # The private requests-session credential provider settings the whole-operation
 # deadline architecture must reject (Task 0 spike gate 4, binding).
@@ -68,116 +71,60 @@ def _partial_response(rejected: int) -> ScriptedResponse:
 
 # ------------------------------------------------------------------ HTTP acknowledgment matrix
 
-def test_http_zero_byte_protobuf_200_is_canonical_full_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """200 + protobuf content type + empty body = full success (the canonical ack)."""
+@pytest.mark.parametrize("response,warning,rejected", [
+    pytest.param(ScriptedResponse(), False, None, id="empty-protobuf"),
+    pytest.param(ScriptedResponse(headers={}), False, None, id="empty-no-content-type"),
+    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"}), False, None, id="empty-json"),
+    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": true}'),
+                 True, None, id="vendor-json"),
+    pytest.param(ScriptedResponse(headers={"Content-Type": "Application/JSON; charset=utf-8"},
+                                  body=b'{"success": true}'), True, None, id="case-insensitive-media-type"),
+    pytest.param(_partial_response(0), True, 0, id="partial-zero-rejected"),
+])
+def test_http_success_ack_is_delivered_once(
+    monkeypatch: pytest.MonkeyPatch, response: ScriptedResponse, warning: bool, rejected: int | None,
+) -> None:
+    """Empty 200 acknowledgments ignore media type; vendor/partial acknowledgments warn."""
     content_types: list[str | None] = []
-    with scripted_otlp_collector([ScriptedResponse()], capture_content_type=content_types) as receiver:
+    with scripted_otlp_collector([response], capture_content_type=content_types) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 1
         assert snapshot["unverified"] == 0
+        assert snapshot["warning"] is warning
+        if rejected is not None:
+            assert snapshot["rejected"] == rejected
         exporter.shutdown()
-        assert content_types == ["application/x-protobuf"]
+        assert len(receiver.requests) == 1
+        assert content_types == [response.headers.get("Content-Type")]
 
-def test_http_empty_body_200_no_content_type_is_full_success(monkeypatch: pytest.MonkeyPatch) -> None:
-    """LangSmith canonical ack: 200 + zero-length body + no Content-Type = full success."""
-    content_types: list[str | None] = []
-    with scripted_otlp_collector([ScriptedResponse(headers={})], capture_content_type=content_types
-    ) as receiver:  # ScriptedResponse defaults: status=200, body=b"" — headers empty ⇒ no CT sent
+
+@pytest.mark.parametrize("response,secret", [
+    pytest.param(ScriptedResponse(body=b"\x00opaque-garbage-body\x01"), "opaque-garbage",
+                 id="undecodable-protobuf"),
+    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"},
+                                  body=b'{"success": false, "error": "boom"}'), "boom", id="json-error"),
+    pytest.param(ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false}'),
+                 None, id="json-explicit-failure"),
+])
+def test_http_terminal_ack_is_unverified_without_logging_body(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
+    response: ScriptedResponse, secret: str | None,
+) -> None:
+    with scripted_otlp_collector([response]) as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1
-        assert snapshot["unverified"] == 0
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # no retry
-        assert content_types == [None]
-
-def test_http_wrong_content_type_with_empty_body_is_success_any_ct(monkeypatch: pytest.MonkeyPatch) -> None:
-    """M1/M6: empty-body 200 short-circuits before the content-type guard, for any CT."""
-    with scripted_otlp_collector([ScriptedResponse(headers={"Content-Type": "application/json"})]
-    ) as receiver:  # default empty body
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
+        assert exporter.export(_spans()) == SpanExportResult.FAILURE
         exporter.shutdown()
         assert len(receiver.requests) == 1
         snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1 and snapshot["unverified"] == 0
+        assert snapshot["delivered"] == 0
+        assert snapshot["unverified"] == 1
+        if secret is not None:
+            assert secret not in caplog.text
 
-def test_http_undecodable_body_is_terminal_and_never_logged(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    with scripted_otlp_collector([ScriptedResponse(body=b"\x00opaque-garbage-body\x01")]) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        exporter.shutdown()
-        assert len(receiver.requests) == 1
-        assert b"opaque-garbage-body".decode("latin-1", "ignore") not in caplog.text
-        assert "opaque-garbage" not in caplog.text
-
-def test_http_vendor_json_success_ack_is_accepted_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    """HoneyHive shape: 200 + application/json + {"success": true} = accepted with warning."""
-    with scripted_otlp_collector(
-        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": true}')]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1
-        assert snapshot["warning"] is True
-        assert snapshot["unverified"] == 0
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # never retried
-
-def test_http_json_ack_with_error_indication_is_terminal(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    with scripted_otlp_collector(
-        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false, "error": "boom"}')]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # terminal, never retried
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
-        assert "boom" not in caplog.text  # body text is never logged
-
-def test_http_json_ack_success_false_without_error_is_terminal(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """The documented HoneyHive inverse {"success": false} is an explicit vendor failure.
-
-    The accept path reads the vendor-documented "success" flag: an explicitly falsy success with no "error" key is
-    still error-indicating JSON and stays terminal OTLP_MALFORMED_ACK — never recorded as delivered."""
-    with scripted_otlp_collector(
-        [ScriptedResponse(headers={"Content-Type": "application/json"}, body=b'{"success": false}')]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.FAILURE
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # terminal, never retried
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
-
-def test_http_vendor_json_ack_success_content_type_is_case_insensitive(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """RFC 9110 media types are case-insensitive: Application/JSON; charset=utf-8."""
-    with scripted_otlp_collector(
-        [ScriptedResponse(headers={"Content-Type": "Application/JSON; charset=utf-8"}, body=b'{"success": true}')]
-    ) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1 and snapshot["warning"] is True
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # never retried
 
 def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch) -> None:
     """A decoded acknowledgment over 4 MiB fails once and never retries."""
@@ -191,17 +138,6 @@ def test_http_oversized_body_is_bounded_discard(monkeypatch: pytest.MonkeyPatch)
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 0 and snapshot["unverified"] == 1
 
-def test_http_partial_success_zero_rejected_is_accepted_with_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    with scripted_otlp_collector([_partial_response(0)]) as receiver:
-        _generic_http(monkeypatch, receiver.base_url)
-        exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
-        assert exporter.export(_spans()) == SpanExportResult.SUCCESS
-        snapshot = exporter.delivery_snapshot()
-        assert snapshot["delivered"] == 1
-        assert snapshot["rejected"] == 0
-        assert snapshot["warning"]
-        exporter.shutdown()
-        assert len(receiver.requests) == 1  # partial success is never retried
 
 def test_http_partial_success_positive_rejection_is_terminal_no_retry(monkeypatch: pytest.MonkeyPatch,) -> None:
     with scripted_otlp_collector([_partial_response(3), ScriptedResponse()]) as receiver:
@@ -324,7 +260,6 @@ def test_http_64mib_encode_bound_refuses_to_send(monkeypatch: pytest.MonkeyPatch
 # ------------------------------------------------------------------ credential-provider rejection
 
 def test_classify_http_ack_incomplete_empty_read_is_not_success() -> None:
-    """M5: a zero-length *incomplete* read must not be graded full success."""
     verdict, rejected = classify_http_ack(status=200, content_type=None, body=b"", complete=False)
     assert (verdict, rejected) == ("oversized", 0)
 
@@ -333,7 +268,6 @@ def test_classify_http_ack_none_body_is_not_success() -> None:
     assert (verdict, rejected) == ("malformed", 0)
 
 def test_classify_http_ack_json_without_positive_success_is_malformed() -> None:
-    """A JSON ack with no truthy success flag is never graded delivered."""
     verdict, rejected = classify_http_ack(
         status=200, content_type="application/json", body=b'{"ok": false}', complete=True
     )
@@ -352,47 +286,22 @@ def test_private_credential_provider_rejected_before_any_send(monkeypatch: pytes
 # ------------------------------------------------------------------ gRPC matrix
 
 
-_GRPC_STATE: dict[str, Any] = {}
+@contextmanager
+def _generic_grpc(
+    monkeypatch: pytest.MonkeyPatch, receive: GrpcReceiver, **extra: str,
+) -> Iterator[GrpcCompatExporter]:
+    with grpc_trace_server(receive) as port:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
+        for key, value in extra.items():
+            monkeypatch.setenv(key, value)
+        exporter = otlp_exporter(ObservabilityConfig())
+        assert isinstance(exporter, GrpcCompatExporter)
+        try:
+            yield exporter
+        finally:
+            exporter.shutdown()
 
-
-def _serve_grpc(receive: Any) -> int:
-    class Servicer:
-        def Export(self, request: Any, context: Any) -> Any:  # noqa: ANN401
-            return receive(request, context)
-
-    server = grpc.server(ThreadPoolExecutor(max_workers=1))
-    server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
-                "opentelemetry.proto.collector.trace.v1.TraceService",
-                {"Export": grpc.unary_unary_rpc_method_handler(
-                        Servicer().Export, request_deserializer=ExportTraceServiceRequest.FromString,
-                        response_serializer=ExportTraceServiceResponse.SerializeToString,
-                    ),
-                },
-            ),
-        )
-    )
-    port = server.add_insecure_port("127.0.0.1:0")
-    server.start()
-    _GRPC_STATE["server"] = server
-    return int(port)
-
-
-def _stop_grpc() -> None:
-    server = _GRPC_STATE.pop("server", None)
-    if server is not None:
-        server.stop(grace=0).wait(timeout=2)
-
-
-def _generic_grpc(monkeypatch: pytest.MonkeyPatch, receive: Any, **extra: str) -> GrpcCompatExporter:
-    """Configure env and return the exporter; the server stays up until _stop_grpc()."""
-    port = _serve_grpc(receive)
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
-    monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
-    for key, value in extra.items():
-        monkeypatch.setenv(key, value)
-    exporter = otlp_exporter(ObservabilityConfig())
-    assert isinstance(exporter, GrpcCompatExporter)
-    return exporter
 
 def test_grpc_export_full_success_and_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     received: list[ExportTraceServiceRequest] = []
@@ -401,15 +310,12 @@ def test_grpc_export_full_success_and_snapshot(monkeypatch: pytest.MonkeyPatch) 
         received.append(request)
         return ExportTraceServiceResponse()
 
-    exporter = _generic_grpc(monkeypatch, receive)
-    try:
+    with _generic_grpc(monkeypatch, receive) as exporter:
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
         assert len(received) == 1
         snapshot = exporter.delivery_snapshot()
         assert snapshot["delivered"] == 1
-    finally:
-        _stop_grpc()
 
 def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(monkeypatch: pytest.MonkeyPatch,) -> None:
     attempts = {"n": 0}
@@ -426,13 +332,10 @@ def test_grpc_resource_exhausted_retries_only_with_valid_retry_info(monkeypatch:
             context.abort(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted")
         return ExportTraceServiceResponse()
 
-    exporter = _generic_grpc(monkeypatch, receive)
-    try:
+    with _generic_grpc(monkeypatch, receive) as exporter:
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
         assert attempts["n"] == 2  # one owned retry under valid RetryInfo
-    finally:
-        _stop_grpc()
 
 @pytest.mark.parametrize(
     ("status", "message"), [(grpc.StatusCode.RESOURCE_EXHAUSTED, "exhausted"), (grpc.StatusCode.UNAVAILABLE, "down")],
@@ -446,23 +349,17 @@ def test_grpc_terminal_status_is_not_retried(monkeypatch: pytest.MonkeyPatch, st
         context.abort(status, message)
         return ExportTraceServiceResponse()  # pragma: no cover
 
-    exporter = _generic_grpc(monkeypatch, receive)
-    try:
+    with _generic_grpc(monkeypatch, receive) as exporter:
         assert exporter.export(_spans()) != SpanExportResult.SUCCESS
         exporter.shutdown()
         assert attempts["n"] == 1  # owned policy: single Export per batch, no stock retry loop
-    finally:
-        _stop_grpc()
 
 def test_grpc_scheme_precedence_over_insecure_variable(monkeypatch: pytest.MonkeyPatch) -> None:
     def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         return ExportTraceServiceResponse()
 
-    exporter = _generic_grpc(monkeypatch, receive, OTEL_EXPORTER_OTLP_INSECURE="false")
-    try:
+    with _generic_grpc(monkeypatch, receive, OTEL_EXPORTER_OTLP_INSECURE="false") as exporter:
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS  # explicit http:// won
-    finally:
-        _stop_grpc()
 
 
 # ------------------------------------------------------------------ shared lifecycle
@@ -474,18 +371,16 @@ def test_noop_meter_provider_keeps_internal_metrics_inactive(monkeypatch: pytest
     def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         return ExportTraceServiceResponse()
 
-    exporter = _generic_grpc(monkeypatch, receive)
-    try:
+    with _generic_grpc(monkeypatch, receive) as exporter:
         # The delegate's meters are created against our explicit NoOpMeterProvider
         # (not the ambient global): recording on them is a no-op by construction.
-        bridge = exporter._bridge
+        bridge = exporter._transport
+        assert isinstance(bridge, GrpcBridge)
         delegate_metrics = bridge._delegate._metrics
         inflight_metric = getattr(delegate_metrics, "_inflight", None)
         assert type(inflight_metric).__name__ == "NoOpUpDownCounter"
         assert exporter.export(_spans()) == SpanExportResult.SUCCESS
         exporter.shutdown()
-    finally:
-        _stop_grpc()
 
 def test_exactly_once_shutdown_refuses_new_sends(monkeypatch: pytest.MonkeyPatch) -> None:
     with scripted_otlp_collector([ScriptedResponse()]) as receiver:
@@ -508,11 +403,7 @@ def test_delivery_snapshot_states_and_flush_are_independent(monkeypatch: pytest.
         exporter.shutdown()
 
 def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pre-send budget exhaustion records the exact unverified diagnostics.
-
-    The first export exhausts the one-deadline budget through retry backoff (the wait-against-deadline pre-check
-    fires inside the loop); the second export re-enters the loop with zero remaining budget. Each exit must carry
-    its exact ledger diagnostic code, never a silent return."""
+    """Both retry-backoff exhaustion and a later zero-budget send must retain exact ledger diagnostics."""
     with scripted_otlp_collector([ScriptedResponse(status=503)]) as receiver:
         _generic_http(monkeypatch, receiver.base_url, OTEL_EXPORTER_OTLP_TRACES_TIMEOUT="0.3")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -528,7 +419,6 @@ def test_pre_send_deadline_exhaustion_records_unverified(monkeypatch: pytest.Mon
         exporter.shutdown()
 
 def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stock OTel semantics: shared endpoint paths get /v1/traces appended."""
     with otlp_collector() as receiver:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_ENDPOINT", receiver.base_url + "/otlp-prefix")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -537,7 +427,6 @@ def test_generic_shared_endpoint_with_path_appends_traces_path(monkeypatch: pyte
         exporter.shutdown()
 
 def test_generic_signal_specific_endpoint_used_verbatim(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A signal-specific endpoint is used exactly as supplied, path included."""
     with otlp_collector() as receiver:
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", receiver.base_url + "/custom/ingest")
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -546,7 +435,6 @@ def test_generic_signal_specific_endpoint_used_verbatim(monkeypatch: pytest.Monk
         exporter.shutdown()
 
 def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shutdown closes the owned AsyncClient through the portal before it stops."""
     with otlp_collector() as receiver:
         _generic_http(monkeypatch, receiver.base_url)
         exporter = cast(CompatSpanExporter, otlp_exporter(ObservabilityConfig()))
@@ -554,6 +442,7 @@ def test_shutdown_closes_owned_http_client_via_portal(monkeypatch: pytest.Monkey
         assert len(receiver.spans) == 1
         # Reach into the transport seam the shutdown contract owns.
         transport = exporter._transport
+        assert isinstance(transport, HttpxOtlpTransport)
         client = transport._client
         assert client is not None
         exporter.shutdown()

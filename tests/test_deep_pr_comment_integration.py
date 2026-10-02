@@ -1,19 +1,7 @@
-"""End-to-end deep-mode PR-comment integration test.
+"""Exercise model, usage, cost, and phase rows in real deep-run PR comments.
 
-Drives the FULL ``daydream.runner.run`` pipeline with ``deep=True``, mocking
-ONLY at the Claude SDK boundary and the final ``gh`` PR-posting transport.
-Captures the markdown produced by ``pr_review.build_payload`` and asserts
-on the production-bug symptoms the user reported:
-
-    Mode: deep review
-    Model: unknown
-    Cost: $0.00
-    Tokens: 0 in -> 0 out
-    Per-phase breakdown rows: Model = unknown, Cost = $0.00
-
-The test is intentionally red until the runner / backend / trajectory
-recorder thread the real SDK model id and per-step usage data into every
-agent step. No production code is modified by this file.
+Mock the Claude SDK and GitHub boundary; production phases, trajectory
+recording, and comment rendering supply the observable payload.
 """
 
 from __future__ import annotations
@@ -29,7 +17,8 @@ import pytest
 
 from daydream import pr_review
 from daydream.exploration import ExplorationContext
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.trajectory import TrajectoryDocumentSnapshot, get_current_recorder
 from tests.conftest import silence_module_console
 from tests.harness.claude_sdk import (
@@ -72,9 +61,7 @@ def _write_live_sibling_canary(*, malformed: bool) -> Path | None:
     )
     return path
 
-# Fake ClaudeSDKClient: picks a canned response per query() prompt and emulates
-# the agent's tool-use file writes (per-stack + merged reports) so downstream
-# phases don't crash on missing files. Only the SDK boundary is mocked.
+# SDK fake emits responses and agent-owned review files for downstream phases.
 
 _OUTPUT_PATH_RE = re.compile(r"to ([^\s]+\.(?:md|json))")
 
@@ -103,9 +90,7 @@ _MERGED_REPORT = (
     "   The current name is ambiguous.\n"
 )
 
-# Canned structured-output finding shared by the per-stack parse, cross-stack
-# merge, and per-stack reviewer canned responses; the three consumers differ
-# only in shape (merge adds ``lens``) and assert on the rendered report.
+# Shared finding; merge adds lens while review and parse use the record shape.
 _REVIEW_FINDING = {
     "id": 1, "description": "Use a more descriptive function name", "file": "foo.py", "line": 1, "severity": "medium",
     "confidence": "MEDIUM", "rationale": "The current name is ambiguous.", "evidence": "foo.py:1",
@@ -151,15 +136,7 @@ class _FakeSDKClient:
 
     @staticmethod
     def _exploration_messages(structured: dict[str, Any], *, tool_name: str, tool_input: dict[str, Any],) -> list[Any]:
-        """Build the response stream for one exploration specialist call.
-
-        Emits an AssistantMessage with a tool-use block, a UserMessage with
-        the matching tool-result, then a final AssistantMessage + Result so
-        ``ClaudeBackend.execute`` records a non-zero ``tool_calls`` count
-        AND surfaces real cost + usage on the trailing CostEvent. The
-        CostEvent is what carries ``model_name`` to the recorder, so the
-        fork's child trajectory should pick up FIXTURE_MODEL_ID.
-        """
+        """Emit paired tool events and SDK model/cost/usage for a forked specialist."""
         tool_id = f"toolu_{tool_name.lower()}_01"
         return [MockAssistantMessage(
                 content=[MockToolUseBlock(id=tool_id, name=tool_name, input=tool_input),], model=FIXTURE_MODEL_ID,
@@ -172,12 +149,7 @@ class _FakeSDKClient:
 
     @staticmethod
     def _build_messages(prompt: str) -> list[Any]:
-        """Pick the per-prompt canned response.
-
-        Every response carries (a) a real SDK model id on AssistantMessage
-        and (b) real cost + usage on ResultMessage, so the trajectory has
-        non-zero metrics to render even though no real Claude API was hit.
-        """
+        """Choose canned SDK responses carrying a real model ID and nonzero cost/usage."""
         pl = prompt.lower()
 
         # Exploration specialists run under maybe_fork; the production-bug path
@@ -205,32 +177,6 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_parse_feedback (FEEDBACK_SCHEMA / PER_STACK_RECORD_SCHEMA):
-        # ResultMessage must carry structured_output of the right shape.
-        # Issue #172: the tiny-diff short-circuit writes ``merged-items.json``
-        # directly from these parsed records (no merge agent) for ≤2-file
-        # diffs, so the per-stack parse MUST yield a non-empty issue for the
-        # PR-comment pipeline to have content on the single-file fixture.
-        # The structural parse returns empty — the per-stack record drives the
-        # assertion below.
-        if "extract only actionable issues" in pl or "read the review output file" in pl:
-            # Every deep parse -- language or the structural meta-stack -- now
-            # passes the severity-bearing PER_STACK_RECORD_SCHEMA (#314), so the
-            # word ``severity`` in the prompt no longer distinguishes the two.
-            # Key the discriminator off the review file the parse reads instead:
-            # the structural parse reads ``stack-structure-review.md`` and stays
-            # empty, so the per-stack record drives the assertions below.
-            is_structural_parse = "stack-structure-review.md" in prompt
-            if not is_structural_parse:  # PER_STACK_RECORD_SCHEMA (per-stack parse)
-                issues = [dict(_REVIEW_FINDING)]
-            else:  # structural parse
-                issues = []
-            return [MockAssistantMessage(content=[MockTextBlock(text="parsing")], model=FIXTURE_MODEL_ID,),
-                MockResultMessage(structured_output={"issues": issues,}, total_cost_usd=0.05,
-                    usage={"input_tokens": 1500, "output_tokens": 100, "cache_read_input_tokens": 500,},
-                ),
-            ]
-
         # phase_understand_intent: free-form text.
         if "understand" in pl and "intent" in pl:
             return [MockAssistantMessage(
@@ -241,9 +187,7 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_cross_stack_merge (MERGED_ITEMS_SCHEMA): ResultMessage carries
-        # the structured item list the host renders review-output.md from. One
-        # item keeps the rendered report (and PR comment) non-empty.
+        # Return one merged item so the host-rendered report and PR comment are nonempty.
         if "cross-stack merge agent" in pl:
             return [MockAssistantMessage(content=[MockTextBlock(text="merging")], model=FIXTURE_MODEL_ID,),
                 MockResultMessage(
@@ -252,10 +196,7 @@ class _FakeSDKClient:
                 ),
             ]
 
-        # phase_per_stack_reviews (issue #745): the reviewer emits
-        # PER_STACK_RECORD_SCHEMA structured output directly (no parse step).
-        # The structural meta-stack returns empty issues; a per-stack reviewer
-        # returns the finding that drives the PR-comment content.
+        # Reviewers return records directly: structure empty, language nonempty.
         if "structural reviewer" in pl:
             review_issues: list[Any] = []
         else:
@@ -270,14 +211,7 @@ class _FakeSDKClient:
 
 @pytest.fixture
 def deep_target_multi(tmp_path: Path) -> Path:
-    """Real git repo with >=4 Python files changed between main and feature.
-
-    Production bug repro: ``select_tier(count_changed_files(diff))`` returns
-    ``"parallel"`` for 4+ files, which is the path that spawns the three
-    exploration specialist subagents (pattern_scanner, dependency_tracer,
-    test_mapper) under ``maybe_fork``. The single-file fixture above
-    short-circuits with ``"skip"`` and never exercises the broken row.
-    """
+    """Change four Python files to exercise parallel exploration and forked trajectories."""
     repo = tmp_path / "deep_repo_multi"
     _init_repo(repo)
     # Seed five Python files on main so the tree-sitter index can resolve them.
@@ -307,9 +241,7 @@ def patch_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch every SDK symbol that ClaudeBackend.execute does isinstance on."""
     patch_claude_sdk(monkeypatch, _FakeSDKClient)
 
-# gh / PR plumbing patches: find_open_pr returns a fake PRInfo and fake gh
-# captures the payload (the only allowed non-SDK mock per the brief — it stands
-# in for the gh-CLI subprocess that would post to GitHub).
+# Fake PR lookup and gh transport capture the production-rendered payload.
 
 @dataclass
 class _CapturedPost:
@@ -376,20 +308,11 @@ def _row_cells(row: str) -> list[str]:
 async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
     deep_target: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Drive ``daydream.runner.run`` end-to-end in deep mode.
+    """Render a deep-run PR comment with real model and nonzero usage/cost.
 
-    Mocks:
-      - ``daydream.backends.claude.ClaudeSDKClient`` and the SDK message-type
-        symbols imported into that module (isinstance-pinning).
-      - ``pr_review.find_open_pr`` returns a synthetic ``PRInfo`` (avoids
-        ``gh pr list`` subprocess).
-      - the fake ``gh`` process captures the payload; the real API adapter
-        and its temporary request-file handling run unchanged.
-
-    Everything else — RunConfig dispatch, _run_loop_deep, run_deep, the
-    real ``TrajectoryRecorder``, ``ClaudeBackend.execute``, ``run_agent``,
-    every phase function, ``Invocation._dispatch``, ``build_payload``, the
-    ``pr_comment_renderer`` — runs unmodified.
+    Only SDK messages/client, PR lookup, and gh transport are mocked; the
+    real API adapter handles its request file and the full pipeline records
+    and renders the results.
     """
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)
@@ -472,20 +395,10 @@ async def test_deep_run_produces_pr_comment_with_real_model_and_metrics(
 async def test_deep_run_exploration_row_has_real_model_and_metrics(
     deep_target_multi: Path, patch_sdk: None, captured_post: _CapturedPost, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Reproduce the production 'Exploration ... unknown ... $0.00' row.
+    """Forked exploration trajectories receive SDK model IDs and usage/cost.
 
-    With >=4 changed Python files, ``select_tier`` returns ``"parallel"``,
-    which spawns three exploration specialists under ``maybe_fork``. Each
-    specialist runs through ``ClaudeBackend.execute`` -> ``Invocation``
-    inside its own forked ``TrajectoryRecorder``. The fork's child recorder
-    inherits the parent's ``agent_model_name`` (still ``""``) and is
-    supposed to upgrade it once the SDK CostEvent surfaces a real model id.
-
-    What the renderer sees today, per the user's bug report:
-
-        Exploration       unknown  4 53  0  0  0  $0.00
-
-    The assertions below pin every column the user called out as broken.
+    Four changed files trigger the three parallel specialists; their child
+    recorders must upgrade the inherited empty model when cost events arrive.
     """
     _silence_ui(monkeypatch)
     _answer_prompts(monkeypatch)

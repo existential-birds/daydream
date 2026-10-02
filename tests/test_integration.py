@@ -31,8 +31,9 @@ from daydream.exploration import ExplorationContext
 from daydream.phases import phase_alternative_review
 from daydream.pr_review import PRInfo
 from daydream.remote_ci import RemoteCITarget, pending_remote_ci_verdict, write_remote_ci_handoff
+from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.runner import RunConfig, run
+from daydream.runner import run
 from daydream.trajectory import DaydreamPhase
 from daydream.ui import NEON_THEME
 from daydream.workspace import WorkContext
@@ -46,7 +47,6 @@ from tests.harness.stub_backend import force_interactive, install_stub_backend, 
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 from tests.test_runner import _fix_item, _seed_fix_resume
 
-# ANSI escape code pattern for stripping terminal colors
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;]*m")
 
 #: The byte-identical CostEvent + ResultEvent tail every scripted stream ends with.
@@ -79,7 +79,6 @@ def _remote_ci_phase_end(trajectory: dict[str, Any]) -> dict[str, Any]:
     assert len(remote_ends) == 1
     return remote_ends[0]
 
-# Mock Backends
 
 _FULL_FLOW_ISSUE = {"id": 1, "description": "Add type hints to function", "file": "main.py", "line": 1}
 
@@ -87,12 +86,10 @@ async def render_agent(
     monkeypatch: pytest.MonkeyPatch, events: list[Any], *, quiet: bool, prompt: str = "Test prompt",
     color_system: str | None = None,
 ) -> str:
-    """Drive ``run_agent`` over *events* and return the raw terminal output. The tool-panel / quiet-mode tests all
-    repeated the same harness: a scripted event-yielding backend, a ``StringIO``-backed ``Console`` bound over
-    ``daydream.agent.console``, and an explicit interaction policy. The console is pinned (``force_terminal=True``,
-    ``width=120``, ``NEON_THEME``) so wrapping and styling are identical regardless of the host terminal. Returns
-    the output with ANSI codes INTACT -- the border/styling assertions read them. Callers comparing plain text pass
-    the result to ``strip_ansi``."""
+    """Run scripted events through a pinned terminal and return raw ANSI output.
+
+    force_terminal, width=120, and NEON_THEME remove host display differences.
+    Styling assertions use raw output; text assertions call strip_ansi."""
     output = StringIO()
     extra: dict[str, Any] = {} if color_system is None else {"color_system": color_system}
     monkeypatch.setattr(
@@ -119,13 +116,10 @@ async def test_five_thinking_panels_render_in_order(monkeypatch: pytest.MonkeyPa
         assert idx > cursor, f"thought {t!r} rendered out of order"
         cursor = idx
 
-# Fixtures
 
 @pytest.fixture
 def target_project(tmp_path: Path) -> Path:
-    """Create a minimal project structure for testing. Stage 4.2: ``open_workspace`` requires a real worktree. Build
-    the shared two-commit repo so ``main`` has a commit and the ``feature`` branch exists, keeping the
-    WrongBranchError guard from firing for default-branch runs."""
+    """Create a real two-commit feature branch satisfying workspace preflight."""
     return _two_commit_repo(
         tmp_path / "test_project", "main.py",
         "def hello():\n    return 'world'\n",
@@ -139,8 +133,7 @@ async def test_full_fix_flow(
 ) -> None:
     """The shallow flow writes a report, applies a fix, tests it, and commits."""
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
-    # Host-native commit/push (issue #726) pushes to 'origin' for real; give
-    # the repo a bare remote so the push + ls-remote verification succeeds.
+    # The real push and ls-remote verification need a bare origin.
     no_ci_remote.connect(target_project, bare_remote(tmp_path / "origin.git"))
     head_before = _git(target_project, "rev-parse", "HEAD")
     config = make_config(
@@ -266,9 +259,7 @@ async def test_shallow_staged_fix_preflight_preserves_review_evidence_and_git_st
     assert not any(prompt.startswith("fix this issue") or prompt.startswith("fix these") for prompt in backend.call_log)
 
 class _WorktreeMutatingBackend(PhaseDispatchBackend):
-    """Phase-dispatch fake whose fix and commit turns really touch the worktree. The backend is the only mocked seam,
-    so the edit and the commit the real prompts ask for have to happen here -- exactly what the agent would do with
-    its tools -- for the run to leave observable Git state behind."""
+    """Fake only the backend; fix/commit turns perform the requested real Git edits."""
 
     async def execute(
         self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
@@ -461,9 +452,7 @@ async def _wait_for_remote_ci_pids(path: Path, *, sha_path: Path, runner_task: a
     raise AssertionError("blocking remote CI process did not publish process ids")
 
 def _live_deep_dir(artifact_runtime_root: Path) -> Path:
-    """Locate the P10 private-live deep dir of the run's one active session. ``_step_remote_ci`` writes its
-    verdict/handoff through ``artifact_dir_for()``, which routes to the session's private live tree, not to the
-    public ``.daydream`` (detached for the run's duration). One session per tmp path."""
+    """Locate the sole active session: remote CI evidence lives in its private tree."""
     matches = sorted(artifact_runtime_root.glob("*/runs/*/live/.daydream/deep"))
     assert len(matches) == 1, f"expected exactly one live deep dir, got {matches}"
     return matches[0]
@@ -489,7 +478,7 @@ async def test_runner_remote_ci_red_fails_after_real_push(
         project, fake_gh, hook_marker, outcome="failed"
     )
     rendered = StringIO()
-    monkeypatch.setattr("daydream.deep.fix_steps.console", Console(file=rendered, width=160))
+    monkeypatch.setattr("daydream.deep.remote_ci_steps.console", Console(file=rendered, width=160))
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]]))
     try:
         exit_code = await run(_shallow_pr_config(make_config, project))
@@ -674,9 +663,7 @@ async def test_runner_remote_ci_cancellation_persists_verdict_and_handoff(
             hook_marker.with_name(hook_marker.name + " pids"),
             sha_path=hook_marker.with_name(hook_marker.name + " sha"), runner_task=task,
         )
-        # Mid-run, P10 routes verdict/handoff writes into the session's
-        # private live tree; the public .daydream tree is detached for the
-        # run's duration and only republished when the run ends.
+        # Mid-run artifacts stay private; the public tree is republished at run end.
         live_deep = _live_deep_dir(artifact_runtime_root)
         pending = json.loads((live_deep / "remote-ci-verdict.json").read_text())
         assert pending["status"] == "pending"
@@ -719,11 +706,10 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     install_backend: Callable[[object], object], make_config: Callable[..., 'RunConfig'],
     silence_console: Callable[..., None], no_ci_remote: NoCIRemote,
 ) -> None:
-    """Heal-menu choice "3" keeps the shallow deep run going all the way to a real commit. Drives the deep shallow
-    flow through the REAL ``phase_test_and_heal`` and ``phase_commit_push`` against a permanently red suite, with
-    the backend as the only mocked seam. Choice "3" (ignore and continue) reports ``passed`` False but ``proceed``
-    True, and the deep fix cycle's commit step reads the operator's "y" at the commit gate -- so the run exits 0
-    and the fix lands in the real worktree instead of being abandoned with the failure."""
+    """Ignoring a red suite keeps proceed=True while passed=False.
+
+    Real heal and commit phases must then honor the commit approval and persist
+    the backend edit in Git, exiting successfully."""
     # stdin answers, in order: intent confirmation, decline the optional PR
     # review post, the apply-fixes gate, the heal menu ("3" = ignore and
     # continue), and the commit gate.
@@ -736,10 +722,9 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     silence_console("daydream.deep.merge_steps")
     silence_console("daydream.deep.diagram_steps")
     silence_console("daydream.deep.fix_steps")
-    silence_console("daydream.phases")
+    silence_console("daydream.ui")
     install_backend(_WorktreeMutatingBackend(parse_results=[[_FULL_FLOW_ISSUE]], tests_pass=False))
-    # Host-native commit/push (issue #726) pushes to 'origin' for real; give
-    # the repo a bare remote so the push + ls-remote verification succeeds.
+    # The real push and ls-remote verification need a bare origin.
     no_ci_remote.connect(feature_branch_repo, bare_remote(tmp_path / "origin.git"))
     head_before = _git(feature_branch_repo, "rev-parse", "HEAD")
     config = make_config(
@@ -757,15 +742,7 @@ async def test_shallow_commits_when_operator_ignores_red_suite(
     assert "Daydream-Run:" in _git(feature_branch_repo, "log", "-1", "--format=%B")
 
 async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test the full tool panel lifecycle in normal mode shows file count and list.
-
-    This test exercises the actual run_agent() flow by providing a scripted backend
-    that yields events. Normal mode (quiet=False) shows both header and output section.
-
-    Also tests that:
-    - AgentTextRenderer displays streamed text with spinner cursor effect
-    - LiveThinkingPanel displays thinking blocks with stable title
-    """
+    """Render the full Glob lifecycle, streamed text cursor, and stable thinking title."""
     tool_use_id = "test-glob-lifecycle-123"
     glob_result = """/project/src/main.py
 /project/src/utils/helper.py
@@ -782,7 +759,6 @@ async def test_glob_tool_panel_displays_file_count_and_list(monkeypatch: pytest.
     assert "I'll search for Python files" in plain_text
     assert "Glob" in plain_text
     assert "**/*.py" in plain_text
-    # Normal mode shows the output section with the file count.
     assert "Found 3 files" in plain_text
     assert "main.py" in plain_text
     assert "helper.py" in plain_text
@@ -796,9 +772,7 @@ async def test_glob_tool_panel_singular_file_count(monkeypatch: pytest.MonkeyPat
         ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "*.py"}),
         ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False), *_TERMINAL_EVENTS,
     ]
-    # Normal mode shows the output section.
     output_text = await render_agent(monkeypatch, events, quiet=False)
-    # Singular "file", not "files".
     assert "Found 1 file" in output_text
     assert "Found 1 files" not in output_text
     assert "main.py" in output_text
@@ -813,7 +787,6 @@ async def test_glob_tool_panel_truncates_long_results(monkeypatch: pytest.Monkey
         ToolStartEvent(id=tool_use_id, name="Glob", input={"pattern": "**/*.py"}),
         ToolResultEvent(id=tool_use_id, output=glob_result, is_error=False), *_TERMINAL_EVENTS,
     ]
-    # Normal mode shows the output section.
     output_text = await render_agent(monkeypatch, events, quiet=False)
     assert "Found 25 files" in output_text
     assert "and 5 more" in output_text  # 25 total - 20 displayed
@@ -830,7 +803,6 @@ async def test_quiet_mode_shows_header_only(monkeypatch: pytest.MonkeyPatch) -> 
     plain_text = strip_ansi(output_text)
     assert "Read" in plain_text
     assert "/project/main.py" in plain_text
-    # Quiet mode: header only — no output section, no content.
     assert "Output" not in plain_text
     assert "hello" not in plain_text
     assert "world" not in plain_text
@@ -872,11 +844,8 @@ async def test_quiet_mode_bash_panel_redacts_command_secrets(monkeypatch: pytest
 
 async def test_quiet_mode_bash_panel_redacts_before_truncating(monkeypatch: pytest.MonkeyPatch) -> None:
     """Secret redaction happens on the complete command before the 200-char slice."""
-    # 'x'*180 + ' token=opaque-test-12345': redaction of the COMPLETE string
-    # lengthens it so the [REDACTED_CREDENTIAL] marker sits at column 194 —
-    # still inside the [:200] slice. A slice-first impl would cut the RAW
-    # string at 200 (mid-secret) and later redaction would print a partial
-    # secret fragment.
+    # Redact before slicing at 200: the raw secret straddles that boundary,
+    # while the redaction marker starts at column 194 and remains visible.
     filler = "x" * 180
     command = f"{filler} token=opaque-test-12345"
     tool_use_id = "test-bash-redact-order-1108"
@@ -917,8 +886,7 @@ async def test_quiet_mode_error_shows_header_with_red_border(monkeypatch: pytest
     assert "\x1b[" in output_text  # ANSI styling present (red border)
 
 async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that Skill tool calls don't show an Output panel. The skill name already appears in the tool call header,
-    so the "Launching skill: X" output is redundant and should be suppressed."""
+    """Suppress the redundant Skill launch output already named in its header."""
     tool_use_id = "test-skill-collapse-001"
     events = [
         ToolStartEvent(id=tool_use_id, name="Skill", input={"skill": "review-python"}),
@@ -933,9 +901,7 @@ async def test_skill_tool_panel_collapses_output(monkeypatch: pytest.MonkeyPatch
     assert "Launching skill:" not in plain_text
 
 async def test_concurrent_tool_panels_display_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Test that concurrent tool panels (e.g. Codex parallel commands) all show results. When multiple ToolStartEvents
-    arrive before any ToolResultEvents (as happens with the Codex backend's parallel command execution), all panels
-    should eventually display their results without display corruption."""
+    """Multiple tool starts before any result must render all results without corruption."""
     # 3 concurrent commands: all started before any complete.
     events = [
         ToolStartEvent(id="cmd-1", name="shell", input={"command": "git diff -- file1.py"}),
@@ -946,7 +912,6 @@ async def test_concurrent_tool_panels_display_results(monkeypatch: pytest.Monkey
         ToolResultEvent(id="cmd-3", output="+added line in file3", is_error=False), *_TERMINAL_EVENTS,
     ]
     plain_text = strip_ansi(await render_agent(monkeypatch, events, quiet=False))
-    # All three results and commands appear.
     assert "+added line in file1" in plain_text
     assert "+added line in file2" in plain_text
     assert "+added line in file3" in plain_text
@@ -988,9 +953,7 @@ async def test_run_comment_full_flow(
     # Comment mode auto-posts (post=True) with the canonical merged items.
     assert posted_posts == [True]
     assert posted, "the --comment post step never received merged items"
-    # The review spine ran: a per-stack finding reached the post step.
     assert any(item.get("file") for item in posted), posted
-    # The diff was materialised for the review prompts.
     assert (tmp_path / ".daydream" / "diff.patch").exists()
 
 @pytest.mark.parametrize("pr_number", [None, 7], ids=["branch", "explicit"])
@@ -1090,7 +1053,7 @@ async def test_run_comment_does_not_prompt_for_skill(
             TextEvent(text="Intent: changes f.txt."), ResultEvent(structured_output={"issues": []}, continuation=None),
         ], model="mock-model",
     ))
-    silence_console("daydream.phases")
+    silence_console("daydream.ui")
     silence_console("daydream.runner")
     # Trap: skill selection must never prompt in --comment mode.
     def runner_prompt_trap(*args: Any, **kwargs: Any) -> None:
@@ -1103,9 +1066,7 @@ async def test_run_comment_does_not_prompt_for_skill(
 async def test_run_comment_missing_pr_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
 ) -> None:
-    """Comment mode chose posting as its deliverable: no open PR -> exit 1. Drives ``runner.run`` for real (real temp
-    worktree, stub backend only); only ``pr_review.find_open_pr`` is mocked to report no PR, so the missing-PR
-    warning path runs production code end to end."""
+    """Comment mode requires a posted review; a missing PR makes runner.run fail."""
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tmp_path)
@@ -1117,8 +1078,7 @@ async def test_run_comment_missing_pr_exits_nonzero(
 async def test_run_comment_submission_failure_exits_nonzero(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'], fake_gh: Any,
 ) -> None:
-    """Comment mode: a failed GitHub review post -> exit 1. Only the external gh process is configured to fail;
-    everything else (the review pipeline, ``_post``, classification, payload build) runs production code."""
+    """A gh-process failure propagates through real classification/posting as exit 1."""
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tmp_path)
@@ -1132,9 +1092,7 @@ async def test_run_comment_submission_failure_exits_nonzero(
 async def test_run_loop_submission_failure_warns_and_continues(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'], fake_gh: Any,
 ) -> None:
-    """Default deep loop: a failed review post warns-and-continues (exit 0). Posting is optional in loop mode, so a
-    failed GitHub post must not abort the run. The post gate is approved (interactive prompt path), the fix gate
-    declines, and the run still exits 0 with the report written."""
+    """Optional loop posting may fail while the approved-post/declined-fix run exits 0."""
     _two_commit_repo(tmp_path, "app.py", "print('hello')", "print('world')", "feat/test")
     silence(monkeypatch, prompts=False)
     install_stub_backend(monkeypatch, tmp_path)
@@ -1155,15 +1113,13 @@ async def test_run_loop_submission_failure_warns_and_continues(
     # The report the review produced is still on disk (the fix gate declined).
     assert (tmp_path / ".review-output.md").exists()
 
-# Phase 02-04: Pre-scan exploration wiring
 
 async def test_run_populates_exploration_context(
     monkeypatch: pytest.MonkeyPatch, multi_stack_target: Path, make_config: Callable[..., 'RunConfig'],
 ) -> None:
-    """run() populates config.exploration_context before the review fan-out fires. Drives the deep shallow flow
-    through ``runner.run`` with exploration left enabled (4 changed files -> "parallel" tier so the real
-    ``pre_scan`` runs) and asserts the wired consequence: ``config.exploration_context`` is set and the per-stack
-    review receives the on-disk ``exploration_dir``."""
+    """Populate exploration context before fan-out on a four-file parallel-tier run.
+
+    The review must receive the actual on-disk exploration directory."""
     (multi_stack_target / "extra.py").write_text("VALUE = 2\n")
     _git(multi_stack_target, "add", ".")
     _commit(multi_stack_target, "add extra")
@@ -1175,8 +1131,7 @@ async def test_run_populates_exploration_context(
         allow_standalone: bool = False, **kwargs: Any,
     ) -> tuple[Any, ...]:
         captured["exploration_dir"] = kwargs.get("exploration_dir")
-        # Issue #745: reviewers write PER_STACK_RECORD_SCHEMA records files that
-        # the loader requires; the fake must do the same or the run stops.
+        # The real loader requires a PER_STACK_RECORD_SCHEMA records file.
         dd = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
         dd.mkdir(parents=True, exist_ok=True)
         for s in stacks:
@@ -1200,9 +1155,7 @@ async def test_codex_backend_raises_on_agents(tmp_path: Path) -> None:
 async def test_alternative_review_surfaces_confidence_and_rationale(
     tmp_path: Path, make_work: Callable[..., WorkContext]
 ) -> None:
-    """Alternative review surfaces confidence + rationale on parsed issues. Exercises `phase_alternative_review`
-    directly: it returns a parsed issue list that must carry the schema-enforced confidence/rationale fields per
-    QUAL-02."""
+    """Parsed alternative-review issues retain schema-enforced confidence and rationale."""
     enriched_trust_issue = {
         "id": 1, "title": "t", "description": "x", "recommendation": "y", "severity": "high", "files": ["a.py"],
         "confidence": "HIGH", "rationale": "verified by Convention snake_case_modules",
@@ -1213,7 +1166,6 @@ async def test_alternative_review_surfaces_confidence_and_rationale(
             model="test-model",
         )
     work = make_work(tmp_path)
-    # phase_alternative_review returns a list of parsed issues.
     diff_path = tmp_path / "diff.txt"
     diff_path.write_text("diff")
     trust_backend = _issue_backend({"issues": [enriched_trust_issue]})

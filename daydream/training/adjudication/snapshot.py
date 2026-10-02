@@ -1,10 +1,4 @@
-"""Shared serializer for the per-finding annotation snapshot pipeline (issue #1055).
-
-One canonical per-finding record shape + evidence digest, consumed by both
-preview materialization (``materialize.py``) and canonical harvest
-(``canonical.py``). Pure module: no I/O, no wall-clock reads — determinism is
-by construction (C4).
-"""
+"""Pure canonical finding serializer and evidence digests shared by preview and harvest."""
 
 from __future__ import annotations
 
@@ -50,12 +44,9 @@ _PIN_FIELDS = (
 def record_evidence_digest(
     per_finding_evidence_lists: Sequence[Sequence[Mapping[str, Any]]],
 ) -> str | None:
-    """Digest over the session's flattened per-finding reply evidence.
+    """Use the shared reply-evidence digest over flattened session evidence.
 
-    Delegates to ``labeler_versions.reply_evidence_digest`` — the shared
-    implementation, never a re-implementation (K4/K5). ``None`` when no reply
-    evidence was collected, so a digest-less row never collides with a
-    digested one under the versioned dedup key.
+    No replies yields None, retaining the distinct digest-less dedup identity.
     """
     evidence = [thaw_json(entry) for per_finding in per_finding_evidence_lists for entry in per_finding]
     return reply_evidence_digest(evidence) if evidence else None
@@ -123,15 +114,10 @@ def build_canonical_record(
 
 
 def snapshot_id(pin: Mapping[str, str]) -> str:
-    """Content-addressed snapshot id: sha256 over canonical JSON of the pin.
+    """Hash canonical sorted-key JSON of exactly _PIN_FIELDS.
 
-    The digest covers exactly the ``_PIN_FIELDS`` components with sorted keys
-    and compact separators, so the caller's key insertion order cannot affect
-    the id. Every component must be present and non-empty except ``as_of``,
-    which may be empty or missing — the unpinned edge (hashed as the empty
-    string), so a pinned and an unpinned pin still produce distinct ids while
-    the unpinned form has exactly one canonical id (AC 8). Any other missing
-    or empty component raises ``ValueError`` naming it.
+    Require nonempty components except as_of: missing/empty as_of has one canonical
+    unpinned identity distinct from every pinned one. Invalid fields raise by name.
     """
     components = {}
     for field in _PIN_FIELDS:

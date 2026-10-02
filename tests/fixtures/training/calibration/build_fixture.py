@@ -1,28 +1,15 @@
-"""Build the synthetic projected-corpus calibration fixture (issue #999, M8).
-
-Regenerates every file under ``tests/fixtures/training/calibration/``
-byte-for-byte deterministically (no timestamps, sorted keys, fixed seed-free
-formulas) so replay diffs are reviewable:
+"""Regenerate deterministic calibration fixtures with fixed formulas, sorted keys, and no timestamps.
 
     uv run python tests/fixtures/training/calibration/build_fixture.py
     uv run python tests/fixtures/training/calibration/build_fixture.py --out /tmp/replay
 
-Layout (consumed by ``daydream.training.calibration.run_calibration``):
+corpus/ contains corpus.jsonl, lineage.json, curation-manifest.json, SHA256SUMS, and _SUCCESS.
+gold.json maps record IDs to accepted booleans; breakdowns.json supplies intrinsic axes. Aligned
+Stage-0 scores cover every record; misaligned scores drop one and add an unknown ID.
 
-- ``corpus/``          — clean bundle: ``corpus.jsonl``, ``lineage.json``,
-                         ``curation-manifest.json``, ``SHA256SUMS``, ``_SUCCESS``
-- ``gold.json``        — gold labels keyed by record_id: ``{"accepted": bool}``
-- ``breakdowns.json``  — per-axis intrinsic breakdowns keyed by record_id
-- ``stage0-scores-aligned.json``    — one score per corpus record
-- ``stage0-scores-misaligned.json`` — aligned scores plus one unknown record_id and one corpus record dropped
-- ``variants/``        — deliberate corruption bundles, one gate each:
-                         ``c5-excluded/`` (C5 exclusion list slug),
-                         ``posterior/`` (valid_at posterior to as_of),
-                         ``digest/`` (tampered corpus, pristine SHA256SUMS)
-
-The frozen reward stamp identifies the original supplied breakdowns. Replaying
-this generator preserves their historical semantics and bytes. Labeler stamps
-remain imported from their unchanged production modules.
+variants/ isolates C5 exclusion, evidence posterior to as_of, and corpus tampering against pristine
+SHA256SUMS. The frozen reward stamp preserves historical breakdown semantics and bytes; labeler
+stamps come from production modules.
 """
 
 from __future__ import annotations
@@ -45,15 +32,13 @@ REWARD_VERSION = "2026.09.04-1"  # Frozen fixture semantics; never rescore on a 
 
 AS_OF = "2026-01-01T00:00:00+00:00"
 VALID_AT = "2025-12-01T00:00:00+00:00"
-#: Salt chosen so the derived holdout split is non-degenerate for the 12-record
-#: corpus (>=3 records, mixed gold labels): a 2-record holdout forces every
-#: stage-0 marginal point-biserial to exactly +/-1, hiding regressions.
+# Choose at least three mixed-label holdout records; a two-record holdout forces point-biserial
+# correlations to +/-1 and hides regressions.
 SALT = "calibration-fixture-salt-nondegenerate"
 RECORD_COUNT = 12
 STAGE0_MODEL_DIGEST = "sha256:calibration-stage0-model-1"
 
-#: A slug that is on the C5 exclusion list in the repo schema — used only in
-#: the ``variants/c5-excluded`` corruption bundle, never in the clean corpus.
+# Use a C5-excluded slug only in the corruption variant.
 C5_SLUG = "getsentry/sentry"
 
 REPO_SLUGS = [f"acme/widgets-{i % 3}" for i in range(RECORD_COUNT)]
@@ -64,9 +49,8 @@ def _record(i: int) -> dict[str, Any]:
         "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}", "repo_slug": REPO_SLUGS[i],
         "reward_version": REWARD_VERSION,
         "lineage": {
-            # Stored split must equal the split run_calibration re-derives from
-            # the bundle salt + split rates (0.2/0.2 in _lineage()); the
-            # stored-split gate compares them fail-closed.
+            # Stored splits must match calibration's derivation from the bundle salt and 0.2/0.2
+            # rates.
             "split": assign_split(f"rec-{i:04d}", holdout_rate=0.2, val_rate=0.2, salt=SALT), "as_of": AS_OF,
             "valid_at": VALID_AT, "license_decision": "allow", "labeler_policy_version": LABELER_POLICY_VERSION,
             "reply_classifier_version": REPLY_CLASSIFIER_VERSION, "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
@@ -79,7 +63,6 @@ def _records() -> list[dict[str, Any]]:
 
 
 def _gold() -> dict[str, dict[str, Any]]:
-    # Interleaved 6/6 class balance.
     return {f"rec-{i:04d}": {"accepted": i % 2 == 0} for i in range(RECORD_COUNT)}
 
 
@@ -141,10 +124,8 @@ def _sha256sums(corpus_dir: Path, names: list[str]) -> None:
 
 
 def _write_bundle(corpus_dir: Path, records: list[dict[str, Any]], *, sums_over_tampered: bool = False) -> None:
-    """Write corpus.jsonl + lineage.json + SHA256SUMS (+ curation-manifest).
-
-    With ``sums_over_tampered`` (the digest variant), the corpus is tampered
-    *after* the pristine SHA256SUMS is computed — the deliberate corruption.
+    """Write the corpus bundle. sums_over_tampered changes corpus bytes after pristine SHA256SUMS to
+    exercise digest refusal.
     """
     corpus_dir.mkdir(parents=True, exist_ok=True)
     (corpus_dir / "corpus.jsonl").write_bytes(_jsonl_bytes(records))
@@ -165,10 +146,8 @@ def build(out: Path) -> None:
 
     records = _records()
 
-    # Clean bundle.
     _write_bundle(out / "corpus", records)
 
-    # Join files.
     _write_json(out / "gold.json", _gold())
     _write_json(out / "breakdowns.json", _breakdowns())
     _write_json(out / "stage0-scores-aligned.json", _stage0_scores(aligned=True))

@@ -1,12 +1,7 @@
-"""Flow engine: ordered, gated execution of registered flow steps.
+"""Ordered, gated registry flows over shared state.
 
-``run_flow`` executes a named flow from the :class:`Registry` over a shared
-:class:`FlowContext`. Steps communicate through ``ctx.data`` and signal
-control flow by returning :class:`Stop` (end the flow with an exit code) or
-:class:`BreakLoop` (end the enclosing :class:`LoopGroup`).
-
-Step exceptions propagate unchanged — error handling lives inside step
-bodies, exactly where the flow helpers' try/excepts sit today.
+Stop ends the flow; BreakLoop ends its enclosing group. Step exceptions propagate
+unchanged, leaving error policy with each step.
 """
 
 from __future__ import annotations
@@ -32,8 +27,8 @@ if TYPE_CHECKING:
     from daydream.backends import Backend
     from daydream.extensions.registry import FlowEntry, Registry
     from daydream.review_profile import Pipeline, ResolvedProfile
+    from daydream.run_config import RunConfig
     from daydream.run_context import RunContext
-    from daydream.runner import RunConfig
     from daydream.workspace import AuditWorkspace, WorkContext
 
 
@@ -43,30 +38,17 @@ type BackendFactory = Callable[[RunConfig, str, BackendCache, Path, AuditWorkspa
 
 @dataclass
 class FlowContext:
-    """Shared state a flow's steps read and write.
+    """Run-owned dependencies and shared mutable step state.
 
-    Attributes:
-        config: The run configuration (backend/model precedence sources).
-        work: The resolved workspace for the run.
-        registry: The per-run extension registry the flow resolves against.
-        data: Cross-step scratch state; steps replace locals with keys here.
-        review_profile: The resolved per-run review profile (validated object
-            + source kind + digest), set by the runner composition root (R1).
-            ``None`` before resolution; ``strategy()``/``pipeline()`` fall back
-            to the packaged default so steps stay operable either way.
-        run_context: Runner-owned interaction policy and backend lifecycle.
-            Direct extension callers may omit it to use the bound runtime or
-            the standalone default when the flow begins.
-        github_execution: Explicit GitHub authentication owned by this run.
-            Omitted by standalone extensions, it inherits the parent environment.
-            This runtime capability is excluded from repr and must not enter data
-            or artifact serializers.
-        _backend_factory: Runner-bound transport factory. It receives this
-            context's configuration, cache, workspace, and audit boundary;
-            omission keeps ordinary backend resolution.
-        allow_standalone_artifacts: Explicit opt-in for direct flow callers
-            without a runner-owned artifact session. Runner-created contexts
-            keep this false and pass ``artifacts`` to generated-path helpers.
+    Unresolved or partial review profiles use packaged strategy/pipeline defaults.
+    Direct callers may omit run_context to inherit the bound runtime or standalone
+    policy. Backend instances share this context's cache; a runner-bound factory
+    receives config, cache, workspace, and audit boundary.
+
+    GitHub execution is an explicit capability excluded from repr/serialization;
+    standalone callers inherit ambient credentials. Never copy it into data or
+    artifacts. Standalone artifact access requires explicit opt-in; runner contexts
+    instead supply their owned artifact session.
     """
 
     config: RunConfig
@@ -108,35 +90,15 @@ class FlowContext:
         )
 
     def backend_for(self, phase: str) -> Backend:
-        """Get or create the backend for ``phase``, reusing per-context instances.
-
-        Instance-sharing semantics are identical to the flow helpers'
-        ``backend_cache`` dicts today: backends are cached per resolved
-        ``(backend_name, model, reasoning_effort, audit_root)`` tuple for the
-        lifetime of this context.
-        """
+        """Cache instances by resolved backend, model, effort, and audit root for this context."""
         return self._backend(phase)
 
     def backend_for_effort(self, phase: str, effort: str) -> Backend:
-        """Get or create ``phase``'s backend with ``effort`` overriding the resolver.
-
-        The arbiter group fan-out resolves one backend per group effort. When a
-        runner-bound factory is installed the same seam is used, so test
-        factories observe the resolution path production takes; otherwise the
-        effort override is threaded through :func:`_resolve_backend` and cached
-        under the resulting ``(backend, model, effort, audit_root)`` key.
-        """
+        """Resolve an effort-specific backend, preserving any runner-bound factory seam."""
         return self._backend(phase, effort=effort)
 
     def strategy(self, stage: str) -> str:
-        """Return the profile-owned strategy content for a model-bearing stage.
-
-        Narrow accessor for flows: reads the resolved per-run review profile
-        (never re-reads a profile file, R1). Stages without a profile strategy
-        and profiles that were never resolved fall back to the packaged
-        default's strategy for the stage, so flow steps stay operable without
-        a profile.
-        """
+        """Read a resolved profile strategy, falling back per stage to packaged defaults."""
         from daydream.review_profile import build_default_profile
 
         # Fall back per-stage on missing keys: ``parse_profile`` accepts partial
@@ -150,11 +112,7 @@ class FlowContext:
         return build_default_profile().strategies[stage].content
 
     def pipeline(self) -> Pipeline:
-        """Return the resolved profile's bounded pipeline section (R2).
-
-        ``None`` (unresolved) falls back to the packaged default's pipeline so
-        pipeline-driven flow steps never branch on resolution state.
-        """
+        """Read the resolved bounded pipeline or use the packaged default."""
         from daydream.review_profile import resolve_pipeline
 
         return resolve_pipeline(self.review_profile)
@@ -206,13 +164,10 @@ async def _run_group(group: LoopGroup, steps: dict[str, FlowStep], ctx: FlowCont
 
 
 async def run_flow(registry: Registry, flow_name: str, ctx: FlowContext) -> int:
-    """Execute the named flow's entries in order; return the flow's exit code.
+    """Resolve every entry before execution, then return the first Stop code or zero.
 
-    Resolves every entry via ``registry.phase()`` FIRST, so an unresolvable
-    flow raises :class:`UnresolvedExtensionError` naming flow + step before
-    any step executes. A ``Stop(code)`` signal returns ``code`` immediately;
-    falling off the end returns 0. A ``BreakLoop`` outside a loop group is
-    ignored.
+    Unknown entries name the flow and phase in UnresolvedExtensionError. BreakLoop
+    outside a group is ignored; the resolved runtime stays bound across steps.
     """
     runtime = resolve_run_context(ctx.run_context)
     ctx.run_context = runtime

@@ -1,15 +1,7 @@
-"""Verbose fatal diagnostics: one privacy-first, size-bounded exception dump.
+"""Privacy-filtered exception diagnostics with bounded head and root-cause tail.
 
-:func:`format_verbose_exception` renders an exception chain newest-first, so
-it adapts the interpreter's interstitial lines to that order; it redacts the
-rendered value with the observability :class:`~.PrivacyPolicy` BEFORE any size
-bound, neutralizes terminal control characters while keeping newlines and
-tabs, then caps the result at one bounded head, a single truncation marker,
-and the root cause's tail. Every failure mode degrades to one fixed marker
-string, and the module imports only the standard library plus
-:class:`~.PrivacyPolicy` and writes to no log sink, terminal, or tracer.
-
-Public seam: ``format_verbose_exception(exc, *, environ=None) -> str``.
+Render newest-first, redact before truncation, then remove terminal controls
+except tabs/newlines. Formatting failures produce fixed markers; nothing is emitted.
 """
 
 from __future__ import annotations
@@ -19,8 +11,6 @@ import traceback
 import unicodedata
 from collections.abc import Mapping
 from typing import Final
-
-from daydream.observability.privacy import PrivacyPolicy
 
 #: Fixed marker emitted when any formatting stage fails. Never rendered from
 #: the failing formatter's own exception object.
@@ -53,13 +43,19 @@ _CONTEXT_LINK = (
 )
 
 
-def _neutralize_control(value: str) -> str:
-    """Drop ANSI CSI sequences and every remaining control character.
+def exception_text(exc: BaseException) -> str | None:
+    """Read untrusted exception text; None means its formatter failed.
 
-    Newlines and tabs are preserved so the traceback keeps its structure; every
-    other control code (escapes, carriage returns, bells, ...) is removed so a
-    hostile exception message cannot paint over the operator's terminal.
+    Callers must still redact and neutralize this text before displaying it.
     """
+    try:
+        return str(exc)
+    except Exception:  # noqa: BLE001 - formatting must not replace the original failure
+        return None
+
+
+def _neutralize_control(value: str) -> str:
+    """Drop ANSI CSI and remaining controls, preserving tabs/newlines for traceback structure."""
     value = _CSI_SEQUENCE.sub("", value)
     return "".join(
         char
@@ -70,12 +66,7 @@ def _neutralize_control(value: str) -> str:
 
 
 def _chain_members(exc: BaseException) -> list[BaseException]:
-    """Return the cause chain newest-first, de-duplicated by identity.
-
-    The member passed in comes first; the walk follows ``__cause__`` (or, when
-    absent, an un-suppressed ``__context__``) until the chain ends, mirroring
-    the interpreter's notion of which exceptions belong to one traceback.
-    """
+    """Follow cause, then unsuppressed context, newest-first with identity deduplication."""
     members: list[BaseException] = []
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -92,14 +83,9 @@ def _chain_members(exc: BaseException) -> list[BaseException]:
 
 
 def _render_chain(exc: BaseException) -> str:
-    """Render *exc*'s chain newest-first, one traceback page per member.
+    """Render bounded traceback pages newest-first, preserving notes and adapted chain links.
 
-    Per-member pages use :class:`traceback.TracebackException` exactly as the
-    interpreter would (``capture_locals=False`` is mandatory — local-variable
-    values must never appear; ``limit`` and the group caps keep the output
-    bounded), but the pages are joined in the order the operator sees them:
-    the exception itself first, then what caused it. The bridge lines are
-    adapted from the interpreter's phrasing to this newest-first page order.
+    Local variables are never captured. Width/depth/trace limits bound exception groups.
     """
     members = _chain_members(exc)
     pages: list[str] = []
@@ -122,14 +108,9 @@ def _render_chain(exc: BaseException) -> str:
 
 
 def _assemble_diagnostic(value: str) -> str:
-    """Neutralize controls and cap *value* at one bounded head + marker + tail.
+    """After redaction, neutralize controls and retain UTF-8-valid head/tail within the cap.
 
-    Runs AFTER the complete value has been redacted by the privacy policy: the
-    head is the longest UTF-8-valid prefix within the head budget, the tail the
-    longest UTF-8-valid suffix within the root-cause tail budget, and exactly
-    one ``[VERBOSE_DIAGNOSTIC_TRUNCATED]`` marker bridges them. The budgets
-    plus the marker always fit the hard cap; the assert protects that
-    invariant from future budget edits.
+    Exactly one truncation marker separates the retained parts.
     """
     value = _neutralize_control(value)
     raw = value.encode("utf-8")
@@ -151,19 +132,16 @@ def sanitize_verbose_message(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> str:
-    """Redact and control-neutralize one fatal message for the UI panel.
+    """Safely format, redact and neutralize one fatal panel message; failure yields empty.
 
-    Applies the same privacy and control boundary as
-    :func:`format_verbose_exception` to a single-line message — the generic
-    fatal branch's panel text. Accepts the exception object itself (not just
-    its pre-materialized ``str``) so the ``str()`` conversion — the one
-    operation that can raise on a hostile value — happens INSIDE the fail-
-    closed try: an exception whose ``__str__`` raises degrades to ``""``
-    instead of escaping the generic fatal handler. Fails closed to ``""``
-    so a hostile message can never paint the panel with a payload.
+    Exception conversion occurs inside the boundary because __str__ may raise.
     """
+    from daydream.observability.privacy import PrivacyPolicy
+
     try:
-        text = str(message) if isinstance(message, BaseException) else message
+        text = exception_text(message) if isinstance(message, BaseException) else message
+        if text is None:
+            return ""
         policy = PrivacyPolicy(environ=environ)
         return _neutralize_control(policy.text(text))
     except Exception:  # noqa: BLE001 - fail closed to an empty panel
@@ -175,24 +153,20 @@ def format_verbose_exception(
     *,
     environ: Mapping[str, str] | None = None,
 ) -> str:
-    """Return the redacted, bounded, control-safe rendering of *exc*.
+    """Render a redacted, bounded chain with notes and no captured local variables.
 
-    Rendering keeps chaining enabled — direct causes and implicit contexts
-    both appear, in the same order the interpreter would narrate them — never
-    captures local-variable values, and prints exception notes. Redaction runs
-    over the complete rendered text BEFORE any size bound and uses the real
-    process environment unless *environ* supplies an explicit replacement.
-
-    Any exception raised at any stage — including a value whose ``__str__``
-    cannot run — fails closed to ``[VERBOSE_DIAGNOSTIC_UNAVAILABLE]``; the
-    failing formatter's own exception object is never rendered into the output.
+    Redact complete text before any size cap, using the real environment unless
+    overridden. Any formatting failure returns the fixed unavailable marker.
     """
+    from daydream.observability.privacy import PrivacyPolicy
+
     try:
         # Materialize the top-level message up front: ``str()`` is the one
         # operation that can raise on a hostile value, and a raising message
         # must fail closed instead of letting the stdlib traceback renderer
         # substitute a placeholder line.
-        str(exc)
+        if exception_text(exc) is None:
+            return VERBOSE_DIAGNOSTIC_UNAVAILABLE
         formatted = _render_chain(exc)
         policy = PrivacyPolicy(environ=environ)
         # The COMPLETE rendered value crosses the privacy boundary first: a

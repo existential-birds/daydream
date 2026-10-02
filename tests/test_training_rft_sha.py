@@ -1,10 +1,5 @@
-"""Full-SHA validation on v2 task records before RFT rebuild (Req 7 / #714 rebase).
-
-A v2 record's ``task_identity`` block is the frozen truth RFT replays against;
-a truncated or malformed SHA must fail closed with a ``ValueError`` naming the
-record id and field *before* any task reconstruction, never run against a
-shortened identity. Mirrors the coordinator ``_rft_rows`` contract so Stage 2
-and the replay agree on what a valid identity is.
+"""Reject malformed or truncated task SHAs before reconstruction, naming record and field. Match
+coordinator validation so RFT replays only frozen full identities.
 """
 
 from __future__ import annotations
@@ -24,7 +19,6 @@ def _config(tmp_path: Path, records: list[dict[str, object]]) -> RftConfig:
 
 
 def test_valid_full_shas_build_the_task(tmp_path: Path) -> None:
-    """A record with valid 40-hex base/head shas replays and writes winners."""
     cfg = _config(tmp_path, [_record("r1"), _record("r2")])
     result = run_rft(cfg)
     assert result.winners_path.is_file()
@@ -37,7 +31,6 @@ def test_valid_full_shas_build_the_task(tmp_path: Path) -> None:
     ], ids=["short-base-sha", "missing-head-sha", "non-hex-sha", "missing-repo-slug"],
 )
 def test_malformed_identity_fails_closed(record: dict[str, object], match: str, tmp_path: Path) -> None:
-    """A malformed identity is refused with ValueError before any rebuild."""
     cfg = _config(tmp_path, [record])
     with pytest.raises(ValueError, match=match):
         run_rft(cfg)

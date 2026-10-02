@@ -28,7 +28,7 @@ def _reply(body: str, login: str = "maintainer", assoc: str = "MEMBER", bot: str
         ("not fixed yet, still reproduces", "ambiguous"),   # M22: negation fails closed
         ("", "ambiguous"),                                  # empty body
         ("Fixed in abc123. Though the other finding was a false positive.", "ambiguous"),  # mixed direction
-        # M22: negating a reject phrase fails closed to ambiguous, never 'rejected'.
+        # Negating a rejection phrase stays ambiguous.
         ("This is not a false positive — it reproduces on main.", "ambiguous"),
         ("This is not intentional; it's a real bug.", "ambiguous"),
         ("This is not applicable to this PR.", "rejected"),  # affirm 'not applicable' is still a rejection
@@ -50,11 +50,9 @@ def test_qualifying_author_gates_decisive_labels(reply: dict[str, Any], expected
     assert classify_reply(reply) == expected
 
 def test_qualifying_author_rules() -> None:
-    """PR author, OWNER/MEMBER/COLLABORATOR, or formal-review author qualify (M6)."""
     assert is_qualifying_author(_reply("x", assoc="OWNER"), pr_author_logins={"someone"}) is True
     assert is_qualifying_author(_reply("x", assoc="COLLABORATOR"), pr_author_logins=set()) is True
     assert is_qualifying_author(_reply("x", login="alice", assoc="NONE"), pr_author_logins={"alice"}) is True
-    # formal review author: passed in via review_author_logins
     assert (
         is_qualifying_author(_reply("x", assoc="NONE"), pr_author_logins=set(), review_author_logins={"bob"}) is False
     )

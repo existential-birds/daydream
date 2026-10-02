@@ -1,9 +1,5 @@
-"""Final-bundle staging constructor tests (issue #1078, Task 5 / M4 core).
-
-``build_final_bundle`` must assemble the complete publish-ready staging
-directory (annotations, sessions, observation history, coverage report,
-generated lineage) from pipeline state alone — no hand-authored lineage file —
-without touching the Hub.
+"""Construct the complete final bundle from pipeline state, including generated lineage, without Hub access
+or hand-authored lineage.
 """
 
 import hashlib
@@ -45,9 +41,9 @@ def _refresh_curation_envelope(root: Path) -> None:
 
 
 def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str, str]]:
-    """Index + archive + materialize-dir fixture whose index carries one
-    ``accepted``, one ``rejected``, and one ``unanswered`` finding (the same
-    seed shape as the canonical-harvest decisive fixture)."""
+    """Seed one accepted, one rejected, and one unanswered finding across index, archive, and
+    materialization.
+    """
 
     root = tmp_path / "index"
     seed_index_dispositions(root)
@@ -77,8 +73,7 @@ def seed_final_bundle_state(tmp_path: Path) -> tuple[Path, Path, Path, dict[str,
 
 def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> None:
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
-    # The human adjudication state the final bundle's report must see: alice
-    # accepts the s1 finding (the same shape the CLI `label` verb records).
+    # The final coverage report requires matching human observations.
 
     obs_path = tmp_path / "observations.jsonl"
     obs_path.write_text(json.dumps(accepted_observation()) + "\n", encoding="utf-8")
@@ -100,10 +95,8 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     assert lineage["rubric_version"] == pin["rubric_version"]
     assert lineage["classifier_version"] == pin["classifier_version"]
     report = json.loads((out / "coverage-report.json").read_text())
-    # The admission gate counts human-adjudicated outcome-bearing records only:
-    # alice's accepted finding is adjudicated; the automatic decisive records
-    # carry no human observation, so gold-eligibility demotion keeps them out
-    # of the outcome-bearing numerator/denominator (issue #336 findings 1-2).
+    # Demote automatic decisive labels that lack matching human observations. Only human outcomes
+    # contribute to the coverage numerator and denominator.
     assert report["outcome_coverage"] == {"adjudicated": 1, "total": 1}
     assert report["unresolved"] == 0
     assert report["admission_gate"]["passes_80pct"] is True
@@ -111,8 +104,7 @@ def test_build_final_bundle_constructs_complete_staging_dir(tmp_path: Path) -> N
     assert set(counts) == {"accepted", "rejected", "ambiguous", "unanswered", "missing"}
 
 def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path) -> None:
-    """With no human observations the 80% admission gate must FAIL, not pass
-    trivially on every automatic decisive record (issue #336 finding 1)."""
+    """Automatic decisive labels must not count as human coverage toward the 80% gate."""
     _index_root, _mat, _archive_dir, out = _built_final_bundle(tmp_path)
     report = json.loads((out / "coverage-report.json").read_text())
     assert report["outcome_coverage"] == {"adjudicated": 0, "total": 0}
@@ -120,9 +112,6 @@ def test_build_final_bundle_gate_fails_without_human_adjudication(tmp_path: Path
     assert report["admission_gate"]["passes_80pct"] is False
 
 def test_build_final_bundle_tolerates_publish_stage_leftover(tmp_path: Path) -> None:
-    """A legacy publish left ``.publish-stage/`` in the bundle dir; the next
-    construction/dry-run over the same dir must treat it as publish scratch,
-    never foreign content (issue #336 finding 5)."""
     index_root, mat, archive_dir, out = _built_final_bundle(tmp_path)
     original_identity = final_snapshot_id(out)
     stage = out / ".publish-stage"
@@ -161,9 +150,6 @@ def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path
     assert hub.commit_order == []
 
 def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) -> None:
-    """A null (unpinned) manifest ``as_of`` must serialize into lineage.json as
-    the empty unpinned-edge string, never the fabricated "None" (issue #336
-    finding 4)."""
     index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
     manifest_path = mat / "preview-manifest.json"

@@ -58,13 +58,7 @@ def test_schema_accepts_wonder_lens() -> None:
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
 
 def test_schema_requires_source_uids() -> None:
-    """Provenance is not optional in the contract (issue #1111).
-
-    Strict mode rejects optional properties, so the merge agent must always emit
-    the key; ``null`` or ``[]`` is how it says "cannot attribute this item",
-    rather than saying it by omission. Omission would be indistinguishable from
-    a model that simply ignored the field.
-    """
+    """Strict schema requires source_uids; null/[] expresses unattributed items."""
     item = _raw_item(line=4, evidence="a.py:4", lens="cross-stack", severity="high",
                      related_files=None, source_uids=["python:1"])
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
@@ -73,24 +67,14 @@ def test_schema_requires_source_uids() -> None:
         jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
 
 def test_schema_rejects_non_string_source_uids() -> None:
-    """A uid is a string handle; a numeric entry is a malformed citation.
-
-    The host validates uid *values* against the run's real record pool, but the
-    schema still pins the shape so a structurally wrong payload is caught at the
-    boundary rather than silently filtered later.
-    """
+    """Schema rejects numeric citations before host validation checks actual UID membership."""
     item = _raw_item(line=4, evidence="a.py:4", related_files=None, source_uids=[7])
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
 
 def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:
-    """Renumbering ``id`` is not enough: the item also needs a stable handle (#1111).
-
-    ``id`` is the dense, human-facing ordinal and is reassigned on every call, so
-    nothing can hold onto it across a merge write. ``item_uid`` is what a holder
-    keys on instead, so it has to be minted for every item -- including the ones
-    that arrived with colliding ids or no id at all, which is the normal shape
-    since per-stack numbering restarts at 1 in every stack.
+    """Every item receives a durable item_uid beside its reassigned display ordinal,
+    including records arriving with duplicate or missing IDs.
     """
     raw = [_raw_item(id=1, description="x"),
            _raw_item(id=1, description="y", lens="structural"),
@@ -106,13 +90,7 @@ def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:
     assert all("item_uid" not in item for item in raw), raw
 
 def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
-    """The divergence that makes two fields necessary (#1111).
-
-    A dense display ordinal *must* shift when the set changes; a durable handle
-    *must not*. Here they are forced apart in one call: the item's ``id`` is
-    renumbered from 42 to 1 while the ``item_uid`` it already carries survives
-    untouched. If one field served both roles, this assertion could not hold.
-    """
+    """Changing the dense display ordinal preserves the existing durable item_uid."""
     raw = [_raw_item(id=42, description="already identified", item_uid="item:9"),
            _raw_item(id=42, description="newcomer")]
 
@@ -123,19 +101,9 @@ def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
     assert out[1]["item_uid"] not in ("", None) and out[1]["item_uid"] != "item:9", out
 
 def test_preserved_item_uid_out_of_position_does_not_collide_with_a_minted_one() -> None:
-    """REGRESSION: minting per display position could emit a duplicate (#1111).
+    """Minting skips existing UIDs even when their ordinals differ from display positions.
 
-    The first cut of this minted inline, per position -- ``item_uid(item) or
-    mint_item_uid(new_id)``. Feed it an item preserving ``item:2`` from anywhere
-    other than position 2 and the unstamped item that lands *on* position 2 was
-    minted the very same ``item:2``: two shipped findings sharing one identity,
-    from the helper whose entire purpose is to make that impossible. That is the
-    defect class #1111 exists to remove -- a non-unique value used as a unique
-    handle -- reintroduced by the fix for it.
-
-    On this input the old code produced ``["item:2", "item:2", "item:3"]``.
-    Minting now skips ordinals an already-stamped item in the list holds, so the
-    preserved value is honoured and the newcomers route around it.
+    Preserving item:2 in position 1 must not mint item:2 again for position 2.
     """
     raw = [_raw_item(id=1, description="preserved out of position", item_uid="item:2"),
            _raw_item(id=2, description="unstamped, lands on position 2"),

@@ -1,7 +1,7 @@
-"""Integration tests for ``run_agent`` and ``TrajectoryRecorder``. Per D-18, tests follow schema-validity +
-behavior-predicate patterns. No full-tree snapshot equality (Pitfall 11). Each test that produces a trajectory
-asserts ``daydream.atif.validate(traj) is True`` plus one or two specific behavioral predicates. The tests also
-enforce that ``phase`` remains a required keyword-only argument at the public boundary."""
+"""Agent/recorder integration: validate persisted trajectories and observable behavior.
+
+The public agent boundary requires an explicit keyword-only phase.
+"""
 
 from __future__ import annotations
 
@@ -77,13 +77,11 @@ async def test_user_prompt_becomes_user_step(tmp_path: Path) -> None:
     assert "reasoning_content" not in user_steps[0] or user_steps[0]["reasoning_content"] is None
 
 async def test_text_event_creates_agent_step(tmp_path: Path) -> None:
-    """MAP-02 — TextEvent becomes Step(source='agent', message=text)."""
     backend = _scripted([ TextEvent(text="hello back"), ])
     traj, _ = await _run_with_recorder(backend, tmp_path, prompt="hi")
     assert _single_agent_step(traj)["message"] == "hello back"
 
 async def test_tool_call_paired_with_observation_in_same_step(tmp_path: Path) -> None:
-    """CORE-06 / MAP-04 / MAP-05 / Pitfall 3 — same-step pairing."""
     backend = _scripted([
         TextEvent(text="running pytest"), ToolStartEvent(id="t1", name="Bash", input={"command": "pytest"}),
         ToolResultEvent(id="t1", output="OK", is_error=False),
@@ -110,7 +108,6 @@ async def test_metrics_event_lands_on_agent_step(tmp_path: Path) -> None:
     assert metrics["cost_usd"] == 0.001
 
 async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> None:
-    """MAP-07 / Roadmap success criterion 4 — FinalMetrics totals match per-step sum."""
     recorder = make_recorder(tmp_path)
     target_path = recorder.path
     backend1 = _scripted([
@@ -139,7 +136,6 @@ async def test_final_metrics_equal_sum_of_per_step_metrics(tmp_path: Path) -> No
     assert final["total_cost_usd"] == pytest.approx(sum_cost) == pytest.approx(0.003)
 
 async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
-    """CORE-09 — run_agent without active recorder runs cleanly."""
     backend = _scripted([ TextEvent(text="ok"), ])
     # NO TrajectoryRecorder context — recorder is None.
     out, cont, _ = await run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW)
@@ -150,7 +146,6 @@ async def test_no_recorder_is_clean_no_op(tmp_path: Path) -> None:
     assert not (tmp_path / ".daydream" / "trajectory.json").exists()
 
 async def test_extra_phase_and_run_flow_labels(tmp_path: Path) -> None:
-    """MAP-08 + MAP-09 — every Step has both extra labels."""
     backend = _scripted([ TextEvent(text="ok"), ])
     traj, _ = await _run_with_recorder(backend, tmp_path, phase=DaydreamPhase.REVIEW, run_flow=DaydreamRunFlow.NORMAL)
     assert traj is not None
@@ -180,26 +175,22 @@ async def test_extra_labels_reflect_per_call_phase_and_run_flow(tmp_path: Path) 
         assert step["extra"]["daydream_run_flow"] == "pr"
 
 def test_run_agent_requires_phase_keyword() -> None:
-    """The public ``phase`` argument is keyword-only."""
     sig = inspect.signature(run_agent)
     assert "phase" in sig.parameters
     assert sig.parameters["phase"].kind == inspect.Parameter.KEYWORD_ONLY
 
 async def test_calling_run_agent_without_phase_raises_typeerror(tmp_path: Path) -> None:
-    """Omitting the required ``phase`` argument raises ``TypeError``."""
     backend = _scripted([ TextEvent(text="ok"), ])
     with pytest.raises(TypeError) as excinfo:
         await run_agent(backend, tmp_path, "hi")  # type: ignore[call-arg]
     assert "phase" in str(excinfo.value).lower()
 
 async def test_calling_run_agent_with_positional_phase_raises_typeerror(tmp_path: Path) -> None:
-    """The required ``phase`` argument remains keyword-only."""
     backend = ScriptedBackend(events=[], model="mock-model")
     with pytest.raises(TypeError):
         await run_agent(backend, tmp_path, "hi", DaydreamPhase.REVIEW)  # type: ignore[call-arg]
 
 async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
-    """MAP-03 — ThinkingEvent populates Step.reasoning_content."""
     backend = _scripted([ ThinkingEvent(text="let me think..."), TextEvent(text="answer"), ])
     traj, _ = await _run_with_recorder(backend, tmp_path)
     step = _single_agent_step(traj)
@@ -207,25 +198,14 @@ async def test_thinking_event_routes_to_agent_step(tmp_path: Path) -> None:
     assert step["message"] == "answer"
 
 def _max_turns_backend(pre_events: list[AgentEvent]) -> ScriptedBackend:
-    """Backend whose event stream raises MaxTurnsError mid-turn. Replays ``pre_events`` (an in-flight assistant turn),
-    then raises ``MaxTurnsError(subtype="error_max_turns")`` — mirroring a Claude ``ResultMessage(is_error=True,
-    subtype="error_max_turns")`` after the agent has already produced output. Exercises the realistic shape: the
-    failure lands on a Step that already carries content, not an empty one."""
+    """Replay partial output then MaxTurnsError, matching a mid-turn SDK limit failure."""
     return ScriptedBackend(
         events=[*pre_events, MaxTurnsError("Claude agent run failed: error_max_turns", subtype="error_max_turns")],
         model="mock-model",
     )
 
 async def test_max_turns_error_is_recorded_in_trajectory(tmp_path: Path) -> None:
-    """Regression: a max-turns failure must NOT be invisible in the archive.
-
-    Drives run_agent (the single-agent production entrypoint) with a backend
-    that raises MaxTurnsError mid-stream. Asserts BOTH:
-      (a) the typed MaxTurnsError propagates out of run_agent, and
-      (b) the trajectory WRITTEN to disk carries an error marker + the
-          ``error_max_turns`` subtype.
-    Removing the __aexit__ recording step makes (b) fail.
-    """
+    """Propagate MaxTurnsError and persist its error marker/subtype on the in-flight step."""
     recorder = make_recorder(tmp_path)
     target_path = recorder.path
     backend = _max_turns_backend([

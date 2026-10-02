@@ -1,18 +1,8 @@
-"""Optional diagnostic of a configured semantic-match judge's agreement with a labeled fixture.
-
-Runs the exact packaged Harbor judge path (``score_review.judge_pairs``,
-loaded via importlib from ``templates/tests/`` so the bare ``import
-verifier_core`` resolves to the canonical host module) against a fixed
-24-pair labeled fixture, three times per pair (72 judge calls). Computes a three-part
-agreement metric — majority correctness, balanced accuracy, and per-pair
-retained-edge threshold-flip stability — and, on pass, records a private
-deterministic invalidation-aware receipt at
-``<workspace>/runtime/calibration-receipt.json``.
-
-A passing result means only that the configured judge agrees with this
-unverified fixture; it is not calibrated or correct, and this module is not
-an authorization gate for any other path. Measuring, never tuning: no
-weights or thresholds are derived here.
+"""Diagnostic agreement check using the packaged semantic judge and a fixed labeled
+fixture. Judge 24 pairs three times each. Require majority correctness, balanced
+accuracy, and retained-edge stability, then write a private receipt whose identity
+includes fixture content/provenance. Agreement with this unverified fixture is not
+correctness, calibration, or authorization; no tuning occurs.
 """
 
 from __future__ import annotations
@@ -38,14 +28,9 @@ _TEMPLATE_CACHE: dict[str, Any] = {}
 
 
 def _load_template_asset(path: Path, name: str) -> Any:
-    """Load a non-package template asset so a bare sibling import resolves to it.
-
-    The loaded module is cached by ``name`` so repeated loads keep stable class
-    identity, and any ``sys.modules`` registrations (the module itself and the
-    canonical ``verifier_core`` backing the asset's bare sibling import) are
-    restored afterwards, so a later bare import of the
-    same name anywhere in the same process cannot silently resolve to the
-    packaged template copy.
+    """Load/cache a template with its canonical sibling import, preserving class identity.
+    Restore sys.modules registrations afterward so later bare imports cannot silently
+    resolve to the template copy.
     """
     cached = _TEMPLATE_CACHE.get(name)
     if cached is not None:
@@ -105,15 +90,8 @@ def _load_fixture() -> list[dict[str, Any]]:
 
 
 def _load_provenance(pairs: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return the fixture's provenance declaration bound to the passed pairs.
-
-    The declaration (``origin``, ``human_reviewed``, ``labels``, notes) comes
-    from the fixture document, while the pair-attestable facts
-    (``class_balance``, ``categories``) are computed from the passed ``pairs``
-    argument, so the provenance describes exactly the pairs a receipt was
-    built from and a synthetic or subset-pairs caller gets a matching
-    declaration. Raises ``ValueError`` if the provenance block is absent or
-    not an object.
+    """Bind declared provenance to class balance/categories computed from the actual pairs;
+    require an object.
     """
     data = _load_fixture_document()
     provenance = data.get("provenance")
@@ -131,19 +109,9 @@ def _load_provenance(pairs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
-    """Build a judge client threading an injectable ``http=`` seam.
-
-    Delegates provider selection, fail-closed allowlisting, and base-URL
-    validation to the packaged ``score_review._build_client`` so the two
-    branches cannot silently drift (the judge template is an in-repo,
-    editable file); only the injectable ``http=`` seam is added here, and
-    ``None`` leaves the client's real httpx behavior intact. The seam only
-    exists for the HTTP judge clients: the ``claude-cli`` provider shells the
-    Claude Code CLI (its injectable seam is the subprocess ``runner``), so an
-    injected ``http`` is rejected fail-closed rather than silently assigned to
-    an attribute that client never reads -- a no-op attribution would quietly
-    shell the real ``claude`` binary in what the caller believed was a
-    scripted run.
+    """Use packaged provider/allowlist/URL validation with an optional HTTP test seam.
+    Reject HTTP injection for claude-cli: it uses subprocesses, so accepting that seam
+    could unexpectedly execute the real CLI.
     """
     sr = _load_judge_template()
     client = sr._build_client(env)
@@ -158,13 +126,8 @@ def _build_calibration_client(env: dict[str, Any], *, http: Any = None) -> Any:
 
 
 def _judge_host_from_env(env: dict[str, Any]) -> str:
-    """Return the normalized-lowercase judge host for ``env``.
-
-    An explicit anthropic or claude-cli provider routes to
-    ``api.anthropic.com``; the openai-compatible provider requires an explicit
-    base URL, resolves it via the packaged ``resolve_base_url``, and returns
-    that URL's host. Missing providers fail closed rather than selecting an
-    implicit API.
+    """Resolve explicit judge provider/host; OpenAI-compatible providers require a concrete
+    configured URL.
     """
     sr = _load_judge_template()
     provider = env.get("DAYDREAM_JUDGE_PROVIDER") or ""
@@ -205,12 +168,8 @@ def _validate_workspace_host(allowlist: list[str] | set[str], host: str) -> None
 def _judge_pairs(
     template: Any, client: Any, pairs: list[dict[str, Any]], *, attempts: int = 3
 ) -> list[list[Any]]:
-    """Drive the packaged ``judge_pairs`` three times per pair, in fixture order.
-
-    Each invocation is 1 gold x 1 candidate, so it makes exactly one judge call;
-    24 pairs x ``attempts`` calls for the exact 72-call budget. Judge-call
-    failures propagate via the packaged module's ``VerifierError`` — never a
-    silent fallback (a judge-call failure aborts the run, fail-closed).
+    """Judge each pair attempts times in fixture order; packaged judge failures abort
+    without fallback.
     """
     per_pair: list[list[Any]] = []
     for pair in pairs:
@@ -269,12 +228,8 @@ def _confusion_matrix(
 
 
 def _class_balanced_accuracy(matrix: dict[str, int]) -> float:
-    """Recognition average over the two classes actually present.
-
-    For the full 24-pair fixture (12 match / 12 nonmatch) this equals
-    ``0.5 * (tp/12 + tn/12)``; per-class denominators keep small partial
-    gates (e.g. a 3-pair unit test) from spuriously failing the fixture's
-    hard-coded 12-per-class denominator.
+    """Average recognition across present classes using their actual sizes, including
+    partial fixtures.
     """
     match_total = matrix["tp"] + matrix["fn"]
     nonmatch_total = matrix["tn"] + matrix["fp"]
@@ -288,14 +243,7 @@ def _pass_gate(
     runs_per_pair: list[list[Any]],
     threshold: float,
 ) -> tuple[bool, dict[str, Any], dict[str, int], float]:
-    """Evaluate the three-part pass gate.
-
-    Returns ``(passed, failures, matrix, bacc)`` where ``failures`` is keyed by
-    condition name and empty on pass; ``matrix`` and ``bacc`` are the confusion
-    matrix and class-balanced accuracy computed for the gate, so callers that
-    need them for the receipt do not recompute them. Never writes anything — a
-    pure computation over the already-validated verdicts.
-    """
+    """Return pass/fail reasons, confusion matrix, and balanced accuracy without I/O."""
     failures: dict[str, Any] = {}
     gold_labels = [p["label"] for p in pairs]
     majority_labels = [_majority_label(runs) for runs in runs_per_pair]
@@ -323,14 +271,8 @@ def _pass_gate(
 
 
 def _fixture_sha256(pairs: list[dict[str, Any]]) -> str:
-    """Canonical sha256 over the full passed fixture pairs.
-
-    Digests the ``pairs`` argument — every pair field (gold/candidate content,
-    category, label) — so the authoritative invalidation digest is bound to
-    exactly what was judged. A caller passing synthetic or subset pairs binds
-    the digest to those pairs rather than to a fixed on-disk file; any fixture
-    content change moves the digest even without a triple reorder and
-    invalidates existing receipts.
+    """Hash all fields of the actual judged pairs, including synthetic/subset input, for
+    receipt invalidation.
     """
     canonical = json.dumps(
         pairs, sort_keys=True, separators=(",", ":"), ensure_ascii=True
@@ -347,12 +289,8 @@ def _render_judge_prompt_digest(sr: Any) -> str:
 def _invalidation_inputs(
     env: dict[str, Any], pairs: list[dict[str, Any]], sr: Any
 ) -> dict[str, Any]:
-    """The receipt's invalidation contract: a deterministic byte-stable dict.
-
-    ``fixture_sha256`` digests the passed ``pairs`` (all content), and
-    ``fixture_provenance`` mirrors the provenance declaration bound to those
-    pairs, so a fixture content or provenance change invalidates existing
-    receipts — not just a reorder of the ordered triples.
+    """Bind deterministic receipt identity to actual pair content and its provenance
+    declaration.
     """
     inputs = {
         "provider": env.get("DAYDREAM_JUDGE_PROVIDER") or "",
@@ -421,14 +359,9 @@ def run_calibration(
     http: Any = None,
     confirm: Callable[[str], bool] | None = None,
 ) -> int:
-    """Run the diagnostic judge-agreement check end-to-end and return an exit code.
-
-    Order: manifest/host validation -> fixture + template load -> confirmation
-    gate -> client build -> 72-call judge driver -> three-part agreement
-    metric. A passing result means the configured judge agrees with the
-    unverified fixture — it is not calibrated or correct. On pass a private
-    receipt is written; on failure (or refusal) no receipt is written and the
-    exit code is nonzero (fail-closed). Never measures by tuning anything.
+    """Validate, confirm, and run the diagnostic; write a private receipt only on
+    agreement. Refusal/failure returns nonzero without a receipt. Agreement with the
+    unverified fixture does not establish correctness or tune the judge.
     """
 
     env = dict(env) if env is not None else dict(os.environ)

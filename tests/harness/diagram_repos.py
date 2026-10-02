@@ -1,15 +1,7 @@
-"""Real git fixture repositories for the grounded-diagram tests (issue #1113).
+"""Real Git repositories and grounded specs shared by both diagram flows.
 
-Six shapes, each built to satisfy (or deliberately miss) one deterministic
-eligibility rule, plus the canonical grounded specs that go with them. Shared by
-``tests/test_deep_diagram_integration.py`` (the review paths) and
-``tests/test_diagram_only_integration.py`` (the ``--diagram-only`` flow), which
-need identical repositories to make their assertions comparable.
-
-Every path, line number and symbol in the specs below is real: the grounding
-pass reads the head tree, so a spec that drifts from the fixture stops being a
-"grounded spec" fixture and silently becomes an omission fixture.
-"""
+Cited paths, lines and symbols must match the head tree: fixture drift would
+turn a grounded case into an omission case."""
 
 from __future__ import annotations
 
@@ -69,12 +61,8 @@ def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path
 
 
 def build_cross_module_repo(root: Path) -> Path:
-    """Two packages, three changed code files, one cross-module import edge.
-
-    Satisfies the sequence diagram's cross-module rule (>= 3 code files, >= 2
-    modules, >= 1 import edge crossing modules) and deliberately misses the
-    flowchart rule: no changed function gains a single branch point.
-    """
+    """Sequence-eligible: three changed files, two modules and one crossing import.
+    No changed function gains a branch point, so flowcharts stay ineligible."""
     return _build_cross_module_variant(root, "cross_module", CLIENT_PY)
 
 
@@ -99,23 +87,12 @@ def _large_client_body(marker: str, lines: int) -> str:
 
 
 def build_large_cross_module_repo(root: Path, *, modules: int = 220, lines: int = 110) -> Path:
-    """A cross-module fixture far beyond the advisory-input budget.
+    """Exceed the advisory-input byte budget with a deterministic cross-module diff.
 
-    Same ``init_repo`` / commit / ``checkout -b feature`` sequence as
-    :func:`build_cross_module_repo`, but generated instead of literal: the
-    initial tree has ``modules // 2`` files under ``pkg_a/`` (including
-    ``core.py`` with a ``handle`` function) and the rest under ``pkg_b/``
-    (including ``client.py``, which imports ``handle`` so one cross-module edge
-    exists), each ``lines`` long. The feature commit rewrites every file, so the
-    whole ``modules x lines`` diff is changed and total diff bytes exceed
-    ``SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES``.
-
-    Contents depend only on the generated module name, the version marker and
-    ``lines`` -- never on *root* -- so byte assertions are deterministic. It
-    deliberately does not reproduce the canonical ``build_cross_module_repo``
-    paths' grounding targets: callers assert on status/omission/advisory facts,
-    not on a rendered mermaid.
-    """
+    Split modules between pkg_a and pkg_b, including core.handle and a client
+    import edge, and rewrite every file on the feature branch. Contents depend
+    only on module, version marker and lines, never root. Citations differ from
+    the canonical fixture; use this for budget/status assertions, not rendering."""
     repo = root / "large_cross_module"
     pkg_a_count = modules // 2
     pkg_b_count = modules - pkg_a_count
@@ -145,11 +122,8 @@ def build_large_cross_module_repo(root: Path, *, modules: int = 220, lines: int 
 
 
 def build_branch_heavy_repo(root: Path) -> Path:
-    """One module, one changed function gaining four branch points.
-
-    Satisfies the flowchart rule and misses the sequence rules (one code file,
-    one module, no service, no import edge).
-    """
+    """Four new branch points satisfy flowchart eligibility. One code file and
+    module without service/import edges keep sequence diagrams ineligible."""
     repo = root / "branch_heavy"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "pipeline.py").write_text("def run(payload):\n    return payload\n", encoding="utf-8")
@@ -160,25 +134,16 @@ def build_branch_heavy_repo(root: Path) -> Path:
 
 
 def build_both_signals_repo(root: Path) -> Path:
-    """Cross-module AND branch-heavy: both kinds are eligible in one run.
+    """Combine cross-module imports and PIPELINE_PY for both diagram kinds.
 
-    Same three files and the same import edge as the cross-module fixture, with
-    the branch-heavy ``run`` function (:data:`PIPELINE_PY`) added to
-    ``pkg_b/client.py`` so a single run exercises the two-kind fan-out. Offset
-    by ``CLIENT_PY`` plus the two-newline join, ``run`` starts on line 11 with
-    branch statements on lines 12, 14, 16 and 17; ``fast_path`` is defined on
-    line 22.
-    """
+    After the CLIENT_PY prefix and two newlines, run starts at line 11, its branch
+    points are 12/14/16/17, and fast_path starts at line 22."""
     return _build_cross_module_variant(root, "both_signals", CLIENT_PY + "\n\n" + PIPELINE_PY)
 
 
 def build_cross_service_repo(root: Path) -> Path:
-    """Monorepo with two manifest-bearing service roots, one changed file each.
-
-    No import edge between them, so only the cross-service rule can fire --
-    which is the point: HTTP and queue boundaries are invisible to the import
-    graph.
-    """
+    """Two changed services with manifests but no import edge: only the
+    cross-service rule can detect this boundary."""
     repo = root / "cross_service"
     for service in ("alpha", "beta"):
         service_root = repo / "services" / service
@@ -195,11 +160,7 @@ def build_cross_service_repo(root: Path) -> Path:
 
 
 def build_flat_repo(root: Path) -> Path:
-    """Two files, one module, zero branch points: no kind is eligible.
-
-    The below-threshold fixture -- the diagram step must record its signals and
-    make no backend call at all.
-    """
+    """Two files in one module with no branches: record signals without calling a backend."""
     repo = root / "flat"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "one.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -272,16 +233,9 @@ def _message(frm: str, to: str, label: str, kind: str, *, file: str, line: int, 
 
 
 def sequence_spec() -> dict[str, Any]:
-    """A fully grounded sequence spec for the cross-module fixture.
-
-    Five messages across three participants: two calls out of
-    ``pkg_b/client.py``, their adjacent replies, and one self-call inside
-    ``pkg_a/core.py``. Each reply cites its enclosing function's return line
-    and immediately follows the reversed call, as required by the sequence
-    grounding contract. Five (not the floor's three) so a test that withholds
-    the reads for ``pkg_b/client.py`` still leaves a renderable diagram behind,
-    making a PARTIAL prune observable.
-    """
+    """Five messages across three participants, with each reply citing its
+    function return and immediately following the reversed call. Five messages
+    leave a renderable partial diagram when client.py reads are withheld."""
     return {"participants": [_participant("Client", ["pkg_b/client.py"]), _participant("Core", ["pkg_a/core.py"]),
             _participant("Util", ["pkg_a/util.py"]),
         ],
@@ -299,17 +253,8 @@ def sequence_spec() -> dict[str, Any]:
 
 
 def flowchart_spec(*, root_file: str = "app/pipeline.py", offset: int = 0) -> dict[str, Any]:
-    """A fully grounded flowchart spec for the branch-heavy fixture.
-
-    Seven nodes rooted at ``run``: start, two decisions, one subroutine call to
-    ``fast_path``, one process, and two terminal returns.
-
-    Args:
-        root_file: The file holding ``run``.
-        offset: Line offset to add to every citation, so the both-signals
-            fixture (where ``run`` starts on line 11 rather than line 1) reuses
-            the same shape.
-    """
+    """Seven nodes rooted at run, with decisions, fast_path and terminal returns.
+    Apply offset to all root_file citations so the combined fixture reuses the shape."""
 
     def _node(node_id: str, kind: str, label: str, line: int, symbol: str | None) -> dict[str, Any]:
         return {"id": node_id, "kind": kind, "label": label,

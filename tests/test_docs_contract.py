@@ -8,7 +8,7 @@ import pytest
 
 import daydream.extensions as ext
 from daydream.benchmark.cli import _build_benchmark_parser
-from daydream.cli import _parse_args
+from daydream.commands.review import _parse_args
 from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
 

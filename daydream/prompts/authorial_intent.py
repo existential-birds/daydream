@@ -1,24 +1,8 @@
-"""The author-intent precedence rule.
+"""Shared author-intent precedence paired with untrusted-data framing.
 
-This module holds one shared definition of the PR-description "authoritative"
-precedence rule. Consumers reference it by import rather than duplicating
-the text inline:
-
-- ``AUTHORITATIVE_INTENT_BLOCK`` pairs the untrusted-content framing with the
-  precedence rule in one exported constant, so the two never diverge in text
-  or order at a consumer site (the framing must never appear without the rule).
-- ``daydream.phases.build_intent_prompt`` composes the block into the
-  intent-phase prompt after the ``"The author supplied the following
-  pull-request description"`` opener.
-- ``daydream.deep.prompts._context_pointers`` and
-  ``daydream.deep.prompts.build_merge_prompt`` inject the block into the
-  finding-producing review prompts when a fresh PR body was ingested.
-
-The rule is worded to be context-neutral: it reads correctly whether it
-follows the "author supplied" opener in the intent prompt or a pointer to
-``intent_path`` in the downstream prompts.
-
-Introduced to fix GitHub issue #279.
+AUTHORITATIVE_INTENT_BLOCK fixes their order for intent and downstream review
+prompts. The wording works after either the PR-description opener or an intent
+artifact pointer; consumers must keep framing and precedence together.
 """
 
 from __future__ import annotations

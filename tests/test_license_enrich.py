@@ -66,16 +66,13 @@ def test_enrich_fills_missing_evidence_and_skips_declared(tmp_path: Path) -> Non
     ])
     resolver = _make_resolver()
     evidence = enrich_license_evidence(stage, resolver=resolver)
-    # The legacy record gains declared evidence identical in shape to producer evidence.
     assert evidence["sess-legacy"]["spdx_id"] == "MIT"
     assert evidence["sess-legacy"]["source"] == f"github:acme/widget@{'b' * 40}"
-    # Well-formed declared evidence is never re-derived (out of scope per spec).
     assert "sess-declared" not in [k for k in evidence if evidence[k].get("origin") == "enriched"]
     assert "sess-declared" not in _as_entries(stage)
     # The enriched evidence was written into the session manifest for the gate to consume.
     manifest = json.loads((stage / "runs" / "sess-legacy" / "manifest.json").read_text())
     assert manifest["license_evidence"] == {"spdx_id": "MIT", "source": f"github:acme/widget@{'b' * 40}"}
-    # Dedupe: one (repo, revision) queried even with two sessions in the same repo.
     assert resolver.queried == ["acme/widget"]
 
 def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Path) -> None:
@@ -88,7 +85,6 @@ def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Pat
     e = next(x for x in entries if x["session_id"] == "sess-legacy")
     assert e["status"] == "resolved" and e["spdx_id"] == "MIT"
     assert e["repo_commit"] == "b" * 40 and "github:acme/widget@" in e["source"]
-    # No token or authenticated URL anywhere in the published bytes.
     raw = cache_path.read_text()
     assert "ghp_" not in raw and "token" not in raw.lower()
 
@@ -100,8 +96,7 @@ def test_enrich_records_stable_failure_codes_for_unresolvable(tmp_path: Path) ->
     ])
     enrich_license_evidence(stage, resolver=FakeResolver({}))
     codes = {sid: v["status"] for sid, v in _as_entries(stage).items()}
-    # No-slug session: repo_identity_missing; unresolvable repo: the specific
-    # repo_commit_unresolved code (the evidence-missing bucket folds it in).
+    # repo_commit_unresolved folds into the downstream evidence-missing bucket.
     assert codes["sess-noslug"] == "repo_identity_missing"
     assert codes["sess-unknown"] == "repo_commit_unresolved"
     # Neither record gained evidence in its manifest — the gate rejects it downstream.
@@ -113,7 +108,6 @@ def test_enrich_reuses_cached_resolution_across_runs(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-1", "acme/widget", None)])
     enrich_license_evidence(stage, resolver=_make_resolver())
-    # A second run (fresh resolver instance) must hit the cache, not the resolver.
     second = _make_resolver()
     seed_admitted_runs(stage, [("sess-2", "acme/widget", None)])
     evidence = enrich_license_evidence(stage, resolver=second)
@@ -130,13 +124,9 @@ def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
     assert published.read_text() == (stage / "_enrich" / "evidence.jsonl").read_text()
 
 def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production adapter: GITHUB_TOKEN from the environment, never an argument or a URL.
-
-    Exercises the real GitHub API shapes: ``default_branch`` is a plain string, the head commit lives on the
-    branch resource, and the contents-style license response carries a blob ``sha`` (no ``commit_sha`` field)."""
+    """Use GitHub's real response shapes: branch head SHA and a distinct license blob SHA."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secrettokenvalue")
     resolver = GithubLicenseResolver()
-    # The token never appears in the request URL — only in the Authorization header.
 
     captured: dict[str, Any] = {}
     commit = "b" * 40
@@ -169,6 +159,5 @@ def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPat
     assert evidence is not None and evidence.spdx_id == "MIT"
     assert "ghp_secrettokenvalue" not in captured["url"]
     assert captured["headers"]["Authorization"] == "Bearer ghp_secrettokenvalue"
-    # The evidence commit is the resolved head commit the license request was pinned at.
     assert captured["url"] == f"{_GITHUB_API}/repos/acme/widget/license?ref={commit}"
     assert evidence.source == f"github:acme/widget@{'b' * 40}"

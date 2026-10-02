@@ -1,17 +1,8 @@
-"""Centralized run archive for daydream.
+"""Publish frozen run artifacts, a manifest, and a cross-project SQLite index.
 
-Copies the full artifact bundle (trajectory, review output, deep artifacts,
-diff) from one run's frozen artifact tree to
-``~/.daydream/archive/runs/{session_id}/``, writes a ``manifest.json``, and
-indexes the run in a SQLite database for cross-project querying. Assembly is
-strict and transactional: it either publishes a complete, attested bundle or
-raises :class:`ArchiveFinalizationError` and leaves nothing behind.
-
-Exports:
-    finalize_archive_run: The single archive entry point, called once per run
-        from the runner's artifact finalization boundary.
-    get_archive_dir: Returns the archive root directory, creating it on
-        first access.
+``finalize_archive_run`` assembles a complete attested bundle transactionally
+under ``get_archive_dir()/runs/{session_id}``; failure raises
+``ArchiveFinalizationError`` and removes this attempt's archive outputs.
 """
 
 from __future__ import annotations
@@ -44,7 +35,7 @@ if TYPE_CHECKING:
         ArtifactEvidenceProvenance,
         ArtifactTreeSnapshot,
     )
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
     from daydream.trajectory import RunWriteSnapshot
     from daydream.workspace import WorkContext
 
@@ -54,12 +45,9 @@ class ArchiveFinalizationError(RuntimeError):
 
 
 def get_archive_dir() -> Path:
-    """Return the archive root directory, creating it on first access.
+    """Create the archive root and runs directory.
 
-    Respects ``DAYDREAM_ARCHIVE_DIR`` env var. Default: ``~/.daydream/archive/``.
-
-    Returns:
-        Path to the archive root directory.
+    Use ``DAYDREAM_ARCHIVE_DIR`` when set, otherwise ``~/.daydream/archive``.
     """
     env = os.environ.get("DAYDREAM_ARCHIVE_DIR")
     if env:
@@ -250,9 +238,7 @@ def finalize_archive_run(
         frozen = snapshot_trajectories(write_snapshot)
         evaluation: dict[str, Any] | None = None
         if config.run_eval and recorder_provenance.run_flow is not DaydreamRunFlow.DIAGRAM:
-            # A failed evaluation is a closed archive failure, not the legacy
-            # warning-and-None disposition, and the evaluator must not be able to
-            # change the frozen tree it read.
+            # Evaluation failure aborts the archive; revalidate its frozen input afterward.
             try:
                 from daydream.eval.analyzer import analyze_session
 
@@ -294,14 +280,8 @@ def finalize_archive_run(
             hub_repo_id = hub.resolve_hub_repo(config)
             _validate_frozen_artifacts(artifacts)
             if hub_repo_id:
-                # A False disposition is a skip (no HF_TOKEN, no huggingface_hub),
-                # a fail-closed secret refusal, or a transport failure — and
-                # upload_run_bundle has already warned with the reason in every
-                # case. None of them is a reason to discard a completed review:
-                # issue #981 requires refusing the upload "while preserving the
-                # local run", and the refusal itself happens inside the callee,
-                # before anything reaches the Hub. Raising here would only throw
-                # the local bundle away without containing anything extra.
+                # Upload refusals/failures are already warned by the uploader;
+                # preserve the completed local bundle regardless of its disposition.
                 hub.upload_run_bundle(assembly_dir, hub_repo_id, session_id)
         if config.dump_artifacts:
             if dump_path is None:
@@ -347,15 +327,11 @@ def _read_json_artifact(path: Path, expected_type: type) -> Any | None:
 
 
 def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
-    """Read ``deep/fix-failures.json`` from the source tree, if present.
+    """Read the deep fix phase's ``{file_group: reason}`` map via `_read_json_artifact`.
 
-    Written by the deep orchestrator when ``phase_fix_parallel`` dropped one or
-    more file-groups. Returns the parsed ``{file_group: reason}`` map, or
-    ``None`` when the file is absent, empty, or malformed — any of which means
-    "no recorded fix failures" and leaves the run status untouched.
+    No recorded failures leaves run status unchanged.
     """
-    # Imported here (not at module level) to avoid pulling the deep package into
-    # the archive import graph for non-deep runs.
+    # Keep deep imports lazy for non-deep runs.
     from daydream.deep.artifacts import fix_failures_path
 
     data = _read_json_artifact(fix_failures_path(target_dir / ".daydream" / "deep"), dict)
@@ -365,12 +341,7 @@ def _read_fix_failures(target_dir: Path) -> dict[str, str] | None:
 
 
 def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
-    """Read ``deep/fix-leftover-untracked.json`` from the source tree, if present.
-
-    Written by the deep orchestrator alongside ``fix-failures.json`` when a
-    failed fix pass left untracked files behind. Returns the parsed sorted list
-    of paths, or ``None`` when the file is absent, empty, or malformed.
-    """
+    """Read paths left untracked by failed fix passes via `_read_json_artifact`."""
     from daydream.deep.artifacts import fix_leftover_untracked_path
 
     data = _read_json_artifact(fix_leftover_untracked_path(target_dir / ".daydream" / "deep"), list)
@@ -382,16 +353,11 @@ def _read_fix_leftover_untracked(target_dir: Path) -> list[str] | None:
 def _read_session_bound_json_artifact(
     target_dir: Path, session_id: str | None, resolver: Callable[[Path], Path]
 ) -> dict[str, Any] | None:
-    """Read a session-bound ``deep/*.json`` sidecar if it matches this run.
+    """Read a deep sidecar only when its ``session_id`` matches this run.
 
-    Shared reader for the deep-flow sidecar artifacts (fix-quality-gate,
-    recommended-capture): parses the JSON written at ``resolver`` under
-    ``<target_dir>/.daydream/deep`` and returns it only when its
-    ``session_id`` matches the current run's -- an artifact left behind by a
-    DIFFERENT session (e.g. a prior deep run on the same target repo) must not
-    be attributed to this run (#329). Returns ``None`` when the file is
-    absent, empty, malformed, unbound (no ``session_id`` key), or bound to
-    another session.
+    Return ``None`` for absent, empty, malformed, unbound, or stale artifacts,
+    or when this run has no session ID. Prior runs' sidecars cannot be attributed
+    to the current run. ``resolver`` receives ``<target_dir>/.daydream/deep``.
     """
     if session_id is None:
         return None
@@ -404,16 +370,9 @@ def _read_session_bound_json_artifact(
 
 
 def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Read ``deep/fix-quality-gate.json`` from the source tree, if present.
+    """Read session-bound fix quality rounds through `_read_session_bound_json_artifact`.
 
-    Written by the deep orchestrator's fix-phase anti-degradation gate (#315):
-    ``{"enabled": bool, "session_id": ..., "rounds": [...]}`` carrying per-file
-    before/after erosion + verbosity deltas over the files the fix phase
-    edited. Returns the parsed dict only when its ``session_id`` matches the
-    current run's -- an artifact left behind by a DIFFERENT session (e.g. a
-    prior deep run on the same target repo) must not be attributed to this run
-    (#329). Returns ``None`` when the file is absent, empty, malformed, unbound
-    (no ``session_id`` key), or bound to another session.
+    The ``{enabled, session_id, rounds}`` payload holds per-file erosion and verbosity deltas.
     """
     from daydream.deep.artifacts import fix_quality_gate_path
 
@@ -421,15 +380,9 @@ def _read_fix_quality_gate(target_dir: Path, session_id: str | None) -> dict[str
 
 
 def _read_recommended_capture(target_dir: Path, session_id: str | None) -> dict[str, Any] | None:
-    """Read ``deep/recommended-capture.json`` from the source tree, if present.
+    """Read session-bound post-test capture provenance through `_read_session_bound_json_artifact`.
 
-    Written by the deep orchestrator's best-effort post-test re-capture
-    (#743): ``{"session_id": ..., "capture_point": "post_test"}`` recording
-    which tree produced the archived ``recommended.patch``. Returns the parsed
-    dict only when its ``session_id`` matches the current run's -- an artifact
-    left behind by a DIFFERENT session must not be attributed to this run.
-    Returns ``None`` when the file is absent, empty, malformed, unbound, or
-    bound to another session (mirrors :func:`_read_fix_quality_gate`).
+    Its ``capture_point`` identifies which tree produced ``recommended.patch``.
     """
     from daydream.deep.artifacts import recommended_capture_path
 
@@ -514,9 +467,6 @@ def _copy_run_artifacts(
     if not diagram_only and recommended_patch.is_file():
         shutil.copy2(recommended_patch, run_dir / "recommended.patch")
 
-    # Findings artifact (``--findings-out`` / Phase A). Archived so the corpus
-    # harvest per-finding join has a fingerprint source for real PR runs —
-    # without it ``_row_recorded_fingerprints`` always returns ``[]`` and the
-    # per-finding supervision never reaches the corpus.
+    # Corpus harvest needs these fingerprints to join per-finding supervision.
     if findings_src is not None and findings_src.is_file():
         shutil.copy2(findings_src, run_dir / "findings.json")

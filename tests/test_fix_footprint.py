@@ -20,8 +20,13 @@ from daydream import git_ops
 from daydream.backends import AgentEvent, Backend, ResultEvent
 from daydream.deep.scope_issues import ScopeEnforcementResult, enforce_authorized_fix_footprint
 from daydream.fix_footprint import AuthorizedFixFootprint
-from daydream.git_ops import GitError, GitPathState, WorktreeRollbackSnapshot
-from daydream.phases import _isolated_fix_fanout, phase_fix_parallel
+from daydream.git_ops import GitError, GitPathState, WorktreeRollbackSnapshot, process as git_process
+from daydream.phases import (
+    phase_fix_parallel,
+)
+from daydream.phases.fix_fanout import (
+    _isolated_fix_fanout,
+)
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
     canonicalize_repository_file_path,
@@ -289,7 +294,7 @@ def test_changed_paths_z_preserves_newline_shell_metacharacters_and_surrogate_by
 
     raw_name = b"invalid-\xff.txt"
     monkeypatch.setattr(
-        git_ops, "_run_git",
+        git_process, "_run_git",
         lambda *_args, **_kwargs: subprocess.CompletedProcess(
             args=[], returncode=0, stdout=raw_name + b"\0", stderr=b""
         ),

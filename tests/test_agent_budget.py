@@ -1,7 +1,4 @@
-"""Tests for run_agent wall-clock and tool-call budgets. Both budgets live inside run_agent: the loop is wrapped in
-``anyio.move_on_after(wall_budget_s)`` and a ToolStartEvent counter trips the tool-call ceiling. On abort, the
-invocation's event iterator is closed, the recorder Invocation is marked aborted via ``inv.mark_aborted(reason)``,
-and the partial output is returned without cancelling sibling backend invocations."""
+"""Agent wall/tool budgets close only the current stream, record aborts, and retain partial output."""
 
 from __future__ import annotations
 
@@ -10,7 +7,7 @@ import contextlib
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import anyio
 import pytest
@@ -18,7 +15,6 @@ import pytest
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
-    Backend,
     ResultEvent,
     RetryPolicy,
     TextEvent,
@@ -35,8 +31,7 @@ from tests.harness.trajectory import make_recorder
 
 
 def _burst_backend(*, count: int = 200, sleep_s: float = 0.0) -> ScriptedBackend:
-    """A ScriptedBackend that streams many ToolStartEvents and never a ResultEvent. With no ``sleep_s`` the stream is
-    a plain ``events=`` turn; a positive ``sleep_s`` streams through a responder so a wall-clock budget can trip."""
+    """Stream tool starts without a result; positive sleep allows wall-clock expiry."""
     if not sleep_s:
         events: list[AgentEvent] = [
             ToolStartEvent(id=f"tool-{i}", name="Bash", input={"command": "ls"}) for i in range(count)
@@ -98,7 +93,6 @@ def _budget_stop(recorder: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     return traj, stops[0]["metadata"]
 
 async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
-    """A 200-event burst with tool_call_budget=5 returns under budget, marked aborted."""
     backend = _burst_backend(count=200, sleep_s=0.0)
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
@@ -129,7 +123,6 @@ async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path)
     assert backend.cancel_calls == 0
 
 async def test_run_agent_abort_records_reason_and_turn_end(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Abort bookkeeping preserves both the reason and synthetic turn boundary."""
     class _InvocationSpy:
         def __init__(self) -> None:
             self.abort_reasons: list[str] = []
@@ -185,8 +178,7 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
             )
     assert reason == "wall_budget_exceeded"
     traj, meta = _budget_stop(recorder)
-    # The deadline is the limit that expired, and the ladder had already flown one
-    # retry, so this is a retry-ladder stop: its counters are retry-scoped.
+    # A deadline after a dispatched retry uses retry-scoped counters.
     assert meta["limit_expired"] == "caller_deadline"
     assert meta["retry_stop_reason"] == "retry_deadline_exhausted"
     assert meta["attempts"] == 1            # 5000 -> 5300 (attempt 1) -> 5600 (retry), then spent
@@ -194,7 +186,6 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
     assert "5600.0" not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
 
 async def test_run_agent_wall_budget(tmp_path: Path) -> None:
-    """A slow stream with wall_budget_s=0.2 returns, step marked wall_budget_exceeded."""
     backend = _burst_backend(count=200, sleep_s=0.05)
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
@@ -211,24 +202,16 @@ async def test_run_agent_wall_budget(tmp_path: Path) -> None:
 async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    class _ClockAdvancingBurstBackend:
-        """Streams text + tool starts, advancing the injected clock per event."""
-        model = "mock-model"
-        fanout_concurrency = 2
-        def __init__(self, advance: Any, advance_s: float) -> None:
-            self.advance, self.advance_s, self.delivered, self.cancel_calls = advance, advance_s, 0, 0
-        def execute(self, *args: Any, **kwargs: Any) -> AsyncGenerator[AgentEvent, None]:
-            async def _gen() -> AsyncGenerator[AgentEvent, None]:
-                for i in range(200):
-                    yield TextEvent(text=f"partial-output-sentinel-{i}")
-                    self.advance(self.advance_s)
-                    self.delivered += 1
-                    yield ToolStartEvent(id=f"t{i}", name="Bash", input={"command": "ls"})
-            return _gen()
-        async def cancel(self) -> None:
-            self.cancel_calls += 1
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
-    backend = _ClockAdvancingBurstBackend(fake.advance, 200.0)
+    delivered = 0
+    async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
+        nonlocal delivered
+        for i in range(200):
+            yield TextEvent(text=f"partial-output-sentinel-{i}")
+            fake.advance(200.0)
+            delivered += 1
+            yield ToolStartEvent(id=f"t{i}", name="Bash", input={"command": "ls"})
+    backend = ScriptedBackend(responder=stream, model="mock-model", fanout_concurrency=2)
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
         async with recorder:
@@ -237,7 +220,7 @@ async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
                 wall_budget_s=600.0,          # deadline = 1000 + 600 = 1600
             )
     assert reason == "wall_budget_exceeded"
-    assert backend.delivered == 3             # 1000->1200->1400->1600: the 4th event is past it
+    assert delivered == 3             # 1000->1200->1400->1600: the 4th event is past it
     assert backend.cancel_calls == 0          # sibling isolation: no backend-wide cancel
     assert "partial-output-sentinel-2" in output   # text emitted before expiry survives
     traj, meta = _budget_stop(recorder)
@@ -319,39 +302,26 @@ async def test_aborting_invocation_does_not_cancel_shared_backend_sibling(tmp_pa
     }
     assert backend.cancel_calls == 0
 
-class _RecordingCancelBackend:
-    """Minimal Backend that records cancel() calls and blocks forever in execute."""
-
-    model = "mock-model"
-
-    def __init__(self) -> None:
-        self.cancelled = False
-        self.entered = asyncio.Event()
-
-    async def execute(self, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
-        self.entered.set()
+async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> None:
+    entered = asyncio.Event()
+    async def stream(*_args: Any, **_kwargs: Any) -> AsyncIterator[AgentEvent]:
+        entered.set()
         yield TextEvent(text="started")
         await asyncio.sleep(3600)
-
-    async def cancel(self) -> None:
-        self.cancelled = True
-
-async def test_run_agent_cancellation_awaits_backend_cancel(tmp_path: Path) -> None:
-    """Task cancellation (SIGINT unwind) deterministically cancels the backend."""
-    backend = _RecordingCancelBackend()
-    task = asyncio.create_task(run_agent( cast(Backend, backend), tmp_path, "hi", phase=DaydreamPhase.REVIEW, ))
-    await backend.entered.wait()  # run_agent is inside the invocation
+    backend = ScriptedBackend(responder=stream, model="mock-model")
+    task = asyncio.create_task(run_agent(backend, tmp_path, "hi", phase=DaydreamPhase.REVIEW))
+    await entered.wait()  # run_agent is inside the invocation
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
-    assert backend.cancelled is True
+    assert backend.cancel_calls == 1
 
 async def test_retry_recovery_allowance_ends_the_ladder_without_dispatching_again(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=30.0)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=60.0, max_delay_s=60.0))
     with pytest.raises(_RetryableBackendError):
@@ -368,7 +338,7 @@ async def test_retry_recovery_allowance_is_never_rebased_by_a_later_failure(
 ) -> None:
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=40.0, max_delay_s=40.0))
     with pytest.raises(_RetryableBackendError):
@@ -405,14 +375,10 @@ async def test_a_healthy_invocation_is_never_capped_by_the_allowance(
 async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A ladder cut by the deadline after a retry keeps its retry summary. The deadline check runs before the
-    allowance check inside the retry branch, so a ladder that already flew a retry and then overran the group wall
-    used to end on a reason-less deadline stop: the manifest's retry summary was silently erased even though real
-    retry overhead had been spent. The stop is now a retry-ladder stop naming the deadline, and the reducer folds
-    it in."""
+    """Deadline checks precede allowance checks but must still retain spent retry overhead."""
     fake = FakeClock(monotonic_value=5_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     # 5000 (+300 attempt 1) -> 5300 -> retry -> 5600 (+300 retry) -> deadline spent.
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=0.0, max_delay_s=0.0))
@@ -442,12 +408,10 @@ async def test_a_deadline_that_ends_a_retry_ladder_still_records_retry_telemetry
 async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A backoff sleep that overruns the deadline is retry overhead too. The ladder spent its allowance on a real
-    backoff sleep and then found the deadline gone before it could dispatch the retry: the stop must name that
-    ending rather than masquerading as a plain deadline stop that erased the retry summary."""
+    """Backoff is retry overhead even when the deadline prevents the retry from dispatching."""
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     # 1000 (+300 attempt 1) -> 1300 -> 100 s backoff -> 1400 = the deadline.
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=300.0)
     setattr(backend, "retry_policy", RetryPolicy(attempts=20, base_delay_s=100.0, max_delay_s=100.0))
@@ -471,9 +435,7 @@ async def test_a_deadline_that_cuts_the_ladder_during_backoff_is_still_a_ladder_
 async def test_a_zero_retry_ladder_stop_reports_no_retry_overhead(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """``allowance = 0`` stops the ladder on the first failure with no retry cost. The stop still names its reason
-    (the manifest must show why recovery ended), but every counter is zero: the failed attempt is useful work, not
-    retry overhead, so the summary cannot claim a retry that never happened."""
+    """Zero allowance records the stop reason without charging the initial attempt as retry overhead."""
     fake = FakeClock(monotonic_value=2_000.0).install(monkeypatch)
     backend = _retryable_failing_backend(advance=fake.advance, advance_s=250.0)
     recorder = make_recorder(tmp_path)
@@ -495,7 +457,7 @@ def _ending_backend(monkeypatch: pytest.MonkeyPatch, ending: str) -> tuple[Any, 
     """Build ``(fake_clock, backend, run_context)`` for one ladder ending."""
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     run_context = RunContext(InteractionPolicy(interactive=False))
     if ending == "deadline":
         # The 1_800 s wall budget is spent inside the first dispatched attempt.
@@ -520,10 +482,7 @@ def _ending_backend(monkeypatch: pytest.MonkeyPatch, ending: str) -> tuple[Any, 
 @pytest.mark.parametrize(
     ("ending", "expected_stop", "expected_partial"),
     [
-        # The 1800 s wall budget is spent by the first attempt's own advance, so
-        # the ladder ends before any retry is dispatched: the deadline stop is
-        # reason-less and the discarded-partials shape (the loop-top reset already
-        # wiped the failed attempt's partial output).
+        # The first attempt exhausts the wall budget before any retry; the loop reset discards its partials.
         pytest.param("deadline", None, "discarded", id="deadline"),
         pytest.param("allowance", "retry_recovery_allowance_exhausted", "discarded", id="allowance"),
         pytest.param("attempts", "retry_attempts_exhausted", "discarded", id="attempts"),
@@ -533,7 +492,6 @@ def _ending_backend(monkeypatch: pytest.MonkeyPatch, ending: str) -> tuple[Any, 
 async def test_every_ladder_ending_records_one_budget_stop(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ending: str, expected_stop: str | None, expected_partial: str
 ) -> None:
-    """Each way a retry ladder ends leaves exactly one budget-stop record."""
     fake, backend, run_context = _ending_backend(monkeypatch, ending)
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
@@ -561,15 +519,13 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
     """Failing siblings coordinate on one circuit instead of one ladder each."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    # Yield to the event loop after each injected sleep so the sibling
-    # invocations actually interleave; without the checkpoint the first task
-    # would run its whole ladder before any sibling starts.
+    # Checkpoint each fake sleep so sibling ladders interleave.
     inner_sleeper = anyio.sleep
     async def _yielding_sleeper(delay: float) -> None:
         await inner_sleeper(delay)
         await anyio.lowlevel.checkpoint()
     monkeypatch.setattr("daydream.agent.anyio.sleep", _yielding_sleeper)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     run_context = RunContext(InteractionPolicy(interactive=False))
     backends = [
         _retryable_failing_backend(advance=fake.advance, advance_s=1.0) for _ in range(3)
@@ -584,14 +540,13 @@ async def test_concurrent_invocations_share_one_run_scoped_circuit(
 async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_probe(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A ladder granted the half-open probe must not re-open the circuit itself. The probe has not dispatched yet when
-    the grant is made, so recording that same failure as a *failed probe* re-opens the circuit on the spot, clears
-    the probe token (letting a concurrent ladder fly a second probe) and restarts the interval — the documented
-    "exactly one probe per interval" contract could then never execute. ``RETRY_CIRCUIT_PROBE_INTERVAL_S = 0``
-    isolates the grant from the interval wait: an open circuit admits a probe on the very next retry."""
+    """A granted probe cannot fail before dispatch or release its token to another ladder.
+
+    A zero probe interval isolates this grant invariant from interval waiting.
+    """
     fake = FakeClock(monotonic_value=1_000.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     monkeypatch.setattr("daydream.config.RETRY_CIRCUIT_PROBE_INTERVAL_S", 0.0)
     run_context = RunContext(InteractionPolicy(interactive=False))
     # Open the circuit up front, then let the first ladder's retry be the probe.
@@ -609,8 +564,7 @@ async def test_a_granted_half_open_probe_is_never_counted_as_its_own_failed_prob
                 )
     traj, meta = _budget_stop(recorder)
     assert meta["retry_stop_reason"] == "retry_attempts_exhausted"
-    # The half-open grant survives its own dispatch: the probe is still outstanding,
-    # so the state reported at the next stop is the probe's, not a re-opened circuit.
+    # The probe remains outstanding after dispatch; its own grant cannot reopen the circuit.
     assert meta["circuit_state"] == "half_open"
     # While that probe is outstanding, a second ladder gets no probe of its own.
     sibling = _retryable_failing_backend(advance=fake.advance, advance_s=0.0)

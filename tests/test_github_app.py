@@ -16,6 +16,7 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
 from daydream import git_ops, github_app
+from daydream.git_ops import process as git_process
 from daydream.github_app import (
     AppCredentials,
     GitHubAppError,
@@ -62,7 +63,7 @@ def test_run_gh_passes_exact_static_environment_without_ambient_merge(monkeypatc
     monkeypatch.setenv("GITHUB_TOKEN", "github_pat_ambient_secret_1234567890")
     auth = git_ops.StaticGitHubAuth({"GH_TOKEN": "ghs_explicit_token_1234567890", "PATH": "/usr/bin"})
     with patch("subprocess.run", side_effect=spy_run):
-        git_ops._run_gh(Path("/tmp"), ["version"], auth=auth)
+        git_process._run_gh(Path("/tmp"), ["version"], auth=auth)
 
     assert captured["env"] == {"GH_TOKEN": "ghs_explicit_token_1234567890", "PATH": "/usr/bin"}
 
@@ -79,7 +80,7 @@ def test_run_gh_passes_none_for_inherited_auth() -> None:
     captured: dict[str, Any] = {}
     spy_run = _spy_run(captured)
     with patch("subprocess.run", side_effect=spy_run):
-        git_ops._run_gh(Path("/tmp"), ["version"], auth=git_ops.INHERIT_GITHUB_AUTH)
+        git_process._run_gh(Path("/tmp"), ["version"], auth=git_ops.INHERIT_GITHUB_AUTH)
 
     assert captured.get("env") is None
 
@@ -95,13 +96,13 @@ def test_run_gh_resolves_auth_once_for_the_complete_retry_sequence() -> None:
             subprocess.CompletedProcess(["gh", "api", "/user"], 0, "{}", ""),
         ],
     ):
-        git_ops._run_gh(Path("/tmp"), ["api", "/user"], auth=CountingAuth(), timeout=1, retries=1,)
+        git_process._run_gh(Path("/tmp"), ["api", "/user"], auth=CountingAuth(), timeout=1, retries=1,)
 
     assert calls == 1
 
 def test_refresh_failure_is_redacted_and_retains_last_good_environment(monkeypatch: pytest.MonkeyPatch,) -> None:
     now = 800.0
-    monkeypatch.setattr("daydream.git_ops.time.time", lambda: now)
+    monkeypatch.setattr("daydream.git_ops.auth.time.time", lambda: now)
     secret = "ghs_refresh_failure_secret_1234567890"
     def fail_refresh() -> tuple[Any, float]:
         raise RuntimeError(f"transport rejected {secret}")
@@ -118,7 +119,7 @@ def test_refresh_failure_is_redacted_and_retains_last_good_environment(monkeypat
 
 def test_refresh_rejects_changed_base_environment_and_keeps_prior(monkeypatch: pytest.MonkeyPatch,) -> None:
     now = 800.0
-    monkeypatch.setattr("daydream.git_ops.time.time", lambda: now)
+    monkeypatch.setattr("daydream.git_ops.auth.time.time", lambda: now)
     auth = git_ops.RefreshingGitHubAuth(
         git_ops.StaticGitHubAuth({"PATH": "/original", "GH_TOKEN": "ghs_prior_token_1234567890"}), expires_at=1_000,
         refresh=lambda: (git_ops.StaticGitHubAuth({"PATH": "/changed", "GH_TOKEN": "ghs_new_token_1234567890"}), 2_000,
@@ -140,9 +141,9 @@ def test_two_refreshing_sessions_keep_subprocess_credentials_isolated() -> None:
     first = session("a")
     second = session("b")
     with patch("subprocess.run", side_effect=spy_run):
-        git_ops._run_gh(Path("/tmp"), ["api", "/user"], auth=first)
-        git_ops._run_gh(Path("/tmp"), ["api", "/user"], auth=second)
-        git_ops._run_gh(Path("/tmp"), ["api", "/user"], auth=first)
+        git_process._run_gh(Path("/tmp"), ["api", "/user"], auth=first)
+        git_process._run_gh(Path("/tmp"), ["api", "/user"], auth=second)
+        git_process._run_gh(Path("/tmp"), ["api", "/user"], auth=first)
 
     assert [env["GH_TOKEN"] for env in captured if env is not None] == [
         "ghs_a_fresh_token_1234567890", "ghs_b_fresh_token_1234567890", "ghs_a_fresh_token_1234567890",
@@ -319,7 +320,7 @@ def test_resolve_run_identity_refreshes_installation_token_after_expiry(monkeypa
     with patch("daydream.git_ops.gh_api", side_effect=fake_gh_api):
         session = resolve_run_identity(tmp_path, "myorg/myrepo", is_posting=True)
         with patch("subprocess.run", side_effect=spy_run):
-            git_ops._run_gh(tmp_path, ["api", "/user"], auth=session.execution.auth)
+            git_process._run_gh(tmp_path, ["api", "/user"], auth=session.execution.auth)
 
     assert session.identity == github_app.GitHubIdentity("daydream-bot[bot]")
     assert minted == 2
@@ -451,7 +452,7 @@ def test_get_app_metadata_does_not_mutate_refreshing_installation_auth() -> None
     with patch("daydream.git_ops.gh_api", return_value={"permissions": {}, "slug": "acme-bot"}):
         get_app_metadata(Path("."), 42, _TEST_PEM)
     with patch("subprocess.run", side_effect=spy_run):
-        git_ops._run_gh(Path("/tmp"), ["api", "/user"], auth=installation_auth,)
+        git_process._run_gh(Path("/tmp"), ["api", "/user"], auth=installation_auth,)
 
     assert refresh_calls == {"installation": 1}
     assert captured["env"]["GH_TOKEN"] == "ghs_installation_fresh_token_1234567890"

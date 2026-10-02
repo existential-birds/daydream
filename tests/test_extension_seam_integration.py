@@ -1,12 +1,7 @@
-"""Real-path tests: fork flow mutations reach the registered flow definitions.
+"""Run fork-mutated flows through runner.run in real temporary repositories.
 
-Drives ``runner.run`` against a real temp git repo, mocking ONLY the backend
-seam (``daydream.runner.create_backend``) per the testing standard. A
-``daydream_ext`` package written by the ``ext_dir`` fixture mutates the flow
-definitions (remove/insert steps); assertions are on the prompts the backend
-actually received and the exit code. Grows across Tasks 9-15 of the
-extension-seam plan, one flow migration at a time.
-"""
+Only the backend seam is mocked; temporary extension packages modify registered
+steps. Assert delivered prompts and exit codes."""
 from __future__ import annotations
 
 import json
@@ -25,8 +20,8 @@ from daydream.extensions.registry import Registry
 from daydream.flows.engine import FlowContext
 from daydream.github_app import GitHubExecutionInput
 from daydream.pr_review import ParsedIssue
+from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.runner import RunConfig
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
@@ -343,11 +338,7 @@ async def test_api_v6_stable_keys_share_state_and_reparse_filtered_items(
 
 
 def _deferred_write_responder(target: Path) -> Callable[..., Any]:
-    """Responder that writes ``target`` only once the consumer resumes the stream.
-
-    The write sits between yields, so a tool supervisor that vetoes the Write
-    closes the stream before the generator resumes and the file never appears.
-    """
+    """Write only between yields, so a supervisor veto can close the stream first."""
 
     def _respond(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> Any:
         async def _gen() -> AsyncGenerator[AgentEvent, None]:
@@ -365,10 +356,7 @@ def _deferred_write_responder(target: Path) -> Callable[..., Any]:
 async def test_fork_inserts_custom_phase_into_review_flow(
     ext_dir: ExtDir, tiny_diff_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
-    """A daydream_ext phase inserted after ``intent`` runs in ``--review`` mode.
-
-    Observable outcomes: exit 0 and the custom phase's prompt reached the backend through the deep flow (review is
-    now a mode of ``deep``, #330)."""
+    """A phase inserted after intent reaches the backend in review mode."""
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
         "async def _ro(ctx):\n"
@@ -392,10 +380,7 @@ async def test_fork_inserts_custom_phase_into_review_flow(
 async def test_fork_inserts_phase_before_summary_in_shallow(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
-    """A daydream_ext phase inserted before ``post-review`` runs in ``--shallow``.
-
-    Observable outcomes: exit 0 and the custom phase's prompt reached the backend through the deep flow (shallow
-    is now a single-stack mode of ``deep``, #330)."""
+    """A phase inserted before post-review reaches the backend in shallow mode."""
     ext_dir.write_module(
         "from daydream.extensions import FlowStep\n"
         "async def _ro(ctx):\n"
@@ -425,14 +410,10 @@ ALTERNATIVES_MARKER = "Given this intent, explore the codebase and evaluate the 
 async def test_fork_disables_arbiter_in_deep(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A daydream_ext removal of ``arbiter`` skips only that step in deep.
+    """Removing arbiter preserves the rest of deep review.
 
-    Observable outcomes: exit 0, the deep pipeline still ran (the intent prompt reached the backend), and the
-    removed arbiter step never sent its prompt. The presence + exit-code assertions make the absence assertion
-    discriminating: a run that no-ops entirely fails the presence check.
-
-    Retargeted from ``alternatives`` at extension API v4: wonder folded into the ``per-stack-reviews`` step, so
-    ``alternatives`` is no longer a removable step name."""
+    Assert successful completion and a delivered intent prompt as well as
+    arbiter absence, so a no-op run cannot satisfy the test."""
 
     ext_dir.write_module("def register(r):\n" "    r.remove('deep', 'arbiter')\n")
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -622,8 +603,7 @@ async def test_retryable_tool_supervisor_failure_propagates_without_retry(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A retryable supervisor error propagates without entering backend retry,
-    and the displayed failure diagnostic is redacted at the host boundary."""
+    """Supervisor failures propagate without backend retries; host diagnostics are redacted."""
     backends: list[ScriptedBackend] = []
 
     with pytest.raises(RuntimeError, match="supervisor failed") as exc_info:
@@ -653,8 +633,7 @@ async def test_custom_flow_dispatches_and_dumps_artifacts(
     ext_dir: ExtDir, multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
     archive_dir: Path, tmp_path: Path,
 ) -> None:
-    """A fork-registered custom flow selected via flow_name runs end-to-end and
-    --dump-artifacts writes the bundle."""
+    """Dispatch a registered custom flow end to end and dump its artifact bundle."""
     ext_dir.write_module(CUSTOM_FLOW_EXT)
     backend = ScriptedBackend(events=_EMPTY_TURN, model="mock-model")
     install_backend(backend)
@@ -691,14 +670,9 @@ async def test_pr_feedback_not_selectable_via_flow(
 async def test_custom_phase_full_stack(
     ext_dir: ExtDir, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Custom phase end-to-end through ``runner.run``.
+    """A custom deep phase uses its registered prompt and configured backend model.
 
-    Proves the extension seams are wired together: a fork-registered phase runs inside the deep flow, builds its
-    prompt from its own registered prompt builder, and gets its backend through ``[tool.daydream.phases.ro_gate]``
-    per-phase config.
-
-    Observable outcomes: exit 0, the ``RO-GATE`` prompt reached the backend, and ``create_backend`` was called
-    with the per-phase model from ``.daydream.toml``."""
+    Assert the delivered RO-GATE prompt, selected model, and successful exit."""
 
     ext_dir.write_module(FULL_RO_EXT)
     (multi_stack_target / ".daydream.toml").write_text('[phases.ro_gate]\nmodel = "test-model-x"\n')
@@ -729,8 +703,7 @@ async def test_custom_phase_full_stack(
 async def test_flow_deep_routes_to_deep_helper(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """--flow deep runs the real deep pipeline: the intent prompt
-    reaches the backend via the deep flow, exit 0."""
+    """Explicit deep flow reaches the intent backend and exits successfully."""
 
     backend = _install_stub_backend(monkeypatch, multi_stack_target)
     _silence(monkeypatch)
@@ -763,8 +736,7 @@ async def test_flow_review_routes_to_review_helper(
 async def test_flow_shallow_routes_to_shallow_helper(
     multi_stack_target: Path, install_backend: InstallBackend, make_config: MakeConfig,
 ) -> None:
-    """--flow shallow runs the real shallow pipeline: the parse phase fires,
-    exit 0."""
+    """Explicit shallow flow reaches parsing and exits successfully."""
     backend = PhaseDispatchBackend(
         parse_results=[[{"id": 1, "description": "Align return", "file": "api.py", "line": 1}]]
     )
@@ -779,11 +751,7 @@ async def test_flow_shallow_routes_to_shallow_helper(
     assert backend.review_prompts, "shallow pipeline did not run a per-stack review"
 
 def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A ``$DAYDREAM_EXT_DIR`` fork's finding renderer reaches ``pr_review``.
-
-    Adds no production code: proves the discovery -> registry -> pr_review path end-to-end. The fork registers a
-    custom ``finding`` renderer via ``override_renderer``; the host still injects its footer around the custom
-    inner block."""
+    """A discovered extension finding renderer retains the host-injected footer."""
     ext = tmp_path / "ext"
     ext.mkdir()
     (ext / "__init__.py").write_text(
@@ -796,7 +764,7 @@ def test_ext_dir_renderer_override_reaches_pr_review(tmp_path: Path, monkeypatch
     prev = get_registry()
     set_registry(build_registry())
     try:
-        body = pr_review._format_comment_body(
+        body = pr_review.format_comment_body(
             ParsedIssue(path="a.py", line=1, title="T", body="B", fingerprint="a" * 64), "inline",
             renderers=pr_review.resolve_review_renderers(get_registry()),
         )

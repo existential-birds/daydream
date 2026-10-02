@@ -1,10 +1,7 @@
-"""Shared cwd-grounding instruction for review/exploration prompts.
+"""Shared prompt boundaries for worktree paths, repository evidence, and test facts.
 
-When daydream runs in a linked git worktree whose shared git dir lives in a
-sibling main worktree, agents that derive the repo root from git topology
-(`git worktree list`, `git rev-parse --git-common-dir`, the `.git` gitdir line)
-resolve paths against the WRONG worktree. This instruction grounds every agent
-to its actual working directory so file paths resolve correctly.
+Agents must resolve paths from their actual cwd: a linked worktree's shared Git
+directory can belong to a different worktree.
 """
 
 from __future__ import annotations
@@ -51,13 +48,10 @@ REVIEW_STOPPING_GUIDANCE = (
 
 
 def render_test_recipe_block(recipe: TestRecipe) -> str:
-    """Render the host-resolved test facts for one agent prompt (issue #1408).
+    """Render resolved argv, package cwd, runner/interpreter, and required-suite facts.
 
-    The single rendering of the shared facts: the exact argv, the package cwd,
-    the runner/interpreter, the declared required suites, and the coverage rule
-    that a passed targeted check never satisfies a required suite. It answers
-    "what do we run" only -- ``REVIEW_STOPPING_GUIDANCE`` still forbids review
-    turns from installing, downloading, or repairing anything.
+    Targeted passes never satisfy required suites. These facts do not relax review
+    restrictions on installation, downloads, or environment repair.
     """
     command_value = recipe.command.value
     command = (

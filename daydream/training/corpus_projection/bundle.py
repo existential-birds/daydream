@@ -33,13 +33,9 @@ class BundleError(ValueError):
 
 
 class BundleBatch(BaseModel):
-    """One batch row from the curation manifest.
+    """One manifest batch; admission separately requires repository and SPDX evidence.
 
-    The optional ``repo_slug`` (the ``normalize_remote_url`` slug, never a raw
-    remote URL) and ``license_evidence`` (``spdx_id`` + ``source``) fields are
-    carried by newer manifests; the admission gate, not this parser, enforces
-    their presence.
-    """
+    repo_slug is normalized identity, never a raw remote URL."""
 
     model_config = ConfigDict(frozen=True)
 
@@ -96,13 +92,7 @@ def _verify_sha256sums(root: Path, prefix: str) -> None:
 
 
 def _validate_relpath(root: Path, relpath: str, what: str) -> Path:
-    """Gate ``relpath`` under ``root`` and require the target to exist.
-
-    Targets may be files or directories: the producer writes each batch as a
-    directory (``batches/<session_id>/``) whose contents SHA256SUMS covers
-    file-by-file. Existence (not ``is_file``) is the gate so both shapes
-    resolve.
-    """
+    """Require an existing repository-relative file or directory without parent traversal."""
     p = Path(relpath)
     _gate(not p.is_absolute(), f"bundle {root}: {what} {relpath!r} is not relative")
     _gate(".." not in p.parts, f"bundle {root}: {what} {relpath!r} contains '..' segment")
@@ -112,15 +102,10 @@ def _validate_relpath(root: Path, relpath: str, what: str) -> Path:
 
 
 def load_curated_bundle(root: Path) -> CuratedBundle:
-    """Load a curated bundle from a local checkout, gating in order: the
-    ``_SUCCESS`` marker, curation-manifest schema validation (which yields the
-    canonical ``publication_prefix``), SHA256SUMS verification,
-    relative-path existence for every batch's artifacts, and the admission
-    gate (every ``admitted`` batch must carry non-blank ``repo_slug`` and
-    ``license_evidence`` with a non-empty ``spdx_id``; quarantined/excluded
-    rows are exempt). Raises :class:`BundleError` naming the offending
-    path/field on any gate failure.
-    """
+    """Verify success marker, schema, checksums, paths, then admitted-batch evidence.
+
+    Admitted rows require nonblank repo_slug and license SPDX identity; other
+    statuses are exempt. Gate failures name their path/field in BundleError."""
     root = Path(root)
     _gate((root / _SUCCESS_NAME).is_file(), f"bundle {root}: missing {_SUCCESS_NAME} marker")
 

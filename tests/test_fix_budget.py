@@ -1,13 +1,6 @@
-"""Unit tests for the per-file-group fix budget (issue #201).
+"""Per-file-group budget precedence and config override parsing.
 
-Covers the two pieces the real-path enforcement tests (in
-``deep_orchestrator/test_precision_budgets_and_tiers.py``) build on:
-
-1. ``FileGroupBudget`` — the aggregate guard's ``check``/``record_item``
-   semantics (which ceiling fires, in what order).
-2. The config-file parser — ``group_max_*`` overrides parse from
-   ``[tool.daydream]`` and junk values degrade to ``None`` (default applies).
-"""
+Real-path enforcement lives in deep_orchestrator/test_precision_budgets_and_tiers.py."""
 
 from __future__ import annotations
 

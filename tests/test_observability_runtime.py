@@ -111,8 +111,7 @@ async def test_owned_span_tree_usage_and_content() -> None:
     assert attrs["gen_ai.usage.cost"] == pytest.approx(0.3)
     assert attrs["gen_ai.request.model"] == "effective"
     assert attrs["gen_ai.response.model"] == "actual"
-    # T4: the invocation aggregate is structural, never a `chat` model call;
-    # it carries the standard invoke_agent operation and agent identity.
+    # Invocation aggregates are structural invoke_agent spans, never chat model calls.
     assert attrs["gen_ai.operation.name"] == "invoke_agent"
     assert attrs["gen_ai.agent.name"] == "review"
     assert attrs["daydream.billing.owner"] == "unresolved"
@@ -200,10 +199,7 @@ def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogC
     assert "REDACTED" in caplog.text
 
 def test_flag_valued_secret_env_vars_are_not_harvested_as_credentials() -> None:
-    """A boolean/numeric flag under a secret-named env var is not a credential.
-
-    Harvesting e.g. ``HERMES_REDACT_SECRETS=true`` as a literal secret literal-replaced every ``true`` in span
-    content, corrupting JSON payloads (``{"ok":true}`` read back as ``{"ok":[REDACTED_CREDENTIAL]}``)."""
+    """Boolean/numeric environment flags must not become secrets that corrupt ordinary JSON literals."""
     policy = PrivacyPolicy(environ={"HERMES_REDACT_SECRETS": "true", "LANGSMITH_API_KEY": "opaque-value"})
     assert json.loads(policy.json({"ok": True})) == {"ok": True}
     assert json.loads(policy.json({"flag": "true", "n": 1, "off": False})) == {"flag": "true", "n": 1, "off": False}
@@ -636,9 +632,7 @@ async def test_ambient_context_restored_after_exception_and_cancellation() -> No
             async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
                 raise RuntimeError("boom")
         current = otel_trace.get_current_span()
-        # The exception path detached the run's span context: the ambient
-        # span after both failed runs is the INVALID span (span_id 0), not a
-        # leftover run scope masquerading as current.
+        # Failed runs must detach, restoring INVALID rather than leaving a stale run span.
         assert current.get_span_context().span_id == 0
         assert not current.is_recording()
         assert otel_context.get_value("workflow_name") == sentinel
@@ -726,8 +720,7 @@ async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(_notebook_e
     agent_attrs = kinds["agent"].attributes or {}
     assert agent_attrs["traceloop.entity.path"] == "daydream.agent.review"
     assert agent_attrs["traceloop.span.kind"] == "agent"
-    # T4: the logical agent carries the standard public agent identity; the
-    # role is root because it is the outermost actual agent scope.
+    # The outermost logical agent owns standard identity and root role.
     assert agent_attrs["gen_ai.agent.name"] == "review"
     assert agent_attrs["daydream.agent.name"] == "review"
     assert agent_attrs["daydream.agent.role"] == "root"
@@ -880,8 +873,7 @@ async def test_owned_session_installs_no_global_signals_or_instrumentors() -> No
         assert get_logger_provider() is logs_before
     assert trace.get_tracer_provider() is provider_before
     assert metrics.get_meter_provider() is meter_before
-    # The owned provider is never registered globally: the session's own
-    # provider object differs from the process-wide proxy.
+    # Owned providers must differ from the global proxy.
     assert exporter.get_finished_spans()
 
 def test_traceloop_default_helper_is_not_invoked() -> None:
@@ -894,8 +886,7 @@ def test_traceloop_default_helper_is_not_invoked() -> None:
     assert "Traceloop.init" not in source
     assert "set_tracer_provider" not in source
     assert "Resource.create(" not in source
-    # NoOpMeterProvider is imported and passed to owned batch processors; the
-    # runtime never constructs an active MeterProvider of its own.
+    # Owned processors use NoOpMeterProvider; the runtime creates no active metrics provider.
     assert "get_meter_provider(" not in source
     assert "LoggerProvider(" not in source
 
@@ -932,8 +923,7 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     spans = exporter.get_finished_spans()
     generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
-    # Sealed native timing lands on the child; the historical end is the host
-    # message_end receipt, and the SDK end happens exactly once at that point.
+    # End once at the sealed historical message_end, preserving native child timing.
     attrs = generation.attributes or {}
     assert attrs["daydream.generation.native_started_at_unix_ms"] == 1788690314289
     assert attrs["daydream.generation.native_started_at_unix_ns"] == 1788690314289000000
@@ -942,8 +932,7 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     assert generation.start_time == 1788690314289000000
     assert generation.end_time == 1788690709621000000
     assert generation.parent is not None and generation.parent.span_id == attempt_span.context.span_id
-    # No recorder => no resolved ledger => the child is explicitly non-billed,
-    # and its standard usage aliases stay absent (fail-closed, never guessed).
+    # Without a recorder’s frozen ledger, children remain unbilled with no usage aliases.
     assert attrs["daydream.generation.billed"] is False
     assert "gen_ai.usage.input_tokens" not in attrs
     assert "gen_ai.response.id" not in attrs
@@ -954,11 +943,7 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
 
 @pytest.mark.anyio
 async def test_generation_span_carries_session_identity_and_aliases() -> None:
-    """Matrix row ``daydream.run.id`` / association aliases: ``All spans``.
-
-    Sealed generation spans are SDK spans like any other kind, so the vendor destinations can only route them into
-    the run's session/tree when they carry the same session identity keys every other span records (readback gate
-    evidence: generations were orphaned without them)."""
+    """Generation spans need the shared session identity to avoid orphaned vendor events."""
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
@@ -976,18 +961,12 @@ async def test_generation_span_carries_session_identity_and_aliases() -> None:
 
 @pytest.mark.anyio
 async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
-    """Scopes opened after ``associate_run_trajectory`` inherit the identity.
-
-    The run's trajectory session becomes known after the root opens. Children opened afterwards must still carry
-    the session identity even when no trajectory recorder is active (the sanitized-replay tool has none): the
-    vendor destinations split the tree across sessions otherwise (readback gate evidence: HH replay children fell
-    back to a run-id session)."""
+    """New children inherit late-bound session identity even when no trajectory recorder is active."""
 
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        # Late-binding seam: mirrors the runner/replay tool association that
-        # happens after the root opened but before children do.
+        # Associate identity after the root opens, before children, as runner/replay does.
         runtime.associate_run_trajectory("late-session-identity")
         with step_scope("review", iteration=1, stack="python"):
             with agent_scope("review", backend="pi", model="requested"):
@@ -1018,9 +997,7 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(monkey
             ], "billing_owner": "generation_children",
         },
     }
-    # Stand in for the T2 ledger having finalized inside the invocation
-    # manager: the observer reads the closed owner from the recorder's
-    # registered subtrajectory exactly once, at attempt finish.
+    # Simulate invocation finalization: the observer reads its frozen ledger at attempt finish.
     recorder = type(
         "FakeRecorder", (), {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
     )()
@@ -1045,8 +1022,7 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(monkey
 async def test_actual_nested_agent_scope_is_subagent_siblings_are_not() -> None:
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        # One real enclosing logical agent makes the inner scope a subagent;
-        # a sibling agent opened after it returns to root.
+        # Nesting makes a subagent; a subsequent sibling returns to root.
         with agent_scope("parent", backend="pi"):
             with agent_scope("child", backend="pi"):
                 pass

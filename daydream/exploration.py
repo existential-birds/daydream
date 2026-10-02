@@ -1,9 +1,4 @@
-"""Exploration result types for review prompt injection.
-
-Holds the typed data model that exploration subagents populate and review
-agents consume via to_prompt_section(). Includes graceful degradation for
-exploration failures.
-"""
+"""Exploration evidence shared by review prompts, persisted artifacts and cache keys."""
 
 from __future__ import annotations
 
@@ -35,14 +30,9 @@ def _no_data_artifact(title: str) -> str:
 
 @dataclass
 class FileInfo:
-    """Information about a file relevant to the review.
+    """Relevant file, its role and static/LLM provenance.
 
-    Attributes:
-        path: Relative file path.
-        role: Relationship to the diff -- "modified", "imported_by", "imports", "test".
-        summary: Brief description of the file's purpose.
-        provenance: Origin of the row (``static`` or ``llm``).
-        source_file: Source file covered by a test row, when known.
+    source_file links test rows to their covered source when known.
     """
 
     path: str
@@ -54,13 +44,7 @@ class FileInfo:
 
 @dataclass
 class Convention:
-    """A codebase convention or pattern detected during exploration.
-
-    Attributes:
-        name: Short convention name (e.g. "snake_case functions").
-        description: What the convention entails.
-        source: Where it was found -- "CLAUDE.md", "inferred from code", etc.
-    """
+    """Named repository convention with its evidence source."""
 
     name: str
     description: str
@@ -69,13 +53,7 @@ class Convention:
 
 @dataclass
 class Dependency:
-    """A dependency relationship between files.
-
-    Attributes:
-        source: File that depends on target.
-        target: File being depended upon.
-        relationship: Type -- "imports", "calls", "extends", "tests".
-    """
+    """Directed file relationship: source imports/calls/extends/tests target."""
 
     source: str
     target: str
@@ -84,19 +62,7 @@ class Dependency:
 
 @dataclass
 class ExplorationContext:
-    """Aggregated exploration results for review prompt injection.
-
-    Populated by exploration subagents in Phase 2, consumed by review
-    agents via to_prompt_section() in Phase 3.
-
-    Attributes:
-        affected_files: Files relevant to the review.
-        conventions: Detected codebase conventions.
-        dependencies: Dependency relationships between files.
-        guidelines: Project guideline snippets (from CLAUDE.md etc).
-        raw_notes: Unstructured exploration notes.
-        completed: Whether exploration ran to completion rather than degrading.
-    """
+    """Collected files, conventions, dependencies, guidelines and notes for review."""
 
     affected_files: list[FileInfo] = field(default_factory=list)
     conventions: list[Convention] = field(default_factory=list)
@@ -270,11 +236,7 @@ async def safe_explore(
     *args: Any,
     **kwargs: Any,
 ) -> ExplorationContext:
-    """Run exploration with graceful degradation.
-
-    Catches any exception from explore_fn and returns an incomplete empty
-    ExplorationContext instead. Displays a warning banner via Rich UI.
-    """
+    """Warn and return an incomplete empty context when exploration raises."""
     try:
         return await explore_fn(*args, **kwargs)
     except Exception:
@@ -286,19 +248,11 @@ async def safe_explore(
 
 
 def merge_contexts(*contexts: ExplorationContext) -> ExplorationContext:
-    """Fold multiple partial ExplorationContext instances into one.
+    """Merge into fresh lists, preserving first-seen ordering.
 
-    De-duplication rules:
-    - FileInfo: keyed on (path, role); the entry with the longer summary wins,
-      while static provenance wins when either duplicate is static.
-    - Convention: keyed on name; first occurrence wins.
-    - Dependency: keyed on (source, target, relationship).
-    - guidelines: keyed on string identity.
-    - raw_notes: non-empty values joined with a double newline.
-
-    Returns:
-        A new merged ExplorationContext (always a fresh instance with fresh
-        list fields, even when called with a single argument).
+    Files key by (path, role): longest summary wins, static provenance dominates.
+    Conventions key by name; dependencies by their triple; guidelines by text.
+    Nonempty notes join with a blank line. Input objects remain unchanged.
     """
     files_by_key: dict[tuple[str, str], FileInfo] = {}
     static_keys: set[tuple[str, str]] = set()
@@ -354,21 +308,10 @@ _CACHE_VERSION = 5
 def exploration_cache_key(
     head_sha: str, diff: str, tier: str, *, strategies: dict[str, str] | None = None,
 ) -> str:
-    """Content key identifying one exploration pre-scan result and its strategy.
+    """Hash format version, HEAD, diff, tier and effective strategies for exact reuse.
 
-    Exact-match only: a stale hit misgrounds every downstream review prompt, so
-    a near-match must never count. The HEAD sha closes the live-file-drift hole
-    left by ``git_ops.diff`` being committed-only three-dot, at no cost to the
-    real reuse cases (bot re-review, --start-at resume, and an immediate re-run
-    all share HEAD). Effective strategy contents distinguish default static
-    context from customized specialist results on the same change.
-
-    An exact key match is reused even with uncommitted worktree edits: the key
-    intentionally excludes uncommitted edits because reuse is exact-match-only
-    on format version + head SHA + diff + tier. The generating code is
-    versioned into the key too, so an upgrade that changes artifact rendering
-    (``_CACHE_VERSION``) never serves stale pre-upgrade artifacts on an exact
-    match.
+    Uncommitted edits are intentionally excluded. Bump _CACHE_VERSION when artifact
+    rendering changes so an upgrade cannot reuse older output bytes.
     """
     payload = json.dumps([_CACHE_VERSION, head_sha, diff, tier, strategies or {}], sort_keys=True)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()

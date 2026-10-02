@@ -25,19 +25,7 @@ from daydream.ui.theme import (
 
 
 def _highlight_agent_text(text: str, base_style: Style | None = None) -> Text:
-    """Apply syntax highlighting to agent text.
-
-    Highlights:
-    - Inline code (`code`)
-    - File paths
-    - Numbers
-    - URLs
-    - Bold (**text**) and italic (*text*)
-
-    Args:
-        base_style: Style for non-highlighted text. Defaults to STYLE_GREEN.
-
-    """
+    """Highlight inline Markdown, paths, and URLs; default unstyled text to green."""
     if base_style is None:
         base_style = STYLE_GREEN
 
@@ -79,12 +67,7 @@ def _render_agent_lines_with_gradient(
     lines: list[str],
     use_italic: bool = True,
 ) -> Text:
-    """Render agent text lines with vertical cyan-to-green gradient.
-
-    Args:
-        use_italic: Whether to apply italic styling (False for markdown content).
-
-    """
+    """Apply a vertical cyan-to-green gradient, optionally using italic text."""
     highlighted = Text()
     num_lines = max(len(lines), 1)
 
@@ -105,20 +88,7 @@ def _render_agent_lines_with_gradient(
 
 
 class AgentTextRenderer:
-    """Renderer for agent text using Rich Live Panel with buffering.
-
-    This class buffers incoming text chunks and displays them in a
-    Live-updating Panel that provides proper word wrapping. This solves
-    the issue of broken line wrapping when streaming text character-by-character.
-
-    Usage:
-        renderer = AgentTextRenderer(console)
-        renderer.start()
-        for chunk in stream:
-            renderer.append(chunk)
-        renderer.finish()
-
-    """
+    """Buffer streaming text in one Live panel to preserve word wrapping."""
 
     def __init__(self, console: Console) -> None:
         """Initialize the renderer."""
@@ -129,15 +99,7 @@ class AgentTextRenderer:
         self._spinner = CrazySpinner(num_spinners=3)
 
     def _render_panel(self, show_spinner: bool = True) -> Panel:
-        """Render the current buffer as a styled Panel with vertical gradient.
-
-        Applies a cyan-to-green vertical gradient. Uses italic styling for
-        regular text, but not for markdown content (detected by headers).
-
-        Args:
-            show_spinner: If True, append animated spinner at end (cursor effect).
-
-        """
+        """Render buffered text with a gradient, optional spinner, and nonitalic Markdown."""
         full_text = "".join(self._buffer)
         lines = full_text.split("\n")
 
@@ -161,10 +123,7 @@ class AgentTextRenderer:
         return self._render_panel(show_spinner=True)
 
     def start(self) -> None:
-        """Start the Live context for real-time updates.
-
-        Call this before appending any text chunks.
-        """
+        """Start Live once; append() also starts it lazily."""
         if self._started:
             return
 
@@ -191,10 +150,7 @@ class AgentTextRenderer:
         self._buffer.append(text)
 
     def finish(self) -> None:
-        """Stop the Live context and print the final Panel.
-
-        Call this when all text has been received.
-        """
+        """Flush the final panel, stop Live, and reset the buffer for reuse."""
         if self._live is not None:
             self._live.update(self._render_panel(show_spinner=False), refresh=True)
             self._live.stop()

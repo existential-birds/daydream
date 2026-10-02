@@ -28,7 +28,8 @@ from daydream.deep.orchestrator import (
 from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.trajectory import DaydreamRunFlow
 from tests.harness.stub_backend import install_stub_backend
 from tests.test_deep_orchestrator import (
@@ -42,7 +43,6 @@ if TYPE_CHECKING:
     pass
 
 def test_diagram_step_position_and_phase_key() -> None:
-    """Issue #1113: ``diagram`` sits between ``supervise`` and ``findings-out``."""
     names = [step.name for step in STEPS]
     assert names.index("supervise") + 1 == names.index("diagram")
     assert names.index("diagram") + 1 == names.index("findings-out")
@@ -56,14 +56,12 @@ def test_diagram_step_position_and_phase_key() -> None:
     assert DIAGRAM_STEPS[0].phase_key == "post-diagram"
 
 def test_diagram_flow_is_registered_with_its_three_steps() -> None:
-    """The ``diagram`` flow reuses the deep flow's exploration + diagram steps."""
     registry = Registry()
     register_builtins(registry)
     assert sorted(registry.flow_names()) == ["deep", "diagram", "improve"]
     assert registry.flow("diagram") == ["exploration", "diagram", "post-diagram"]
 
 def test_resolve_mode_maps_diagram_output_mode() -> None:
-    """``--diagram-only`` resolves to the ``diagram`` mode and its own flow."""
     config = RunConfig(target="/tmp", output_mode="diagram", diagram="sequence")
     assert _resolve_mode(config) == "diagram"
     assert _flow_name_for_mode("diagram") == "diagram"
@@ -75,7 +73,6 @@ def test_resolve_mode_maps_diagram_output_mode() -> None:
         assert _flow_name_for_mode(mode) == "deep"
 
 def test_deep_shard_enabled_default_off(tmp_path: Path) -> None:
-    """Sharding is off by default: DEFAULT_DEEP_SHARD_ENABLED = False."""
 
     assert DEFAULT_DEEP_SHARD_ENABLED is False
     # Default off (sharding-off): no RunConfig attr, no file config.
@@ -131,7 +128,6 @@ def test_deep_shard_default_bounds_align_with_inline_budget() -> None:
 async def test_deep_large_diff_produces_review_and_record_shards(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
 ) -> None:
-    """A large Python stack produces multiple review and records artifacts."""
 
     install_stub_backend(monkeypatch, shard_many_python_target)
     # Sharding enabled, tiny file bound -> the python stack shards.
@@ -150,7 +146,6 @@ async def test_deep_large_diff_produces_review_and_record_shards(
 async def test_deep_sharding_off_keeps_single_agent_per_stack(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, install_backend: Callable[[object], object],
 ) -> None:
-    """Issue #731: sharding-off (the default) keeps exactly one agent per stack."""
     install_stub_backend(monkeypatch, shard_many_python_target)
     rc = await run(RunConfig(target=str(shard_many_python_target), cleanup=False,
             deep_shard_enabled=False,  # default / sharding off
@@ -203,7 +198,6 @@ async def test_no_parse_phase_and_records_from_output_schema(multi_stack_target:
     assert json.loads(structural.read_text())["issues"][0]["description"] == "Structural maintainability concern"
 
 def test_structural_gate_resolver_reads_profile_pipeline() -> None:
-    """The structural gate's pre-context resolver reads the profile flag."""
     assert _config_pipeline(RunConfig(target="/tmp/x")).structural_enabled is True
     off = _profile_with_pipeline(structural_enabled=False)
     assert _config_pipeline(RunConfig(target="/tmp/x", review_profile=off)).structural_enabled is False

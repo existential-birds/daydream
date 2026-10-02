@@ -28,7 +28,7 @@ from tests.harness.backend import ScriptedBackend
 
 def _rec(monkeypatch: Any) -> Console:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100, height=25)
-    monkeypatch.setattr("daydream.phases.console", rec)
+    monkeypatch.setattr("daydream.agent.console", rec)
     return rec
 
 

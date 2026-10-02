@@ -243,7 +243,6 @@ def test_specialist_rows_carry_llm_provenance(tmp_path: Path) -> None:
     assert by_path["daydream/extra.py"].provenance == "llm"
 
 def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path: Path) -> None:
-    """A source_file-carrying specialist envelope reaches test-map.json end-to-end."""
     py = (FIXTURES / "python_multifile.diff").read_text()
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts  # 4 files -> parallel tier, so the test_mapper specialist runs
@@ -494,7 +493,6 @@ def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
     assert ctx.conventions == []
 
 def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
-    """One specialist raising doesn't cancel the others."""
     py = (FIXTURES / "python_multifile.diff").read_text()
     ts = (FIXTURES / "typescript_multifile.diff").read_text()
     diff_text = py + ts  # 4 files -> parallel tier
@@ -516,7 +514,6 @@ def _multifile_diff(paths: list[str]) -> str:
     return "".join(f"diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-old\n+new\n" for p in paths)
 
 async def test_pre_scan_dispatch_interval_success(tmp_path: Path) -> None:
-    """The real parallel pre-scan records one enclosing, ordered dispatch."""
     diff_text = _multifile_diff([f"src/file_{index}.py" for index in range(4)])
     recorder = make_recorder(tmp_path)
     async with recorder:
@@ -570,7 +567,6 @@ async def test_pre_scan_dispatch_interval_timeout_dispatch_keeps_completed_child
     assert step["extra"]["completed_count"] == 3
 
 async def test_repo_scan_dispatch_records_survey_failure(tmp_path: Path) -> None:
-    """The best-effort repository survey still records its failed outcome."""
     backend = ScriptedBackend(events=[TextEvent(text="Starting repository survey"), RuntimeError("survey failed")])
     recorder = make_recorder(tmp_path)
     async with recorder:
@@ -642,8 +638,6 @@ def test_pre_scan_passes_cwd_absolute_static_files(tmp_path: Path, monkeypatch: 
     assert "- services/taste/dep.py (" not in dep_prompt
 
 def test_pre_scan_fallback_uses_rename_new_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fallback seeding is rename-aware: a renamed file seeds its new path, not the old one."""
-
     # Force the fallback path with a genuine static-analysis failure.
     def analyzer_failure(diff_text: str, repo_root: Path) -> list[FileInfo]:
         raise OSError("tree-sitter source unavailable")

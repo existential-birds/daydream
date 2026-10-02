@@ -10,7 +10,8 @@ import anyio
 import pytest
 
 from daydream.backends import AgentEvent
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.review_profile import independent_alternatives_profile as _independent_alternatives
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
@@ -72,7 +73,7 @@ async def test_budget_truncated_wonder_keeps_review_results(
     """A budget stop preserves completed stack findings and finishes the review."""
 
     silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_alternatives = True
     mute_side_effects()

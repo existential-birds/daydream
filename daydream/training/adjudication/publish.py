@@ -349,15 +349,13 @@ def _parse_checkpoint(
         raise ValueError(f"{_CHECKPOINT_RELPATH}: files must be a list")
     allowed_names = _CHECKPOINT_ALLOWED_NAMES
     required_names = _CHECKPOINT_REQUIRED_NAMES
-    seen: set[str] = set()
     payloads: dict[str, bytes] = {}
     for entry in entries:
         if not isinstance(entry, dict) or set(entry) != {"path", "sha256"}:
             raise ValueError(f"{_CHECKPOINT_RELPATH}: invalid file entry")
         name = _validate_remote_path(entry.get("path"), allowed=allowed_names, what="checkpoint file")
-        if name in seen:
+        if name in payloads:
             raise ValueError(f"{_CHECKPOINT_RELPATH}: duplicate normalized path {name!r}")
-        seen.add(name)
         expected_digest = entry.get("sha256")
         if not isinstance(expected_digest, str) or re.fullmatch(r"[0-9a-f]{64}", expected_digest) is None:
             raise ValueError(f"{_CHECKPOINT_RELPATH}: invalid digest for {name!r}")
@@ -371,7 +369,7 @@ def _parse_checkpoint(
         if _digest(data) != expected_digest:
             raise ValueError(f"digest mismatch for {name!r}")
         payloads[name] = data
-    if not required_names.issubset(seen) or not seen.issubset(allowed_names):
+    if not required_names.issubset(payloads):
         raise ValueError(f"{_CHECKPOINT_RELPATH}: incomplete or foreign file set")
     derived_id, _ = _batch_identity(payloads)
     if derived_id != batch_id:
@@ -480,41 +478,26 @@ def publish_annotation_state(
             if path in current_files and _download_remote(client, path, current_revision) != expected:
                 raise HydrationError(f"immutable checkpoint collision for batch {batch_id}")
 
-        with tempfile.TemporaryDirectory(prefix=".daydream-checkpoint-", dir=state_dir.parent) as temp:
-            staging = Path(temp)
-            mapping: dict[str | Path, Path] = {}
-            for index, (path, data) in enumerate(sorted(batch_mapping_bytes.items())):
-                local = staging / f"payload-{index}"
-                local.write_bytes(data)
-                mapping[path] = local
-            pointer_path = staging / "pointer"
-            pointer_path.write_bytes(pointer_bytes)
-            mapping[stable_path] = pointer_path
-            try:
-                revision = client.commit_files_atomic(
-                    mapping,
-                    commit_message,
-                    parent_commit=current_revision,
-                    branch=ANNOTATION_BRANCH,
-                )
-            except HubConcurrentUpdateError:
-                current_revision = _pin_repository(client)
-                current_files = _list_remote(client, current_revision)
-                current_checkpoint = _parse_checkpoint(
-                    client,
-                    revision=current_revision,
-                    curation_id=curation_id,
-                    remote_files=current_files,
-                )
-                if initial_checkpoint is not None and current_checkpoint is None:
-                    raise HydrationError(
-                        "published checkpoint pointer disappeared during concurrent update"
-                    )
-                continue
-            except Exception as exc:
-                raise HubUnavailableError(redact_text(f"annotation checkpoint commit failed: {exc}")) from None
+        payloads = {**batch_mapping_bytes, stable_path: pointer_bytes}
+        try:
+            revision = _commit_payloads(
+                client, payloads, staging_parent=state_dir.parent,
+                parent=current_revision, message=commit_message, operation="annotation checkpoint",
+            )
+        except HubConcurrentUpdateError:
+            current_revision = _pin_repository(client)
+            current_files = _list_remote(client, current_revision)
+            current_checkpoint = _parse_checkpoint(
+                client,
+                revision=current_revision,
+                curation_id=curation_id,
+                remote_files=current_files,
+            )
+            if initial_checkpoint is not None and current_checkpoint is None:
+                raise HydrationError("published checkpoint pointer disappeared during concurrent update")
+            continue
         _validate_oid(revision, what="checkpoint revision")
-        return _state_result(pointer, revision, sorted(map(str, mapping)))
+        return _state_result(pointer, revision, sorted(payloads))
     raise HubUnavailableError("annotation checkpoint could not win the bounded concurrent-update race")
 
 
@@ -560,20 +543,14 @@ def _validate_coverage_report(data: bytes) -> None:
     balance = report["class_balance"]
     inter_rater = report["inter_rater"]
     gate = report["admission_gate"]
-    if not isinstance(coverage, dict) or set(coverage) != {"adjudicated", "total"}:
-        raise ValueError("coverage-report.json: invalid outcome_coverage")
-    if not isinstance(balance, dict) or set(balance) != {"accepted", "rejected"}:
-        raise ValueError("coverage-report.json: invalid class_balance")
-    if not isinstance(inter_rater, dict) or set(inter_rater) != {"items", "agreeing"}:
-        raise ValueError("coverage-report.json: invalid inter_rater")
-    if not isinstance(gate, dict) or set(gate) != {
-        "outcome_bearing_total",
-        "total",
-        "passes_80pct",
-        "class_balance_ok",
-        "gate_version",
-    }:
-        raise ValueError("coverage-report.json: invalid admission_gate")
+    for name, fields in (
+        ("outcome_coverage", {"adjudicated", "total"}),
+        ("class_balance", {"accepted", "rejected"}),
+        ("inter_rater", {"items", "agreeing"}),
+        ("admission_gate", {"outcome_bearing_total", "total", "passes_80pct", "class_balance_ok", "gate_version"}),
+    ):
+        if not isinstance(report[name], dict) or set(report[name]) != fields:
+            raise ValueError(f"coverage-report.json: invalid {name}")
 
     adjudicated = _report_count(coverage["adjudicated"], field="outcome_coverage.adjudicated")
     total = _report_count(coverage["total"], field="outcome_coverage.total")
@@ -735,13 +712,12 @@ def _verify_prefix(
     remote_files: set[str],
     prefix: str,
     expected: Mapping[str, bytes],
-) -> dict[str, bytes]:
+) -> None:
     names = _prefix_names(remote_files, prefix)
     if names != set(expected):
         raise HydrationError(
             f"immutable final bundle collision: expected {sorted(expected)}, found {sorted(names)}"
         )
-    actual: dict[str, bytes] = {}
     allowed_paths = {f"{prefix}{name}" for name in expected}
     for name, wanted in sorted(expected.items()):
         path = f"{prefix}{name}"
@@ -750,8 +726,6 @@ def _verify_prefix(
         _scan_for_secrets(name, data)
         if data != wanted:
             raise HydrationError(f"immutable final bundle collision for {name}")
-        actual[name] = data
-    return actual
 
 
 def _success_bytes(final_id: str, data_commit_oid: str) -> bytes:
@@ -866,34 +840,41 @@ def _install_staging(
             os.close(stage_fd)
 
 
-def _commit_final_mapping(
+def _commit_payloads(
     client: AnnotationHubClient,
-    *,
-    bundle_dir: Path,
-    prefix: str,
     payloads: Mapping[str, bytes],
+    *,
+    staging_parent: Path,
     parent: str,
     message: str,
+    operation: str,
 ) -> str:
-    with tempfile.TemporaryDirectory(prefix=".daydream-final-", dir=bundle_dir.parent) as temp:
-        root = Path(temp)
+    """Commit captured bytes with CAS; leave typed races for the caller to retry."""
+    with tempfile.TemporaryDirectory(prefix=".daydream-annotation-", dir=staging_parent) as temp:
         mapping: dict[str | Path, Path] = {}
-        for index, (name, data) in enumerate(sorted(payloads.items())):
-            local = root / str(index)
+        for index, (path, data) in enumerate(sorted(payloads.items())):
+            local = Path(temp) / str(index)
             local.write_bytes(data)
-            mapping[f"{prefix}{name}"] = local
+            mapping[path] = local
         try:
-            revision = client.commit_files_atomic(
-                mapping,
-                message,
-                parent_commit=parent,
-                branch=ANNOTATION_BRANCH,
+            return client.commit_files_atomic(
+                mapping, message, parent_commit=parent, branch=ANNOTATION_BRANCH,
             )
         except HubConcurrentUpdateError:
             raise
         except Exception as exc:
-            raise HubUnavailableError(redact_text(f"final annotation commit failed: {exc}")) from None
-    return _validate_oid(revision, what="final annotation revision")
+            raise HubUnavailableError(redact_text(f"{operation} commit failed: {exc}")) from None
+
+
+def _verify_data_commit(
+    client: AnnotationHubClient, data_oid: str, prefix: str, payloads: Mapping[str, bytes],
+) -> None:
+    """Verify a success marker's complete data set at its immutable parent commit."""
+    revision = _pin_repository(client, revision=data_oid)
+    _verify_prefix(
+        client, revision=revision, remote_files=_list_remote(client, revision),
+        prefix=prefix, expected=payloads,
+    )
 
 
 def _verified_existing_success(
@@ -917,15 +898,7 @@ def _verified_existing_success(
         prefix=prefix,
         expected=expected_success,
     )
-    pinned_data = _pin_repository(client, revision=data_oid)
-    data_files = _list_remote(client, pinned_data)
-    _verify_prefix(
-        client,
-        revision=pinned_data,
-        remote_files=data_files,
-        prefix=prefix,
-        expected=data_payloads,
-    )
+    _verify_data_commit(client, data_oid, prefix, data_payloads)
     return {
         "hub_commit_sha": revision,
         "data_commit_sha": data_oid,
@@ -983,25 +956,15 @@ def publish_final_annotation_bundle(
             data_oid = current
             break
         try:
-            data_oid = _commit_final_mapping(
-                client,
-                bundle_dir=bundle_dir,
-                prefix=prefix,
-                payloads=data_payloads,
-                parent=current,
-                message=commit_message,
+            data_oid = _commit_payloads(
+                client, {f"{prefix}{name}": data for name, data in data_payloads.items()},
+                staging_parent=bundle_dir.parent, parent=current,
+                message=commit_message, operation="final annotation",
             )
         except HubConcurrentUpdateError:
             continue
-        pinned_data = _pin_repository(client, revision=data_oid)
-        data_files = _list_remote(client, pinned_data)
-        _verify_prefix(
-            client,
-            revision=pinned_data,
-            remote_files=data_files,
-            prefix=prefix,
-            expected=data_payloads,
-        )
+        _validate_oid(data_oid, what="final annotation revision")
+        _verify_data_commit(client, data_oid, prefix, data_payloads)
         break
     if data_oid is None:
         raise HubUnavailableError("final data publication could not win the concurrent-update race")
@@ -1023,16 +986,14 @@ def publish_final_annotation_bundle(
         success_message = f"daydream annotation final success {curation_id} {final_id}"
         _scan_for_secrets("final success commit message", success_message.encode("utf-8"))
         try:
-            success_oid = _commit_final_mapping(
-                client,
-                bundle_dir=bundle_dir,
-                prefix=prefix,
-                payloads={_SUCCESS_FILENAME: marker},
-                parent=current,
-                message=success_message,
+            success_oid = _commit_payloads(
+                client, {f"{prefix}{_SUCCESS_FILENAME}": marker},
+                staging_parent=bundle_dir.parent, parent=current,
+                message=success_message, operation="final annotation",
             )
         except HubConcurrentUpdateError:
             continue
+        _validate_oid(success_oid, what="final annotation revision")
         pinned_success = _pin_repository(client, revision=success_oid)
         success_files = _list_remote(client, pinned_success)
         return verified_receipt(pinned_success, success_files)
@@ -1104,14 +1065,9 @@ def download_final_annotation_bundle(
     if downloaded[_SUMS_FILENAME] != expected_sums:
         raise HydrationError("final SHA256SUMS mismatch")
     data_oid = _parse_success(downloaded[_SUCCESS_FILENAME], final_id=final_id)
-    data_revision = _pin_repository(client, revision=data_oid)
-    data_files = _list_remote(client, data_revision)
-    _verify_prefix(
-        client,
-        revision=data_revision,
-        remote_files=data_files,
-        prefix=prefix,
-        expected={
+    _verify_data_commit(
+        client, data_oid, prefix,
+        {
             **semantic,
             _PUBLICATION_MANIFEST_FILENAME: downloaded[_PUBLICATION_MANIFEST_FILENAME],
             _SUMS_FILENAME: expected_sums,

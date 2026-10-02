@@ -1,11 +1,8 @@
-"""#1227: identifiable command render paths use the shared display pipeline.
+"""Keep identifiable command rendering on the shared display pipeline.
 
-The AST guard covers the production package. It catches direct redaction of a
-literal ``["command"]``/``.get("command")`` value and its local aliases, and
-redaction of the primary ``value`` in a ``key == "command"`` branch. It also
-allows the Codex display strip only inside ``_redacted_bash_command`` (and its
-backend definition). This is a bounded source-pattern guard, not a proof about
-arbitrary data flow or a replacement for real-path render tests.
+The AST guard tracks command keys, local aliases, and key == command branches;
+Codex stripping belongs only to _redacted_bash_command and its backend definition.
+This bounded source-pattern check supplements real rendering tests.
 """
 
 from __future__ import annotations

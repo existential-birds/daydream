@@ -49,7 +49,7 @@ def _install_phase_fix_spy(monkeypatch: pytest.MonkeyPatch) -> list[Any]:
     async def _spy_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fix_calls.append(item)
         return None
-    monkeypatch.setattr("daydream.phases.phase_fix", _spy_fix)
+    monkeypatch.setattr("daydream.phases.fix.phase_fix", _spy_fix)
     return fix_calls
 
 async def test_verifier_contradicts_propagates_to_fix_prompt(
@@ -150,7 +150,7 @@ async def test_structural_finding_reaches_fix_loop(
     async def _capture_fix(backend: Any, work: Any, items: Any, item_nums: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fixed.extend(items)
 
-    monkeypatch.setattr("daydream.phases.phase_fix_batched", _capture_fix)
+    monkeypatch.setattr("daydream.phases.fix.phase_fix_batched", _capture_fix)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -242,7 +242,7 @@ async def test_start_at_fix_recovers_merged_items(
     async def _capture_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         fixed.append(item)
 
-    monkeypatch.setattr("daydream.phases.phase_fix", _capture_fix)
+    monkeypatch.setattr("daydream.phases.fix.phase_fix", _capture_fix)
 
     # Prime fix-resume prerequisites EXCEPT the canonical markdown report -- only
     # the deep-dir merged-items.json exists, no review-output.md anywhere.
@@ -277,7 +277,6 @@ async def test_apply_fixes_gate_non_interactive_takes_safe_default(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path: non-interactive deep run declines fixes and exits 0 without reading stdin."""
 
     _silence_gate_noise(monkeypatch)
     # The PR post runs before the gate; stub the non-idempotent GitHub write.
@@ -346,7 +345,6 @@ async def test_apply_fixes_gate_eof_declines_cleanly_no_crash(
 async def test_apply_fixes_gate_interactive_yes_applies_fixes(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path: a typed ``y`` at the apply-fixes gate runs the fix loop."""
 
     _silence_gate_noise(monkeypatch)
     mute_side_effects()
@@ -381,7 +379,6 @@ async def test_cleanup_flag_controls_review_report_on_success(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     shallow: bool, cleanup: bool, report_exists: bool,
 ) -> None:
-    """Successful shallow and deep runs follow the explicit cleanup flag."""
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
     assert await run(make_config(multi_stack_target, shallow=shallow, cleanup=cleanup, assume="yes")) == 0
@@ -432,7 +429,6 @@ async def test_cleanup_gate_declines_honors_cleanup_flag(
     cleanup: bool, expected_exists: bool, multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """#335 real-path: ``--cleanup`` is honored even when the fix gate declines."""
 
     _install_stub_backend(monkeypatch, multi_stack_target)
     mute_side_effects()
@@ -454,7 +450,6 @@ async def test_cleanup_gate_declines_honors_cleanup_flag(
 async def test_cleanup_skips_on_failure_keeps_evidence(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """#335 real-path: a non-zero exit skips ``--cleanup`` so evidence survives."""
 
 
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -479,7 +474,6 @@ async def test_cleanup_skips_on_failure_keeps_evidence(
 
 async def test_deep_run_recovers_from_transient_git_timeout(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Regression for #120: a transient git timeout no longer fails the run."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -496,7 +490,7 @@ async def test_deep_run_recovers_from_transient_git_timeout(multi_stack_target: 
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=5)
         return real_run(*args, **kwargs)
 
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", flaky_run)
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", flaky_run)
 
     exit_code = await _run_deep(multi_stack_target)
 
@@ -509,7 +503,6 @@ async def test_deep_run_recovers_from_transient_git_timeout(multi_stack_target: 
 async def test_deep_run_reports_persistent_git_timeout_distinctly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A timeout that survives retries is surfaced as a distinct 'Git Timeout'."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 

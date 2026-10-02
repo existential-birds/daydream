@@ -1,11 +1,4 @@
-"""Stage-3 composite integration (M13) + pi-only train backend pin (M24).
-
-The env's scoring path must compose the validated Stage-0 rubric (rubric)
-with the intrinsic composite when an outcome model is configured, and every
-train environment in ``rl/train/`` must pin ``backend = "pi"`` and carry a
-Stage-0 gate report path — the M4 refusal has to hold for the shipped configs,
-not just the loader.
-"""
+"""Verify Stage-0 rubric composition and the shipped training configs' Pi backend and gate-report pins."""
 
 from __future__ import annotations
 
@@ -45,12 +38,10 @@ def mini_taskset(fixture_manifest_path: Path, stage0_gate_report: Path, outcome_
 
 @pytest.fixture
 def rl_train_configs() -> list[dict[str, Any]]:
-    """Every shipped training config, parsed."""
     return [tomllib.loads(p.read_text(encoding="utf-8")) for p in sorted(RL_TRAIN_DIR.glob("*.toml"))]
 
 
 def _stage_run_dir(tmp_path: Path) -> Path:
-    """A minimal archived run dir: merged findings and a manifest."""
     run_dir = tmp_path / "run"
     deep = run_dir / "deep"
     deep.mkdir(parents=True)
@@ -71,19 +62,12 @@ async def test_env_scores_with_stage0_composite(
     mini_taskset: DaydreamReviewTaskset, tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path,
     outcome_model_path: Path,
 ) -> None:
-    """The scoring path composes rubric terms, not intrinsic-only (M13).
-
-    Drives the reward through the production entrypoint (``await task.score``),
-    where ``intrinsic_composite`` composes the Stage-0 rubric only because the
-    per-task config carried ``outcome_model_path``. A caller regression that
-    drops that path before the reward reads it fails here — the asserted
-    ``stage0`` breakdown would be absent and the reward would be intrinsic-only.
+    """Drive task.score with outcome_model_path and require the stage0 breakdown, proving the path survives
+    the loader-to-reward handoff.
     """
     tasks = mini_taskset.load()
     assert tasks, "gate passed but no tasks loaded"
     task = tasks[0]
-    # The taskset stamps outcome_model_path onto each per-task config; the
-    # reward composes rubric only when it actually reads the path (M13).
     assert task.config.outcome_model_path == outcome_model_path
 
     archive_root = tmp_path / "archive"
@@ -102,23 +86,18 @@ async def test_env_scores_with_stage0_composite(
     stage0 = breakdown.get("stage0")
     assert stage0 is not None, ("outcome_model_path was dropped before the reward: no rubric composite composed (M13)"
     )
-    # The scored breakdown carries the rubric terms, not intrinsic-only.
     assert "learned_outcome" in stage0["terms"]
     assert "fp_penalty" in stage0["terms"]
     assert "localization" not in stage0["terms"]
     assert stage0["composite"] is not None
     assert stage0["reward_version"]  # rubric version stamped for provenance
-    # M13: the reward IS the rubric composite (which carries the intrinsic
-    # composite as one weighted term), not the intrinsic-only value.
     assert stage0["terms"]["intrinsic_composite"] is None  # no verifier verdicts in this rollout
     assert trace.rewards["intrinsic_composite"] == stage0["composite"]
 
 def test_stage0_composition_absent_without_model(tmp_path: Path) -> None:
-    """No outcome model configured → no Stage-0 composition (intrinsic-only)."""
     assert stage0_composite_terms(Path(""), _stage_run_dir(tmp_path)) is None
 
 def test_backend_config_pi_only(rl_train_configs: list[dict[str, Any]]) -> None:
-    """M24: only pi may be configured for training runs."""
     checked = 0
     for cfg in rl_train_configs:
         envs: list[dict[str, Any]] = cfg.get("orchestrator", {}).get("train", {}).get("env", [])
@@ -128,7 +107,6 @@ def test_backend_config_pi_only(rl_train_configs: list[dict[str, Any]]) -> None:
     assert checked >= 1, "no train env found — the backend pin test must not pass vacuously"
 
 def test_train_envs_carry_stage0_gate(rl_train_configs: list[dict[str, Any]]) -> None:
-    """M4 at the config level: shipped train envs name a Stage-0 gate report."""
     checked = 0
     for cfg in rl_train_configs:
         envs: list[dict[str, Any]] = cfg.get("orchestrator", {}).get("train", {}).get("env", [])

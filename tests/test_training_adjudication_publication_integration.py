@@ -149,8 +149,7 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
     assert rebuilt_curation == curation_id
     materialized = _materialize_vm(vm2, stage, pin, capsys)
     assert json.loads((materialized / "preview-manifest.json").read_text()) == pin
-    # Literal runbook branch: restored history owns the archive when present;
-    # otherwise the exact rehydrated source index supplies the run identities.
+    # Restored archive history takes precedence over hydrated-source history.
     archive = state if (state / "index.db").is_file() else stage
     assert (archive == state) is import_history
     _run_cli(["adjudicate", "harvest-snapshot", "--index-root", str(stage),

@@ -1,15 +1,9 @@
-"""Single source of truth for finding severity vocabulary and policy.
+"""Canonical severity vocabulary and explicit boundary normalization.
 
-Leaf module: it must not import from any other daydream module, so it stays
-importable everywhere in the pipeline. ``CANONICAL_LEVELS`` is the only
-declaration of the levels.
-
-P6 rule: off-vocabulary severity values are never silently passed through. A
-boundary site that encounters an unknown or absent value must map it explicitly
-(via :func:`normalize_severity`, which returns ``None`` for unknown/absent) and
-decide what that means in its own context. A missing severity stays ``None`` on
-report and approval paths (``None`` deliberately does not block approval); the
-only ``"high"`` default permitted is the structural-lens ``setdefault``.
+This leaf module must not import other daydream modules. CANONICAL_LEVELS owns
+the levels; normalize_severity returns None for unknown or absent values.
+Each boundary decides how to handle None: report/approval paths preserve it
+without blocking approval; only the structural lens may default to high.
 """
 
 from typing import Literal, TypeAlias
@@ -68,12 +62,9 @@ rubric to profile override.
 
 
 def normalize_severity(value: object) -> str | None:
-    """Normalize a severity value to the canonical vocabulary.
+    """Return a canonical lowercase level, tolerating case and whitespace.
 
-    Returns the canonical lowercase value for known levels (case- and
-    whitespace-tolerant), and ``None`` for unknown, non-string, or absent
-    values. Callers must handle ``None`` explicitly — an unknown value is
-    never mapped implicitly.
+    Unknown, non-string, or absent values return None for explicit caller handling.
     """
     if not isinstance(value, str):
         return None
@@ -87,15 +78,10 @@ def is_high_severity(value: object) -> bool:
 
 
 def stronger_severity(a: object, b: object) -> str | None:
-    """Return the more severe of two severity values.
+    """Return the stronger canonical input when folding duplicate findings.
 
-    Both inputs go through :func:`normalize_severity`, so an unknown or absent
-    value never wins and is never fabricated into a level: when only one side is
-    canonical that side is returned, and when neither is, the result is ``None``.
-
-    Used where two findings that describe one defect are folded into a single
-    reported finding and the survivor must not be demoted below either input
-    (issue #1103).
+    Normalize both inputs; unknown/absent values cannot win or fabricate a level.
+    Return None only when neither input is canonical.
     """
     left = normalize_severity(a)
     right = normalize_severity(b)

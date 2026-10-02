@@ -1,9 +1,6 @@
-"""Offline end-to-end hydrate tests over a local fake Hub snapshot (M22).
+"""Offline hydration, interruption recovery, confinement, and bronze immutability.
 
-No network: the snapshot is materialized in-memory by build_hub_snapshot.py and
-served by hydrate_client.FakeHub. Scenarios: clean import, interruption/resume,
-identity collision, path traversal, deterministic re-index — plus bronze
-immutability (M10).
+FakeHub serves the locally built snapshot through the production pipeline.
 """
 from __future__ import annotations
 
@@ -33,9 +30,7 @@ def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_resolver(monkeypatch)
 
 def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
-    """Probe the production post-gate v2 identity derivation (issue #1094):
-    the pipeline's curation id comes from the resolved policy binding, not
-    the historical v1 derivation, so resume probing must use the same path."""
+    """Derive the resume prefix through the production license gate and policy binding."""
     stage = tmp_path / "identity-probe"
     hydrate.download_snapshot(hub, revision=REVISION, stage_dir=stage / "downloads")
     hydrate.ingest_bundles(stage, revision=REVISION)
@@ -113,12 +108,9 @@ class TestInterruptionResume:
         assert len(query_runs(stage)) == 3  # no duplicate sessions after resume
 
     def test_resume_between_publish_and_finalize_proceeds(self, hub: FakeHub, tmp_path: Path) -> None:
-        """A v2 run killed between publish_batches and finalize resumes cleanly.
+        """Resume published v2 batches whose policy binding was not yet finalized.
 
-        The interrupted prefix has published batches + a resume ledger but no
-        policy-binding record; the pre-publish check must treat that window as
-        the documented interrupted-v2 case (allow_unbound_resume), not as a
-        pre-v2 legacy prefix, or the resume is blocked with a misdiagnosis.
+        The remote ledger identifies interrupted publication rather than a legacy prefix.
         """
         stage = tmp_path / "stage"
 

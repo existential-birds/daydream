@@ -1,8 +1,4 @@
-"""Stage-0 gate refusal (M4): a Stage-3 run may not start without gate evidence.
-
-Every path here is fail-closed: a missing, unreadable, or failed gate report
-refuses the run and names the reason. There is no default-to-allowed branch.
-"""
+"""A Stage-3 run requires readable, passing Stage-0 gate evidence; refusals name the reason."""
 
 from __future__ import annotations
 
@@ -60,7 +56,6 @@ def test_start_allowed_on_passed_gate(tmp_path: Path) -> None:
     assert report["evidence_digest"] == "abc"
 
 def test_checkpoint_bound_to_passed_report(tmp_path: Path) -> None:
-    """The fixture pair (report + matching checkpoint) passes the binding."""
     report = _bound_gate_report()
     require_outcome_model_bound(report, _write_checkpoint(tmp_path))  # no raise
 
@@ -165,16 +160,12 @@ def _build_projection(tmp_path: Path) -> Path:
 
 
 def test_coordinator_gate_report_is_consumed_unmodified(tmp_path: Path) -> None:
-    """Stage-boundary contract audit: the gate-report.json the coordinator's
-    Stage-0 stage writes must satisfy require_stage0_gate verbatim — no
-    reshaping at the handoff, no nested wrapper that reads as passed=None."""
+    """Consume the coordinator's Stage-0 report verbatim, without reshaping or wrapping it."""
     from daydream.training.coordinator import PipelineConfig, run_pipeline
 
     projection = _build_projection(tmp_path)
     run_pipeline(PipelineConfig(projection=projection, out_dir=tmp_path, stages=("stage0",)), dry_run=True)
     report_path = tmp_path / "stage0" / "gate-report.json"
-    # The behavioral contract: the on-disk gate-report.json (manifest "gate" and the
-    # file both derive from the same report.to_dict(), so a manifest-vs-file digest
-    # comparison is tautological) must satisfy the Stage-3 boundary consumer verbatim.
+    # Consume the actual report; comparing two serializations of one object would be tautological.
     report = require_stage0_gate(gate_report_path=report_path)  # no raise
     assert report["passed"] is True

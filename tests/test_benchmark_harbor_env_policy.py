@@ -75,19 +75,16 @@ _EXPECTED_DROPPED_EVERYWHERE = frozenset({
 
 
 def test_renderer_anthropic_placeholders_equal_the_claude_keep_set() -> None:
-    """M7(a): rendered agent env and host Claude exemptions must agree."""
     env = yaml.safe_load(render_job_config(oracle=False).decode())["agents"][0]["env"]
     assert {k for k in env if k.startswith(env_policy.CLAUDE_KEEP_PREFIX)} == set(env_policy.HOST.claude_keep_vars)
 
 def test_every_rendered_reviewer_placeholder_is_a_declared_operator_channel_name() -> None:
-    """M7(b): the renderer emits exactly the operator-supplied reviewer names."""
     env = yaml.safe_load(render_job_config(oracle=False).decode())["agents"][0]["env"]
     operator_names = {n for n, provenance in env_policy.REVIEWER_CONTROL_PLANE.items() if provenance == "operator"}
     assert operator_names <= set(env)
     assert {n for n in env if n in env_policy.REVIEWER_CONTROL_PLANE} == operator_names
 
 def test_judge_asset_declared_names_are_owned_by_the_judge_channel() -> None:
-    """M7(c): compare the packaged judge asset's names with its policy channel."""
     text = template_text("tests/score_review.py")
     declared = set(re.findall(r'^_[A-Za-z_]+ = "([A-Z][A-Z0-9_]*)"', text, re.M))
     assert declared == {"DAYDREAM_JUDGE_PROVIDER", "DAYDREAM_JUDGE_MODEL", "DAYDREAM_JUDGE_API_KEY",
@@ -99,7 +96,6 @@ def test_judge_asset_declared_names_are_owned_by_the_judge_channel() -> None:
 
 @pytest.mark.parametrize("prefix", sorted(env_policy.HOST.banned_prefixes))
 def test_host_builder_denies_each_declared_banned_prefix(prefix: str) -> None:
-    """M7(d): each host deny prefix is enforced by its consumer."""
     child = build_child_env({"PATH": "/usr/bin", f"{prefix}PROBE": "secret"}, backend="pi")
     assert f"{prefix}PROBE" not in child
 
@@ -118,12 +114,10 @@ def test_claude_exemption_is_exactly_the_declared_exempt_set() -> None:
     assert not [k for k in build_child_env(parent, backend="pi") if k.startswith("ANTHROPIC_")]
 
 def test_oracle_render_path_applies_no_policy_view() -> None:
-    """S3: the oracle path remains env-free."""
     oracle = yaml.safe_load(render_job_config(oracle=True).decode())
     assert oracle["agents"] == [{"name": "oracle"}]
 
 def test_every_declared_name_has_a_recorded_outcome() -> None:
-    """Adding a name to the declaration without recording its outcome fails here."""
     recorded = (set().union(*_EXPECTED_HOST_KEEP.values())
         | set().union(*_EXPECTED_CONTAINER_KEEP.values())
         | _EXPECTED_RENDERER_PRESENT
@@ -149,7 +143,6 @@ def test_rendered_job_config_table(backend: str) -> None:
     assert present & (env_policy.declared_names() | _PROBES) == _EXPECTED_RENDERER_PRESENT
 
 def test_task_toml_renderer_derives_its_injected_env_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """The [environment.env] block is built from the declaration's injection channel."""
     extended = replace(env_policy.TASK,
         injected=MappingProxyType({**env_policy.TASK.injected, "DAYDREAM_REVIEW_PROBE": "{opaque_key}"}),
     )
@@ -171,7 +164,6 @@ def test_harbor_layers_declare_no_policy_name_literal() -> None:
         assert offenders == [], f"{module.__name__} restates policy names: {offenders}"
 
 def test_job_config_renderer_derives_its_env_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """A placeholder added to the declaration reaches the rendered bytes (spec M2)."""
     extended = replace(env_policy.RENDERER,
         judge_placeholders=MappingProxyType(
             {**env_policy.RENDERER.judge_placeholders, "DAYDREAM_JUDGE_PROBE": "${DAYDREAM_JUDGE_PROBE:-}"}
@@ -194,7 +186,6 @@ def test_rendered_env_key_order_is_unchanged() -> None:
     ]
 
 def test_container_sanitiser_derives_its_sets_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """Changing the declaration's container view changes the sanitised map (spec M2)."""
     extended = replace(env_policy.CONTAINER, scrub_prefixes=env_policy.CONTAINER.scrub_prefixes | {"PROBE_"})
     monkeypatch.setattr(env_policy, "CONTAINER", extended)
     sanitized = _sanitize_reviewer_environment(
@@ -204,7 +195,6 @@ def test_container_sanitiser_derives_its_sets_from_the_declaration(monkeypatch: 
     assert "PROBE_X" not in sanitized
 
 def test_host_builder_derives_its_sets_from_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """Changing the host view changes the builder's output, without a private copy."""
     extended = replace(env_policy.HOST, required_process_vars=env_policy.HOST.required_process_vars | {"PROBE_VAR"})
     monkeypatch.setattr(env_policy, "HOST", extended)
     child = build_child_env({"PATH": "/usr/bin", "PROBE_VAR": "kept"})
@@ -218,7 +208,6 @@ def test_declaration_is_a_leaf_module() -> None:
     assert imported <= {"__future__", "collections.abc", "dataclasses", "types", "typing"}
 
 def test_host_channel_declares_the_host_child_env_sets() -> None:
-    """The host channel is today's fail-closed allowlist, verbatim."""
     host = env_policy.HOST
     assert env_policy.REVIEW_CHANNEL_PREFIX == "DAYDREAM_REVIEW_"
     assert host.posture == "allowlist"
@@ -236,7 +225,6 @@ def test_host_channel_declares_the_host_child_env_sets() -> None:
     assert host.claude_exempt_prefix == "ANTHROPIC_"
 
 def test_container_channel_declares_the_container_scrub_sets() -> None:
-    """The container channel is today's scrub-list posture, verbatim (spec D3)."""
     container = env_policy.CONTAINER
     assert container.posture == "scrub-list"
     assert container.github_credential_vars == frozenset({

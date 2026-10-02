@@ -67,15 +67,12 @@ def test_workspace_lock_acquire_release(tmp_path: Path) -> None:
     with WorkspaceLock(tmp_path):
         lock_file = tmp_path / ".benchmark.lock"
         assert lock_file.exists()
-    # released: re-acquirable
     with WorkspaceLock(tmp_path):
         pass
 
 def test_workspace_lock_contention_is_explicit(tmp_path: Path) -> None:
-    # A second exclusive holder on a SEPARATE open file description must be
-    # surfaced explicitly, never silently ignored. Use a non-blocking probe so
-    # this cannot deadlock against the first holder's flock (flock conflicts
-    # across open file descriptions even within one process).
+    # Separate open file descriptions conflict even within one process.
+    # Probe without blocking to avoid deadlocking on the first holder.
     first = WorkspaceLock(tmp_path)
     first.__enter__()
     try:
@@ -269,12 +266,8 @@ def test_referenced_missing_file_is_corruption(tmp_path: Path) -> None:
         recover_startup(tmp_path, indexed={"cases/pr-000001-abcdef012345.yaml"}, on_disk=set())
 
 def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Path) -> None:
-    # For each named boundary, drive a transaction that injects a crash there,
-    # then recover_startup and assert the workspace is either the complete
-    # before-state or the complete after-state — never checksum drift. Each
-    # boundary advances the journal to its own distinct position (open staging
-    # vs prepared vs committing vs complete) rather than blanket-preparing, so
-    # the after-recovery (complete) branch is exercised too.
+    # Assert each durable state before recovery, including complete-before-cleanup,
+    # so every boundary exercises its actual recovery branch.
     for boundary in ("staged", "backup", "journal", "data", "manifest"):
         target = tmp_path / f"t-{boundary}.yaml"
         target.write_text("before")
@@ -297,14 +290,10 @@ def test_crash_injection_at_every_boundary_restores_before_or_after(tmp_path: Pa
                 assert (op_dir / "backup-0000.bin").exists()
         recover_startup(tmp_path)
         if boundary in ("staged", "backup"):
-            # Crash before the journal is written: recovery has nothing to do
-            # and leaves the pristine target untouched.
             assert target.read_text() == "before"
         elif boundary in ("journal", "data"):
-            # Prepared/committing journals roll back to the whole before-state.
             assert target.read_text() == "before"
         else:  # manifest
-            # A complete journal is verified against the after-state and kept.
             assert target.read_text() == "after"
         assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
@@ -344,9 +333,7 @@ def test_unidentifiable_residue_is_corruption_and_left_untouched(tmp_path: Path)
     assert (op / "foreign.txt").read_text() == "not residue"  # left untouched, never guessed/deleted
 
 def test_import_crash_transaction_restores_before_or_after(tmp_path: Path) -> None:
-    # The import writes {import file, case, benchmark.yaml} as one atomic unit.
-    # Driving crater recovery across that whole set proves a crash at any
-    # boundary leaves the complete before- or after-state, never a mix.
+    # Import, case, and manifest must recover as one atomic unit.
     for boundary in ("journal", "data", "manifest"):
         imp = tmp_path / "imports" / "pr-000101.json"
         case = tmp_path / "cases" / "pr-000101-aaaaaaaaaaaa.yaml"
@@ -486,8 +473,7 @@ def test_disjoint_transactions_both_recover(tmp_path: Path) -> None:
     assert t1.read_text() == "a-before" and t2.read_text() == "b-before"
 
 def test_empty_transactions_never_follows_symlink(tmp_path: Path) -> None:
-    # A journaled op dir exists so recover_startup reaches _empty_transactions,
-    # plus a symlink under transactions/ that must NOT be followed or deleted.
+    # A journaled operation ensures recovery reaches _empty_transactions.
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "precious.txt").write_text("keep me")
@@ -501,8 +487,7 @@ def test_empty_transactions_never_follows_symlink(tmp_path: Path) -> None:
     assert (tmp_path / "transactions" / "op-link").is_symlink()  # never removed
 
 def test_empty_transactions_removes_only_positive_residue(tmp_path: Path) -> None:
-    # Journaled dir is cleaned by _recover_one_journal; a leftover positively-
-    # identified residue dir is removed; a foreign file is left untouched.
+    # Mix a journal, recognized staging residue, and an unrecognized foreign file.
     with Transaction(tmp_path, op_id="op-j", kind="write") as tx:
         _stage(tx, tmp_path / "a.yaml", "x")
         tx.prepare()
@@ -517,7 +502,6 @@ def test_empty_transactions_removes_only_positive_residue(tmp_path: Path) -> Non
     assert (foreign / "note.txt").read_text() == "keep"  # foreign left untouched
 
 def test_multi_target_each_per_target_boundary_restores_all_old(tmp_path: Path) -> None:
-    # 3 targets; halt after each individual durable rename/fsync boundary.
     for n in range(0, 4):  # after applying 0, 1, 2, 3 of the 3 targets
         root = tmp_path / f"ws-{n}"
         root.mkdir()
@@ -614,18 +598,14 @@ def test_complete_restart_recovery_is_idempotent(tmp_path: Path) -> None:
     assert t.read_text() == "new"
 
 def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path: Path) -> None:
-    """Recovery consumes the canonical rel the validator computed, never the
-    raw journal string -- a crafted non-canonical-but-inside-root target rel
-    must still be rolled back, not silently skipped (all-or-nothing)."""
+    """A noncanonical in-root journal path must roll back via its canonical target."""
     target = tmp_path / "target.yaml"
     target.write_text("old")
     with Transaction(tmp_path, op_id="op-noncanon", kind="write") as tx:
         _stage(tx, target, "new")
         tx.prepare()
         tx.begin_commit()   # state=committing, applied_count=1, target -> "new"
-    # Corrupt the journal target rel to a non-canonical form that still
-    # resolves inside root; keep replacement_order canonical (as the
-    # validator's rels set is built from _resolve_target).
+    # Change only the raw target spelling; replacement_order remains canonical.
     jf = tmp_path / "transactions" / "op-noncanon" / "journal.json"
     doc = load_json_strict(jf)
     doc["targets"][0]["rel"] = "./target.yaml"
@@ -636,8 +616,7 @@ def test_recovery_trusts_canonical_rel_not_raw_doc_rel(tmp_path: Path) -> None:
     assert target.read_text() == "old"  # restored from backup, not skipped
 
 def test_empty_prejournal_dir_fails_closed_and_left_untouched(tmp_path: Path) -> None:
-    """A genuinely empty dir under transactions/ is not positively-identified
-    residue -- recovery fails closed and never deletes what it can't identify."""
+    """An empty directory is not enough evidence to identify transaction residue."""
     op = tmp_path / "transactions" / "op-empty"
     op.mkdir(parents=True)
     with pytest.raises(WorkspaceCorrupt):

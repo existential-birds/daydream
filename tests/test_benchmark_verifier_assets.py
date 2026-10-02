@@ -239,11 +239,6 @@ def test_location_tolerance_meets_floor() -> None:
     assert vc.LOCATION_TOLERANCE >= 3  # below 3 measures the snapper, not the reviewer (R2)
 
 def test_range_distance_cannot_drift_from_hunk_index() -> None:
-    """Lock the deployed verifier's private ``_range_distance`` to the shared
-    primitive in ``daydream/hunk_index.py`` (its documented source of truth,
-    ``verifier_core.py``/``hunk_index.py``): benchmark location-tier scoring
-    must never silently diverge from the product's near-line notion."""
-
     cases: list[tuple[int, int, int]] = [
         (1, 5, 10),   # below the range -> distance to the start boundary
         (4, 5, 10),   # one line below start
@@ -260,9 +255,6 @@ def test_range_distance_cannot_drift_from_hunk_index() -> None:
         assert vc._range_distance(line, start, end) == hunk_range_distance(line, start, end)
 
 def test_render_metric_loads_colocated_canonical_and_matches_host(tmp_path: Path,) -> None:
-    """The rendered metric must obtain aggregate_metrics by loading the colocated
-    canonical verifier_core.py from the stage root — not from a spliced body."""
-
     stage = tmp_path / "stage"
     stage.mkdir()
     (stage / "metric.py").write_bytes(build.render_metric())
@@ -315,9 +307,6 @@ def test_aggregate_metrics_axis_absent_is_zero_pairs_not_raise() -> None:
     assert m["location_exact_rate"] == 0.0  # absent axis = missing signal, not 1.0
 
 def test_deployed_scoring_surfaces_are_stdlib_only_and_daydream_free() -> None:
-    """Both deployed scoring surfaces — the rendered metric and the colocated
-    canonical copy — must stay stdlib-only and free of any ``daydream`` import."""
-
     metric_text = build.render_metric().decode("utf-8")
     canonical = (REPO / "daydream" / "benchmark" / "harbor" / "verifier_core.py").read_text()
     for surface_name, text in (("metric", metric_text), ("canonical", canonical)):

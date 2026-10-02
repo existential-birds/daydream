@@ -1,16 +1,7 @@
-"""Real-path tests for the ``daydream post-findings`` verb.
+"""Exercise post-findings through cli.main with real Git and JSON processing.
 
-Every test enters from ``cli.main`` (sys.argv patched — the production
-entrypoint) with ``gh`` faked in-process at the ``subprocess.run`` boundary
-(``tests/harness/fake_gh.py``), so ``git_ops._run_gh``, the ``gh_api``
-tempfile-``--input`` path, and JSON parsing all run for real. Only the
-GitHub network boundary (the ``gh`` process) is faked — synchronously, with
-no fork and no clock, so these tests are deterministic under any host load.
-
-Assertions are on observable outcomes: exit codes, the review payloads that
-crossed the ``gh`` boundary, and the GraphQL mutations issued — never on
-in-process bookkeeping.
-"""
+Only the gh subprocess boundary is faked. Assertions inspect exit codes,
+posted review payloads, and GraphQL mutations."""
 
 from __future__ import annotations
 
@@ -182,17 +173,11 @@ def artifact_on_disk_second(tmp_path: Path) -> Path:
     )
 
 def test_post_findings_body_names_cli_head_sha(fake_gh: FakeGh, artifact_on_disk: Path) -> None:
-    """M3 CI path: the posted body's reviewed-commit line names the
-    --head-sha given on the CLI (validated event data), never the
-    artifact's untrusted run_info string."""
     assert cli_main(_post_argv(artifact_on_disk)) == 0
     body = fake_gh.calls("POST", "/repos/o/r/pulls/7/reviews")[0].payload["body"]
     assert ("- **Reviewed commit:** [`hhhhhhh`]" "(https://github.com/o/r/commit/" + "h" * 40 + ")") in body
 
 def test_post_findings_ignores_artifact_run_info_sha(fake_gh: FakeGh, tmp_path: Path) -> None:
-    """The CLI --head-sha wins: a different 40-char SHA embedded in the
-    artifact's run_info string must never appear in the reviewed-commit
-    line — not even as a fully formatted forged line (issue 2)."""
     artifact = _write_artifact(tmp_path / "findings.json", [_inline_finding("Inline finding")],
         run_info=("run from commit "
             + "a" * 40
@@ -249,12 +234,6 @@ def test_malformed_artifact_aborts(fake_gh: FakeGh, tmp_path: Path) -> None:
     assert rc == 1 and fake_gh.calls("POST") == []
 
 def test_malformed_repo_config_warns_and_still_posts(fake_gh: FakeGh, tmp_path: Path,) -> None:
-    """A malformed .daydream.toml in the checkout must not abort the unattended post.
-
-    post-findings never consulted the repo config before issue #343; the new
-    approve-on-clean lookup is best-effort, so a malformed TOML degrades to a
-    warning plus the CLI flag instead of a Fatal Error (exit 1).
-    """
     (tmp_path / ".daydream.toml").write_text("this is [not valid toml ==")
     artifact = _write_single_finding_artifact(tmp_path, "a" * 64)
     code = cli_main(_post_argv(artifact, target=tmp_path))
@@ -299,7 +278,6 @@ def test_bot_login_env_fallback(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh
 def test_post_findings_approve_on_clean_reflects_finding_severity(
     fake_gh: FakeGh, tmp_path: Path, severity: str, expected_event: str, expect_clean_marker: bool,
 ) -> None:
-    """--approve-on-clean approves only when no high/medium finding remains."""
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Finding", severity=severity)],)
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean"])
     assert code == 0
@@ -309,13 +287,6 @@ def test_post_findings_approve_on_clean_reflects_finding_severity(
     assert ("no high/medium findings" in posts[0].payload["body"]) is expect_clean_marker
 
 def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
-    """F2: an all-matched clean artifact + --approve-on-clean still posts APPROVE.
-
-    The post-findings spine previously returned 0 on its unconditional empty
-    guard, so a re-run with nothing new to comment on never posted the
-    approval and ``required_approving_review_count`` stayed unsatisfied — the
-    headline two-phase CI use case.
-    """
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
     code = cli_main(_post_argv(artifact) + ["--approve-on-clean", "--bot-login", "daydream"])
@@ -326,7 +297,6 @@ def test_post_findings_approve_when_all_matched_and_clean_flag(fake_gh: FakeGh, 
     assert "no high/medium findings" in posts[0].payload["body"]
 
 def test_post_findings_all_matched_no_approve_without_flag(fake_gh: FakeGh, tmp_path: Path) -> None:
-    """F2: without --approve-on-clean the same all-matched artifact posts nothing."""
     artifact = _write_artifact(tmp_path / "f.json", [_inline_finding("Nit", severity="low")],)
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True)
     code = cli_main(_post_argv(artifact) + ["--bot-login", "daydream"])
@@ -412,12 +382,7 @@ def test_post_findings_drops_diagram_evidence_absent_from_immutable_head(
 def test_post_findings_drops_a_citation_absent_from_the_local_checkout(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A local read git itself names as a missing path IS an absent citation.
-
-    Guards the ``git show`` half of ``unreadable()`` — git answers "does not
-    exist in <sha>", which proves absence, so the verdict must not degrade to
-    "could not be read".
-    """
+    """An explicit missing-path Git response proves absence, rather than unreadability."""
     (git_repo / "b.py").write_text("def other():\n    return 1\n")
     git(git_repo, "add", "b.py")
     head_sha = commit(git_repo, "head without the cited file")
@@ -433,12 +398,7 @@ def test_post_findings_drops_a_citation_absent_from_the_local_checkout(
 def test_post_findings_reports_a_damaged_local_object_as_unreadable_not_missing(
     fake_gh: FakeGh, git_repo: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A local read that fails for any other reason is the poster's problem.
-
-    The checkout holds the head commit and the citation, but its blob is gone
-    from the object store, so ``git show`` fails without naming a missing
-    path. Blaming the artifact for that sends an operator hunting a forgery.
-    """
+    """A missing local blob is a reader failure, not evidence of a forged citation."""
     (git_repo / "a.py").write_text("def run():\n    return 1\n")
     git(git_repo, "add", "a.py")
     head_sha = commit(git_repo, "add flowchart source")
@@ -486,7 +446,6 @@ def _contents_calls(fake_gh: FakeGh) -> list[str]:
     return [call.endpoint for call in fake_gh.calls("GET") if call.endpoint.startswith("repos/o/r/contents/")]
 
 def test_post_findings_posts_flowchart_evidence_read_without_a_checkout(fake_gh: FakeGh, tmp_path: Path,) -> None:
-    """The regression: an empty (non-repository) target must still post."""
     _serve_contents(fake_gh, "a.py", "def run():\n    return 1\n")
     artifact = _api_head_artifact(tmp_path)
 
@@ -499,7 +458,6 @@ def test_post_findings_posts_flowchart_evidence_read_without_a_checkout(fake_gh:
     assert "```mermaid" in posts[0].payload["body"]
 
 def test_post_findings_posts_sequence_evidence_read_without_a_checkout(fake_gh: FakeGh, tmp_path: Path,) -> None:
-    """The sequence branch re-grounds a snapshot built from the same API reads."""
     _serve_contents(fake_gh, "api.py",
         "from worker import worker\ndef api():\n    worker()\n    if enabled:\n        worker()\n",
     )
@@ -538,12 +496,6 @@ def test_post_findings_reads_oversized_evidence_through_the_blob_endpoint(fake_g
 def test_post_findings_drops_api_evidence_that_contradicts_the_spec(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Issue #1176: the contradicted diagram is dropped, the findings still post.
-
-    Evidence fetched over the API is adjudicated exactly as a checkout's is,
-    but a rejected diagram costs only the diagram — the review that carries
-    the artifact's validated findings is posted without a mermaid block.
-    """
     _serve_contents(fake_gh, "a.py", "x = 1\n")  # no `run` definition, one line
     artifact = _api_head_artifact(
         tmp_path, [_finding("a" * 64, path="a.py", line=1, placement="inline", title="Real finding")],
@@ -573,13 +525,10 @@ def test_post_findings_classifies_api_head_reads(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], label: str, response: dict[str, str],
     present_message: str, absent_message: str,
 ) -> None:
-    """A head read is missing only when the API positively proves absence.
+    """Only positive absence evidence (404 or non-file) means missing.
 
-    A 404 and a non-file response are proofs of absence; a rate-limited read is
-    the poster's problem, not a forged citation. In every case the artifact
-    carries no findings, so the run reaches the no-new-findings short-circuit --
-    not the old fail-closed diagram gate (#1176) -- and posts no review.
-    """
+    Rate limits mean unreadable. With no findings, all cases reach the ordinary
+    no-new-findings short-circuit and post no review."""
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
     artifact = _api_head_artifact(tmp_path)
 
@@ -594,13 +543,9 @@ def test_post_findings_classifies_api_head_reads(
 def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A path no read could be attempted for is the artifact's defect.
+    """A trailing newline can pass schema re.search but must fail path fullmatch.
 
-    The spec schema applies its ``pattern`` with ``re.search``, whose ``$``
-    matches before a trailing newline, so ``a.py\\n`` reaches the fullmatch in
-    ``_HeadEvidence.read`` and fails it. No read happened, so the verdict must
-    name the bad path rather than report the poster as unable to read.
-    """
+    No head read occurred; attribute the bad path to the artifact."""
     payload = _flowchart_payload()
     flowchart = payload["results"]["flowchart"]
     flowchart["spec_final"]["root"]["file"] = "a.py\n"
@@ -630,12 +575,7 @@ def test_post_findings_blames_the_artifact_for_a_malformed_citation_path(
 def test_post_findings_reports_an_unreadable_api_head_as_unreadable(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str], label: str, response: dict[str, str],
 ) -> None:
-    """Every contents-API failure that is not proven absence reads as unreadable.
-
-    Two of these never reach ``_gh_error_for`` as a recognizable status (the
-    undecodable body is raised by ``_parse_gh_json``), which is why absence is
-    claimed only where the read positively proved it.
-    """
+    """Unrecognized API statuses and undecodable bodies cannot prove citation absence."""
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value=response)
     artifact = _api_head_artifact(tmp_path)
 
@@ -649,11 +589,6 @@ def test_post_findings_reports_an_unreadable_api_head_as_unreadable(
 def test_post_findings_posts_findings_when_an_unreadable_diagram_is_dropped(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Issue #1176 for the unreadable half: a throttled read costs only the diagram.
-
-    The poster's own inability to read head evidence must not discard findings
-    that passed schema, fingerprint and event-fact validation.
-    """
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
     )
     artifact = _api_head_artifact(
@@ -674,12 +609,6 @@ def test_post_findings_posts_findings_when_an_unreadable_diagram_is_dropped(
 def test_post_findings_minimizes_stale_threads_on_a_degraded_artifact(
     fake_gh: FakeGh, tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A degraded artifact takes the ordinary no-diagram path, minimization included.
-
-    Documented consequence of the #1176 degrade: the run no longer returns
-    above ``fetch_prior_findings``, so an empty findings list reconciles as it
-    always has and the bot's own resolved threads are minimized.
-    """
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
     )
     fake_gh.serve_prior_threads(fingerprints=["a" * 64], thread_ids=["RT_1"], viewer_did_author=True,)
@@ -692,11 +621,6 @@ def test_post_findings_minimizes_stale_threads_on_a_degraded_artifact(
     assert "Diagram dropped (the findings are still posted)" in _console_text(capsys)
 
 def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeGh, tmp_path: Path,) -> None:
-    """Documented consequence of the #1176 degrade: APPROVE becomes reachable.
-
-    ``can_approve`` reads findings only, never diagrams, so a low-severity-only
-    artifact whose diagram was dropped approves exactly as a diagram-less one.
-    """
     fake_gh.set_response("GET", "repos/o/r/contents/a.py", value={"__error__": "gh: HTTP 403: API rate limit exceeded"},
     )
     artifact = _api_head_artifact(
@@ -712,13 +636,6 @@ def test_post_findings_approves_on_clean_with_a_degraded_artifact(fake_gh: FakeG
     assert "```mermaid" not in posts[0].payload["body"]
 
 def test_post_findings_matched_high_blocks_approval(fake_gh: FakeGh, tmp_path: Path) -> None:
-    """F2b: a still-live matched high finding blocks APPROVE.
-
-    The approval decision must count the severities of already-posted
-    (matched) findings, not just the new ones: a re-run whose only NEW
-    finding is low must not post APPROVE over the bot's own open high finding
-    on the PR.
-    """
     artifact = _write_artifact(tmp_path / "f.json",
         [_inline_finding("Old high finding"),
             _finding("b" * 64, path="b.py", line=5, placement="inline", title="New nit", severity="low",),

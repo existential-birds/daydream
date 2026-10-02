@@ -14,11 +14,12 @@ from daydream import git_ops
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.config_file import load_file_config
 from daydream.deep.artifacts import deep_dir
-from daydream.deep.fix_steps import FixCycleState, capture_retained_tree
+from daydream.deep.fix_state import FixCycleState, capture_retained_tree
 from daydream.extensions import Registry
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
-from daydream.runner import RunConfig, run as _run
+from daydream.run_config import RunConfig
+from daydream.runner import run as _run
 from tests.harness.git_helpers import (
     commit as _commit,
     git as _git,
@@ -123,13 +124,7 @@ def _iter_run_payloads(run_root: Path, traj: Path) -> Iterator[dict[str, Any]]:
 
 
 def _scan_trajectory_extra(run_root: Path, traj: Path, key: str, *, phase: str | None = None) -> list[str]:
-    """Collect ``step["extra"][key]`` across every trajectory JSON written for a run.
-
-    An aborted/forked turn writes sibling trajectory files under the per-run dir, so
-    scan all ``*.json`` beneath ``run_root`` plus the top-level ``traj`` path. When
-    *phase* is set, only steps whose ``daydream_phase`` matches are considered.
-    Returns only truthy values, in discovery order.
-    """
+    """Collect truthy extra values from main and fork trajectories, optionally filtering phase."""
     values: list[str] = []
     for payload in _iter_run_payloads(run_root, traj):
         for step in payload.get("steps", []):
@@ -178,14 +173,7 @@ def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
 
 
 def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict[str, Any]]:
-    """Single-finding ``phase_fix`` calls whose ``File:`` line names *file_basename*.
-
-    Robust to issue #336's "Allowed files" clause, which legitimately lists every
-    reviewed-diff file in every prompt: a substring check like
-    ``"api.py" in prompt`` would over-count by also matching the App.tsx prompt
-    (whose allowed-files clause names api.py). Filtering on the ``File:`` line
-    captures only the calls actually fixing *file_basename*.
-    """
+    """Match a fix prompt's primary File line, ignoring sibling paths in Allowed files."""
     out: list[dict[str, Any]] = []
     for c in stub.calls:
         prompt = c["prompt"]
@@ -198,15 +186,9 @@ def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict
 
 
 def _install_accept_gate_pipeline(monkeypatch: pytest.MonkeyPatch, target: Path, mute: Mute) -> _StubBackend:
-    """Patch the deep pipeline for a fix-gate-ACCEPT run.
+    """Accept the interactive fix gate, silence UI, and stub post/test/commit side effects.
 
-    Bundles the setup every accept-the-gate test shares: pin the interactive
-    stdin/CI axis so a forced accept is honoured, silence the deep UI noise
-    (including the recommendation verification summary), force every
-    ``prompt_user`` seam to ``"y"`` (belt-and-suspenders alongside
-    ``assume="yes"``, which short-circuits the gate before any prompt runs),
-    and stub the non-idempotent PR-post / test / commit steps. ``phase_fix``
-    stays REAL. Returns the stub backend.
+    phase_fix stays real; return the installed backend.
     """
     _force_interactive(monkeypatch)
     _silence(monkeypatch, prompts=False)
@@ -320,12 +302,10 @@ def _high_record(**overrides: Any) -> dict[str, Any]:
 
 
 def _prime_uid_merge_resume(target: Path, python: list[dict[str, Any]]) -> Path:
-    """Prime a merge resume whose only arbiter-eligible records are *python*'s.
+    """Prime a resume with only Python eligible for arbitration.
 
-    Unlike ``_prime_merge_resume_records`` the structural record sits at
-    ``api.py:5``, alone at that location: the contested-location branch would
-    otherwise pull both it and the python record into arbitration whenever their
-    severities diverge, which muddies "exactly this record was adjudicated".
+    The structural record occupies api.py:5 alone so contested-location selection
+    cannot pull it into the pass.
     """
     return _prime_merge_resume(
         target, python=python, react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
@@ -335,14 +315,7 @@ def _prime_uid_merge_resume(target: Path, python: list[dict[str, Any]]) -> Path:
 
 
 class _RejectingArbiterBackend(_StubBackend):
-    """Arbiter stub that rejects exactly the record carrying *reject_uid* (#1111).
-
-    The shipped stub echoes ``keep=true`` for every ``arb_id``, so no test could
-    observe a *drop* crossing the disk boundary. This one reads the uid the
-    orchestrator wrote into ``arbiter-input.json`` and names its target by that
-    uid, which is how a real reviewer would name a specific record among several
-    that share the reviewer's ``id``.
-    """
+    """Reject one host UID from arbiter-input.json, even when reviewer IDs repeat."""
 
     def __init__(self, target: Path, reject_uid: str) -> None:
         super().__init__(target)
@@ -377,13 +350,7 @@ def _merged_items(deep: Path) -> list[dict[str, Any]]:
 
 
 def _run_uid_pool(deep: Path) -> set[str]:
-    """Every record uid this run actually minted, read back off its artifacts.
-
-    The pool is read from disk rather than hardcoded because it is exactly what
-    ``_validate_agent_source_uids`` builds to check the agent's claims against:
-    asserting a shipped attribution is a subset of it is asserting the shipped
-    item names a record that exists.
-    """
+    """Read the actual on-disk UID pool used to validate shipped source attribution."""
     return {uid
         for path in sorted(deep.glob("stack-*-records.json"))
         for record in _record_issues(json.loads(path.read_text()))
@@ -402,24 +369,11 @@ def _source_uids_by_description(deep: Path) -> dict[str, Any]:
 
 
 def _prime_source_uid_merge_resume(target: Path, *, structure: list[dict[str, Any]] | None = None,) -> Path:
-    """Prime a four-stack merge resume whose uid pool is known before the run.
+    """Prime generic:1, python:1, react:1, structure:1 as the known on-disk UID pool.
 
-    Every stack ``multi_stack_target`` detects gets exactly one grounded record,
-    so the pool is exactly ``{generic:1, python:1, react:1, structure:1}`` and a
-    test can name a real uid (or a plausible non-existent one) in the merge
-    agent's output up front -- which a fresh run cannot do, since the records do
-    not exist until it has already merged them.
-
-    Each record sits on its own file and the structural record sits alone at
-    ``api.py:5``, so arbiter selection's contested-location branch never fires
-    and no verdict rewrites a description these tests match on.
-
-    Every primed record carries its ``uid`` ON DISK, exactly as a fresh run
-    writes it at record birth. That is load-bearing rather than cosmetic:
-    ``_validate_agent_source_uids`` builds the run's uid pool by re-reading the
-    records FILES -- the same bytes the merge agent is pointed at -- so a resume
-    primed with uid-less records (a pre-#1111 artifact) legitimately has an empty
-    pool, and every uid a test made the agent cite would be dropped as invented.
+    Keep locations distinct so contested arbitration cannot rewrite descriptions.
+    UIDs must exist in record files: merge validation rereads those files and rejects
+    claims absent from their pool.
     """
     return _prime_merge_resume(target, python=[_record(description="py issue", evidence="api.py:1", uid="python:1")],
         react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1", uid="react:1")],

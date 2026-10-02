@@ -1,5 +1,4 @@
-"""Tests for the backend protocol and the ``create_backend`` factory. The ``AgentEvent`` dataclass field/default
-assertions live in ``tests/test_backends_events.py``; they used to be duplicated here."""
+"""Backend protocol and factory contracts; event dataclass fields/defaults live in test_backends_events.py."""
 from pathlib import Path
 from typing import Any, cast
 
@@ -55,12 +54,10 @@ def test_create_backend_invalid_raises() -> None:
         create_backend("invalid")
 
 def test_pi_backend_concise_fix_prompts_true() -> None:
-    """PiBackend requests concise fix prompts by default (GLM verbosity suppression)."""
     backend = PiBackend(model="glm-5.2")
     assert backend.concise_fix_prompts is True
 
 async def test_create_backend_claude_execute_accepts_agents_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A factory-created real backend accepts agents=None at the SDK boundary."""
     captured: dict[str, Any] = {}
     patch_claude_sdk(
         monkeypatch,
@@ -74,7 +71,6 @@ async def test_create_backend_claude_execute_accepts_agents_none(monkeypatch: py
     assert getattr(captured["options"], "agents", None) is None
 
 def test_create_backend_forwards_reasoning_effort_to_every_driver() -> None:
-    """Each configured backend carries the resolved reasoning effort."""
     for name in ("claude", "codex", "pi"):
         backend: Any = create_backend(name, reasoning_effort="max")
         assert backend.reasoning_effort == "max", name

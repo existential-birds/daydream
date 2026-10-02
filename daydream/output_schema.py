@@ -25,3 +25,8 @@ def strict_object(properties: dict[str, Any]) -> dict[str, Any]:
         "required": list(properties),
         "additionalProperties": False,
     }
+
+
+def result_array_schema(label: str, properties: dict[str, Any]) -> dict[str, Any]:
+    """Wrap strict records in a named result array with a closed outer object."""
+    return strict_object({label: {"type": "array", "items": strict_object(properties)}})

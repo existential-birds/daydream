@@ -179,7 +179,6 @@ async def test_fix_quality_gate_carries_to_manifest(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#315): the archived manifest carries the gate verdict + flagged file."""
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
     run_dir = _only_archived_run(archive_dir)
@@ -316,7 +315,6 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, archive_dir: Path,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 7): the gate artifact is bound to the run that wrote it."""
     alpha = _build_gate_target(tmp_path, "gate_alpha")
     exit_code = await _run_quality_gate_fixture(alpha, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
@@ -358,7 +356,7 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
         return result
 
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
 
@@ -388,7 +386,7 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     mute_side_effects()
     _install_stub_backend(monkeypatch, target)
 
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
     exit_code = await run(make_config(target, start_at="fix", assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
     assert any("fix-quality-gate.json" in w and "malformed" in w for w in warnings), (
@@ -402,7 +400,6 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
 async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 5): a new session never inherits a prior session's rounds."""
 
     target = _build_gate_target(tmp_path, "gate_session_resume")
     _silence(monkeypatch)
@@ -411,7 +408,7 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
     stub = _install_stub_backend(monkeypatch, target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_edit_line = _FIX_EDIT_VERBOSE
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
     first = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False))
     assert first == 0
     first_gate = _read_quality_gate(target)
@@ -440,7 +437,6 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
 async def test_fix_quality_gate_covers_authorized_secondary_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 6): an explicitly authorized secondary file is gated."""
 
     target = _build_gate_target_with_helper(tmp_path, "gate_secondary_edit")
     _silence(monkeypatch)
@@ -471,7 +467,6 @@ async def test_fix_quality_gate_covers_authorized_secondary_edit(
 async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#457): both gate captures call analyze_quality with the reviewed *.py set only."""
 
     target = _build_scope_creep_target(tmp_path, "gate_scoped")
     real_analyze = analyzer_mod.analyze_quality
@@ -506,7 +501,7 @@ async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
 
     exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False,
             file_config=DaydreamFileConfig(quality_gate_erosion_absolute=100.0, quality_gate_verbosity_absolute=100.0,

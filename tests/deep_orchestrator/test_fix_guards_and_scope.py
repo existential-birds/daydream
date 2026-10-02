@@ -132,7 +132,6 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     no_ci_remote: NoCIRemote,
 ) -> None:
-    """Real path: a fix writing U+201D into a changed .go comment is scrubbed pre-commit."""
 
     project = _go_quote_project(tmp_path)
     bare = _bare_remote(tmp_path / "remote.git")
@@ -164,7 +163,6 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
 async def test_test_healing_guard_reverts_generated_migration_edit(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """The runner snapshots and restores a forbidden edit made by a heal turn."""
 
     project, migration = _migration_project(tmp_path, "heal_migration_repo")
     pre_migration = migration.read_bytes()
@@ -218,7 +216,6 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
 async def test_parallel_fix_commit_runs_once_after_all(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """AC#6: commit stays serial and runs exactly once, after every parallel fix lands."""
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -359,7 +356,6 @@ async def test_reverted_edit_dedups_across_runs(
 async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """#336 real-path: a failed residual revert aborts before commit."""
 
     target = _build_scope_creep_target(tmp_path, "scope_creep_residual_fail")
     head_before = _git(target, "rev-parse", "HEAD")
@@ -421,7 +417,6 @@ async def test_fix_tool_veto_blocks_denied_write(
 async def test_fix_tool_veto_allows_unmatched_write(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Built-in rules allow a Write whose path does not match the deny glob."""
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -441,7 +436,6 @@ async def test_fix_tool_veto_allows_unmatched_write(
 async def test_fix_tool_veto_stops_subsequent_calls(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """A vetoed first deferred Write prevents the generator's later Write."""
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -462,7 +456,6 @@ async def test_fix_tool_veto_stops_subsequent_calls(
 async def test_fix_tool_supervisor_off_writes(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """With tool supervision off, the deferred Write resumes and writes."""
     _silence(monkeypatch)
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)

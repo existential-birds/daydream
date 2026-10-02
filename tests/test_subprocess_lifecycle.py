@@ -20,7 +20,7 @@ from tests.harness.processes import (
 )
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 MakeConfig = Callable[..., "RunConfig"]
 
@@ -109,7 +109,8 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     grandchildren) and the fd count returns to the pre-run baseline.
     """
     silence_console("daydream.runner")
-    silence_console("daydream.improve.orchestrator")
+    for module in ("recon", "audit", "planning", "issue_publication", "reporting"):
+        silence_console(f"daydream.improve.{module}")
     silence_console("daydream.agent")
 
     # A fake `codex` CLI that is a genuine subprocess: it forks a `sleep`

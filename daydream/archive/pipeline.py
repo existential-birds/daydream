@@ -1,18 +1,8 @@
-"""Per-phase pipeline state derivation for archived runs.
+"""Derive phase and pipeline outcomes from frozen events and existing artifacts.
 
-Derives terminal states (merge/fix/test/push/remote CI) and ``pipeline_status``
-aggregate from existing deep artifacts + phase events — no new runtime
-instrumentation. Separates pipeline outcome from archive finalization so a run
-that merged-failed and never tested is never archived as unqualified success.
-
-Artifact reads are best-effort: stale unbound artifacts are absent, while
-malformed evidence for an observed/current phase is partial. These functions
-never raise on bad input and never turn incomplete evidence green.
-
-Exports:
-    derive_phase_states: Per-phase terminal states from artifacts + events.
-    derive_pipeline_status: Aggregate pipeline outcome from archive state +
-        per-phase states.
+Archive finalization is independent of workflow success. Stale unbound
+artifacts count as absent; malformed current evidence degrades to partial.
+Bad or incomplete evidence never turns a phase green.
 """
 
 from collections.abc import Mapping, Sequence
@@ -24,10 +14,12 @@ from daydream.archive import _read_json_artifact
 from daydream.remote_ci import (
     CIObservation,
     RequiredContext,
-    _normalize_repository as _normalize_remote_repository,
-    _require_sha as _require_remote_sha,
     required_context_label,
     required_context_matches,
+)
+from daydream.remote_ci.evidence import (
+    _normalize_repository as _normalize_remote_repository,
+    _require_sha as _require_remote_sha,
 )
 from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
@@ -796,13 +788,7 @@ def derive_phase_states(
 
 
 def _phase(phase_states: dict[str, Any], name: str) -> dict[str, Any]:
-    """Return a phase's state dict, defaulting to ``{}`` when absent/malformed.
-
-    Unifies the two key styles used across ``derive_pipeline_status`` (reading
-    ``"status"`` vs ``"ran"``) into one spelling, so an absent phase entry
-    reads as an empty dict: ``.get("status")`` -> ``None`` and ``.get("ran")``
-    -> ``None`` both degrade to the all-absent case instead of raising.
-    """
+    """Read a phase state, treating missing or malformed entries as empty."""
     return phase_states.get(name) or {}
 
 

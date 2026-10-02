@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from daydream import cli, runner
+from daydream import runner
 from daydream.backends import (
     CostEvent,
     MetricsEvent,
@@ -21,8 +21,9 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.commands import review as cli_review
 from daydream.observability.config import ObservabilityConfig
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import TraceCollector, attributes, otlp_collector
@@ -287,7 +288,7 @@ async def test_explicit_off_overrides_environment_and_repository_cannot_enable_t
             'model = "file-config-was-loaded"\n'
             '[observability]\ndestinations = ["otlp"]\nendpoint = "' + receiver.base_url + '"\n'
         )
-        config = cli._parse_args([
+        config = cli_review._parse_args([
             str(feature_branch_repo), "--flow", "trace-probe", "--non-interactive", "--no-archive",
         ])
         assert config.file_config is not None

@@ -22,7 +22,8 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import build_merge_prompt
-from daydream.runner import RunConfig, _resolve_backend
+from daydream.run_config import RunConfig
+from daydream.runner import _resolve_backend
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
     _install_post_recorder,
@@ -73,7 +74,6 @@ def _install_merge_captures(
 def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Detected React files retain their own stack without the plugin registry."""
 
 
     _silence(monkeypatch)
@@ -147,7 +147,6 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
 
 async def test_merge_prompt_lists_records_in_sorted_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The merge prompt lists per-stack records in stable order."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     exit_code = await _run_deep(multi_stack_target)
@@ -232,7 +231,6 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
 
 async def test_resume_merge_errors_on_missing_stack_records(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--start-at merge must fail loudly when a detected stack has no records."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     # Records for python only; react and generic are missing.
@@ -246,7 +244,6 @@ async def test_resume_merge_errors_on_missing_stack_records(multi_stack_target: 
 async def test_resume_merge_allows_missing_records_for_failed_stacks(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stack listed in per-stack-failures.json is allowed to be missing."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -265,7 +262,6 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
 async def test_orchestrator_partitions_structural_records_from_merge(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Structural records are partitioned out of the dedup pre-filter pool."""
     captured_merge: dict[str, Any] = {}
     captured_dedup_records: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
@@ -310,7 +306,6 @@ async def test_orchestrator_partitions_structural_records_from_merge(
 async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh-run path (no start_at) applies the same structural partition."""
     captured_merge: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
     _install_merge_captures(monkeypatch, captured_merge=captured_merge, captured_record_dedup=captured_record_dedup,)
@@ -427,7 +422,6 @@ async def test_distinct_structural_finding_survives_the_fold(multi_stack_target:
     assert "## Structural Review" in merged_report_path(dd).read_text()
 
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """--start-at fix must not call post_review_to_pr_from_report."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -458,7 +452,6 @@ async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: p
 async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """The deep orchestrator resolves a backend for each required phase."""
     seen_phases: list[str] = []
     original = _runner._resolve_backend
 
@@ -489,7 +482,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     async def _stub_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         return None
 
-    monkeypatch.setattr("daydream.phases.phase_fix", _stub_fix)
+    monkeypatch.setattr("daydream.phases.fix.phase_fix", _stub_fix)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -549,7 +542,6 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(multi_stack_target
 async def test_verifier_runs_after_merge_before_fix(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """Recommendation verifier runs as a sub-step of the fix gate."""
     # phase_fix stays REAL so verdict propagation is observable.
     stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
     exit_code = await _run_deep(multi_stack_target)

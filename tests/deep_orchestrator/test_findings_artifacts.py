@@ -12,11 +12,12 @@ import pytest
 import daydream.deep.orchestrator as orch_mod
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.deep import orchestrator as deep_orchestrator
+from daydream.deep.diff import bound_deep_diff
 from daydream.deep.orchestrator import STEPS
-from daydream.deep.prompts import bound_deep_diff
 from daydream.extensions.api import EXTENSION_API_VERSION
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _eroded_main_repo,
     _silence_gate_noise,
@@ -95,7 +96,6 @@ async def test_deep_findings_out_emits_artifact_and_stops(
 async def test_cleanup_keeps_report_on_findings_out_run(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``."""
 
     _silence_gate_noise(monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
@@ -118,16 +118,15 @@ async def test_cleanup_keeps_report_on_findings_out_run(
 async def test_test_verdict_artifact_written_on_passing_suite(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path: a run whose suite passes leaves ``test-verdict.json`` on disk."""
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
-    monkeypatch.setattr("daydream.remote_ci.platform.system", lambda: "Darwin")
-    monkeypatch.setattr("daydream.remote_ci.platform.release", lambda: "25.1.0")
-    monkeypatch.setattr("daydream.remote_ci.platform.machine", lambda: "arm64")
-    monkeypatch.setattr("daydream.remote_ci.platform.python_implementation", lambda: "CPython")
-    monkeypatch.setattr("daydream.remote_ci.platform.python_version", lambda: "3.13.7")
+    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.system", lambda: "Darwin")
+    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.release", lambda: "25.1.0")
+    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.machine", lambda: "arm64")
+    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.python_implementation", lambda: "CPython")
+    monkeypatch.setattr("daydream.remote_ci.artifacts.platform.python_version", lambda: "3.13.7")
     _install_stub_backend(monkeypatch, tiny_diff_target)
     mute_side_effects(heal=False)
 
@@ -149,7 +148,6 @@ async def test_test_verdict_artifact_written_on_passing_suite(
 async def test_test_verdict_artifact_written_on_failing_suite(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path: a permanently-red suite STILL leaves ``test-verdict.json``."""
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
@@ -202,7 +200,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
     tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Real path: a small diff is inlined into BOTH the intent and wonder prompts."""
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
     assert await _run_deep(tiny_diff_target, review_profile=independent_alternatives_profile()) == 0
     intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
@@ -215,7 +212,6 @@ async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
 async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
 
     # Push the diff over the byte budget with a large committed file.
     big = "\n".join(f"line {i} of filler content" for i in range(INLINE_DIFF_BUDGET_BYTES // 10))
@@ -300,7 +296,6 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
 async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL."""
 
     big = "\n".join(f"line {i} of filler content" for i in range((INLINE_DIFF_BUDGET_BYTES // 10) + 50))
     (multi_stack_target / "big.py").write_text(big + "\n")
@@ -347,7 +342,6 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
 
 async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """intent.md is on disk even when the wonder step dies."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fail_alternatives = True
@@ -378,12 +372,10 @@ async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monke
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
 def test_deep_flow_has_no_feedback_prefix() -> None:
-    """M2: the registered deep flow has no feedback-only prefix."""
     names = {step.name for step in STEPS}
     assert not names & {"fetch-feedback", "parse-feedback", "fix-items", "commit-push", "respond-feedback"}
 
 def test_no_feedback_mode_resolver() -> None:
-    """M2: `_resolve_mode` cannot return `feedback`; no feedback runner exists."""
     assert not hasattr(deep_orchestrator, "_run_feedback_flow")
     config = RunConfig(target="/tmp", pr_number=7)
     assert deep_orchestrator._resolve_mode(config) != "feedback"
@@ -458,7 +450,6 @@ async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
 async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stack: str, description: str, lens: str,
 ) -> None:
-    """Python and structural extraction findings keep their reported severity."""
     _silence(monkeypatch)
     project = _eroded_main_repo(tmp_path)
     stub = _install_stub_backend(monkeypatch, project)

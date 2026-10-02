@@ -26,7 +26,6 @@ def test_latest_human_rater_wins_over_automatic() -> None:
     human = _obs("accepted", "alice", observed="2026-08-30T11:00:00+00:00")
     assert effective_adjudication([auto, human])["disposition"] == "accepted"
     assert effective_adjudication([auto, human])["labeler"] == "alice"
-    # The automatic tier is reached when no human judgment exists.
     assert effective_adjudication([auto])["role"] == "automatic"
 
 def test_explicit_adjudicator_resolution_beats_later_rater() -> None:
@@ -52,7 +51,6 @@ def test_conflict_resolved_by_adjudicator_is_gold_eligible_again() -> None:
     assert result["conflict"] is False and result["gold_eligible"] is True
 
 def test_conflicting_raters_fixture_order_is_stable() -> None:
-    # Determinism: the same observations in any input order resolve identically.
     obs_a: list[Mapping[str, Any]] = [_obs("accepted", "alice", observed="2026-08-30T10:00:00+00:00"),
         _obs("rejected", "bob", observed="2026-08-30T11:00:00+00:00"),
     ]
@@ -60,14 +58,11 @@ def test_conflicting_raters_fixture_order_is_stable() -> None:
 
 def test_digest_change_requeues_prior_judgment() -> None:
     human = _obs("accepted", "alice", digest="d" * 64)
-    # Same digest: judgment stands.
     assert reopen_on_digest_change(human, current_digest="d" * 64) is False
-    # Digest drifted: item must reopen, not silently reuse the judgment.
     assert reopen_on_digest_change(human, current_digest="e" * 64) is True
 
 def test_model_suggested_queue_item_never_gold_eligible_unreviewed(tmp_path: Path) -> None:
-    # Model suggested 'accepted' on a queue item: stored via the store API,
-    # which must force review_required=True on the record.
+    # The writer forces review_required for model suggestions, including accepted labels.
     obs = {"record_id": "c" * 64, "disposition": "accepted", "evidence_digest": "d" * 64,
            "labeler": "reply-classifier-980-r1", "role": "model-suggested",
            "rationale": "classifier says accept", "valid_at": "2026-08-30T10:00:00+00:00",

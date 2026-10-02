@@ -1,28 +1,7 @@
-"""Pure mermaid renderers for the grounded-diagram phase (issue #1113).
+"""Deterministically render grounded specs as Mermaid and folded markdown.
 
-The LLM never writes mermaid. It proposes a structured spec whose every element
-carries ``file:line`` evidence; a deterministic grounding pass prunes and caps
-that spec; this module turns the surviving ``spec_final`` into mermaid text and
-into the folded ``<details>`` blocks that land in the Code Review Summary and in
-``review-output.md``.
-
-Everything here is pure and byte-deterministic: same spec in, same bytes out. No
-I/O, no LLM, no clock, no set iteration. Model-authored strings only ever reach
-the output through :func:`sanitize_label` (mermaid labels) or ``_md_text``
-(omission text), so a label can never introduce a new mermaid statement or
-close the surrounding ``<details>`` wrapper.
-
-The render caps are enforced upstream, in the grounding pass, *before* the
-omission floor is evaluated -- that is what keeps the floor honest. The
-renderers assert them again and raise ``ValueError`` on an over-cap spec:
-defense in depth against a hand-written or corrupted artifact.
-
-Exports:
-    render_sequence_mermaid: spec_final -> mermaid ``sequenceDiagram`` text
-    render_flowchart_mermaid: spec_final -> mermaid ``flowchart TD`` text
-    render_diagram_blocks: per-kind results -> folded markdown blocks
-    render_omission_notice: kind + result -> one-paragraph omission text
-    sanitize_label: model text + cap -> mermaid-safe label
+All model text is sanitized. Grounding enforces caps before omission floors;
+renderers reject over-cap artifacts again. Stored Mermaid is never trusted.
 """
 
 from __future__ import annotations
@@ -72,33 +51,12 @@ _EMPTY_LABEL = "unlabeled"
 
 
 def sanitize_label(text: str, cap: int) -> str:
-    """Reduce model-authored text to a mermaid-safe, length-capped label.
+    """Remove unsafe label syntax, cap before escaping, then escape HTML delimiters.
 
-    Pipeline, in this exact order (the order is load-bearing):
-
-    1. drop non-printable characters (control bytes, ANSI escapes),
-    2. drop every character in ``_DROPPED_LABEL_CHARS`` -- including ``#``,
-    3. remove ``%%`` sequences repeatedly until none remain (a single ``%`` is
-       harmless and is preserved),
-    4. collapse every whitespace run (newlines included) to a single space and
-       strip the ends,
-    5. truncate to ``cap`` characters and right-strip,
-    6. escape ``<``/``>``/``"`` as ``#lt;``/``#gt;``/``#quot;``.
-
-    The ``%%`` pass runs after the drop pass (dropping a character between two
-    percent signs would otherwise fuse them) and before the collapse pass
-    (which shrinks whitespace runs and so can never fuse them). Truncation
-    happens *before* escaping, so a cut can never bisect an escape and leave a
-    stray ``#``; the returned string may therefore be slightly longer than
-    ``cap`` when it contains escapes.
-
-    Args:
-        text: The model-authored label. A non-string is treated as empty.
-        cap: Maximum number of pre-escape characters to keep. ``<= 0`` disables
-            truncation.
-
-    Returns:
-        The sanitized label. May be empty; callers substitute ``_EMPTY_LABEL``.
+    Drop controls and Mermaid delimiters before removing %% (drops can join two
+    percent signs). Fold whitespace, truncate, then escape <, > and quotes so caps
+    cannot split an escape. Non-strings become empty; cap <= 0 disables truncation.
+    Escapes can make the final text longer than cap; callers replace empty labels.
     """
     raw = text if isinstance(text, str) else ""
     raw = "".join(ch for ch in raw if ch.isprintable() or ch.isspace())
@@ -145,12 +103,7 @@ _CALL_ARROW = "->>"
 
 
 def _message_line(message: dict[str, Any], ids: dict[str, str], indent: str) -> str | None:
-    """Render one message arrow, or ``None`` when an endpoint is not a participant.
-
-    Grounding drops participants with no remaining messages and messages whose
-    endpoints did not survive, so an unresolvable endpoint can only come from a
-    hand-written or corrupted spec. Skipping the line is the fail-open answer.
-    """
+    """Render an arrow or skip unresolved endpoints in a malformed artifact."""
     src = ids.get(_key(message.get("from")) or "")
     dst = ids.get(_key(message.get("to")) or "")
     if src is None or dst is None:
@@ -191,24 +144,10 @@ def _block_ownership(
 
 
 def render_sequence_mermaid(spec_final: dict[str, Any]) -> str:
-    """Render a grounded sequence spec as mermaid ``sequenceDiagram`` text.
+    """Render in proposal order, without a trailing newline; reject over-cap collections.
 
-    Participants are declared in spec order as ``P1..Pn``; ``call`` and ``self``
-    messages use ``->>``, ``reply`` uses ``-->>``. Blocks are emitted by walking
-    the messages in order and opening/closing the owning block as ownership
-    changes, so no message is ever dropped or reordered by a malformed block and
-    an ``alt`` whose branches are interleaved simply closes and reopens.
-
-    Args:
-        spec_final: The pruned + capped sequence spec.
-
-    Returns:
-        The mermaid text, without a trailing newline.
-
-    Raises:
-        ValueError: A collection exceeds its render cap. The grounding pass
-            enforces the caps before the omission floor; reaching this means the
-            spec did not come from that pass.
+    Block ownership changes open/close blocks without reordering messages. An
+    interleaved alt closes and reopens; call/self use ->>, replies use -->>.
     """
     participants = _dicts(spec_final.get("participants"))
     messages = _dicts(spec_final.get("messages"))
@@ -266,12 +205,7 @@ def render_sequence_mermaid(spec_final: dict[str, Any]) -> str:
 
 
 def _node_shape(node: dict[str, Any]) -> str:
-    """Render a node's mermaid shape + label, e.g. ``([Start])`` or ``{Ready?}``.
-
-    An unknown kind falls back to the ``process`` rectangle. The label cannot
-    contain a shape delimiter (the sanitizer drops all of them), so a shape can
-    never be closed early from model text.
-    """
+    """Render a sanitized shape; unknown kinds use the process rectangle."""
     label = _label(node.get("label"), DIAGRAM_LABEL_CAP_NODE)
     kind = node.get("kind")
     if kind in ("start", "end"):
@@ -289,22 +223,10 @@ def _node_shape(node: dict[str, Any]) -> str:
 
 
 def render_flowchart_mermaid(spec_final: dict[str, Any]) -> str:
-    """Render a grounded flowchart spec as mermaid ``flowchart TD`` text.
+    """Render nodes in spec order with shapes at first mention, then isolated nodes.
 
-    Nodes are numbered ``N1..Nn`` in spec order. A node carries its shape and
-    label at its **first mention** in the edge list and is referenced bare
-    afterwards; nodes that no edge mentions are declared on their own lines after the
-    edges, in spec order. Edges whose endpoints are not declared nodes are
-    skipped (grounding drops those; a corrupted spec must not crash the report).
-
-    Args:
-        spec_final: The pruned + capped flowchart spec.
-
-    Returns:
-        The mermaid text, without a trailing newline.
-
-    Raises:
-        ValueError: ``nodes`` or ``edges`` exceeds its render cap.
+    Skip unknown edge endpoints, reject over-cap collections, and omit the trailing
+    newline. Node identifiers are deterministic N1..Nn.
     """
     nodes = _dicts(spec_final.get("nodes"))
     edges = _dicts(spec_final.get("edges"))
@@ -382,23 +304,10 @@ def _wrap_block(title: str, mermaid: str) -> str:
 
 
 def render_diagram_blocks(results: dict[str, dict[str, Any] | None]) -> str:
-    """Render the folded ``<details>`` block for every kind that rendered.
+    """Render valid rendered-kind specs in DIAGRAM_KINDS order, separated by a blank line.
 
-    The mermaid is **always re-rendered from** ``spec_final``; a stored
-    ``mermaid`` string is never read, so no model-authored markdown can reach a
-    PR comment even if the artifact carries some. Kinds are emitted in
-    ``config.DIAGRAM_KINDS`` order (sequence first) and joined with one blank
-    line, with no leading or trailing blank line.
-
-    A kind is skipped when its result is missing, is not ``status ==
-    "rendered"``, or lacks a usable ``spec_final`` -- a combination
-    only a malformed artifact can produce, and never a reason to raise.
-
-    Args:
-        results: The per-kind result dicts, keyed by diagram kind.
-
-    Returns:
-        The joined markdown blocks, or ``""`` when nothing rendered.
+    Re-render spec_final; never trust stored Mermaid. Missing/malformed results are
+    skipped. Return empty when no kind rendered.
     """
     blocks: list[str] = []
     for kind in DIAGRAM_KINDS:
@@ -408,34 +317,13 @@ def render_diagram_blocks(results: dict[str, dict[str, Any] | None]) -> str:
         spec = result.get("spec_final")
         if not isinstance(spec, dict):
             continue
-        if kind == "sequence":
-            block = _wrap_block(
-                _KIND_TITLES[kind],
-                render_sequence_mermaid(spec),
-            )
-        else:
-            block = _wrap_block(
-                _KIND_TITLES[kind],
-                render_flowchart_mermaid(spec),
-            )
-        blocks.append(block)
+        renderer = render_sequence_mermaid if kind == "sequence" else render_flowchart_mermaid
+        blocks.append(_wrap_block(_KIND_TITLES[kind], renderer(spec)))
     return "\n\n".join(blocks)
 
 
 def render_omission_notice(kind: str, result: dict[str, Any]) -> str:
-    """Render the one-paragraph "no diagram" text for an explicitly-requested kind.
-
-    Used only on an explicit request (``--diagram-only`` / a mention command),
-    where silence would be indistinguishable from a broken run. States the kind,
-    the floor reason codes or the skip/failure reason.
-
-    Args:
-        kind: ``"sequence"`` or ``"flowchart"``.
-        result: That kind's result dict.
-
-    Returns:
-        A single-line paragraph, or ``""`` when the kind did render.
-    """
+    """Explain an explicit diagram request's omission, or return empty for rendered kinds."""
     if result.get("status") == "rendered":
         return ""
     phrase = _KIND_PHRASES.get(kind, _md_text(kind) or "diagram")

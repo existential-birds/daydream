@@ -1,9 +1,4 @@
-"""Tests for lazy ``base_sha`` materialization in older archive manifests.
-
-Each test monkeypatches ``daydream.git_ops.merge_base`` to keep the unit
-under test pure — no shelling out, no live clones. The function-under-test
-calls that exact symbol.
-"""
+"""Test lazy archive base-SHA materialization with only git_ops.merge_base replaced."""
 
 from __future__ import annotations
 
@@ -17,7 +12,6 @@ from daydream.training.base_sha import materialize_base_sha
 
 
 def _write_manifest(manifest_path: Path, *, base_sha: str | None, head_sha: str, branch: str,) -> None:
-    """Write the minimal manifest needed for base-SHA materialization tests."""
     manifest_path.write_text(json.dumps({"code_context": {
                     "base_sha": base_sha, "base_branch": "main", "head_sha": head_sha, "branch": branch,
                     "changed_files": [],
@@ -28,7 +22,6 @@ def _write_manifest(manifest_path: Path, *, base_sha: str | None, head_sha: str,
 
 
 def test_materialize_writes_sha_into_manifest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Resolve a missing merge base and persist it into the archive manifest."""
     manifest_path = tmp_path / "manifest.json"
     _write_manifest(manifest_path, base_sha=None, head_sha="abc123", branch="feat/x")
     monkeypatch.setattr("daydream.git_ops.merge_base",

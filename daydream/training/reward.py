@@ -1,24 +1,13 @@
-"""Reward reducer for code-review trajectories.
+"""Score intrinsic correctness/length and a separate maintainer-outcome penalty.
 
-Scores a *single* run across intrinsic (capture-time) credit/penalty axes and
-the posterior false-positive axis derived from maintainer accept/reject
-outcomes. All weights, ramps, and label maps live on :class:`RewardWeights`;
-scoring under :data:`DEFAULT_WEIGHTS` reproduces the golden-locked formula.
+Composite = round(clip(correctness - w_len * len_norm, 0, 1), 4).
+Missing/empty verifier evidence leaves correctness absent and a valid-format
+composite uncomputable. PosteriorBreakdown carries posterior cost beside the
+intrinsic composite, never subtracting it.
 
-Composite = ``round(clip(correctness − w_len·len_norm, 0, 1), 4)``.
-Verifier correctness supplies credit; a missing or empty verdict set leaves
-correctness ``None`` and ``axes_present["correctness"] = False``.
-If no correctness evidence is present while
-``format_valid`` is ``True``, the composite is ``None`` (uncomputable). The
-posterior is a *sibling* of the composite, carried on
-:class:`PosteriorBreakdown`, and is **never** subtracted inside it.
-
-Changing any default weight — or redefining the meaning of an input label —
-is a deliberate golden-update: re-pin the golden test values *and* bump
-:data:`REWARD_VERSION`. :data:`REWARD_VERSION` fully identifies the formula
-*only* under :data:`DEFAULT_WEIGHTS`; a custom :class:`RewardWeights` is an
-analysis-time override whose output must never be stored as the canonical
-corpus reward.
+Changing default weights or label meanings requires golden updates and a
+REWARD_VERSION bump. Only DEFAULT_WEIGHTS identifies the canonical corpus
+formula; custom weight outputs are analysis overrides.
 """
 
 from __future__ import annotations
@@ -27,7 +16,7 @@ import hashlib
 import json
 import types
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 REWARD_VERSION = "2026.10.01-1"
@@ -57,28 +46,12 @@ FLOOR = 0.0
 
 @dataclass(frozen=True)
 class RewardWeights:
-    """Tunable weights and ramp parameters for :func:`score_trajectory`.
+    """Canonical reward weights and length-ramp parameters.
 
-    Defaults reproduce the golden-locked formula exactly; overriding any
-    field is an analysis-time choice, not a change to the canonical corpus
-    reward (which is defined by :data:`REWARD_VERSION` under
-    :data:`DEFAULT_WEIGHTS`).
-
-    Attributes:
-        w_len: Length-penalty weight, so verbosity can shave correctness credit.
-        w_fp: False-positive (posterior reject) penalty weight. **No longer
-            applied inside the composite** (C5 made the posterior a sibling
-            field, not a subtracted term); retained as a documented
-            training-time combination weight pending recalibration (#114).
-        len_tau: Length-ramp baseline (chars): no penalty at or below this
-            proxy value.
-        len_scale: Length-ramp scale (chars): the penalty saturates at
-            ``len_tau + len_scale``.
-        verdict_map: Per-finding verdict → ``[0, 1]`` correctness sub-score.
-        fp_penalty_map: Maintainer outcome label → posterior penalty
-            (``accepted → 0.0``, ``contested → 0.5``, ``rejected → 1.0``).
-            An unmapped/``"unknown"`` label leaves the axis absent.
-    """
+    Length penalty rises from zero at len_tau to one at len_tau + len_scale.
+    w_fp is reserved for training-time combination; it never changes the
+    intrinsic composite. Unmapped feedback leaves the posterior axis absent.
+    Only DEFAULT_WEIGHTS earns the canonical version stamp."""
 
     w_len: float = 0.2
     w_fp: float = 0.3
@@ -107,16 +80,7 @@ earns the canonical stamp, keyed by object identity in
 
 
 def _weights_fingerprint(weights: RewardWeights) -> str:
-    """Return a stable 8-char fingerprint of a :class:`RewardWeights`.
-
-    Serializes the four scalar fields plus the two map fields (as plain
-    ``dict``) via sorted-key JSON, then takes the leading 8 hex chars of the
-    SHA-256 digest. Pure; no I/O.
-
-    Returns:
-        The first 8 hex characters of the SHA-256 digest of the canonical
-        JSON serialization of the scoring parameters.
-    """
+    """Hash sorted-key JSON of the scoring parameters to eight hexadecimal characters."""
     payload = {
         "w_len": weights.w_len,
         "w_fp": weights.w_fp,
@@ -135,16 +99,9 @@ def _clip(value: float, low: float, high: float) -> float:
 
 @dataclass(frozen=True)
 class ScoringInputs:
-    """Intrinsic, capture-time signals for one trajectory.
+    """Capture-time signals: optional structured verifier verdicts and character count.
 
-    Attributes:
-        verifier_verdicts: Per-finding verifier verdict records (each a
-            dict with a ``"verdict"`` key), or ``None`` when the run has no
-            structured verdicts (e.g. a shallow run).
-        format_valid: Whether the structured bronze artifacts parsed
-            cleanly. ``False`` floors the composite (dominating gate).
-        length: Char-count length proxy, or ``None`` when absent.
-    """
+    format_valid=False dominates every credit axis and floors the composite."""
 
     verifier_verdicts: Sequence[Mapping[str, Any]] | None
     format_valid: bool
@@ -153,25 +110,12 @@ class ScoringInputs:
 
 @dataclass(frozen=True)
 class RewardBreakdown:
-    """Per-axis decomposition + composite for one *intrinsic-only* trajectory.
+    """Intrinsic score and axis presence for one trajectory.
 
-    Represents a row with no maintainer outcome label. The posterior
-    false-positive axis lives on the :class:`PosteriorBreakdown` subclass, not
-    here — keeping the two populations type-separated (C3).
-
-    Attributes:
-        correctness_per_finding: Mapped verdict scores per finding, or
-            ``None`` when the correctness axis is absent.
-        format_valid: The dominating format gate flag.
-        length_penalty: Bounded length ramp ``len_norm ∈ [0, 1]``, or
-            ``None`` when no length proxy was available.
-        composite: Pure-intrinsic ``[0, 1]`` score (``round(..., 4)``),
-            ``0.0`` when format-invalid, or ``None`` when uncomputable (no
-            present credit axis while format-valid).
-        axes_present: Per-axis presence flags (``correctness``,
-            ``length``).
-        reward_version: The :data:`REWARD_VERSION` stamped at scoring time.
-    """
+    Missing verdicts leave correctness absent; missing length leaves its penalty
+    absent. The composite is rounded to four places in [0, 1], zero for invalid
+    format, or None when valid format has no correctness credit. Posterior
+    fields exist only on PosteriorBreakdown."""
 
     correctness_per_finding: list[float] | None
     format_valid: bool
@@ -182,55 +126,23 @@ class RewardBreakdown:
 
     def to_dict(self) -> dict[str, Any]:
         """Return a JSON-serializable representation with explicit key order."""
-        return {
-            "correctness_per_finding": (
-                list(self.correctness_per_finding) if self.correctness_per_finding is not None else None
-            ),
-            "format_valid": self.format_valid,
-            "length_penalty": self.length_penalty,
-            "composite": self.composite,
-            "axes_present": dict(self.axes_present),
-            "reward_version": self.reward_version,
-        }
+        return asdict(self)
 
 
 @dataclass(frozen=True)
 class PosteriorBreakdown(RewardBreakdown):
-    """Intrinsic breakdown extended with the posterior false-positive axis.
+    """Intrinsic score plus a separate observed maintainer penalty.
 
-    Produced by :func:`score_trajectory` only when a mapped maintainer outcome
-    label is supplied. The ``composite`` it inherits is the pure intrinsic
-    score (C5: the posterior is a sibling, never folded in). The presence of
-    ``posterior_cost`` in :meth:`to_dict` is the population discriminator for
-    downstream consumers splitting labeled from unlabeled rows.
-
-    Attributes:
-        false_positive_penalty: Raw observed maintainer outcome mapped via
-            :attr:`RewardWeights.fp_penalty_map` (``accepted → 0.0``,
-            ``contested → 0.5``, ``rejected → 1.0``).
-        posterior_cost: The surprise component ``abs(observed − prior)``
-            on the ``[0, 1]`` penalty scale — the absolute deviation from the
-            reviewers' prior is penalized in both directions.
-        outcome_prior: The reviewers' mean observed penalty used as the prior,
-            or ``None`` when uncalibrated (the reducer then applies the ``0.5``
-            maximum-entropy default).
-        outcome_prior_n: The pooled count of prior outcomes behind
-            ``outcome_prior`` (for audit; recorded regardless of threshold).
-    """
+    posterior_cost is abs(observed_penalty - prior), penalizing deviation in
+    both directions. A missing prior uses 0.5 for cost while preserving None and
+    outcome_prior_n for audit. Presence of posterior_cost distinguishes labeled
+    rows; it never changes the inherited intrinsic composite."""
 
     false_positive_penalty: float
     posterior_cost: float
     outcome_prior: float | None
     outcome_prior_n: int
 
-    def to_dict(self) -> dict[str, Any]:
-        """Return the intrinsic dict extended with the four posterior keys."""
-        base = super().to_dict()
-        base["false_positive_penalty"] = self.false_positive_penalty
-        base["posterior_cost"] = self.posterior_cost
-        base["outcome_prior"] = self.outcome_prior
-        base["outcome_prior_n"] = self.outcome_prior_n
-        return base
 
 
 def score_trajectory(
@@ -241,44 +153,15 @@ def score_trajectory(
     outcome_prior_n: int = 0,
     weights: RewardWeights = DEFAULT_WEIGHTS,
 ) -> RewardBreakdown | PosteriorBreakdown:
-    """Reduce intrinsic (+ optional posterior) signals to a breakdown.
+    """Reduce capture-time signals, optionally adding a separate posterior penalty.
 
-    Pure: no filesystem, network, or subprocess access; identical inputs
-    yield identical output. The ``composite`` is always a pure intrinsic
-    score (correctness − length penalty); the posterior
-    false-positive axis is a *sibling* field, never folded in (C5).
+    The format gate dominates; missing correctness makes a valid-format composite
+    uncomputable. A mapped pr_feedback label returns PosteriorBreakdown with
+    absolute deviation from the supplied prior (0.5 when absent). Unmapped
+    feedback returns RewardBreakdown without imputing a measured penalty.
 
-    ``pr_feedback`` carries the maintainer outcome label. When it maps to a
-    measured penalty via :attr:`RewardWeights.fp_penalty_map`, the result is a
-    :class:`PosteriorBreakdown` carrying the posterior fields. Otherwise
-    (``None``/``"unknown"``/unmapped) the result is a plain
-    :class:`RewardBreakdown` — the composite is identical either way.
-
-    Args:
-        inputs: The intrinsic, capture-time signals to score.
-        pr_feedback: Maintainer outcome label (``accepted``/``contested``/
-            ``rejected``); mapped via :attr:`RewardWeights.fp_penalty_map`.
-            ``None``/``"unknown"``/unmapped yields a base
-            :class:`RewardBreakdown`.
-        outcome_prior: The reviewers' mean observed penalty on the ``[0, 1]``
-            penalty scale, used as the prior the posterior surprise is measured
-            against. ``None`` (uncalibrated) falls back to the ``0.5``
-            maximum-entropy default for the cost, and is stored verbatim on the
-            breakdown as the audit trail of calibration status. Meaningful only
-            on the mapped-label (:class:`PosteriorBreakdown`) path.
-        outcome_prior_n: The pooled count of prior outcomes behind
-            ``outcome_prior`` (audit only; stored verbatim). Meaningful only on
-            the mapped-label path.
-        weights: The :class:`RewardWeights` to score under; defaults to
-            :data:`DEFAULT_WEIGHTS` (the golden-locked, canonical weights).
-
-    Returns:
-        A frozen :class:`PosteriorBreakdown` when ``pr_feedback`` maps to a
-        penalty, else a frozen :class:`RewardBreakdown`. Both are stamped with
-        :data:`REWARD_VERSION` (read at call time); ``composite`` is ``0.0``
-        when ``format_valid`` is ``False``, ``None`` when no credit axis is
-        present, else the rounded ``[0, 1]`` pure-intrinsic composite.
-    """
+    Read REWARD_VERSION at call time. Only the DEFAULT_WEIGHTS instance receives
+    its canonical stamp; all other weights receive a custom fingerprint."""
     version = (
         REWARD_VERSION
         if weights is DEFAULT_WEIGHTS

@@ -1,13 +1,7 @@
-"""Exclusion-list and copyleft license helpers for the training exporter.
+"""C5 exclusions and C8 copyleft opt-ins from packaged schema/ lists.
 
-C5 (always-enforced exclusion) and C8 (GPL/AGPL opt-in) from the SPEC are
-implemented here. The two backing files live alongside this module under
-`schema/` so the package works correctly when installed (paths resolve
-relative to `__file__`, not the current working directory).
-
-The loaders deliberately re-read the on-disk files on every call. The files
-are tiny and re-reading avoids stale-state surprises in tests; do not add
-`functools.lru_cache` here.
+Resolve paths relative to this module for installed use. Re-read on every
+call to avoid stale state; do not add a process cache.
 """
 
 from __future__ import annotations
@@ -55,20 +49,9 @@ def is_copyleft(
     *,
     copyleft_list: frozenset[str] | None = None,
 ) -> bool:
-    """Check whether a repo slug should be skipped under C8.
+    """Return whether a non-None slug requires a copyleft opt-in it does not have.
 
-    Args:
-        repo_slug: ``owner/repo`` to check, or ``None``.
-        allow_list: Frozen set of slugs the caller has explicitly opted in
-            via ``--allow-copyleft``.
-        copyleft_list: Pre-loaded copyleft set.  When ``None`` (the default)
-            the list is loaded from disk on every call (same as before).
-            Pass the result of ``load_copyleft_list()`` when checking many
-            rows in a loop to avoid O(N) redundant file opens.
-
-    Returns:
-        ``True`` only when ``repo_slug`` is on the copyleft list and is not
-        in ``allow_list``. ``None`` short-circuits to ``False``.
+    Pass a preloaded copyleft_list for loops; otherwise read it on every call.
     """
     if repo_slug is None:
         return False

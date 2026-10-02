@@ -1,10 +1,4 @@
-"""Real-path verify-selection config tests (issue #735).
-
-``runner.run`` is the production entrypoint; only the external backend is
-stubbed (``_install_accept_gate_pipeline``). The assertions read the persisted
-``recommendation-verdicts.json`` artifact, so they observe the wiring from the
-``RunConfig`` knob through ``_step_verify`` to the phase's ``selection`` block.
-"""
+"""Real runner tests of config-to-verifier wiring via persisted selection decisions."""
 
 from __future__ import annotations
 
@@ -15,7 +9,8 @@ from typing import Any
 import pytest
 
 from daydream.deep.artifacts import verdicts_path
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import _install_accept_gate_pipeline
 from tests.test_deep_orchestrator import Mute, _run_deep
 

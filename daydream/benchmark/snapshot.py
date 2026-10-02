@@ -1,10 +1,6 @@
-"""Freeze reproducible, self-contained ``base -> head`` PR snapshot bundles.
-
-This module owns the shared bare mirror (``cache/repository.git``), the base tip
-+ ``refs/pull/N/head`` + explicit-head ref fetch into it, ancestor-of-PR-head
-enforcement, merge-base + tree resolution, synthetic-commit + minimal-bundle
-construction, offline-clone validation, and the ``freeze_one`` orchestrator
-that yields exactly one ``ready`` or ``unreplayable`` snapshot outcome.
+"""Freeze PR heads into deterministic, self-contained base/head bundles. A shared mirror
+supplies ancestry and tree proofs; freezing returns ready or a classified unreplayable
+outcome after offline fidelity validation.
 """
 
 from __future__ import annotations
@@ -18,6 +14,7 @@ from typing import AbstractSet, Any, Literal, NamedTuple, cast, overload
 
 from daydream import git_ops
 from daydream.benchmark import schema, storage
+from daydream.git_ops import process as git_process
 
 # Pinned synthetic-commit identity/timestamp so a bundle is byte-identical
 # across repeated builds (Spike Finding 1).
@@ -38,8 +35,8 @@ def mirror(root: Path) -> Path:
 
 def rev_parse(repo: Path, ref: str) -> str:
     """Resolve *ref* to a 40-hex SHA in *repo*, raising GitError on absence."""
-    proc = git_ops._run_git(repo, ["rev-parse", "--verify", ref], retries=0)
-    git_ops._require_ok(proc, f"git rev-parse --verify {ref} failed in {repo}")
+    proc = git_process._run_git(repo, ["rev-parse", "--verify", ref], retries=0)
+    git_process._require_ok(proc, f"git rev-parse --verify {ref} failed in {repo}")
     return proc.stdout.strip()
 
 
@@ -57,25 +54,21 @@ def ensure_mirror(root: Path) -> Path:
     m = mirror(root)
     if not m.exists():
         m.parent.mkdir(parents=True, exist_ok=True)
-        proc = git_ops._run_git(
+        proc = git_process._run_git(
             root, ["init", "--bare", str(m)], env_cmd=_fetch_env(), retries=0, timeout=30,
         )
-        git_ops._require_ok(proc, f"git init --bare {m} failed")
+        git_process._require_ok(proc, f"git init --bare {m} failed")
     return m
 
 
 def _git_fetch(mirror_repo: Path, url: str, refspecs: list[str]) -> None:
-    """Fetch refspecs into the mirror. An unresolved refspec raises ``GitError``.
-
-    Carries the command-scoped ``gh auth git-credential`` helper fragment so
-    HTTPS fetches from GitHub authenticate through Git's normal helper contract
-    (``GIT_TERMINAL_PROMPT=0`` in :func:`_fetch_env`). Local/file origins never
-    invoke the helper, so local-origin tests are unaffected.
+    """Fetch with command-scoped gh credential-helper authentication and terminal prompts
+    disabled. Local/file origins skip the helper; unresolved refspecs raise GitError.
     """
     url = str(url)
-    args = [*git_ops._credential_helper_args(), "fetch", url, *refspecs]
-    proc = git_ops._run_git(mirror_repo, args, env_cmd=_fetch_env(), retries=0, timeout=300)
-    git_ops._require_ok(proc, f"git fetch {url} {' '.join(refspecs)} failed")
+    args = [*git_process._credential_helper_args(), "fetch", url, *refspecs]
+    proc = git_process._run_git(mirror_repo, args, env_cmd=_fetch_env(), retries=0, timeout=300)
+    git_process._require_ok(proc, f"git fetch {url} {' '.join(refspecs)} failed")
 
 
 def fetch_base_tip(
@@ -84,14 +77,8 @@ def fetch_base_tip(
     base_tip: str,
     origin_url: str | None = None,
 ) -> Path:
-    """Fetch the selected base-branch tip into the mirror as ``refs/heads/base_tip``.
-
-    A missing/unfetchable base tip raises :class:`GitError` — the caller
-    classifies it ``base_unreachable``. The ref is force-updated (``+``
-    refspec): the mirror ref is derived state that must re-point to the
-    caller's selected tip even when a later freeze selects an ancestor (a
-    plain fetch would reject the non-fast-forward update). Returns the mirror
-    path. Idempotent.
+    """Force-update the mirror base_tip ref, including moves to ancestor commits. Return
+    the mirror path; fetch failure raises GitError for base_unreachable classification.
     """
     root = Path(root)
     origin_url = origin_url or f"https://github.com/{repo_slug}.git"
@@ -123,40 +110,31 @@ def fetch_head_refs(
 
 
 def head_reachability(mirror_repo: Path, sha: str, pr_head_sha: str) -> str:
-    """Classify how an explicit *sha* relates to the PR-head ancestry.
-
-    Returns ``"ok"`` when ``sha`` equals the PR head or is an ancestor of it,
-    ``"head_not_on_pr"`` when ``sha`` is in the mirror but on a different
-    ancestry, and ``"head_unreachable"`` when ``sha`` is absent entirely.
-    Never raises for a merely-missing or merely-unrelated SHA.
+    """Classify a SHA as ok, head_not_on_pr, or head_unreachable without raising for
+    missing objects.
     """
     if sha == pr_head_sha:
         return "ok"
-    verify = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{sha}^{{commit}}"], retries=0)
+    verify = git_process._run_git(mirror_repo, ["rev-parse", "--verify", f"{sha}^{{commit}}"], retries=0)
     if verify.returncode != 0:
         return "head_unreachable"
-    anc = git_ops._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
+    anc = git_process._run_git(mirror_repo, ["merge-base", "--is-ancestor", sha, pr_head_sha], retries=0)
     return "ok" if anc.returncode == 0 else "head_not_on_pr"
 
 
 def commit_relation(mirror_repo: Path, head: str, commit: str) -> str:
-    """Classify how *commit* relates to the PR head in the pinned mirror.
-
-    Returns ``"at_head"`` iff *commit* equals *head*; ``"ancestor"`` when
-    ``git merge-base --is-ancestor commit head`` exits zero; ``"non_ancestor"``
-    on a non-zero exit with the object present; and ``"unavailable"`` when the
-    object is missing from the mirror or the probe itself fails. Errors are
-    returned as the value, never raised.
+    """Classify at_head/ancestor/non_ancestor; absent objects or probe failures return
+    unavailable.
     """
     if commit == head:
         return "at_head"
     try:
-        verify = git_ops._run_git(
+        verify = git_process._run_git(
             mirror_repo, ["rev-parse", "--verify", f"{commit}^{{commit}}"], retries=0,
         )
         if verify.returncode != 0:
             return "unavailable"
-        anc = git_ops._run_git(
+        anc = git_process._run_git(
             mirror_repo, ["merge-base", "--is-ancestor", commit, head], retries=0,
         )
     except git_ops.GitError:
@@ -165,14 +143,8 @@ def commit_relation(mirror_repo: Path, head: str, commit: str) -> str:
 
 
 class AnchorDiff(NamedTuple):
-    """Whole-tree ``base_tip..head`` diff classification, shared across anchors.
-
-    A pure function of ``(base_tip, head)`` and the mirror's content-addressed
-    objects, so one classification serves every anchor against the same pair:
-    :func:`anchor_delta` skips the two whole-tree diffs
-    (``--name-status -z -M`` / ``--numstat -z``) for subsequent records,
-    leaving only the per-path ``-U0`` probe. A path appears in at most one
-    bucket, mirroring the probe's check order.
+    """Disjoint whole-tree change buckets reusable for all anchors on one content-addressed
+    commit pair.
     """
 
     renames: frozenset[str]
@@ -182,27 +154,21 @@ class AnchorDiff(NamedTuple):
 
 
 def _nul_fields(stdout: str | bytes) -> list[str]:
-    """NUL-split ``git -z`` output into surrogateescape-decoded fields.
-
-    The canonical split shared by :func:`anchor_delta` and
-    :func:`resolve_authoring_path` (and ``git_ops.ls_files``): ``-z`` emits
-    raw pathnames (no C-style quoting to unparse), so records must be split on
-    NUL and each field surrogateescape-decoded.
-    """
+    """Split raw git -z path bytes on NUL and decode with surrogateescape."""
     stdout = stdout if isinstance(stdout, bytes) else stdout.encode()
     return [f.decode("utf-8", errors="surrogateescape") for f in stdout.split(b"\0") if f]
 
 
 def changed_paths(mirror_repo: Path, base_sha: str, head_sha: str) -> frozenset[str]:
     """Return every old/new path in a strict NUL-framed Git tree diff."""
-    proc = git_ops._run_git(
+    proc = git_process._run_git(
         mirror_repo,
         ["diff", "--name-status", "-z", "-M", base_sha, head_sha],
         retries=0,
         capture_bytes=True,
         timeout=30,
     )
-    git_ops._require_ok(proc, "git diff --name-status failed")
+    git_process._require_ok(proc, "git diff --name-status failed")
     raw = proc.stdout if isinstance(proc.stdout, bytes) else proc.stdout.encode()
     if not raw:
         return frozenset()
@@ -238,13 +204,9 @@ def changed_paths(mirror_repo: Path, base_sha: str, head_sha: str) -> frozenset[
 
 
 def _classify_diff(name_status: str | bytes, numstat: str | bytes) -> AnchorDiff:
-    """Classify a whole-tree ``base..head`` diff into per-path buckets.
-
-    Never probes git — the caller supplies the already-captured
-    ``--name-status -z -M`` and ``--numstat -z`` byte streams (both pure
-    functions of ``(base_tip, head)``). Rename/copy rows contribute the old
-    AND new name; ``D`` rows the deleted set; every other two-field row the
-    modified set; numstat ``-\t-`` records the binary set.
+    """Classify captured name-status and numstat bytes without probing Git. Renames/copies
+    include both paths; deletions, modifications, and binary numstat markers populate
+    their respective buckets.
     """
     fields = _nul_fields(name_status)
     # numstat -z records are NUL-terminated with tab-separated fields:
@@ -291,31 +253,12 @@ def anchor_delta(
     anchor: Any,
     diff_cache: dict[tuple[str, str], AnchorDiff] | None = None,
 ) -> str:
-    """Classify how the base..head change interacts with one authoring anchor.
-
-    *anchor* is an :class:`~daydream.benchmark.schema.AuthoringAnchor`-shaped
-    dict whose ``[start_line, end_line]`` span lives in the diff base (the
-    ``base_tip`` argument) commit's file coordinate space — for real fact
-    extraction the caller feeds the record's authoring commit as ``base_tip``,
-    the space GitHub's authoring ``original_line`` fields are expressed in.
-    Returns ``"locationless"`` when the anchor is not ``status == "derived"``
-    or carries no path/range; otherwise the base..head diff is classified:
-    anchored path renamed -> ``"renamed"``; anchored path deleted ->
-    ``"deleted"``; binary content at the anchored path -> ``"binary"``; a
-    modification whose ``-U0`` base-side hunk ranges intersect the anchored
-    ``[start_line, end_line]`` span -> ``"changed"``; a same-file
-    modification outside the span -> ``"unchanged"``. Equal base/head (an
-    at-head anchor) is ``"unchanged"`` with no mirror probes. Any git failure
-    returns ``"unavailable"`` (fail-closed: never raised, never guessed). All
-    reads are local mirror reads only.
-
-    The two whole-tree diffs are pure functions of ``(base_tip, head)``, so
-    when *diff_cache* is supplied the classification is computed once per
-    distinct pair and shared by every anchor on it: a comment-heavy
-    materialization whose records sit on the same authoring commit pays the
-    ``--name-status``/``--numstat`` fan-out once, not once per record. The
-    per-path ``-U0`` probe still runs per modified record (it depends on the
-    anchored path, and the hunk intersection on the anchor's span).
+    """Classify local base..head changes against an anchor in base-commit coordinates.
+    Undeclared locations return locationless. Check rename, deletion, binary, then
+    base-side hunk intersection: only edits overlapping the anchor range are changed.
+    Equal commits are unchanged without probes; Git failures are unavailable. Cache
+    whole-tree classification per commit pair, while path-specific hunk checks retain
+    each anchor range.
     """
     if not isinstance(anchor, dict) or anchor.get("status") != "derived":
         return "locationless"
@@ -332,7 +275,7 @@ def anchor_delta(
     try:
         diff = diff_cache.get((base_tip, head)) if diff_cache is not None else None
         if diff is None:
-            st = git_ops._run_git(
+            st = git_process._run_git(
                 mirror_repo,
                 ["diff", "--name-status", "-z", "-M", base_tip, head],
                 retries=0,
@@ -340,7 +283,7 @@ def anchor_delta(
             )
             if st.returncode != 0:
                 return "unavailable"
-            numstat = git_ops._run_git(
+            numstat = git_process._run_git(
                 mirror_repo,
                 ["diff", "--numstat", "-z", base_tip, head],
                 retries=0,
@@ -367,7 +310,7 @@ def anchor_delta(
         # intersect it with the -U0 hunk *base-side* ranges (``-l,s``) — the
         # new-side ``+c,d`` positions diverge from the authoring coordinates
         # whenever lines shift above the anchor, misclassifying the span.
-        hunks = git_ops._run_git(
+        hunks = git_process._run_git(
             mirror_repo, ["diff", "-U0", base_tip, head, "--", path], retries=0,
         )
         if hunks.returncode != 0:
@@ -400,12 +343,12 @@ def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -
     Soft-failure: returns ``None`` for a documented no-merge-base case (a real
     broken git invocation propagates as ``GitError``).
     """
-    proc = git_ops._run_git(mirror_repo, ["merge-base", base_tip_ref, head_sha], retries=0)
+    proc = git_process._run_git(mirror_repo, ["merge-base", base_tip_ref, head_sha], retries=0)
     if proc.returncode == 1:
         # exit code 1 is git's documented signal for "no common ancestor" --
         # the soft-failure sentinel. Any other non-zero code is a real failure.
         return None
-    git_ops._require_ok(
+    git_process._require_ok(
         proc, f"git merge-base {base_tip_ref} {head_sha} failed in {mirror_repo}"
     )
     out = proc.stdout.strip()
@@ -413,13 +356,8 @@ def resolve_original_base(mirror_repo: Path, base_tip_ref: str, head_sha: str) -
 
 
 class AnchorDerivationError(git_ops.GitError):
-    """Fail-closed authoring-path derivation failure, carrying a closed reason.
-
-    ``reason`` is one of ``"history-unavailable"`` (the authoring commit, or
-    the rename-trace diff over it, is unavailable in the mirror) or
-    ``"path-unavailable"`` (the path cannot be traced to a unique
-    authoring-time name). Never a free-form string and never a guessed path:
-    the caller maps it to a fixed anchor status.
+    """Closed history-unavailable/path-unavailable failure; callers must not guess an
+    anchor.
     """
 
     def __init__(self, reason: str, detail: str) -> None:
@@ -428,39 +366,22 @@ class AnchorDerivationError(git_ops.GitError):
 
 
 def derive_authoring_path(mirror_repo: Path, authoring_sha: str, path: str, mapped_sha: str) -> str:
-    """Derive the authoring-time path for *path* from a strict, versioned anchor.
-
-    Three-step, fail-closed derivation over the pinned mirror:
-
-    1. the authoring commit must resolve in the mirror -- absence raises
-       :class:`AnchorDerivationError` with reason ``"history-unavailable"``;
-    2. if ``path`` exists in the authoring tree, it derives to itself (the
-       common same-path case needs no rename trace);
-    3. otherwise the rename trace between the authoring commit and the
-       ``mapped_sha`` commit (the commit GitHub re-anchored the review onto)
-       must contain exactly one ``R<score>`` row whose *new* name is ``path``
-       -- exactly one match returns the old name; zero or multiple matches
-       raise reason ``"path-unavailable"`` (never a guess among rename
-       candidates); a failed diff raises ``"history-unavailable"``.
-
-    All git failure paths propagate through :class:`git_ops.GitError`
-    semantics; nothing is silently coerced to a fallback path.
-
-    The diff runs with ``-z`` so paths containing spaces/quote characters are
-    emitted raw (no C-style quoting to unparse), and records are NUL-split:
-    rename rows carry three fields (``R<score>``, old, new) and every other
-    status row carries two (status, path).
+    """Resolve the path at the original authoring commit using the pinned mirror. Use the
+    path directly if it exists there; otherwise require exactly one rename to the mapped
+    path. Missing objects/diff failures are history-unavailable; ambiguous or absent
+    renames are path-unavailable. NUL-delimited Git output preserves arbitrary path
+    bytes.
     """
-    verify = git_ops._run_git(mirror_repo, ["rev-parse", "--verify", f"{authoring_sha}^{{commit}}"], retries=0)
+    verify = git_process._run_git(mirror_repo, ["rev-parse", "--verify", f"{authoring_sha}^{{commit}}"], retries=0)
     if verify.returncode != 0:
         raise AnchorDerivationError(
             "history-unavailable",
             f"authoring commit {authoring_sha[:12]} is absent from the mirror {mirror_repo}",
         )
-    exists = git_ops._run_git(mirror_repo, ["cat-file", "-e", f"{authoring_sha}:{path}"], retries=0)
+    exists = git_process._run_git(mirror_repo, ["cat-file", "-e", f"{authoring_sha}:{path}"], retries=0)
     if exists.returncode == 0:
         return path
-    trace = git_ops._run_git(
+    trace = git_process._run_git(
         mirror_repo,
         ["diff", "--name-status", "-z", "-M", authoring_sha, mapped_sha],
         retries=0,
@@ -529,11 +450,11 @@ def _canonical_diff_args(base: str, head: str) -> list[str]:
 
 def canonical_diff_sha256(mirror_repo: Path, base_sha: str, head_sha: str) -> str:
     """sha256 of the canonical binary-safe diff between two commits."""
-    proc = git_ops._run_git(
+    proc = git_process._run_git(
         mirror_repo, _canonical_diff_args(base_sha, head_sha),
         retries=0, capture_bytes=True,
     )
-    git_ops._require_ok(proc, f"git diff --binary {base_sha} {head_sha} failed")
+    git_process._require_ok(proc, f"git diff --binary {base_sha} {head_sha} failed")
     return hashlib.sha256(proc.stdout).hexdigest()
 
 
@@ -575,14 +496,14 @@ def _run_git_checked(
     repo = Path(repo)
     proc: subprocess.CompletedProcess[bytes] | subprocess.CompletedProcess[str]
     if capture_bytes:
-        proc = git_ops._run_git(
+        proc = git_process._run_git(
             repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=True
         )
     else:
-        proc = git_ops._run_git(
+        proc = git_process._run_git(
             repo, args, env_cmd=env_cmd, retries=0, timeout=timeout, capture_bytes=False
         )
-    git_ops._require_ok(proc, f"git {' '.join(args)} failed")
+    git_process._require_ok(proc, f"git {' '.join(args)} failed")
     if capture_bytes:
         return proc.stdout
     return proc.stdout.strip()
@@ -591,12 +512,8 @@ def _run_git_checked(
 def build_bundle(
     mirror_repo: Path, base_sha: str, head_sha: str, bundle_path: Path
 ) -> None:
-    """Write a deterministic minimal ``refs/heads/base`` + ``refs/heads/head`` bundle.
-
-    Builds two synthetic commits directly from the original base/head tree
-    objects with pinned identity/timestamp, then exposes only the two refs. Any
-    non-zero step raises :class:`GitError` so the caller maps it to
-    ``bundle_failure``.
+    """Build exactly base/head synthetic commits with pinned identity/time; Git failures
+    propagate.
     """
     bundle_path = Path(bundle_path).resolve()
     bundle_path.parent.mkdir(parents=True, exist_ok=True)
@@ -623,10 +540,10 @@ def build_bundle(
 def bundle_heads(bundle_path: Path) -> set[str]:
     """The list of refs a bundle exposes."""
     bundle_path = Path(bundle_path).resolve()
-    proc = git_ops._run_git(
+    proc = git_process._run_git(
         bundle_path.parent, ["bundle", "list-heads", str(bundle_path)], retries=0, timeout=30
     )
-    git_ops._require_ok(proc, "git bundle list-heads failed")
+    git_process._require_ok(proc, "git bundle list-heads failed")
     heads: set[str] = set()
     for line in proc.stdout.splitlines():
         parts = line.split()
@@ -638,31 +555,21 @@ def bundle_heads(bundle_path: Path) -> set[str]:
 def validate_offline_clone(
     bundle_path: Path, base_tree: str, head_tree: str, diff_sha256: str, workdir: Path
 ) -> None:
-    """Offline-clone fidelity check on a frozen bundle, network disabled.
-
-    Clones the bundle with ``--no-local --no-checkout`` and verifies the full
-    fidelity contract: the clone exposes **exactly** the two refs
-    ``refs/remotes/origin/base`` and ``refs/remotes/origin/head``; exactly two
-    commits are reachable from the head (base + head); the base is a root
-    commit (no parent); the head's single parent is the base commit; the
-    base/head tree IDs match; and the canonical diff digest matches. A
-    checksum-restamped, ref-padded, or structurally-tampered bundle fails one
-    of these probes.
-
-    Raises :class:`GitError` naming the failing check on any clone error,
-    unexpected ref set, ancestry/parent mismatch, tree mismatch, or diff-digest
-    mismatch. Returns ``None``.
+    """Clone with network disabled and verify the full portable fidelity contract. Require
+    exactly origin/base and origin/head refs, exactly two reachable commits, a root
+    base, head parented only on base, matching tree ids, and the canonical diff digest.
+    Any mismatch or clone error raises GitError.
     """
     bundle_path = Path(bundle_path).resolve()
     import tempfile
 
     clone_dir = Path(tempfile.mkdtemp(prefix="clone-", dir=str(workdir)))
     try:
-        proc = git_ops._run_git(
+        proc = git_process._run_git(
             Path(workdir), ["clone", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
             retries=0, timeout=120,
         )
-        git_ops._require_ok(proc, f"offline clone of {bundle_path} failed")
+        git_process._require_ok(proc, f"offline clone of {bundle_path} failed")
         refs_out = _run_git_checked(clone_dir, ["for-each-ref", "--format=%(refname)", "refs/remotes"])
         refs = set(refs_out.splitlines())
         expected_refs = {"refs/remotes/origin/base", "refs/remotes/origin/head"}
@@ -725,16 +632,10 @@ def freeze_one(
     pr_changed_files: AbstractSet[str],
     origin_url: str | None = None,
 ) -> tuple[dict[str, Any], bytes | None]:
-    """Freeze one requested head into a ``(ready|unreplayable, bundle_bytes)`` pair.
-
-    Runs the full pipeline (mirror ensure -> fetch -> ancestry -> merge-base -> trees
-    -> degenerate -> bundle -> offline validate). Classified git failures return an
-    ``unreplayable`` dict with an exact reason (and ``None`` bytes); only unexpected
-    errors propagate. The produced bundle is written to a private scratch path and
-    returned as *bytes* (never to the final ``snapshots/<case>.bundle``) so the caller
-    stages it through the crash-consistent :class:`storage.Transaction` — the final
-    path is created only by that transaction's commit, and a crash mid-freeze cannot
-    leak an un-journaled private snapshot bundle.
+    """Return a ready/unreplayable snapshot plus optional bundle bytes. Classified Git
+    failures become exact unreplayable reasons; unexpected errors propagate. Bundle
+    bytes stay in private scratch until the caller journal commits them, preventing
+    untracked final bundles after interruption.
     """
     root = Path(root)
     origin_url = origin_url or f"https://github.com/{repo_slug}.git"

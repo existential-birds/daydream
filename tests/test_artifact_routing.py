@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from daydream import runner
+from daydream import run_artifacts, runner
 from daydream.agent import run_agent
 from daydream.artifact_visibility import (
     ArtifactVisibilityError,
@@ -22,7 +22,7 @@ from daydream.artifact_visibility import (
 )
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.orchestrator import run_deep
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -33,10 +33,10 @@ async def test_recorder_public_output_requires_standalone_opt_in(tmp_path: Path,
 ) -> None:
     config = make_config(tmp_path)
     with pytest.raises(ArtifactVisibilityError, match="allow_standalone=True"):
-        runner._open_recorder(config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,)
+        run_artifacts._open_recorder(config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,)
     assert not (tmp_path / ".daydream").exists()
 
-    recorder = runner._open_recorder(
+    recorder = run_artifacts._open_recorder(
         config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
     )
     async with recorder:
@@ -73,7 +73,7 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
             if entrypoint == "deep":
                 await run_deep(config, work, allow_standalone=True)
             else:
-                runner._open_recorder(
+                run_artifacts._open_recorder(
                     config=config, target_dir=repo, work=work, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
                 )
         assert not (repo / ".daydream").exists()

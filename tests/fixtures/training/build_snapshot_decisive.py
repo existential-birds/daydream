@@ -1,12 +1,6 @@
-"""Decisive-finding fake-Hub snapshot for the end-to-end annotation pipeline.
-
-Extends :mod:`tests.fixtures.training.build_hub_snapshot` with exactly one
-delta: each session's per-finding resolution carries a disposition mix that
-exercises every materialization class — sess-a automatic ``accepted``,
-sess-b automatic ``rejected``, sess-c ``unanswered`` (human-resolved by the
-label step). Ids, manifests, curation derivation, and FakeHub wiring are
-unchanged; the evidence digest is recomputed per the shared serializer
-contract, and the profile/stack fields mirror ``_snapshot_trajectory``.
+"""Extend the fake-Hub snapshot with accepted, rejected, and unanswered sessions; the label step
+resolves the last. Preserve IDs, manifests, curation, and Hub wiring, recomputing evidence digests
+under the shared serializer and retaining native profile/stack fields.
 """
 
 from __future__ import annotations
@@ -21,8 +15,6 @@ from tests.fixtures.training.build_hub_snapshot import (
 
 __all__ = ["REPO_ID", "SNAPSHOT_REVISION", "build_snapshot_decisive"]
 
-# One decisive class per session: automatic accepted, automatic rejected,
-# human-resolved (label step) — the §9 alias ids from the base snapshot.
 _DECISIVE_DISPOSITIONS = {"sess-a": "accepted", "sess-b": "rejected", "sess-c": "unanswered"}
 
 
@@ -38,8 +30,7 @@ def _snapshot_trajectory_decisive(session_id: str) -> dict[str, object]:
 
 
 def _add_license_evidence(data: dict[str, object]) -> None:
-    # Required by the projection admission gate and bundle loader for every
-    # admitted batch (MIT, accepted by the policy the projector run pins).
+    # MIT evidence admits each batch under the projector's pinned license policy.
     data["license_evidence"] = {"spdx_id": "MIT", "source": "github-api"}
 
 

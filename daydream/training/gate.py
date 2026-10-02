@@ -1,26 +1,9 @@
-"""Stage-0 offline gate: frozen split + separation/calibration validation (M3, S2).
+"""Validate the learned outcome model against a frozen held-out split.
 
-This is the *offline validation harness* for the learned outcome reward model
-(:mod:`daydream.training.reward_model`), not a scoring function. It mirrors the
-version/digest stamping discipline of :mod:`daydream.training.reward`
-(``reward.py`` fingerprint discipline): every gate verdict carries an
-``evidence_digest`` so the decision is reproducible and auditable.
-
-Contract points:
-
-- **Frozen split (M3/M18)**: the train/held-out partition is frozen *before*
-  the reward model trains. It is content-addressed — the digest is the
-  SHA-256 of the sorted held-out row ids plus the seed — and the digest is
-  written beside the labels file for the resume guard (M18's split digest)
-  and the stage manifest (M16). The same labels + seed always reproduce the
-  same digest; a different seed yields a different digest.
-- **Gate refusal (M4's underlying rule)**: missing split/label evidence raises
-  :class:`RuntimeError` naming what is missing. The gate never fails open.
-- **Thresholds are documented, never silent**: ``GateConfig`` thresholds are
-  supplied by the calibration run (Open Question 1); construction rejects
-  values outside ``(0, 1)`` so no degenerate threshold can silently pass.
-- **S2**: the accepted ratio is measured from the held-out labels at gate
-  time — never read from a stored/stale figure.
+The digest binds sorted held-out row ids and seed before training; its sidecar
+feeds resume and manifest evidence. Gate thresholds must be in (0, 1), and
+missing, empty, or single-class evidence refuses evaluation. Ratios are
+measured at evaluation time; every verdict carries its evidence digest.
 """
 
 from __future__ import annotations
@@ -40,19 +23,10 @@ _LABELS = {"accepted": 1.0, "rejected": 0.0}
 
 @dataclass(frozen=True)
 class GateConfig:
-    """Documented gate thresholds (values pinned by the calibration run,
-    Open Question 1 — never hard-coded defaults that silently pass).
+    """Required separation and calibration thresholds, each strictly between 0 and 1.
 
-    Attributes:
-        min_separation: Minimum required gap between the mean composite score
-            of the accepted population and the rejected population on the
-            held-out split.
-        min_calibration: Minimum required calibration score on the held-out
-            split, where calibration ``= 1 - mean(|score - label|)`` (1.0 is
-            perfectly calibrated, 0.0 is maximally miscalibrated).
-
-    Raises:
-        ValueError: When any threshold is ≤ 0 or ≥ 1.
+    Separation is mean accepted minus mean rejected score. Calibration is
+    1 - mean(abs(score - label)); thresholds are supplied by calibration policy.
     """
 
     min_separation: float = 0.1
@@ -68,23 +42,16 @@ class GateConfig:
                 )
 
     def thresholds(self) -> dict[str, float]:
-        return {"min_separation": self.min_separation, "min_calibration": self.min_calibration}
+        return asdict(self)
 
 
 @dataclass(frozen=True)
 class FrozenSplit:
-    """A frozen train/held-out partition of the gold labels, frozen before
-    the reward model trains.
+    """Admitted train/held-out rows frozen before model training.
 
-    Attributes:
-        digest: Content-addressed SHA-256 of the sorted held-out row ids plus
-            the seed (M18's split digest; feeds the stage manifest, M16).
-        fingerprint: Short (8-char) form of the digest for display/stamping.
-        digest_path: Path (relative to the labels file's directory) of the
-            digest sidecar written beside the split for the resume guard.
-        train_rows / held_out_rows: The admitted rows in each partition.
-        seed: The seed that froze the shuffle.
-        held_out_fraction: The fraction that determined the partition size.
+    The digest binds held-out ids and seed; fingerprint is its first eight
+    characters. digest_path is a sidecar filename relative to the labels directory.
+    held_out_fraction records the rate that determined the partition size.
     """
 
     digest: str
@@ -109,21 +76,10 @@ class FrozenSplit:
 
 @dataclass(frozen=True)
 class GateReport:
-    """JSON-serializable verdict of the Stage-0 offline gate.
+    """Gate verdict and measurements bound to split, model, thresholds, and row count.
 
-    Attributes:
-        passed: Whether both documented thresholds were met on the held-out
-            split.
-        separation: Mean accepted composite score minus mean rejected
-            composite score on the held-out split.
-        calibration: ``1 - mean(|score - label|)`` on the held-out split.
-        accepted_ratio: Fraction of accepted rows in the held-out split,
-            measured at gate time (S2) — never a stored figure.
-        evidence_digest: SHA-256 over the full evidence payload (split digest,
-            model fingerprint, thresholds, counts, and measurements) so the
-            verdict is reproducible and auditable.
-        thresholds: The documented thresholds the verdict was judged against.
-        held_out_rows: Number of held-out rows evaluated.
+    accepted_ratio is measured from held-out labels; evidence_digest binds the
+    complete evidence payload for reproducibility.
     """
 
     passed: bool
@@ -152,14 +108,7 @@ def _build_frozen_split(
     seed: int,
     held_out_fraction: float,
 ) -> FrozenSplit:
-    """Assemble a :class:`FrozenSplit` and write its digest sidecar.
-
-    Shared by the labels-file :func:`freeze_split` producer and the projected-
-    corpus frozen-boundary producer in :mod:`daydream.training.coordinator`, so
-    the two cannot drift on the digest/sidecar/FrozenSplit shape. Writes the
-    canonical ``<labels>.gate-split.json`` sidecar with the shared crash-safe
-    JSON writer.
-    """
+    """Write the canonical split sidecar shared by label and projection producers."""
     held_out_ids = [str(r["comment_id"]) for r in held_out_rows]
     digest = _split_digest(held_out_ids, seed)
     sidecar_path = Path(labels_path).parent / (Path(labels_path).name + ".gate-split.json")
@@ -188,28 +137,10 @@ def _build_frozen_split(
 def freeze_split(
     labels_path: str | Path, *, held_out_fraction: float, seed: int
 ) -> FrozenSplit:
-    """Freeze the train/held-out split of gold accepted/rejected rows.
+    """Admit, sort, then deterministically shuffle labels before training.
 
-    Must be called **before** the reward model trains. Rows are admitted via
-    the same gold-outcome gate as the reward model (fail closed on refusal),
-    deterministically shuffled with ``seed``, and partitioned so the held-out
-    side holds ``held_out_fraction`` of the admitted rows (at least one).
-
-    A digest sidecar (``<labels>.gate-split.json``) is written beside the
-    labels file recording the split digest for the resume guard (M18) and the
-    stage manifest (M16).
-
-    Args:
-        labels_path: JSONL labels file (``comment_id``/``text``/``label`` rows).
-        held_out_fraction: Fraction of admitted rows reserved for the gate;
-            must be in ``(0, 1)`` exclusive.
-        seed: Seed freezing the shuffle; part of the digest.
-
-    Returns:
-        The frozen :class:`FrozenSplit`.
-
-    Raises:
-        ValueError: On an unreadable/refused row or a degenerate fraction.
+    The held-out fraction must be in (0, 1). Empty admitted input or an empty
+    held-out side raises ValueError; success writes the digest sidecar.
     """
     if not (0.0 < held_out_fraction < 1.0):
         raise ValueError(
@@ -246,27 +177,10 @@ def _evidence_digest(payload: dict[str, Any]) -> str:
 
 
 def evaluate_gate(model: Any, split: FrozenSplit | None, config: GateConfig) -> GateReport:
-    """Evaluate the Stage-0 gate on the held-out split only.
+    """Measure separation, calibration, and label balance on held-out rows only.
 
-    Computes the separation of composite scores between the accepted and
-    rejected held-out populations, a calibration measure, and the accepted
-    ratio measured at gate time (S2). ``passed`` is determined by the
-    documented :class:`GateConfig` thresholds.
-
-    Args:
-        model: A trained :class:`~daydream.training.reward_model.OutcomeModel`.
-        split: The frozen split. ``None`` — or a split missing evidence —
-            refuses the gate.
-        config: Documented thresholds.
-
-    Returns:
-        The :class:`GateReport` verdict.
-
-    Raises:
-        RuntimeError: When the split or its label evidence is missing, the
-            held-out side is empty or single-class (separation/calibration are
-            undefined), or the model carries no score function. The gate
-            refuses closed — never fails open.
+    Missing split/model evidence, empty holdout, invalid labels, or a single class
+    raises RuntimeError. Both configured thresholds must pass.
     """
     if split is None:
         raise RuntimeError(

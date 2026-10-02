@@ -1,20 +1,7 @@
-"""Exploration subagent prompts and output schemas.
+"""Pre-scan pattern, dependency, and test-mapping prompts and schemas.
 
-Three specialist subagents power pre-scan exploration:
-
-- **pattern-scanner**: detects codebase conventions and reads guideline files
-  (CLAUDE.md, ruff.toml, etc.) -- satisfies EXPL-04.
-- **dependency-tracer**: extends the static-resolved import graph by grepping
-  call sites and emits Dependency edges.
-- **test-mapper**: locates test files for each modified source file via
-  conventional path mapping.
-
-The orchestrator (daydream.exploration_runner) merges their partial
-ExplorationContext results with merge_contexts() in daydream.exploration.
-
-A fourth prompt, **repo-survey**, serves the diff-less repo-scoped scan used by
-``daydream improve``. It shares the pattern-scanner output shape but must never
-share its diff framing.
+exploration_runner merges specialist contexts. Improve's diff-less repo-survey
+shares the pattern schema while retaining repository-wide framing.
 """
 
 from __future__ import annotations
@@ -22,7 +9,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from daydream.output_schema import strict_object
+from daydream.output_schema import result_array_schema, strict_object
 from daydream.prompt_budget import INLINE_DIFF_BUDGET_BYTES, fits_inline_diff_budget
 from daydream.prompts.grounding import (
     CWD_GROUNDING_INSTRUCTION,
@@ -76,16 +63,11 @@ DEPENDENCY_TRACER_SCHEMA: dict[str, Any] = strict_object({
     },
 })
 
-TEST_MAPPER_SCHEMA: dict[str, Any] = strict_object({
-    "affected_files": {
-        "type": "array",
-        "items": strict_object({
-            "path": {"type": "string"},
-            "role": {"type": "string", "enum": ["test"]},
-            "summary": {"type": "string"},
-            "source_file": {"type": "string"},
-        }),
-    },
+TEST_MAPPER_SCHEMA: dict[str, Any] = result_array_schema("affected_files", {
+    "path": {"type": "string"},
+    "role": {"type": "string", "enum": ["test"]},
+    "summary": {"type": "string"},
+    "source_file": {"type": "string"},
 })
 
 
@@ -122,9 +104,9 @@ def _change_overview(diff: str) -> str:
     are explicit. Equal per-file shares prevent a large addition from hiding
     all subsequent small changes.
     """
-    from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
+    from daydream.deep.diff import iter_diff_blocks
 
-    blocks = [block for block in _DIFF_BLOCK_SPLIT.split(diff) if _diff_block_path(block)]
+    blocks = [block for path, block in iter_diff_blocks(diff) if path]
     opening = (
         "<change_overview>\nAdvisory changed-line excerpts; unchanged context is omitted. "
         "This is not source-read or review-coverage evidence, nor a complete patch. "

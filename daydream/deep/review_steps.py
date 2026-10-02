@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 import logging
 import shutil
-from collections.abc import Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -31,31 +30,31 @@ from daydream.deep.latency import (
     summarize_risk,
     wonder_decision,
 )
-from daydream.deep.records import duplicate_record_uids, record_uid, stack_name_from_uid, stamp_record_uids
+from daydream.deep.records import (
+    duplicate_record_uids,
+    partition_record_sources,
+    record_issues_or_empty,
+    record_uid,
+    stack_name_from_uid,
+    stamp_record_uids,
+)
 from daydream.deep.render import _PIPELINE_STAGE_NAMES
 from daydream.deep.reuse_key import (
-    PhaseIdentity,
     digest_text,
     exploration_digest,
-    grounding_digests,
     intent_key_payload,
     phase_identity_for,
-    unit_key,
     wonder_key_payload,
 )
 from daydream.deep.reuse_store import (
     REUSE_HIT_OUTCOMES,
-    lookup_reuse_entry,
-    record_absent_components,
-    record_reuse_hit,
     reuse_cache_for,
-    reuse_grounding_statuses,
     review_cache_enabled,
 )
+from daydream.deep.review_reuse import ReviewReuseUnit
 from daydream.deep.routing_record import write_routing_record
 from daydream.deep.settings import fold_default_alternatives, fresh_ttt
 from daydream.deep.state import DeepState
-from daydream.eval.analyzer import _records_issues_or_empty
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
 from daydream.phases import (
@@ -81,7 +80,7 @@ from daydream.ui import (
 )
 
 if TYPE_CHECKING:
-    from daydream.deep.reuse_store import ReuseCache
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -96,36 +95,6 @@ try:
     EXPLORATION_AVAILABLE = True
 except ImportError:  # pragma: no cover -- optional exploration dependency
     EXPLORATION_AVAILABLE = False
-
-
-def _restore_reuse_entry(
-    reuse: "ReuseCache",
-    unit: str,
-    key: str,
-    payload: Mapping[str, Any],
-    dd: Path,
-    *,
-    label: str,
-) -> bool:
-    """Look up and restore one reuse entry, recording the hit or miss.
-
-    Returns ``True`` only when the entry restored completely; the caller then
-    performs its own on-hit action. Review surfaces a failed restore with its
-    unit label; on any miss the reason is recorded and the caller recomputes.
-    """
-    hit = lookup_reuse_entry(
-        reuse,
-        unit,
-        key,
-        dd,
-        on_restore_failure=lambda reason: print_warning(
-            console, f"Reuse restore failed for {label}: {reason}"
-        ),
-    )
-    if hit is None:
-        return False
-    record_reuse_hit(reuse, unit, key, hit, payload)
-    return True
 
 
 def _grounding_moved(entry: object) -> bool:
@@ -217,14 +186,8 @@ async def _step_exploration(ctx: FlowContext) -> None:
         session=ctx.artifacts,
         allow_standalone=ctx.allow_standalone_artifacts,
     )
-    # Issue #644 — the pre-scan must be grounded in the FULL diff, never the
-    # bounded in-memory ``ctx.data["diff"]``: ``detect_affected_files`` seeds a
-    # specialist per affected file, so a dropped-block file would otherwise get
-    # zero exploration context, and the exact-match cache key would cover only
-    # the retained blocks (a change confined to a dropped-block region could
-    # then hit the cache). ``diff_path`` is always written full at gather; a
-    # read failure degrades to the bounded text with a warning rather than
-    # failing the run — exploration is fail-open by design.
+    # Explore and key the full persisted diff so omitted inline blocks remain covered.
+    # Read failure warns and falls back to bounded text because exploration is optional.
     diff = deep_state.diff
     try:
         diff = _read_full_diff(ctx)
@@ -265,11 +228,7 @@ async def _step_exploration(ctx: FlowContext) -> None:
         )
         _record_exploration("regenerated", "exploration pre-scan unavailable")
     elif config.exploration_context is None:
-        # The in-process context short-circuits first; the disk cache is only
-        # consulted when there is no in-memory context to reuse. Issue #733
-        # (MH13): ``--no-review-cache`` bypasses BOTH the pre-scan cache read and
-        # its write, so a forensic run genuinely recomputes the pre-scan rather
-        # than restoring an earlier run's grounding.
+        # Prefer in-memory context; disabling review reuse bypasses disk reads and writes.
         cache_key = exploration_cache_key(
             ctx.work.head_sha or "", diff, tier,
             strategies={name: ctx.strategy(name) for name in (
@@ -397,14 +356,10 @@ async def _step_intent(ctx: FlowContext) -> None:
     deep_state.intent_authoritative = bool(pr_description and pr_description.strip())
     review_budget_path(deep_state.dd).unlink(missing_ok=True)
     intent_p = _intent_path(deep_state.dd)
-    # Issue #733 — intent is a whole-change unit: its subject is the diff plus
-    # the commit log, branch name and PR description that reach its prompt. Its
-    # exploration pre-scan is recorded grounding only (MH2/MH16), so a moved
-    # pre-scan can never move the key; the hit path restores the recorded
-    # ``intent.md`` byte-for-byte rather than re-rendering it.
+    # Intent keys its prompt subject; exploration is recorded grounding only.
+    # Hits restore the original artifact bytes.
     reuse = reuse_cache_for(ctx)
-    intent_payload: dict[str, Any] | None = None
-    intent_reuse_key: str | None = None
+    intent_unit: ReviewReuseUnit | None = None
     intent_identity = phase_identity_for(ctx, "intent")
     if reuse is not None:
         intent_payload = intent_key_payload(
@@ -416,16 +371,14 @@ async def _step_intent(ctx: FlowContext) -> None:
             worktree_root=work.repo,
             identity=intent_identity,
         )
-        intent_reuse_key = unit_key(intent_payload)
-        if intent_reuse_key is None:
-            record_absent_components(reuse, "intent", intent_payload)
-        else:
-            if _restore_reuse_entry(
-                reuse, "intent", intent_reuse_key, intent_payload, deep_state.dd, label="intent"
-            ):
-                deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
-                deep_state.intent_path = intent_p
-                return
+        intent_unit = ReviewReuseUnit(reuse, "intent", intent_identity, intent_payload)
+        if intent_unit.restore(
+            deep_state.dd,
+            on_restore_failure=lambda reason: print_warning(console, f"Reuse restore failed for intent: {reason}"),
+        ):
+            deep_state.intent_summary = intent_p.read_text(encoding="utf-8")
+            deep_state.intent_path = intent_p
+            return
     intent_complete = True
     async with phase_scope(DaydreamPhase.INTENT) as phase:
         try:
@@ -489,21 +442,8 @@ async def _step_intent(ctx: FlowContext) -> None:
     deep_state.intent_path = intent_p
     # Store only a completed intent: a budget-exceeded partial is a degraded
     # result and must never be served to a later run as this unit's output.
-    if (
-        intent_complete
-        and reuse is not None
-        and intent_payload is not None
-        and intent_reuse_key is not None
-    ):
-        reuse.store(
-            intent_reuse_key,
-            unit="intent",
-            payload={intent_p.name: intent_p.read_bytes()},
-            components=intent_payload["components"],
-            identity=intent_identity,
-            grounding=grounding_digests(intent_payload),
-            grounding_status=reuse_grounding_statuses(reuse, intent_payload),
-        )
+    if intent_complete and intent_unit is not None:
+        intent_unit.store(lambda: {intent_p.name: intent_p.read_bytes()})
 
 
 def _fold_default_alternatives(ctx: FlowContext) -> bool:
@@ -538,9 +478,7 @@ async def _wonder(ctx: FlowContext) -> None:
     alt_issues: list[dict[str, Any]] = []
     wonder_reused = False
     wonder_complete = True
-    wonder_payload: dict[str, Any] | None = None
-    wonder_reuse_key: str | None = None
-    wonder_identity: PhaseIdentity | None = None
+    wonder_unit: ReviewReuseUnit | None = None
     if decision.outcome == "folded":
         print_dim(console, "Design alternatives are included in the structural review")
     elif decision.outcome == "skip":
@@ -560,18 +498,13 @@ async def _wonder(ctx: FlowContext) -> None:
                     "exploration": {"digest": exploration_digest(deep_state.exploration_dir)},
                 },
             )
-            wonder_reuse_key = unit_key(wonder_payload)
-            if wonder_reuse_key is None:
-                record_absent_components(reuse, "alternatives", wonder_payload)
-            else:
-                wonder_reused = _restore_reuse_entry(
-                    reuse,
-                    "alternatives",
-                    wonder_reuse_key,
-                    wonder_payload,
-                    deep_state.dd,
-                    label="alternatives",
-                )
+            wonder_unit = ReviewReuseUnit(reuse, "alternatives", wonder_identity, wonder_payload)
+            wonder_reused = wonder_unit.restore(
+                deep_state.dd,
+                on_restore_failure=lambda reason: print_warning(
+                    console, f"Reuse restore failed for alternatives: {reason}"
+                ),
+            )
         if not wonder_reused:
             async with phase_scope(DaydreamPhase.ALTERNATIVES) as phase:
                 try:
@@ -600,23 +533,8 @@ async def _wonder(ctx: FlowContext) -> None:
     deep_state.alts_path = alts_p
     # Store only a completed pass: a budget-exceeded partial is never served to
     # a later run as this unit's output.
-    if (
-        wonder_complete
-        and not wonder_reused
-        and reuse is not None
-        and wonder_payload is not None
-        and wonder_reuse_key is not None
-        and wonder_identity is not None
-    ):
-        reuse.store(
-            wonder_reuse_key,
-            unit="alternatives",
-            payload={alts_p.name: alts_p.read_bytes()},
-            components=wonder_payload["components"],
-            identity=wonder_identity,
-            grounding=grounding_digests(wonder_payload),
-            grounding_status=reuse_grounding_statuses(reuse, wonder_payload),
-        )
+    if wonder_complete and not wonder_reused and wonder_unit is not None:
+        wonder_unit.store(lambda: {alts_p.name: alts_p.read_bytes()})
     write_routing_record(
         deep_state.dd,
         {
@@ -631,19 +549,13 @@ async def _wonder(ctx: FlowContext) -> None:
 
 
 async def _step_wonder_and_per_stack(ctx: FlowContext) -> None:
-    """Fold default design review into structure; schedule independent policies.
+    """Fold default design review into structure; schedule custom policies independently.
 
-    A fresh default run writes the compatibility alternatives artifact before
-    fan-out; its structural reviewer owns the design lens. A custom alternatives
-    policy (or absent structural reviewer) retains the independent pass.
-    On a fresh multi-stack run these are siblings in one task group: wonder
-    only feeds the merge agent and the dedup pre-filter, so the reviewers do not
-    need to wait for it. Their prompts drop the ``alternatives.json`` pointer,
-    since the file does not exist yet.
-
-    Single-stack mode and every ``--start-at`` resume keep today's serial order
-    and the pointer — in single-stack mode there is no merge agent, so the
-    reviewer pointer is the ONLY path wonder findings take into the report.
+    Fresh default runs write a compatibility alternatives artifact before fan-out.
+    Independent wonder and stack reviews run concurrently only on fresh multi-stack
+    runs, omitting the not-yet-written alternatives pointer. Single-stack and resume
+    runs keep serial ordering: without merge, that pointer carries wonder findings
+    into the final report.
     """
     deep_state = DeepState(ctx.data)
     # A resume (--start-at per-stack/merge/fix) skips wonder entirely — its
@@ -730,13 +642,8 @@ async def _per_stack_body(ctx: FlowContext, *, include_alternatives: bool) -> No
         # outputs, so failed stacks never re-enter the parse pipeline.
         failures_p = per_stack_failures_path(dd)
         loaded = _load_failures(failures_p)
-        # Surface a prior cross-stack synthesis failure (issue #361): the
-        # structured ``MERGE_FAILURE_KEY`` entry is deliberately excluded from
-        # ``failed_stacks`` (below) so it can't be misread as a failed stack /
-        # garbled "Uncovered stacks" line, but resuming into a *partial* review
-        # must not look clean -- say so explicitly so a ``--start-at fix``
-        # relaunch doesn't fix + commit partial findings as if the cross-stack
-        # merge had succeeded.
+        # Report prior merge failure separately from failed stacks: resumed partial
+        # findings must not appear to have completed cross-stack synthesis.
         _warn_prior_merge_failure(loaded)
         # Legacy entries are ``{stack_name: reason}`` str->str. Skip the
         # structured merge-failure entry (``MERGE_FAILURE_KEY``, a dict)
@@ -763,11 +670,7 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
     failed_stacks: dict[str, str] = deep_state.failed_stacks
 
     print_stage_progress(console, 4, 5, _PIPELINE_STAGE_NAMES[3])
-    # Issue #745 (AC4): the per-stack reviewers emit PER_STACK_RECORD_SCHEMA
-    # records directly (no separate `parse-<stack>` stage), so BOTH a fresh run
-    # and a `--start-at merge` resume load the on-disk per-stack records. A
-    # fresh run separates records by the structural meta-stack below exactly as
-    # the resume path does.
+    # Fresh and resumed runs load the same on-disk per-stack records.
     per_stack_records_paths: list[Path] = []
     all_records: list[dict[str, Any]] = []
     record_sources: list[str] = []
@@ -802,22 +705,10 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         # ``{"issues": [...]}``. Merge consumes a bare
         # issues list, so normalize the dict shape here; legacy bare-list
         # records pass through unchanged.
-        records = _records_issues_or_empty(loaded)
-        # Issue #1111: this loop is the single choke point that populates
-        # ``ctx.data["records"]`` -- on a fresh run and on a ``--start-at merge``
-        # resume alike -- so it is where the ``uid`` invariant is guaranteed.
-        # ``phase_per_stack_reviews`` stamps at record birth, but two shapes
-        # still arrive here unstamped: records written by a run from before this
-        # field existed simply lack the key, and so would any future producer
-        # that missed the birth stamp. Re-deriving the uid from
-        # ``(stack_name, position)`` reproduces exactly the value the producing
-        # run would have minted -- which is precisely why the format is
-        # deterministic rather than a uuid4 -- so the backfill is
-        # indistinguishable from a birth stamp. ``stamp_record_uids`` normalizes
-        # the records filename to a bare stack name itself and PRESERVES any uid
-        # already on disk, so this is idempotent and never re-mints a uid the
-        # producing run already handed out (which matters on resume, where the
-        # on-disk list may be shorter than the list those uids were minted from).
+        records = record_issues_or_empty(loaded)
+        # Guarantee UIDs at the records entry point for fresh and resumed runs.
+        # Backfill from stack/ordinal only when absent; preserve stored UIDs because
+        # previous adjudication may have shortened the on-disk list.
         stamp_record_uids(records, records_path.name)
         per_stack_records_paths.append(records_path)
         source_name = records_path.name
@@ -847,15 +738,13 @@ async def _step_per_stack_parse(ctx: FlowContext) -> Stop | None:
         per_stack_records_paths = [
             p for p in per_stack_records_paths if p != structural_path_candidate
         ]
-        kept_pairs = []
-        for rec, src in zip(all_records, record_sources, strict=True):
-            if stack_name_from_uid(record_uid(rec)) == STRUCTURE_STACK_NAME:
-                structural_records.append(rec)
-                structural_record_sources.append(src)
-            else:
-                kept_pairs.append((rec, src))
-        all_records = [rec for rec, _ in kept_pairs]
-        record_sources = [src for _, src in kept_pairs]
+        structural_uids = {
+            uid for rec in all_records
+            if stack_name_from_uid(uid := record_uid(rec)) == STRUCTURE_STACK_NAME
+        }
+        all_records, record_sources, structural_records, structural_record_sources = (
+            partition_record_sources(all_records, record_sources, structural_uids)
+        )
     else:
         structural_records_path = None
 

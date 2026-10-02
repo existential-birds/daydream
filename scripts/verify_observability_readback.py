@@ -1,55 +1,27 @@
 #!/usr/bin/env python3
-"""Verify stored HoneyHive/LangSmith native trees against an immutable receipt.
+"""Verify stored HoneyHive/LangSmith trees against an immutable canonical receipt.
 
-P18/#1156 Task 6 bounded native readback verifier. Its transport contract is
-frozen as follows:
+Validate the input receipt and base URLs before creating one trust_env=False,
+follow_redirects=False AsyncClient. JSON only; never initialize OTLP machinery.
+Use one immutable monotonic deadline for requests, capped streaming reads,
+polling, and backoff. Close each stream before continuing and on cancellation;
+expiry emits one fixed redacted timeout result and starts no further request.
 
-- JSON parsing only (this tool never reuses the OTLP protobuf machinery);
-- one AnyIO run owning exactly one ``httpx.AsyncClient(trust_env=False,
-  follow_redirects=False)`` closed on every exit path;
-- one immutable monotonic deadline computed before the first request; every
-  request, capped streamed JSON-body read, poll sleep and backoff uses only
-  ``overall_remaining``; each request runs as ``async with client.stream(...)``
-  under ``anyio.fail_after(overall_remaining)`` and therefore closes before
-  another page/poll and on ordinary error or cancellation;
-- deadline expiry emits ONE fixed redacted timeout disposition, starts no
-  further request/poll, and never includes a URL, header, response body,
-  exception text or credential;
-- the immutable canonical input receipt is validated BEFORE the client is
-  constructed; a separate result receipt is written atomically (input receipt
-  is never modified);
-- keys are read only from existing environment variables; base URLs are
-  validated with the same production policy as the exporters;
-- HoneyHive ``POST /v1/events/search`` is paginated with a strict
-  ``{events, count}`` shape until ``count`` is satisfied or a page is
-  exhausted; duplicate event IDs, wrong-session rows, malformed/changing
-  shapes, page/item bounds and redirects fail closed;
-- LangSmith ``POST /runs/query`` discovery filters the exact
-  ``daydream.run.id`` equality in one explicit project with a bounded start
-  time, requires one trace/root, freezes the vendor-returned root/trace IDs,
-  then re-reads the exact IDs/tree; never derives IDs from HoneyHive or from
-  the Daydream UUID;
-- after shutdown the verifier polls until two complete exact-session snapshots
-  agree or the shared immutable deadline expires;
-- stored field presence/types/relationships are compared to the checked-in
-  machine-readable matrix subset (``tests/fixtures/observability_contract/
-  readback-matrix.json``);
-- output contains only destination, IDs, counts, names, types, booleans,
-  stable hashes and pass/fail matrix rows. It exits 0 only when the exact
-  session/run has one root, expected descendants, complete parents, canonical
-  types, expected generation/turn/tool counts, exact response identity/timing
-  provenance (sanitized replay), complete usage invariants with no
-  parent/child billing duplicate, resource identity and no forbidden/private
-  or ambient-context fields. API storage proof is never UI proof.
+HoneyHive uses bounded exact-session pagination with strict shape, count, and
+identity checks. LangSmith resolves one explicit project, discovers by exact
+run-id metadata and bounded start time, freezes vendor root/trace ids, then
+reads that tree. Never derive vendor IDs from Daydream or another destination.
+Require two equal complete snapshots within the shared deadline.
 
-Operator usage (keys come from the environment, never from the receipt):
+Compare stored types, parent/root relationships, generation/turn/tool counts,
+identity/timing provenance, resource identity, and unique billing ownership
+against the checked-in readback-matrix.json and sanitized replay. Refuse
+forbidden/private/ambient fields. Output only IDs, counts, names, types,
+booleans, stable hashes, and matrix results; storage proof is not UI proof.
 
-    HH_API_URL=... HH_API_KEY=... LANGSMITH_API_KEY=... \
-    python scripts/verify_observability_readback.py \
-        --receipt /path/to/receipt.json --result /path/to/result.json
-
-``--deadline`` defaults to 30 seconds and is the ONE immutable budget for all
-requests, polls and backoff. ``--matrix`` defaults to the checked-in subset.
+Keys come from environment variables. --receipt is never modified; --result
+is written atomically. --deadline defaults to 30 seconds, and --matrix to the
+checked-in observability contract subset.
 """
 
 from __future__ import annotations
@@ -148,12 +120,10 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
 
 
 def validate_base_url(raw: str, setting: str) -> str:
-    """Validate a readback base URL with the same production policy.
+    """Apply the exporter's HTTP(S) URL policy without importing its OTLP transport.
 
-    Mirrors ``daydream.observability.exporters._validated_endpoint`` (HTTP(S)
-    only, hostname present, no credentials/query/fragment/whitespace/control
-    characters, parseable port). The verifier deliberately does not import the
-    OTLP transport machinery; this is the identical URL policy.
+    Require hostname/valid port; reject credentials, query, fragment, whitespace,
+    and controls.
     """
     try:
         parsed = urlsplit(raw)
@@ -191,12 +161,7 @@ def _split_path(path: str) -> list[str]:
 
 
 def walk_metadata(value: Any, dotted: str) -> Any:
-    """Walk a stored metadata/config object for a dotted Daydream key.
-
-    Both flat metadata (``metadata["daydream.generation.sealed_end_unix_ns"]``)
-    and nested objects (``metadata["daydream"]["generation"]["sealed_end_unix_ns"]``)
-    are accepted; returns None when absent.
-    """
+    """Find a dotted Daydream key in flat or nested metadata/config; return None when absent."""
     if isinstance(value, Mapping):
         if dotted in value:
             return value[dotted]
@@ -361,12 +326,10 @@ async def read_honeyhive(
     session_id: str,
     expected_run_id: str,
 ) -> dict[str, Any]:
-    """Exact-session paginated read of ``POST /v1/events/search``.
+    """Read exact-session POST /v1/events/search pages (100 rows, at most 1000 pages).
 
-    Pages 1..1000 with limit 100; stops once ``count`` is satisfied or a page
-    is exhausted; rejects duplicates, wrong-session rows, malformed/changing
-    shapes and page/item bounds. Returns verified rows plus a stable snapshot
-    hash when two consecutive complete snapshots agree.
+    Stop at declared count or exhaustion; reject duplicate/wrong-session rows and
+    shape/count/bound violations. Return rows and a stable hash after equal snapshots.
     """
     limit = 100
     search_path = "/v1/events/search"
@@ -374,12 +337,10 @@ async def read_honeyhive(
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json", "Accept": "application/json"}
 
     async def _read_complete() -> dict[str, Any]:
-        """One full paginated exact-session read with strict reconciliation.
+        """Read one bounded complete session, stopping at count or page exhaustion.
 
-        Stops once ``count`` is satisfied or a page is exhausted; rejects
-        duplicates, wrong-session rows, malformed/changing shapes and
-        page/item bounds. Returns ``{count, rows}`` on success or
-        ``{error, detail}`` on any closed failure.
+        Reject duplicates, wrong sessions, or shape/count changes; return {count, rows}
+        or a closed {error, detail} failure.
         """
         page = 1
         rows: list[dict[str, Any]] = []
@@ -490,24 +451,13 @@ async def read_langsmith(
     run_id: str,
     started_at: str,
 ) -> dict[str, Any]:
-    """Exact ``daydream_run_id`` discovery, freeze, then exact-ID tree reads.
+    """Discover by exact Daydream run metadata, then freeze and reread native root/trace IDs.
 
-    The vendor stores the OpenLLMetry association property
-    ``traceloop.association.properties.daydream_run_id`` as run metadata at
-    ``extra.metadata.daydream_run_id`` and filters metadata with the
-    ``metadata_key``/``metadata_value`` equality grammar; a dotted-key
-    metadata filter is rejected. ``/runs/query`` requires an explicit
-    resolved session id (a project name alone is a 400), so the verifier
-    first resolves the receipt's project name to its vendor session id via
-    the bounded ``GET /api/v1/sessions?name=`` lookup, then discovers with
-    ``and(eq(metadata_key, 'daydream_run_id'), eq(metadata_value, run_id))``
-    inside one explicit session with a bounded start time. The verifier
-    requires one trace/root, freezes the vendor-returned IDs for the exact
-    re-reads (never derived from HoneyHive or from the Daydream UUID), and
-    re-reads the exact tree with the vendor-accepted
-    ``filter: eq(trace_id, ...)`` form (the vendor's maximum page limit is
-    100). The exact-ID tree must reach two equal complete snapshots within
-    the deadline.
+    Resolve the receipt's project name with GET /api/v1/sessions?name=; /runs/query
+    requires its session id. Match metadata_key=daydream_run_id and metadata_value,
+    not a dotted-key filter. Bound start time, require one root/trace, then use the
+    vendor's eq(trace_id, ...) filter with page limit 100 until two complete trees
+    agree within the deadline.
     """
     query_path = "/runs/query"
     url = f"{base_url}{query_path}"
@@ -721,12 +671,9 @@ def compare_stored(
     *,
     acceptance_kind: str,
 ) -> list[dict[str, Any]]:
-    """Compare stored native rows against the matrix subset; all-pass returns [].
+    """Return failed matrix rows, or [] when all stored type/shape/privacy checks pass.
 
-    Checks required keys/types, conditional keys (when present), forbidden
-    vendor fields and exact expected-shape reconciliation for the sanitized
-    protocol replay. Honest dispositions only: anything unverifiable is a
-    `MISSING_FIELD`/`SHAPE` row, never an invented pass.
+    Unverifiable fields yield MISSING_FIELD/SHAPE, never inferred success.
     """
     rows: list[dict[str, Any]] = []
 
@@ -734,63 +681,49 @@ def compare_stored(
         rows.append({"field": field, "disposition": code, "detail": detail})
 
     forbidden = matrix.get("forbidden_vendor_fields", [])
-    hh_required: dict[str, Any] = matrix.get("honeyhive", {}).get("required_event_keys", {})
-    hh_conditional: dict[str, Any] = matrix.get("honeyhive", {}).get("conditional_event_keys", {})
-    ls_required: dict[str, Any] = matrix.get("langsmith", {}).get("required_run_keys", {})
-    ls_conditional: dict[str, Any] = matrix.get("langsmith", {}).get("conditional_run_keys", {})
-    ls_identity_key = matrix.get("langsmith", {}).get("identity_metadata_key", "daydream_run_id")
     expected_shape = matrix.get("expected_shape", {}).get(acceptance_kind)
-
     hh: dict[str, Any] = data.get("honeyhive") or {}
     ls: dict[str, Any] = data.get("langsmith") or {}
 
-    if isinstance(hh.get("rows"), list):
-        for event in hh["rows"]:
-            for key, expected in hh_required.items():
-                if key not in event:
-                    _fail(DISPOSITION_MISSING_FIELD, f"honeyhive.event.{key}", "required key absent")
-                elif not _type_ok(str(expected), event.get(key)):
-                    _fail(DISPOSITION_SHAPE, f"honeyhive.event.{key}", f"expected {expected}")
-            for key, expected in hh_conditional.items():
-                # The vendor elides empty containers (e.g. metrics/feedback on
-                # non-billed events) and synthesizes aggregate session events;
-                # keys are type-checked when the vendor returns them.
-                if key in event and not _type_ok(str(expected), event.get(key)):
-                    _fail(DISPOSITION_SHAPE, f"honeyhive.event.{key}", f"expected {expected}")
-            found = _has_forbidden_key(event, forbidden)
+    for destination, container, rows_key, noun in (
+        ("honeyhive", hh, "rows", "event"),
+        ("langsmith", ls, "runs", "run"),
+    ):
+        stored = container.get(rows_key)
+        if not isinstance(stored, list):
+            continue
+        section = matrix.get(destination, {})
+        required = section.get(f"required_{noun}_keys", {})
+        conditional = section.get(f"conditional_{noun}_keys", {})
+        for row in stored:
+            for key, expected in required.items():
+                field = f"{destination}.{noun}.{key}"
+                if key not in row:
+                    _fail(DISPOSITION_MISSING_FIELD, field, "required key absent")
+                elif not _type_ok(str(expected), row.get(key)):
+                    _fail(DISPOSITION_SHAPE, field, f"expected {expected}")
+            # Vendors may elide empty containers; only returned values have a type contract.
+            for key, expected in conditional.items():
+                if key in row and not _type_ok(str(expected), row.get(key)):
+                    _fail(DISPOSITION_SHAPE, f"{destination}.{noun}.{key}", f"expected {expected}")
+            if destination == "langsmith":
+                # Discovery identity must survive at the vendor's actual storage path.
+                identity_key = section.get("identity_metadata_key", "daydream_run_id")
+                extra = row.get("extra") if isinstance(row.get("extra"), dict) else {}
+                metadata = extra.get("metadata") if isinstance(extra.get("metadata"), dict) else {}
+                field = "langsmith.run.extra.metadata"
+                if metadata:
+                    identity = walk_metadata(metadata, identity_key)
+                    field = f"{field}.{identity_key}"
+                    if identity is None:
+                        _fail(DISPOSITION_MISSING_FIELD, field, "required key absent")
+                    elif identity != ls.get("run_id"):
+                        _fail(DISPOSITION_WRONG_SESSION, field, "run identity mismatch")
+                else:
+                    _fail(DISPOSITION_MISSING_FIELD, field, "required key absent")
+            found = _has_forbidden_key(row, forbidden)
             if found is not None:
-                _fail(DISPOSITION_SHAPE, f"honeyhive.forbidden.{found}", "forbidden private vendor field present")
-
-    if isinstance(ls.get("runs"), list):
-        for run in ls["runs"]:
-            for key, expected in ls_required.items():
-                if key not in run:
-                    _fail(DISPOSITION_MISSING_FIELD, f"langsmith.run.{key}", "required key absent")
-                elif not _type_ok(str(expected), run.get(key)):
-                    _fail(DISPOSITION_SHAPE, f"langsmith.run.{key}", f"expected {expected}")
-            for key, expected in ls_conditional.items():
-                if key in run and not _type_ok(str(expected), run.get(key)):
-                    _fail(DISPOSITION_SHAPE, f"langsmith.run.{key}", f"expected {expected}")
-            # The exact-filtered discovery identity must survive into the tree.
-            # The vendor stores the OpenLLMetry association property as run
-            # metadata at ``extra.metadata``; top-level ``metadata`` is not
-            # projected. A run record without the stored identity key is a
-            # missing required vendor field (honest MISSING_FIELD row).
-            extra = run.get("extra") if isinstance(run.get("extra"), dict) else {}
-            stored_metadata = extra.get("metadata") if isinstance(extra.get("metadata"), dict) else {}
-            if stored_metadata:
-                run_identity = walk_metadata(stored_metadata, ls_identity_key)
-                if run_identity is None:
-                    missing = f"langsmith.run.extra.metadata.{ls_identity_key}"
-                    _fail(DISPOSITION_MISSING_FIELD, missing, "required key absent")
-                elif run_identity != ls.get("run_id"):
-                    wrong = f"langsmith.run.extra.metadata.{ls_identity_key}"
-                    _fail(DISPOSITION_WRONG_SESSION, wrong, "run identity mismatch")
-            else:
-                _fail(DISPOSITION_MISSING_FIELD, "langsmith.run.extra.metadata", "required key absent")
-            found = _has_forbidden_key(run, forbidden)
-            if found is not None:
-                _fail(DISPOSITION_SHAPE, f"langsmith.forbidden.{found}", "forbidden private vendor field present")
+                _fail(DISPOSITION_SHAPE, f"{destination}.forbidden.{found}", "forbidden private vendor field present")
 
     if expected_shape is not None and acceptance_kind == "sanitized_protocol_replay":
         _reconcile_replay(hh, ls, expected_shape, _fail)
@@ -800,22 +733,17 @@ def compare_stored(
         # already enforced by the exact-session/exact-trace reads, so the
         # remaining expectations are the descendant minimums. A tree without
         # a generation child or a tool sibling is not a complete agent tree.
-        generations_min = int(expected_shape.get("generations_min", 0))
-        tools_min = int(expected_shape.get("tools_min", 0))
-        if isinstance(ls.get("runs"), list):
-            llm = sum(1 for run in ls["runs"] if isinstance(run, dict) and run.get("run_type") == "llm")
-            tools = sum(1 for run in ls["runs"] if isinstance(run, dict) and run.get("run_type") == "tool")
-            if llm < generations_min:
-                _fail(DISPOSITION_SHAPE, "langsmith.tree.generations", f"expected at least {generations_min}")
-            if tools < tools_min:
-                _fail(DISPOSITION_SHAPE, "langsmith.tree.tools", f"expected at least {tools_min}")
-        if isinstance(hh.get("rows"), list):
-            models = sum(1 for event in hh["rows"] if isinstance(event, dict) and event.get("event_type") == "model")
-            tools = sum(1 for event in hh["rows"] if isinstance(event, dict) and event.get("event_type") == "tool")
-            if models < generations_min:
-                _fail(DISPOSITION_SHAPE, "honeyhive.session.model_events", f"expected at least {generations_min}")
-            if tools < tools_min:
-                _fail(DISPOSITION_SHAPE, "honeyhive.session.tool_events", f"expected at least {tools_min}")
+        minimums = (int(expected_shape.get("generations_min", 0)), int(expected_shape.get("tools_min", 0)))
+        for container, rows_key, type_key, prefix, checks in (
+            (ls, "runs", "run_type", "langsmith.tree", (("llm", "generations"), ("tool", "tools"))),
+            (hh, "rows", "event_type", "honeyhive.session", (("model", "model_events"), ("tool", "tool_events"))),
+        ):
+            if not isinstance(container.get(rows_key), list):
+                continue
+            for (kind, field), minimum in zip(checks, minimums, strict=True):
+                count = sum(1 for row in container[rows_key] if isinstance(row, dict) and row.get(type_key) == kind)
+                if count < minimum:
+                    _fail(DISPOSITION_SHAPE, f"{prefix}.{field}", f"expected at least {minimum}")
 
     return rows
 
@@ -826,15 +754,10 @@ def _reconcile_replay(
     expected: dict[str, Any],
     fail: Any,
 ) -> None:
-    """Exact historical-equivalent reconciliation of the sanitized replay.
+    """Reconcile sanitized replay identities, timing, and usage from flat/nested metadata.
 
-    The generation identity/timing/usage evidence is searched flat and nested
-    in stored metadata/config (the canonical destination mapping is
-    documented per-field in docs/observability-fields.md; the verifier uses
-    the same key spellings). The billing duplicate invariant (usage on exactly
-    one billable owner) is enforced for both destinations, and the fixture's
-    native session/response identities never substitute for Daydream
-    run/session identities.
+    Require exactly one billable owner. Native response/session IDs never substitute
+    for Daydream run/session identity; mappings live in observability-fields.md.
     """
     session = expected.get("session_id")  # native pi session identity (fixture)
     model = expected.get("model_name")
@@ -843,16 +766,11 @@ def _reconcile_replay(
     start_ms = expected.get("native_started_at_unix_ms")
     sealed_ns = expected.get("sealed_end_unix_ns")
     duration_ns = expected.get("duration_ns")
-    input_tokens = expected.get("normalized_input_tokens")
-    output_tokens = expected.get("output_tokens")
-    reasoning_tokens = expected.get("reasoning_tokens")
-    cost = expected.get("reported_cost_usd")
-
-    usage_keys = (
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.output_tokens",
-        "gen_ai.usage.reasoning.output_tokens",
-        "gen_ai.usage.cost",
+    usage_expectations = (
+        ("gen_ai.usage.input_tokens", expected.get("normalized_input_tokens"), "input token mismatch"),
+        ("gen_ai.usage.output_tokens", expected.get("output_tokens"), "output token mismatch"),
+        ("gen_ai.usage.reasoning.output_tokens", expected.get("reasoning_tokens"), "reasoning token mismatch"),
+        ("gen_ai.usage.cost", expected.get("reported_cost_usd"), "cost mismatch"),
     )
     billed_by_destination: dict[str, int] = {}
 
@@ -862,7 +780,7 @@ def _reconcile_replay(
             fail(DISPOSITION_MISSING_FIELD, f"{destination}.rows", "no stored rows to reconcile")
             continue
         for row_index, row in enumerate(rows):
-            metadata = {}
+            metadata: dict[str, Any] = {}
             if isinstance(row, dict):
                 # The vendor stores the OpenLLMetry association properties at
                 # ``extra.metadata``; top-level ``metadata``/``config`` are
@@ -891,24 +809,19 @@ def _reconcile_replay(
                     "native pi session must never substitute for the Daydream session id",
                 )
             usage_seen = 0
-            for key in usage_keys:
+            for key, expected_value, mismatch in usage_expectations:
                 value = walk_metadata(metadata, key)
                 if value is None:
                     continue
                 usage_seen += 1
-                if key == "gen_ai.usage.input_tokens" and input_tokens is not None and value != input_tokens:
-                    fail(DISPOSITION_SHAPE, f"{destination}.rows[{row_index}].{key}", "input token mismatch")
-                if key == "gen_ai.usage.output_tokens" and output_tokens is not None and value != output_tokens:
-                    fail(DISPOSITION_SHAPE, f"{destination}.rows[{row_index}].{key}", "output token mismatch")
-                if (
-                    key == "gen_ai.usage.reasoning.output_tokens"
-                    and reasoning_tokens is not None
-                    and value != reasoning_tokens
-                ):
-                    fail(DISPOSITION_SHAPE, f"{destination}.rows[{row_index}].{key}", "reasoning token mismatch")
-                if key == "gen_ai.usage.cost" and cost is not None:
-                    if not isinstance(value, (int, float)) or abs(float(value) - float(cost)) > 1e-9:
-                        fail(DISPOSITION_SHAPE, f"{destination}.rows[{row_index}].{key}", "cost mismatch")
+                if expected_value is None:
+                    continue
+                if key == "gen_ai.usage.cost":
+                    differs = not isinstance(value, (int, float)) or abs(float(value) - float(expected_value)) > 1e-9
+                else:
+                    differs = value != expected_value
+                if differs:
+                    fail(DISPOSITION_SHAPE, f"{destination}.rows[{row_index}].{key}", mismatch)
             if usage_seen:
                 billed_by_destination[destination] = billed_by_destination.get(destination, 0) + 1
                 # The billable owner also carries the exact response identity.

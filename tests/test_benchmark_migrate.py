@@ -327,8 +327,6 @@ def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None
 
 @pytest.mark.parametrize("failure", ["missing_mirror", "tree_mismatch"])
 def test_migrate_ready_provenance_failure_is_atomic(tmp_path: Path, failure: str) -> None:
-    """A failed proof reports the case and leaves its v1 bytes unchanged."""
-
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     case_path = ws / "cases" / f"{case_id}.yaml"
     if failure == "missing_mirror":
@@ -369,8 +367,6 @@ def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: 
     assert "base_resolution" not in migrated["snapshot"]
 
 def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The ``upgrade`` verb drives migrate_workspace through the CLI seam (exit 0)."""
-
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
 
     # --dry-run reports the upgrade (finding recomputed, would change) without writing.
@@ -390,8 +386,6 @@ def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.
     assert rc == 0
 
 def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """An errored case surfaces on stderr and yields exit code 1."""
-
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw["schema_version"] = "bogus"

@@ -22,20 +22,17 @@ def _merge_prompt(tmp_path: Path, records: list[Path] | None = None, *, dedup_ca
     )
 
 def test_merge_prompt_mandates_cross_stack_lens(tmp_path: Path) -> None:
-    """D-26: cross-stack concerns are tagged via the cross-stack lens."""
     prompt = _merge_prompt(tmp_path)
     assert "cross-stack" in prompt
     assert "spanning multiple stacks" in prompt
 
 def test_merge_prompt_references_records_by_path(tmp_path: Path) -> None:
-    """D-22: prompt references records by path, not embedded content."""
     records = [tmp_path / "deep" / "stack-python-records.json", tmp_path / "deep" / "stack-react-records.json",]
     prompt = _merge_prompt(tmp_path, records)
     for r in records:
         assert str(r) in prompt
 
 def test_merge_prompt_mentions_dedup_candidates(tmp_path: Path) -> None:
-    """D-27: merger is told to read dedup-candidates and adjudicate."""
     prompt = _merge_prompt(tmp_path, dedup_candidates_path=tmp_path / "dedup-candidates.json")
     assert "dedup-candidates.json" in prompt or "candidate pair" in prompt
     assert ("adjudication" in prompt.lower() or "adjudicate" in prompt.lower() or "decide" in prompt.lower())
@@ -53,7 +50,6 @@ _MERGE_TURN: Turn = [TextEvent(text="merged"),
 
 async def test_phase_cross_stack_merge_returns_output_path(tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
-    """D-24: merged report path is work.repo / REVIEW_OUTPUT_FILE."""
     backend = ScriptedBackend(events=_MERGE_TURN)
     result = await phase_cross_stack_merge(
         backend, make_work(tmp_path), per_stack_records_paths=[tmp_path / "r.json"], intent_path=tmp_path / "i.md",
@@ -71,7 +67,6 @@ async def test_phase_cross_stack_merge_no_agents_kwarg(tmp_path: Path, make_work
     assert all(c["agents"] is None for c in backend.calls)
 
 def test_merge_prompt_accepts_shard_records_paths(tmp_path: Path) -> None:
-    """Issue #731 (P2): merge prompt references synthetic ``#`` shard paths."""
     records = [tmp_path / "deep" / "stack-python#0-records.json",
                tmp_path / "deep" / "stack-python#1-records.json"]
     prompt = _merge_prompt(tmp_path, records)
@@ -84,25 +79,16 @@ def test_merge_prompt_tags_alternatives_items_as_wonder(tmp_path: Path) -> None:
     assert "alternatives" in prompt
 
 def test_merge_prompt_demands_verbatim_source_uids(tmp_path: Path) -> None:
-    """#1111: the merge prompt asks for machine-readable provenance, verbatim.
+    """Require exact source uids and every contributor to a merged item.
 
-    ``source_uids`` is strict-mode required, so the model emits the key whether
-    or not it was told what to put in it -- meaning a prompt that never explains
-    the field yields a schema-valid run in which every item is attributed to
-    nothing, and the host-side validator has nothing to validate. Two halves of
-    the instruction are load-bearing and pinned here: copy the uid VERBATIM (a
-    reformatted uid is indistinguishable from an invented one to the validator,
-    which keeps only exact pool members), and list ALL contributing uids on a
-    deduplicated item (the multi-record case is the whole reason the field is a
-    list rather than a single handle).
+    The schema alone cannot ensure attribution: reformatted or invented uids are
+    discarded by host validation, while an empty list still satisfies the schema.
     """
     prompt = _merge_prompt(tmp_path, [tmp_path / "stack-python-records.json"])
     assert "source_uids" in prompt
     assert "VERBATIM" in prompt
     assert "list ALL contributing" in prompt
-    # The consequence of inventing one is stated, because the host silently
-    # drops an unknown uid rather than failing the merge over it.
+    # Unknown uids are discarded without failing the merge.
     assert "not in the records is discarded" in prompt
-    # ...and the human-readable citation is still required alongside it, so the
-    # machine-readable field does not quietly replace the reader's version.
+    # Machine provenance must coexist with human-readable citations.
     assert "(Sources: ...)" in prompt

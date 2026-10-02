@@ -1,11 +1,7 @@
-"""Real-wire OTLP fidelity, limit and encoder-repair tests (P18 Task 4A Step 1).
+"""Real protobuf identity, flags, trace state, and dropped-count fidelity.
 
-Exercises the destination exporters against real ``ReadableSpan`` instances with
-bounded containers and real protobuf encoding: identity/order on the wire,
-span/link flags, link trace state, and exact dropped counters under independent
-limit pressure. The stock encoder's proved fidelity losses (low trace flags,
-link trace state) are asserted first, then required to be repaired in transit.
-"""
+First prove the stock encoder’s flag/state losses, then require repair while
+preserving bounded-container order and independent limit counters."""
 
 from __future__ import annotations
 
@@ -16,14 +12,13 @@ import pytest
 from opentelemetry.attributes import BoundedAttributes
 from opentelemetry.exporter.otlp.proto.common.trace_encoder import encode_spans
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import Event, ReadableSpan, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+from opentelemetry.sdk.trace import Event, ReadableSpan
 from opentelemetry.sdk.util import BoundedList
 from opentelemetry.trace import Link, SpanContext, TraceFlags, TraceState
 
 from daydream.observability.config import ObservabilityConfig
 from daydream.observability.exporters import honeyhive_exporter, langsmith_exporter, otlp_exporter
-from tests.harness.otlp import attributes, otlp_collector
+from tests.harness.otlp import attributes, exporting_provider, otlp_collector
 
 _FLAGS_HAS_IS_REMOTE = 256
 _FLAGS_IS_REMOTE = 512
@@ -82,11 +77,10 @@ def _vendor_wire(monkeypatch: pytest.MonkeyPatch, vendor: str, spans: list[Reada
         else:
             monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", receiver.base_url + "/v1/traces")
             exporter = otlp_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        exporter.export(spans)
-        exporter.shutdown()
-        provider.shutdown()
+        try:
+            exporter.export(spans)
+        finally:
+            exporter.shutdown()
         assert len(receiver.requests) == 1
         return _wire_spans(receiver.requests[0])
 
@@ -160,7 +154,6 @@ def test_wire_preserves_identity_order_and_fields_for_all_destinations(monkeypat
 @pytest.mark.parametrize("pressure", ["attributes", "events", "links", "event_attributes", "link_attributes"],)
 def test_wire_preserves_exact_dropped_counters_under_limit_pressure(monkeypatch: pytest.MonkeyPatch, pressure: str,
 ) -> None:
-    """Original bounded dropped counters stay exact after vendor additions."""
     span: ReadableSpan
     if pressure == "attributes":
         attrs = BoundedAttributes(maxlen=2, attributes={"a": 1, "b": 2, "c": 3})
@@ -210,20 +203,17 @@ def test_wire_preserves_exact_dropped_counters_under_limit_pressure(monkeypatch:
             assert wire["links"][0]["droppedAttributesCount"] == 1, vendor
 
 def test_vendor_wire_attributes_survive_additions_on_the_wire(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """Vendor additions land in wire attributes without erasing originals."""
     with otlp_collector() as receiver:
         monkeypatch.setenv("HH_API_URL", receiver.base_url)
         monkeypatch.setenv("HH_API_KEY", "opaque-key")
         exporter = honeyhive_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        with provider.get_tracer("daydream-test").start_as_current_span("attempt",
-            attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
-                "gen_ai.usage.input_tokens": 100,
-            },
-        ):
-            pass
-        provider.shutdown()
+        with exporting_provider(exporter) as provider:
+            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
+                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
+                    "gen_ai.usage.input_tokens": 100,
+                },
+            ):
+                pass
     wire = _wire_spans(receiver.requests[0])[0]
     keys = [attr["key"] for attr in wire["attributes"]]
     assert "daydream.span.kind" in keys

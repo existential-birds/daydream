@@ -1,19 +1,9 @@
-"""Real-path tests that the posterior-capture loop closes.
+"""Place findings in repliable threads and capture their posterior labels.
 
-A finding is only labelable if it reaches ``/pulls/{n}/comments`` as a
-top-level, repliable thread carrying :data:`DAYDREAM_FOOTER` and
-``finding_marker(fingerprint)``. The review *body* carries those markers too,
-but that surface is invisible to :func:`index_pr_review_comments` — so a
-finding folded into the body is permanently unlabelable.
-
-These tests cover the two halves of that loop:
-
-* placement — a finding with no diff-line home whose file IS in the PR diff
-  must be classified ``"file"``, not ``"body"`` (driven through
-  ``runner.run`` with a real git worktree);
-* capture — driving ``daydream post-findings`` from ``cli.main`` with a real
-  ``gh`` subprocess seam must produce a comment on ``/pulls/{n}/comments``
-  that the labeler's own signals read back, count, and resolve on reply.
+Only top-level /pulls/{n}/comments carrying the Daydream footer and finding
+marker are visible to the labeler; review-body findings are not. Real runner
+placement and post-findings CLI tests exercise posting, readback, counting,
+and reply-based resolution through the fake gh process.
 """
 from __future__ import annotations
 
@@ -30,7 +20,8 @@ from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
 from daydream.findings import FINDINGS_SCHEMA_VERSION, write_findings_artifact
 from daydream.pr_review import parse_finding_markers
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.training.labeler_signals import (
     comment_resolution_signal,
     index_pr_review_comments,
@@ -54,12 +45,7 @@ def _never_fetch(*_args: Any, **_kwargs: Any) -> None:
 @contextmanager
 def _review_run_env(repo: Path, monkeypatch: pytest.MonkeyPatch, out: Path, backend: Any, fake_gh: FakeGh,
 ) -> Iterator[Any]:
-    """`--review --findings-out` real-path setup, mocking ONLY the backend seam.
-
-    PR discovery runs for real through ``git_ops``' ``gh`` subprocess seam
-    against the fake ``gh`` binary, so a regression in PR lookup surfaces here
-    instead of being patched out.
-    """
+    """Set up review/findings output with a fake backend and real Git/gh discovery."""
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
     fake_gh.serve_pr_view({"number": 7, "state": "OPEN", "headRefName": "feature", "baseRefName": "main",
@@ -95,17 +81,11 @@ def _issue(*, line: int) -> dict[str, Any]:
 async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
-    """A finding whose anchors match nothing still gets a trackable placement.
+    """A changed-file finding with no usable anchor remains a trackable file comment.
 
-    Enters from ``runner.run`` against a real git worktree. The scripted issue targets ``main.py`` — a file
-    genuinely in the PR diff — but its text contains no token present in that file, so anchor resolution yields no
-    line. Before the fix this fell through to ``placement="body"``, which no posterior signal can ever read back.
-    It must now be ``"file"``.
-
-    The cited line is deliberately past the end of ``main.py`` (2 lines at head) and so outside every hunk: since
-    #1102 an in-hunk citation is authoritative and would be posted inline, which is a *different* invariant (see
-    the sibling test below). Only a citation that no path can place exercises the file-level fallback this test
-    guards."""
+    Cite beyond EOF and every hunk: an in-hunk citation would be authoritative
+    and exercise inline placement instead of this fallback.
+    """
     out = tmp_path / "findings.json"
     issue = _issue(line=9)
     with _review_run_env(feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh) as config:
@@ -123,13 +103,7 @@ async def test_unanchorable_finding_on_changed_file_is_placed_file_level(
 async def test_in_hunk_citation_is_placed_inline_without_an_anchor_match(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
-    """Real-path #1102: an in-hunk cited line keeps its inline placement.
-
-    Same harness as the sibling test — ``runner.run`` over a real worktree, only the backend mocked — but the
-    scripted issue cites ``main.py:1``, a line inside the live PR hunk, while its text still shares no token with
-    the file. Posting-time resolution is documented as a no-op on a valid line; before #1102 it had no view of the
-    diff, so it discarded the correct hint and demoted the finding to a file-level comment. It must now post
-    inline on the cited line."""
+    """A valid in-hunk citation stays inline despite having no matching text anchor."""
     out = tmp_path / "findings.json"
     issue = _issue(line=1)
     with _review_run_env(feature_branch_repo, monkeypatch, out, _scripted_review_backend(issue), fake_gh) as config:
@@ -179,11 +153,7 @@ def _posted_comments(fake_gh: FakeGh) -> list[dict[str, Any]]:
     ]
 
 def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_level_artifact: Path) -> None:
-    """The full loop: post → read back → count → resolve on reply.
-
-    Drives ``daydream post-findings`` from ``cli.main`` with the real ``git_ops`` subprocess seam (only the ``gh``
-    binary is faked), then feeds the comments that actually crossed that boundary into the labeler's own signals.
-    Asserts the rubric-visible outcome, not that anything was called."""
+    """Post through the CLI/gh seam, then read, count, and resolve the actual comment."""
     fake_gh.set_response("diff-paths", value=["b.py"])
     assert cli_main(["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
     ) == 0
@@ -219,10 +189,7 @@ def test_file_level_finding_is_captured_and_resolvable(fake_gh: FakeGh, file_lev
     assert [(r.fingerprint, r.disposition) for r in per_finding] == [(FILE_FINGERPRINT, "accepted")]
 
 def test_file_level_post_rejected_falls_back_to_review_body(fake_gh: FakeGh, file_level_artifact: Path) -> None:
-    """A finding GitHub refuses a file-level comment for is never silently dropped.
-
-    ``diff-paths`` excludes ``b.py``, so the shim 422s the file-level POST the way real GitHub does for a path
-    outside the PR diff. The finding must then appear in the review body — worse for capture, but delivered."""
+    """A 422 for a path outside the PR diff retains the finding in the review body."""
     fake_gh.set_response("diff-paths", value=["other.py"])
     assert cli_main(["post-findings", str(file_level_artifact), "--pr", "7", "--head-sha", "h" * 40, "--repo", "o/r"]
     ) == 0
@@ -236,11 +203,7 @@ def test_file_level_post_rejected_falls_back_to_review_body(fake_gh: FakeGh, fil
 def test_review_failure_still_reports_live_file_level_comments(
     fake_gh: FakeGh, file_level_artifact: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """A failed review POST must not claim nothing was posted.
-
-    File-level comments post *before* the consolidated review, so when the review POST fails they are already live
-    on the PR. Reporting "no comments were posted" would send the operator looking for a clean slate that does not
-    exist."""
+    """A failed review POST must acknowledge file comments already posted before it."""
     fake_gh.set_response("diff-paths", value=["b.py"])
     fake_gh.set_response("POST", "/repos/o/r/pulls/7/reviews", value=None)
 

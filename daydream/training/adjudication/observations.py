@@ -1,9 +1,6 @@
-"""Append-only observation store for human adjudication judgments.
-
-Each observation is one JSONL line with full provenance (rationale, labeler,
-role, timestamps, rubric version, evidence digest). Lines are never rewritten
-or deleted; appending an observation whose canonical JSON already exists is a
-no-op, so interrupted labeling sessions can safely re-run.
+"""Append-only JSONL judgments retain rationale, labeler, role, timestamps, rubric version, and
+evidence digest. Canonically identical observations are no-ops, allowing interrupted labeling to
+resume without rewriting history.
 """
 
 from __future__ import annotations
@@ -14,9 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-# Labeler names that identify a model/LLM classifier rather than a human
-# (mirrors the versioned classifier identity convention, e.g.
-# ``REPLY_CLASSIFIER_VERSION`` consumers stamping ``claude-classifier``).
+# Recognize versioned model/classifier identities so they cannot act as human adjudicators.
 _MODEL_LABELER_RE = re.compile(
     r"(?:^|[-_])(?:claude|gpt|llm|model|classifier|anthropic|openai|codex|gemini)(?:$|[-_0-9])",
     re.IGNORECASE,
@@ -45,9 +40,7 @@ def validate_observation(obs: Mapping[str, Any]) -> None:
         if not isinstance(obs[field], str) or not obs[field]:
             raise ValueError(f"observation field must be a non-empty string: {field}")
     if obs.get("evidence") is None:
-        # The resolver (precedence.effective_adjudication) hard-requires
-        # evidence, so the store must reject evidence-less rows up front
-        # instead of accepting rows the resolver later crashes on.
+        # Reject missing evidence here because effective_adjudication requires it.
         raise ValueError("observation missing required field: evidence")
     record_id = obs["record_id"]
     if len(record_id) != 64 or any(c not in "0123456789abcdefABCDEF" for c in record_id):
@@ -73,15 +66,10 @@ def _canonical(obs: Mapping[str, Any]) -> str:
 
 
 def append_observation(path: Path, obs: Mapping[str, Any]) -> None:
-    """Validate then append one observation line; idempotent for identical lines.
-
-    Validation happens before any bytes are written, so a failed append leaves
-    the file byte-identical. Never rewrites or deletes existing lines.
-    """
+    """Validate before writing; append only when the canonical observation is new."""
     validate_observation(obs)
     if obs["role"] == "model-suggested":
-        # Model-suggested labels are always review-required; the writer forces
-        # the flag so callers cannot omit or clear it.
+        # Force review_required so model-suggestion callers cannot omit or clear it.
         obs = {**obs, "review_required": True}
     line = _canonical(obs)
     if path.exists():

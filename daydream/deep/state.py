@@ -2,19 +2,69 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
 if TYPE_CHECKING:
     from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
-    from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
+    from daydream.deep.diff import DeepDiffBoundInfo
+    from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
     from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
-    from daydream.deep.prompts import DeepDiffBoundInfo
     from daydream.deep.reuse_store import ReuseCache
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
     from daydream.test_execution import TestRecipe
+
+
+_T = TypeVar("_T")
+
+
+class _StateField(Generic[_T]):
+    """A checked mapping field with an optional fresh default and opt-in writes."""
+
+    def __init__(
+        self,
+        expected: type[object],
+        *,
+        key: str | None = None,
+        label: str | None = None,
+        default: Callable[[], _T] | None = None,
+        writable: bool = False,
+    ) -> None:
+        self.expected = expected
+        self.key = key
+        self.label = label or expected.__name__
+        self.default = default
+        self.writable = writable
+
+    def __set_name__(self, owner: type[DeepState], name: str) -> None:
+        self.name = name
+        self.key = self.key or name
+
+    @overload
+    def __get__(self, instance: None, owner: type[DeepState]) -> _StateField[_T]: ...
+
+    @overload
+    def __get__(self, instance: DeepState, owner: type[DeepState] | None = None) -> _T: ...
+
+    def __get__(
+        self, instance: DeepState | None, owner: type[DeepState] | None = None
+    ) -> _T | _StateField[_T]:
+        if instance is None:
+            return self
+        assert self.key is not None
+        value = instance._data[self.key] if self.default is None else instance._data.get(self.key)
+        if value is None and self.default is not None:
+            return self.default()
+        return cast(_T, instance._check(self.key, value, self.expected, self.label))
+
+    def __set__(self, instance: DeepState, value: _T) -> None:
+        if not self.writable:
+            raise AttributeError(f"property '{self.name}' of 'DeepState' object has no setter")
+        assert self.key is not None
+        instance._data[self.key] = value
 
 
 class DeepState:
@@ -38,10 +88,6 @@ class DeepState:
             )
         return value
 
-    def _required(self, key: str, expected: type[object], expected_name: str) -> object:
-        value: object = self._data[key]
-        return self._check(key, value, expected, expected_name)
-
     def _optional(
         self, key: str, expected: type[object], expected_name: str, default: object | None = None
     ) -> object | None:
@@ -54,29 +100,21 @@ class DeepState:
     def mode(self) -> str:
         return str(self._data.get("mode", "loop"))
 
-    @property
-    def diff(self) -> str:
-        return cast(str, self._required("diff", str, "str"))
+    diff = _StateField[str](str)
 
     @property
     def diff_or_empty(self) -> str:
         return cast(str, self._optional("diff", str, "str")) or ""
 
-    @property
-    def diff_path(self) -> Path:
-        return cast(Path, self._required("diff_path", Path, "Path"))
+    diff_path = _StateField[Path](Path)
 
-    @property
-    def diff_path_or_none(self) -> Path | None:
-        return cast(Path | None, self._optional("diff_path", Path, "Path or None"))
+    diff_path_or_none = _StateField[Path | None](Path, key='diff_path', label='Path or None', default=lambda: None)
 
-    @property
-    def diff_truncated(self) -> bool:
-        return cast(bool, self._optional("diff_truncated", bool, "bool", False))
+    diff_truncated = _StateField[bool](bool, default=bool)
 
     @property
     def diff_truncation(self) -> DeepDiffBoundInfo | None:
-        from daydream.deep.prompts import DeepDiffBoundInfo
+        from daydream.deep.diff import DeepDiffBoundInfo
 
         return cast(
             DeepDiffBoundInfo | None,
@@ -104,94 +142,37 @@ class DeepState:
     def exploration_dir(self, value: Path | None) -> None:
         self._data["exploration_dir"] = value
 
-    @property
-    def exploration_dir_or_none(self) -> Path | None:
-        return cast(
-            Path | None,
-            self._optional("exploration_dir", Path, "Path or None"),
-        )
+    exploration_dir_or_none = _StateField[Path | None](
+        Path, key='exploration_dir', label='Path or None', default=lambda: None
+    )
 
-    @property
-    def intent_path(self) -> Path:
-        return cast(Path, self._required("intent_path", Path, "Path"))
+    intent_path = _StateField[Path](Path, writable=True)
 
-    @intent_path.setter
-    def intent_path(self, value: Path) -> None:
-        self._data["intent_path"] = value
+    alts_path = _StateField[Path](Path, writable=True)
 
-    @property
-    def alts_path(self) -> Path:
-        return cast(Path, self._required("alts_path", Path, "Path"))
+    items_file = _StateField[Path](Path, writable=True)
 
-    @alts_path.setter
-    def alts_path(self, value: Path) -> None:
-        self._data["alts_path"] = value
+    items = _StateField[list[dict[str, Any]]](list, writable=True)
 
-    @property
-    def items_file(self) -> Path:
-        return cast(Path, self._required("items_file", Path, "Path"))
+    items_or_empty = _StateField[list[dict[str, Any]]](list, key='items', default=list)
 
-    @items_file.setter
-    def items_file(self, value: Path) -> None:
-        self._data["items_file"] = value
+    diagrams = _StateField[dict[str, Any] | None](dict, label='dict or None', default=lambda: None, writable=True)
 
-    @property
-    def items(self) -> list[dict[str, Any]]:
-        return cast(list[dict[str, Any]], self._required("items", list, "list"))
+    import_graph = _StateField[dict[str, set[str]]](dict, default=dict)
 
-    @items.setter
-    def items(self, value: list[dict[str, Any]]) -> None:
-        self._data["items"] = value
+    intent_authoritative = _StateField[bool](bool, default=bool, writable=True)
 
-    @property
-    def items_or_empty(self) -> list[dict[str, Any]]:
-        return cast(list[dict[str, Any]], self._optional("items", list, "list", []))
+    changed_files = _StateField[set[str]](set)
 
-    @property
-    def diagrams(self) -> dict[str, Any] | None:
-        return cast(
-            dict[str, Any] | None,
-            self._optional("diagrams", dict, "dict or None"),
-        )
+    changed_files_or_none = _StateField[set[str] | None](
+        set, key='changed_files', label='set or None', default=lambda: None
+    )
 
-    @diagrams.setter
-    def diagrams(self, value: dict[str, Any]) -> None:
-        self._data["diagrams"] = value
+    dd = _StateField[Path](Path)
 
-    @property
-    def import_graph(self) -> dict[str, set[str]]:
-        return cast(dict[str, set[str]], self._optional("import_graph", dict, "dict", {}))
+    stacks: _StateField[list[StackAssignment]] = _StateField(list)
 
-    @property
-    def intent_authoritative(self) -> bool:
-        return cast(bool, self._optional("intent_authoritative", bool, "bool", False))
-
-    @intent_authoritative.setter
-    def intent_authoritative(self, value: bool) -> None:
-        self._data["intent_authoritative"] = value
-
-    @property
-    def changed_files(self) -> set[str]:
-        return cast(set[str], self._required("changed_files", set, "set"))
-
-    @property
-    def changed_files_or_none(self) -> set[str] | None:
-        return cast(
-            set[str] | None,
-            self._optional("changed_files", set, "set or None"),
-        )
-
-    @property
-    def dd(self) -> Path:
-        return cast(Path, self._required("dd", Path, "Path"))
-
-    @property
-    def stacks(self) -> list[StackAssignment]:
-        return cast("list[StackAssignment]", self._required("stacks", list, "list"))
-
-    @property
-    def single_stack_mode(self) -> bool:
-        return cast(bool, self._required("single_stack_mode", bool, "bool"))
+    single_stack_mode = _StateField[bool](bool)
 
     @property
     def latency_route(self) -> LatencyRoute | None:
@@ -233,24 +214,11 @@ class DeepState:
     def arbiter_plan(self, value: ArbiterPlan) -> None:
         self._data["arbiter_plan"] = value
 
-    @property
-    def log(self) -> str:
-        return cast(str, self._required("log", str, "str"))
+    log = _StateField[str](str)
 
-    @property
-    def branch(self) -> str:
-        return cast(str, self._required("branch", str, "str"))
+    branch = _StateField[str](str)
 
-    @property
-    def failed_stacks(self) -> dict[str, str]:
-        return cast(
-            dict[str, str],
-            self._required("failed_stacks", dict, "dict"),
-        )
-
-    @failed_stacks.setter
-    def failed_stacks(self, value: dict[str, str]) -> None:
-        self._data["failed_stacks"] = value
+    failed_stacks = _StateField[dict[str, str]](dict, writable=True)
 
     @property
     def failed_stacks_or_none(self) -> dict[str, str] | None:
@@ -259,44 +227,17 @@ class DeepState:
             self._optional("failed_stacks", dict, "dict or None") or None,
         )
 
-    @property
-    def intent_summary(self) -> str:
-        return cast(str, self._required("intent_summary", str, "str"))
+    intent_summary = _StateField[str](str, writable=True)
 
-    @intent_summary.setter
-    def intent_summary(self, value: str) -> None:
-        self._data["intent_summary"] = value
+    intent_summary_or_none = _StateField[str | None](
+        str, key='intent_summary', label='str or None', default=lambda: None
+    )
 
-    @property
-    def intent_summary_or_none(self) -> str | None:
-        return cast(str | None, self._optional("intent_summary", str, "str or None"))
+    records_paths = _StateField[list[Path]](list, writable=True)
 
-    @property
-    def records_paths(self) -> list[Path]:
-        return cast(list[Path], self._required("records_paths", list, "list"))
+    records = _StateField[list[dict[str, Any]]](list, writable=True)
 
-    @records_paths.setter
-    def records_paths(self, value: list[Path]) -> None:
-        self._data["records_paths"] = value
-
-    @property
-    def records(self) -> list[dict[str, Any]]:
-        return cast(
-            list[dict[str, Any]],
-            self._required("records", list, "list"),
-        )
-
-    @records.setter
-    def records(self, value: list[dict[str, Any]]) -> None:
-        self._data["records"] = value
-
-    @property
-    def record_sources(self) -> list[str]:
-        return cast(list[str], self._required("record_sources", list, "list"))
-
-    @record_sources.setter
-    def record_sources(self, value: list[str]) -> None:
-        self._data["record_sources"] = value
+    record_sources = _StateField[list[str]](list, writable=True)
 
     @property
     def structural_records_path(self) -> Path | None:
@@ -312,30 +253,13 @@ class DeepState:
     def structural_records_path(self, value: Path | None) -> None:
         self._data["structural_records_path"] = value
 
-    @property
-    def structural_records_path_or_none(self) -> Path | None:
-        return cast(
-            Path | None,
-            self._optional("structural_records_path", Path, "Path or None"),
-        )
+    structural_records_path_or_none = _StateField[Path | None](
+        Path, key='structural_records_path', label='Path or None', default=lambda: None
+    )
 
-    @property
-    def structural_records(self) -> list[dict[str, Any]]:
-        return cast(list[dict[str, Any]], self._optional("structural_records", list, "list", []))
+    structural_records = _StateField[list[dict[str, Any]]](list, default=list, writable=True)
 
-    @structural_records.setter
-    def structural_records(self, value: list[dict[str, Any]]) -> None:
-        self._data["structural_records"] = value
-
-    @property
-    def structural_record_sources(self) -> list[str]:
-        return cast(
-            list[str], self._optional("structural_record_sources", list, "list", [])
-        )
-
-    @structural_record_sources.setter
-    def structural_record_sources(self, value: list[str]) -> None:
-        self._data["structural_record_sources"] = value
+    structural_record_sources = _StateField[list[str]](list, default=list, writable=True)
 
     @property
     def arbiter_continuation(self) -> ContinuationToken | None:
@@ -352,25 +276,16 @@ class DeepState:
     def arbiter_continuation(self, value: ContinuationToken) -> None:
         self._data["arbiter_continuation"] = value
 
-    @property
-    def merged_report(self) -> Path:
-        return cast(Path, self._required("merged_report", Path, "Path"))
+    merged_report = _StateField[Path](Path, writable=True)
 
-    @merged_report.setter
-    def merged_report(self, value: Path) -> None:
-        self._data["merged_report"] = value
-
-    @property
-    def merged_report_or_none(self) -> Path | None:
-        return cast(
-            Path | None,
-            self._optional("merged_report", Path, "Path or None"),
-        )
+    merged_report_or_none = _StateField[Path | None](
+        Path, key='merged_report', label='Path or None', default=lambda: None
+    )
 
     @property
     def fix_cycle_state(self) -> FixCycleState:
         value: object | None = self._data.get("fix_cycle_state")
-        from daydream.deep.fix_steps import FixCycleState
+        from daydream.deep.fix_state import FixCycleState
 
         if not isinstance(value, FixCycleState):
             raise RuntimeError("fix cycle was not initialized at the accepted gate")
@@ -404,20 +319,12 @@ class DeepState:
             )
         return value
 
-    @property
-    def fix_outcomes(self) -> dict[str, dict[str, Any]]:
-        return cast(
-            dict[str, dict[str, Any]], self._optional("fix_outcomes", dict, "dict", {})
-        )
-
-    @fix_outcomes.setter
-    def fix_outcomes(self, value: dict[str, dict[str, Any]]) -> None:
-        self._data["fix_outcomes"] = value
+    fix_outcomes = _StateField[dict[str, dict[str, Any]]](dict, default=dict, writable=True)
 
     @property
     def fix_round_snapshot(self) -> RetainedTreeSnapshot | None:
         value: object | None = self._data.get("fix_round_snapshot")
-        from daydream.deep.fix_steps import RetainedTreeSnapshot
+        from daydream.deep.fix_state import RetainedTreeSnapshot
 
         if not isinstance(value, RetainedTreeSnapshot):
             return None

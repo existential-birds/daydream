@@ -1,8 +1,4 @@
-"""Shared fixtures: the deterministic fixture repo, a real runtime, a stub upstream.
-
-The fixture repository itself lives in the package
-(:mod:`daydream_review.fixture`) because the image builder needs it too.
-"""
+"""Shared deterministic repository, real runtime, and stub upstream; image builds use the packaged fixture."""
 
 from __future__ import annotations
 
@@ -27,12 +23,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 def docker_daemon_is_available() -> bool:
-    """Whether the Docker daemon is reachable, determined by ``docker info``.
-
-    Returns ``True`` only when ``docker info`` exits with return code 0.
-    If the client binary cannot be launched (``OSError``) or the daemon is
-    unreachable (non-zero exit), returns ``False``.
-    """
+    """Return whether docker info succeeds; missing clients and unreachable daemons return False."""
     try:
         result = subprocess.run(["docker", "info"], capture_output=True, check=False)
     except OSError:
@@ -42,12 +33,7 @@ def docker_daemon_is_available() -> bool:
 
 @pytest.fixture(scope="session")
 def base_image() -> str:
-    """The versioned base image every PR-snapshot image is ``FROM``, built if absent.
-
-    The versioned tag (``base_tag()``, e.g. ``daydream-rl/base:v0.1.2-3-g5ce4c0e``)
-    is returned rather than the mutable ``latest`` alias, so every snapshot build
-    the slow tests drive pins an explicit immutable base identity.
-    """
+    """Build the base image if absent and return its versioned tag, never mutable latest."""
     tag = build_images.base_tag()
     present = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, check=False)
     if present.returncode != 0:
@@ -88,13 +74,7 @@ def passed_gate_report() -> Iterator[Path]:
 
 @pytest.fixture
 def stage0_gate_report(tmp_path: Path) -> Path:
-    """A PASSED Stage-0 gate report, bound to the fixture outcome model (M4).
-
-    The evidence_digest is recomputed over the same payload the offline gate
-    hashes (``{split_digest, model_fingerprint, thresholds, held_out_rows,
-    separation, calibration, accepted_ratio}``), so the taskset load path's
-    gateway binding accepts it alongside the ``outcome_model_path`` fixture.
-    """
+    """Build a passing Stage-0 gate with the offline evidence digest bound to the fixture model."""
     p = tmp_path / "stage0-gate.json"
     p.write_text(json.dumps({"passed": True, "separation": _GATE_EVIDENCE["separation"],
                 "calibration": _GATE_EVIDENCE["calibration"], "accepted_ratio": _GATE_EVIDENCE["accepted_ratio"],
@@ -116,25 +96,16 @@ def outcome_model_path(tmp_path: Path) -> Path:
 
 @pytest.fixture(scope="session")
 def rundir_golden() -> Path:
-    """An archived run dir from a real local daydream run against the fixture repo.
+    """A real archived run retained as untrusted test data, never model input.
 
-    UNTRUSTED, model-directed test-only data: the retained root
-    ``trajectory.json`` carries operational text captured during the run. It is
-    never a model-input source — the scoring projection excludes it at the
-    ``fetch_run_dir`` boundary (see
-    tests/test_rundir.py::test_fetch_run_dir_excludes_fixture_trajectories).
+    fetch_run_dir excludes its root trajectory from the scoring projection.
     """
     return PROJECT_ROOT / "tests" / "fixtures" / "rundir-golden"
 
 
 @pytest.fixture
 async def runtime() -> AsyncIterator[SubprocessRuntime]:
-    """A real verifiers subprocess runtime — not a double.
-
-    It shares the host filesystem, so absolute sandbox paths in the tests are
-    plain host temp dirs and ``read``/``run`` behave exactly as they do in a real
-    rollout (``verifiers/v1/runtimes/subprocess.py``).
-    """
+    """Use real SubprocessRuntime; absolute sandbox paths map to host temporary directories."""
     rt = SubprocessRuntime(SubprocessConfig())
     await rt.start()
     try:
@@ -144,12 +115,7 @@ async def runtime() -> AsyncIterator[SubprocessRuntime]:
 
 
 class FakeRuntime(vf.Runtime):
-    """Records what a strategy or the harness does, without touching the host.
-
-    Used only where a real runtime would have side effects the test must not
-    have: ``pi install`` mutating the developer's own ``~/.pi``, or a full
-    daydream run. Everything that can use the real subprocess runtime does.
-    """
+    """Record calls where real execution would mutate host Pi config or launch a full model run."""
 
     is_local = True
 

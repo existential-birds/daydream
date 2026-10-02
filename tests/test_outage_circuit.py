@@ -1,9 +1,6 @@
-"""Unit tests for the run-scoped outage circuit state machine.
+"""Drive the pure outage state machine with explicit clock values.
 
-The circuit is pure and caller-clocked: every observation takes an explicit
-``now``, so these tests drive it with raw floats and never touch a real clock.
-The real-path coordination test lives in ``tests/test_agent_budget.py``.
-"""
+Real-path coordination lives in test_agent_budget.py."""
 
 from __future__ import annotations
 

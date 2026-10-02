@@ -1,31 +1,11 @@
-"""Hermetic tests for the P18 Task 6 readback verifier and replay tool.
+"""Hermetic replay/readback verification over local HTTP, OTLP, and slow peers.
 
-Plan Task 6 steps 1-2. All tests run against a fake external HTTP
-boundary on loopback, real loopback slow peers, local OTLP collectors and fake
-vendor HTTP; no real vendor, model call, credential or repository content is
-ever touched.
-
-Coverage:
-- HoneyHive ``POST /v1/events/search`` request shape, strict ``{events,count}``
-  validation, pagination, duplicates, wrong-session rows, auth/redirect/HTTP
-  errors, malformed and oversized responses;
-- LangSmith project-session resolution (exact project-name lookup), tree
-  discovery (``and(eq(metadata_key, 'daydream_run_id'),
-  eq(metadata_value, …))`` in one explicit session with a bounded start
-  time), single-root requirement, exact-ID freeze and re-read, two equal
-  complete tree snapshots (``filter: eq(trace_id, …)``);
-- separate real loopback peers delaying response headers or trickling JSON
-  body bytes cannot extend a 0.12-second immutable verifier budget past 0.35
-  seconds; each peer observes connection closure within one second; the
-  verifier emits only its fixed redacted timeout disposition and its request
-  log proves no later page or stability poll began;
-- output redaction: never prompts/reasoning/tool/result content, headers,
-  keys, full endpoints or exception response text;
-- replay tool fail-closed gates (fixture/hash, dirty/private repo, real pi
-  executable, wrong destinations, missing authorization) all run BEFORE any
-  send, and the full hermetic replay writes the labeled receipt with
-  model-call count 0 and operational cost 0.
-"""
+HoneyHive covers strict search responses, pagination, duplicates, session filtering,
+and malformed/auth/redirect failures. LangSmith covers exact project selection,
+bounded tree discovery, one root, frozen ids, and two equal complete snapshots.
+Slow peers verify immutable deadlines and observed connection closure. Output
+must omit content and credentials. Replay gates run before sends; end-to-end
+receipts remain labeled with zero model calls and zero operational cost."""
 
 from __future__ import annotations
 
@@ -74,11 +54,7 @@ _replay = _load_script(REPLAY_PATH, "replay_observability_acceptance")
 
 
 class FakeVendorServer:
-    """Loopback HTTP server faking HoneyHive and/or LangSmith JSON endpoints.
-
-    ``responders`` maps ``(method, path)`` to a callable returning
-    ``(status, headers, body_bytes)``; every request is recorded.
-    """
+    """Record loopback requests and dispatch (method,path) to status/headers/body responders."""
 
     def __init__(self) -> None:
         self.requests: list[dict[str, Any]] = []
@@ -96,8 +72,7 @@ class FakeVendorServer:
                 }
                 with self.server._lock:
                     self.server.requests.append(record)
-                # Route on the path only (query strings are transport detail);
-                # responders still see the full raw path in the record.
+                # Route by path; the request record retains its query string.
                 route_path = self.path.split("?", 1)[0]
                 responder = self.server.responders.get((self.command, route_path))
                 if responder is None:
@@ -175,11 +150,7 @@ _OTLP_ACK: tuple[int, dict[str, str], bytes] = (200, {"Content-Type": "applicati
 
 @pytest.fixture
 def fake_vendors(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeVendorServer, FakeVendorServer]]:
-    """Paired fake HoneyHive + LangSmith servers with the replay env bound.
-
-    Registers the canonical protobuf-ack trace routes on both and points the
-    replay/vendor environment at them; tears both down afterwards.
-    """
+    """Bind replay environment to paired fake vendors with canonical OTLP acknowledgment routes."""
     fake_hh = FakeVendorServer()
     fake_ls = FakeVendorServer()
     try:
@@ -333,8 +304,7 @@ def test_honeyhive_paginates_until_count_satisfied(
 ) -> None:
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
     session_id = json.loads(receipt.read_text())["session_id"]
-    # Page limit is 100; a full page means "more available", a short page ends
-    # pagination. 250 rows = 3 pages (100 + 100 + 50) and must reconcile.
+    # Full 100-row pages continue pagination; 250 rows require three pages.
     pages: dict[int, list[str]] = {1: [f"e{i:03d}" for i in range(100)], 2: [f"e{i:03d}" for i in range(100, 200)],
         3: [f"e{i:03d}" for i in range(200, 250)],
     }
@@ -443,8 +413,7 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     session = _ls_session(project)
     session_id = session["id"]
     discovered: list[dict[str, Any]] = []
-    # Every run in the tree carries the stored identity (vendor-actual:
-    # association properties at extra.metadata), including the child.
+    # Every run, including children, carries stored identity at extra.metadata.
     root = _ls_run(
         "root-1", run_type="chain", metadata={"daydream_run_id": run_id, "daydream.session.id": "daydream-session-1"},
     )
@@ -523,8 +492,7 @@ def test_langsmith_unstable_tree_fails_closed(
         if "id" in payload:
             return 200, {"Content-Type": "application/json"}, json.dumps({"runs": [root]}).encode()
         if payload.get("filter", "").startswith("eq(trace_id"):
-            # Every snapshot carries a different run id: no two complete
-            # snapshots can ever agree, so stability must fail closed.
+            # Changing IDs prevent two complete snapshots from agreeing.
             calls["tree"] += 1
             runs = [_ls_run(f"root-{calls['tree']}", metadata={"daydream_run_id": run_id})]
             return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
@@ -543,12 +511,7 @@ def test_langsmith_unstable_tree_fails_closed(
 
 
 class _LoopbackPeer:
-    """A real socket peer that bounds the verifier's deadline behavior.
-
-    Records ``(accepted_at, closed_at)`` per connection using monotonic
-    seconds; the tests assert the peer observed closure within one second of
-    accept ("peer observes connection closure within one second").
-    """
+    """Record monotonic accept/close times so deadline tests can verify observed connection closure."""
 
     def __init__(self, *, trickle: bool = False) -> None:
         self.trickle = trickle
@@ -575,9 +538,7 @@ class _LoopbackPeer:
         accepted_at = time.monotonic()
         conn.settimeout(30)
 
-        # The client request arrives first; then we stall (never completing a
-        # valid JSON body inside the 0.12s budget). The verifier must close
-        # the connection itself when its immutable deadline fires.
+        # Stall after receipt; the verifier must close the connection at its 0.12s deadline.
         try:
             conn.recv(65536)
         except OSError:
@@ -593,9 +554,7 @@ class _LoopbackPeer:
                 conn.sendall(b',"count":0}')
             except OSError:
                 pass
-        # Delay headers indefinitely in the plain case; then observe client
-        # closure (EOF/reset) — this is the peer-close proof. recv() returns
-        # b"" as soon as the verifier closes the stream at its deadline.
+        # Observe EOF/reset after delayed headers as proof the client closed at its deadline.
         try:
             while conn.recv(4096):
                 pass
@@ -635,8 +594,7 @@ def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pyte
         assert exit_code != 0
         result = json.loads(result_path.read_text())
         assert result["terminal"] == _verifier.DISPOSITION_TIMEOUT
-        # The peer observed connection closure within one second of accept
-        # (the verifier closes the stream when its immutable deadline fires).
+        # Bound peer-observed closure independently of verifier return.
         peer.close()
         deadline = time.monotonic() + 2.0
         while not peer.connections and time.monotonic() < deadline:
@@ -838,11 +796,6 @@ def test_replay_fake_pi_marker_requirement(tmp_path: Path, monkeypatch: pytest.M
 def test_replay_receipt_is_accepted_by_verifier_validator(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
 ) -> None:
-    """The replay tool's receipt must validate under the verifier's schema.
-
-    The two operator scripts are one pipeline: the replay tool writes the immutable receipt the verifier consumes.
-    A receipt the verifier rejects (missing the canonical ``destinations`` list) breaks that pipeline before any
-    network work."""
     _receipt_path, receipt = _replay_receipt(tmp_path, message="replay must produce its receipt before validation")
     # Must not raise: the replay receipt is the verifier's canonical input.
     _verifier.validate_receipt(receipt)
@@ -850,10 +803,7 @@ def test_replay_receipt_is_accepted_by_verifier_validator(
 def test_honeyhive_requires_two_stable_complete_snapshots(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """HoneyHive must reach two equal complete exact-session snapshots.
-
-    The card/plan gate is 'two stable complete post-shutdown snapshots' for HoneyHive exactly as for LangSmith. A
-    vendor whose second full read disagrees must fail closed with READBACK_UNSTABLE."""
+    """Two unequal complete exact-session reads must fail closed as READBACK_UNSTABLE."""
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
     session_id = json.loads(receipt.read_text())["session_id"]
     calls = {"n": 0}
@@ -876,7 +826,6 @@ def test_honeyhive_requires_two_stable_complete_snapshots(
 def test_honeyhive_two_stable_complete_snapshots_pass(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A stable HoneyHive session passes only after two complete equal reads."""
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
     data = json.loads(receipt.read_text())
     session_id, run_id = data["session_id"], data["run_id"]
@@ -902,16 +851,13 @@ def test_honeyhive_two_stable_complete_snapshots_pass(
 def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Vendor-actual replay rows: only the pinned FIRST generation is exact.
+    """Only the first replay generation is bound to the manifest’s historical timing.
 
-    The sanitized fixture has two generations with distinct native/sealed timings; the manifest pins the first's
-    exact historical interval. A second generation row must be self-consistent but never compared to the first's
-    pins, and a billed owner whose vendor storage lacks the response-model key (HoneyHive stores the configured
-    request model at config.model instead) must not fail on absence — only a present wrong value fails."""
+    Later generations remain self-consistent. Missing stored model evidence is allowed;
+    a present wrong model must fail."""
     receipt = _write_receipt(tmp_path, destinations=[], kind="sanitized_protocol_replay")
     run_id = json.loads(receipt.read_text())["run_id"]
-    # Vendor-actual: HH rows put identity+timing in metadata; the billed
-    # attempt row carries usage but HH does not project gen_ai.response.model.
+    # HH stores identity/timing in metadata and omits gen_ai.response.model on billed attempts.
     first = _hh_event("first", "29cb884b-712b-4de4-b478-3652932ff5dc", event_type="model",
         **{"daydream.run.id": run_id, "daydream.generation.native_started_at_unix_ms": 1788690314289,
             "daydream.generation.native_started_at_unix_ns": 1788690314289000000,
@@ -930,8 +876,7 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
         **{"daydream.run.id": run_id, "gen_ai.usage.cost": 0.00402781},
     )
     data = {"honeyhive": {"rows": [billed, first, second]},
-        # One identity-bearing LS run so the reconcile's per-destination row
-        # requirement is met without turning this into an LS-shape test.
+        # One identity-bearing LS row satisfies its destination requirement.
         "langsmith": {"run_id": run_id,
             "runs": [_ls_run("ls-run-1", run_type="chain",
                     metadata={"daydream_run_id": run_id, "daydream.session.id": "dd-session-1"},
@@ -970,18 +915,12 @@ def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
 def test_replay_then_verify_end_to_end_on_fake_vendors(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
 ) -> None:
-    """Full operator chain: replay tool writes the receipt the verifier accepts.
-
-    The replay runs hermetically (fake vendors, loopback OTLP oracle, fake pi executable); the verifier then
-    consumes the replay's receipt against the same fake vendor endpoints and must pass the stored contract for
-    both destinations without any manual receipt editing."""
     fake_hh, fake_ls = fake_vendors
     receipt_path, receipt = _replay_receipt(tmp_path, message="replay must pass all gates before the verifier runs")
     run_id = receipt["run_id"]
     session_id = receipt["session_id"]
 
-    # Vendor readback stores derived from the actual receipt identity:
-    # one HoneyHive session (stable across reads) and one LangSmith tree.
+    # Derive both vendor stores from the actual receipt identity.
     hh_events = [_hh_event(f"ev-{i}", session_id) for i in range(2)]
     hh_payload = json.dumps({"events": hh_events, "count": len(hh_events)}).encode()
     fake_hh.respond("POST", "/v1/events/search", lambda _r: (200, {"Content-Type": "application/json"}, hh_payload),)
@@ -1018,11 +957,7 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(
 def test_replay_full_hermetic_run_writes_labeled_receipt(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The complete sanitized replay through real PiBackend/run_agent/trace_run.
-
-    Vendor destinations are fake loopback OTLP/HTTP endpoints; the local generic OTLP destination is the tool's
-    own loopback receiver; the pi subprocess boundary is the fake executable. Receipt must be labeled
-    ``sanitized_protocol_replay`` with model calls 0 and operational cost 0."""
+    """Real PiBackend/run_agent/trace_run with a fake process emits a labeled zero-cost replay receipt."""
     monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-replay-test")
     fake_hh, fake_ls = fake_vendors
     _receipt_path, receipt = _replay_receipt(
@@ -1041,7 +976,5 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(
     assert receipt["labels"]["reported_cost"].startswith("synthetic")
     # Both vendor destinations must have been reached by the real exporters.
     assert fake_hh.requests and fake_ls.requests
-    # The pinned replay clock must be restored to the host clock when the
-    # replay returns (guarded global environment: never skew the host or
-    # the pytest worker's later tests).
+    # Replay must restore the host clock for subsequent worker tests.
     assert time.time_ns is _replay._stdlib_real_time_ns

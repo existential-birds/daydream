@@ -1,16 +1,8 @@
-"""Pull daydream's archived run directory out of a live rollout sandbox.
+"""Fetch reward inputs from the live rollout runtime and replay them through the host scorer. The
+supervisor seals the archive and candidate diff after the agent write window; verify the staged copy
+before trusting it, with tampering yielding zero reward.
 
-Scoring runs while the runtime is still up (a ``@vf.reward`` with a required
-``runtime`` parameter — verifiers 0.2.1 ``task.py:269-277``), so the reward reads
-daydream's own artifacts straight off the sandbox filesystem and replays them
-through the training pipeline's scorer on the host. The supervisor seals the
-archived run dir (with the candidate diff) after the agent's write window, and
-the reward verifies that seal against the staged copy before trusting any
-value — a tampered archive must zero the reward, never record honest telemetry.
-
-Only the handful of small files the scorer actually reads are copied. The full
-archive bundle carries per-fork trajectories and diffs that can run to megabytes;
-none of it feeds the reward.
+Copy only the small scorer inputs, excluding the megabyte-scale per-fork trajectories and diffs.
 """
 
 from __future__ import annotations
@@ -23,21 +15,11 @@ import verifiers.v1 as vf
 
 from daydream_review.verifier import SealResult, seal_bytes, verify
 
-#: Fixed members of the archived run dir the reward path reads. Every one is
-#: optional: a review-only rollout has no verdicts, a green run has no
-#: fix-failures. ``deep/stack-*-records.json`` is collected separately by glob —
-#: its names depend on which stacks the router detected.
-#:
-#: ``seal.json`` is the supervisor-produced integrity seal over the other
-#: members plus the candidate diff; it rides in the fetch so the reward can
-#: verify the staged copy against it.
-#:
-#: ``trajectory.json`` and any per-fork ``trajectories/*.json`` are deliberately
-#: NOT listed here: they carry untrusted, model-directed operational text from
-#: the committed golden run (test-only data) and must never be forwarded into
-#: model context through the collector. Exclusion is by omission from this
-#: allowlist and is pinned by tests/test_rundir.py::
-#: test_fetch_run_dir_excludes_fixture_trajectories.
+#: Optional fixed reward inputs: review-only runs omit verdicts and green runs omit fix-failures.
+#: Collect dynamic deep/stack-*-records.json separately. seal.json travels with the inputs for
+#: verification.  Exclude trajectory.json and trajectories/*.json: golden-run trajectories contain
+#: untrusted model-directed text that must never enter model context through the collector.
+#: test_fetch_run_dir_excludes_fixture_trajectories pins this allowlist boundary.
 RUN_DIR_FILES: tuple[str, ...] = (
     "manifest.json",
     "review-output.md",
@@ -51,39 +33,21 @@ RUN_DIR_FILES: tuple[str, ...] = (
 
 DEFAULT_ARCHIVE_ROOT = "/rollout/archive"
 
-#: Flags disabling git's two repository-configurable diff-rewrite mechanisms: a
-#: ``diff.external`` helper (optionally with ``diff.trustExitCode``) configured
-#: in ``.git/config`` and per-path ``.gitattributes`` ``diff.*.textconv``
-#: drivers. The supervisor derives every load-bearing diff as (the root) host
-#: identity, while a repo-local external helper would execute under the repo's
-#: own untrusted identity. Single-sourced here so every load-bearing ``git diff``
-#: deriv site carries the identical pair, and a future hardening flag added
-#: once cannot silently leave another deriv site unhardened.
+#: Disable repository-controlled diff.external helpers (including trustExitCode) and .gitattributes
+#: textconv drivers. Supervisors derive diffs as the trusted host/root identity; untrusted
+#: repository configuration must not execute there. All candidate derivations share these hardening
+#: flags.
 GIT_DIFF_HARDENING_FLAGS: tuple[str, str] = ("--no-ext-diff", "--no-textconv")
 
-#: Git pathspec (passed as a bare argv element, never shell-interpolated)
-#: excluding daydream's own ``.daydream/`` artifacts from the candidate product
-#: diff. daydream may write its own tracked artifacts into the tree during a
-#: rollout, but they are never part of the candidate product; the load-bearing
-#: seal/verify diff must agree with the fix-acceptance oracle
-#: (``_fixes_applied``), which excludes ``.daydream/`` from both of its probes.
-#: Defined here, the single-sourced deriv helper, so the exclusion can only
-#: drift by intentional edit and never by one string falling out of sync.
+#: Pass as a bare argv element, never shell-interpolate. Exclude tracked .daydream artifacts from
+#: the product diff, matching both _fixes_applied probes so sealing and fix acceptance agree.
 DAYDREAM_EXCLUDE = ":(exclude).daydream"
 
 
 def candidate_diff_cmd(repo: str, head_sha: str) -> list[str]:
-    """Argv for re-deriving the rollout's candidate diff against the baked head.
-
-    The candidate diff is the load-bearing contract the seal binds and the
-    verifier re-applies, so it must be derived identically everywhere it is
-    needed (seal production, seal verification, and the verify-checkout
-    construction).
-
-    The one-revision form (``git diff <flags> <head_sha>``) compares the
-    current tracked tree — committed, staged, and unstaged — against the
-    baked ``head_sha``, excluding untracked files. This matches the working-
-    tree semantics ``_fixes_applied`` uses to accept a fix.
+    """Derive the candidate identically for sealing, verification, and verifier-checkout construction.
+    The one-revision git diff against head_sha includes committed, staged, and unstaged tracked
+    changes, excluding untracked files; this matches _fixes_applied.
     """
     return [
         "git", "-C", repo, "diff",
@@ -101,16 +65,9 @@ def candidate_quiet_diff_cmd(
     *,
     include_head: bool = False,
 ) -> list[str]:
-    """Argv for the ``--quiet`` oracle-probe diff against the baked head.
-
-    The ``--quiet`` companion of :func:`candidate_diff_cmd`, used by the two
-    non-regression oracle probes (``_fixes_applied`` and
-    ``_protected_test_paths_unchanged``).
-
-    ``include_head`` selects the committed-tree form (``<head_sha> HEAD --
-    <pathspecs>``, used by ``_fixes_applied``) versus the working-tree form
-    (``<head_sha> -- <pathspecs>``, used by ``_protected_test_paths_unchanged``,
-    which must compare against the mutable tree to catch uncommitted tampering).
+    """Quiet companion to candidate_diff_cmd for oracle probes. include_head selects head_sha HEAD for
+    _fixes_applied; otherwise compare head_sha with the current tracked tree so
+    _protected_test_paths_unchanged catches uncommitted tampering.
     """
     cmd = ["git", "-C", repo, "diff", *GIT_DIFF_HARDENING_FLAGS, "--quiet", head_sha]
     if include_head:
@@ -151,20 +108,10 @@ async def fetch_run_dir(
     dest: Path,
     archive_root: str = DEFAULT_ARCHIVE_ROOT,
 ) -> Path | None:
-    """Copy the rollout's archived run dir into *dest* on the host.
-
-    Args:
-        runtime: The live rollout runtime.
-        dest: Host directory to populate. Caller owns its lifetime — pass a
-            ``tempfile.TemporaryDirectory()`` path so nothing is left behind
-            across thousands of rollouts.
-        archive_root: ``DAYDREAM_ARCHIVE_DIR`` as the harness set it.
-
-    Returns:
-        *dest* when a run dir was found and at least one member copied, else
-        ``None``. ``None`` is the crash case and scores zero — it is never an
-        exception, because a policy that crashes daydream must still receive a
-        gradient rather than killing the rollout.
+    """Copy archived reward inputs into caller-owned dest; archive_root is the harness's
+    DAYDREAM_ARCHIVE_DIR. Use a TemporaryDirectory across scoring to avoid rollout leaks. Return
+    dest if any member copied, else None: a pre-archive crash scores zero instead of aborting the
+    rollout.
     """
     session_dir = await _session_dir(runtime, archive_root)
     if session_dir is None:
@@ -188,65 +135,36 @@ async def verify_seal(
     *,
     seal_expected: bool = False,
 ) -> bool | None:
-    """Verify the staged run dir's supervisor-produced seal.
+    """Verify fetch_run_dir's staged seal and artifacts against the candidate diff re-derived from the
+    live sandbox at scoring time.
 
-    Args:
-        run_dir: The staged host copy of the archived run dir (``fetch_run_dir``
-            output), including ``seal.json`` when the supervisor sealed the run.
-        runtime: The live rollout runtime. The candidate diff is re-derived
-            from the sandbox through it at scoring time, so the seal binds the
-            diff the verifier checkout will actually apply.
-        repo: The repository under review inside the sandbox.
-        head_sha: The baked head SHA the rollout diffed against.
-        seal_expected: Whether the harness claims to have sealed the run. A run
-            the harness sealed whose ``seal.json`` is missing at scoring time
-            is a vanished seal — a tamper, never a legacy unsealed run — so it
-            must fail closed rather than score at full trust.
-
-    Returns:
-        ``True`` when the seal verifies against the staged members and the diff
-        re-derived from the sandbox; ``False`` when a seal exists but is
-        missing, malformed, or mismatched (a tamper must zero the reward, not
-        crash scoring) — including a vanished seal on a run the harness claims
-        to have sealed (*seal_expected*), and a diff that cannot be re-derived
-        (a git failure must fail closed, never hash as the empty diff); ``None``
-        when no seal was produced and none was expected (legacy/unsealed runs
-        keep their pre-seal scoring — the harness seals every completed
-        production run, so this is the test-only path). Never raises.
+    Return True for a matching seal; False for missing expected seals, malformed/mismatched seals,
+    or failed diff derivation. Never hash a failed git read as an empty diff. Return None only when
+    no seal exists and none was expected (legacy tests; completed production runs are sealed). Never
+    raise: unverifiable state must zero reward, not crash scoring.
     """
     seal_path = run_dir / "seal.json"
     if not seal_path.is_file():
-        # A missing seal is the legacy path only when none was expected. The
-        # harness claimed to seal this run, so a vanished seal.json is an
-        # internal contradiction that must read as a tamper, never as an
-        # unsealed run at full trust.
         return False if seal_expected else None
     try:
         seal = SealResult.model_validate_json(seal_path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return False
-    # The seal covers the RUN_DIR_FILES members that exist plus the
-    # deep/stack-*-records.json glob members — both are reward inputs (the
-    # stack records feed the intrinsic scorer's format gate). seal.json itself
-    # is the seal record and is never hashed into itself.
+    # Hash present fixed inputs and stack records used by the intrinsic format gate; exclude
+    # seal.json itself.
     present = [
         run_dir / rel for rel in RUN_DIR_FILES if rel != "seal.json" and (run_dir / rel).is_file()
     ]
     present += sorted(run_dir.glob("deep/stack-*-records.json"))
-    # Re-derive the candidate diff from the sandbox exactly as the seal
-    # producer did (and as the verifier checkout will apply it): the seal's
-    # embedded copy is an audit record, never the verification input, so a
-    # tracked change rewritten after sealing fails the digest check.
+    # Re-derive the diff: the embedded seal copy is audit-only, and later tracked changes must fail
+    # verification.
     try:
         diff_result = await runtime.run(candidate_diff_cmd(repo, head_sha), {})
     except Exception:
         return False
     if diff_result.exit_code != 0:
-        # The diff cannot be re-derived, so there is nothing to verify against.
-        # Hashing b"" here would let a git failure at BOTH seal and scoring
-        # time pass as a matching empty diff (seal_verified 1.0 on a run whose
-        # diff was never re-derived); a failed re-derivation must fail closed
-        # like any other unverifiable seal.
+        # Fail closed: hashing b"" after git fails both here and during sealing could falsely verify
+        # a diff that was never derived.
         return False
     return verify(seal, present, candidate_diff=diff_result.stdout.encode())
 
@@ -258,31 +176,19 @@ async def seal_archived_run(
     repo: str,
     head_sha: str,
 ) -> bool:
-    """Seal the archived run dir + the candidate diff; write ``seal.json`` into the sandbox.
+    """Seal the archive and current tracked diff against the baked head after the agent write window.
+    The candidate is b"" when the runner cannot derive it.
 
-    The supervisor (harness) runs this after the launch returns, so the seal is
-    produced outside the agent's write window and the reward can verify the
-    staged copy against it. The candidate diff is the rollout's own current
-    tracked diff against the baked head (``b""`` when the runner cannot produce one).
-
-    Returns:
-        ``True`` when a seal was written (and, under docker, the run dir
-        hardened root-owned read-only); ``False`` when there is no run dir to
-        seal or sealing failed. Never raises: a missing seal must not crash the
-        rollout. A sealing failure on a real run dir is fail-closed: the dir is
-        marked with an unvalidatable ``seal.json`` so scoring reads a failed
-        seal (``seal_verified`` 0.0, zero reward) rather than an unsealed run
-        at full trust.
+    Return True after writing seal.json and, under Docker, hardening the archive
+    root-owned/read-only; return False for no archive or any failure. Never raise. If an existing
+    archive cannot be sealed, write an invalid seal marker so scoring yields seal_verified=0 and
+    zero reward instead of legacy full trust.
     """
     session_dir = await _session_dir(runtime, archive_root)
     if session_dir is None:
         return False
     try:
         artifacts: dict[str, bytes] = {}
-        # _present_files already restricts the listing to the reward inputs
-        # (RUN_DIR_FILES members that exist + the deep/stack-*-records.json
-        # glob members), so only the self-exclusion of seal.json is needed
-        # here.
         for rel in await _present_files(runtime, session_dir):
             if rel == "seal.json":
                 continue
@@ -291,14 +197,9 @@ async def seal_archived_run(
         candidate_diff = diff_result.stdout.encode() if diff_result.exit_code == 0 else b""
         seal = seal_bytes(artifacts, candidate_diff)
         await runtime.write(f"{session_dir}/seal.json", seal.model_dump_json().encode())
-        # base.Dockerfile documents that the supervisor re-chowns the sealed run
-        # dir root-owned read-only at seal time — the mechanism that makes the
-        # sealed artifacts agent-inaccessible once the agent's write window has
-        # closed. The docker runtime execs as the container root, so the chown
-        # lands there; the local subprocess path has no root boundary (it runs
-        # as the host user, sharing the agent's uid), so there is nothing to
-        # re-chown on that path. A failed hardening is a sealing failure: a
-        # seal over still-agent-writable bytes would not be worth trusting.
+        # Docker exec runs as root: harden the archive root-owned/read-only after the agent write
+        # window. Local subprocess smoke runs share the host UID and have no root boundary. Failed
+        # hardening is failed sealing; agent-writable sealed bytes cannot be trusted.
         if runtime.type == "docker":
             hardened = await runtime.run(
                 [
@@ -316,10 +217,8 @@ async def seal_archived_run(
                 )
         return True
     except Exception:
-        # Fail closed: a run whose seal could not be produced must score as a
-        # failed seal (verify_seal -> False -> zero reward), never as an
-        # unsealed full-trust run. Overwrite seal.json with an unvalidatable
-        # marker; if even that write fails, the harness records the failure.
+        # Mark failed sealing explicitly so verification returns False and zero reward. If even this
+        # write fails, the harness records that failure.
         try:
             await runtime.write(f"{session_dir}/seal.json", b'{"seal_failed": true}')
         except Exception:
@@ -331,12 +230,9 @@ async def daydream_completed(
     runtime: vf.Runtime,
     archive_root: str = DEFAULT_ARCHIVE_ROOT,
 ) -> bool:
-    """Whether daydream finished its pipeline, regardless of exit code.
-
-    daydream writes the trajectory's ``final_metrics`` only at the very end, so
-    its presence separates a legitimate non-zero outcome — tests still red after
-    the fix pass, ``Stop(1)`` at ``deep/orchestrator.py:1389`` — from a crash.
-    Mirrors the legacy ``_review_complete`` benchmark run-completion check.
+    """Detect pipeline completion from trajectory final_metrics, which is written only at the end. A
+    nonzero outcome such as tests remaining red is complete; absence indicates a crash. Matches the
+    benchmark _review_complete convention.
     """
     session_dir = await _session_dir(runtime, archive_root)
     if session_dir is None:

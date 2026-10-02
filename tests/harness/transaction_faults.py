@@ -19,7 +19,6 @@ class TransactionFaultDriver:
         self.transaction = Transaction(root, op_id=op_id, kind=kind)
 
     def halt_at(self, boundary: str) -> None:
-        """Leave the transaction at a documented durable crash boundary."""
         tx = self.transaction
         if boundary in ("staged", "backup"):
             return

@@ -110,9 +110,9 @@ async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
     assert backend._transports == []
 
 async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() -> None:
-    """A non-UTF-8 byte must surface as a non-JSON line, not an over-limit line. Osprey decodes stdout with
-    errors="replace" (its historical contract), so a 0xff byte in a line that still fails JSON parsing after repair
-    is diagnosed as non-JSON — never mislabeled as the 10485760-byte-limit error."""
+    """Replacement decoding may still leave invalid JSON; diagnose that as non-JSON rather than an
+    oversized line.
+    """
     stdout = _over_limit_reader(b'{"event"' + b"\xff" + b"}\n")
     backend = OspreyBackend(osprey_binary="fake")
     with pytest.raises(OspreyError, match=r"non-JSON line in JSONL mode") as exc_info:
@@ -123,8 +123,6 @@ async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() 
     assert backend._transports == []
 
 async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes() -> None:
-    """A non-UTF-8 byte inside a JSON string is repaired with U+FFFD and the event is processed normally (the
-    historical errors="replace" contract), never hard-failed as a protocol error."""
     lines = osprey_session({"event": "text_delta", "content": "x"})
     payload: list[bytes] = []
     for event in lines:
@@ -175,10 +173,7 @@ async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
     assert spawner.kwargs[0]["stderr"] is asyncio.subprocess.PIPE
 
 async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> None:
-    """Valid-JSONL run: spawn opts reach the transport, and the unconditional
-    lifecycle holds even after a clean exit: wait reaps the child, terminate
-    closes the pipe fds, and the finally drops the transport from the backend
-    list, the only cleanup exclusive to the finally block (pi/codex parity)."""
+    """Even successful children must be reaped, their pipes closed, and their transport removed."""
     lines = osprey_session()
     backend = OspreyBackend(osprey_binary="fake")
     events, spawner = await _collect(backend, lines, workspace=tmp_path)
@@ -551,7 +546,6 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     assert "cost_usd" not in trajectory["final_metrics"]
 
 async def test_cancel_delegates_to_shared_transport_lifecycle() -> None:
-    """cancel() reaps every tracked transport's process group and pipes."""
     backend, proc = make_cancel_probe("osprey")
     await backend.cancel()
     proc.terminate.assert_called_once()
@@ -583,16 +577,13 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
-    # Temperature: exact zero preserved (the argv carries it).
     assert config.temperature == 0.0
     assert argv[argv.index("--temperature") + 1] == "0.0"
-    # Persona/toolset: exact argv values present in argv, presence booleans in
-    # telemetry, and NO label-carrying field exists.
+    # Arbitrary labels belong in argv; telemetry records only their presence.
     assert argv[argv.index("--persona") + 1] == "PATTERN_PERSONA_PLACEHOLDER"
     assert argv[argv.index("--toolset") + 1] == "TOOLSET_PLACEHOLDER"
     assert config.persona_present is True and config.toolset_present is True
     assert not hasattr(config, "persona") and not hasattr(config, "toolset")
-    # Closed modes and booleans from exact argv.
     assert config.approval_mode == "deny-untrusted"
     assert config.sandbox is True
     assert config.immutable_surface is True
@@ -603,36 +594,29 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     assert config.vars_count == 2
     assert config.continuation_mode == "fresh"
     assert config.model_mode == "single"
-    # Provenance: all four identity fields are native (session_start).
     assert request.model_source == "native"
     assert request.provider_source == "native"
     assert request.session_source == "native"
     assert request.timestamp_source == "native"
 
-async def test_osprey_hidden_temperature_stays_absent_in_telemetry() -> None:
-    """Without explicit --temperature, the config carries temperature=None."""
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake")
+@pytest.mark.parametrize("temperature", [None, 0.7])
+async def test_osprey_temperature_telemetry_matches_explicit_option(temperature: float | None) -> None:
+    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=temperature)
     events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     argv = list(spawner.argvs[-1])
-    assert "--temperature" not in argv
+    if temperature is None:
+        assert "--temperature" not in argv
+    else:
+        assert argv[argv.index("--temperature") + 1] == "0.7"
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
-    assert config.temperature is None  # config-resolved temperature is hidden
-
-async def test_osprey_nonzero_temperature_is_admitted_verbatim() -> None:
-    """An explicit nonzero temperature passes through exactly."""
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=0.7)
-    events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
-    argv = list(spawner.argvs[-1])
-    assert argv[argv.index("--temperature") + 1] == "0.7"
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    config = request.config
-    assert isinstance(config, OspreyRequestConfig)
-    assert config.temperature == 0.7
+    if temperature is None:
+        assert config.temperature is None
+    else:
+        assert config.temperature == 0.7
 
 async def test_osprey_turn_end_model_override_is_native() -> None:
-    """turn_end model becomes the native TurnEnd identity; no finish reason."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
     events, _spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
@@ -647,7 +631,6 @@ async def test_osprey_turn_end_model_override_is_native() -> None:
     assert turn_end.finish_reason is None
 
 async def test_osprey_session_end_usage_is_session_sourced() -> None:
-    """Terminal totals carry session measurement source and reported cost."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
     events, _spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     costs = [e for e in events if isinstance(e, CostEvent)]
@@ -657,7 +640,6 @@ async def test_osprey_session_end_usage_is_session_sourced() -> None:
     assert costs[0].cost_source is None
 
 async def test_osprey_resume_and_fork_continuation_modes() -> None:
-    """Resume and fork continuation tokens map to closed config modes."""
     for mode, flag in (("resume", "--resume"), ("fork", "--fork-from")):
         backend = OspreyBackend(model="custom-model", osprey_binary="fake")
         token = ContinuationToken(backend="osprey", data={"session_id": "s-9", "mode": mode})

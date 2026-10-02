@@ -1,14 +1,7 @@
-"""OTLP destination factories and destination-specific compatibility attributes.
+"""Destination factories and native compatibility attributes over bounded OTLP transports.
 
-The runtime owns each returned exporter. Presets isolate authentication and TLS
-from generic OTLP environment settings; the generic destination honors the
-SDK's standard HTTP/protobuf and gRPC transport configuration.
-
-P18 Task 4A: all destinations export through the bounded compatibility
-boundary (``daydream.observability.otlp_compat``) — an HTTPX/AnyIO
-whole-operation-deadline HTTP transport, a version-guarded gRPC delegate
-bridge, one shared acknowledgment decision contract and per-destination
-delivery outcome ledgers.
+Presets isolate authentication/TLS from generic settings; generic OTLP honors
+signal-specific/shared settings. Each runtime owns its exporter and delivery ledger.
 """
 
 from __future__ import annotations
@@ -81,7 +74,7 @@ def _header_value(setting: str, *, default: str | None = None, required: bool = 
 class CompatSpanExporter(SpanExporter):
     """Own one otlp_compat transport and expose the delivery snapshot."""
 
-    def __init__(self, transport: HttpxOtlpTransport, ledger: DeliveryLedger, *, timeout_s: float) -> None:
+    def __init__(self, transport: HttpxOtlpTransport | GrpcBridge, ledger: DeliveryLedger, *, timeout_s: float) -> None:
         self._transport = transport
         self._ledger = ledger
         self._timeout_s = timeout_s
@@ -111,11 +104,9 @@ def _preset_transport(
     endpoint: str,
     headers: dict[str, str],
 ) -> SpanExporter:
-    """Build the owned preset HTTP transport under the diagnostic boundary.
+    """Build preset HTTP transport with explicit credentials/TLS and no ambient settings.
 
-    Presets never consult generic OTLP environment settings, so the private
-    credential-provider rejection applies only to the generic OTLP resolver.
-    Ambient authentication, redirects, and compression are disabled.
+    Generic credential-provider rejection applies only to the generic resolver.
     """
     ledger = DeliveryLedger()
     try:
@@ -237,11 +228,8 @@ def _http_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     """Owned HTTP transport via the typed signal-over-shared resolver."""
     endpoint_setting = _traces_or_shared_endpoint_setting()
     raw_endpoint = os.environ.get(endpoint_setting, "http://localhost:4318")
-    # Stock OTel 1.44 semantics (pinned exporter ground truth): the shared
-    # endpoint always gets the traces path appended — even when it already
-    # carries a path (https://collector.example.com/otlp becomes
-    # /otlp/v1/traces) — while a signal-specific endpoint is used exactly
-    # as supplied, whatever its path.
+    # Shared endpoints append /v1/traces even after an existing path; signal
+    # endpoints stay verbatim (pinned OTel 1.44 behavior).
     is_signal_specific = endpoint_setting == "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"
     if is_signal_specific:
         endpoint = raw_endpoint
@@ -310,25 +298,11 @@ def _grpc_generic_exporter(timeout: float, config: ObservabilityConfig) -> SpanE
     return GrpcCompatExporter(bridge, ledger, timeout_s=timeout)
 
 
-class GrpcCompatExporter(SpanExporter):
+class GrpcCompatExporter(CompatSpanExporter):
     """SpanExporter facade over the pinned gRPC bridge."""
 
     def __init__(self, bridge: otlp_compat.GrpcBridge, ledger: DeliveryLedger, *, timeout_s: float) -> None:
-        self._bridge = bridge
-        self._ledger = ledger
-        self._timeout_s = timeout_s
-
-    def export(self, spans: Sequence[ReadableSpan]) -> SpanExportResult:
-        return self._bridge.export(spans, timeout_s=self._timeout_s)
-
-    def force_flush(self, timeout_millis: int = 30000) -> bool:
-        return True
-
-    def shutdown(self) -> None:
-        self._bridge.shutdown()
-
-    def delivery_snapshot(self) -> dict[str, Any]:
-        return self._ledger.snapshot()
+        super().__init__(bridge, ledger, timeout_s=timeout_s)
 
 
 def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]:
@@ -358,18 +332,10 @@ def _langsmith_usage(attributes: Mapping[str, AttributeValue]) -> dict[str, Any]
 
 
 def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> ReadableSpan:
-    """Copy a span preserving identity, bounded containers and dropped counts.
+    """Clone identity and attributes while preserving bounded event/link containers.
 
-    The destination clone keeps the exact original span identity, ordered
-    events/links and the bounded-container dropped counts (including nested
-    event/link attribute counts). The original events/links containers are
-    passed through unmodified so the SDK's ``dropped_events``/``dropped_links``
-    counters survive the copy: the public ``events``/``links`` properties
-    return plain tuples, which would silently reset those counters to zero.
-    Vendor adapters never mutate events/links, so sharing the immutable
-    bounded container is safe. The plain dict fallback is only used for
-    spans whose attributes are not a bounded container, matching the SDK's own
-    ``dropped_attributes`` of zero.
+    Their public tuple views lose dropped counts. Adapters share the untouched
+    containers and retain exact event/link ordering.
     """
     return ReadableSpan(
         name=span.name,
@@ -390,16 +356,10 @@ def _copy_span(span: ReadableSpan, attributes: Mapping[str, AttributeValue]) -> 
 def _preserved_attributes(
     span: ReadableSpan, additions: Mapping[str, AttributeValue]
 ) -> BoundedAttributes | dict[str, AttributeValue]:
-    """Merge vendor additions without erasing bounded dropped-attribute counts.
+    """Add vendor attributes with enough capacity to retain every existing/additional key.
 
-    The SDK reads dropped counts only from the original ``BoundedAttributes``
-    container, so rebuild one and replay the vendor addition under the
-    documented admission policy: the clone is given enough capacity for every
-    original attribute plus every vendor addition (so neither is ever dropped),
-    and the original dropped count is copied verbatim — a real counter is
-    preserved, never erased and never inflated by the adapter's own additions.
-    Plain dict fallback matches the SDK's zero dropped count for non-bounded
-    attributes.
+    Copy original bounded dropped counts verbatim. Plain dict inputs retain the
+    SDK's zero dropped-count behavior.
     """
     original = getattr(span, "_attributes", None)
     if isinstance(original, BoundedAttributes):
@@ -429,13 +389,9 @@ class _NativeSpanExporter(SpanExporter):
 
     @staticmethod
     def _is_billed_owner(attributes: Mapping[str, AttributeValue]) -> bool:
-        """True only for the one resolved native billing owner per attempt.
+        """Bill the resolved structural attempt or a generation explicitly marked billed.
 
-        A structural attempt bills when the closed owner is the structural
-        chain; a generation child bills only when the ledger resolved
-        ``generation_children`` and marked this exact child billed. ``none``
-        and ``unresolved`` yield no native billing aliases, and no non-owner
-        span is ever billed.
+        Unresolved/none ownership and other span kinds receive no native billing aliases.
         """
         kind = attributes.get("daydream.span.kind")
         if kind == "generation":
@@ -469,10 +425,6 @@ _STRUCTURAL_EVENT_TYPES = {
 class HoneyHiveExporter(_NativeSpanExporter):
     """Add native event types and billed metadata without changing portable spans."""
 
-    # Native event-type classification: structural aggregates (run/step/logical
-    # agent/attempt) stay chain; only an approved generation is a model event;
-    # opaque backends emit no model event because they create no generation
-    # span. Tool calls are tool events.
     _EVENT_TYPES = {**_STRUCTURAL_EVENT_TYPES, "generation": "model"}
 
     @staticmethod
@@ -485,10 +437,7 @@ class HoneyHiveExporter(_NativeSpanExporter):
             attributes["honeyhive.session_id"] = session_id
             attributes["honeyhive.session_auto_create"] = True
             attributes["honeyhive.session_name"] = f"daydream.{attributes.get('daydream.flow', 'run')}"
-        # HoneyHive's documented canonical mapping recognizes the standard
-        # agent identity: gen_ai.agent.name/description/id normalize into
-        # metadata.agent_name/description/id. No guessed underscore-prefixed
-        # derived fields are written (issue #1156).
+        # Standard gen_ai.agent identity already maps to native agent metadata.
         if HoneyHiveExporter._is_billed_owner(attributes):
             for portable, native in (
                 ("gen_ai.usage.input_tokens", "prompt_tokens"),
@@ -506,9 +455,6 @@ class HoneyHiveExporter(_NativeSpanExporter):
 class LangSmithExporter(_NativeSpanExporter):
     """Add LangSmith compatibility attributes to copies; keep portable spans untouched."""
 
-    # LangSmith native run types: every structural aggregate (run/step/logical
-    # agent/attempt) is a chain; approved generations are llm; tool is tool;
-    # no aggregate is ever an llm and no fake agent run type is authored.
     _RUN_TYPES = {**_STRUCTURAL_EVENT_TYPES, "generation": "llm"}
 
     @staticmethod
@@ -516,9 +462,7 @@ class LangSmithExporter(_NativeSpanExporter):
         attributes = dict(span.attributes or {})
         kind = attributes.get("daydream.span.kind")
         attributes["langsmith.span.kind"] = LangSmithExporter._RUN_TYPES.get(str(kind), "chain")
-        # Root/subagent semantics only on actual logical agent scopes. The
-        # documented ls_agent_type control is set exclusively for the real
-        # enclosing-agent case; sibling phases and retries never qualify.
+        # Native agent type reflects only actual nested agent scopes.
         role = attributes.get("daydream.agent.role")
         if kind == "agent" and role in ("root", "subagent"):
             attributes["langsmith.metadata.ls_agent_type"] = role

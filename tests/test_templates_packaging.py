@@ -1,10 +1,6 @@
-"""Packaged-template discovery + name-drift cross-check.
+"""Workflow templates must ship in package data for editable and built installs.
 
-The three #147 workflow templates ship as package data under
-``daydream/templates/workflows/`` so they are present in both editable and
-built installs. These tests pin the discovery accessor and guard against the
-deposited secret/variable names drifting away from the YAML the workflows
-actually reference.
+Check discovery and secret/variable-name agreement with the shipped YAML.
 """
 
 from __future__ import annotations

@@ -23,7 +23,7 @@ from daydream.backends.claude import ClaudeAgentError
 from daydream.backends.codex import CodexError
 from daydream.backends.osprey import OspreyTerminalError
 from daydream.backends.pi import PiError
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.harness.claude_sdk import (
     MockAssistantMessage,
     MockResultMessage,
@@ -1025,7 +1025,6 @@ async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze
     tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
     archive_dir: Path,
 ) -> None:
-    """Adjudicated Claude cancellation: disconnect completes, then freeze."""
     repo = tiny_diff_target
     private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     BACKEND_SINK.clear()

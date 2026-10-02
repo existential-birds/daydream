@@ -1,13 +1,6 @@
-"""Grounded-diagram eligibility (issue #1113).
+"""Ground diagram eligibility in real Git diffs, stack/service discovery, and imports.
 
-Covers ``daydream.deep.diagram_trigger`` against real inputs: a real temporary
-git repository, a real ``git diff`` parsed by the production hunk index, real
-``detect_stacks`` routing, real ``enumerate_services`` discovery and a real
-``build_import_graph``. Nothing here is mocked except the two failure
-injections that prove the tree-sitter path fails open, because the whole point
-of this module is that a diagram decision is reproducible from facts about the
-tree rather than from anything a model said.
-"""
+Only two native-parser failure injections are mocked, to verify graceful fallback."""
 
 from __future__ import annotations
 
@@ -128,13 +121,7 @@ def _write(repo: Path, files: dict[str, str]) -> None:
 def _diff_repo(
     repo: Path, base: dict[str, str], head: dict[str, str]
 ) -> tuple[list[str], dict[str, list[tuple[int, int]]]]:
-    """Build a real two-commit repo and return its changed files and hunk ranges.
-
-    ``base`` is committed first (plus an unrelated seed file so the base commit
-    is never empty), then ``head`` is written over it and committed. The
-    returned ranges come from the production ``parse_hunks`` /
-    ``head_side_ranges_by_file`` pair over a real ``git diff``.
-    """
+    """Commit base/head files with a seed, then parse the real diff into hunk ranges."""
     init_repo(repo)
     _write(repo, {"seed.txt": "seed\n", **base})
     git(repo, "add", ".")
@@ -163,7 +150,6 @@ def _decide(
 # --- Sequence eligibility ---------------------------------------------------
 
 def test_cross_module_rule_fires_on_a_real_import_edge(tmp_path: Path) -> None:
-    """Three code files across two modules with one cross-module import edge."""
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
@@ -207,7 +193,6 @@ def test_cross_service_rule_fires_without_any_import_edge(tmp_path: Path) -> Non
     assert "2 services (a, b)" in eligibility.sequence.reason
 
 def test_single_module_diff_is_below_the_sequence_threshold(tmp_path: Path) -> None:
-    """Three files in one module with an import edge is not a cross-module change."""
     repo = tmp_path / "repo"
     head = {
         "core/a.py": "from core.b import b\n\n\ndef a():\n    return b()\n",
@@ -225,7 +210,6 @@ def test_single_module_diff_is_below_the_sequence_threshold(tmp_path: Path) -> N
     assert eligibility.eligible_kinds() == []
 
 def test_lowered_thresholds_admit_a_two_file_cross_module_change(tmp_path: Path) -> None:
-    """The cross-module floors are thresholds, not constants."""
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
@@ -239,7 +223,6 @@ def test_lowered_thresholds_admit_a_two_file_cross_module_change(tmp_path: Path)
     assert lowered.cross_module_edges == 1
 
 def test_root_level_file_module_is_dot(tmp_path: Path) -> None:
-    """A repository-root code file's module is ``"."``, never the empty string."""
     repo = tmp_path / "repo"
     head = {"main.py": "def main():\n    return 1\n", "api/a.py": "def a():\n    return 1\n"}
     changed, ranges = _diff_repo(repo, {}, head)
@@ -261,7 +244,6 @@ def test_tests_and_docs_are_not_code_files(tmp_path: Path) -> None:
     assert eligibility.code_files == ["api/handler.py"]
 
 def test_structure_and_generic_stacks_never_contribute_code_files(tmp_path: Path) -> None:
-    """A docs-only diff has no code files even though ``structure`` holds every file."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"docs/guide.md": "# guide\n"})
     stacks = detect_stacks(sorted(changed))
@@ -269,14 +251,12 @@ def test_structure_and_generic_stacks_never_contribute_code_files(tmp_path: Path
     assert _decide(repo, changed, ranges).code_files == []
 
 def test_sharded_stack_names_classify_like_unsharded_ones(tmp_path: Path) -> None:
-    """A ``python#2`` shard is still the python stack."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/a.py": "def a():\n    return 1\n"})
     sharded = [StackAssignment(stack_name="python#2", files=["api/a.py"])]
     assert _decide(repo, changed, ranges, stacks=sharded).code_files == ["api/a.py"]
 
 def test_cross_module_edges_are_counted_per_direction(tmp_path: Path) -> None:
-    """A mutual import between two modules counts as two directed edges."""
     repo = tmp_path / "repo"
     head = {
         "api/a.py": "from core.b import b\n\n\ndef a():\n    return b()\n",
@@ -301,7 +281,6 @@ def test_cross_module_edges_are_counted_per_direction(tmp_path: Path) -> None:
 def test_branch_points_are_counted_per_language(
     tmp_path: Path, path: str, source: str, name: str, branch_points: int
 ) -> None:
-    """Each grammar's conditional and loop constructs are counted once each."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {path: source})
     eligibility = _decide(repo, changed, ranges)
@@ -314,14 +293,12 @@ def test_branch_points_are_counted_per_language(
     assert eligibility.eligible_kinds() == ["flowchart"]
 
 def test_unsupported_language_contributes_no_branch_points(tmp_path: Path) -> None:
-    """A language with no installed grammar has no branch points to count."""
     repo = tmp_path / "repo"
     (repo / "api").mkdir(parents=True)
     (repo / "api/sample.rb").write_text("def handle(a)\n  if a\n    1\n  end\nend\n")
     assert count_function_branch_points(repo, "api/sample.rb", [(1, 5)]) == []
 
 def test_branch_points_belong_to_the_innermost_function(tmp_path: Path) -> None:
-    """A branch inside a nested closure counts for the closure, not its host."""
     repo = tmp_path / "repo"
     (repo / "api").mkdir(parents=True)
     (repo / "api/sample.py").write_text(PYTHON_SOURCE)
@@ -332,7 +309,6 @@ def test_branch_points_belong_to_the_innermost_function(tmp_path: Path) -> None:
     ]
 
 def test_only_branch_points_inside_a_changed_hunk_are_counted(tmp_path: Path) -> None:
-    """The count is over changed hunks, not over the whole function."""
     repo = tmp_path / "repo"
     (repo / "api").mkdir(parents=True)
     (repo / "api/sample.py").write_text(PYTHON_SOURCE)
@@ -355,11 +331,9 @@ def test_no_hunks_means_no_changed_functions(tmp_path: Path) -> None:
     assert count_function_branch_points(repo, "api/sample.py", []) == []
 
 def test_missing_file_contributes_no_branch_points(tmp_path: Path) -> None:
-    """A path that is not on disk fails open rather than raising."""
     assert count_function_branch_points(tmp_path, "api/gone.py", [(1, 10)]) == []
 
 def test_candidate_roots_are_ordered_by_branch_points_then_file_then_line(tmp_path: Path,) -> None:
-    """Ordering is deterministic and puts the busiest function first."""
     repo = tmp_path / "repo"
     two_branches = "def {name}(a, b):\n    if a:\n        return 1\n    if b:\n        return 2\n    return 3\n"
     head = {
@@ -375,7 +349,6 @@ def test_candidate_roots_are_ordered_by_branch_points_then_file_then_line(tmp_pa
     assert eligibility.function_branch_counts == eligibility.candidate_roots
 
 def test_functions_below_the_branch_threshold_are_reported_but_not_candidates(tmp_path: Path,) -> None:
-    """``function_branch_counts`` records the near misses the decision rejected."""
     repo = tmp_path / "repo"
     head = {"api/a.py": "def a(x):\n    if x:\n        return 1\n    return 2\n"}
     changed, ranges = _diff_repo(repo, {}, head)
@@ -387,7 +360,6 @@ def test_functions_below_the_branch_threshold_are_reported_but_not_candidates(tm
     assert "No changed function has >= 3 changed branch points" in eligibility.flowchart.reason
 
 def test_raised_branch_threshold_disables_the_flowchart(tmp_path: Path) -> None:
-    """``min_branch_points`` is honored, not baked in."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
 
@@ -400,7 +372,6 @@ def test_raised_branch_threshold_disables_the_flowchart(tmp_path: Path) -> None:
 # --- Forcing ----------------------------------------------------------------
 
 def test_force_sequence_leaves_the_flowchart_skipped(tmp_path: Path) -> None:
-    """A forcing mode names kinds; the kinds it does not name are skipped."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
     eligibility = _decide(repo, changed, ranges, force="sequence")
@@ -414,7 +385,6 @@ def test_force_sequence_leaves_the_flowchart_skipped(tmp_path: Path) -> None:
     assert eligibility.eligible_kinds() == ["sequence"]
 
 def test_force_both_makes_both_kinds_eligible(tmp_path: Path) -> None:
-    """``both`` forces the two kinds on a diff no rule would have admitted."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/a.py": "def a():\n    return 1\n"})
     eligibility = _decide(repo, changed, ranges, force="both")
@@ -423,7 +393,6 @@ def test_force_both_makes_both_kinds_eligible(tmp_path: Path) -> None:
     assert eligibility.sequence.rule == eligibility.flowchart.rule == "forced"
 
 def test_forced_flowchart_falls_back_to_every_changed_function(tmp_path: Path) -> None:
-    """With no qualifying candidate, a forced flowchart may root anywhere changed."""
     repo = tmp_path / "repo"
     head = {"api/a.py": "def a(x):\n    if x:\n        return 1\n    return 2\n\n\ndef b():\n    return 3\n"}
     changed, ranges = _diff_repo(repo, {}, head)
@@ -435,7 +404,6 @@ def test_forced_flowchart_falls_back_to_every_changed_function(tmp_path: Path) -
     assert [(root.name, root.branch_points) for root in eligibility.candidate_roots] == [("a", 1), ("b", 0)]
 
 def test_forced_flowchart_keeps_the_qualifying_candidates_when_there_are_any(tmp_path: Path,) -> None:
-    """The fallback is a fallback: a qualifying candidate list is not widened."""
     repo = tmp_path / "repo"
     head = {"api/sample.py": PYTHON_SOURCE + "\n\ndef plain():\n    return 0\n"}
     changed, ranges = _diff_repo(repo, {}, head)
@@ -445,7 +413,6 @@ def test_forced_flowchart_keeps_the_qualifying_candidates_when_there_are_any(tmp
     assert "every changed function is offered" not in eligibility.flowchart.reason
 
 def test_force_off_skips_both_kinds(tmp_path: Path) -> None:
-    """``off`` denies both kinds and skips the branch sweep entirely."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
     eligibility = _decide(repo, changed, ranges, force="off")
@@ -474,12 +441,10 @@ def test_unrecognized_force_behaves_like_auto(tmp_path: Path) -> None:
 # --- Tiny-diff stack collapse (why stacks are an argument) -------------------
 
 def test_decide_eligibility_is_immune_to_the_tiny_diff_stack_collapse(tmp_path: Path,) -> None:
-    """A collapsed stack list would classify a real code diff as no code at all.
+    """Fresh stack detection must precede diagram eligibility.
 
-    The orchestrator's published ``ctx.data["stacks"]`` is post-collapse: on a two-file diff spanning two
-    languages every file lands in one ``generic`` assignment. Passing that list in produces zero code files and
-    therefore no diagram; passing a fresh ``detect_stacks`` produces both files. This is why ``_step_diagram``
-    must call ``detect_stacks`` itself."""
+    Tiny-diff collapse puts two real language files in the generic stack, which
+    would otherwise make the diagram see no code."""
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "def handle():\n    return 1\n",
@@ -499,7 +464,6 @@ def test_decide_eligibility_is_immune_to_the_tiny_diff_stack_collapse(tmp_path: 
 # --- Fail-open and budget ---------------------------------------------------
 
 def test_bad_tree_sitter_install_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A known-bad tree-sitter yields no branch points, never an exception."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
 
@@ -513,7 +477,6 @@ def test_bad_tree_sitter_install_fails_open(tmp_path: Path, monkeypatch: pytest.
     assert not eligibility.flowchart.eligible
 
 def test_unexpected_tree_sitter_error_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Anything the tree-sitter helpers let through is absorbed too."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
 
@@ -524,7 +487,6 @@ def test_unexpected_tree_sitter_error_fails_open(tmp_path: Path, monkeypatch: py
     assert _decide(repo, changed, ranges).candidate_roots == []
 
 def test_exhausted_wall_budget_yields_partial_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The branch sweep is wall-bounded; on expiry it stops instead of stalling."""
     repo = tmp_path / "repo"
     changed, ranges = _diff_repo(repo, {}, {"api/sample.py": PYTHON_SOURCE})
 
@@ -536,7 +498,6 @@ def test_exhausted_wall_budget_yields_partial_counts(tmp_path: Path, monkeypatch
 # --- Artifact form ----------------------------------------------------------
 
 def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
-    """``diagram.json`` carries every signal behind the decision."""
     repo = tmp_path / "repo"
     head = {
         "api/handler.py": "from core.engine import run\n\n\ndef handle(x):\n    return run(x)\n",
@@ -559,7 +520,6 @@ def test_to_dict_is_json_serializable_and_complete(tmp_path: Path) -> None:
     assert json.loads(json.dumps(payload)) == payload
 
 def test_candidate_root_and_thresholds_are_re_exported() -> None:
-    """The eligibility call sites import both dataclasses from this module."""
     root = CandidateRoot(file="a.py", name="f", line=1, end_line=9, branch_points=3)
     assert (root.file, root.branch_points) == ("a.py", 3)
     assert DiagramThresholds() == DiagramThresholds(min_code_files=3, min_modules=2, min_branch_points=3)

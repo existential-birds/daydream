@@ -1,5 +1,4 @@
-"""Tests for :mod:`daydream.training.rubric` (core rubric + Stage-0 learned
-outcome term and CR-Bench FP penalty)."""
+"""Test the core rubric, learned Stage-0 outcome term, and CR-Bench false-positive penalty."""
 
 from __future__ import annotations
 
@@ -70,7 +69,6 @@ MERGED = PRMergeSignal(True, "2026-01-01T00:00:00Z", state="merged")
 
 
 def test_run_label_all_accepted_any_merge_state() -> None:
-    """All-accepted maps to accepted regardless of merge state (M22/M10)."""
     for pr in (MERGED, PRMergeSignal(False, None, state="open"), PRMergeSignal(False, None, state="closed")):
         assert derive_outcome_label(_fp_rubric(pr, [_res("accepted")])) == "accepted"
 
@@ -79,7 +77,6 @@ def test_run_label_all_rejected_any_merge_state() -> None:
         assert derive_outcome_label(_fp_rubric(pr, [_res("rejected")])) == "rejected"
 
 def test_run_label_mixed_decisive_is_contested() -> None:
-    """Mixed decisive evidence → contested (M9); the amelia#626 shape (M10)."""
     rub = _fp_rubric(MERGED, [_res("accepted"), _res("rejected")])
     assert derive_outcome_label(rub) == "contested"
 
@@ -99,8 +96,6 @@ def test_run_label_no_decisive_evidence_is_unknown() -> None:
     ],
 )
 def test_run_label_local_branch(verdict: Literal["applied", "rejected", "unknown"], expected: str) -> None:
-    """local_branch posterior: applied→accepted, rejected→rejected, otherwise
-    unknown (rubric.py:113-117)."""
     assert derive_outcome_label(_local_rubric(verdict)) == expected
 
 
@@ -113,12 +108,10 @@ def _local_rubric(verdict: Literal["applied", "rejected", "unknown"]) -> Rubric:
 
 
 def test_run_label_no_signal_is_unknown() -> None:
-    """posterior_source ``none`` always maps to ``unknown`` (rubric.py:118)."""
     rub = _fp_rubric(MERGED, [_res("accepted")], source="none")
     assert derive_outcome_label(rub) == "unknown"
 
 def test_per_finding_labels_come_from_dispositions() -> None:
-    """Per-finding labels pass dispositions through; merge state is irrelevant (M10)."""
     rub = _fp_rubric(PRMergeSignal(False, None, state="closed"), [])
     per = [_res("accepted"), _res("rejected"), _res("ambiguous"), _res("unanswered"), _res("missing")]
     assert derive_per_finding_labels(rub, per) == ["accepted", "rejected", "ambiguous", "unanswered", "missing"]
@@ -129,7 +122,6 @@ def test_per_finding_non_pr_source_stays_unknown() -> None:
 
 
 class _StubModel:
-    """Tiny stub satisfying the OutcomeModel scoring protocol."""
 
     def score_comment(self, text: str) -> float:  # noqa: ARG002
         return 0.5
@@ -177,7 +169,6 @@ def test_breakdown_stamps_rubric_version(model: _StubModel) -> None:
     assert b.reward_version.startswith(REWARD_VERSION_RUBRIC)
 
 def test_missing_correctness_is_none_not_zero(model: _StubModel) -> None:
-    # No verifier verdicts means no intrinsic correctness credit.
     b = cast(
         RubricV2Breakdown, score_review(model, findings=[_finding()], fp_count=0, total_findings=1, breakdown=True),
     )
@@ -186,8 +177,7 @@ def test_missing_correctness_is_none_not_zero(model: _StubModel) -> None:
     assert "tool_grounded" not in b.terms
 
 def test_zero_total_findings_guards_fp_and_snr_terms(model: _StubModel) -> None:
-    # Regression: fp/total and (total-fp)/total must not divide by zero when
-    # total_findings == 0; the ratio terms are then absent (None), never 0.0.
+    # At zero findings, ratio terms stay None without dividing by zero.
     b = cast(
         RubricV2Breakdown, score_review(model, findings=[_finding()], fp_count=0, total_findings=0, breakdown=True),
     )

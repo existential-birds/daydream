@@ -1,20 +1,8 @@
-"""End-to-end integration tests for the workspace + branch-resolution layer.
+"""Workspace/branch integration with real Git repositories and bare remotes.
 
-Stage 4.2: every test below stands up a real git repository (often with a
-real bare-origin remote) and exercises ``daydream.runner.run`` end-to-end.
-The Backend is the ONLY thing mocked — git
-operations all run for real so the tests reflect actual user-facing
-behavior. The scripted backend mirrors the canned-event pattern used in
-``tests/test_runner.py`` and ``tests/test_integration.py``.
-
-Test inventory (keyed to the Stage 4.2 spec):
-
-1. ``test_default_loop_on_base_branch_raises_wrong_branch_error``
-2. ``test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up``
-3. ``test_branch_also_checked_out_locally_warns_uses_origin``
-4. ``test_comment_mode_without_open_pr_runs_deep_flow``
-5. ``test_comment_mode_with_open_pr_uses_pr_base``
-6. ``test_review_mode_on_base_branch_does_not_error``
+Runner tests cover remote-only branches, private ephemeral cleanup, PR base
+selection, branch guards, and mode dispatch. Backend/dispatch seams isolate
+review execution while workspace and Git operations remain real.
 """
 
 from __future__ import annotations
@@ -28,8 +16,8 @@ from daydream import git_ops, runner
 from daydream.backends import ResultEvent, TextEvent
 from daydream.flows.engine import BackendFactory
 from daydream.github_app import GitHubExecutionInput
+from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
-from daydream.runner import RunConfig
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
 
@@ -37,11 +25,8 @@ from tests.harness.git_helpers import git as _git
 
 
 def _make_feature_branch_on_origin(tmp_path: Path, bare_origin: Path, branch: str = "feat/X") -> str:
-    """Push a new commit on *branch* to *bare_origin* via a sidecar clone.
-
-    Returns the new commit SHA. Done via a sidecar so the working ``repo`` does
-    not have *branch* checked out locally (mirrors the "branch only on origin"
-    scenario the production code is expected to handle).
+    """Push a branch from a sidecar clone and return its SHA, leaving the main
+    working repository without a local checkout of that branch.
     """
     sidecar = tmp_path / f"sidecar-{branch.replace('/', '_')}"
     _git(tmp_path, "clone", str(bare_origin), str(sidecar))
@@ -57,11 +42,7 @@ def _make_feature_branch_on_origin(tmp_path: Path, bare_origin: Path, branch: st
 
 
 def _stub_run_loop_deep(monkeypatch: pytest.MonkeyPatch, on_dispatch: Callable[[Any, Any], None]) -> None:
-    """Install a ``_run_loop_deep`` stub that asserts the dispatch contract.
-
-    ``on_dispatch(work, config)`` captures whatever fields a test cares about;
-    the stub always returns success so each test owns its own assertions.
-    """
+    """Capture the real workspace/config dispatch and return success."""
 
     async def _stub(
         work: Any, config: Any, run_artifacts: Any = None, *, run_context: Any, github_execution: GitHubExecutionInput,
@@ -98,10 +79,7 @@ def install_mock_backend(monkeypatch: pytest.MonkeyPatch) -> ScriptedBackend:
 async def test_default_loop_on_base_branch_raises_wrong_branch_error(
     repo_with_origin: Path, install_mock_backend: ScriptedBackend,
 ) -> None:
-    """Default loop (no --branch, no --worktree) on the base branch errors loudly.
-
-    ``runner.run`` propagates :class:`git_ops.WrongBranchError` for the rendering-level catch in
-    :func:`daydream.cli.main` to surface the panel and exit 1."""
+    """Default loop on the base branch propagates WrongBranchError for CLI rendering."""
     config = RunConfig(target=str(repo_with_origin), shallow=True, cleanup=False)
 
     with pytest.raises(git_ops.WrongBranchError) as excinfo:
@@ -214,11 +192,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
 async def test_comment_mode_without_open_pr_runs_deep_flow(
     tmp_path: Path, repo_with_origin: Path, bare_origin: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``--comment --branch feat/Z`` with no open PR runs the deep flow.
-
-    The review flow's early "No Open PR" refusal is gone in the single-flow collapse (#330): comment mode runs the
-    deep flow and ``_step_post_review`` warns-and-skips when no PR is resolvable. The workspace layer still
-    resolves the origin-only branch into an ephemeral worktree before dispatch."""
+    """Comment mode resolves an origin-only branch and dispatches deep review without a PR."""
     _make_feature_branch_on_origin(tmp_path, bare_origin, branch="feat/Z")
     monkeypatch.setattr("daydream.workspace.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
     monkeypatch.setattr("daydream.runner.git_ops.gh_pr_list_for_branch", lambda _repo, _branch, **_kwargs: [],)
@@ -285,10 +259,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
 async def test_review_mode_on_base_branch_does_not_error(
     repo_with_origin: Path, install_mock_backend: ScriptedBackend, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``--review`` on base branch must NOT raise WrongBranchError.
-
-    The review flow may legitimately produce a no-op report from the base branch (no diff = no findings) — that's
-    not a failure case."""
+    """Review mode permits a no-diff base-branch report without WrongBranchError."""
     captured: dict[str, str] = {}
 
     def fake_print_error(_console: Any, title: str, body: str) -> None:

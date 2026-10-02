@@ -22,7 +22,8 @@ from daydream.findings import (
     write_findings_artifact,
 )
 from daydream.pr_review import ParsedIssue, PRInfo
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.phase_backend import PhaseDispatchBackend
 
@@ -108,13 +109,10 @@ def _review_run_env(feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, 
 async def test_review_mode_writes_findings_artifact(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """`--review --findings-out` writes a fingerprinted artifact pinned to the PR.
+    """Exercise the event-bound findings handoff through runner.run and real Git.
 
-    Enters from ``runner.run`` with a real temp git repo and a scripted backend
-    injected through the ``create_backend`` seam (the existing phase-dispatch
-    harness in events mode). Only the backend and the GitHub lookups
-    (``find_pr_by_number`` / identity) are mocked; classification, fingerprints,
-    and the artifact write all run for real.
+    Only backend and GitHub lookups are doubled; classification, fingerprinting,
+    and artifact writing run unchanged.
     """
     out = tmp_path / "findings.json"
     issue = {"id": 1, "title": "Greeting changed without tests",
@@ -151,15 +149,10 @@ async def test_review_mode_writes_findings_artifact(
 async def test_review_mode_errored_agent_never_writes_clean_artifact(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """A backend error must abort the review run, not produce an empty artifact.
+    """An errored backend must abort rather than publish an empty, apparently clean artifact.
 
-    Regression guard for the sandbox acceptance failure: with an invalid
-    ANTHROPIC_API_KEY the agent errored on every invocation, yet the run
-    exited 0, printed "no issues found", and uploaded an empty findings
-    artifact that Phase B happily validated. Enters from ``runner.run`` with
-    a real temp git repo; only the backend (raising ``ClaudeAgentError`` the
-    way the fixed ClaudeBackend does on ``ResultMessage.is_error``) and the
-    GitHub lookups are mocked.
+    Drive runner.run with real Git; only the Claude error boundary and GitHub lookups
+    are doubled. This protects privileged posting from accepting failed analysis.
     """
     out = tmp_path / "findings.json"
 
@@ -193,7 +186,6 @@ def _diagram_payload() -> dict[str, Any]:
     }
 
 def test_diagram_artifact_round_trips_kind_and_payload(tmp_path: Path) -> None:
-    """``kind``/``diagrams`` survive build -> write -> validate -> load."""
     pr = PRInfo(number=7, head_sha="h" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature",
                 owner="o", repo="r", url="u")
     payload = _diagram_payload()
@@ -209,7 +201,6 @@ def test_diagram_artifact_round_trips_kind_and_payload(tmp_path: Path) -> None:
     assert loaded.findings == []
 
 def test_review_artifact_defaults_kind_and_diagrams(tmp_path: Path) -> None:
-    """A pre-#1113 artifact with neither key loads as a review with no diagrams."""
     path = tmp_path / "legacy.json"
     path.write_text(json.dumps({
                 "schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,
@@ -222,7 +213,6 @@ def test_review_artifact_defaults_kind_and_diagrams(tmp_path: Path) -> None:
     assert loaded.diagrams is None
 
 def test_unknown_artifact_kind_is_rejected_by_the_schema(tmp_path: Path) -> None:
-    """``kind`` is an enum: an unknown value fails validation before any use."""
     path = tmp_path / "bad-kind.json"
     path.write_text(json.dumps({
                 "schema_version": FINDINGS_SCHEMA_VERSION, "repo": "o/r", "pr_number": 7, "head_sha": "h" * 40,

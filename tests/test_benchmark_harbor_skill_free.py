@@ -1,9 +1,6 @@
-"""Harbor skill-free gate (M16): the controlled entrypoint runs native, skill-free.
+"""Controlled Harbor wiring: no skill directory or Beagle probe, explicit profiles only.
 
-The real end-to-end Python + mixed-stack Harbor run is outside this module;
-these tests prove the controlled wiring: no
-``DAYDREAM_SKILLS_DIR``, no Beagle probe, and the candidate profile still
-resolves via the explicit-only Harbor resolver.
+Full Python and mixed-stack Harbor runs are tested separately.
 """
 import asyncio
 import json
@@ -112,24 +109,15 @@ def test_parse_reviewer_environment_accepts_claude_proxy() -> None:
     assert parsed.execution.backend.child_environment()["ANTHROPIC_BASE_URL"] == ("https://claude-proxy.internal/v1"
     )
 
-# ---------------------------------------------------------------------------
-# host-side gate/egress: the preflight must resolve and validate the claude
-# reviewer endpoint (ANTHROPIC_BASE_URL), never the pi-era var alone.
-# ---------------------------------------------------------------------------
 
 
 def test_host_reviewer_host_resolution_is_backend_aware() -> None:
-    # A claude operator configuring only ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL
-    # (no pi-era DAYDREAM_REVIEW_BASE_URL) must resolve the reviewer host from
-    # ANTHROPIC_BASE_URL; the pi default keeps its existing behavior/error.
     assert run_mod._reviewer_host_from_env({
         "DAYDREAM_REVIEW_BACKEND": "claude", "ANTHROPIC_BASE_URL": "https://claude-proxy.internal/v1",
     }) == "claude-proxy.internal"
-    # Unset ANTHROPIC_BASE_URL falls back to the Anthropic SDK default, mirroring
-    # the in-container claude branch that accepts an unset base URL.
+    # Match the Anthropic SDK default when no base URL is configured.
     assert run_mod._reviewer_host_from_env({"DAYDREAM_REVIEW_BACKEND": "claude"}) == "api.anthropic.com"
     assert run_mod._reviewer_base_url_from_env({}) == ""
-    # Default (pi) resolution is unchanged, including the fail-closed error.
     assert run_mod._reviewer_host_from_env({"DAYDREAM_REVIEW_BASE_URL": "https://openrouter.ai/api"}) == "openrouter.ai"
     with pytest.raises(ValueError, match="missing DAYDREAM_REVIEW_BASE_URL"):
         run_mod._reviewer_host_from_env({})
@@ -170,13 +158,7 @@ def _seed_host_ws(tmp_path: Path, reviewer_hosts: list[str]) -> Path:
 def test_host_preflight_resolves_claude_proxy_against_reviewer_allowlist(
     tmp_path: Path, reviewer_hosts: list[str], blocked: bool
 ) -> None:
-    # A claude reviewer whose ANTHROPIC_BASE_URL is in the compiled reviewer
-    # allowed_hosts passes preflight with no pi-era DAYDREAM_REVIEW_BASE_URL
-    # set (regression: "cannot resolve reviewer host: missing
-    # DAYDREAM_REVIEW_BASE_URL" blocked the documented claude surface). A
-    # proxy outside that allowlist must be rejected host-side, before any paid
-    # review starts (previously it passed setup+preflight and failed only
-    # in-container at the SDK call).
+    # Reject non-allowlisted Claude proxies on the host, before a paid review.
     ws = _seed_host_ws(tmp_path, reviewer_hosts)
 
     def _docker_ok() -> pkg.DockerNetworkPolicyCapability:
@@ -196,9 +178,6 @@ def test_host_preflight_resolves_claude_proxy_against_reviewer_allowlist(
 
 def test_host_run_gate_threads_claude_credentials_into_supervisor_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # The host-side run gate env snapshot must carry the ANTHROPIC_* reviewer
-    # credentials (previously it forwarded only DAYDREAM_REVIEW_*/JUDGE_*), so
-    # run.py can resolve ANTHROPIC_BASE_URL for the claude backend.
     monkeypatch.setenv("DAYDREAM_REVIEW_BACKEND", "claude")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok")
@@ -219,9 +198,7 @@ def test_host_run_gate_threads_claude_credentials_into_supervisor_env(tmp_path: 
     assert captured["env"]["ANTHROPIC_BASE_URL"] == "https://claude-proxy.internal/v1"
 
 def test_entrypoint_skill_free_python_case(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    # The runner is stubbed at its production seam, but the entrypoint still
-    # builds its controlled review config and runs the real publisher against
-    # the runner's canonical merged-items output.
+    # Stub the runner; exercise config construction and the real merged-items publisher.
     (tmp_path / "a.py").write_text("x = 1\n")
     artifact = tmp_path / "logs" / "artifacts" / "review.json"
     seen: dict[str, Any] = {}

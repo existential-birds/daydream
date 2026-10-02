@@ -11,22 +11,20 @@ import pytest
 from daydream import git_ops
 from daydream.archive.pipeline import derive_phase_states, derive_pipeline_status
 from daydream.backends import ResultEvent
+from daydream.deep.fix_state import EvidenceKey, RetainedTreeSnapshot
 from daydream.deep.fix_steps import (
-    EvidenceKey,
-    RetainedTreeSnapshot,
     _authorize_final_red_override,
     _persist_push_verdict,
     _persist_test_verdict,
     _render_fix_outcome_summary,
-    _resolve_remote_ci_target,
     _round_dispatch_items,
     _step_fix_gate,
-    _step_remote_ci,
     _step_test,
     finalize_retained_tree_after_test,
     verify_retained_tree,
 )
 from daydream.deep.orchestrator import _remote_ci_enabled
+from daydream.deep.remote_ci_steps import _resolve_remote_ci_target, _step_remote_ci
 from daydream.extensions.api import Stop
 from daydream.git_ops import GitError
 from daydream.phases import PushReceipt, TestAndHealResult, TestAttemptEvidence
@@ -277,8 +275,8 @@ async def test_post_heal_actionable_verifier_stops_without_test_or_stage(
     )
     calls = {"verify": 0, "test": 0}
 
-    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
-    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.fix_state.capture_retained_tree", lambda *_a, **_k: snapshot)
 
     async def _actionable(*_a: Any, **_k: Any) -> dict[str, dict[str, Any]]:
         calls["verify"] += 1
@@ -378,8 +376,8 @@ async def test_stabilization_stops_after_two_passes_without_third_or_heal(
             "test output",
         )
 
-    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", _guard)
-    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", _guard)
+    monkeypatch.setattr("daydream.deep.fix_state.capture_retained_tree", lambda *_a, **_k: snapshot)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _one_test)
     monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())
 
@@ -403,9 +401,9 @@ async def test_stabilization_audit_write_failure_stops_before_retest(tmp_path: P
     evidence = _host_test_evidence(
         state, passed=True, input_tree_key=snapshot.tree_key, output_tree_key=snapshot.tree_key
     )
-    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
-    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
-    monkeypatch.setattr("daydream.deep.fix_steps._write_footprint_audit",
+    monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.fix_state.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_state._write_footprint_audit",
         lambda *_a, **_k: (_ for _ in ()).throw(OSError("audit disk full")),
     )
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once",
@@ -447,8 +445,8 @@ async def test_changed_tree_red_retest_requires_new_override(
             ), None, "1 failed",
         )
 
-    monkeypatch.setattr("daydream.deep.fix_steps._strict_scope_and_scrub", lambda *_a, **_k: False)
-    monkeypatch.setattr("daydream.deep.fix_steps.capture_retained_tree", lambda *_a, **_k: snapshot)
+    monkeypatch.setattr("daydream.deep.fix_state._strict_scope_and_scrub", lambda *_a, **_k: False)
+    monkeypatch.setattr("daydream.deep.fix_state.capture_retained_tree", lambda *_a, **_k: snapshot)
     monkeypatch.setattr("daydream.deep.fix_steps.phase_test_once", _red_retest)
     monkeypatch.setattr("daydream.deep.fix_steps._authorize_final_red_override", lambda _ctx: new_override,)
     monkeypatch.setattr(ctx, "backend_for", lambda _phase: object())

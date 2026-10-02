@@ -14,7 +14,7 @@ from contextvars import ContextVar
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from daydream.trajectory import redact_structured_text, redact_value
+from daydream.redaction import redact_structured_text, redact_value
 
 #: A secret-named variable holding one of these (``SOME_AUTH=1``) is a feature
 #: flag, not a credential: harvesting it would literal-replace the token across
@@ -71,12 +71,9 @@ def _has_control_character(text: str) -> bool:
 
 
 def parse_operator_resource_attributes(raw: str) -> dict[str, str]:
-    """Parse one operator resource variable; reject the whole value on any error.
+    """Decode string attributes; reject the whole variable on malformed input.
 
-    Every accepted value stays a string. A malformed pair, malformed percent
-    escape, empty or control-character key, control character in a value, or a
-    duplicate key (including aliases that collide only after percent decoding)
-    raises :class:`ResourceParseError` — callers discard the entire variable.
+    Reject malformed pairs/escapes, empty keys, controls, and duplicate decoded keys.
     """
     attributes: dict[str, str] = {}
     if not raw:
@@ -100,12 +97,7 @@ def parse_operator_resource_attributes(raw: str) -> dict[str, str]:
 def sanitize_operator_resource_attributes(
     attributes: Mapping[str, str], policy: PrivacyPolicy
 ) -> dict[str, str]:
-    """Return the privacy-filtered copy of accepted operator resource entries.
-
-    Secret-like keys keep a stable key with the value replaced; all other keys
-    and values are scrubbed of operator secret literals. Keys and values remain
-    strings.
-    """
+    """Copy attributes with secret-key values replaced and literal credentials scrubbed."""
     sanitized: dict[str, str] = {}
     for key, value in attributes.items():
         safe_key = policy.text(key)

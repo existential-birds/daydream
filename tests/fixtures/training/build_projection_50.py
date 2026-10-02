@@ -1,28 +1,11 @@
-"""50-record frozen-corpus projection integration fixture.
+"""Build exactly 50 frozen records through the real projector: both gold classes on training and
+holdout sides, plus silver process traces and task-only rows.
 
-Builds a real frozen-corpus projection directory with :func:`build_frozen_corpus`
-over a curated bundle + annotation snapshot — the same staging helpers
-``tests.test_corpus_projection`` uses — sized so that:
+Every admitted batch supplies findings.json, diff.patch, and a manifest with git.head_sha and
+code_context base/head SHAs. These exercise finding enrichment and carry full repo/base/head/diff
+identity into RFT without post-processing.
 
-- exactly 50 records are emitted,
-- both gold classes (accepted + rejected) are present, including on the
-  frozen holdout side (Stage 0's gate evaluates there),
-- silver ``process-trace`` and ``task-only`` records are present
-  (``emit_process_traces=True``),
-- every admitted batch carries ``findings.json`` (localized finding text),
-  ``diff.patch``, and a ``manifest.json`` with ``git.head_sha`` plus
-  ``code_context.{base_sha, head_sha}`` (the producer-realistic namespaces),
-  so the per-finding record enrichment is exercised end-to-end.
-
-The build is fully deterministic: the same inputs produce byte-identical
-projection directories, so the loader's directory-level digest — and the
-pipeline run's ``run_identity.corpus_digest`` — is stable across runs.
-
-The projector embeds the raw diff body on every record (training record schema
-``diff``) directly from the bundle's ``batches/<sid>/diff.patch``, so the
-fixture needs no post-processing: the real projector -> Stage-2 journey
-(``coordinator._rft_rows`` over ``build_frozen_corpus`` output) carries the
-full RFT identity (repo_slug/base_sha/head_sha/diff) on its own.
+Identical inputs produce byte-identical projection directories and stable corpus digests.
 """
 
 from __future__ import annotations
@@ -63,19 +46,17 @@ _SESSION_ORDER = ["sess-a"] + [
 
 
 def _fingerprints(session_id: str, *, prefixed: bool) -> list[str]:
-    """The fingerprint triple ``_write_annotations_snapshot`` derives for one
-    session: the first snapshot call writes unprefixed canonical fingerprints;
-    every later session's fingerprints are prefixed with ``sha256(sid)[:2]``
-    so globally keyed snapshots never collide."""
+    """Use the snapshot helper's canonical fingerprints for the first session and sha256(sid)[:2]
+    prefixes afterward to avoid globally keyed collisions.
+    """
     prefix = hashlib.sha256(session_id.encode()).hexdigest()[:2] if prefixed else ""
     return [prefix + fp for fp in ("a1" * 32, "b2" * 32, "c3" * 32)]
 
 
 def _plan_dispositions() -> dict[str, list[str]]:
-    """Deterministic per-session dispositions guaranteeing both gold classes
-    on both sides of the frozen boundary. Labels are assigned over the
-    record ids the snapshot helper will derive, using the same
-    ``assign_split`` call the projector makes, so the plan matches the build."""
+    """Assign dispositions using the projector's record IDs and assign_split so both gold classes
+    appear on both sides of the frozen boundary.
+    """
     gold_pairs: list[tuple[str, str, str]] = []  # (session_id, fingerprint, split)
     for index, sid in enumerate(_SESSION_ORDER):
         if sid.startswith("sess-amb-"):
@@ -89,8 +70,7 @@ def _plan_dispositions() -> dict[str, list[str]]:
     holdout = [pair for pair in gold_pairs if pair[2] == "holdout"]
     assert len(holdout) >= 2, "fixture design requires >=2 holdout gold findings"
     label_of: dict[tuple[str, str], str] = {}
-    # First two holdout findings pin the two classes on the evaluated side;
-    # everything else alternates, so the training side carries both too.
+    # Pin both classes in holdout, then alternate labels to retain both in training.
     for position, pair in enumerate(holdout):
         label_of[(pair[0], pair[1])] = "accepted" if position % 2 == 0 else "rejected"
     for position, pair in enumerate(p for p in gold_pairs if p[2] != "holdout"):
@@ -111,10 +91,9 @@ def _body_for(label: str) -> str:
 
 
 def _add_batch(bundle_dir: Path, manifest: dict[str, Any], session_id: str, dispositions: list[str],) -> None:
-    """One admitted batch directory: producer-realistic ``manifest.json``
-    (``git.head_sha`` plus ``code_context.{base_sha, head_sha}``),
-    ``findings.json`` (fingerprint-keyed bodies), and ``diff.patch``, plus
-    its curation-manifest row."""
+    """Write a batch manifest with git.head_sha and code_context base/head SHAs, fingerprint-keyed
+    findings, diff, and its curation-manifest row.
+    """
     batch_dir = bundle_dir / "batches" / session_id
     batch_dir.mkdir(parents=True, exist_ok=True)
     fps = _fingerprints(session_id, prefixed=_SESSION_ORDER.index(session_id) > 0)
@@ -145,7 +124,6 @@ def _add_batch(bundle_dir: Path, manifest: dict[str, Any], session_id: str, disp
     }
     existing = {b["session_id"] for b in manifest["batches"]}
     if session_id in existing:
-        # e.g. sess-a from the shared bundle helper: refresh identity in place
         manifest["batches"] = [
             {**b, "repo_slug": batch_row["repo_slug"], "license_evidence": batch_row["license_evidence"]}
             if b["session_id"] == session_id else b
@@ -156,16 +134,8 @@ def _add_batch(bundle_dir: Path, manifest: dict[str, Any], session_id: str, disp
 
 
 def build_projection_50(tmp_path: Path) -> Path:
-    """Materialize the 50-record frozen-corpus projection under ``tmp_path``.
-
-    Returns:
-        The projection directory (the ``train --projection`` input).
-
-    Raises:
-        AssertionError: When the deterministic build does not produce the
-            contracted population (50 records, both gold classes, silver +
-            task-only records) — a broken fixture is a test-authoring bug,
-            never a silently accepted projection.
+    """Build the train --projection input directory. Assert the required population: 50 records, both
+    gold classes, silver traces, and task-only records. A broken fixture must fail at construction.
     """
     work = tmp_path / "projection-fixture"
     bundle_dir = _write_bundle(work)
@@ -186,19 +156,17 @@ def build_projection_50(tmp_path: Path) -> Path:
             emit_process_traces=True,
         )
     )
-    # Reproduce the committed projection-dir shape: SHA256SUMS over the
-    # payload files (mirroring the bundle's own manifest) and the bundle's
-    # curation-manifest.json, both before nothing depends on ordering — the
-    # loader's digest is computed over whatever the directory holds.
+    # Include SHA256SUMS and curation-manifest.json before loading; the directory digest covers all
+    # files.
     _write_sumsums(proj_dir)
     shutil.copyfile(bundle_dir / "curation-manifest.json", proj_dir / "curation-manifest.json")
     return proj_dir
 
 
 def main() -> None:
-    """Commit the fixture: build into a scratch dir, copy the projection
-    directory to ``--out`` (content-only — the loader's directory digest is
-    computed over file bytes, never mtimes)."""
+    """Build in scratch space and copy content to --out; the loader digest depends on bytes, not
+    mtimes.
+    """
     import argparse
     import tempfile
 

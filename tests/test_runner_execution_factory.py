@@ -15,6 +15,7 @@ from daydream.artifact_visibility import private_root_locations
 from daydream.backends import AUDIT_ROOT_ISOLATION, BackendExecutionInput
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
@@ -95,7 +96,7 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
         # An injected GitHub capability must bypass ambient App validation/mint.
         monkeypatch.setenv("DAYDREAM_APP_ID", "malformed-parent-app-id")
         monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "parent-private-key")
-    config = runner.RunConfig(
+    config = RunConfig(
         target=str(repo), flow_name=flow, base="main", backend="claude", model="factory-model", archive=False,
         run_eval=False, non_interactive=True, file_config=DaydreamFileConfig(),
         trajectory_path=tmp_path / "trajectory.json",

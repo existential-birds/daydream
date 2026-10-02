@@ -1,40 +1,22 @@
 #!/usr/bin/env python3
-"""Sanitized Pi protocol replay through the REAL Daydream trace path.
+"""Replay pinned sanitized Pi bytes through real backend, agent, and trace boundaries.
 
-P18/#1156 Task 6 replay tool. This is a separate operator boundary, never a
-test monkeypatch or a model call. It:
+Admit only the checked-in hash/size-pinned fixture and a clean disposable public
+repository whose origin is allowlisted. Require an executable external fake pi,
+distinct from PATH's real CLI, that behaviorally reproduces the fixture under
+--mode json. Validate exact destinations and authorization before any send.
 
-- accepts ONLY the checked-in manifest-pinned sanitized fixture (SHA-256 and
-  byte length) and a clean public disposable repository whose origin remote
-  appears in the manifest's public-repo allowlist (identity);
-- requires a caller-provided external fake ``pi`` executable at the subprocess
-  boundary: the file must be executable, must NOT be the real ``pi`` resolved
-  from PATH, and must replay the pinned fixture byte-for-byte to stdout when
-  invoked with ``--mode json`` (proves it is fixture-derived, not the real
-  CLI);
-- validates the exact destination set (local generic OTLP + the two explicitly
-  enabled vendor destinations) and every authorization value BEFORE
-  constructing exporters or sending anything;
-- sets the admitted resource marker ``daydream.acceptance.kind=
-  sanitized_protocol_replay`` (required via ``DAYDREAM_ACCEPTANCE_KIND``);
-- invokes the ACTUAL ``PiBackend``/``run_agent``/``trace_run`` path once with
-  only the subprocess boundary faked, pointing the local generic OTLP at its
-  OWN bounded loopback receiver (the local-wire oracle; loopback-only, no
-  external access), requires local wire success, shuts down normally, and
-  writes an immutable canonical receipt labeled ``sanitized_protocol_replay``
-  with model-call count ``0``, operational cost ``$0`` and hashes/IDs only;
-- reproduces the manifest-pinned host receipt clock for ``message_end`` so the
-  exact 395.332-second historical interval and native-ms conversion are
-  reconciled deterministically (the pin is applied ONLY for this admitted
-  replay kind and restored to the host clock immediately after the traced
-  run, exactly as plan Task 7 requires; the reported $0.00402781 is
-  labeled synthetic historical-equivalent telemetry, never actual billing);
-- never includes private repository prompts: the invocation prompt is a fixed
-  public placeholder and the receipt contains no prompts, responses, tool
-  content, credentials, endpoints or exceptions.
+Require DAYDREAM_ACCEPTANCE_KIND=sanitized_protocol_replay. Run once with the
+real PiBackend/run_agent/trace_run and exporters; only the subprocess is faked.
+The tool owns a bounded loopback OTLP receiver and requires local wire success
+before normal shutdown and an immutable canonical receipt. Gates fail closed
+without writing a receipt; hermetic tests use fake local vendor endpoints.
 
-Hermetic tests drive this tool against local collectors and fake vendor HTTP
-only. Fail-closed gates all run BEFORE any send; a failure writes no receipt.
+Pin and restore the host message_end receipt clock to reconcile the historical
+395.332-second interval and native-ms conversion. Label $0.00402781 as synthetic
+historical telemetry; actual model-call count and operational cost remain zero.
+Use a fixed public prompt and store only hashes/IDs: no prompts, responses,
+tool content, credentials, endpoints, or exception text in the receipt.
 """
 
 from __future__ import annotations
@@ -165,12 +147,9 @@ def _validate_repo(path: Path, allowlist: list[str]) -> None:
 
 
 def _validate_fake_pi(path: Path, marker: str, *, fixture_raw: bytes, timeout_s: float) -> None:
-    """The fake pi must be executable, NOT the real pi, and replay the fixture.
+    """Require an executable fake distinct from real pi that emits the pinned fixture within the timeout.
 
-    Identity is proven behaviorally: invoking the file with ``--mode json``
-    must emit the pinned fixture bytes (normalized) to stdout within the
-    timeout. The real pi cannot produce the fixture stream, so this rejects it
-    before any exporter is constructed.
+    Prove identity behaviorally with --mode json before constructing exporters.
     """
     if not path.is_file():
         raise ReplayValidationError("Fake pi path is not a regular file")
@@ -205,12 +184,7 @@ def _validate_fake_pi(path: Path, marker: str, *, fixture_raw: bytes, timeout_s:
 
 
 def _validate_destinations(manifest: dict[str, Any]) -> tuple[str, ...]:
-    """Destinations bound to the manifest: required set exactly, forbidden absent.
-
-    The manifest's ``destinations`` block is load-bearing: editing it fails
-    this gate instead of silently drifting from what the replay enforces.
-    A missing or malformed block is a validation failure, not a crash.
-    """
+    """Require the manifest's exact destination set; missing/malformed declarations fail validation."""
     destinations_block = manifest.get("destinations")
     if not isinstance(destinations_block, dict):
         raise ReplayValidationError("Manifest must carry a destinations block")
@@ -319,20 +293,12 @@ class _OtlpReceiver:
 
 
 def _pin_replay_clock(pinned_first_end_ns: int) -> Callable[[], None]:
-    """Pin the host-observed ``message_end`` receipt and return a restore hook.
+    """Pin Pi host receipt time and return the mandatory restoration hook.
 
-    Mirrors the test-side pin (``_pin_first_message_end_receipt``) but as an
-    operator-level deterministic clock: the FIRST host receipt read lands one
-    ns before the pinned end; the second (the first ``message_end`` receipt)
-    lands exactly on the pinned ns; later receipts advance by real elapsed ns
-    (monotonic, never backward). This is what makes the exact 395.332-second
-    historical interval reproducible through the REAL PiBackend.
-
-    The pin deliberately replaces the process-global stdlib ``time.time_ns``
-    inside the REAL ``backends.pi`` module. The caller MUST invoke the
-    returned callable (in a ``finally``) so the host clock is restored even
-    on failure or cancellation — an unguarded global mutation would skew
-    every later in-process consumer, e.g. a pytest worker's remaining tests.
+    The first read is one ns before the pin, the first message_end read equals it,
+    and later reads advance by elapsed real ns. This reproduces the historical
+    interval. Mutation affects process-global time.time_ns, so callers must restore
+    in finally even after failure/cancellation to avoid skewing later consumers.
     """
     # The stdlib ``time`` module is the same object ``pi.py`` imports; pin the
     # host receipt clock there so the REAL backends.pi reads land deterministically.
@@ -402,11 +368,9 @@ def _span_attrs(span: dict[str, Any]) -> dict[str, Any]:
 async def _run_traced(
     manifest: dict[str, Any], repo: Path, fake_pi: Path
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[bytes]]:
-    """One real traced invocation with only the subprocess boundary faked.
+    """Run one real traced invocation with only Pi spawning faked.
 
-    Returns (decoded spans, decoded resources, raw wire batches). The
-    receiver is owned, bounded and loopback-only; the exporters run for real
-    against the vendor endpoints.
+    Own the bounded loopback receiver; return spans, resources, and raw wire batches.
     """
     receiver = _OtlpReceiver()
     fake_bin = Path(tempfile.mkdtemp(prefix="daydream-replay-pi-"))

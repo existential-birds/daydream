@@ -22,10 +22,7 @@ from daydream.pr_review import (
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
-    _format_comment_body,
     _parse_hunks,
-    _render_body_section,
-    _summary_findings,
     build_payload,
     classify,
     default_render_finding,
@@ -39,8 +36,15 @@ from daydream.pr_review import (
     snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
+from daydream.reviews.rendering import (
+    _build_consolidated_prompt,
+    _render_body_section,
+    _summary_findings,
+    format_comment_body,
+)
+from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext
-from daydream.runner import RunConfig, _emit_findings_from_items
+from daydream.runner import _emit_findings_from_items
 from tests.harness.git_helpers import git as _git
 from tests.harness.review_profile import sample_pr
 
@@ -53,7 +57,7 @@ BUILTIN_RENDERERS = ReviewRenderers(default_render_finding, default_render_summa
 
 
 def _inline(path: str = "a.py", line: int = 10, body: str = "x") -> InlineReviewComment:
-    """One typed inline comment, the shape ``_ClassifiedIssues.inline`` holds."""
+    """One typed inline comment, the shape ``ClassifiedIssues.inline`` holds."""
     return InlineReviewComment(path=path, line=line, side="RIGHT", body=body)
 
 
@@ -71,8 +75,8 @@ def test_finding_and_summary_markdown_is_byte_stable() -> None:
     i = ParsedIssue(
         path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH", fingerprint="a" * 64
     )
-    assert _format_comment_body(i, "inline", renderers=BUILTIN_RENDERERS) == (SNAP / "inline.md").read_text()
-    assert (_format_comment_body(replace(i, is_cross_stack=True), "file_level", renderers=BUILTIN_RENDERERS)
+    assert format_comment_body(i, "inline", renderers=BUILTIN_RENDERERS) == (SNAP / "inline.md").read_text()
+    assert (format_comment_body(replace(i, is_cross_stack=True), "file_level", renderers=BUILTIN_RENDERERS)
         == (SNAP / "file_level.md").read_text()
     )
     section = _render_body_section(_summary_findings(
@@ -87,7 +91,7 @@ def test_custom_finding_renderer_flows_into_inline_body_with_host_invariants() -
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    body = _format_comment_body(ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64), "inline",
+    body = format_comment_body(ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="a" * 64), "inline",
         renderers=resolve_review_renderers(reg),
     )
     assert "CUSTOM::inline::T" in body
@@ -103,7 +107,7 @@ def test_finding_renderer_falls_back_and_warns_on_error(caplog: pytest.LogCaptur
     register_builtins(reg)
     reg.override_renderer("finding", boom)
     with caplog.at_level("WARNING"):
-        body = _format_comment_body(ParsedIssue(
+        body = format_comment_body(ParsedIssue(
                 path="a.py", line=3, title="T", body="B rationale", severity="high", confidence="HIGH",
                 fingerprint="a" * 64,
             ), "inline", renderers=resolve_review_renderers(reg),
@@ -126,7 +130,7 @@ def test_custom_summary_renderer_can_build_collapsible_per_finding_list(pr: PRIn
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("summary", summary_renderer)
-    classified = pr_review._ClassifiedIssues(
+    classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
     )
     payload = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
@@ -143,7 +147,7 @@ def test_custom_finding_renderer_flows_into_summary_section(pr: PRInfo) -> None:
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("finding", lambda finding, ctx: f"CUSTOM::{ctx.placement}::{finding.title}")
-    classified = pr_review._ClassifiedIssues(
+    classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64)]
     )
     body = build_payload(pr, classified, renderers=resolve_review_renderers(reg),
@@ -160,7 +164,7 @@ def test_summary_renderer_falls_back_and_warns_on_error(pr: PRInfo, caplog: pyte
     reg = Registry()
     register_builtins(reg)
     reg.override_renderer("summary", boom)
-    classified = pr_review._ClassifiedIssues(body_only=[ParsedIssue(
+    classified = pr_review.ClassifiedIssues(body_only=[ParsedIssue(
                 path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM", severity="low",
                 fingerprint="b" * 64,
             )
@@ -187,26 +191,24 @@ def test_inline_body_has_footer_and_tags() -> None:
     issue = ParsedIssue(
         path="a.py", line=10, title="Null deref", body="rationale here", confidence="HIGH", severity="high",
     )
-    body = pr_review._format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
+    body = pr_review.format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
     assert "**Null deref**" in body
     assert "severity: `high`" in body
     assert "confidence: `HIGH`" in body
     assert body.rstrip().endswith("</sub>")
     assert pr_review.DAYDREAM_REPO_URL in body
-    # Severity emoji prefix.
     assert "⚠️" in body
-    # Collapsible AI agent prompt.
     assert "🔮 Prompt for AI Agents" in body
     assert "<details>" in body
 
 def test_inline_body_carries_parseable_marker() -> None:
     issue = ParsedIssue(path="a.py", line=3, title="T", body="B", fingerprint="ab12" * 16)
-    body = _format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
+    body = format_comment_body(issue, "inline", renderers=BUILTIN_RENDERERS)
     assert parse_finding_markers(body) == ["ab12" * 16]
     assert DAYDREAM_FOOTER in body  # marker does not displace the footer
 
 def test_no_marker_without_fingerprint() -> None:
-    assert (parse_finding_markers(_format_comment_body(
+    assert (parse_finding_markers(format_comment_body(
                 ParsedIssue(path="a.py", line=3, title="T", body="B"), "inline", renderers=BUILTIN_RENDERERS
             )
         )
@@ -264,11 +266,8 @@ def test_snap_to_hunk_inside_returns_unchanged() -> None:
 
 def test_snap_to_hunk_within_tolerance_snaps_to_boundary() -> None:
     hunks = [(90, 105)]
-    # Line 89 is 1 below hunk start -> snap to 90
     assert snap_to_hunk(89, hunks) == 90
-    # Line 87 is 3 below hunk start -> snap to 90
     assert snap_to_hunk(87, hunks) == 90
-    # Line 108 is 3 above hunk end -> snap to 105
     assert snap_to_hunk(108, hunks) == 105
 
 def test_snap_to_hunk_beyond_tolerance_returns_none() -> None:
@@ -277,13 +276,9 @@ def test_snap_to_hunk_beyond_tolerance_returns_none() -> None:
     assert snap_to_hunk(109, hunks) is None
 
 def test_snap_to_hunk_between_two_hunks() -> None:
-    """Line between hunks snaps to the nearest boundary."""
     hunks = [(80, 98), (106, 120)]
-    # Line 105 is 7 past first hunk end (too far) but 1 before second start
     assert snap_to_hunk(105, hunks) == 106
-    # Line 100 is 2 past first hunk end -> snap to 98
     assert snap_to_hunk(100, hunks) == 98
-    # Line 102 is 4 past first hunk end (too far) and 4 before second (too far)
     assert snap_to_hunk(102, hunks) is None
 
 def test_snap_to_hunk_empty_hunks() -> None:
@@ -305,8 +300,7 @@ def _raise_on_gh_fallback(*_a: Any, **_k: Any) -> str:
     raise AssertionError("gh fallback invoked")
 
 def test_agent_prompt_has_no_skill_advertising(pr: PRInfo) -> None:
-    """M5: the consolidated AI-agent prompt carries no /beagle-core skill reference."""
-    body = pr_review._build_consolidated_prompt(pr_review._ClassifiedIssues(), pr)
+    body = _build_consolidated_prompt(pr_review.ClassifiedIssues(), pr)
     assert "/beagle-core:fetch-pr-feedback" not in body
     assert "/beagle-core:" not in body
 
@@ -339,7 +333,6 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
     assert set(body_paths) == {"b.py", "c.py"}
 
 def test_classify_snaps_tolerance_line_to_hunk_boundary(monkeypatch: pytest.MonkeyPatch, pr: PRInfo) -> None:
-    """Line 89 near hunk (90, 105) should become inline at line 90, not 89."""
     issues = [ParsedIssue(path="conftest.py", line=89, title="t1", body="anchor_one"),
         ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
     ]
@@ -358,17 +351,14 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(monkeypatch: pytest.Monk
 
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 2
-    # conftest.py:89 snapped to hunk start 90
     assert result.inline[0].path == "conftest.py"
     assert result.inline[0].line == 90
-    # modernize-app.py:105 snapped to second hunk start 106
     assert result.inline[1].path == "scripts/modernize-app.py"
     assert result.inline[1].line == 106
 
 def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> None:
-    """M1/M4: the reviewed-commit line is rendered, fully linked (S1),
-    and precedes Model/Cost and Severity/Confidence in the review-info block."""
-    classified = pr_review._ClassifiedIssues(body_only=[
+    """The trusted, linked commit precedes model/cost and severity/confidence."""
+    classified = pr_review.ClassifiedIssues(body_only=[
             ParsedIssue(path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM", severity="low",)
         ],
     )
@@ -383,20 +373,14 @@ def test_build_payload_reviewed_commit_line_first_in_review_info(pr: PRInfo) -> 
         f"- **Reviewed commit:** [`{pr.head_sha[:7]}`](https://github.com/{pr.owner}/{pr.repo}/commit/{pr.head_sha})"
     )
     assert expected in body
-    # Ordering: the commit line precedes the enriched run-info fields
-    # (Model/Cost) and the conditional Severity/Confidence lines inside
-    # the Review info block. Whole-body indices suffice: the commit line
-    # appears exactly once, and all compared markers first appear inside
-    # this block.
+    # These markers first occur inside Review info, so body indices verify its order.
     assert body.index(expected) < body.index("- **Model:**")
     assert body.index(expected) < body.index("- **Severity:**")
     assert body.index(expected) < body.index("- **Confidence:**")
 
 def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) -> None:
-    """M2: renderer degradation to 'run details unavailable' must not hide
-    the reviewed-commit line (host-injection, Key Decision 2)."""
     payload = build_payload(
-        pr, pr_review._ClassifiedIssues(), renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer._render_fallback()
+        pr, pr_review.ClassifiedIssues(), renderers=BUILTIN_RENDERERS, run_info=pr_comment_renderer._render_fallback()
     )
     body = payload["body"]
     assert "*run details unavailable*" in body  # degraded run-info present
@@ -405,20 +389,17 @@ def test_build_payload_reviewed_commit_survives_run_info_fallback(pr: PRInfo) ->
     )
 
 def test_build_payload_reviewed_commit_links_fork_for_fork_head_pr(pr: PRInfo,) -> None:
-    """Fork-head PRs: the reviewed-commit link points at the fork that holds
-    the head commit, while owner/repo (the POST target) stay the base repo."""
+    """Link the fork commit while retaining the base repository as the POST target."""
     fork_pr = replace(pr, head_repo="forky/widgets")
     payload = build_payload(
-        fork_pr, pr_review._ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
+        fork_pr, pr_review.ClassifiedIssues(), run_info="test run info", renderers=BUILTIN_RENDERERS
     )
     body = payload["body"]
     assert "- **Reviewed commit:** [`head123`](https://github.com/forky/widgets/commit/head123)" in body
     assert "https://github.com/acme/widgets/commit/head123" not in body
 
 def test_build_payload_blocks_forged_reviewed_commit_line(pr: PRInfo,) -> None:
-    """A hostile run_info containing a crafted reviewed-commit line
-    must not render a second, forged line below the trusted one (issue 2)."""
-    payload = build_payload(pr, pr_review._ClassifiedIssues(),
+    payload = build_payload(pr, pr_review.ClassifiedIssues(),
         run_info=(
             "test run info\n"
             "- **Reviewed commit:** [`deadbee`](https://github.com/evil/widgets/commit/" + "e" * 40 + ")\n"
@@ -433,7 +414,7 @@ def test_build_payload_blocks_forged_reviewed_commit_line(pr: PRInfo,) -> None:
     assert "e" * 40 not in body
 
 def test_build_payload_shape(pr: PRInfo) -> None:
-    classified = pr_review._ClassifiedIssues(inline=[_inline()],
+    classified = pr_review.ClassifiedIssues(inline=[_inline()],
         body_only=[
             ParsedIssue(path="b.py", line=None, title="File note", body="desc", confidence="MEDIUM", severity="low",)
         ], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", confidence="HIGH", severity="high",)],
@@ -448,41 +429,31 @@ def test_build_payload_shape(pr: PRInfo) -> None:
 
     body = payload["body"]
     assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
-    # Title header.
     assert "**Code Review Summary**" in body
-    # Bottom-of-comment wizard footer (DAYDREAM_FOOTER) carries the version.
     assert "🧙 Posted by [daydream v" in body
     assert pr_review.DAYDREAM_REPO_URL in body
-    # Mode line is gone everywhere.
     assert "**Mode:**" not in body
-    # Severity/confidence still surface inside the collapsible block.
     assert "**Severity:**" in body and "1 high" in body and "1 low" in body
     assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
-    # Non-inline section grouped by file in <details>.
     assert "Non-inline findings" in body
     assert "b.py" in body
-    # Consolidated AI agent prompt references manual fetch commands with PR details.
     assert "🔮 Prompt for all review comments" in body
     assert "/beagle-core:" not in body
     assert "repos/acme/widgets/pulls/42/comments" in body
-    # Review info collapsible.
     assert "ℹ️ Review info" in body
-    # Renderer fields (M1, M2): rollup labels and per-phase table shell.
     assert "- **Model:**" in body
     assert "- **Cost:**" in body
     assert "- **Tokens:**" in body
     assert "- **Steps / tool calls:**" in body
     assert "<details><summary>Per-phase breakdown</summary>" in body
     assert "| Phase | Model | Tools | Input (cached) | Output | Cost |" in body
-    # Renderer-owned version footer appears once, inside the review-info shell.
     assert body.count("Generated by daydream v") == 1
-    # Footer is the last block.
     assert body.rstrip().endswith("</sub>")
 
 
 def _classified_with_severity(severity: str, confidence: str, *, body_confidence: str | None = None,
-) -> pr_review._ClassifiedIssues:
-    return pr_review._ClassifiedIssues(
+) -> pr_review.ClassifiedIssues:
+    return pr_review.ClassifiedIssues(
         inline=[_inline()], body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc",
                                confidence=body_confidence or confidence, severity=severity)],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b",
@@ -490,13 +461,12 @@ def _classified_with_severity(severity: str, confidence: str, *, body_confidence
     )
 
 
-def _approval_payload(pr: PRInfo, classified: pr_review._ClassifiedIssues) -> dict[str, Any]:
+def _approval_payload(pr: PRInfo, classified: pr_review.ClassifiedIssues) -> dict[str, Any]:
     return build_payload(pr, classified, approve_on_clean=True, renderers=BUILTIN_RENDERERS,
         run_info=pr_comment_renderer.render_run_info_block([_FIXTURE]),
     )
 
 def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo) -> None:
-    """A review with only low findings may approve when enabled."""
     payload = _approval_payload(pr, _classified_with_severity("low", "LOW", body_confidence="MEDIUM"))
     assert payload["event"] == "APPROVE"
     assert "no high/medium findings" in payload["body"]
@@ -506,14 +476,12 @@ def test_build_payload_approves_when_clean_and_enabled(pr: PRInfo) -> None:
 
 @pytest.mark.parametrize("severity", ["high", "medium"])
 def test_build_payload_keeps_comment_when_blocking_finding(pr: PRInfo, severity: str) -> None:
-    """High and medium findings block approval even when it is enabled."""
     payload = _approval_payload(pr, _classified_with_severity(severity, severity.upper()))
     assert payload["event"] == "COMMENT"
     assert "no high/medium findings" not in payload["body"]
 
 def test_build_payload_none_severity_does_not_crash_on_approve_check(pr: PRInfo,) -> None:
-    """A None-severity issue must not crash the clean computation."""
-    classified = pr_review._ClassifiedIssues(
+    classified = pr_review.ClassifiedIssues(
         inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
@@ -522,11 +490,7 @@ def test_build_payload_none_severity_does_not_crash_on_approve_check(pr: PRInfo,
 
 @pytest.mark.parametrize("off_vocabulary_severity", ["critical", "blocker"])
 def test_build_payload_keeps_comment_when_off_vocabulary_severity(pr: PRInfo, off_vocabulary_severity: str,) -> None:
-    """F1: approve_on_clean=True but an off-vocabulary severity -> event COMMENT.
-
-    The findings schema permits any string, so 'critical'/'blocker' must block the approval (fail-closed) just
-    like 'high'/'medium'."""
-    classified = pr_review._ClassifiedIssues(inline=[_inline()],
+    classified = pr_review.ClassifiedIssues(inline=[_inline()],
         inline_issues=[ParsedIssue(
                 path="a.py", line=10, title="t", body="b", confidence="HIGH", severity=off_vocabulary_severity,
             )
@@ -547,9 +511,7 @@ def test_non_blocking_severities_fail_closed() -> None:
     assert pr_review._severity_blocks_approval(None) is False
 
 def test_find_open_pr_returns_none_on_empty_list(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Real git tells us the branch; gh wrapper returns no PRs -> None.
-
-    Stubbed at the git_ops gh wrapper layer (not subprocess) so it works without a real GitHub remote or gh auth."""
+    """Use real branch discovery with an empty gh response and no remote/auth."""
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [])
     assert pr_review.find_open_pr(git_repo) is None
 
@@ -577,8 +539,7 @@ def test_find_open_pr_returns_pr_info(monkeypatch: pytest.MonkeyPatch, git_repo:
     assert (info.number, info.head_sha, info.base_sha, info.owner, info.repo) == (7, head, base, "o", "r",)
 
 def test_find_open_pr_captures_head_repo_for_fork_pr(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Fork-head PR: the row's headRepository/headRepositoryOwner (the fork) is captured as ``head_repo`` for the
-    reviewed-commit link, while owner/repo (the POST target) stay the base repo from ``gh repo view``."""
+    """Capture fork identity for commit links while posting to the base repository."""
     row, _, _ = _local_pr_row(git_repo, head_owner="forky")
     row["headRepository"] = {"name": "widgets", "nameWithOwner": "forky/widgets"}
     monkeypatch.setattr(git_ops, "gh_pr_list_for_branch", lambda *_a, **_k: [row])
@@ -607,7 +568,6 @@ def test_find_pr_by_number_raises_when_slug_unresolved(monkeypatch: pytest.Monke
         pr_review.find_pr_by_number(git_repo, 7)
 
 def test_find_pr_by_number_assembles_pr_info(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Valid lookups assemble a fully-populated PRInfo from the gh view row."""
     row, base, head = _local_pr_row(git_repo, head_owner="forky")
     monkeypatch.setattr(git_ops, "gh_pr_view", lambda *_a, **_k: row)
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
@@ -802,10 +762,9 @@ async def test_post_fails_with_safe_diagnostic_when_pr_lookup_errors(monkeypatch
 
 @pytest.mark.asyncio
 async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
-    """On a successful submit the URL is forwarded to print_success."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
+        pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
     )
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
     fake_submit = _recording_fake_submit(captured)
@@ -827,10 +786,9 @@ async def test_post_succeeds_and_prints_url(monkeypatch: pytest.MonkeyPatch, tmp
 @pytest.mark.asyncio
 async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
 ) -> None:
-    """_post with approve_on_clean=True + clean classified -> APPROVE payload."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(pr_review, "classify",
-        lambda *_a, **_k: pr_review._ClassifiedIssues(inline=[_inline(line=1)],
+        lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)],
             inline_issues=[ParsedIssue(path="a.py", line=1, title="t", body="b", confidence="LOW", severity="low",)],
         ),
     )
@@ -852,10 +810,9 @@ async def test_post_payload_approves_when_clean_and_enabled(monkeypatch: pytest.
 async def test_post_warns_with_preserved_payload_path_on_failure(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo,
 ) -> None:
-    """When submit returns an error, the warning surfaces git_ops's preserved-path text."""
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
+        pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
     )
     err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
     monkeypatch.setattr(pr_review, "post_classified_review",
@@ -904,7 +861,7 @@ def test_github_transport_surfaces_only_structured_preserved_payload_path(
 async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pr: PRInfo) -> None:
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
     monkeypatch.setattr(
-        pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
+        pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues(inline=[_inline(line=1)], body_only=[],),
     )
     submit_called = False
 
@@ -950,7 +907,7 @@ async def test_post_review_from_report_empty_items_posts_diagram(
     merged.write_text(json.dumps({"items": []}))
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
+    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
     fake_submit = _recording_fake_submit(captured)
     monkeypatch.setattr(pr_review, "post_classified_review", fake_submit)
@@ -974,7 +931,7 @@ async def test_incomplete_live_review_posts_even_without_findings_and_cannot_app
     merged = tmp_path / "merged-items.json"
     merged.write_text(json.dumps({"items": []}))
     monkeypatch.setattr(pr_review, "find_open_pr", lambda _td, **_kwargs: pr)
-    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review._ClassifiedIssues())
+    monkeypatch.setattr(pr_review, "classify", lambda *_a, **_k: pr_review.ClassifiedIssues())
     captured: dict[str, pr_review.ClassifiedReviewPlan] = {}
     monkeypatch.setattr(pr_review, "post_classified_review", _recording_fake_submit(captured))
     warnings = ("Alternatives: wall_budget_exceeded",)
@@ -1011,19 +968,13 @@ def test_resolve_line_full_search_when_hint_bad(git_repo: Path) -> None:
     assert pr_review.resolve_line(git_repo, sha, issue) == 15
 
 def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
-    """git show fails for a path that doesn't exist at HEAD -> None."""
     sha = _git(git_repo, "rev-parse", "HEAD")
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="b")
     assert pr_review.resolve_line(git_repo, sha, issue) is None
 
 
-# --- Diff-aware line resolution (issue #1102) -----------------------------
-#
-# `resolve_line` is documented (deep/location_validator.py:1-10) as a
-# no-op-on-valid backstop behind the merge-time location validator. Before
-# #1102 it never saw the diff, so a correct in-hunk line was re-derived from
-# prose tokens and could be relocated to the first anchor hit anywhere in the
-# file -- after which `snap_to_hunk` dropped the finding off the diff.
+# Valid in-hunk locations must survive prose matching: an earlier anchor outside
+# the diff would otherwise move the finding and cause snap_to_hunk to drop it.
 
 # The finding from the issue's reproduction: a prose-heavy rationale whose one
 # code identifier (`ttl`) is short enough that longest-first ranking cuts it.
@@ -1069,11 +1020,10 @@ def test_extract_anchors_prefer_quoted_keeps_short_backticked_identifier() -> No
     assert bare == sorted(bare, key=len, reverse=True)
 
 def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> None:
-    """The default (fingerprint-hashed) selection is unchanged by #1102.
+    """Default anchor ordering determines fingerprints and must remain stable.
 
-    ``compute_fingerprint`` hashes the default token set, so re-ranking it would re-identify every open finding
-    and defeat the reconcile dedup. The prose-heavy rationale must still crowd ``ttl`` out of the default cap --
-    that is exactly the selection the existing fingerprints were built from."""
+    Rationale prose must still crowd ttl out of the cap; re-ranking would
+    re-identify existing findings and defeat reconciliation."""
     text = f"{_PROSE_HEAVY_ISSUE.title}\n{_PROSE_HEAVY_ISSUE.body}"
     anchors = extract_anchors(text)
     assert anchors == [
@@ -1082,10 +1032,6 @@ def test_extract_anchors_default_ordering_stays_frozen_for_fingerprints() -> Non
     assert "ttl" not in anchors
 
 def test_resolve_line_trusts_in_hunk_hint_without_any_anchor_match(git_repo: Path) -> None:
-    """An in-hunk line hint is returned unchanged even when no anchor matches.
-
-    This is the "no-op-on-valid" contract: the merge-time validator already confirmed the line against the hunk
-    index, so posting must not re-derive it."""
     text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
     sha = _commit_file(git_repo, "x.py", text, "add x.py")
     issue = ParsedIssue(path="x.py", line=10, title="Latency regression", body="prose only")
@@ -1094,7 +1040,6 @@ def test_resolve_line_trusts_in_hunk_hint_without_any_anchor_match(git_repo: Pat
     assert pr_review.resolve_line(git_repo, sha, issue, [(8, 12)]) == 10
 
 def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: Path) -> None:
-    """With no usable hint, an in-hunk anchor hit beats the first hit in the file."""
     lines = [f"row_{i}" for i in range(1, 21)]
     lines[1] = "marker_token  # pre-existing, unchanged"
     lines[17] = "marker_token  # the changed line"
@@ -1106,7 +1051,6 @@ def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: P
     assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 18
 
 def test_resolve_line_returns_out_of_hunk_hit_when_no_in_hunk_candidate(git_repo: Path,) -> None:
-    """An out-of-hunk anchor hit is still returned when no anchor hits a hunk."""
     lines = [f"row_{i}" for i in range(1, 21)]
     lines[1] = "marker_token  # pre-existing, unchanged"
     sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
@@ -1114,13 +1058,10 @@ def test_resolve_line_returns_out_of_hunk_hit_when_no_in_hunk_candidate(git_repo
     assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 2
 
 def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> None:
-    """Real-path #1102 repro: a correct in-hunk citation stays inline.
+    """A valid line-12 citation survives prose-only anchors in a real Git diff.
 
-    Drives the real :func:`classify` over a real two-commit repo -- real ``git diff`` for both the changed-file
-    set and the hunk ranges, no mocks. The finding cites line 12, the only changed line. Before the fix the eight
-    surviving anchors were all rationale prose, none of them within +/-5 lines of line 12, so the hint was
-    discarded and the full-file search relocated the comment to ``Expiration`` on line 1 -- 8 lines outside the
-    hunk, so ``snap_to_hunk`` returned None and the finding lost its line."""
+    Searching those anchors would relocate it to line 1, outside snap tolerance,
+    incorrectly converting an inline finding into a body-only finding."""
     base = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_BASE, "add cache.yaml")
     head = _commit_file(git_repo, "cache.yaml", _CACHE_YAML_HEAD, "cut prod ttl")
     issue = replace(_PROSE_HEAVY_ISSUE)
@@ -1134,15 +1075,9 @@ def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> No
     assert result.inline[0].path == "cache.yaml"
     assert not result.file_level
     assert not result.body_only
-    # Nothing moved, so nothing is annotated.
     assert "**Placement:**" not in result.inline[0].body
 
 def test_classify_annotates_relocated_line(git_repo: Path) -> None:
-    """A snapped line is recorded in the body instead of overwritten silently.
-
-    Real-path: the finding cites line 15, two lines outside the real hunk (17, 23). ``snap_to_hunk`` moves the
-    comment to 17, so the posted line is not the cited one -- and the relocation must be visible on the comment
-    and in the issue body the findings artifact serialises (issue #1102)."""
     lines = [f"row_{i}" for i in range(1, 31)]
     lines[14] = "settle_window = 5  # cited here"
     base = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
@@ -1156,16 +1091,11 @@ def test_classify_annotates_relocated_line(git_repo: Path) -> None:
     note = "**Placement:** posted on line 17; reviewer cited line 15."
     assert note in issue.body, "the relocation was not recorded on the finding"
     assert note in result.inline[0].body, "the posted comment does not show the relocation"
-    # Re-classifying the same objects must not stack duplicate notes.
     classify(git_repo, _pr_for(base, head), [issue])
     assert issue.body.count("**Placement:**") == 1
 
 def test_classify_skips_file_hunks_for_path_missing_at_head(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """A path that doesn't exist at head_sha (deleted/renamed) never calls file_hunks.
-
-    ``resolve_line`` would reject such a path via its own ``git show`` no matter what hunks it was handed, so
-    `classify` should discover the path is unresolvable up front instead of paying for the file_hunks() diff
-    lookup (and its gh-pr-diff network fallback) first (issue #1102 follow-up)."""
+    """Reject absent head paths before reading hunks or invoking gh fallback."""
     base = _commit_file(git_repo, "gone.py", "x = 1\n", "add gone.py")
     _git(git_repo, "rm", "gone.py")
     _git(git_repo, "commit", "-m", "delete gone.py")
@@ -1181,9 +1111,6 @@ def test_classify_skips_file_hunks_for_path_missing_at_head(monkeypatch: pytest.
 
     assert not result.inline
     assert [i.path for i in result.file_level] == ["gone.py"]
-
-
-# --- file_hunks git-diff + gh-pr-diff fallback ----------------------------
 
 
 _GH_PR_DIFF = (
@@ -1202,7 +1129,6 @@ _GH_PR_DIFF = (
 )
 
 def test_file_hunks_uses_git_diff_when_it_succeeds(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Happy path: real git diff yields hunks; gh fallback is not consulted."""
     # Build base, then add 5 lines on a feature branch starting at line N.
     _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(1, 30)) + "\n", "baseline")
     base = _git(git_repo, "rev-parse", "HEAD")
@@ -1220,10 +1146,7 @@ def test_file_hunks_uses_git_diff_when_it_succeeds(monkeypatch: pytest.MonkeyPat
     assert hunks  # at least one hunk
 
 def test_file_hunks_falls_back_to_gh_when_base_unreachable(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """When git diff fails (base_sha unreachable), gh pr diff rescues the hunks.
-
-    Uses real git (which raises GitError on the bogus base SHA) and stubs the git_ops gh wrapper (no remote/auth
-    required)."""
+    """A gh-wrapper fake supplies hunks after real Git rejects the base SHA."""
     monkeypatch.setattr(git_ops, "gh_pr_diff", lambda _r, _n, **_kwargs: _GH_PR_DIFF)
     hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42)
     # Must come from the x.py block only -- the other.py hunk starts at line 1
@@ -1231,20 +1154,12 @@ def test_file_hunks_falls_back_to_gh_when_base_unreachable(monkeypatch: pytest.M
     assert hunks == [(10, 14)]
 
 def test_file_hunks_no_fallback_without_pr_number(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """Without a pr_number, file_hunks returns empty instead of calling gh.
-
-    Uses real git (which fails on the bogus base) plus a guard on the gh wrapper to confirm no fallback is
-    invoked."""
     monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
     hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py")
     assert hunks == []
 
 def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """If gh itself errors out, file_hunks returns empty without raising.
-
-    Real git is allowed to fail, then the stubbed gh wrapper raises GitError
-    -- pr_review must swallow it and return [].
-    """
+    """After real Git fails, a GitError from gh degrades to an empty hunk list."""
 
     def raise_git_error(*_a: Any, **_k: Any) -> str:
         raise git_ops.GitError("gh blew up")
@@ -1254,9 +1169,7 @@ def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.Mon
     assert hunks == []
 
 def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
-    """R2.2: a judged-high finding demoted to low by location validation must
-    still block APPROVE — demotion is visible, never approval-silencing."""
-    classified = pr_review._ClassifiedIssues(inline=[_inline()],
+    classified = pr_review.ClassifiedIssues(inline=[_inline()],
         inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity="low", location_distrust=True,
                 severity_before_demotion="high",
             )
@@ -1266,12 +1179,9 @@ def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
     assert payload["event"] == "COMMENT"
 
 def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
-    """#336: a demoted finding whose ORIGINAL severity was already low (or never
-    asserted) must not block APPROVE — the location_distrust mark is written for
-    every beyond-tolerance record, but only a demotion from a blocking severity
-    keeps the gate closed."""
+    """Location distrust alone does not block originally low or unasserted severity."""
     for before in ("low", None):
-        classified = pr_review._ClassifiedIssues(inline=[_inline()],
+        classified = pr_review.ClassifiedIssues(inline=[_inline()],
             inline_issues=[ParsedIssue(
                     path="a.py", line=10, title="t", body="b", severity="low", location_distrust=True,
                     severity_before_demotion=before,
@@ -1284,16 +1194,12 @@ def test_demoted_low_finding_does_not_block_approval(pr: PRInfo) -> None:
         assert payload["event"] == "APPROVE"
 
 def test_demoted_low_finding_approval_gate_does_not_block() -> None:
-    """#336: the approval-gate unit check itself — location_distrust alone no
-    longer blocks once the original severity was low or never asserted."""
     assert pr_review._finding_blocks_approval("low", True, False, "low") is False
     assert pr_review._finding_blocks_approval("low", True, False, None) is False
     assert pr_review._finding_blocks_approval("low", True, False, "high") is True
     assert pr_review._finding_blocks_approval("low", True, False, "medium") is True
 
 def test_parsed_issues_carry_location_distrust_and_report_note() -> None:
-    """R2 visibility: the demotion reaches the human-read issue body and the
-    machine-readable flag rides on the ParsedIssue."""
     items = [{"file": "a.py", "line": 10, "description": "off-citation", "rationale": "r", "severity": "low",
             "confidence": "LOW", "severity_before_demotion": "high", "location_distrust": True,
         }
@@ -1311,7 +1217,7 @@ def test_null_severity_coerces_to_none_not_none_string(raw: dict[str, Any]) -> N
 
 def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
     # SUPERVISE_SCHEMA emits severity: null — must approve like omitted.
-    classified = pr_review._ClassifiedIssues(
+    classified = pr_review.ClassifiedIssues(
         inline=[_inline()], inline_issues=[ParsedIssue(path="a.py", line=10, title="t", body="b", severity=None)],
     )
 
@@ -1320,11 +1226,9 @@ def test_null_severity_does_not_block_approval(pr: PRInfo) -> None:
     assert "**Severity:** none" not in payload["body"]  # no phantom label rendered
 
 def test_artifact_off_vocabulary_severity_blocks_approval() -> None:
-    """R1/F1: an off-vocabulary label ('critical') folded to None at the Phase A boundary must still block the
-    artifact-backed approve gate.
+    """Unknown raw severity still blocks after schema normalization produces None.
 
-    The raw off-vocabulary signal rides through the artifact as ``severity_off_vocabulary`` so the poster's gate
-    fails closed even though ``severity`` reads ``None``."""
+    The artifact retains severity_off_vocabulary for the posting gate."""
     finding = ArtifactFinding(fingerprint="f" * 64, path="a.py", line=10, placement="inline", title="t", body="b",
         severity=None,  # "critical" was folded to None by Phase A normalization
         confidence="HIGH", is_cross_stack=False, severity_off_vocabulary=True,
@@ -1337,8 +1241,7 @@ def test_artifact_off_vocabulary_severity_blocks_approval() -> None:
     ) is True
 
 def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
-    """Present-but-null severity (wire ``severity: null``) is not an asserted
-    off-vocabulary label: it models an omitted severity and does not block."""
+    """Explicit null severity is unasserted, not an unknown label that blocks approval."""
     finding = ArtifactFinding(
         fingerprint="f" * 64, path="a.py", line=10, placement="inline", title="t", body="b", severity=None,
         confidence="HIGH", is_cross_stack=False, severity_off_vocabulary=False,
@@ -1347,8 +1250,6 @@ def test_artifact_folding_to_none_not_off_vocabulary_does_not_block() -> None:
     assert pr_review._finding_blocks_approval(issue.severity, issue.location_distrust, issue.severity_off_vocabulary
     ) is False
 
-
-# --- Grounded diagrams (issue #1113) ----------------------------------------
 
 def test_diagram_marker_round_trip() -> None:
     """The hidden marker is invisible in rendered markdown and parses back exactly."""
@@ -1422,8 +1323,7 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
     assert calls == [("post", None), ("minimize", "IC_matching")]
 
 def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo) -> None:
-    """``diagram_blocks`` lands directly under ``**Code Review Summary**``."""
-    classified = pr_review._ClassifiedIssues(
+    classified = pr_review.ClassifiedIssues(
         body_only=[ParsedIssue(path="b.py", line=None, title="File note", body="desc", fingerprint="b" * 64,)]
     )
     blocks = "<details><summary><h3>Sequence Diagram</h3></summary>\nX\n</details>"
@@ -1440,10 +1340,7 @@ def test_build_payload_places_diagram_blocks_under_the_header(pr: PRInfo) -> Non
     )["body"] == body.replace(f"{header}\n\n{blocks}", header)
 
 def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> None:
-    """Spec test 16: ``ctx.diagrams`` reaches a fork renderer, which owns it.
-
-    The host cannot inject the blocks around a custom renderer's output (they belong inside the summary body), so
-    a renderer that ignores ``ctx.diagrams`` drops them -- which is exactly what docs/extensions.md warns about."""
+    """Custom renderers own ctx.diagrams; the host cannot restore blocks they omit."""
 
     seen: list[str | None] = []
 
@@ -1455,7 +1352,7 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
         seen.append(ctx.diagrams)
         return "**Custom**"
 
-    classified = pr_review._ClassifiedIssues()
+    classified = pr_review.ClassifiedIssues()
     blocks = "<details><summary><h3>Flowchart</h3></summary>\nX\n</details>"
     for renderer, expect_present in ((keeps, True), (drops, False)):
         reg = Registry()
@@ -1469,7 +1366,7 @@ def test_custom_summary_renderer_receives_and_may_drop_diagrams(pr: PRInfo) -> N
 
 def test_explicit_run_info_payload_is_byte_stable(pr: PRInfo) -> None:
     """Pin the host envelope, approval, rollup, markers and diagram placement."""
-    classified = pr_review._ClassifiedIssues(body_only=[ParsedIssue(
+    classified = pr_review.ClassifiedIssues(body_only=[ParsedIssue(
                 path="a.py", line=None, title="Fixture note", body="Fixture rationale", severity="low",
                 confidence="HIGH", fingerprint="a" * 64,
             )
@@ -1493,7 +1390,7 @@ def test_payload_uses_only_explicit_renderers_and_run_info(pr: PRInfo, monkeypat
     register_builtins(registry)
     registry.override_renderer("summary", summary)
     renderers = resolve_review_renderers(registry)
-    classified = pr_review._ClassifiedIssues(body_only=[ParsedIssue(
+    classified = pr_review.ClassifiedIssues(body_only=[ParsedIssue(
         path="a.py", line=None, title="Explicit finding", body="Explanation", severity="low", confidence="HIGH",
     )])
     run_info = pr_comment_renderer.render_run_info_block([_FIXTURE])

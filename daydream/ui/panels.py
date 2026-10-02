@@ -53,11 +53,7 @@ from daydream.ui.tools import (
 
 
 def print_thinking(console: Console, content: str, max_length: int = 300) -> None:
-    """Print a stable thinking panel.
-
-    Displays the AI's thought process in a purple-styled panel
-    with a static title, rendered immediately.
-    """
+    """Print a truncated Markdown thinking panel."""
     if len(content) > max_length:
         content = content[:max_length] + "..."
     console.print()
@@ -75,12 +71,7 @@ def print_thinking(console: Console, content: str, max_length: int = 300) -> Non
 
 
 class CrazySpinner:
-    """Wild multi-pattern spinner with gradient colors.
-
-    Displays multiple spinner characters simultaneously, each with its own
-    animation pattern and gradient color cycling. Creates a chaotic but
-    visually striking loading indicator.
-    """
+    """Cycle independent spinner patterns and gradient colors."""
 
     SPINNERS = [
         # Braille dots - vertical bounce
@@ -142,14 +133,7 @@ def _found_count_header(count: int, singular: str, plural: str) -> Text:
 
 
 class LiveToolPanel:
-    """Manage a single tool call panel with Live updates.
-
-    Consolidates tool call display and result into a single live-updating panel.
-    Shows an animated throbber while waiting for the result, then replaces it
-    with the actual result content.
-
-    In quiet mode, renders the tool header only and skips result display.
-    """
+    """Animate one tool call, then show its result; quiet mode omits output."""
 
     def __init__(
         self,
@@ -159,13 +143,7 @@ class LiveToolPanel:
         quiet_mode: bool = False,
         label: str | None = None,
     ) -> None:
-        """Initialize the LiveToolPanel.
-
-        Args:
-            label: Resolved human label for background-task tools, threaded
-                through to the header by the registry.
-
-        """
+        """Keep the resolved background-task label for the header."""
         self._console = console
         self._name = name
         self._args = args
@@ -176,19 +154,8 @@ class LiveToolPanel:
         self._quiet_mode = quiet_mode
         self._frame = 0  # Animation frame counter for Edit surgery visualization
 
-    def _build_tool_header_content(self) -> Text:
-        """Build the tool call header content.
-
-        Delegates to shared _build_tool_header() helper for consistent styling.
-        """
-        return _build_tool_header(self._name, self._args, self._quiet_mode, label=self._label)
-
     def _build_result_content_internal(self, max_lines: int = _RESULT_MAX_LINES) -> Text | Syntax | Group:
-        """Build the result content with syntax highlighting.
-
-        Delegates to shared _build_result_content() helper for consistent styling.
-        Special handling for Glob and Grep tools to show file counts and formatted lists.
-        """
+        """Render nonempty results, with tool-specific successful output formatting."""
         if self._result is None:
             return Text()
         if not self._result.strip():
@@ -309,11 +276,8 @@ class LiveToolPanel:
         return result
 
     def _render_panel(self) -> Panel:
-        """Render the current state as a Panel.
-
-        Shows tool call header + either throbber (if waiting) or result.
-        """
-        header = self._build_tool_header_content()
+        """Render the header with either a waiting animation or completed output."""
+        header = _build_tool_header(self._name, self._args, self._quiet_mode, label=self._label)
 
         if self._name == "Skill":
             border_color = NEON_COLORS["cyan"]
@@ -376,11 +340,7 @@ class LiveToolPanel:
 
 
 class _ActivePanelsGroup:
-    """Renderable that dynamically renders all active panels in a registry.
-
-    Used as the target for a single shared ``Live`` instance so that
-    multiple concurrent tool panels animate without conflicting.
-    """
+    """Render concurrent panels within one shared Live context."""
 
     def __init__(self, registry: "LiveToolPanelRegistry") -> None:
         self._registry = registry
@@ -392,32 +352,16 @@ class _ActivePanelsGroup:
 
 
 class LiveToolPanelRegistry:
-    """Registry for tracking multiple concurrent tool panels.
+    """Own one Live context for concurrent tool panels.
 
-    Manages a **single** ``Rich.Live`` instance that renders all active
-    panels together, preventing the display corruption that occurs when
-    multiple ``Live`` contexts compete for the terminal (as happens with
-    the Codex backend's parallel command execution).
-
-    When a panel is finalized (result received), the shared ``Live`` is
-    stopped, the finished panel is printed statically, and the ``Live``
-    is restarted for any remaining active panels.
-
-    Usage:
-        registry = LiveToolPanelRegistry(console, quiet_mode=False)
-        panel = registry.create("tool-123", "Bash", {"command": "ls"})
-        # ... tool executes ...
-        panel.set_result("file1.txt", is_error=False)
-        registry.remove("tool-123")
-
-    """
+    Finalization pauses Live, prints the finished panel, then resumes remaining
+    panels. Task labels are correlated even when callbacks create no panel."""
 
     def __init__(self, console: Console, quiet_mode: bool = False) -> None:
         """Initialize the registry."""
         self._console = console
         self._quiet_mode = quiet_mode
         self._panels: dict[str, LiveToolPanel] = {}
-        self._active_order: list[str] = []
         self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
@@ -433,24 +377,11 @@ class LiveToolPanelRegistry:
     _LABEL_SOURCE_TOOL_NAMES: frozenset[str] = _LAUNCH_TASK_TOOLS | frozenset({"TaskCreate"})
 
     def note_call(self, tool_use_id: str, name: str, args: dict[str, object]) -> None:
-        """Record an originating call's name + args for later label correlation.
-
-        Called on **every** ``ToolStartEvent`` (both the Live-panel and the
-        callback render paths) so that ``observe_result`` can resolve a
-        background ``task_id``'s label without a panel having been created.
-        """
+        """Record every call, including callbacks without panels, for label correlation."""
         self._call_args[tool_use_id] = (name, args)
 
     def observe_result(self, tool_use_id: str, output: str) -> None:
-        """Harvest a ``task_id → label`` mapping from an originating tool's result.
-
-        When a backgrounded launch tool (``Bash``/``Agent``/``Task``) or a
-        ``TaskCreate`` call returns, its result string assigns an id. This
-        records that id mapped to a human-readable label derived from the
-        originating call's input args. Reads the originating call from the
-        ``note_call`` store, so it works in both render modes (panel creation
-        is not a prerequisite).
-        """
+        """Correlate an assigned task id with its originating call and consume the call."""
         call = self._call_args.pop(tool_use_id, None)
         if call is None or call[0] not in self._LABEL_SOURCE_TOOL_NAMES:
             return
@@ -461,29 +392,11 @@ class LiveToolPanelRegistry:
         self._task_labels[_task_label_ns_key(name, task_id)] = _derive_task_label(args, task_id)
 
     def resolve_label(self, name: str, task_id: str) -> str | None:
-        """Return the harvested label for a task id, or None if unknown.
-
-        Args:
-            name: The originating tool's name (used to select the correct
-                namespace prefix — launch tools vs. TaskCreate).
-            task_id: The assigned task id to look up.
-
-        """
+        """Look up a label in the launch-tool or todo-tool namespace."""
         return self._task_labels.get(_task_label_ns_key(name, task_id))
 
     def resolve_call_label(self, name: str, args: dict[str, object]) -> str | None:
-        """Resolve a Task-family call's human label from its args.
-
-        Background-task tools (``TaskOutput``/``TaskStop``) key off ``task_id``;
-        todo-list tools (``TaskGet``/``TaskUpdate``/…) key off ``taskId``. Returns
-        the harvested label for that id, or None when no mapping was recorded (the
-        caller falls back to a non-opaque rendering).
-
-        Returns:
-            The resolved label, or None if the tool is not Task-family or the id
-            is unknown.
-
-        """
+        """Resolve task_id for background tools or taskId for todo tools; else None."""
         if name in _BACKGROUND_TASK_TOOLS or name in _TODO_TASK_TOOLS:
             task_id = str(args.get(_task_id_key(name), ""))
             return self.resolve_label(_label_source_name(name), task_id)
@@ -495,12 +408,7 @@ class LiveToolPanelRegistry:
         name: str,
         args: dict[str, object],
     ) -> LiveToolPanel:
-        """Create and register a new panel.
-
-        The panel is added to the shared ``Live`` context which renders
-        all active panels together.  Individual panels do **not** own
-        their own ``Live`` instance.
-        """
+        """Register a panel; Task tools scroll inline while others share Live."""
         if tool_use_id in self._panels:
             self._finalize_panel(tool_use_id)
 
@@ -529,8 +437,6 @@ class LiveToolPanelRegistry:
             self._ensure_live()
             return panel
 
-        self._active_order.append(tool_use_id)
-
         if self._live is None:
             self._console.print()
 
@@ -543,44 +449,33 @@ class LiveToolPanelRegistry:
 
     def iter_active_panels(self) -> Iterator[LiveToolPanel]:
         """Iterate over active panels in order."""
-        for tid in self._active_order:
-            panel = self._panels.get(tid)
-            if panel:
+        # Rich refreshes from another thread while tool calls mutate the registry.
+        for tid, panel in self._panels.copy().items():
+            if tid not in self._static_ids:
                 yield panel
 
     def remove(self, tool_use_id: str) -> None:
-        """Remove a panel from the registry and print its final state.
-
-        Stops the shared ``Live``, prints the finalized panel statically,
-        then restarts ``Live`` for any remaining active panels.
-        """
+        """Print a final panel while pausing and resuming Live around it."""
         self._finalize_panel(tool_use_id)
 
     def finish_all(self) -> None:
-        """Finalize all remaining panels.
-
-        Stops the shared ``Live`` and prints each panel's current state
-        statically.  Use this for cleanup when a response ends
-        unexpectedly.
-        """
+        """Stop Live and print remaining active panels, including interrupted calls."""
         self._stop_live()
-        for tid in list(self._active_order):
-            panel = self._panels.get(tid)
-            if panel:
-                self._console.print(panel._render_panel())
+        for panel in self.iter_active_panels():
+            self._console.print(panel._render_panel())
         self.discard_all()
 
     def discard_all(self) -> None:
         """Stop rendering and clear tracked panels without printing them."""
         self._stop_live()
-        self._active_order.clear()
+        self._static_ids.clear()
         self._panels.clear()
         self._call_args.clear()
         self._task_labels.clear()
 
     def _ensure_live(self) -> None:
         """Start the shared ``Live`` if there are active panels."""
-        if self._active_order:
+        if any(self.iter_active_panels()):
             if self._live is None:
                 self._live = Live(
                     self._group,
@@ -604,58 +499,24 @@ class LiveToolPanelRegistry:
         # has already harvested any task_id → label mapping from it.
         self._call_args.pop(tool_use_id, None)
 
-        if tool_use_id in self._static_ids:
-            self._static_ids.discard(tool_use_id)
-            panel = self._panels.pop(tool_use_id, None)
-            if panel is not None:
-                self._stop_live()
-                self._console.print(panel._render_panel())
-                self._ensure_live()
-            return
-
-        if tool_use_id not in self._active_order:
-            self._panels.pop(tool_use_id, None)
-            return
-
+        self._static_ids.discard(tool_use_id)
         panel = self._panels.pop(tool_use_id, None)
-        self._active_order.remove(tool_use_id)
-
-        # Stop Live so the finalized panel can be printed statically.
-        self._stop_live()
-
-        if panel:
+        if panel is not None:
+            self._stop_live()
             self._console.print(panel._render_panel())
-
-        self._ensure_live()
+            self._ensure_live()
 
 
 @dataclass
 class ShutdownStep:
-    """A step in the shutdown process.
-
-    Attributes:
-        status: Current status of the step ("pending", "in_progress", or "completed").
-
-    """
+    """One shutdown message and its pending/in_progress/completed status."""
 
     message: str
     status: str = "pending"  # pending, in_progress, completed
 
 
 class ShutdownPanel:
-    """Live-updating panel for showing shutdown progress.
-
-    Consolidates all shutdown messages into a single panel that
-    updates in place, showing the progression of shutdown steps.
-
-    Usage:
-        panel = ShutdownPanel(console)
-        panel.start("Received SIGINT, shutting down")
-        panel.add_step("Terminating running agent...")
-        panel.complete_step(0)  # Mark first step as completed
-        panel.finish()
-
-    """
+    """Render shutdown steps in one Live panel, then print their final state."""
 
     def __init__(self, console: Console) -> None:
         """Initialize the ShutdownPanel."""
@@ -686,12 +547,7 @@ class ShutdownPanel:
         )
 
     def start(self, initial_message: str) -> None:
-        """Start the live panel with an initial message.
-
-        Args:
-            initial_message: The first message to display (e.g., "Received SIGINT").
-
-        """
+        """Start Live with an initial completed message."""
         self._steps.append(ShutdownStep(message=initial_message, status="completed"))
 
         self._console.print()
@@ -704,15 +560,7 @@ class ShutdownPanel:
         self._live.start()
 
     def add_step(self, message: str, status: str = "in_progress") -> int:
-        """Add a new step to the shutdown sequence.
-
-        Args:
-            status: Initial status ("pending", "in_progress", "completed").
-
-        Returns:
-            Index of the added step for later updates.
-
-        """
+        """Append a step and return its index for later completion."""
         self._steps.append(ShutdownStep(message=message, status=status))
         if self._live is not None:
             self._live.update(self._render_panel())
@@ -731,10 +579,7 @@ class ShutdownPanel:
             self.complete_step(len(self._steps) - 1)
 
     def finish(self) -> None:
-        """Stop the live context and print the final panel.
-
-        Call this when all shutdown steps are complete.
-        """
+        """Stop Live and print the final shutdown state."""
         if self._live is not None:
             self._live.stop()
             self._live = None
@@ -753,11 +598,6 @@ def get_shutdown_panel() -> ShutdownPanel | None:
 
 
 def set_shutdown_panel(panel: ShutdownPanel | None) -> None:
-    """Set the global shutdown panel instance.
-
-    Args:
-        panel: The ShutdownPanel instance to set, or None to clear.
-
-    """
+    """Set the shared shutdown panel, or clear it with None."""
     global _shutdown_panel
     _shutdown_panel = panel

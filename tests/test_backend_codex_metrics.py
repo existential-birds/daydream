@@ -1,18 +1,5 @@
-"""Tests for Codex backend MetricsEvent emission (EVNT-07).
-
-Verifies that the Codex backend emits a MetricsEvent at every
-``turn.completed`` event with the documented shape:
-
-- ``cost_usd`` is synthesized from tokens via the #61 price table for known
-  models (#194 reverses D-16 — Codex now matches Claude/Pi by populating
-  cost at the backend layer). It stays None for models unknown to the table
-  (#156 observable marker).
-- ``cached_tokens`` mirrors ``cached_input_tokens`` from usage (None when the
-  CLI omits the field).
-- ``message_id`` is the empty string "" (Codex has no per-message id; D-04).
-
-The legacy CostEvent emission is preserved so FinalMetrics aggregation
-still works for Codex runs.
+"""Codex emits per-turn MetricsEvent plus terminal CostEvent. Known models use token pricing; unknown cost
+stays None. Cache counts mirror usage, and absent message identity remains empty.
 """
 
 from __future__ import annotations
@@ -28,24 +15,17 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend
 from daydream.pricing import compute_cost, load_user_prices, resolve_prices
-
-# Reuse the shared JSONL-stream mock helper from tests/harness — single
-# source of truth for the mock-process shape (Pitfall: do NOT re-implement
-# readline). Imported directly so the existing pattern is preserved.
 from tests.harness.codex_replay import make_mock_process_from_fixture as _make_mock_process
 
 
 async def _execute_events(model: str, fixture: str) -> list[object]:
-    """Replay one Codex fixture through a real CodexBackend, collecting all events."""
     backend = CodexBackend(model=model)
     mock_proc = _make_mock_process(fixture)
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc):
         return [event async for event in backend.execute(Path("/tmp"), "test")]
 
 async def test_metrics_event_emitted_at_turn_completed() -> None:
-    """turn.completed with full usage produces MetricsEvent with EVNT-02 field names (EVNT-07). Model gpt-5.3-codex is
-    in MODEL_PRICES, so #194 synthesizes cost at the backend layer; the value must match compute_cost for these
-    tokens."""
+    """Known-model turn metrics must match compute_cost for the emitted usage."""
     events = await _execute_events("gpt-5.3-codex", "turn_completed_with_usage.jsonl")
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 1
@@ -63,10 +43,9 @@ async def test_metrics_event_emitted_at_turn_completed() -> None:
     assert m.cost_usd == pytest.approx(expected)
 
 async def test_cost_event_still_emitted() -> None:
-    """The legacy CostEvent emission is preserved (so FinalMetrics aggregation works for Codex too). Model
-    ``fixture-model`` is unknown to the price table, so cost_usd stays None here (#156); a known model would
-    synthesize (see test_metrics_event above and
-    test_backend_codex.py::test_codex_synthesizes_cost_for_known_model)."""
+    """Terminal CostEvent remains available to FinalMetrics; fixture-model intentionally has no known
+    price.
+    """
     events = await _execute_events("fixture-model", "turn_completed_with_usage.jsonl")
     cost = [e for e in events if isinstance(e, CostEvent)]
     assert len(cost) == 1
@@ -76,11 +55,9 @@ async def test_cost_event_still_emitted() -> None:
     assert cost[0].cost_usd is None        # fixture-model unknown → #156 marker
 
 async def test_partial_usage_skips_metrics_event() -> None:
-    """usage missing output_tokens => no MetricsEvent emitted (EVNT-02 requires both as int)."""
     events = await _execute_events("fixture-model", "turn_completed_partial_usage.jsonl")
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 0
-    # CostEvent still emitted with the partial signal.
     cost = [e for e in events if isinstance(e, CostEvent)][0]
     assert cost.input_tokens == 200
     assert cost.output_tokens is None

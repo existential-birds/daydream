@@ -1,9 +1,5 @@
-"""Resumable keyboard-driven terminal curation client.
-
-Pure-client UI over :mod:`daydream.benchmark.curation`: every mutating action
-``[a/e/n/x/c/r/d/z/i/q]`` maps one-to-one onto a service operation and never
-mutates the case YAML/model directly. Rendering is plain-string builders for
-deterministic tests; Rich stays available for live styling.
+"""Resumable keyboard curation over service operations. The UI never mutates case YAML
+directly; plain-string renderers support deterministic tests.
 """
 
 import hashlib
@@ -25,13 +21,9 @@ from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 
 
 def parse_indices(spec: str, n: int) -> list[int]:
-    """Parse a comma-separated 1-based selector into sorted unique 0-based indices.
-
-    Accepts single numbers and a single ``a-b`` range (a reversed ``b-a`` range
-    spans ``a..b`` inclusive). Raises :class:`ValueError` for any index or range
-    endpoint outside ``1..n`` (including ``0``), a repeated index or an
-    overlapping range, non-numeric or empty tokens, a single-point range, and
-    multiple range tokens.
+    """Parse unique 1-based indices and at most one inclusive range into sorted 0-based
+    indices. Reversed ranges are accepted; invalid/out-of-bounds endpoints, overlaps,
+    empty tokens, and single-point ranges raise.
     """
     if not spec or not spec.strip():
         raise ValueError("empty index selector")
@@ -100,24 +92,14 @@ def _prompt(read_line: Callable[[str], str], message: str) -> str:
 
 
 def _evidence_entries(view: dict[str, Any]) -> list[Any]:
-    """The ordered evidence entries of *view* in canonical order.
-
-    Prefers the full import-evidence list and falls back to ``candidates`` only
-    for a minimal dict without an ``evidence`` key. The prioritized render and
-    every number-based action instead number through the captured view binding
-    (:func:`_view_binding`); this canonical order remains the fallback path for
-    a minimal dict and the import-order source of ``position``.
+    """Read canonical import evidence, falling back to candidates for minimal views.
+    Numbered actions use captured render bindings instead of this raw order.
     """
     return view.get("evidence") or view.get("candidates") or []
 
 
 class _ViewBinding(list):  # type: ignore[type-arg]
-    """The captured ordered entry→source_id map formed at render time.
-
-    A ``list[str]`` of source_ids in exactly the order :func:`render_case`
-    numbered them, carrying the digest of the view it was captured from so
-    :func:`_binding_stale` can detect any post-render case mutation.
-    """
+    """Render-time ordered source ids plus the view digest used to detect stale numbering."""
 
     def __init__(self, source_ids: list[str], digest: str) -> None:
         super().__init__(source_ids)
@@ -132,11 +114,8 @@ def _view_digest(view: dict[str, Any]) -> str:
 
 
 def _view_binding(view: dict[str, Any]) -> _ViewBinding:
-    """The captured entry→source_id map for *view*, in render order.
-
-    One source of numbering for render/page/edit/exclude/accept: the
-    prioritized entries when the case carries facts (and candidates), else the
-    canonical evidence order (the minimal-dict fallback).
+    """Capture the exact render/action order: prioritized facts when available, otherwise
+    canonical evidence.
     """
     prioritized = (view.get("prioritized_evidence") or {}).get("entries") or []
     if prioritized and view.get("prioritization") is not None and view.get("candidates"):
@@ -159,11 +138,8 @@ def _resolve_number(number: int, binding: list[str]) -> str | None:
 
 
 def _binding_stale(root: Path, case_id: str, binding: list[str]) -> bool:
-    """True when the case changed after *binding* was captured at render time.
-
-    Compares the render-time view digest against a fresh read, so any case-doc
-    mutation (finding, exclusion, state transition) invalidates the captured
-    numbering instead of letting an old number reinterpret fresh content.
+    """Compare the captured digest with a fresh read so old numbers cannot select changed
+    content.
     """
     fresh = _view_binding(cu.get_case(root, case_id))
     if isinstance(binding, _ViewBinding):
@@ -183,15 +159,8 @@ _MAX_STALE_RERENDERS = 3
 
 
 def _refresh_stale_view(root: Path, case_id: str) -> _ViewBinding:
-    """Re-render *case_id* and return a binding verified current, bounded.
-
-    A stale binding means the case changed after render; the refresh re-reads,
-    re-renders, and captures a fresh binding, then verifies that captured
-    binding is current — bounded to ``_MAX_STALE_RERENDERS`` consecutive
-    re-renders so a continuously-mutating case can never loop the rerender
-    forever. When the view keeps changing, the freshest displayed binding is
-    returned (the numbering always matches the display) with a message naming
-    the instability.
+    """Refresh and recheck the rendered binding up to _MAX_STALE_RERENDERS. Continuous
+    mutation returns the freshest displayed binding with an instability message.
     """
     for _ in range(_MAX_STALE_RERENDERS):
         view = cu.get_case(root, case_id)
@@ -281,26 +250,11 @@ _LEGEND = (
 
 
 def render_case(case: dict[str, Any]) -> str:
-    """Render the snapshot header plus the numbered evidence view.
-
-    When the case carries prioritization facts, evidence renders in labeled
-    band sections (:data:`cu.BAND_RANK` order, only non-empty bands), each
-    entry keeping its detail line plus advisory reason/disposition markers,
-    closed by a legend line decoding the reason codes. Numbering comes from the
-    captured view binding (:func:`_view_binding`) — the same order every
-    number-based action resolves through. When the case carries no
-    prioritization facts, the canonical order renders with an explanatory
-    note instead (only signal-free candidates rank as ``needs_judgment``); a
-    minimal dict without an ``evidence`` key falls back to ``candidates``.
-
-    Every evidence entry shows its number, kind, author login (+ ``[bot]`` for a
-    bot), the re-anchored ``commit_id`` prefix (labeled ``commit:``) and — where
-    the record carries a strict ``authoring_anchor`` — the authoring commit
-    prefix (labeled ``auth:``), the fixed ``not_exact_reason`` whenever exact
-    acceptance is unavailable, and — where the record carries one — its review
-    ``state`` (e.g. ``APPROVED``/``COMMENTED``/``CHANGES_REQUESTED``), the
-    ``path:line`` anchor, resolved/outdated markers, and a body preview (first
-    ~120 chars). Candidate records additionally show their title.
+    """Render snapshot identity and numbered evidence from the captured action binding. Use
+    ranked bands/reason legends when facts exist, otherwise canonical order with an
+    explanation. Show author/bot, mapped and original commit identities,
+    exact-acceptance reason, review state, path/range, resolution markers, and body
+    preview; candidates include titles.
     """
     snapshot = case.get("snapshot") or {}
     curation = case.get("curation") or {}
@@ -350,11 +304,8 @@ def _pick_editor() -> str:
 
 
 def _launch_editor(initial: str) -> str | None:
-    """Open *initial* in the user's editor; return edited text or ``None``.
-
-    A ``0600`` temp ``.yaml`` buffer is created and removed in a ``finally`` so
-    an editor interrupt cannot leak it. A nonzero editor exit removes the buffer
-    and returns ``None`` (no mutation).
+    """Edit a private 0600 YAML buffer, always removing it afterward; nonzero editor exit
+    returns None.
     """
     editor = _pick_editor()
     fd, path = tempfile.mkstemp(suffix=".yaml")
@@ -377,11 +328,8 @@ def _launch_editor(initial: str) -> str | None:
 
 
 def _service_error(exc: BaseException, outcome: str = "continue") -> str:
-    """Print a curation error message and return the action-loop *outcome*.
-
-    Shared by every ``_action_*`` handler so a typed ``cu.CurationError``
-    (or a ``ValidationError`` from a malformed atom) renders as a one-line
-    message plus a verdict, never a bare traceback.
+    """Render a typed curation/validation failure as one message and return the action
+    outcome.
     """
     print(str(exc))
     return outcome
@@ -442,14 +390,9 @@ def _edit_and_stage_fragment(
     success: Callable[[int], str],
     err_outcome: str = "continue",
 ) -> str:
-    """The shared edit-a-fragment -> stage-through-service scaffold.
-
-    Launches the editor over *initial*, parses its non-blank atoms, then stages
-    them through *stage*. Editor cancellation, an invalid fragment, a curation
-    error or a validation error all print a one-line message, mutate nothing,
-    and return *err_outcome* (``continue`` by default; ``rerender`` for the
-    ``[n]`` add path). On success reports *success(len(atoms))* and returns
-    ``"rerender"``.
+    """Edit, parse, and stage atoms through the supplied service operation.
+    Cancellation/validation errors mutate nothing and return err_outcome; success
+    reports the atom count and rerenders.
     """
     text = _launch_editor(initial)
     if text is None:
@@ -483,12 +426,8 @@ def _action_new(
 def _action_edit(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str], binding: list[str]
 ) -> str:
-    """The ``[e]`` edit-or-author action.
-
-    Prompts for a finding to rewrite (the existing finding-rewrite path) or
-    ``a`` to author edited finding(s) from selected evidence via
-    :func:`add_edited_findings`. The evidence selector resolves through the
-    captured view binding; a stale binding rerenders instead of acting.
+    """Rewrite a finding or author findings from evidence; stale render bindings rerender
+    before selection.
     """
     findings = (view.get("curation") or {}).get("findings") or []
     first = _prompt(
@@ -543,13 +482,8 @@ def _select_evidence_indices(
 def _edit_author_evidence(
     root: Path, case_id: str, binding: list[str], read_line: Callable[[str], str]
 ) -> str:
-    """The ``[e]``\u2192[author-from-evidence] sub-flow.
-
-    Parses one 1-based evidence selector (a number or a single ``a-b`` range)
-    against the captured view binding, pins the selected source_ids into a
-    blank atom, opens the editor, then stages the atoms through
-    :func:`add_edited_findings`. Editor cancellation, an invalid fragment, a
-    curation error or a validation error all mutate nothing.
+    """Resolve selected rendered evidence ids, pin them into an editor atom, and stage
+    edited findings. Cancellation or invalid fragments leave the case untouched.
     """
     indices = _select_evidence_indices(read_line, binding)
     if indices is None:
@@ -635,15 +569,9 @@ def _action_clean(
 def _action_ready(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str], binding: list[str]
 ) -> str:
-    """The ``[r]`` mark-ready action: pages the exact Task Spec and asks one combined question.
-
-    Renders the byte-deterministic Task.md for the case (the same bytes the
-    compiler verifies and writes), prints it, then asks the single combined
-    approve-spec + attest-review question. Only a literal ``y`` proceeds: the
-    digest is derived by :func:`mark_ready` **under the workspace lock** from
-    the exact case being marked ready, so the approved digest is never a stale
-    pre-lock render and cannot abort a later whole-workspace compile. Anything
-    else is a no-op leaving the case ``draft``.
+    """Display the deterministic Task Spec and require literal y for approval plus review
+    attestation. mark_ready computes its digest from the locked case; other responses
+    leave it draft.
     """
     del binding
     head = (view.get("snapshot") or {}).get("original_head_sha") or ""
@@ -668,18 +596,9 @@ def _action_ready(
 def _action_exclude(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str], binding: list[str]
 ) -> str:
-    """The ``[x]`` evidence-exclusion action over the captured view binding.
-
-    Parses one 1-based selector (a single index or one ``a-b`` range) against
-    the binding the render numbered. A stale binding prints the rerender prompt
-    and re-renders without acting. The reason/note contract is validated
-    **before** any mutation, then every selected evidence source is excluded
-    with the same reason/note. A bad range, an invalid reason, or a missing
-    ``other`` note mutates nothing. Single-index selections keep the original
-    note prompt (a stray note on a non-``other`` reason is still rejected); a
-    range with reason ``other`` prompts for the single note applied to the
-    whole range, so a range exclusion is never a dead-end the service
-    immediately rejects.
+    """Resolve a rendered selection and validate reason/note before any mutation. Stale
+    views rerender. Range exclusions share one reason/note; other requires a note, and
+    unrelated notes are rejected.
     """
     if not _check_fresh(root, case_id, binding):
         return "rerender"
@@ -712,11 +631,8 @@ def _action_exclude(
 def _action_accept(
     root: Path, case_id: str, view: dict[str, Any], read_line: Callable[[str], str], binding: list[str]
 ) -> str:
-    """The ``[a]`` accept-candidate action: one exact-acceptable candidate.
-
-    The candidate number resolves through the captured view binding — the same
-    numbers the render displayed — and a stale binding rerenders instead of
-    re-interpreting the number against fresh content.
+    """Accept one exact-eligible candidate through the captured numbering; stale views
+    rerender.
     """
     if not _check_fresh(root, case_id, binding):
         return "rerender"
@@ -790,16 +706,9 @@ def _launch_pager(text: str) -> None:
 
 
 def _run_case(root: Path, case_id: str, read_line: Callable[[str], str]) -> str:
-    """Run one case session; returns ``"quit"`` or ``"done"``.
-
-    Renders once and captures the view binding the render numbered; every
-    number-based action resolves through that binding. When the case changed
-    after render (stale binding), the loop prints a rerender prompt and
-    re-renders (bounded to ``_MAX_STALE_RERENDERS`` consecutive attempts via
-    :func:`_refresh_stale_view`) instead of re-interpreting the number against
-    content the user never saw; the number action then proceeds against the
-    freshest displayed binding, so a continuously-mutating case can never
-    re-arm the rerender bound and spin forever.
+    """Run a case against its displayed source-id binding. Stale selections trigger bounded
+    refresh rather than reinterpretation against unseen content; persistent mutation
+    cannot restart the bound indefinitely.
     """
     view = cu.get_case(root, case_id)
     print(render_case(view))
@@ -851,12 +760,7 @@ def run_curate_tui(
     *,
     read_line: Callable[[str], str] | None = None,
 ) -> int:
-    """Drive the resumable curation terminal client.
-
-    Queue mode (``case_id is None``) lists cases, renders the index, and prompts
-    for a case (id, or 1-based row number) or ``q`` to quit. Single-case mode
-    opens *case_id* once and returns its outcome.
-    """
+    """Open one case or a resumable queue selected by id/row number; q exits the queue."""
     read = read_line or input
     try:
         if case_id is not None:

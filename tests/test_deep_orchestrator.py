@@ -14,12 +14,13 @@ import pytest
 from daydream import git_ops
 from daydream.backends import AgentEvent
 from daydream.deep.artifacts import diff_key, diff_key_path
-from daydream.eval.analyzer import _records_issues
+from daydream.deep.records import record_issues
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
 from daydream.prompts.authorial_intent import AUTHORITATIVE_INTENT_RULE, PR_DESCRIPTION_UNTRUSTED_FRAMING
 from daydream.review_profile import ResolvedProfile, build_default_profile, parse_profile
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.workspace import _resolve_base
 from tests.harness.git_helpers import (
     commit as _commit,
@@ -59,12 +60,7 @@ def _recording_prompter(asked: list[str]) -> Callable[..., str]:
     return _prompt
 
 def _add_bare_remote(repo: Path) -> Path:
-    """Give *repo* a real, pushable ``origin``: a sibling bare clone.
-
-    Host-native commit/push (issue #726) really runs ``git push`` and verifies
-    the remote holds the pushed HEAD, so a flow test that leaves the commit
-    step unmuted needs an actual remote to succeed against.
-    """
+    """Create a sibling bare origin for real push and remote-HEAD verification."""
     bare = repo.parent / (repo.name + "-remote.git")
     subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
     subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(bare)], check=True, capture_output=True,)
@@ -74,16 +70,7 @@ def _install_model_capturing_stubs(monkeypatch: pytest.MonkeyPatch, target: Path
     merge_echo_records: bool = False, arbiter_omit_verdicts: bool = False,
     parse_by_stack: dict[str, dict[str, Any]] | None = None, suppression_keep: bool = True,
 ) -> list[dict[str, Any]]:
-    """Patch create_backend with a per-(name, model) stub factory (#168).
-
-    Each phase resolves its own model, so the orchestrator's (name, model)
-    backend cache produces a distinct stub instance per model. Every instance
-    shares one model-tagged call list, letting a test assert which model ran
-    each phase — the observable proof that the per-stack fan-out runs on Sonnet,
-    the merge on Opus, and the arbiter on Opus exactly when it should.
-
-    Returns the shared, model-tagged call list (one dict per execute()).
-    """
+    """Install cached per-(name, model) stubs sharing one model-tagged call log."""
     shared_calls: list[dict[str, Any]] = []
 
     def factory(name: str, model: str | None = None, **kwargs: object) -> _StubBackend:
@@ -173,34 +160,24 @@ def _record(**overrides: Any) -> dict[str, Any]:
     return record
 
 def _write_matching_diff_key(target: Path, deep: Path) -> None:
-    """Write ``diff-key`` for *target*'s current diff into *deep*.
-
-    These primed artifacts stand in for a prior run over the same diff, so the
-    key must match what ``run_deep``'s preamble computes.
-    """
+    """Key primed resume artifacts to the current diff, matching the deep preamble."""
     base = _resolve_base(target, None, None)
     diff = git_ops.diff(target, base)
     diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
 
 def _record_issues(loaded: Any) -> list[dict[str, Any]]:
-    """Normalize a per-stack records file to its bare issues list.
-
-    Delegates to ``analyzer._records_issues`` (the canonical records-shape
-    normalization); non-list shapes (malformed fixtures) degrade to ``[]``.
-    """
-    issues = _records_issues(loaded)
+    """Use canonical record normalization; malformed non-list fixtures yield []."""
+    issues = record_issues(loaded)
     return issues if issues is not None else []
 
 def _prime_merge_resume(
     target: Path, *, python: list[dict[str, Any]] | None = None, react: list[dict[str, Any]] | None = None,
     generic: list[dict[str, Any]] | None = None, structure: list[dict[str, Any]] | None = None,
 ) -> Path:
-    """Prime the deep artifacts a ``--start-at`` resume reads, returning the deep dir.
+    """Write required intent/alternative artifacts and optional stack records.
 
-    ``intent.md`` + ``alternatives.json`` are the TTT artifacts every resume gate
-    requires. Any stack passed a record list also gets its
-    ``stack-<name>-records.json``; a stack left as ``None`` is deliberately
-    absent (the shape that drives the missing-records guard).
+    None deliberately omits a stack file to exercise the missing-record guard.
+    Return the deep artifact directory.
     """
     deep = target / ".daydream" / "deep"
     deep.mkdir(parents=True, exist_ok=True)
@@ -215,11 +192,7 @@ def _prime_merge_resume(
     return deep
 
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
-    """Async stand-in for phase_test_and_heal that always passes.
-
-    Kept for the sibling modules that import it (tests/test_archive_data_capture.py);
-    tests in this module use the ``mute_side_effects`` fixture instead.
-    """
+    """Always-passing async test phase shared with archive data-capture tests."""
     key = kwargs["capture_tree_key"]()
     return TestAndHealResult(passed=True, retries=0, proceed=True, ignored=False,
         attempts=(TestAttemptEvidence(
@@ -313,12 +286,7 @@ def _build_gate_target_no_functions(tmp_path: Path, name: str) -> Path:
     )
 
 def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
-    """``_build_gate_target`` plus a second tracked python file (helper.py).
-
-    The quality gate measures python files; this fixture gives the fix agent a
-    SECOND parseable python file to touch outside its finding group (#329 /
-    Finding 6).
-    """
+    """Add tracked helper.py as a parseable quality-gate target outside the fix group."""
     project = _build_gate_target(tmp_path, name)
     (project / "helper.py").write_text("def helper():\n    return 'util'\n")
     _git(project, "add", "helper.py")
@@ -326,14 +294,7 @@ def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
     return project
 
 def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
-    """A python-only fixture repo whose diff does NOT include a tracked module.
-
-    ``api.py`` changes on the feature branch (so ``changed_files`` names only
-    it), while ``unrelated.py`` is a tracked file committed on ``main`` and left
-    untouched by the diff — the exact shape issue #336's post-fix residual check
-    must protect: a fix agent editing ``unrelated.py`` is editing outside the
-    reviewed diff.
-    """
+    """Change only api.py while leaving unrelated.py tracked outside the reviewed diff."""
     return _feature_branch_repo(tmp_path, name,
         initial={
             "api.py": "def hello():\n    return 'universe'\n",
@@ -343,11 +304,7 @@ def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
     )
 
 class _PromptHookStub(_StubBackend):
-    """``_StubBackend`` whose ``intercept`` hook may answer one prompt itself.
-
-    Returning ``None`` (the default) falls through to the base stub's stream;
-    returning a sequence of events replaces that turn's stream entirely.
-    """
+    """Let intercept replace a turn's events, or return None to use the base stub."""
 
     def intercept(self, cwd: Path, prompt: str) -> Sequence[AgentEvent] | None:
         return None
@@ -403,11 +360,7 @@ async def _run_quality_gate_fixture(
     target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute, *,
     fix_edit_line: str | None = _FIX_EDIT_VERBOSE, file_config: DaydreamFileConfig | None = None,
 ) -> int:
-    """Drive a deep run to the fix phase over *target*, editing api.py verbosely.
-
-    The stub merge emits one high-severity api.py item; the fix agent appends
-    ``fix_edit_line`` to the tracked file. Returns the run exit code.
-    """
+    """Run one high-severity api.py fix, append fix_edit_line, and return the exit code."""
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
@@ -437,11 +390,7 @@ def _intent_prompt(stub: _StubBackend) -> str:
     return cast(str, next(c["prompt"] for c in _intent_calls(stub)))
 
 def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
-    """Classify captured prompts for the finding-producing builders (#279).
-
-    Keys are ``per-stack``, ``generic-fallback``, ``structural``, ``arbiter``,
-    and ``merge``; each is identified by its stable opening phrase.
-    """
+    """Classify finding-producing prompts by their stable role-opening phrases."""
     by_kind: dict[str, list[str]] = {
         "per-stack": [], "generic-fallback": [], "structural": [], "arbiter": [], "merge": [],
     }
@@ -485,13 +434,9 @@ def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
 _TWIN_DESCRIPTION = "The staging cache URL does not match the documented shared instance"
 
 def _twin_parse_by_stack(structural_line: int) -> dict[str, dict[str, Any]]:
-    """Stub per-stack overrides staging one structural/language twin on api.py.
+    """Create a structural/language twin differing only in severity or whole-file scope.
 
-    The python stack and the structural meta-stack report the same defect in the
-    same words at the same file, diverging only on severity (and, for case B, on
-    whether the structural side is anchored whole-file). The other two stacks are
-    moved onto their own files so nothing else collides at that location and the
-    arbiter's target set is exactly the twin.
+    Move other findings to distinct files so arbitration selects exactly the twin.
     """
     return {"python": {
             "severity": "medium", "confidence": "MEDIUM", "file": "api.py", "line": 1, "description": _TWIN_DESCRIPTION,

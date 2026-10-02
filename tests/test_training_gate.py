@@ -42,7 +42,6 @@ def test_split_frozen_before_training(tmp_path: Path) -> None:
     again = freeze_split(labels, held_out_fraction=0.2, seed=3)
     assert again.digest == frozen.digest
     assert sidecar_path.read_bytes() == first_bytes
-    # digest file records the split digest for the resume guard (M18)
     expected = {"digest": frozen.digest, "held_out_fraction": 0.2,
         "held_out_ids": sorted(str(row["comment_id"]) for row in frozen.held_out_rows), "seed": 3,
         "train_ids": sorted(str(row["comment_id"]) for row in frozen.train_rows),
@@ -50,7 +49,6 @@ def test_split_frozen_before_training(tmp_path: Path) -> None:
     assert first_bytes == json.dumps(expected, indent=2, sort_keys=True).encode()
     assert not first_bytes.endswith(b"\n")
     assert json.loads(first_bytes) == expected
-    # a second freeze with a different seed rewrites the sidecar with its own digest
     other = freeze_split(labels, held_out_fraction=0.2, seed=4)
     assert other.digest != frozen.digest
     assert json.loads(sidecar_path.read_text())["digest"] == other.digest

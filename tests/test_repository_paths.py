@@ -1,9 +1,4 @@
-"""Tests for the shared repository-path helpers.
-
-Covers ``is_test_path``, the deterministic test-vs-production path classifier
-promoted out of ``improve/assemble.py`` (issue #1113) so the improve plan gates
-and grounded-diagram eligibility answer that question from one implementation.
-"""
+"""Shared repository-path confinement and deterministic test-file classification."""
 from __future__ import annotations
 
 import pytest
@@ -51,7 +46,6 @@ def test_is_test_path_is_public_api() -> None:
     assert "is_test_path" in repository_paths.__all__
 
 def test_strip_dot_slash_normalizes_once() -> None:
-    """Repository citations use the shared leading-dot normalization."""
     assert repository_paths.strip_dot_slash("api.py") == "api.py"
     assert repository_paths.strip_dot_slash("./api.py") == "api.py"
     assert repository_paths.strip_dot_slash("./dir/x.py") == "dir/x.py"

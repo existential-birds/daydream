@@ -25,14 +25,7 @@ def create_console() -> Console:
 
 
 def _interpolate_color(color1: str, color2: str, t: float) -> str:
-    """Interpolate between two hex colors.
-
-    Args:
-        color1: Starting hex color (e.g., "#8BE9FD").
-        color2: Ending hex color (e.g., "#FF79C6").
-        t: Interpolation factor (0.0 = color1, 1.0 = color2).
-
-    """
+    """Interpolate hex colors; t=0 selects color1 and t=1 selects color2."""
     r1, g1, b1 = int(color1[1:3], 16), int(color1[3:5], 16), int(color1[5:7], 16)
     r2, g2, b2 = int(color2[1:3], 16), int(color2[3:5], 16), int(color2[5:7], 16)
     r = int(r1 + (r2 - r1) * t)
@@ -42,14 +35,7 @@ def _interpolate_color(color1: str, color2: str, t: float) -> str:
 
 
 def _get_gradient_color(position: float) -> str:
-    """Get a color from the gradient based on position (0.0 to 1.0).
-
-    The gradient smoothly transitions: cyan -> pink -> purple.
-
-    Args:
-        position: Position in gradient (0.0 = start, 1.0 = end).
-
-    """
+    """Interpolate the theme gradient, clamping position to [0, 1]."""
     position = max(0.0, min(1.0, position))
 
     index = position * (len(ASCII_GRADIENT_COLORS) - 1)
@@ -69,16 +55,7 @@ def print_phase_hero(
     title: str,
     description: str,
 ) -> None:
-    """Print a visually striking ASCII art banner with neon gradient.
-
-    Uses pyfiglet to generate ASCII art and applies a horizontal
-    gradient from cyan -> pink -> purple character-by-character.
-    Includes a decorative subtitle below the ASCII art.
-
-    Args:
-        title: The ASCII art text (e.g., "DAYDREAM", "BREATHE", "HEAL").
-
-    """
+    """Print a pyfiglet title with a horizontal gradient and decorative subtitle."""
     try:
         ascii_art = pyfiglet.figlet_format(title, font="ansi_shadow")
     except pyfiglet.FigletError:
