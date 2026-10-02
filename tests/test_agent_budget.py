@@ -92,38 +92,19 @@ def _budget_stop(recorder: Any) -> tuple[dict[str, Any], dict[str, Any]]:
     assert len(stops) == 1
     return traj, stops[0]["metadata"]
 
-
-@pytest.mark.parametrize(
-    ("sleep_s", "budget_kwargs", "expected_reason"),
-    [
-        (0.0, {"tool_call_budget": 5, "wall_budget_s": None}, "tool_call_budget_exceeded"),
-        (0.05, {"wall_budget_s": 0.2, "tool_call_budget": None}, "wall_budget_exceeded"),
-    ],
-    ids=["tool_call", "wall"],
-)
-async def test_run_agent_budget_stop(
-    tmp_path: Path,
-    sleep_s: float,
-    budget_kwargs: dict[str, Any],
-    expected_reason: str,
-) -> None:
-    """A burst returns under budget, and the recorder marks the exceeded ceiling."""
-    backend = _burst_backend(count=200, sleep_s=sleep_s)
+async def test_run_agent_tool_call_ceiling(tmp_path: Path) -> None:
+    backend = _burst_backend(count=200, sleep_s=0.0)
     recorder = make_recorder(tmp_path)
     with anyio.fail_after(5):
         async with recorder:
             result, _, _ = await run_agent(
-                backend,
-                tmp_path,
-                "go",
-                phase=DaydreamPhase.FIX,
-                **budget_kwargs,
+                backend, tmp_path, "go", phase=DaydreamPhase.FIX, tool_call_budget=5, wall_budget_s=None,
             )
     assert isinstance(result, str)
     assert backend.cancel_calls == 0
     traj = json.loads(recorder.path.read_text(encoding="utf-8"))
     step = _agent_step_with_stop_reason(traj)
-    assert step["extra"]["stop_reason"] == expected_reason
+    assert step["extra"]["stop_reason"] == "tool_call_budget_exceeded"
 
 async def test_run_agent_abort_swallows_event_stream_close_error(tmp_path: Path) -> None:
     """Invocation cleanup failures must not replace the successful abort result."""
@@ -204,6 +185,19 @@ async def test_budget_stop_records_the_limit_and_durations_but_no_monotonic_valu
     assert meta["elapsed_s"] == 600.0 and meta["backend_s"] == 300.0
     assert "5600.0" not in recorder.path.read_text(encoding="utf-8")  # no reusable monotonic
 
+async def test_run_agent_wall_budget(tmp_path: Path) -> None:
+    backend = _burst_backend(count=200, sleep_s=0.05)
+    recorder = make_recorder(tmp_path)
+    with anyio.fail_after(5):
+        async with recorder:
+            result, _, _ = await run_agent(
+                backend, tmp_path, "go", phase=DaydreamPhase.FIX, wall_budget_s=0.2, tool_call_budget=None,
+            )
+    assert isinstance(result, str)
+    assert backend.cancel_calls == 0
+    traj = json.loads(recorder.path.read_text(encoding="utf-8"))
+    step = _agent_step_with_stop_reason(traj)
+    assert step["extra"]["stop_reason"] == "wall_budget_exceeded"
 
 async def test_streaming_turn_is_cut_at_the_deadline_and_keeps_partial_output(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path

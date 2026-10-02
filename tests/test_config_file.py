@@ -19,15 +19,15 @@ def test_improve_config_table_parses_service_roots(tmp_path: Path) -> None:
 def test_improve_config_absent_defaults_empty(tmp_path: Path) -> None:
     assert load_file_config(tmp_path).improve_service_roots == []
 
+def test_improve_github_issue_publishing_is_explicitly_configurable(tmp_path: Path,) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.daydream.improve.github]\npublish_issues = true\n")
 
-@pytest.mark.parametrize("spelling", ["publish_issues", "publish-issues"])
-def test_improve_github_issue_publishing_is_explicitly_configurable(
-    tmp_path: Path,
-    spelling: str,
-) -> None:
-    (tmp_path / "pyproject.toml").write_text(
-        f"[tool.daydream.improve.github]\n{spelling} = true\n"
-    )
+    config = load_file_config(tmp_path)
+
+    assert config.improve_github_publish_issues is True
+
+def test_improve_github_issue_publishing_accepts_kebab_case_fallback(tmp_path: Path,) -> None:
+    (tmp_path / "pyproject.toml").write_text("[tool.daydream.improve.github]\npublish-issues = true\n")
 
     config = load_file_config(tmp_path)
 
