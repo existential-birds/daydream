@@ -127,9 +127,10 @@ under the current reward formula.
 ## Hardware
 
 The offline stages (Stage-0 gate, all dry-path validation, CI) ran on the
-development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU** — the dry path
-imports no pynvml and never initializes CUDA (asserted by
-`tests/training/test_stage1_sft_config.py::test_dry_run_passes_without_gpu`).
+development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU**. The committed
+projection dry run is covered by `tests/test_training_dry_fixture.py`. The
+separate `tests/training/test_stage1_sft_config.py` checks the SFT recipe's
+dry run when a prime-rl workspace is available.
 
 GPU stages (Stage-1 dataset SFT, Stage-2 deterministic RFT replay, Stage-3
 online GRPO) are planned for a single-GPU 80 GB node (H100 or A100 80 GB);

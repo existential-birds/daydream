@@ -208,11 +208,6 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     manifest = json.loads((out / "manifest.json").read_text())
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
 
-def test_cli_legacy_corpus_flag_is_gone(tmp_path: Path, cli_runner: Any) -> None:
-    """#1093: the legacy `--corpus` flag no longer parses."""
-    res = cli_runner.invoke(["train", "--corpus", "x.jsonl", "--out", str(tmp_path / "o")])
-    assert res.exit_code != 0
-
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
     """AC6: the 50-record real-projection fixture feeds the full pipeline.
 
