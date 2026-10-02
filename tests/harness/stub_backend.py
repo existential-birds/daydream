@@ -958,9 +958,10 @@ class StubBackend:
                 # each marker the prompt names (in prompt/severity order), not just
                 # the first. A single-finding prompt names exactly one marker.
                 toks = re.findall(r"marker-\d+", prompt) or ["?"]
-                cur = self.fix_append_path.read_text() if self.fix_append_path.exists() else ""
+                append_path = cwd / self.fix_append_path.relative_to(self._target)
+                cur = append_path.read_text() if append_path.exists() else ""
                 await anyio.sleep(0)  # deterministic interleave point
-                self.fix_append_path.write_text(cur + "".join(t + "\n" for t in toks))
+                append_path.write_text(cur + "".join(t + "\n" for t in toks))
             yield TextEvent(text="Applied the fix.")
             self._tick()
             yield ResultEvent(structured_output=None, continuation=None)

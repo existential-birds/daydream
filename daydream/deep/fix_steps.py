@@ -1192,6 +1192,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 test_map_path=test_map_path,
                 footprint=state.footprint,
                 round_snapshot=round_snapshot,
+                file_scope_issues=_resolve_opt_in(config, "scope_issue_filing"),
+                auth=ctx.github_execution.auth,
                 run_context=ctx.run_context,
             )
         except Exception as exc:

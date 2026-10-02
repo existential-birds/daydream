@@ -346,6 +346,15 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         return await batched_implementation(*args, **kwargs)
 
     async def _parallel_with_contract(*args: Any, **kwargs: Any) -> Any:
+        # The parallel boundary now owns independent Git checkouts, even when
+        # this unit case mocks individual fix calls. Supply a real baseline
+        # instead of replacing its storage or recovery operations with fakes.
+        repo = args[1].repo
+        if not (repo / ".git").exists():
+            init_repo(repo)
+            (repo / ".phase-fixture").write_text("real Git baseline\n")
+            git(repo, "add", ".phase-fixture")
+            git_commit(repo, "test: parallel phase baseline")
         original_items = args[2]
         items = [dict(item, item_uid=item.get("item_uid") or f"item:{n}")
                  for n, item in enumerate(original_items, start=1)]
@@ -383,9 +392,6 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(phases, "phase_fix_batched", _batched_with_contract)
     monkeypatch.setattr(phases, "phase_fix_parallel", _parallel_with_contract)
     monkeypatch.setattr(git_ops, "restore_group_from_snapshot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        git_ops, "restore_group_worktree_from_snapshot", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(git_ops, "restore_index", lambda *args, **kwargs: None)
 
 
@@ -5181,7 +5187,9 @@ def test_fix_verify_schema_accepts_all_four_verdicts() -> None:
 
 
     for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
-        entry: dict[str, Any] = {"issue_id": 1, "verdict": verdict, "reason": "r"}
+        entry: dict[str, Any] = {
+            "issue_id": 1, "verdict": verdict, "reason": "r", "check_command": None, "check_only": False,
+        }
         # ``path`` is strict-mode required (see test_output_schema_strict.py)
         # but nullable; wrong_target/regressed carry the corrected file.
         if verdict in ("wrong_target", "regressed"):
@@ -5314,7 +5322,12 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-
+    init_repo(tmp_path)
+    paths = {"a.py", "shared.py", "test_a.py"}
+    for path in paths:
+        (tmp_path / path).write_text("original group content\n")
+    git(tmp_path, "add", *sorted(paths))
+    git_commit(tmp_path, "test: complete group rollback baseline")
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["shared.py"]},
         {"id": 2, "item_uid": "item:2", "file": "shared.py", "related_files": ["test_a.py"]},
@@ -5326,20 +5339,20 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
         path_states=(),
         untracked={},
     )
-    restored: list[tuple[WorktreeRollbackSnapshot, frozenset[str]]] = []
+    fallback_contents: list[dict[str, str]] = []
 
     async def _fail_batch(*args: Any, **kwargs: Any) -> None:
+        for path in paths:
+            (args[1].repo / path).write_text("partial batched edit\n")
         raise RuntimeError("partial batch")
 
     async def _fix(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    def _restore(repo: Path, supplied: WorktreeRollbackSnapshot, paths: Any) -> None:
-        restored.append((supplied, frozenset(paths)))
+        repo = args[1].repo
+        fallback_contents.append({path: (repo / path).read_text() for path in paths})
+        (repo / args[2]["file"]).write_text("successful fallback fix\n")
 
     monkeypatch.setattr(phases, "phase_fix_batched", _fail_batch)
     monkeypatch.setattr(phases, "phase_fix", _fix)
-    monkeypatch.setattr(git_ops, "restore_group_worktree_from_snapshot", _restore)
 
     failures = await phases.phase_fix_parallel(
         cast(Backend, object()),
@@ -5350,7 +5363,12 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     )
 
     assert failures == {}
-    assert restored == [(snapshot, frozenset({"a.py", "shared.py", "test_a.py"}))]
+    assert fallback_contents[0] == {path: "original group content\n" for path in paths}
+    assert fallback_contents[1]["a.py"] == "successful fallback fix\n"
+    assert fallback_contents[1]["shared.py"] == "original group content\n"
+    assert (tmp_path / "a.py").read_text() == "successful fallback fix\n"
+    assert (tmp_path / "shared.py").read_text() == "successful fallback fix\n"
+    assert (tmp_path / "test_a.py").read_text() == "original group content\n"
 
 
 @pytest.mark.asyncio

@@ -42,6 +42,7 @@ from daydream.backends import (
     effective_fanout_concurrency,
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
+from daydream.check_claims import substantiate_check_claims
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
@@ -119,6 +120,7 @@ from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.fix_isolation import FixIsolationRound
 from daydream.generated_files import (
     GENERATED_FILES_PROMPT_RULE,
     _changed_untracked_generated_files,
@@ -1461,6 +1463,8 @@ FIX_VERIFY_VERDICTS_SCHEMA = strict_object({
             # requirement because JSON Schema cannot express it.
             "path": {"type": ["string", "null"]},
             "reason": {"type": "string"},
+            "check_command": {"type": ["string", "null"]},
+            "check_only": {"type": "boolean"},
         }),
     },
 })
@@ -2038,6 +2042,13 @@ async def phase_fix_verify(
         round_number=round_number,
     )
     prompt = append_extended_facts(prompt, _recipe_for_work(work))
+    prompt += (
+        "\nIf regressed relies on a deterministic lint/test/type/build/check failure, "
+        "set check_command to the repository-declared command (or null if unknown). "
+        "The host validates it; do not invent diagnostic failures. "
+        "Set check_only true only when the entire regressed verdict relies solely on that check failure; "
+        "set it false for any semantic or additional defect.\n"
+    )
 
     candidate = await _run_verifier(
         backend, work, prompt, FIX_VERIFY_VERDICTS_SCHEMA, run_context,
@@ -2056,6 +2067,10 @@ async def phase_fix_verify(
             "verdict": verdict,
             "reason": entry.get("reason") or "",
         }
+        if "check_command" in entry:
+            cleaned["check_command"] = entry["check_command"]
+        if "check_only" in entry:
+            cleaned["check_only"] = entry["check_only"]
         path = entry.get("path")
         if verdict in FIX_VERIFY_RETARGETABLE_VERDICTS and isinstance(path, str) and path.strip():
             cleaned["path"] = path.strip()
@@ -2074,7 +2089,7 @@ async def phase_fix_verify(
                 "reason": "no verifier verdict",
             }
         verdicts.append(entry)
-    return verdicts
+    return await substantiate_check_claims(work.repo, verdicts, recipe=_recipe_for_work(work))
 
 
 # Shared scope/precedence/contract guardrails appended to every fix prompt
@@ -2640,24 +2655,38 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
 
 @asynccontextmanager
-async def _restore_round_index_after_fanout(
-    repo: Path,
-    index: git_ops.IndexSnapshot,
-) -> AsyncIterator[None]:
-    """Restore one shared index only after the enclosed fixer fan-out closes."""
+async def _isolated_fix_fanout(
+    work: WorkContext,
+    footprint: AuthorizedFixFootprint,
+    *,
+    file_scope_issues: bool,
+    auth: git_ops.GitHubAuth,
+) -> AsyncIterator[FixIsolationRound]:
+    """Join isolated writers, restore direct parent writes, then import fixes."""
+    isolation = FixIsolationRound(work, footprint, capture_discarded_edits=file_scope_issues)
     try:
-        yield
-    except BaseException as fanout_error:
         try:
-            git_ops.restore_index(repo, index)
-        except BaseException as restore_error:
-            raise BaseExceptionGroup(
-                "fix fan-out failed and round index restoration also failed",
-                [fanout_error, restore_error],
-            ) from None
-        raise
-    else:
-        git_ops.restore_index(repo, index)
+            yield isolation
+        except BaseException as fanout_error:
+            try:
+                isolation.restore_parent()
+                isolation.publish()
+            except BaseException as restore_error:
+                raise BaseExceptionGroup(
+                    "fix fan-out failed and parent restoration also failed",
+                    [fanout_error, restore_error],
+                ) from None
+            raise
+        else:
+            isolation.restore_parent()
+            isolation.publish()
+            if file_scope_issues:
+                from daydream.deep.scope_issues import _file_reverted_edit_issue
+
+                for path, patch in isolation.discarded_edits:
+                    _file_reverted_edit_issue(work.repo, path, patch, auth=auth)
+    finally:
+        isolation.close()
 
 
 @bind_resolved_run_context
@@ -2667,6 +2696,8 @@ async def phase_fix_parallel(
     items: list[dict[str, Any]],
     *,
     footprint: AuthorizedFixFootprint | None = None,
+    file_scope_issues: bool = False,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     round_snapshot: git_ops.WorktreeRollbackSnapshot | None = None,
     limiter_size: int = 10,
     intent_path: Path | None = None,
@@ -2775,10 +2806,14 @@ async def phase_fix_parallel(
                 f"item(s); skipping remaining {skipped}.",
             )
 
-    def _restore_group_or_raise(context: str, paths: frozenset[str]) -> None:
+    def _restore_group_or_raise(
+        context: str, paths: frozenset[str], group_work: WorkContext,
+        group_snapshot: git_ops.WorktreeRollbackSnapshot,
+    ) -> None:
         """Restore the complete group from the round snapshot, or fail the group."""
         try:
-            git_ops.restore_group_worktree_from_snapshot(work.repo, round_snapshot, paths)
+            isolation.audit_group(group_work.repo, group_snapshot)
+            git_ops.restore_group_worktree_from_snapshot(group_work.repo, group_snapshot, paths)
         except Exception as restore_err:  # noqa: BLE001
             raise RuntimeError(
                 f"failed to restore the complete fix group {context}"
@@ -2789,6 +2824,8 @@ async def phase_fix_parallel(
         grp: list[tuple[dict[str, Any], int]],
         budget: FileGroupBudget,
         edit_scope: frozenset[str],
+        group_work: WorkContext,
+        group_snapshot: git_ops.WorktreeRollbackSnapshot,
     ) -> None:
         """Fix a group's findings one at a time, honoring the group budget.
 
@@ -2810,7 +2847,7 @@ async def phase_fix_parallel(
                 await _record_budget_stop(fkey, budget_reason, len(grp), budget)
                 return
             turn_reason = await phase_fix(
-                backend, work, item, item_num, total,
+                backend, group_work, item, item_num, total,
                 edit_scope=edit_scope,
                 read_scope=footprint.run_allowed_paths,
                 console_lock=_console_lock,
@@ -2822,6 +2859,7 @@ async def phase_fix_parallel(
                 retry_recovery_allowance_s=retry_recovery_allowance_s,
             )
             if turn_reason == "wall_budget_exceeded":
+                _restore_group_or_raise("after its turn wall budget cut", edit_scope, group_work, group_snapshot)
                 if group_max_wall_s > DEFAULT_WALL_BUDGET_S and budget.remaining() > 0:
                     # The invocation's own per-turn wall budget
                     # (DEFAULT_WALL_BUDGET_S) cut the turn, not the group
@@ -2841,7 +2879,7 @@ async def phase_fix_parallel(
                     # restore the complete group from the round snapshot so the
                     # half-applied change cannot reach fix-verify/test/commit,
                     # mirroring the batched fallback recovery.
-                    _restore_group_or_raise("after its wall budget cut", edit_scope)
+                    _restore_group_or_raise("after its wall budget cut", edit_scope, group_work, group_snapshot)
                 await _record_budget_stop(fkey, "group_wall_budget_exceeded", len(grp), budget)
                 return
             # Any other turn reason (a ``tool_vetoed:<tool>`` supervisor veto is
@@ -2862,9 +2900,16 @@ async def phase_fix_parallel(
         phase=DaydreamPhase.FIX,
         descriptors=dispatch_descriptors,
     ) as dispatch:
-        async with _restore_round_index_after_fanout(
-            work.repo, round_snapshot.index
-        ), anyio.create_task_group() as tg:
+        async with _isolated_fix_fanout(
+            work, footprint, file_scope_issues=file_scope_issues, auth=auth,
+        ) as isolation, anyio.create_task_group() as tg:
+            # Complete host checkout preparation before starting any backend.
+            # Synchronous cloning must not block a live sibling or consume its
+            # cumulative model-call wall budget.
+            group_workspaces = {
+                file_key: isolation.create_group(footprint.group_paths([item for item, _ in numbered]))
+                for file_key, numbered in groups_numbered
+            }
             for file_key, numbered_items in groups_numbered:
                 # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
                 async def _task(
@@ -2876,6 +2921,7 @@ async def phase_fix_parallel(
                         async with maybe_fork(
                             recorder, f"fix-{_fkey_slug}", dispatch=dispatch,
                         ):
+                            group_work, group_snapshot = group_workspaces[fkey]
                             budget = FileGroupBudget(
                                 max_wall_seconds=group_max_wall_s,
                                 max_serial_items=group_max_serial_items,
@@ -2889,7 +2935,7 @@ async def phase_fix_parallel(
                                     # Single-item or <no-file> groups: go straight to
                                     # per-finding phase_fix (no batched prompt to build,
                                     # no fallback retry on failure).
-                                    await _fix_group_serially(fkey, grp, budget, edit_scope)
+                                    await _fix_group_serially(fkey, grp, budget, edit_scope, group_work, group_snapshot)
                                 else:
                                     # Design-checkpoint #1: consult the group budget
                                     # BEFORE the batched call too, mirroring the serial
@@ -2902,7 +2948,7 @@ async def phase_fix_parallel(
                                         return
                                     try:
                                         await phase_fix_batched(
-                                            backend, work, grp_items, grp_nums, total,
+                                            backend, group_work, grp_items, grp_nums, total,
                                             edit_scope=edit_scope,
                                             read_scope=footprint.run_allowed_paths,
                                             console_lock=_console_lock,
@@ -2919,8 +2965,14 @@ async def phase_fix_parallel(
                                         # Restore the file to HEAD before falling back so
                                         # per-finding fixes don't re-apply partial edits
                                         # that the batched turn may have already written.
-                                        _restore_group_or_raise("before fallback", edit_scope)
-                                        await _fix_group_serially(fkey, grp, budget, edit_scope)
+                                        _restore_group_or_raise(
+                                            "before fallback", edit_scope, group_work, group_snapshot,
+                                        )
+                                        await _fix_group_serially(
+                                            fkey, grp, budget, edit_scope, group_work, group_snapshot,
+                                        )
+                                if fkey in successful_groups:
+                                    isolation.retain_group(group_work.repo, edit_scope, group_snapshot)
                             except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                                 # Recovery restores the complete group, so earlier
                                 # serial progress cannot justify a partial status.
@@ -2928,9 +2980,10 @@ async def phase_fix_parallel(
                                 failure: BaseException = e
                                 try:
                                     grp_items = [item for item, _ in grp]
+                                    isolation.audit_group(group_work.repo, group_snapshot)
                                     git_ops.restore_group_worktree_from_snapshot(
-                                        work.repo,
-                                        round_snapshot,
+                                        group_work.repo,
+                                        group_snapshot,
                                         footprint.group_paths(grp_items),
                                     )
                                 except Exception as restore_err:  # noqa: BLE001

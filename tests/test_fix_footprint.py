@@ -21,7 +21,7 @@ from daydream.backends import AgentEvent, Backend, ResultEvent
 from daydream.deep.scope_issues import ScopeEnforcementResult, enforce_authorized_fix_footprint
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.git_ops import GitError, GitPathState, WorktreeRollbackSnapshot
-from daydream.phases import _restore_round_index_after_fanout, phase_fix_parallel
+from daydream.phases import _isolated_fix_fanout, phase_fix_parallel
 from daydream.repository_paths import (
     InvalidRepositoryFilePath,
     canonicalize_repository_file_path,
@@ -782,11 +782,14 @@ async def test_fanout_cancellation_and_index_restore_failure_are_both_reported(
 
 
     _seed(git_repo, {"a.py": b"A = 1\n"})
-    index = git_ops.snapshot_index(git_repo)
+    footprint = AuthorizedFixFootprint.build(git_repo, {"a.py"}, [])
     lock = git_repo / ".git" / "index.lock"
 
     with pytest.raises(BaseExceptionGroup) as raised:
-        async with _restore_round_index_after_fanout(git_repo, index):
+        async with _isolated_fix_fanout(
+            work_context(git_repo, run_id="test-run"), footprint,
+            file_scope_issues=False, auth=git_ops.INHERIT_GITHUB_AUTH,
+        ):
             lock.write_bytes(b"held")
             raise asyncio.CancelledError("primary cancellation")
 

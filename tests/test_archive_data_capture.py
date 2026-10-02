@@ -156,6 +156,8 @@ async def _run_real_phases_deep(
     stub.fix_edit_line = fix_edit_line
     if untracked_fix is not None:
         stub.fix_new_generated = untracked_fix
+        assert stub.merge_items is not None
+        stub.merge_items[0]["related_files"] = [untracked_fix]
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(
         _deep_run_config(
@@ -856,7 +858,7 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
                 ),
             ]
         if "fix this issue" in pl or pl.startswith("fix these"):
-            main_py = repo / "main.py"
+            main_py = Path(cwd) / "main.py"
             main_py.write_text(main_py.read_text() + "# daydream recommended change\n")
             return [TextEvent(text="Fixed."), ResultEvent(structured_output=None, continuation=None)]
         if "post-fix fix-verifier agent" in pl:

@@ -329,6 +329,45 @@ class IndexSnapshot:
 
 
 @dataclass(frozen=True)
+class RawIndexSnapshot:
+    """Exact owner index bytes, including intent-to-add and entry flags."""
+
+    content: bytes | None
+    mode: int | None
+
+
+def snapshot_raw_index(repo: Path) -> RawIndexSnapshot:
+    """Capture an index without reducing it to a Git tree."""
+    path = _snapshot_git_path(repo, "index")
+    try:
+        return RawIndexSnapshot(path.read_bytes(), stat.S_IMODE(path.stat().st_mode))
+    except FileNotFoundError:
+        return RawIndexSnapshot(None, None)
+
+
+def restore_raw_index(repo: Path, snapshot: RawIndexSnapshot) -> None:
+    """Restore exact bytes under Git's ordinary exclusive index lock."""
+    path = _snapshot_git_path(repo, "index")
+    lock = path.with_name(path.name + ".lock")
+    try:
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, snapshot.mode or 0o644)
+    except OSError as exc:
+        raise GitError("could not acquire index lock for exact restoration") from exc
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            if snapshot.content is not None:
+                stream.write(snapshot.content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if snapshot.content is None:
+            path.unlink(missing_ok=True)
+        else:
+            os.replace(lock, path)
+    finally:
+        lock.unlink(missing_ok=True)
+
+
+@dataclass(frozen=True)
 class WorktreeRollbackSnapshot:
     """One round's tracked, untracked, and index rollback point."""
 
@@ -1685,11 +1724,37 @@ def snapshot_untracked_paths(
     }
 
 
-def snapshot_worktree_paths(repo: Path, paths: Iterable[str]) -> tuple[GitPathState, ...]:
+def snapshot_ignored_owner_paths(repo: Path) -> dict[str, GitPathState]:
+    """Protect ignored source/owner files, excluding generated runtime trees.
+
+    These bytes remain private to parent recovery and never enter fixer
+    clones. Dependency installations and tool caches are runtime output,
+    rather than source state to import or snapshot for each fixer round.
+    """
+    runtime_directories = {
+        ".daydream", ".git", ".venv", "venv", "node_modules", "__pycache__",
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", ".cache", ".tox", ".nox",
+    }
+    proc = _run_git(
+        repo, ["ls-files", "--others", "--ignored", "--exclude-standard", "-z"],
+        capture_bytes=True, timeout=30,
+    )
+    _require_ok(proc, "could not enumerate ignored owner files")
+    return {
+        path: _snapshot_worktree_path(repo, path, allow_leaf_symlink=True)
+        for path in _decode_nul_paths(proc.stdout)
+        if not runtime_directories.intersection(path.split("/")[:-1])
+        and not _is_untracked_runtime_artifact(path)
+    }
+
+
+def snapshot_worktree_paths(
+    repo: Path, paths: Iterable[str], *, allow_leaf_symlink: bool = False,
+) -> tuple[GitPathState, ...]:
     """Capture binary-safe worktree states for exact confined paths."""
     unique = sorted(set(paths), key=_path_sort_key)
     return tuple(
-        _snapshot_worktree_path(repo, path, allow_leaf_symlink=False)
+        _snapshot_worktree_path(repo, path, allow_leaf_symlink=allow_leaf_symlink)
         for path in unique
     )
 
@@ -2804,6 +2869,8 @@ def restore_group_worktree_from_snapshot(
     repo: Path,
     snapshot: WorktreeRollbackSnapshot,
     paths: Iterable[str],
+    *,
+    allow_leaf_type_replacement: bool = False,
 ) -> None:
     """Restore requested group paths without mutating the parent index."""
     requested = sorted(set(paths), key=_path_sort_key)
@@ -2839,7 +2906,7 @@ def restore_group_worktree_from_snapshot(
         _restore_path_state(
             repo,
             state,
-            allow_leaf_type_replacement=replace_type,
+            allow_leaf_type_replacement=replace_type or allow_leaf_type_replacement,
         )
 
 
@@ -2853,6 +2920,25 @@ def restore_group_from_snapshot(
         restore_group_worktree_from_snapshot(repo, snapshot, paths)
     finally:
         restore_index(repo, snapshot.index)
+
+
+def copy_worktree_paths(source: Path, destination: Path, paths: Iterable[str]) -> None:
+    """Import exact file/type/mode states without staging destination paths.
+
+    Transfer captured blobs into the destination object store first, so no
+    shared Git storage or surviving disposable checkout is required. Validate
+    every path before the first destination write.
+    """
+    states = snapshot_worktree_paths(source, paths, allow_leaf_symlink=True)
+    for state in states:
+        _require_git_path_confined(destination, state.path, allow_leaf_symlink=True)
+        if state.state == "gitlink":
+            raise GitError("isolated fixer cannot publish a gitlink mutation")
+        if state.digest is not None:
+            if _write_git_blob(destination, _read_git_blob(source, state.digest)) != state.digest:
+                raise GitError("isolated fixer blob transfer changed identity")
+    for state in states:
+        _restore_path_state(destination, state, allow_leaf_type_replacement=True)
 
 
 def restore_index(repo: Path, snapshot: IndexSnapshot) -> None:

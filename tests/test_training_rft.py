@@ -11,6 +11,7 @@ propagation on missing identity / scalar thresholds.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -75,6 +76,23 @@ def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Pat
         assert w.breakdown.composite is not None  # every winner went through score_trajectory's breakdown
         assert w.breakdown.correctness_per_finding
         assert sum(w.breakdown.correctness_per_finding) / len(w.breakdown.correctness_per_finding) >= 0.5
+
+
+def test_shipped_threshold_example_replays_current_reward(
+    frozen_rft_inputs: Path, tmp_path: Path,
+) -> None:
+    """The shipped launch example must produce winners with supported reward axes."""
+    example = Path(__file__).resolve().parents[1] / "rl/train/rft.toml"
+    match = re.search(r"e\.g\. (\{[^\n]+\})", example.read_text())
+    assert match is not None, "the reference recipe must document a winner threshold"
+    spec = json.loads(match.group(1))
+    winners = run_rft(RftConfig(
+        inputs=frozen_rft_inputs, seed=11, rubric_version="current",
+        output_dir=tmp_path / "shipped-example", min_breakdown=spec,
+    ))
+    assert winners.records
+    assert all(w.breakdown.composite is not None and w.breakdown.composite >= spec["composite"]
+               for w in winners.records)
 
 
 def test_spec_axes_match_score_trajectory_breakdown_fields(

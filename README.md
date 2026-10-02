@@ -293,13 +293,17 @@ The build stage applies a temporal-leakage guard. It prevents future data from l
 
 ### Scoring
 
-The harvest stage scores each trajectory. The intrinsic reward is a composite:
+The harvest stage scores each trajectory using verifier correctness and a length penalty:
 
-- Correctness, weight 0.6
-- Grounding, weight 0.4
-- A length ramp (a penalty)
+```text
+correctness = mean(consistent: 1.0, uncertain: 0.5, contradicts: 0.0)
+length_penalty = clip((length - 2000) / 8000, 0, 1)
+composite = round(clip(correctness - 0.2 * length_penalty, 0, 1), 4)
+```
 
-The format-valid check dominates. A trajectory that fails the format check receives no reward. Daydream records a posterior-cost axis as a sibling. It is never folded into the intrinsic reward.
+The format-valid check dominates: invalid format yields `0.0`. Missing or empty verifier verdicts leave the composite uncomputable (`None`); missing length contributes no penalty. The current reward version is `2026.10.01-1`. Grounding is no longer a reward axis. Daydream records posterior cost separately from the intrinsic reward; `w_fp = 0.3` remains a training-time combination parameter and is never subtracted here.
+
+RFT winner thresholds support `composite`, `correctness_per_finding` (mean score), and `length_penalty`. Each threshold is a minimum; a length threshold selects at least that much penalty, not a maximum verbosity limit.
 
 ### Upload to a private Hugging Face dataset
 

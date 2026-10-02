@@ -568,20 +568,24 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
     )
 
 
-async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
+async def test_fix_quality_gate_covers_authorized_secondary_edit(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 6): a file edited OUTSIDE its finding group is gated."""
+    """Real-path (#329/Finding 6): an explicitly authorized secondary file is gated."""
 
     target = _build_gate_target_with_helper(tmp_path, "gate_secondary_edit")
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
     stub = _ExtraEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    # A single-stack run consumes parsed findings directly, without merge.
+    stub.parse_by_stack = {"python": {
+        "severity": "high", "confidence": "MEDIUM",
+        "issue": {"related_files": ["helper.py"]},
+    }}
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
@@ -591,7 +595,7 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     gate = _read_quality_gate(target)
     assert gate["enabled"] is True
     per_file = gate["rounds"][0]["per_file"]
-    assert "helper.py" in per_file, "a file the fix agent edited outside its finding group must be gated"
+    assert "helper.py" in per_file, "an authorized secondary file must still pass the quality gate"
     helper = per_file["helper.py"]
     assert helper["verbosity_delta"] is not None, "the secondary file's delta must be computed"
     assert helper["verbosity_after"] > helper["verbosity_before"]
