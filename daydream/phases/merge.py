@@ -57,9 +57,13 @@ def _empty_merge_inputs(per_stack_records_paths: list[Path], alternatives_path: 
     if not per_stack_records_paths:
         return False
     try:
-        for path in [*per_stack_records_paths, alternatives_path]:
+        for path in per_stack_records_paths:
             if record_issues(json.loads(path.read_text())) != []:
                 return False
+        # Unlike records, the persisted alternatives contract is a bare list;
+        # an issues envelope does not establish completed alternative coverage.
+        if json.loads(alternatives_path.read_text()) != []:
+            return False
     except (OSError, ValueError):
         return False
     return True

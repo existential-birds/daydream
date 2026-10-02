@@ -43,7 +43,7 @@ async def test_empty_completed_merge_publishes_host_result_without_provider(
 @pytest.mark.parametrize("input_kind", [
     "nonempty-records", "nonempty-alternatives", "missing-records", "missing-alternatives",
     "malformed-records", "malformed-alternatives", "wrong-records-shape", "wrong-alternatives-shape",
-    "no-record-paths", "custom-strategy", "custom-builder",
+    "envelope-alternatives", "no-record-paths", "custom-strategy", "custom-builder",
 ])
 async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
     tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch, input_kind: str,
@@ -64,6 +64,8 @@ async def test_empty_merge_requires_completed_inputs_and_builtin_contract(
         (records if input_kind == "malformed-records" else alternatives).write_text("{bad json")
     elif input_kind.startswith("wrong-"):
         (records if input_kind == "wrong-records-shape" else alternatives).write_text('{"issues": null}')
+    elif input_kind == "envelope-alternatives":
+        alternatives.write_text('{"issues": []}')
     elif input_kind == "custom-strategy":
         strategy = "Perform an independent custom merge inspection."
     elif input_kind == "custom-builder":

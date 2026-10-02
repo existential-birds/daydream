@@ -25,3 +25,22 @@ def test_failed_reviewer_remains_a_reported_warning(tmp_path: Path, reason: str)
 
     per_stack_failures_path(tmp_path).write_text("{}")
     assert review_warnings(tmp_path) == ("Arbiter: wall budget exhausted",)
+
+
+def test_reserved_merge_failure_is_not_a_reviewer_warning(tmp_path: Path) -> None:
+    per_stack_failures_path(tmp_path).write_text(json.dumps({
+        "__merge__": "corrupt", "python": "provider unavailable",
+    }))
+    assert review_warnings(tmp_path) == ("python: provider unavailable",)
+
+
+def test_failed_reviewer_warning_redacts_provider_credentials(tmp_path: Path) -> None:
+    reason = "RuntimeError: OPENROUTER_API_KEY=not-a-real-credential"
+    per_stack_failures_path(tmp_path).write_text(json.dumps({"python": reason}))
+
+    warnings = review_warnings(tmp_path)
+
+    assert len(warnings) == 1
+    assert "not-a-real-credential" not in warnings[0]
+    assert "[REDACTED_ENV_VAR]" in warnings[0]
+    assert json.loads(per_stack_failures_path(tmp_path).read_text()) == {"python": reason}

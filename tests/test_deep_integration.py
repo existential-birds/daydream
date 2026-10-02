@@ -39,10 +39,13 @@ class _DeepMockBackend(ScriptedBackend):
     Stage labels live in stages to avoid colliding with the harness's calls.
     """
 
-    def __init__(self, *, cost_usd: float | None = 0.01, raise_on_agents: bool = False,) -> None:
+    def __init__(
+        self, *, cost_usd: float | None = 0.01, raise_on_agents: bool = False, language_finding: bool = False,
+    ) -> None:
         super().__init__(model="mock-model", cost_usd=cost_usd, responder=self._dispatch)
         self.cost_usd = cost_usd
         self.raise_on_agents = raise_on_agents
+        self.language_finding = language_finding
         self.stages: list[str] = []
 
     def _dispatch(
@@ -109,14 +112,21 @@ class _DeepMockBackend(ScriptedBackend):
                     out.parent.mkdir(parents=True, exist_ok=True)
                     out.write_text(f"# Review ({name})\n\n## Issues\n1. [a.py:1] stub\n")
             # Issue #745: per-stack reviewer emits structured output directly.
-            events += [TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),]
+            issues = [{"id": 1, "description": "Language review finding", "file": "api.py", "line": 1,
+                       "severity": "medium", "confidence": "MEDIUM", "rationale": "stub", "evidence": "api.py:1"}
+                      ] if self.language_finding and m is not None and m.group(1) == "python" else []
+            events += [TextEvent(text=""), ResultEvent(structured_output={"issues": issues}, continuation=None),]
             return events
 
-        # Merge: return an empty item list (no language-stack issues in this fixture),
-        # so the host's canonical report carries only the appended structural section.
+        # Backend parity fixtures exercise the model merge with language findings;
+        # structural-only fixtures retain the host's deterministic merge path.
         if "cross-stack merge agent" in pl:
             self.stages.append("merge")
-            events += [TextEvent(text=""), ResultEvent(structured_output={"items": []}, continuation=None),]
+            items = [{"id": 1, "lens": "per-stack", "description": "Language review finding", "file": "api.py",
+                      "line": 1, "severity": "medium", "confidence": "MEDIUM", "rationale": "stub",
+                      "evidence": "api.py:1", "source_uids": ["python:1"]}
+                     ] if self.language_finding else []
+            events += [TextEvent(text=""), ResultEvent(structured_output={"items": items}, continuation=None),]
             return events
 
         # Fallback -- unexpected prompt, but keep the pipeline alive.
@@ -161,7 +171,7 @@ async def _run_deep(target: Path, backend: _DeepMockBackend, monkeypatch: pytest
 
 async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes end-to-end on a Claude-shaped backend (cost_usd populated)."""
-    backend = _DeepMockBackend(cost_usd=0.0123)
+    backend = _DeepMockBackend(cost_usd=0.0123, language_finding=True)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), ("merged report missing after Claude-shape run")
@@ -172,10 +182,11 @@ async def test_claude_shape_backend(multi_stack_target: Path, monkeypatch: pytes
 
 async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """D-38: run_deep completes on Codex-shape (cost_usd=None, no agents= ever passed)."""
-    backend = _DeepMockBackend(cost_usd=None, raise_on_agents=True)
+    backend = _DeepMockBackend(cost_usd=None, raise_on_agents=True, language_finding=True)
     exit_code = await _run_deep(multi_stack_target, backend, monkeypatch)
     assert exit_code == 0, f"run_deep returned {exit_code} (expected 0)"
     assert (multi_stack_target / REVIEW_OUTPUT_FILE).exists(), ("merged report missing after Codex-shape run")
+    assert {"intent", "structure", "per-stack", "merge"}.issubset(backend.stages)
     # Parity guarantee: any stage passing agents= would have raised
     # NotImplementedError above; this asserts it directly too.
     agents_kwargs_seen = [call["agents"] for call in backend.calls]
