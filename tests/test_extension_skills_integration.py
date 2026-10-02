@@ -15,30 +15,21 @@ import pytest
 
 from daydream import review_profile as rp, runner
 from daydream.backends import ResultEvent, TextEvent
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.test_deep_orchestrator import _install_stub_backend, _silence
 
-_CLEAN_TURN = (
-    TextEvent(text=""),
-    ResultEvent(structured_output={"issues": []}, continuation=None),
-)
-
+_CLEAN_TURN = (TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
 
 async def test_shallow_stack_uses_native_profile_strategy_no_skill(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    mute_side_effects: Callable[..., None],
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], mute_side_effects: Callable[..., None],
 ) -> None:
     """``--stack python`` renders the native per-stack strategy with no skill token.
 
-    Built-in stacks have no ``stack:*`` skill slot (M1/M2); the shallow flow's
-    review prompt must carry the profile-owned ``discovery.per_stack`` strategy
-    and never a Beagle/skill invocation.
-    """
+    Built-in stacks have no ``stack:*`` skill slot (M1/M2); the shallow flow's review prompt must carry the
+    profile-owned ``discovery.per_stack`` strategy and never a Beagle/skill invocation."""
     backend = ScriptedBackend(events=_CLEAN_TURN)
     install_backend(backend)
     mute_side_effects("daydream.deep.fix_steps")
@@ -50,22 +41,16 @@ async def test_shallow_stack_uses_native_profile_strategy_no_skill(
     assert any(strategy in p for p in backend.prompts)
     assert not any("/beagle-" in p or "/ro-" in p or "/skill:" in p for p in backend.prompts)
 
-
 async def test_fork_stack_rule_routes_deep_per_stack_review(
-    ext_dir: ExtDir,
-    multi_stack_target: Path,
-    make_config: Callable[..., RunConfig],
-    mute_side_effects: Callable[..., None],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, multi_stack_target: Path, make_config: Callable[..., RunConfig],
+    mute_side_effects: Callable[..., None], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A daydream_ext ``add_stack(StackRule(...))`` reaches the deep per-stack review.
 
-    Commits a ``.proto`` file into the multi-stack diff so ``detect_stacks``
-    (deep flow only) sees a file matching the fork glob, then drives the full
-    deep pipeline through ``runner.run``. Observable outcomes: exit 0, the
-    routed ``.proto`` file reaches the per-stack reviewer, and the prompt is
-    native (profile strategy, no fork skill invocation).
-    """
+    Commits a ``.proto`` file into the multi-stack diff so ``detect_stacks`` (deep flow only) sees a file matching
+    the fork glob, then drives the full deep pipeline through ``runner.run``. Observable outcomes: exit 0, the
+    routed ``.proto`` file reaches the per-stack reviewer, and the prompt is native (profile strategy, no fork
+    skill invocation)."""
     ext_dir.write_module(
         "from daydream.extensions import StackRule\n"
         "def register(r):\n"
@@ -90,10 +75,7 @@ async def test_fork_stack_rule_routes_deep_per_stack_review(
     # The fork StackRule routes the .proto file to the proto stack (scope
     # metadata), but the native per-stack prompt carries the profile strategy
     # with no skill invocation (M2/M12).
-    proto_prompts = [
-        c["prompt"] for c in backend.calls
-        if "you are reviewing the proto stack" in c["prompt"].lower()
-    ]
+    proto_prompts = [c["prompt"] for c in backend.calls if "you are reviewing the proto stack" in c["prompt"].lower()]
     assert proto_prompts and "api.proto" in proto_prompts[0]
     assert "/ro-proto:review-proto" not in proto_prompts[0]
     assert "/beagle-" not in proto_prompts[0]

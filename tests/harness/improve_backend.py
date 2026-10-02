@@ -54,56 +54,26 @@ _AUDIT_HEADINGS = {
 }
 
 
-def plan_ref(
-    recon_command_id: str = "test-suite",
-    *,
-    appended_args: str | None = None,
-    note: str | None = None,
+def plan_ref(recon_command_id: str = "test-suite", *, appended_args: str | None = None, note: str | None = None,
 ) -> dict[str, Any]:
-    return {
-        "recon_command_id": recon_command_id,
-        "appended_args": appended_args,
-        "note": note,
-    }
+    return {"recon_command_id": recon_command_id, "appended_args": appended_args, "note": note}
 
 
 def _neutral_maintenance_fields() -> dict[str, Any]:
     """Required finding metadata for fixtures unrelated to cleanup pressure."""
-    return {
-        "maintenance_signals": [],
-        "change_shape": "unknown",
-        "reuse_target": None,
-    }
+    return {"maintenance_signals": [], "change_shape": "unknown", "reuse_target": None}
 
 
 def _recon_command(
-    *,
-    command_id: str,
-    purpose: str,
-    command: str,
-    line: int,
-    excerpt: str,
-    observable_result: str,
-    rationale: str,
+    *, command_id: str, purpose: str, command: str, line: int, excerpt: str, observable_result: str, rationale: str,
     scope_kind: str = "whole-repository",
 ) -> dict[str, Any]:
     """One recon-command record in the shared validated shape."""
-    return {
-        "id": command_id,
-        "purpose": purpose,
-        "command": command,
-        "working_directory": ".",
+    return {"id": command_id, "purpose": purpose, "command": command, "working_directory": ".",
         "expected_success": {"exit_code": 0, "observable_result": observable_result},
-        "applicability": {
-            "scope": {"kind": scope_kind},
-            "preconditions": [],
-            "rationale": rationale,
-        },
-        "evidence": {
-            "kind": "literal-command",
-            "source_path": "pyproject.toml",
-            "line_anchor": {"start_line": line, "end_line": line},
-            "verbatim_excerpt": excerpt,
+        "applicability": {"scope": {"kind": scope_kind}, "preconditions": [], "rationale": rationale},
+        "evidence": {"kind": "literal-command", "source_path": "pyproject.toml",
+            "line_anchor": {"start_line": line, "end_line": line}, "verbatim_excerpt": excerpt,
         },
     }
 
@@ -115,26 +85,15 @@ def stub_recon_commands(*, all_invalid: bool = False, start_line: int = 5) -> li
     validating against a REAL ``pyproject.toml`` can point both at its lines.
     """
     scope_kind = "unsupported" if all_invalid else "whole-repository"
-    return [
-        _recon_command(
-            command_id="test-suite",
-            purpose="Run the repository Python test suite",
-            command="uv run pytest",
-            line=start_line,
-            excerpt='test-command = "uv run pytest"',
+    return [_recon_command(
+            command_id="test-suite", purpose="Run the repository Python test suite", command="uv run pytest",
+            line=start_line, excerpt='test-command = "uv run pytest"',
             observable_result="exit 0 and the selected pytest tests pass",
-            rationale="The root configuration declares the test command.",
-            scope_kind=scope_kind,
-        ),
-        _recon_command(
-            command_id="git-diff",
-            purpose="Check that unrelated paths remain unchanged",
-            command="git diff --exit-code",
-            line=start_line + 1,
-            excerpt='scope-command = "git diff --exit-code"',
+            rationale="The root configuration declares the test command.", scope_kind=scope_kind,
+        ), _recon_command(command_id="git-diff", purpose="Check that unrelated paths remain unchanged",
+            command="git diff --exit-code", line=start_line + 1, excerpt='scope-command = "git diff --exit-code"',
             observable_result="exit 0 and no unexpected diff is reported",
-            rationale="The root configuration declares the scope command.",
-            scope_kind=scope_kind,
+            rationale="The root configuration declares the scope command.", scope_kind=scope_kind,
         ),
     ]
 
@@ -144,163 +103,88 @@ def _authored_plan_result(finding: dict[str, Any]) -> dict[str, Any]:
         f" for the requested change: {finding['title']}" if finding.get("category") == "requested" else ""
     )
     title = finding["title"] if len(finding["title"]) >= 12 else f"Implement requested change {finding['title']}"
-    step_gate = plan_ref(
-        "test-suite",
-        appended_args="apps/billing/test_api.py -q",
+    step_gate = plan_ref("test-suite", appended_args="apps/billing/test_api.py -q",
         note="The focused billing suite proves the changed behavior.",
     )
-    test_gate = plan_ref(
-        "test-suite",
-        appended_args="apps/billing/test_api.py -q",
-    )
+    test_gate = plan_ref("test-suite", appended_args="apps/billing/test_api.py -q",)
     scope_gate = plan_ref(
-        "git-diff",
-        appended_args="-- README.md",
-        note="Documentation must stay untouched by the billing change.",
+        "git-diff", appended_args="-- README.md", note="Documentation must stay untouched by the billing change.",
     )
     return {
-        "title": title,
-        "covered_fingerprints": list(finding.get("member_fingerprints") or [finding["fingerprint"]]),
-        "why_this_matters": {
-            "problem": (f"{finding['title']} affects the billing service contract today."),
+        "title": title, "covered_fingerprints": list(finding.get("member_fingerprints") or [finding["fingerprint"]]),
+        "why_this_matters": {"problem": (f"{finding['title']} affects the billing service contract today."),
             "concrete_cost": (
                 "Leaving the billing behavior unchanged creates avoidable maintenance and verification cost."
             ),
             "intended_outcome": ("The billing service has an explicit implementation and named regression coverage."),
-        },
-        "scope": {
-            "existing_paths": [
-                {
-                    "path": "apps/billing/api.py",
+        }, "scope": {"existing_paths": [{"path": "apps/billing/api.py",
                     "role": (f"Implement the selected billing behavior{requested_context}."),
                 }
-            ],
-            "new_paths": [
-                {
-                    "path": "apps/billing/test_api.py",
+            ], "new_paths": [{"path": "apps/billing/test_api.py",
                     "role": (f"Add named regression coverage for billing{requested_context}."),
                 }
             ],
             "out_of_scope_paths": [
-                {
-                    "path": "README.md",
-                    "reason": "The billing implementation does not alter documentation.",
-                }
-            ],
-            "out_of_scope_behaviors": [
-                {
-                    "behavior": "The public service_name return type remains a string.",
+                {"path": "README.md", "reason": "The billing implementation does not alter documentation."}
+            ], "out_of_scope_behaviors": [{"behavior": "The public service_name return type remains a string.",
                     "reason": "Existing service consumers depend on the return type.",
                 }
             ],
-        },
-        "context_excerpts": [
-            {
-                "path": "apps/billing/api.py",
-                "start_line": 1,
-                "end_line": 2,
-                "file_role": (
-                    f"Quote the billing behavior being changed{requested_context}."
-                ),
+        }, "context_excerpts": [{"path": "apps/billing/api.py", "start_line": 1, "end_line": 2,
+                "file_role": (f"Quote the billing behavior being changed{requested_context}."),
             }
-        ],
-        "git_workflow": {
-            "commit_boundaries": "Commit the billing behavior and test as one logical unit.",
+        ], "git_workflow": {"commit_boundaries": "Commit the billing behavior and test as one logical unit.",
             "commit_message_example": "fix: preserve billing service contract",
-        },
-        "steps": [
-            {
-                "title": "Implement the billing service behavior",
-                "changes": [
-                    {
-                        "path": "apps/billing/api.py",
-                        "symbol": "service_name",
-                        "operation": "modify",
-                        "instruction": (
-                            "Implement the requested behavior at the service_name "
+        }, "steps": [{"title": "Implement the billing service behavior",
+                "changes": [{"path": "apps/billing/api.py", "symbol": "service_name", "operation": "modify",
+                        "instruction": ("Implement the requested behavior at the service_name "
                             f"boundary{requested_context}."
                         ),
-                        "target_state": (
-                            "service_name preserves its string contract with "
+                        "target_state": ("service_name preserves its string contract with "
                             f"explicit behavior{requested_context}."
                         ),
                     }
-                ],
-                "verification": step_gate,
-            },
-            {
-                "title": "Add the named billing regression",
-                "changes": [
-                    {
-                        "path": "apps/billing/test_api.py",
-                        "symbol": "test_service_name_preserves_contract",
+                ], "verification": step_gate,
+            }, {"title": "Add the named billing regression",
+                "changes": [{"path": "apps/billing/test_api.py", "symbol": "test_service_name_preserves_contract",
                         "operation": "create",
-                        "instruction": (
-                            "Create a focused regression for the service_name "
+                        "instruction": ("Create a focused regression for the service_name "
                             f"contract{requested_context}."
                         ),
-                        "target_state": (
-                            "test_service_name_preserves_contract checks the "
+                        "target_state": ("test_service_name_preserves_contract checks the "
                             f"requested behavior{requested_context}."
                         ),
                     }
-                ],
-                "verification": test_gate,
+                ], "verification": test_gate,
             },
-        ],
-        "test_plan": {
-            "mode": "new-or-updated-tests",
+        ], "test_plan": {"mode": "new-or-updated-tests",
             "rationale": ("The selected behavior changes and needs one focused regression test."),
             "existing_coverage": [],
             # The fixture repository intentionally has no tests yet. A source
             # helper is not a test exemplar, so the honest contract is empty.
             "exemplars": [],
-            "cases": [
-                {
-                    "name": (f"Billing service preserves the requested contract{requested_context}"),
-                    "test_file": "apps/billing/test_api.py",
-                    "test_symbol": "test_service_name_preserves_contract",
-                    "kind": "unit",
-                    "setup": (f"Import service_name from the billing API module{requested_context}."),
+            "cases": [{"name": (f"Billing service preserves the requested contract{requested_context}"),
+                    "test_file": "apps/billing/test_api.py", "test_symbol": "test_service_name_preserves_contract",
+                    "kind": "unit", "setup": (f"Import service_name from the billing API module{requested_context}."),
                     "action": (f"Call service_name once without additional arguments{requested_context}."),
                     "assertions": [f"The returned value is the expected billing service string{requested_context}."],
                     "verification": test_gate,
                 }
             ],
-        },
-        "done_criteria": [
-            {
-                "kind": "behavior",
-                "description": (
-                    "service_name implements the requested billing behavior"
-                    f"{requested_context}."
-                ),
+        }, "done_criteria": [{"kind": "behavior",
+                "description": ("service_name implements the requested billing behavior" f"{requested_context}."),
                 "verification": step_gate,
-            },
-            {
-                "kind": "test-gate",
-                "description": "The named billing service regression test passes.",
+            }, {"kind": "test-gate", "description": "The named billing service regression test passes.",
                 "verification": test_gate,
-            },
-            {
-                "kind": "scope-integrity",
-                "description": "No file outside the declared billing scope changes.",
+            }, {"kind": "scope-integrity", "description": "No file outside the declared billing scope changes.",
                 "verification": scope_gate,
             },
         ],
         "false_assumption": {
-            "condition": (
-                "The service_name public return type is not a string "
-                f"contract{requested_context}."
-            ),
-            "evidence_to_report": (
-                "Report the actual callers and observed return contract"
-                f"{requested_context}."
-            ),
-            "related_paths": ["apps/billing/api.py"],
-            "related_step_numbers": [1],
-        },
-        "additional_command_refs": [],
+            "condition": ("The service_name public return type is not a string " f"contract{requested_context}."),
+            "evidence_to_report": ("Report the actual callers and observed return contract" f"{requested_context}."),
+            "related_paths": ["apps/billing/api.py"], "related_step_numbers": [1],
+        }, "additional_command_refs": [],
     }
 
 
@@ -312,9 +196,7 @@ def _menu_ids(prompt: str) -> list[str]:
     return _MENU_ID.findall(prompt)
 
 
-def _set_plan_verification(
-    plan: dict[str, Any], verification: dict[str, Any] | None
-) -> dict[str, Any]:
+def _set_plan_verification(plan: dict[str, Any], verification: dict[str, Any] | None) -> dict[str, Any]:
     """Point every verification slot at one value (a recon ref, or ``None``)."""
     plan["additional_command_refs"] = []
     for step in plan["steps"]:
@@ -361,11 +243,7 @@ def _citable_file(target: Path, root: str) -> str:
     direct = sorted(path for path in base.iterdir() if path.is_file())
     if direct:
         return direct[0].relative_to(target).as_posix()
-    nested = sorted(
-        path
-        for path in base.rglob("*")
-        if path.is_file() and ".git" not in path.parts
-    )
+    nested = sorted(path for path in base.rglob("*") if path.is_file() and ".git" not in path.parts)
     return nested[0].relative_to(target).as_posix() if nested else f"{root}/api.py"
 
 
@@ -375,12 +253,7 @@ class ImproveStubBackend:
     model = "mock-model"
 
     def __init__(
-        self,
-        target: Path,
-        *,
-        n_findings: int | None = None,
-        attempt_write: bool = False,
-        fanout_concurrency: int = 4,
+        self, target: Path, *, n_findings: int | None = None, attempt_write: bool = False, fanout_concurrency: int = 4,
     ) -> None:
         self._target = target
         self.audit_root_isolation: str | None = None
@@ -430,12 +303,7 @@ class ImproveStubBackend:
         # (e.g. advance HEAD) with a plan-write session already open.
         self.on_first_plan_write: Callable[[], None] | None = None
 
-    async def _pre_execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        **turn_kwargs: Any,
-    ) -> list[AgentEvent] | None:
+    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any,) -> list[AgentEvent] | None:
         """Per-turn hook run before the dispatch body.
 
         Return a list of events to short-circuit the body entirely; return
@@ -445,48 +313,26 @@ class ImproveStubBackend:
         """
         return None
 
-    async def _post_execute(
-        self,
-        prompt: str,
-        **turn_kwargs: Any,
-    ) -> None:
+    async def _post_execute(self, prompt: str, **turn_kwargs: Any,) -> None:
         """Per-turn hook run after the dispatch body has been fully consumed."""
 
     def _record_call(self, cwd: Path, prompt: str, marker: str, **turn_kwargs: Any) -> None:
         """Append one per-turn call record, stamped with the model observed here."""
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": turn_kwargs.get("output_schema"),
-                "agents": turn_kwargs.get("agents"),
-                "max_turns": turn_kwargs.get("max_turns"),
+        self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": turn_kwargs.get("output_schema"),
+                "agents": turn_kwargs.get("agents"), "max_turns": turn_kwargs.get("max_turns"),
                 "read_only": turn_kwargs.get("read_only", False),
-                "persist_session": turn_kwargs.get("persist_session", True),
-                "marker": marker,
-                "model": self.model,
+                "persist_session": turn_kwargs.get("persist_session", True), "marker": marker, "model": self.model,
                 "reasoning_effort": self.reasoning_effort,
             }
         )
 
     async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
+        self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         turn_kwargs: dict[str, Any] = {
-            "output_schema": output_schema,
-            "continuation": continuation,
-            "agents": agents,
-            "max_turns": max_turns,
-            "read_only": read_only,
-            "persist_session": persist_session,
+            "output_schema": output_schema, "continuation": continuation, "agents": agents, "max_turns": max_turns,
+            "read_only": read_only, "persist_session": persist_session,
         }
         prelude = await self._pre_execute(cwd, prompt, **turn_kwargs)
         if prelude is not None:
@@ -498,15 +344,8 @@ class ImproveStubBackend:
         await self._post_execute(prompt, **turn_kwargs)
 
     async def _execute_body(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
+        self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
         marker = "other"
         category = None
@@ -525,115 +364,63 @@ class ImproveStubBackend:
                 hook, self.on_first_plan_write = self.on_first_plan_write, None
                 hook()
         self._record_call(
-            cwd,
-            prompt,
-            marker,
-            output_schema=output_schema,
-            agents=agents,
-            max_turns=max_turns,
-            read_only=read_only,
+            cwd, prompt, marker, output_schema=output_schema, agents=agents, max_turns=max_turns, read_only=read_only,
             persist_session=persist_session,
         )
         if self._attempt_write and not self._write_attempted:
             self._write_attempted = True
             write_path = self._target / "agent-write-attempt.txt"
-            yield ToolStartEvent(
-                id="improve-write-attempt",
-                name="Write",
-                input={
-                    "file_path": str(write_path),
-                    "content": "must not be written",
-                },
+            yield ToolStartEvent(id="improve-write-attempt", name="Write",
+                input={"file_path": str(write_path), "content": "must not be written"},
             )
             if read_only:
                 yield ToolResultEvent(
-                    id="improve-write-attempt",
-                    output="denied by read-only backend profile",
-                    is_error=True,
+                    id="improve-write-attempt", output="denied by read-only backend profile", is_error=True,
                 )
             else:
                 write_path.write_text("must not be written")
-                yield ToolResultEvent(
-                    id="improve-write-attempt",
-                    output="written",
-                    is_error=False,
-                )
+                yield ToolResultEvent(id="improve-write-attempt", output="written", is_error=False,)
         if category in self.fail_categories:
             raise RuntimeError(f"{category} audit failed")
         if marker == "repo-scan":
-            yield ResultEvent(
-                structured_output={
-                    "conventions": [
-                        {
-                            "name": "OpenAPI First",
-                            "description": "openapi.yaml is the HTTP contract",
+            yield ResultEvent(structured_output={"conventions": [{
+                            "name": "OpenAPI First", "description": "openapi.yaml is the HTTP contract",
                             "source": "CLAUDE.md",
                         }
-                    ],
-                    "guidelines": [],
-                },
-                continuation=None,
+                    ], "guidelines": [],
+                }, continuation=None,
             )
             return
 
         if "IMPROVE_RECON" in prompt:
             if self.recon_output_override is not None:
-                yield ResultEvent(
-                    structured_output=self.recon_output_override,
-                    continuation=None,
-                )
+                yield ResultEvent(structured_output=self.recon_output_override, continuation=None,)
                 return
-            commands = stub_recon_commands(
-                all_invalid=self.all_recon_commands_invalid
-            )
+            commands = stub_recon_commands(all_invalid=self.all_recon_commands_invalid)
             commands = [*commands, *self.recon_commands_extra]
-            yield ResultEvent(
-                structured_output={
-                    "languages": (
-                        self.recon_languages_override
+            yield ResultEvent(structured_output={"languages": (self.recon_languages_override
                         if self.recon_languages_override is not None
                         else ["python", "typescript"]
-                    ),
-                    "commands": commands,
-                    "conventions": ["OpenAPI First"],
-                    "intent_docs": ["README.md"],
-                },
-                continuation=None,
+                    ), "commands": commands, "conventions": ["OpenAPI First"], "intent_docs": ["README.md"],
+                }, continuation=None,
             )
             return
         if category is not None:
             category_index = AUDIT_CATEGORIES.index(category)
-            if (
-                self._n_findings is not None
-                and category_index >= self._n_findings
-            ):
-                yield ResultEvent(
-                    structured_output={"findings": []},
-                    continuation=None,
-                )
+            if (self._n_findings is not None and category_index >= self._n_findings):
+                yield ResultEvent(structured_output={"findings": []}, continuation=None,)
                 return
             if self.findings_per_category is not None:
                 cited = "apps/billing/api.py"
-                yield ResultEvent(
-                    structured_output={
-                        "findings": [
-                            {
-                                "title": f"{category.title()} finding {number:02d}",
-                                "category": "wrong-agent-category",
-                                "path": cited,
-                                "line": 1,
-                                "body": f"Concrete {category} impact and fix {number:02d}.",
-                                "impact": "HIGH",
-                                "effort": "S",
-                                "risk": "LOW",
-                                "confidence": "HIGH",
-                                "evidence": [f"{cited}:1"],
-                                **_neutral_maintenance_fields(),
+                yield ResultEvent(structured_output={"findings": [{
+                                "title": f"{category.title()} finding {number:02d}", "category": "wrong-agent-category",
+                                "path": cited, "line": 1, "body": f"Concrete {category} impact and fix {number:02d}.",
+                                "impact": "HIGH", "effort": "S", "risk": "LOW", "confidence": "HIGH",
+                                "evidence": [f"{cited}:1"], **_neutral_maintenance_fields(),
                             }
                             for number in range(1, self.findings_per_category + 1)
                         ]
-                    },
-                    continuation=None,
+                    }, continuation=None,
                 )
                 return
             title = f"{category.title()} finding"
@@ -650,86 +437,42 @@ class ImproveStubBackend:
                 group, root = group_scope(prompt)
                 cited = _citable_file(self._target, root)
                 title = f"{title} in {group}"
-            findings = [
-                {
-                    "title": (
-                        f"{title} OPENAI_API_KEY=sk-secret123456"
-                        if self.inject_credential
-                        else title
-                    ),
-                    "category": "wrong-agent-category",
-                    "path": cited,
-                    "line": 1,
-                    "body": f"Concrete {category} impact and fix.",
-                    "impact": impact,
-                    "effort": effort,
-                    "risk": "LOW",
-                    "confidence": "HIGH",
-                    "evidence": [f"{cited}:1"],
-                    **_neutral_maintenance_fields(),
+            findings = [{"title": (f"{title} OPENAI_API_KEY=sk-secret123456" if self.inject_credential else title),
+                    "category": "wrong-agent-category", "path": cited, "line": 1,
+                    "body": f"Concrete {category} impact and fix.", "impact": impact, "effort": effort, "risk": "LOW",
+                    "confidence": "HIGH", "evidence": [f"{cited}:1"], **_neutral_maintenance_fields(),
                 }
             ]
             if category == "performance":
-                findings.append(
-                    {
-                        "title": "Phantom N+1",
-                        "category": "wrong-agent-category",
-                        "path": "apps/catalog/api.py",
-                        "line": 1,
-                        "body": "Claims a query loop that is not present.",
-                        "impact": "HIGH",
-                        "effort": "S",
-                        "risk": "LOW",
-                        "confidence": "HIGH",
-                        "evidence": ["apps/catalog/api.py:1"],
+                findings.append({
+                        "title": "Phantom N+1", "category": "wrong-agent-category", "path": "apps/catalog/api.py",
+                        "line": 1, "body": "Claims a query loop that is not present.", "impact": "HIGH", "effort": "S",
+                        "risk": "LOW", "confidence": "HIGH", "evidence": ["apps/catalog/api.py:1"],
                         **_neutral_maintenance_fields(),
                     }
                 )
-            yield ResultEvent(
-                structured_output={"findings": findings},
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"findings": findings}, continuation=None,)
             return
         if marker == "vet":
-            match = re.search(
-                r"Candidates .*?:\n```json\n(.*?)\n```",
-                prompt,
-                flags=re.DOTALL,
-            )
+            match = re.search(r"Candidates .*?:\n```json\n(.*?)\n```", prompt, flags=re.DOTALL,)
             assert match is not None
             candidates = json.loads(match.group(1))
-            if any(
-                candidate["title"] in self.fail_vet_titles
-                for candidate in candidates
-            ):
+            if any(candidate["title"] in self.fail_vet_titles for candidate in candidates):
                 raise RuntimeError("vet batch failed")
-            yield ResultEvent(
-                structured_output={
-                    "verdicts": [
-                        {
-                            "vet_id": candidate["vet_id"],
+            yield ResultEvent(structured_output={"verdicts": [{"vet_id": candidate["vet_id"],
                             "keep": candidate["title"]
                             not in self.vet_reject_titles,
-                            "reason": (
-                                "No query loop exists at the cited location."
+                            "reason": ("No query loop exists at the cited location."
                                 if candidate["title"] in self.vet_reject_titles
                                 else "Confirmed from cited evidence."
-                            ),
-                            "severity": None,
-                            "impact": candidate["impact"],
-                            "effort": candidate["effort"],
-                            "risk": candidate["risk"],
-                            "confidence": candidate["confidence"],
-                            "path": candidate["path"],
-                            "line": candidate["line"],
-                            "maintenance_signals": candidate["maintenance_signals"],
-                            "change_shape": candidate["change_shape"],
-                            "reuse_target": candidate["reuse_target"],
+                            ), "severity": None, "impact": candidate["impact"], "effort": candidate["effort"],
+                            "risk": candidate["risk"], "confidence": candidate["confidence"], "path": candidate["path"],
+                            "line": candidate["line"], "maintenance_signals": candidate["maintenance_signals"],
+                            "change_shape": candidate["change_shape"], "reuse_target": candidate["reuse_target"],
                         }
                         for candidate in candidates
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
         if marker == "plan-writer":
@@ -743,22 +486,14 @@ class ImproveStubBackend:
             if self.inject_credential:
                 yield TextEvent(text="OPENAI_API_KEY=sk-secret123456")
             for index in range(self.plan_tool_calls_before_result):
-                yield ToolStartEvent(
-                    id=f"plan-read-{index}",
-                    name="Read",
-                    input={"file_path": "apps/billing/api.py"},
-                )
+                yield ToolStartEvent(id=f"plan-read-{index}", name="Read", input={"file_path": "apps/billing/api.py"},)
             finding = _finding_from_prompt(prompt)
             if self.return_legacy_plan:
-                yield ResultEvent(
-                    structured_output={
-                        "slug": "legacy-plan",
-                        "title": "Legacy Markdown implementation plan",
-                        "priority": "P1",
+                yield ResultEvent(structured_output={
+                        "slug": "legacy-plan", "title": "Legacy Markdown implementation plan", "priority": "P1",
                         "depends_on": [],
                         "markdown": "## Steps\n\nMake the change.",
-                    },
-                    continuation=None,
+                    }, continuation=None,
                 )
                 return
             plan = _authored_plan_result(finding)
@@ -767,80 +502,53 @@ class ImproveStubBackend:
                 offered = _menu_ids(prompt)
                 plan = _set_plan_verification(plan, plan_ref(offered[0])) if offered else plan
             if self.plan_file_role_override is not None:
-                plan["scope"]["existing_paths"][0]["role"] = (
-                    self.plan_file_role_override
-                )
-                plan["context_excerpts"][0]["file_role"] = (
-                    self.plan_file_role_override
-                )
+                plan["scope"]["existing_paths"][0]["role"] = (self.plan_file_role_override)
+                plan["context_excerpts"][0]["file_role"] = (self.plan_file_role_override)
             if self.plan_problem_override is not None:
                 plan["why_this_matters"]["problem"] = self.plan_problem_override
             if self.plan_instruction_override is not None:
-                plan["steps"][0]["changes"][0]["instruction"] = (
-                    self.plan_instruction_override
-                )
+                plan["steps"][0]["changes"][0]["instruction"] = (self.plan_instruction_override)
             if self.plan_ungate_steps:
                 # The shape a plan takes when recon verified no commands: the
                 # contract tells the writer to use null verification everywhere.
                 plan = _set_plan_verification(plan, None)
             if self.plan_sloppy:
-                plan["debug_notes"] = (
-                    "Planner scratch notes that must never reach the artifact."
-                )
+                plan["debug_notes"] = ("Planner scratch notes that must never reach the artifact.")
                 plan["markdown"] = "## Steps\n\nMake the change."
-                plan["scope"]["out_of_scope_paths"].append(
-                    {
-                        "path": "apps/billing/api.py",
-                        "reason": (
-                            "The billing implementation file must not change further."
-                        ),
+                plan["scope"]["out_of_scope_paths"].append({"path": "apps/billing/api.py",
+                        "reason": ("The billing implementation file must not change further."),
                     }
                 )
-                plan["scope"]["existing_paths"][0]["role"] = (
-                    "Billing role " + "x" * 293
-                )
-                plan["why_this_matters"]["problem"] = (
-                    "Callers keep sending secret: hunter2realvalue in "
+                plan["scope"]["existing_paths"][0]["role"] = ("Billing role " + "x" * 293)
+                plan["why_this_matters"]["problem"] = ("Callers keep sending secret: hunter2realvalue in "
                     "production traffic today."
                 )
             if self.plan_no_test_exemplars:
                 # The only honest answer in a repository with no test files.
                 plan["test_plan"]["exemplars"] = []
             if self.plan_stop_condition_path is not None:
-                plan["false_assumption"]["related_paths"].append(
-                    self.plan_stop_condition_path
-                )
+                plan["false_assumption"]["related_paths"].append(self.plan_stop_condition_path)
             if self.plan_writer_calls <= self.plan_bad_recon_id_attempts:
                 plan["steps"][0]["verification"] = plan_ref("make-tests")
             if self.plan_writer_calls <= self.plan_unquoted_path_attempts:
                 plan["context_excerpts"] = []
             if self.plan_writer_calls <= self.plan_missing_path_attempts:
-                plan["scope"]["existing_paths"].append(
-                    {
-                        "path": "apps/billing/legacy_api.py",
+                plan["scope"]["existing_paths"].append({"path": "apps/billing/legacy_api.py",
                         "role": "Reference the retired billing module for parity.",
                     }
                 )
             if self.all_recon_commands_invalid:
                 plan = _set_plan_verification(plan, None)
-            if self.return_secret_invalid_enum or (
-                self.return_secret_invalid_enum_once
+            if self.return_secret_invalid_enum or (self.return_secret_invalid_enum_once
                 and self.plan_writer_calls == 1
             ):
                 # A schema-invalid enum carrying a credential: the value must
                 # fail validation AND never surface in any host observable.
-                plan["steps"][0]["changes"][0]["operation"] = (
-                    "TOKEN=PRIVATE_SCHEMA_SECRET"
-                )
+                plan["steps"][0]["changes"][0]["operation"] = ("TOKEN=PRIVATE_SCHEMA_SECRET")
                 plan["title"] = "PRIVATE_SCHEMA_SECRET rejected title"
             if self.inject_credential:
-                plan["steps"][0]["changes"][0]["operation"] = (
-                    "OPENAI_API_KEY=sk-secret123456"
-                )
-            yield ResultEvent(
-                structured_output=plan,
-                continuation=None,
-            )
+                plan["steps"][0]["changes"][0]["operation"] = ("OPENAI_API_KEY=sk-secret123456")
+            yield ResultEvent(structured_output=plan, continuation=None,)
             return
         raise AssertionError(f"unexpected improve prompt: {prompt[:120]}")
 
@@ -855,12 +563,7 @@ class AuditAbsoluteWorkingDirectoryBackend(ImproveStubBackend):
         super().__init__(target)
         self._rel = rel
 
-    async def _pre_execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        **turn_kwargs: Any,
-    ) -> list[AgentEvent] | None:
+    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any,) -> list[AgentEvent] | None:
         if "IMPROVE_RECON" in prompt:
             assert isinstance(self.recon_output_override, dict)
             commands = self.recon_output_override["commands"]
@@ -885,11 +588,7 @@ class ProductionPathBackend(ImproveStubBackend):
     planner_secret = "ZAI_API_KEY=task10-planner-secret123456"
 
     def __init__(self, target: Path, *, failed_title: str | None = None) -> None:
-        super().__init__(
-            target,
-            n_findings=len(AUDIT_CATEGORIES),
-            fanout_concurrency=10,
-        )
+        super().__init__(target, n_findings=len(AUDIT_CATEGORIES), fanout_concurrency=10,)
         self.failed_title = failed_title
         self.plan_active = 0
 
@@ -897,61 +596,38 @@ class ProductionPathBackend(ImproveStubBackend):
         commands: list[dict[str, Any]] = []
         for index in range(42):
             test_command = index % 2 == 0
-            commands.append(
-                _recon_command(
-                    command_id=(
-                        "test-suite"
+            commands.append(_recon_command(command_id=("test-suite"
                         if index == 0
                         else "git-diff"
                         if index == 1
                         else f"verified-command-{index:02d}"
-                    ),
-                    purpose=f"Run verified repository command {index + 1}",
-                    command="uv run pytest" if test_command else "git diff --exit-code",
-                    line=5 if test_command else 6,
-                    excerpt=(
-                        'test-command = "uv run pytest"'
+                    ), purpose=f"Run verified repository command {index + 1}",
+                    command="uv run pytest" if test_command else "git diff --exit-code", line=5 if test_command else 6,
+                    excerpt=('test-command = "uv run pytest"'
                         if test_command
                         else 'scope-command = "git diff --exit-code"'
-                    ),
-                    observable_result="exit 0 and the repository command succeeds",
+                    ), observable_result="exit 0 and the repository command succeeds",
                     rationale="The root configuration declares this command.",
                 )
             )
-        commands.append(
-            {
-                **commands[0],
-                "id": "malformed-secret-bearing-command",
-                "purpose": f"Rejected planner content {self.recon_secret}",
-                "command": "pytest ...",
+        commands.append({**commands[0], "id": "malformed-secret-bearing-command",
+                "purpose": f"Rejected planner content {self.recon_secret}", "command": "pytest ...",
             }
         )
         return commands
 
-    async def _pre_execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        **turn_kwargs: Any,
-    ) -> list[AgentEvent] | None:
+    async def _pre_execute(self, cwd: Path, prompt: str, **turn_kwargs: Any,) -> list[AgentEvent] | None:
         if "IMPROVE_RECON" in prompt:
             self._record_call(cwd, prompt, "recon", **turn_kwargs)
-            return [
-                ResultEvent(
-                    structured_output={
-                        "languages": ["python", "typescript"],
-                        "commands": self._recon_commands(),
-                        "conventions": ["OpenAPI First"],
-                        "intent_docs": ["README.md"],
-                    },
-                    continuation=None,
+            return [ResultEvent(structured_output={
+                        "languages": ["python", "typescript"], "commands": self._recon_commands(),
+                        "conventions": ["OpenAPI First"], "intent_docs": ["README.md"],
+                    }, continuation=None,
                 )
             ]
 
         if "read-only improve audit specialist" in prompt:
-            category = next(
-                name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt
-            )
+            category = next(name for name, heading in _AUDIT_HEADINGS.items() if heading in prompt)
             self._record_call(cwd, prompt, "audit", **turn_kwargs)
             # One finding per category, from the first partition group only:
             # numbering by category keeps the selected set identical no matter
@@ -961,37 +637,20 @@ class ProductionPathBackend(ImproveStubBackend):
                 findings: list[dict[str, Any]] = []
             else:
                 finding_number = AUDIT_CATEGORIES.index(category) + 1
-                findings = [
-                    {
-                        "title": f"Production finding {finding_number:02d}",
-                        "category": category,
-                        "path": "apps/billing/api.py",
-                        "line": 1,
-                        "body": (
-                            "The billing service contract needs explicit "
+                findings = [{"title": f"Production finding {finding_number:02d}", "category": category,
+                        "path": "apps/billing/api.py", "line": 1,
+                        "body": ("The billing service contract needs explicit "
                             f"production-path coverage {finding_number:02d}."
-                        ),
-                        "impact": "HIGH",
-                        "effort": "S",
-                        "risk": "LOW",
-                        "confidence": "HIGH",
-                        "evidence": ["apps/billing/api.py:1"],
-                        **_neutral_maintenance_fields(),
+                        ), "impact": "HIGH", "effort": "S", "risk": "LOW", "confidence": "HIGH",
+                        "evidence": ["apps/billing/api.py:1"], **_neutral_maintenance_fields(),
                     }
                 ]
-            return [
-                ResultEvent(
-                    structured_output={"findings": findings},
-                    continuation=None,
-                )
-            ]
+            return [ResultEvent(structured_output={"findings": findings}, continuation=None,)]
 
         if _is_plan_writer_prompt(prompt, turn_kwargs.get("output_schema")):
             finding = _finding_from_prompt(prompt)
             if self.plan_active >= 2:
-                raise _ProductionPathRateLimitError(
-                    "provider plan concurrency limit exceeded"
-                )
+                raise _ProductionPathRateLimitError("provider plan concurrency limit exceeded")
             self.plan_active += 1
             try:
                 await anyio.sleep(0.05)
@@ -1006,8 +665,7 @@ class ProductionPathBackend(ImproveStubBackend):
 
 
 def _is_plan_writer_prompt(prompt: str, output_schema: Any) -> bool:
-    return "You are writing a self-contained implementation plan" in prompt or (
-        isinstance(output_schema, dict)
+    return "You are writing a self-contained implementation plan" in prompt or (isinstance(output_schema, dict)
         and "false_assumption" in output_schema.get("properties", {})
     )
 
@@ -1020,13 +678,7 @@ class IncrementalPlanBackend(ImproveStubBackend):
     plan file exists until every writer has returned.
     """
 
-    def __init__(
-        self,
-        target: Path,
-        *,
-        slow_title: str,
-        crash: bool = False,
-    ) -> None:
+    def __init__(self, target: Path, *, slow_title: str, crash: bool = False,) -> None:
         super().__init__(target, n_findings=2)
         self._slow_title = slow_title
         self._crash = crash
@@ -1034,34 +686,24 @@ class IncrementalPlanBackend(ImproveStubBackend):
         self.observed_while_slow_writer_ran: list[str] = []
         self.observed_index_while_slow_writer_ran = ""
 
-    async def _pre_execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        **turn_kwargs: Any,
+    async def _pre_execute(self, cwd: Path, prompt: str, output_schema: Any = None, **turn_kwargs: Any,
     ) -> list[AgentEvent] | None:
-        if (
-            _is_plan_writer_prompt(prompt, output_schema)
+        if (_is_plan_writer_prompt(prompt, output_schema)
             and _finding_from_prompt(prompt)["title"] == self._slow_title
         ):
             with anyio.move_on_after(10):
                 while not self.observed_while_slow_writer_ran:
                     await anyio.sleep(0.01)
-                    self.observed_while_slow_writer_ran = sorted(
-                        path.name
+                    self.observed_while_slow_writer_ran = sorted(path.name
                         for path in self._plans_dir.glob("[0-9][0-9][0-9]-*.md")
                     )
                     index_path = self._plans_dir / "README.md"
-                    self.observed_index_while_slow_writer_ran = (
-                        index_path.read_text(encoding="utf-8")
+                    self.observed_index_while_slow_writer_ran = (index_path.read_text(encoding="utf-8")
                         if index_path.is_file()
                         else ""
                     )
             if self._crash:
-                raise _ProductionPathPlannerError(
-                    "plan writer process exited"
-                )
+                raise _ProductionPathPlannerError("plan writer process exited")
         return None
 
 
@@ -1086,12 +728,7 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
         """Fingerprints in the host's observed writer-dispatch order."""
         return list(self._selection_order)
 
-    async def _pre_execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        **turn_kwargs: Any,
+    async def _pre_execute(self, cwd: Path, prompt: str, output_schema: Any = None, **turn_kwargs: Any,
     ) -> list[AgentEvent] | None:
         if _is_plan_writer_prompt(prompt, output_schema):
             fingerprint = _finding_from_prompt(prompt)["fingerprint"]
@@ -1104,12 +741,7 @@ class OutOfOrderPlanBackend(ImproveStubBackend):
                         await anyio.sleep(0.01)
         return None
 
-    async def _post_execute(
-        self,
-        prompt: str,
-        output_schema: Any = None,
-        **turn_kwargs: Any,
-    ) -> None:
+    async def _post_execute(self, prompt: str, output_schema: Any = None, **turn_kwargs: Any,) -> None:
         if _is_plan_writer_prompt(prompt, output_schema):
             fingerprint = _finding_from_prompt(prompt)["fingerprint"]
             self.completion_order.append(self._selection_order.index(fingerprint))
@@ -1119,47 +751,30 @@ _ImproveBackendT = TypeVar("_ImproveBackendT", bound=ImproveStubBackend)
 
 
 def install_improve_stub(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-    *,
-    n_findings: int | None = None,
-    attempt_write: bool = False,
+    monkeypatch: pytest.MonkeyPatch, target: Path, *, n_findings: int | None = None, attempt_write: bool = False,
     fanout_concurrency: int = 4,
 ) -> ImproveStubBackend:
     stub = ImproveStubBackend(
-        target,
-        n_findings=n_findings,
-        attempt_write=attempt_write,
-        fanout_concurrency=fanout_concurrency,
+        target, n_findings=n_findings, attempt_write=attempt_write, fanout_concurrency=fanout_concurrency,
     )
     return install_capable_improve_backend(monkeypatch, stub)
 
 
-def install_capable_improve_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    backend: _ImproveBackendT,
-) -> _ImproveBackendT:
+def install_capable_improve_backend(monkeypatch: pytest.MonkeyPatch, backend: _ImproveBackendT,) -> _ImproveBackendT:
     """Bind an existing host-controlled fake to the runner's audit boundary."""
 
     def _factory(*args: Any, **kwargs: Any) -> ImproveStubBackend:
         audit_root = kwargs.get("audit_root")
         backend.audit_root = audit_root
-        backend.audit_outward_symlinks = kwargs.get(
-            "audit_outward_symlinks", frozenset()
-        )
-        backend.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION if audit_root is not None else None
-        )
+        backend.audit_outward_symlinks = kwargs.get("audit_outward_symlinks", frozenset())
+        backend.audit_root_isolation = (AUDIT_ROOT_ISOLATION if audit_root is not None else None)
         return backend
 
     monkeypatch.setattr("daydream.runner.create_backend", _factory)
     return backend
 
 
-def install_per_phase_improve_stubs(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-) -> list[dict[str, Any]]:
+def install_per_phase_improve_stubs(monkeypatch: pytest.MonkeyPatch, target: Path,) -> list[dict[str, Any]]:
     """Install a factory that mints one stub per resolved backend cache key.
 
     ``_resolve_backend`` caches on ``(name, model, reasoning_effort,
@@ -1170,14 +785,8 @@ def install_per_phase_improve_stubs(
     """
     shared_calls: list[dict[str, Any]] = []
 
-    def _factory(
-        name: str,
-        model: str | None = None,
-        *,
-        cwd: Path | None = None,
-        reasoning_effort: str | None = None,
-        audit_root: Path | None = None,
-        audit_outward_symlinks: frozenset[Path] = frozenset(),
+    def _factory(name: str, model: str | None = None, *, cwd: Path | None = None, reasoning_effort: str | None = None,
+        audit_root: Path | None = None, audit_outward_symlinks: frozenset[Path] = frozenset(),
     ) -> ImproveStubBackend:
         stub = ImproveStubBackend(target)
         stub.calls = shared_calls
@@ -1185,9 +794,7 @@ def install_per_phase_improve_stubs(
         stub.reasoning_effort = reasoning_effort
         stub.audit_root = audit_root
         stub.audit_outward_symlinks = audit_outward_symlinks
-        stub.audit_root_isolation = (
-            AUDIT_ROOT_ISOLATION if audit_root is not None else None
-        )
+        stub.audit_root_isolation = (AUDIT_ROOT_ISOLATION if audit_root is not None else None)
         return stub
 
     monkeypatch.setattr("daydream.runner.create_backend", _factory)

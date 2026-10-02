@@ -1,18 +1,4 @@
-"""Render canonical merged finding items into the human-readable markdown report.
-
-`render_report` is a pure function: it takes the canonical item list (the single
-source of truth produced by the cross-stack merge) and produces the same
-``review-output.md`` layout the merge agent used to emit as prose. Mirrors the
-mandatory report format defined in ``daydream/deep/prompts.py`` (the
-``## Structural Review`` / ``## Issues`` / ``## Cross-Stack Issues`` sections,
-the ``[cross-stack]`` title prefix, and the unbolded ``N. [FILE:LINE] DESC``
-head-line rule). No LLM, no I/O.
-
-Exports:
-    render_report: list[dict] -> str
-    render_held_section: list[dict] -> str
-    insert_diagrams_section: (report text, diagram blocks) -> str
-"""
+"""Pure Markdown rendering of canonical merged findings and grounded diagram sections."""
 
 from __future__ import annotations
 
@@ -27,42 +13,25 @@ _PIPELINE_STAGE_NAMES: list[str] = [
     "optional fix gate",
 ]
 
-# Heading of the grounded-diagram section (issue #1113). The section is written
-# by ``render_report`` on the merge write and re-applied textually by the
-# diagram step, which runs after two other writers have already produced
-# ``review-output.md``; ``insert_diagrams_section`` is what makes that second
-# application idempotent.
+# Merge and diagram steps share this heading for idempotent replacement.
 _DIAGRAMS_HEADING = "## Diagrams"
 _REVIEW_HEADING = "# Review"
 
 
 def _finding_line(item: dict[str, Any], *, prefix: str = "") -> str:
-    """Format one finding as the unbolded ``N. [prefix][FILE:LINE] DESCRIPTION`` line.
-
-    The numbered head line is plain text — never wrapped in bold markers — per
-    the report-format rules in ``deep/prompts.py``.
-    """
+    """Render the canonical id and location as an unbolded numbered finding line."""
     return f"{item['id']}. {prefix}[{item['file']}:{item['line']}] {item['description']}"
 
 
 def _is_heading(line: str) -> bool:
-    """True for a top-level (``# ``) or section-level (``## ``) markdown heading.
-
-    The rendered diagram blocks can never produce one: their headings are HTML
-    (``<h3>``), their table rows start with ``|``, and every mermaid line is
-    indented or is a bare keyword -- the label sanitizer drops ``#`` outright.
-    So this is a safe section terminator to scan for.
-    """
+    """Recognize section terminators: rendered diagram blocks cannot emit top-level #/## headings."""
     return line.startswith("# ") or line.startswith("## ")
 
 
 def _remove_diagrams_section(lines: list[str]) -> list[str]:
-    """Drop an existing ``## Diagrams`` section, leaving one blank separator.
+    """Remove diagram sections through the next heading and restore one separator between neighbors.
 
-    Consumes the heading and everything up to the next markdown heading (or end
-    of file), then normalizes the blank lines around the hole so the result is
-    byte-identical to a report that never had the section. That exact-inverse
-    property is what makes ``insert_diagrams_section`` idempotent.
+    This exactly reverses insertion, preserving idempotence.
     """
     out: list[str] = []
     index = 0
@@ -77,31 +46,17 @@ def _remove_diagrams_section(lines: list[str]) -> list[str]:
             index += 1
         while out and out[-1] == "":
             out.pop()
-        # One blank separator, but only between two surviving neighbours -- a
-        # leading or trailing blank line would make the removal a non-inverse
-        # of the insertion and break idempotence.
+        # Only surviving neighbors need a separator; edge blanks would break the inverse.
         if out and index < total:
             out.append("")
     return out
 
 
 def insert_diagrams_section(report_text: str, blocks: str) -> str:
-    """Insert (or replace) the ``## Diagrams`` section in a rendered report.
+    """Replace diagrams after # Review, or prepend when that heading is absent.
 
-    Pure and idempotent: applying it twice with the same ``blocks`` yields the
-    same bytes, because an existing section is removed before the new one is
-    inserted. The section goes directly after the ``# Review`` heading, so it
-    reads above the findings; every other section, including the ``## Coverage``
-    block that ``_append_coverage_section`` appends later, is left untouched.
-
-    Args:
-        report_text: The rendered report. Its trailing-newline convention is
-            preserved.
-        blocks: The rendered diagram blocks. Empty or whitespace-only removes
-            the section instead of writing an empty one.
-
-    Returns:
-        The report text with the section inserted, replaced, or removed.
+    Pure and byte-idempotent. Empty/whitespace blocks remove the section; retain
+    other sections and the report's trailing-newline convention.
     """
     trailing_newline = report_text.endswith("\n")
     lines = _remove_diagrams_section(report_text.split("\n"))
@@ -118,27 +73,13 @@ def insert_diagrams_section(report_text: str, blocks: str) -> str:
 
 
 def render_report(items: list[dict[str, Any]]) -> str:
-    """Render canonical items into the deep-review markdown report.
+    """Render nonempty lens groups in structural, per-stack, cross-stack, then wonder order.
 
-    Groups items by ``lens`` and emits, in order: ``## Structural Review``
-    (only when structural items exist), ``## Issues`` (per-stack lens),
-    ``## Cross-Stack Issues`` (cross-stack lens, each title prefixed with the
-    literal ``[cross-stack]``), and ``## Wonder Findings`` (wonder lens). A
-    section is omitted entirely when it has no items. Each finding line is
-    ``N. [FILE:LINE] DESCRIPTION``, unbolded, where ``N`` is the item's
-    canonical ``id``.
-
-    Args:
-        items: Canonical merged finding items, each carrying ``id``, ``lens``,
-            ``file``, ``line``, and ``description``.
-
-    Returns:
-        The rendered markdown report as a string.
+    Use canonical ids, plain numbered location lines, and [cross-stack] title prefixes.
     """
     sections: list[str] = ["# Review"]
 
-    # lens -> (section title, line prefix). One arm per lens; a section is
-    # emitted only when it has items.
+    # Omit empty lenses; each entry specifies its heading and finding prefix.
     lens_sections = [
         ("structural", "## Structural Review", ""),
         ("per-stack", "## Issues", ""),

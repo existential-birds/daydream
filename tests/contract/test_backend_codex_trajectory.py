@@ -1,17 +1,6 @@
-"""ATIF trajectory parity for CodexBackend — golden round-trip + D-04 fallback (#155).
-
-Contract tests over a real-shape multi-turn Codex JSONL fixture:
-
-1. **Correlation (D-04 fallback):** a multi-turn Codex fixture produces exactly
-   one ``MetricsEvent`` per ``turn.completed`` (turn-granular correlation),
-   each with ``message_id=''`` (Codex emits no per-message id). This is the
-   documented, tested limitation — no silent coarsening.
-
-2. **Golden round-trip:** the recorded trajectory validates cleanly against
-   the ATIF v1.7 schema, survives a load → re-validate cycle, and captures
-   REASON spans (ThinkingEvent), ACT/tool spans (ToolStart/ToolResult paired
-   via the item ``id``), ``Step.metrics`` with prompt/completion tokens, and
-   ``cached_tokens`` surfaced from ``usage.cached_input_tokens``.
+"""Codex JSONL must produce one MetricsEvent per turn.completed with empty message_id because no
+per-message identity is available. Recorded ATIF v1.7 trajectories must validate after reload and
+preserve reasoning, item-ID tool correlation, per-step usage, and cached input tokens.
 """
 
 from __future__ import annotations
@@ -40,14 +29,8 @@ async def _drive_codex_through_recorder(
     *,
     fixture: str = FIXTURE,
 ) -> tuple[list[Any], TrajectoryRecorder]:
-    """Drive ``CodexBackend.execute`` through *fixture* while recording.
-
-    Mirrors the recorder + invocation pattern in
-    ``tests/contract/test_backend_step_parity.py`` /
-    ``_run_backend_against_canonical``: one ``TrajectoryRecorder``, one
-    ``Invocation`` scope, and the backend's ``AgentEvent`` stream fed to
-    ``inv.observe``. Returns the raw event list (for stream assertions) and
-    the recorder (for step assertions).
+    """Drive the fixture through Backend.execute inside one recorder/invocation. Return raw events and
+    the recorder for stream and step assertions.
     """
     recorder = make_recorder(
         tmp_path, path=tmp_path / "trajectory.json",
@@ -72,12 +55,8 @@ async def _drive_codex_through_recorder(
 async def test_codex_emits_one_turn_granular_metrics_event_per_turn(
     tmp_path: Path,
 ) -> None:
-    """D-04 fallback: one MetricsEvent per turn.completed, message_id always ''.
-
-    Codex has no per-message id surface (spike: agent_message items carry
-    ``id`` but no ``message_id``; ``turn.completed`` carries only ``usage``),
-    so correlation is turn-granular — coarser than Claude's per-message
-    correlation. The limitation is named here in code, not silently applied.
+    """Codex item IDs identify messages but turn.completed carries only usage, so metrics correlation
+    remains turn-granular with empty message_id.
     """
     events, _ = await _drive_codex_through_recorder(tmp_path)
 
@@ -96,32 +75,25 @@ async def test_codex_emits_one_turn_granular_metrics_event_per_turn(
         assert mev.completion_tokens > 0, (
             f"turn {idx}: completion_tokens non-positive ({mev.completion_tokens})"
         )
-    # Distinct token counts prove the two MetricsEvents originate from the two
-    # separate turn.completed events rather than a duplicated emission.
+    # Distinct token counts distinguish separate turns from duplicate MetricsEvent emission.
     assert metrics_events[0].prompt_tokens != metrics_events[1].prompt_tokens
 
 
 @pytest.mark.asyncio
 async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
-    """Recorded trajectory validates, round-trips, and spans REASON + ACT.
-
-    The fixture carries reasoning items (→ ThinkingEvent → reasoning_content =
-    REASON span), ``command_execution`` items with ``id`` fields (→ paired
-    ToolStart/ToolResult = ACT/tool span), and ``usage.cached_input_tokens``
-    (→ ``Step.metrics.cached_tokens`` non-None).
+    """The fixture covers reasoning_content, command_execution tool/result pairs, and
+    cached_input_tokens mapped into Step.metrics.
     """
     _, recorder = await _drive_codex_through_recorder(tmp_path)
 
     traj_path = tmp_path / "trajectory.json"
     assert traj_path.exists(), "recorder.__aexit__ must write trajectory.json"
 
-    # First validation pass on the freshly-written file.
     validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
     first_ok = validator.validate(traj_path)
     assert first_ok, validator.get_errors() or "first validation failed"
 
-    # Round-trip: re-load the written JSON, re-validate from dict form
-    # (validate_images=False — no filesystem anchor for in-memory dict).
+    # Revalidate the loaded dict without image checks because it has no filesystem anchor.
     raw = json.loads(traj_path.read_text())
     rt_validator = TrajectoryValidator()  # type: ignore[no-untyped-call]  # vendored atif (untyped)
     rt_ok = rt_validator.validate(raw, validate_images=False)
@@ -130,43 +102,34 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
     agent_steps = [s for s in recorder.steps if s.source == "agent"]
     assert agent_steps, "no agent steps recorded"
 
-    # REASON span: at least one step carries reasoning_content.
     reason_steps = [s for s in agent_steps if s.reasoning_content]
     assert reason_steps, "no REASON span (reasoning_content) captured"
 
-    # ACT/tool span: at least one step carries paired tool_calls + observation.
     act_steps = [
         s
         for s in agent_steps
         if s.tool_calls and s.observation and s.observation.results
     ]
     assert act_steps, "no ACT/tool span (tool_calls + observation) captured"
-    # ToolStart/ToolResult paired via the item 'id' field: each observation
-    # result's source_call_id must match a tool_call's tool_call_id on the
-    # same step (CORE-06).
+    # Every linked observation must reference a tool call on the same step.
     for act_step in act_steps:
         observation = act_step.observation
         assert observation is not None and observation.results, (
             f"ACT span on step {act_step.step_id}: observation/results missing"
         )
         call_ids = {tc.tool_call_id for tc in (act_step.tool_calls or [])}
-        # Interrupted markers deliberately carry NO source_call_id (null =
-        # "not a standard tool-call result", ATIF v1.7) so coverage consumers
-        # never derive an interrupted read as completed; only linked results
-        # must pair with a tool call.
+        # Interrupted markers use null source_call_id so coverage consumers cannot count interrupted
+        # reads as completed results.
         result_ids = {
             r.source_call_id for r in observation.results if r.source_call_id is not None
         }
-        # issubset, not intersection: intersection (&) would only prove at
-        # least one match, letting a step with mixed matched/unmatched results
-        # pass false-green. Every result id must correspond to a call id.
+        # Require every result ID to match; a nonempty intersection would allow unmatched results.
         assert result_ids.issubset(call_ids), (
             f"ACT span on step {act_step.step_id}: unpaired tool result ids "
             f"{sorted(str(r) for r in (result_ids - call_ids))} "
             f"not present in tool call ids {sorted(str(c) for c in call_ids)}"
         )
 
-    # Step.metrics present with prompt/completion tokens (turn-granular, D-04).
     metric_steps = [s for s in agent_steps if s.metrics is not None]
     assert metric_steps, "no step carries metrics"
     for ms in metric_steps:
@@ -179,7 +142,6 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"step {ms.step_id}: metrics.completion_tokens is None"
         )
 
-    # cached_tokens surfaced from usage.cached_input_tokens (non-None).
     cached_steps = [s for s in metric_steps if s.metrics is not None and s.metrics.cached_tokens is not None]
     assert cached_steps, "no step carries non-None cached_tokens"
     for cs in cached_steps:
@@ -189,10 +151,8 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
             f"step {cs.step_id}: cached_tokens not positive "
             f"({metrics.cached_tokens})"
         )
-    # #192: reasoning_output_tokens surfaced via Metrics.extra (vendored
-    # Metrics has no dedicated field — D-03 — so the documented extension
-    # carrier ``extra`` is used). Fixture's two turns carry 88 and 100.
-    # Subset of completion_tokens, NOT additive.
+    # Reasoning tokens use Metrics.extra because ATIF has no dedicated field. They are a subset of
+    # completion tokens, never additive.
     reasoning_steps = [
         s
         for s in metric_steps
@@ -210,7 +170,6 @@ async def test_codex_trajectory_golden_round_trip(tmp_path: Path) -> None:
         assert isinstance(rt, int) and rt > 0, (
             f"step {rs.step_id}: reasoning_tokens not a positive int ({rt})"
         )
-        # Subset invariant: reasoning is part of completion, never exceeds it.
         assert metrics.completion_tokens is not None and rt <= metrics.completion_tokens, (
             f"step {rs.step_id}: reasoning_tokens ({rt}) exceeds "
             f"completion_tokens ({metrics.completion_tokens}) — subset invariant"
@@ -243,8 +202,7 @@ async def test_replayable_shell_commands_survive_codex_to_atif_exactly(
 
     assert archived == expected
     for command in archived:
-        # These bodies use POSIX shell syntax; validate without requiring the
-        # wrapper shell from the capture to be installed on the test host.
+        # Syntax-check POSIX bodies without requiring the captured wrapper shell on this host.
         checked = subprocess.run(
             ["/bin/sh", "-n", "-c", command],
             capture_output=True,
@@ -292,7 +250,6 @@ async def test_parser_gap_survives_in_partial_trajectory_before_stream_stall(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The first gap reaches the recorder before a later blocked read stalls."""
     monkeypatch.setenv("DAYDREAM_STREAM_IDLE_TIMEOUT_S", "0.01")
 
     recorder = make_recorder(
@@ -327,10 +284,7 @@ async def test_parser_gap_survives_in_partial_trajectory_before_stream_stall(
 
 @pytest.mark.asyncio
 async def test_codex_final_metrics_equal_step_sum(tmp_path: Path) -> None:
-    """Codex restates each turn's usage on both a MetricsEvent and a CostEvent.
-
-    ``final_metrics`` must equal the per-step sum, not twice it.
-    """
+    """Usage appears in both MetricsEvent and CostEvent; final_metrics must count it once."""
     await _drive_codex_through_recorder(
         tmp_path, fixture="turn_completed_with_usage.jsonl"
     )
@@ -355,7 +309,6 @@ async def test_codex_final_metrics_equal_step_sum(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 async def test_codex_multi_turn_final_metrics_equal_step_sum(tmp_path: Path) -> None:
-    """Same invariant across the two-turn fixture (34594+36000 in, 168+200 out)."""
     await _drive_codex_through_recorder(tmp_path)
 
     traj = json.loads((tmp_path / "trajectory.json").read_text())
@@ -370,14 +323,12 @@ async def test_codex_multi_turn_final_metrics_equal_step_sum(tmp_path: Path) -> 
 
 @pytest.mark.asyncio
 async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -> None:
-    """Issue #1126: nonzero-exit results carry failure metadata; a started-but-
-    never-completed call gets a schema-valid interrupted marker, and the whole
-    trajectory validates against ATIF v1.7."""
+    """Nonzero exits retain failure metadata. Uncompleted calls receive schema-valid interruption
+    markers, and the trajectory validates as ATIF v1.7.
+    """
     _, recorder = await _drive_codex_through_recorder(
         tmp_path, fixture="command_failures_issue1126.jsonl"
     )
-    # Mirror the golden round-trip test: filter agent steps to those actually
-    # carrying observation results, so indices pin assertion targets.
     steps = [
         s
         for s in recorder.steps
@@ -391,9 +342,6 @@ async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -
     assert ok.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
 
     dangling = steps[-1].observation.results[-1]  # type: ignore[union-attr]  # filtered above
-    # The marker records the interruption WITHOUT source_call_id: stamping the
-    # in-flight id would let _completed_read_paths derive the interrupted call
-    # as completed and flip fail-open coverage to fail-closed.
     assert dangling.source_call_id is None
     assert dangling.content == "[interrupted: call did not complete before invocation ended]"
     assert dangling.extra == {"is_error": True, "status": "interrupted"}

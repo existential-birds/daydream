@@ -1,17 +1,7 @@
-"""Best-effort system clipboard support via platform shell tools.
+"""Best-effort clipboard support through platform tools.
 
-Detects the first available clipboard mechanism in priority order
-(``pbcopy`` for macOS, ``xclip`` then ``xsel`` for Linux/X11, ``clip.exe``
-for WSL/Windows) and pipes text into it via ``subprocess.run``. Every
-subprocess is bounded to a five-second timeout so a hung clipboard utility
-cannot block the caller; a timeout is treated as a failure. Returns False
-when no mechanism is available or any subprocess call fails so callers can
-degrade gracefully without raising.
-
-Exports:
-    clipboard_available: Check whether a clipboard mechanism is present.
-    copy_to_clipboard: Copy ``text`` to the system clipboard.
-"""
+Try pbcopy, xclip, xsel, then clip.exe. Copies have a five-second deadline;
+missing tools and subprocess failures return False for manual-copy fallback."""
 
 from __future__ import annotations
 
@@ -34,12 +24,7 @@ _CLIPBOARD_TIMEOUT_SECONDS: int = 5
 
 
 def _detect_clipboard_command() -> list[str] | None:
-    """Return the first available clipboard argv, or None if none found.
-
-    Detection uses :func:`shutil.which` for each candidate's program name.
-    The argv (with flags) is returned verbatim so the caller can invoke it
-    via ``subprocess.run`` without re-deriving flags.
-    """
+    """Return a copy of the first available tool argv, or None."""
     for argv in _CLIPBOARD_COMMANDS:
         if shutil.which(argv[0]) is not None:
             return list(argv)
@@ -52,21 +37,8 @@ def clipboard_available() -> bool:
 
 
 def copy_to_clipboard(text: str) -> bool:
-    """Copy *text* to the system clipboard using the first available tool.
-
-    Detection order is macOS (``pbcopy``) → Linux/X11 (``xclip``,
-    ``xsel``) → WSL/Windows (``clip.exe``). Every subprocess is bounded to a
-    five-second timeout (:data:`_CLIPBOARD_TIMEOUT_SECONDS`); a timeout is
-    treated as a failure. Returns False if no mechanism is available or the
-    subprocess fails for any reason — callers should treat False as "tell the
-    user to copy from the printed path".
-
-    Args:
-        text: Content to place on the clipboard.
-
-    Returns:
-        True on successful copy, False otherwise.
-    """
+    """Copy text with the first available tool under the shared deadline.
+    Return False on missing tools, timeout or subprocess failure."""
     argv = _detect_clipboard_command()
     if argv is None:
         return False

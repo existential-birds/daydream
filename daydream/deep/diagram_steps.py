@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -24,7 +23,6 @@ from daydream.config import (
     DIAGRAM_MODES,
 )
 from daydream.deep.artifacts import diagram_markdown_path, diagram_path, merged_report_path
-from daydream.deep.coverage import _completed_read_paths
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -72,20 +70,15 @@ from daydream.trajectory import (
 from daydream.ui import print_error, print_info, print_success, print_warning
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
     from daydream.trajectory import DispatchHandle, PhaseScopeHandle, TrajectoryRecorder
 
 
 @dataclass(frozen=True)
 class DiagramSettings:
-    """One run's resolved grounded-diagram configuration (issue #1113).
+    """Resolved mode, eligibility thresholds, and service-root globs.
 
-    Attributes:
-        mode: The resolved diagram mode -- one of
-            :data:`~daydream.config.DIAGRAM_MODES`.
-        thresholds: The eligibility thresholds the decision is taken against.
-        service_roots: Declared service-root globs for participant grouping;
-            empty means "fall back to the improve list, then to inference".
+    Empty service roots fall back to Improve's list, then layout inference.
     """
 
     mode: str
@@ -94,17 +87,7 @@ class DiagramSettings:
 
 
 def _diagram_mode_for(config: RunConfig, mode: str) -> str:
-    """Resolve the diagram mode for a run: CLI > file config > ``"auto"``.
-
-    Split from :func:`_resolved_diagram_mode` so the spine can consult it
-    before a ``FlowContext`` exists (it decides whether to build the import
-    graph the cross-module rule needs).
-
-    In ``--diagram-only`` mode ``config.diagram`` carries the requested kind
-    and a repository file's ``mode = "off"`` is deliberately ignored: the user
-    asked for this run by name, and silently doing nothing would be the worst
-    possible answer. Every other mode honors the file's off switch.
-    """
+    """Resolve CLI > file > auto; diagram-only explicitly overrides a file off switch."""
     if config.diagram in DIAGRAM_MODES:
         return str(config.diagram)
     if mode == "diagram":
@@ -115,21 +98,13 @@ def _diagram_mode_for(config: RunConfig, mode: str) -> str:
 
 
 def _resolved_diagram_mode(ctx: FlowContext) -> str:
-    """The active diagram mode for this flow context (issue #1113)."""
+    """Resolve the active mode from the flow state."""
     deep_state = DeepState(ctx.data)
     return _diagram_mode_for(ctx.config, deep_state.mode)
 
 
 def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
-    """Resolve mode + thresholds + service roots for the diagram step.
-
-    Thresholds resolve through :func:`_resolve_config_value` (``RunConfig``
-    attr, then file config, then the ``config.py`` default); there are no
-    per-threshold CLI flags, so in practice the file config is the only
-    override source. Resolved once per step and passed by value, which is what
-    keeps ``decide_eligibility`` a pure function of its arguments and its
-    verdict reproducible from ``diagram.json``.
-    """
+    """Resolve mode, threshold overrides, and service roots once for this step."""
     file_config = ctx.config.file_config
     return DiagramSettings(
         mode=_resolved_diagram_mode(ctx),
@@ -148,33 +123,18 @@ def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
     )
 
 
-# --- Grounded diagrams (issue #1113) ----------------------------------------
-#
-# Two agent turns at most per kind, and no mermaid from either of them: the
-# model proposes a JSON spec whose every element carries file:line evidence,
-# ``ground_*`` verifies each element against the head tree and the turn's own
-# read receipts, one repair turn fixes or removes what failed, survivors are
-# pruned/capped, and a pure renderer emits the diagram. What the checker could
-# not confirm is never drawn.
+# Models propose evidence-bearing JSON, with at most one repair per kind.
+# Only deterministically grounded elements reach the mermaid renderer.
 
 
 def _diagram_result(
     status: str, reason: str | None, *, advisory: dict[str, Any] | None = None
 ) -> DiagramResult:
-    """A no-spec result for a kind that never produced one.
-
-    ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
-    this shape: no spec, no grounding, no mermaid, and a reason the omission
-    notice and ``diagram.json`` can both render. ``advisory`` is the kind's
-    resolved input-omission diagnostic (or ``None`` when no capture ran), so a
-    budget/authoring failure keeps both facts.
-    """
+    """Build a no-spec skipped/failed result, retaining its reason and advisory omission."""
     return {
         "status": status,
         "reason": reason,
-        "spec_proposed": None,
         "spec_final": None,
-        "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
         "advisory": advisory,
@@ -190,35 +150,6 @@ def _failed_kind_result(exc: BaseException, advisory: dict[str, Any] | None = No
     )
 
 
-def _diagram_read_paths(fork_path: Path | None) -> set[str]:
-    """Completed diagram-phase read paths recorded in one fork's trajectory.
-
-    Fail-CLOSED: a missing, unreadable, or malformed fork file yields the empty
-    set, which makes every citation fail ``FILE_NOT_READ_BY_MODEL``. The
-    alternative -- treating "no receipts" as "all reads happened" -- would turn
-    a recording failure into an unverified diagram.
-
-    The fork file is written by ``_ForkCM.__aexit__`` even when the body
-    raised, but ``_write`` short-circuits on a fork with no steps, so absence
-    is a real and expected case.
-
-    Note that the receipts are the UNION across ``run_agent``'s retry attempts:
-    a failed retryable attempt's invocation is still flushed into the fork, so
-    a file read during an attempt that later errored still counts. That is
-    fail-open in the model's favour and is deliberate -- the read did happen,
-    and the file content it returned is what grounding cares about.
-    """
-    if fork_path is None:
-        return set()
-    try:
-        trajectory = json.loads(fork_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    if not isinstance(trajectory, dict):
-        return set()
-    return _completed_read_paths(trajectory, phases={DaydreamPhase.DIAGRAM.value})
-
-
 def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
     """Group the changed code files by module for the sequence prompt."""
     grouped: dict[str, list[str]] = {}
@@ -228,19 +159,10 @@ def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
 
 
 def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, str | None]:
-    """Best-effort host-side reads of the exploration summary and dependencies.
+    """Read available exploration text for disposable clones within one shared byte budget.
 
-    Issue #1123: on read-only disposable-clone backends the host-only
-    ``.daydream/`` artifacts are absent from the clone, so the prompt must
-    carry their content inline. Both files are read best-effort (an
-    ``OSError`` yields ``None`` — the block is omitted, never faked) and
-    share one ``INLINE_DIFF_BUDGET_BYTES`` budget: the summary takes the
-    first slice, the dependency edges fill the remainder. Each over-budget
-    piece is truncated with an explicit marker whose bytes count inside the
-    shared budget, so the emitted block never exceeds it. The
-    summary is scrubbed first (``_scrub_exploration_summary``) so the
-    standalone-artifact scaffolding the pre-scan writer emits cannot dangle
-    in the inline rendering.
+    Scrub summary scaffolding first; dependencies consume the remainder. Unreadable
+    files yield None. Truncation markers count toward the budget.
     """
     if exploration_dir is None:
         return None, None
@@ -269,16 +191,7 @@ def _inline_exploration_text(exploration_dir: Path | None) -> tuple[str | None, 
 
 
 def _scrub_exploration_summary(summary: str) -> str:
-    """Drop the standalone-artifact scaffolding ``summary.md`` carries.
-
-    The pre-scan writer emits the summary as a standalone artifact: an
-    embedded untrusted-content blockquote plus a table whose rows name the
-    sibling artifacts (``affected_files.md``, ``conventions.md``,
-    ``dependencies.md``). On a disposable clone only the summary body and the
-    dependency edges travel inline — the siblings are absent, so rows that
-    name them would dangle, and the clone-mode block builder re-emits the
-    boundary as its opening block. Strip that scaffolding and keep the prose.
-    """
+    """Remove the re-emitted boundary and table naming sibling artifacts absent from clones."""
     kept: list[str] = []
     in_artifact_table = False
     for line in summary.splitlines():
@@ -297,21 +210,10 @@ def _scrub_exploration_summary(summary: str) -> str:
 def _scrub_inline_exploration_summary(
     prepared: PreparedSanctionedInputs | None,
 ) -> PreparedSanctionedInputs | None:
-    """Strip summary.md's standalone-artifact scaffolding from captured text.
+    """Scrub captured INLINE summaries before rendering, including run_agent's re-render.
 
-    A live artifact session routes the pre-scan through sanctioned inputs, and
-    the INLINE render appends the captured summary verbatim. The sibling
-    artifacts the summary table names do not travel on an INLINE transport, so
-    those rows and the embedded boundary blockquote would dangle exactly as
-    they do on the disposable-clone path (:func:`_scrub_exploration_summary`).
-    The captured text is scrubbed before any render, so both
-    :meth:`~daydream.prompt_budget.PreparedSanctionedInputs.render` and the
-    idempotent re-render in ``run_agent`` emit the same clean section.
-
-    Only the captured ``text`` changes; ``(device, inode, size, mtime_ns)``
-    stay those of the on-disk file, so
-    :meth:`~daydream.prompt_budget.PreparedSanctionedInputs.revalidate` still
-    attests the exact file it captured.
+    Keep device/inode/size/mtime unchanged so revalidation still attests the source
+    file; only its captured text changes.
     """
     if prepared is None or prepared.transport is not SanctionedInputTransport.INLINE:
         return prepared
@@ -325,15 +227,10 @@ def _scrub_inline_exploration_summary(
 
 
 def _prompt_builder_accepts_inline_kwargs(builder: Any) -> bool:
-    """Whether ``builder`` accepts the clone-mode inline kwargs.
+    """Check extension support for the three inline kwargs without breaking older builders.
 
-    Fork overrides written against the documented extension contract predate
-    ``clone_mode``/``inline_exploration``/``inline_dependencies``; splatting
-    them into such a builder would raise ``TypeError`` on every
-    disposable-clone run, degrading the kind to failed. The builtin builders
-    accept all three; a legacy override keeps the documented kwarg set, with
-    ``exploration_dir`` arriving as ``None`` on clone runs (the host path
-    would dangle in the disposable clone).
+    Legacy builders retain their documented arguments and receive no host-only
+    exploration path on INLINE transports.
     """
     try:
         params = inspect.signature(builder).parameters
@@ -350,17 +247,9 @@ _PRIVATE_ARTIFACT_PLACEHOLDER = "sanctioned artifact storage"
 def _redact_private_artifacts(
     prompt: str, diff_path: Path, exploration_dir: Path | None
 ) -> str:
-    """Replace the private artifact paths an INLINE builder may have printed.
+    """Remove known host-private paths emitted by INLINE extension builders.
 
-    The builtin INLINE builders suppress the pointers they own, but a fork
-    override written before the inline kwargs still receives ``diff_path`` and
-    may echo it. This call site knows exactly four host-private paths — the
-    diff, its sibling hunk index, the exploration directory, and the artifact
-    root that holds them — and replaces each with the neutral phrase
-    :meth:`PreparedSanctionedInputs.render_prompt` already uses. Repository
-    paths under ``ctx.work.repo`` are never touched. Longer paths are listed
-    first, so ``diff_path.parent`` cannot truncate a fuller path before it is
-    matched.
+    Replace full paths before their parent root. Repository paths are untouched.
     """
     private_paths: tuple[Path | None, ...] = (
         diff_path,
@@ -382,26 +271,12 @@ def _diagram_author_prompt(
     *,
     inline_transport: SanctionedInputTransport | None = None,
 ) -> str:
-    """Build one kind's first-turn author prompt through the registry.
+    """Build a registry prompt using the resolved sanctioned-input transport.
 
-    The builder's self-sufficiency flag follows the *resolved transport*, never
-    the disposable-clone capability: on an INLINE transport (a strict audit
-    root, a read-only disposable clone, or a sandboxed backend) the host-only
-    ``.daydream/`` artifact paths the pointer blocks name would dangle, so the
-    prompt is made self-sufficient — the diff is inlined by the builder (with
-    an explicit marker when over budget) and the exploration pointers are
-    suppressed, with whatever exploration context was admitted travelling in
-    the sanctioned-input section the caller appends. EXACT_PATHS keeps the
-    pointer path byte-for-byte.
-
-    The inline kwargs are only passed when the registered builder accepts
-    them: fork overrides written against the documented extension contract
-    predate them, and splatting them in would raise ``TypeError`` on every
-    INLINE run, degrading the kind to failed. A legacy override keeps the
-    documented kwarg set — ``exploration_dir`` arrives as ``None`` rather than
-    a dangling host path — and, because such a builder may print the paths it
-    was handed, the assembled prompt is redacted of every private artifact
-    path this call site knows before it leaves this function.
+    INLINE prompts carry the diff and suppress private artifact pointers; EXACT_PATHS
+    keeps pointers. Only compatible builders receive inline kwargs. Older extensions
+    retain documented arguments, receive exploration_dir=None on INLINE, and have
+    known private paths redacted before dispatch.
     """
     deep_state = DeepState(ctx.data)
     diff_path: Path = deep_state.diff_path
@@ -432,29 +307,22 @@ def _diagram_author_prompt(
         # must not name the host-only exploration_dir: the path dangles on the
         # transport, so it arrives as ``None`` there and untouched otherwise.
         inline_kwargs = {"exploration_dir": None if inline else exploration_dir}
-    if kind == "sequence":
-        prompt = str(
-            builder(
-                diff_path=diff_path,
-                inline_diff=inline_diff,
-                files_by_module=_files_by_module(eligibility),
-                cwd=ctx.work.repo,
-                schema=SEQUENCE_SPEC_SCHEMA,
-                **inline_kwargs,
-            )
-        )
-    else:
-        prompt = str(
-            builder(
-                diff_path=diff_path,
-                inline_diff=inline_diff,
-                candidate_roots=[asdict(root) for root in eligibility.candidate_roots],
-                forced=eligibility.flowchart.rule == "forced",
-                cwd=ctx.work.repo,
-                schema=FLOWCHART_SPEC_SCHEMA,
-                **inline_kwargs,
-            )
-        )
+    kind_kwargs = (
+        {"files_by_module": _files_by_module(eligibility), "schema": SEQUENCE_SPEC_SCHEMA}
+        if kind == "sequence"
+        else {
+            "candidate_roots": [asdict(root) for root in eligibility.candidate_roots],
+            "forced": eligibility.flowchart.rule == "forced",
+            "schema": FLOWCHART_SPEC_SCHEMA,
+        }
+    )
+    prompt = str(builder(
+        diff_path=diff_path,
+        inline_diff=inline_diff,
+        cwd=ctx.work.repo,
+        **kind_kwargs,
+        **inline_kwargs,
+    ))
     return _redact_private_artifacts(prompt, diff_path, exploration_dir) if inline else prompt
 
 
@@ -470,20 +338,14 @@ async def _diagram_turn(
     continuation: Any = None,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     advisory: dict[str, Any] | None = None,
-) -> tuple[Any, Any, str | None, Path | None] | DiagramResult:
-    """Run one diagram turn, mapping its failure modes to a kind result.
+) -> tuple[Any, Any, str | None] | DiagramResult:
+    """Run an author/repair turn and return output, continuation, and budget reason.
 
-    Shared by the author and repair turns so the two cannot drift. A
-    capture/revalidation failure is not an authoring outcome: it must reach
-    the caller's failure path unchanged, without being relabelled as an
-    advisory degradation, so ``SanctionedInputUnavailable`` propagates. Every
-    other exception fails the kind while keeping both facts -- the reason and
-    the advisory omission diagnostic (or ``None`` when every advisory input
-    fit). On success the turn's output, continuation, budget reason, and fork
-    path are returned.
+    SanctionedInputUnavailable propagates to the caller's failure path. Other errors
+    fail this kind, retaining any real advisory omission diagnostic.
     """
     try:
-        async with maybe_fork(recorder, descriptor, dispatch=dispatch) as fork:
+        async with maybe_fork(recorder, descriptor, dispatch=dispatch):
             output, token, budget_reason = await run_agent(
                 backend,
                 ctx.work.repo,
@@ -502,7 +364,7 @@ async def _diagram_turn(
         raise
     except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
         return _failed_kind_result(exc, advisory)
-    return output, token, budget_reason, getattr(fork, "path", None)
+    return output, token, budget_reason
 
 
 async def _run_diagram_kind(
@@ -516,42 +378,32 @@ async def _run_diagram_kind(
     backend: Any,
     dispatch: "DispatchHandle | None" = None,
 ) -> DiagramResult:
-    """Author, ground, repair once, prune and render one diagram kind.
+    """Author, ground, optionally repair once, then prune and render a kind.
 
-    Each turn runs in its own fork (``diagram-<kind>`` then
-    ``diagram-<kind>-repair``) and the forks are strictly sequential: the first
-    must EXIT before grounding runs, because the read receipts that decide
-    ``FILE_NOT_READ_BY_MODEL`` only reach disk on exit, and the repair decision
-    depends on that grounding. Nested forks would also be illegal -- the
-    recorder ContextVar is reset LIFO.
-
-    Returns:
-        The kind's result dict (see
-        :data:`~daydream.deep.diagram_types.DiagramResult`).
+    Author and repair forks run sequentially so recorder ContextVars reset LIFO.
     """
     deep_state = DeepState(ctx.data)
     schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
 
-    def _ground(spec: dict[str, Any], read_paths: set[str]) -> Any:
+    def _ground(spec: dict[str, Any]) -> Any:
         if kind == "sequence":
-            return ground_sequence(
+            report = ground_sequence(
                 spec,
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
-                read_paths=read_paths,
                 symbols=symbols,
             )
-        return ground_flowchart(
-            spec,
-            repo_root=ctx.work.repo,
-            hunk_ranges=hunk_ranges,
-            read_paths=read_paths,
-            candidate_roots=eligibility.candidate_roots,
-            symbols=symbols,
-        )
+        else:
+            report = ground_flowchart(
+                spec,
+                repo_root=ctx.work.repo,
+                hunk_ranges=hunk_ranges,
+                candidate_roots=eligibility.candidate_roots,
+                symbols=symbols,
+            )
+        return report
 
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
-    read_paths: set[str] = set()
 
     diff_path: Path = deep_state.diff_path
     exploration_dir = deep_state.exploration_dir_or_none
@@ -561,12 +413,8 @@ async def _run_diagram_kind(
     sanctioned_inputs: PreparedSanctionedInputs | None = None
 
     try:
-        # One resolved transport decides both what is worth capturing and how the
-        # author prompt carries it: selection and prompt shaping read this value,
-        # never the backend's clone capability flag directly. Resolved inside the
-        # guard because a strict-audit backend whose audit root does not match the
-        # model cwd fails closed here, and that failure must take the
-        # ``SanctionedInputUnavailable`` path rather than the generic one.
+        # Resolve transport inside the guard: a strict audit-root mismatch must propagate
+        # as SanctionedInputUnavailable, not an advisory authoring failure.
         transport = sanctioned_transport_for(backend, ctx.work.repo, read_only=True)
         # Declared in semantic priority: exploration context degrades whole-artifact
         # first, and only pointer transports can carry the host-private diff index.
@@ -624,7 +472,7 @@ async def _run_diagram_kind(
         )
         if not isinstance(turn, tuple):
             return turn
-        structured, continuation, budget_reason, fork_path = turn
+        structured, continuation, budget_reason = turn
     except SanctionedInputUnavailable:
         # A capture/revalidation failure is not an authoring outcome: it must
         # reach the caller's failure path unchanged, without being relabelled
@@ -635,7 +483,6 @@ async def _run_diagram_kind(
         # advisory inputs all fit has nothing to report beyond its reason, and
         # ``None`` is the documented "no omission diagnostic" value.
         return _failed_kind_result(exc, advisory)
-    read_paths |= _diagram_read_paths(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
@@ -644,9 +491,7 @@ async def _run_diagram_kind(
         return _diagram_result("failed", "no structured output produced", advisory=advisory)
 
     spec = coerce(structured)
-    report = _ground(spec, read_paths)
-    grounded_first_pass = int(report.summary["grounded"])
-    repaired = 0
+    report = _ground(spec)
 
     # Exactly one repair turn, and only when the session can be resumed: a
     # fresh session would have to re-derive the whole spec from scratch, which
@@ -676,12 +521,10 @@ async def _run_diagram_kind(
         )
         if not isinstance(turn, tuple):
             return turn
-        repaired_output, _, repair_budget, repair_fork_path = turn
-        read_paths |= _diagram_read_paths(repair_fork_path)
+        repaired_output, _, repair_budget = turn
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
-            report = _ground(spec, read_paths)
-            repaired = max(int(report.summary["grounded"]) - grounded_first_pass, 0)
+            report = _ground(spec)
 
     omit_reasons = list(report.omit_reasons)
     mermaid: str | None = None
@@ -697,19 +540,7 @@ async def _run_diagram_kind(
     return {
         "status": status,
         "reason": report.rejected,
-        "spec_proposed": spec,
         "spec_final": report.spec_final,
-        "grounding": {
-            "elements": [check.to_dict() for check in report.elements],
-            "summary": {
-                "proposed": int(report.summary["proposed"]),
-                "grounded_first_pass": grounded_first_pass,
-                "repaired": repaired,
-                "pruned": int(report.summary["pruned"]),
-            },
-            "capped": dict(report.capped),
-            "root_range": list(report.root_range) if report.root_range is not None else None,
-        },
         "omit_reasons": omit_reasons,
         "mermaid": mermaid,
         "advisory": advisory,
@@ -717,12 +548,7 @@ async def _run_diagram_kind(
 
 
 def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
-    """The ``diagram.json`` payload with every rendered ``mermaid`` string dropped.
-
-    What travels in the Phase A findings artifact. The privileged poster
-    re-renders from ``spec_final``, so shipping the mermaid would only offer it
-    a model-adjacent string to trust by mistake.
-    """
+    """Drop rendered mermaid from Phase A payloads; the privileged poster re-renders specs."""
     results = payload.get("results")
     stripped: dict[str, Any] = {}
     if isinstance(results, dict):
@@ -736,15 +562,7 @@ def _diagram_payload_without_mermaid(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
-    """Insert the ``## Diagrams`` section into both copies of the rendered report.
-
-    Textual insertion rather than a re-render: by the time this step runs,
-    ``review-output.md`` has been written by the merge write and possibly
-    rewritten by ``supervise``, and ``load-items`` has appended a ``##
-    Coverage`` section that a re-render would erase.
-    ``insert_diagrams_section`` is idempotent, so a repeated application is a
-    no-op rather than a duplicate section.
-    """
+    """Idempotently insert diagrams into both reports, preserving supervision and coverage text."""
     deep_state = DeepState(ctx.data)
     targets = [merged_report_path(deep_state.dd)]
     canonical = deep_state.merged_report_or_none
@@ -758,16 +576,10 @@ def _apply_diagrams_to_report(ctx: FlowContext, blocks: str) -> None:
 
 
 async def _step_diagram(ctx: FlowContext) -> Stop | None:
-    """Decide, author, ground and render this run's grounded diagrams (#1113).
+    """Persist eligibility and results even when no kind qualifies.
 
-    Always writes ``diagram.json`` when the step is enabled, even when nothing
-    is eligible: the recorded eligibility signals are the audit trail for why a
-    PR did or did not get a diagram, and producing them costs zero agent calls.
-
-    Fail-open in every review mode -- one kind's failure warns, records
-    ``status="failed"`` and leaves the rest of the review untouched. In
-    ``--diagram-only`` mode the diagram IS the deliverable, so a failure exits
-    1 (after the artifact is written, so the evidence survives).
+    Kind failures warn and leave reviews running. Diagram-only failures return 1
+    after writing the artifact.
     """
     async with phase_scope(DaydreamPhase.DIAGRAM, stage="diagram") as phase:
         return await _run_diagram_step(ctx, phase=phase)
@@ -784,7 +596,7 @@ async def _run_diagram_step(
     dd: Path = deep_state.dd
 
     from daydream.hunk_index import head_side_ranges_by_file, load_hunk_index
-    from daydream.runner import _file_config_or_empty
+    from daydream.run_config import _file_config_or_empty
     from daydream.services import enumerate_services
 
     changed_files = sorted(str(path) for path in deep_state.changed_files)
@@ -870,6 +682,7 @@ async def _run_diagram_step(
         if result is not None and result.get("status") == "failed":
             failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
 
+
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     blocks = render_diagram_blocks(ordered)
     payload: dict[str, Any] = {"eligibility": eligibility.to_dict(), "results": ordered}
@@ -899,13 +712,9 @@ async def _run_diagram_step(
 
 
 async def _step_post_diagram(ctx: FlowContext) -> Stop:
-    """Deliver a diagram-only run: findings artifact, or a standalone comment.
+    """Emit diagram-only findings for Phase B or post the standalone comment here.
 
-    ``--findings-out`` makes this Phase A of the two-phase flow (the artifact
-    declares ``kind="diagram"`` and an empty findings list, and the privileged
-    Phase B job posts it). Otherwise the comment posts here, and -- mirroring
-    ``--comment`` -- an unresolvable PR or a failed POST ends the run with
-    exit 1, because the comment was the whole point of the run.
+    An unresolved PR or failed POST returns 1 because the comment is the deliverable.
     """
     deep_state = DeepState(ctx.data)
     from daydream.git_ops import GitError

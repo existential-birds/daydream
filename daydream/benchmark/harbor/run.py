@@ -1,19 +1,7 @@
-"""Supervised Harbor runs behind the Oracle self-match gate (issue #781).
-
-A thin safety wrapper around Harbor 0.23 that fail-closes on every preflight
-before Harbor starts (same-interpreter Harbor, compiled-tree presence,
-endpoint hosts vs the compiled network policy, telemetry/upload rejection,
-and Docker allowlist support), prints a pre-run spend summary, and
-records every run in a private ``runtime/harbor.json`` cleanup ledger. Harbor
-remains the only orchestrator/results implementation; this module only
-selects the already-compiled config, drives ``harbor run -c <config>`` with
-the process CWD set to the absolute ``<workspace>/harbor`` directory, and
-parses the spike-confirmed job/result layout (jobs/<job>/<trial>/verifier/
-reward.json) afterwards. The whole run path is driven through injectable
-seams (``spawn`` / ``docker_ok`` / ``confirm``) so CI stays hermetic.
-
-Expected failures are a ``RunError`` family with a clear message; the CLI
-handler maps them to exit ``1`` — never a bare traceback.
+"""Supervise Harbor behind privacy/network preflight and the Oracle self-match gate. Print
+spend, record each run in the private cleanup ledger, and launch the compiled config
+from the canonical Harbor directory. Harbor owns execution and result layout. Expected
+RunError failures map to CLI exit 1.
 """
 
 from __future__ import annotations
@@ -47,12 +35,8 @@ class RunBlocked(RunError):
 
 
 def _load_workspace_privacy(workspace: Path) -> dict[str, Any]:
-    """Return the raw ``benchmark.yaml`` privacy block.
-
-    Falls back to the raw manifest dict (never the strict ``Privacy`` model)
-    so a privacy field like ``uploads: enabled`` is *reported* by the preflight
-    rather than rejected wholesale as corrupt. A malformed/missing manifest
-    raises the project's existing ``WorkspaceCorrupt`` — never a silent default.
+    """Read raw privacy settings so preflight can report forbidden values; malformed
+    manifests raise.
     """
     raw = storage.load_yaml_strict(workspace / "benchmark.yaml")
     privacy = raw.get("privacy")
@@ -77,21 +61,9 @@ def _read_compiled_lock(workspace: Path) -> Any:
 
 
 def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | None:
-    """The reviewer/judge egress allowlists Harbor will actually enforce.
-
-    Harbor applies the policy written into each compiled case's ``task.toml``
-    -- ``[agent].allowed_hosts`` (reviewer boundary) and
-    ``[verifier.environment].allowed_hosts`` (judge boundary) -- not the raw
-    ``benchmark.yaml``, which may be stale relative to the compiled tree
-    (``compile_workspace`` threads one reviewer/judge allowlist into every
-    compiled case; the task hashed digest is locked into ``compiled_lock_sha256``).
-    Reading the compiled cases enumerated by ``benchmark.lock.json`` keeps the
-    preflight checking the same artifact Harbor executes, ignoring any runtime
-    ``jobs/`` trial copies of ``task.toml`` that may linger from earlier runs.
-    Returns ``None`` when there are no compiled cases (nothing Harbor runs, so
-    no egress boundary to enforce). Fail-closed: a listed case without a
-    readable ``task.toml`` raises ``RunBlocked`` -- the egress check is never
-    skipped when a policy exists.
+    """Read reviewer/judge policy from lock-listed compiled tasks, the actual execution
+    input. Ignore stale authoring settings and prior job copies. Return None only when
+    there are no compiled cases; unreadable listed policy raises RunBlocked.
     """
     compiled = workspace / "harbor"
     lock = _read_compiled_lock(workspace)
@@ -115,12 +87,8 @@ def _compiled_allowed_hosts(workspace: Path) -> tuple[list[str], list[str]] | No
 
 
 def _reviewer_base_url_from_env(env: dict[str, Any]) -> str:
-    """Return the reviewer base URL (raw string, ``""`` when unset).
-
-    Backend-aware (issue #966): a claude reviewer reads ``ANTHROPIC_BASE_URL``
-    -- the in-container claude branch accepts an unset base URL (the SDK
-    default applies); every other backend keeps the pi-era
-    ``DAYDREAM_REVIEW_BASE_URL``.
+    """Read ANTHROPIC_BASE_URL for Claude, otherwise DAYDREAM_REVIEW_BASE_URL; unset means
+    empty.
     """
     backend = (env.get("DAYDREAM_REVIEW_BACKEND") or "").strip().lower()
     if backend == "claude":
@@ -129,16 +97,9 @@ def _reviewer_base_url_from_env(env: dict[str, Any]) -> str:
 
 
 def _reviewer_host_from_env(env: dict[str, Any]) -> str:
-    """Return the reviewer base-URL host, failing closed when it is absent.
-
-    Backend-aware (issue #966): a claude reviewer resolves its host from
-    ``ANTHROPIC_BASE_URL`` -- falling back to the Anthropic SDK default
-    ``api.anthropic.com`` when unset, and refusing a set-but-hostless URL
-    (mirroring the in-container claude branch's concrete-hostname
-    requirement). Every other backend keeps the pi-era rule: a configured
-    ``DAYDREAM_REVIEW_BASE_URL`` resolves to its hostname (lowercased, no
-    port), and a missing one raises. Daydream never selects an implicit
-    provider API.
+    """Resolve reviewer hostname; reject configured URLs without a concrete host. Claude
+    permits the SDK default api.anthropic.com when unset. Other backends require an
+    explicit DAYDREAM_REVIEW_BASE_URL.
     """
     backend = (env.get("DAYDREAM_REVIEW_BACKEND") or "").strip().lower()
     if backend == "claude":
@@ -238,13 +199,8 @@ def _compiled_lock_sha256(workspace: Path) -> str:
 
 
 def _compiled_daydream_wheel(workspace: Path) -> tuple[str, str]:
-    """The ``daydream`` wheel ``(version, sha256)`` from the compiled lock.
-
-    Authoritative provenance source (issue #888): the compiled
-    ``harbor/benchmark.lock.json`` ``daydream`` block describing the exact
-    Daydream wheel the run executed under. Fail-closed: an absent/malformed
-    block (or unreadable lock) raises ``RunError`` naming the lock path — a
-    plausible placeholder is never defaulted.
+    """Require recorded version/SHA-256 from the compiled lock; absent or malformed
+    provenance raises.
     """
     path = _compiled_lock_path(workspace)
     lock = _read_compiled_lock(workspace)
@@ -335,29 +291,9 @@ def ledger_append_running(
     judge_model: str | None = None,
     judge_host: str | None = None,
 ) -> None:
-    """Append a ``running`` entry (written before Harbor spawns) for this run.
-
-    Uniqueness is the freshly generated uuid4 ``run_id``; the ``job_dir`` is
-    validated only for containment under ``<ws>/harbor/jobs/``.
-
-    ``profile_digest`` (issue #885/R12) is the canonical digest of the
-    review-profile candidate this run executes under, supplied by the control
-    plane (the entrypoint computes it from the validated candidate); this
-    function never reads ambient env itself. Optional: legacy/late callers
-    that omit it leave the field ``None`` on the entry.
-
-    ``reviewer_effort`` (issue #888) is the reviewer reasoning-effort this run
-    executed under, threaded from the control-plane env so the read-only
-    objective can recover it without inference. Optional: callers that omit it
-    leave the field ``None`` on the entry (legacy/late callers stay byte-stable).
-
-    ``reviewer_backend``/``reviewer_model``/``reviewer_base_url``/``judge_provider``/
-    ``judge_model``/``judge_host`` (issue #888) persist the reviewer/judge
-    attribution the run actually executed under, so the read-only objective
-    binds them from the run's recorded state rather than the resolution-time
-    ambient env (which would mis-attribute a historical run under env drift).
-    These are always supplied by the control-plane env; callers that omit them
-    leave the fields ``None`` on the entry (legacy/late callers stay byte-stable).
+    """Record a unique contained job before Harbor starts. Control-plane callers supply
+    profile, reviewer, judge, and effort identity; this function never infers historical
+    attribution from ambient environment. Omitted legacy fields remain None.
     """
     validated = _validate_job_dir(workspace, job_dir)
     with storage.WorkspaceLock(workspace):
@@ -505,16 +441,9 @@ def _iter_trial_dirs(job_dir: Path) -> Iterator[Path]:
 
 
 def _parse_job_results(job_dir: Path) -> tuple[bool, list[dict[str, Any]]]:
-    """Parse Harbor's job dir for per-task scores + resolved environments.
-
-    Fail-closed: returns ``(oracle_ok, environments)`` where a trial with no
-    score evidence (neither ``reward.json`` nor ``reward-details.json`` — e.g.
-    Harbor returned/wrote nothing) or an empty job dir blocks the oracle rather
-    than passing with zero per-task evidence. A task is scored when its
-    ``<trial>/verifier/reward.json`` exists; it is *unscored* when only
-    ``reward-details.json`` exists (the infra-error path — never a numeric
-    zero). Oracle success requires every trial scored with ``reward == 1.0``
-    and ``verifier_error == 0``.
+    """Return Oracle success and recorded environments from trial artifacts. Every trial
+    must have reward=1 and verifier_error=0. Missing evidence or an empty job blocks
+    success; details-only trials are unscored infra failures.
     """
     job_dir = Path(job_dir)
     if not job_dir.is_dir():
@@ -556,12 +485,8 @@ def _parse_reward(reward_path: Path) -> dict[str, Any] | None:
 
 
 def _environment_from_trial(trial: Path) -> dict[str, Any]:
-    """Deterministic resolved-environment entry for one scored trial.
-
-    Computes ``environment_id`` as a content-address over the trial's compiled
-    environment (task.toml ``[environment]`` + environment/ bytes); the docker
-    provider tags the built image ``hb__<environment_id>`` when the task does
-    not pin a concrete ``docker_image``.
+    """Hash compiled environment configuration/bytes; unpinned Docker images use hb__ plus
+    that identity.
     """
     digest = hashlib.sha256()
     task_toml = trial / "task.toml"
@@ -743,13 +668,9 @@ def run_run(
     docker_ok: Callable[[], package.DockerNetworkPolicyCapability] | None = None,
     confirm: Callable[[str], bool] | None = None,
 ) -> int:
-    """Supervised Harbor run: fail-closed preflight, then one gated run.
-
-    The Oracle path (``oracle=True``) runs a self-match pass to prove the stack
-    reproduces gold and writes ``harbor/oracle-receipt.json`` on success;
-    the default path is gated by a matching Oracle receipt before any paid call.
-    Every run is recorded in ``runtime/harbor.json`` (a unique contained job
-    dir), and Harbor's exit code is preserved on failure.
+    """Preflight and run Harbor, preserving its failure exit code and recording cleanup
+    ownership. Oracle success writes a receipt; default paid runs require a matching
+    receipt first.
     """
     workspace = Path(workspace).resolve()
     env = dict(env) if env is not None else {}

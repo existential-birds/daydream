@@ -22,41 +22,23 @@ from tests.harness.trajectory import make_recorder
 def recorder(tmp_path: Path) -> Any:
     """A real recorder shared by the review and parse invocations."""
     return make_recorder(
-        tmp_path, path=tmp_path / "t.json",
-        agent_model_name="m", session_id="00000000-0000-0000-0000-0000000000ff",
+        tmp_path, path=tmp_path / "t.json", agent_model_name="m", session_id="00000000-0000-0000-0000-0000000000ff",
     )
-
 
 async def test_successive_agent_phases_preserve_structured_parse_output(tmp_path: Path, recorder: Any) -> None:
     rev_script = {"turns": [{"message_id": "r1", "text": "reviewed"}]}
-    parse_script = {
-        "turns": [{"message_id": "p1", "text": ""}],
-        "structured_output": {
-            "issues": [
-                {
-                    "id": 1,
-                    "description": "x",
-                    "file": "a.py",
-                    "line": 1,
-                    "confidence": "HIGH",
-                    "rationale": "r",
-                }
+    parse_script = {"turns": [{"message_id": "p1", "text": ""}],
+        "structured_output": {"issues": [
+                {"id": 1, "description": "x", "file": "a.py", "line": 1, "confidence": "HIGH", "rationale": "r"}
             ]
         },
     }
     processes = [make_mock_process(build_codex_jsonl_for_phase(script)) for script in (rev_script, parse_script)]
-
     async with recorder:
         with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=processes):
-            await run_agent(
-                CodexBackend("m"), tmp_path, "go", phase=DaydreamPhase.REVIEW
-            )
+            await run_agent(CodexBackend("m"), tmp_path, "go", phase=DaydreamPhase.REVIEW)
             par = cast(dict[str, Any], (await run_agent(
-                CodexBackend("m"),
-                tmp_path,
-                "go",
-                output_schema=FEEDBACK_SCHEMA,
-                phase=DaydreamPhase.PARSE,
+                CodexBackend("m"), tmp_path, "go", output_schema=FEEDBACK_SCHEMA, phase=DaydreamPhase.PARSE,
             ))[0])
 
     # The second invocation retains its parsed result after a text-only review.

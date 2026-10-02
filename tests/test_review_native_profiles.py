@@ -2,7 +2,6 @@
 from pathlib import Path
 
 from daydream import review_profile as rp
-from daydream.deep.coverage import build_uncovered_sweep_prompt
 from daydream.deep.prompts import (
     build_arbiter_prompt,
     build_generic_fallback_prompt,
@@ -16,8 +15,7 @@ from tests.harness.review_profile import default_strategy as _default_strategy
 
 
 def test_golden_baseline_generic_fallback() -> None:
-    p = build_generic_fallback_prompt(
-        strategy=_default_strategy("discovery.generic_fallback"),
+    p = build_generic_fallback_prompt(strategy=_default_strategy("discovery.generic_fallback"),
         files=["a.js"], diff_path=Path("/d"), intent_path=Path("/i"),
         alternatives_path=Path("/a"), output_path=Path("/o"), cwd=Path("/c"),
     )
@@ -25,7 +23,6 @@ def test_golden_baseline_generic_fallback() -> None:
     assert "language-agnostic review practices" in p
     assert "a.js" in p and "/d" in p and "/c" in p   # host runtime data present
     assert "beagle" not in p.lower() and "/beagle-" not in p
-
 
 def test_golden_baseline_arbiter_and_merge() -> None:
     a = build_arbiter_prompt(strategy=_default_strategy("arbitration"),
@@ -53,7 +50,6 @@ def test_authored_blocks_land_verbatim() -> None:
     assert p.strategies["discovery.structural"].source == "authored: #886 NATIVE_STRUCTURAL_DISCOVERY_STRATEGY"
     assert p.strategies["improve.vetting"].source == "authored: #886 NATIVE_IMPROVE_VET_STRATEGY"
 
-
 def test_discovery_strategy_reads_hunk_context_without_mandatory_full_large_files() -> None:
     profile = rp.build_default_profile()
     for name in ("discovery.per_stack", "discovery.generic_fallback"):
@@ -61,60 +57,31 @@ def test_discovery_strategy_reads_hunk_context_without_mandatory_full_large_file
         assert "Read every assigned file in full" not in strategy
         assert "enclosing symbol or configuration section" in strategy
 
-
 def test_structural_strategy_owns_folded_design_review() -> None:
     strategy = rp.build_default_profile().strategies["discovery.structural"].content
     assert "design choices that conflict with the confirmed intent" in strategy
     assert "or alternatives analysis" not in strategy
 
-
 def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None:
-    sv = build_supervise_prompt(
-        strategy="supervise-strategy-sentinel {supervise_input_path}",
-        supervise_input_path=Path("/supervise-input.json"),
-        diff_path=Path("/review.diff"),
-        intent_path=Path("/intent.md"),
-        alternatives_path=Path("/alternatives.json"),
-        cwd=Path("/review-repo"),
+    sv = build_supervise_prompt(strategy="supervise-strategy-sentinel {supervise_input_path}",
+        supervise_input_path=Path("/supervise-input.json"), diff_path=Path("/review.diff"),
+        intent_path=Path("/intent.md"), alternatives_path=Path("/alternatives.json"), cwd=Path("/review-repo"),
     )
-    sup = build_suppression_prompt(
-        strategy="suppression-strategy-sentinel {suppression_input_path}",
-        suppression_input_path=Path("/suppression-input.json"),
-        diff_path=Path("/review.diff"),
-        intent_path=Path("/intent.md"),
-        alternatives_path=Path("/alternatives.json"),
-        cwd=Path("/review-repo"),
+    sup = build_suppression_prompt(strategy="suppression-strategy-sentinel {suppression_input_path}",
+        suppression_input_path=Path("/suppression-input.json"), diff_path=Path("/review.diff"),
+        intent_path=Path("/intent.md"), alternatives_path=Path("/alternatives.json"), cwd=Path("/review-repo"),
     )
-    ver = build_verification_prompt(
-        strategy="verification-strategy-sentinel",
-        items=[
-            {
-                "id": 1,
-                "lens": "per-stack",
-                "file": "changed.py",
-                "line": 1,
+    ver = build_verification_prompt(strategy="verification-strategy-sentinel",
+        items=[{"id": 1, "lens": "per-stack", "file": "changed.py", "line": 1,
                 "description": "verification-candidate-sentinel",
             }
-        ],
-        cwd=Path("/review-repo"),
-        output_path=Path("/verification.json"),
-    )
-    unc = build_uncovered_sweep_prompt(
-        strategy="uncovered-strategy-sentinel {file}",
-        file="uncovered.py",
-        diff_path=Path("/diff.patch"),
-        intent_path=Path("/intent.md"),
-        cwd=Path("/review-repo"),
-        output_path=Path("/uncovered-review.md"),
+        ], cwd=Path("/review-repo"), output_path=Path("/verification.json"),
     )
     intent = build_intent_prompt(
-        strategy="intent-strategy-sentinel {diff_path}",
-        diff_path="/review.diff",
-        inline_diff="+new behavior",
+        strategy="intent-strategy-sentinel {diff_path}", diff_path="/review.diff", inline_diff="+new behavior",
     )
     alt = build_alternative_review_prompt(
-        strategy="alternative-strategy-sentinel {intent_summary} {diff_path}",
-        intent_summary="intent-summary-sentinel",
+        strategy="alternative-strategy-sentinel {intent_summary} {diff_path}", intent_summary="intent-summary-sentinel",
         diff_path="/alternative.diff",
     )
 
@@ -124,13 +91,11 @@ def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None
     assert "/suppression-input.json" in sup and "/review.diff" in sup
     assert "verification-strategy-sentinel" in ver
     assert "changed.py" in ver and "verification-candidate-sentinel" in ver
-    assert "uncovered-strategy-sentinel" in unc
-    assert "uncovered.py" in unc and "/diff.patch" in unc
     assert "intent-strategy-sentinel" in intent
     assert "/review.diff" in intent and "+new behavior" in intent
     assert "alternative-strategy-sentinel" in alt
     assert "intent-summary-sentinel" in alt and "/alternative.diff" in alt
 
     # Native builders must not reintroduce the removed skill-invocation framing.
-    for text in (sv, sup, ver, unc, intent, alt):
+    for text in (sv, sup, ver, intent, alt):
         assert "/beagle-" not in text and "beagle" not in text.lower()

@@ -22,11 +22,9 @@ from daydream import git_ops
 from daydream.benchmark import snapshot, snapshot as sn, storage
 from daydream.benchmark.schema import case_id_for
 from daydream.benchmark.storage import recover_startup
-from daydream.git_ops import GitError
+from daydream.git_ops import GitError, process as git_process
 from tests.harness.git_helpers import git as _git, seed_pr_origin, seeded_commit, write_and_stage
 from tests.harness.transaction_faults import TransactionFaultDriver
-
-# real-git seed helpers (deterministic commit SHAs)
 
 
 def _publish_origin(repo: Path, bare: Path, *refspecs: str) -> None:
@@ -40,17 +38,11 @@ def _publish_origin(repo: Path, bare: Path, *refspecs: str) -> None:
     _git(bare, "init", "--bare")
     _git(repo, "remote", "add", "origin", str(bare))
     for refspec in refspecs:
-        _git(repo, "push", "origin", refspec.removeprefix("!"),
-             check=not refspec.startswith("!"))
+        _git(repo, "push", "origin", refspec.removeprefix("!"), check=not refspec.startswith("!"))
 
 
 def _primed_mirror(
-    tmp_path: Path,
-    origin: str,
-    *,
-    base_tip: str,
-    explicit_shas: list[str] | tuple[str, ...] = (),
-    pr_number: int = 1,
+    tmp_path: Path, origin: str, *, base_tip: str, explicit_shas: list[str] | tuple[str, ...] = (), pr_number: int = 1,
 ) -> Path:
     """Bring up the shared mirror and prime it with the base tip and PR head(s)."""
 
@@ -62,9 +54,7 @@ def _primed_mirror(
 
 def _seed_origin(tmp_path: Path) -> str:
     """Bare origin: main (base1->base2->base3) + "refs/pull/1/head" off base2."""
-    bare, _, _ = seed_pr_origin(
-        tmp_path, repo_name="seed_wt", bare_name="origin.git", number=1
-    )
+    bare, _, _ = seed_pr_origin(tmp_path, repo_name="seed_wt", bare_name="origin.git", number=1)
     return bare
 
 
@@ -73,11 +63,8 @@ def _seed_two_pr_origin(tmp_path: Path) -> tuple[str, str, str]:
     with refs/pull/1/head off base2, plus a diverged `dev` branch (off base1) whose
     first commit is PR2's base tip and second commit is PR2's head. Returns
     (bare, dev_base_tip_sha, pr2_head_sha)."""
-    bare, _, pr1_head = seed_pr_origin(
-        tmp_path, repo_name="seed_wt", bare_name="origin.git", number=1
-    )
+    bare, _, pr1_head = seed_pr_origin(tmp_path, repo_name="seed_wt", bare_name="origin.git", number=1)
     repo = tmp_path / "seed_wt"
-    # PR 2: unrelated `dev` branch diverged from base1; base tip = dev1, head = dev2
     _git(repo, "checkout", "-b", "dev", "HEAD~2")           # base1
     write_and_stage(repo, "dev.py", "DEV = 1\n")
     dev_tip = seeded_commit(repo, "dev1")
@@ -108,7 +95,6 @@ def _seed_rename_origin(tmp_path: Path) -> tuple[str, str, str]:
     _publish_origin(repo, bare, "main:main", f"!{head_sha}:refs/pull/1/head")
     return str(bare), authoring_sha, head_sha
 
-
 # Deterministic SHAs/trees produced by ``_seed_origin`` (verified at seed build).
 _SHA_BASE2 = 'd35f2cbffc81b6292f67cf891ac1c4256fe948a4'
 _SHA_BASE2_TREE = 'a54e8fefe4dd3ffe592efe5fc64eb32f9eb7dbd4'
@@ -117,24 +103,10 @@ _SHA_HEAD = 'd9a75fd29107db73ef6cb08f877e644381c31f25'
 _SHA_HEAD_TREE = '100c61d903cabfd705776af46193bc55d494940d'
 
 
-
-
 def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) -> None:
-    """The shared bare mirror must support both rename-tracing primitives the
-    authoring-anchor derivation depends on: ``git log --follow`` (path history
-    across renames) and ``git diff -M`` (rename detection). This pins the spec's
-    Key Decision -- that a plain bare mirror (no shallow flags, plain fetch)
-    retains full history -- so the rename-derivation strategy is sound.
-
-    Spike finding (recorded task notes): in the bare mirror, ``git log`` with
-    no start commit resolves to the symbolic ``HEAD`` -> ``refs/heads/main``,
-    which is never fetched (the mirror carries only ``base_tip`` + pull/explicit
-    refs), so the dotless form fails with "current branch 'main' does not have
-    any commits yet". The decision survives: full history is retained, and
-    ``--follow`` works as long as the caller names a start commit -- which the
-    anchor helper always will (it traces from a concrete head/authoring SHA).
-    If either probe fails, mirror handling must be revised (or the decision
-    re-routed to the spec) before any anchor task runs.
+    """A full-history bare mirror supports both --follow and diff -M rename tracing. Name
+    an explicit starting SHA: mirror refs omit the symbolic HEAD branch, so an
+    unqualified git log would fail despite retained history.
     """
 
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
@@ -143,14 +115,11 @@ def test_mirror_supports_rename_tracing_for_anchor_derivation(tmp_path: Path) ->
     m = sn.mirror(tmp_path)
     assert sn.rev_parse(m, "refs/pull/1/head") == head_sha
 
-    # (a) --follow (with an explicit start commit) must surface BOTH commits
-    # when tracing the pre-rename path -- the bare mirror retains full history.
     traced = _git(m, "log", "--follow", "--format=%H", head_sha, "--", "old.py").splitlines()
     assert authoring_sha in traced, f"authoring commit missing from log --follow: {traced}"
     assert head_sha in traced, f"rename commit missing from log --follow: {traced}"
     assert traced[0] == head_sha  # most recent commit first
 
-    # (b) diff -M must emit a pure rename record R100 old.py -> new.py.
     statuses = _git(m, "diff", "--name-status", authoring_sha, head_sha, "-M")
     assert "R100\told.py\tnew.py" in statuses, f"no R100 rename record in: {statuses!r}"
 
@@ -221,7 +190,6 @@ def test_derive_authoring_path(
     m = snapshot.mirror(tmp_path)
     assert snapshot.derive_authoring_path(m, authoring_sha, requested, head_sha) == expected
 
-
 def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
     """Derivation never guesses: a missing authoring commit is
     ``history-unavailable``; a path that is neither in the authoring tree nor an
@@ -239,19 +207,13 @@ def test_derive_authoring_path_fails_closed(tmp_path: Path) -> None:
     sha_present = (anchor_auth, "missing.py", anchor_head)  # (b) no rename, no path
     sha_ambiguous = (dbl_auth, "missing.py", dbl_head)  # (c) two R-candidates
     for args, expected_reason in [
-        (sha_absent, "history-unavailable"),
-        (sha_present, "path-unavailable"),
-        (sha_ambiguous, "path-unavailable"),
+        (sha_absent, "history-unavailable"), (sha_present, "path-unavailable"), (sha_ambiguous, "path-unavailable"),
     ]:
         with pytest.raises(snapshot.AnchorDerivationError) as exc:
             snapshot.derive_authoring_path(m, *args)
         assert expected_reason in str(exc.value)
 
-
-
-
 def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     mirror = tmp_path / "cache" / "repository.git"
     sn.ensure_mirror(tmp_path)
@@ -259,15 +221,10 @@ def test_ensure_mirror_and_fetch_pr_head(tmp_path: Path) -> None:
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
     assert sn.rev_parse(mirror, "refs/heads/base_tip") == _SHA_BASE2
-    # second call is idempotent
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
     assert sn.rev_parse(mirror, "refs/pull/1/head") == _SHA_HEAD
 
-
-
-
 def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)   # base3 reachable via main, NOT an ancestor of the PR head
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE3, explicit_shas=[_SHA_HEAD])
     pr_head = sn.rev_parse(m, "refs/pull/1/head")
@@ -276,11 +233,7 @@ def test_ancestor_of_pr_head_enforced(tmp_path: Path) -> None:
     assert sn.head_reachability(m, _SHA_BASE3, pr_head) == "head_not_on_pr"
     assert sn.head_reachability(m, "0" * 40, pr_head) == "head_unreachable"
 
-
-
-
 def test_resolve_base_and_trees(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     base = sn.resolve_original_base(m, "refs/heads/base_tip", _SHA_HEAD)
@@ -291,11 +244,7 @@ def test_resolve_base_and_trees(tmp_path: Path) -> None:
     assert bt == _SHA_BASE2_TREE and ht == _SHA_HEAD_TREE
     assert sn.resolve_trees(m, base, "0" * 40) == "missing_object"
 
-
-
-
 def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     assert sn.degenerate(_SHA_BASE2_TREE, _SHA_BASE2_TREE) == "equal_trees"
@@ -303,11 +252,7 @@ def test_degenerate_equal_trees_and_canonical_diff(tmp_path: Path) -> None:
     d = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
     assert re.fullmatch(r"[0-9a-f]{64}", d)
 
-
-
-
 def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
@@ -318,11 +263,9 @@ def test_bundle_two_refs_deterministic(tmp_path: Path) -> None:
     assert sn.rev_parse(m, f"{base_commit}^{{tree}}") == _SHA_BASE2_TREE
     assert sn.rev_parse(m, f"{head_commit}^{{tree}}") == _SHA_HEAD_TREE
     assert sn.rev_parse(m, f"{head_commit}^") == base_commit           # single parent
-    # determinism: rebuild and compare bytes against the first build's hash
     first = storage.sha256_file(bundle)
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     assert storage.sha256_file(bundle) == first
-
 
 def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     origin = _seed_origin(tmp_path)
@@ -336,9 +279,6 @@ def test_bundle_heads_accepts_relative_path_from_any_cwd(tmp_path: Path, monkeyp
     assert heads_rel == {"refs/heads/base", "refs/heads/head"}
     assert heads_abs == {"refs/heads/base", "refs/heads/head"}
 
-
-
-
 def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
     """The same base/head pair hashes identically whether the diff runs in a
     mirror whose effective core.abbrev is widened past the clone's. Failing-by-
@@ -347,21 +287,16 @@ def test_canonical_diff_digest_is_abbreviation_stable(tmp_path: Path) -> None:
 
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2)
-    # widen the mirror's effective abbrev past the fresh 2-commit clone's default
     _git(m, "config", "core.abbrev", "12")
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    # must not raise: the clone's diff digest must equal the mirror's
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha,
-                              workdir=tmp_path)
-
+    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
 def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-
     origin = _seed_origin(tmp_path)
     mirror = tmp_path / "mirror.git"
-    git_ops._run_git(tmp_path, ["init", "--bare", str(mirror)], retries=0)
+    git_process._run_git(tmp_path, ["init", "--bare", str(mirror)], retries=0)
     captured: dict[str, list[str]] = {}
 
     real_run = subprocess.run
@@ -372,27 +307,22 @@ def test_git_fetch_wires_command_scoped_credential_helper(tmp_path: Path, monkey
             captured["argv"] = grg
         return real_run(args, *pargs, **kwargs)
 
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", spy)
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", spy)
     sn._git_fetch(mirror, origin, ["refs/heads/main"])
     argv = captured["argv"]
     assert "-c" in argv and any(a.startswith("credential.helper=!gh auth git-credential") for a in argv)
 
-
 def test_offline_clone_validates(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     bundle = tmp_path / "snapshots" / "pr-000001-aaaaaaaaaaaa.bundle"
     sn.build_bundle(m, _SHA_BASE2, _SHA_HEAD, bundle)
     diff_sha = sn.canonical_diff_sha256(m, _SHA_BASE2, _SHA_HEAD)
-    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha,
-                              workdir=tmp_path)
+    sn.validate_offline_clone(bundle, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
     bad = tmp_path / "snapshots" / "bad.bundle"
     bad.write_bytes(bundle.read_bytes()[: len(bundle.read_bytes()) // 2])
     with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha,
-                                  workdir=tmp_path)
-
+        sn.validate_offline_clone(bad, _SHA_BASE2_TREE, _SHA_HEAD_TREE, diff_sha, workdir=tmp_path)
 
 def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
     """Acceptance (b/c) at unit level: the offline-clone fidelity contract
@@ -413,75 +343,53 @@ def test_offline_clone_fidelity_rejects_tampering(tmp_path: Path) -> None:
     # (deterministic: identical tree+message+env => identical sha).
     synth_env = sn._synthetic_env()
     base_commit = _git(m, "commit-tree", base_tree, "-m", "snapshot base", env=synth_env)
-    head_commit = _git(m, "commit-tree", head_tree, "-p", base_commit,
-                       "-m", "snapshot head", env=synth_env)
+    head_commit = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "snapshot head", env=synth_env)
 
     # (c) extra ref: a third ref in the bundle -> for-each-ref sees 3.
     extra_ref_bundle = tmp_path / "snapshots" / "extra-ref.bundle"
     extra = _git(m, "commit-tree", head_tree, "-p", base_commit, "-m", "extra", env=synth_env)
     _git(m, "update-ref", "refs/heads/extra", extra)
-    _git(m, "bundle", "create", str(extra_ref_bundle),
-         "refs/heads/base", "refs/heads/head", "refs/heads/extra")
+    _git(m, "bundle", "create", str(extra_ref_bundle), "refs/heads/base", "refs/heads/head", "refs/heads/extra")
     with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, diff_sha,
-                                  workdir=tmp_path)
+        sn.validate_offline_clone(extra_ref_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
 
     # (c) extra reachable commit (no extra ref): head parented on an extra
     # commit parented on base -> rev-list --count origin/head == 3.
     extra_commit_bundle = tmp_path / "snapshots" / "extra-commit.bundle"
-    extra_commit = _git(m, "commit-tree", base_tree, "-p", base_commit,
-                        "-m", "extra", env=synth_env)
-    head_tampered = _git(m, "commit-tree", head_tree, "-p", extra_commit,
-                         "-m", "snapshot head", env=synth_env)
+    extra_commit = _git(m, "commit-tree", base_tree, "-p", base_commit, "-m", "extra", env=synth_env)
+    head_tampered = _git(m, "commit-tree", head_tree, "-p", extra_commit, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", head_tampered)
-    _git(m, "bundle", "create", str(extra_commit_bundle),
-         "refs/heads/base", "refs/heads/head")
+    _git(m, "bundle", "create", str(extra_commit_bundle), "refs/heads/base", "refs/heads/head")
     with pytest.raises(git_ops.GitError, match="exactly two reachable commits"):
-        sn.validate_offline_clone(extra_commit_bundle, base_tree, head_tree, diff_sha,
-                                  workdir=tmp_path)
+        sn.validate_offline_clone(extra_commit_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
 
     # (c) wrong parent: head with NO parent -> GitError (head^ fails, count 1).
     wrong_parent_bundle = tmp_path / "snapshots" / "wrong-parent.bundle"
     parentless_head = _git(m, "commit-tree", head_tree, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", parentless_head)
-    _git(m, "bundle", "create", str(wrong_parent_bundle),
-         "refs/heads/base", "refs/heads/head")
+    _git(m, "bundle", "create", str(wrong_parent_bundle), "refs/heads/base", "refs/heads/head")
     with pytest.raises(git_ops.GitError):
-        sn.validate_offline_clone(wrong_parent_bundle, base_tree, head_tree, diff_sha,
-                                  workdir=tmp_path)
+        sn.validate_offline_clone(wrong_parent_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
 
     # (c) wrong tree: head's tree is the base tree -> tree mismatch.
     wrong_tree_bundle = tmp_path / "snapshots" / "wrong-tree.bundle"
-    wrong_tree_head = _git(m, "commit-tree", base_tree, "-p", base_commit,
-                           "-m", "snapshot head", env=synth_env)
+    wrong_tree_head = _git(m, "commit-tree", base_tree, "-p", base_commit, "-m", "snapshot head", env=synth_env)
     _git(m, "update-ref", "refs/heads/head", wrong_tree_head)
-    _git(m, "bundle", "create", str(wrong_tree_bundle),
-         "refs/heads/base", "refs/heads/head")
+    _git(m, "bundle", "create", str(wrong_tree_bundle), "refs/heads/base", "refs/heads/head")
     with pytest.raises(git_ops.GitError, match="tree mismatch"):
-        sn.validate_offline_clone(wrong_tree_bundle, base_tree, head_tree, diff_sha,
-                                  workdir=tmp_path)
+        sn.validate_offline_clone(wrong_tree_bundle, base_tree, head_tree, diff_sha, workdir=tmp_path)
 
     # Restore the mirror refs so the mirror is reusable for later freezes.
     _git(m, "update-ref", "refs/heads/base", base_commit)
     _git(m, "update-ref", "refs/heads/head", head_commit)
 
-
-
-
-
 def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
-
     origin, authoring_sha, head_sha = _seed_rename_origin(tmp_path)
     sn.ensure_mirror(tmp_path)
     sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
-    assert sn.changed_paths(sn.mirror(tmp_path), authoring_sha, head_sha) == {
-        "old.py",
-        "new.py",
-    }
+    assert sn.changed_paths(sn.mirror(tmp_path), authoring_sha, head_sha) == {"old.py", "new.py"}
 
-
-@pytest.mark.parametrize(
-    "stdout",
+@pytest.mark.parametrize("stdout",
     [
         b"M\x00a.py",
         b"M\x00\x00",
@@ -491,32 +399,19 @@ def test_changed_paths_returns_both_names_for_rename(tmp_path: Path) -> None:
         b"Z\x00a.py\x00",
     ],
 )
-def test_changed_paths_rejects_malformed_nul_records(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes
+def test_changed_paths_rejects_malformed_nul_records(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stdout: bytes
 ) -> None:
-
     monkeypatch.setattr(
-        git_ops,
-        "_run_git",
-        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout, b""),
+        git_process, "_run_git", lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, stdout, b""),
     )
     with pytest.raises(GitError, match="name-status"):
         sn.changed_paths(tmp_path, "a" * 40, "b" * 40)
 
-
 def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     drifted, bundle = sn.freeze_one(
-        tmp_path,
-        "o/r",
-        1,
-        base_tip=_SHA_BASE3,
-        head_sha=_SHA_HEAD,
-        policy="explicit_head",
-        requested_head=_SHA_HEAD,
-        pr_changed_files={"feature.py"},
-        origin_url=origin,
+        tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD, policy="explicit_head", requested_head=_SHA_HEAD,
+        pr_changed_files={"feature.py"}, origin_url=origin,
     )
     assert drifted["status"] == "unreplayable"
     assert drifted["error"]["reason"] == "base_drift"
@@ -525,32 +420,20 @@ def test_freeze_explicit_head_rejects_paths_outside_pr_inventory(tmp_path: Path)
     assert drifted["requested_base_sha"] == _SHA_BASE3
     assert bundle is None
 
-
 def test_freeze_final_head_skips_pr_inventory_guard(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     ready, bundle = sn.freeze_one(
-        tmp_path,
-        "o/r",
-        1,
-        base_tip=_SHA_BASE3,
-        head_sha=_SHA_HEAD,
-        policy="final_pr_head",
-        requested_head="final",
-        pr_changed_files=set(),
-        origin_url=origin,
+        tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD, policy="final_pr_head", requested_head="final",
+        pr_changed_files=set(), origin_url=origin,
     )
     assert ready["status"] == "ready"
     assert isinstance(bundle, bytes)
 
-
 def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
-
     origin = _seed_origin(tmp_path)
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE2, head_sha=_SHA_HEAD,
-                           policy="final_pr_head", requested_head="final",
-                           pr_changed_files=set(), origin_url=origin)
+                           policy="final_pr_head", requested_head="final", pr_changed_files=set(), origin_url=origin)
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2 and ready["original_head_sha"] == _SHA_HEAD
     assert ready["requested_base_sha"] == _SHA_BASE2
@@ -578,7 +461,6 @@ def test_freeze_one_ready_and_reasons(tmp_path: Path) -> None:
     assert bundle2 is None
     assert ur2["bundle_file"] is None
 
-
 def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
     """The forced +{base_tip} refspec lets two PRs with unrelated, non-fast-forward
     base tips both freeze ready in one shared mirror (regression for defect 3)."""
@@ -594,9 +476,7 @@ def test_freeze_two_prs_unrelated_base_tips_both_ready(tmp_path: Path) -> None:
                                pr_changed_files=set(), origin_url=origin)
     assert ready1["status"] == "ready" and isinstance(b1, bytes)
     assert ready2["status"] == "ready" and isinstance(b2, bytes)
-    # the shared base_tip ref was force-re-pointed from base2 to the unrelated dev tip
     assert sn.rev_parse(m, "refs/heads/base_tip") == dev_tip
-
 
 def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
     """Acceptance (a): a base branch advanced past the PR fork records the true
@@ -607,14 +487,12 @@ def test_freeze_one_base_advanced_two_sha(tmp_path: Path) -> None:
     _primed_mirror(tmp_path, origin, base_tip=_SHA_BASE2, explicit_shas=[_SHA_HEAD])
     # PR head is forked from base2; main has advanced to base3.
     ready, bundle = sn.freeze_one(tmp_path, "o/r", 1, base_tip=_SHA_BASE3, head_sha=_SHA_HEAD,
-                           policy="final_pr_head", requested_head="final",
-                           pr_changed_files=set(), origin_url=origin)
+                           policy="final_pr_head", requested_head="final", pr_changed_files=set(), origin_url=origin)
     assert ready["status"] == "ready"
     assert ready["original_base_sha"] == _SHA_BASE2      # the true merge base
     assert ready["requested_base_sha"] == _SHA_BASE3      # the selected base-branch tip
     assert ready["original_base_sha"] != ready["requested_base_sha"]
     assert isinstance(bundle, bytes) and bundle.startswith(b"# v2 git bundle")
-
 
 def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
     """A base-tip fetch failure classifies ``base_unreachable``; a PR-head fetch
@@ -623,30 +501,17 @@ def test_freeze_distinct_base_vs_head_unreachable(tmp_path: Path) -> None:
     origin = _seed_origin(tmp_path)
     # base-tip ref absent on the origin (only base1..3 + refs/pull/1/head exist)
     ur, b = sn.freeze_one(tmp_path, "o/r", 1, base_tip="0" * 40, head_sha=_SHA_HEAD,
-                          policy="final_pr_head", requested_head="final",
-                          pr_changed_files=set(), origin_url=origin)
+                          policy="final_pr_head", requested_head="final", pr_changed_files=set(), origin_url=origin)
     assert ur["status"] == "unreplayable" and ur["error"]["reason"] == "base_unreachable"
     assert b is None
     assert ur["requested_base_sha"] == "0" * 40
     # PR-head ref absent (origin has only refs/pull/1/head, not 999)
     ur2, b2 = sn.freeze_one(tmp_path, "o/r", 999, base_tip=_SHA_BASE2, head_sha="0" * 40,
-                            policy="final_pr_head", requested_head="final",
-                            pr_changed_files=set(), origin_url=origin)
+                            policy="final_pr_head", requested_head="final", pr_changed_files=set(), origin_url=origin)
     assert ur2["error"]["reason"] == "head_unreachable" and b2 is None
     assert ur2["requested_base_sha"] == _SHA_BASE2
 
-
-
-
 def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
-    """A crash at any freeze {bundle, case, manifest} boundary heals whole.
-
-    Mirrors the import-crash transaction test, substituting the snapshot bundle
-    for one staged file: ``journal``/``data`` restore the whole before-state,
-    ``manifest`` keeps the complete after-state, and ``transactions/`` is left
-    empty after recovery.
-    """
-
     for boundary in ("journal", "data", "manifest"):
         case_dir = tmp_path / "cases"
         snap_dir = tmp_path / "snapshots"
@@ -670,15 +535,9 @@ def test_freeze_crash_recovers_whole_before_or_after(tmp_path: Path) -> None:
             assert (snap_dir / "pr-000001-aaaaaaaaaaaa.bundle").read_bytes() == b"bundle-after"
             assert (case_dir / "pr-000001-aaaaaaaaaaaa.yaml").read_text() == "case-after"
             assert (tmp_path / "benchmark.yaml").read_text() == "ledger-after"
-        assert not (tmp_path / "transactions").exists() or not list(
-            (tmp_path / "transactions").iterdir()
-        )
-
+        assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
 # ---------------------------------------------------------------------------
-
-
-
 
 
 def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
@@ -718,23 +577,18 @@ def _seed_rich_origin(tmp_path: Path) -> tuple[str, str, str, str, str]:
 
 
 def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: Path) -> None:
-
     origin, base, head, base_tree, head_tree = _seed_rich_origin(tmp_path)
     m = _primed_mirror(tmp_path, origin, base_tip=base, explicit_shas=[head])
     bundle = tmp_path / "snapshots" / "pr-000001-000000000000.bundle"
     sn.build_bundle(m, base, head, bundle)
     assert sn.bundle_heads(bundle) == {"refs/heads/base", "refs/heads/head"}
-    # trees match the origin exactly (modes, symlink targets, binary preserved)
     assert sn.rev_parse(m, "refs/heads/base^{tree}") == base_tree
     assert sn.rev_parse(m, "refs/heads/head^{tree}") == head_tree
-    # offline clone recomputes matching trees + diff
     diff = sn.canonical_diff_sha256(m, base, head)
     sn.validate_offline_clone(bundle, base_tree, head_tree, diff, workdir=tmp_path)
-    # repeatable bytes
     first = storage.sha256_file(bundle)
     sn.build_bundle(m, base, head, bundle)
     assert storage.sha256_file(bundle) == first
-    # no origin remote and only the two refs in an offline clone
     clone = _clone_offline(bundle, tmp_path)
     try:
         url = _git(Path(clone), "remote", "get-url", "origin")
@@ -742,10 +596,7 @@ def test_e2e_fidelity_trees_modes_symlinks_renames_deletions_binaries(tmp_path: 
         # fully offline-replayable with no GitHub/HTTPS network dependency
         assert url and not url.startswith(("https://", "http://", "git://", "ssh://"))
         refs = _git(Path(clone), "for-each-ref", "--format=%(refname)", "refs/remotes")
-        assert {line for line in refs.splitlines() if line} == {
-            "refs/remotes/origin/base",
-            "refs/remotes/origin/head",
-        }
+        assert {line for line in refs.splitlines() if line} == {"refs/remotes/origin/base", "refs/remotes/origin/head"}
     finally:
         shutil.rmtree(clone, ignore_errors=True)
 
@@ -759,16 +610,10 @@ def _clone_offline(bundle: Path, workdir: Path) -> Path:
     return Path(clone)
 
 
-
-
 def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
-    """Bare origin seeded for the prioritization fact probes.
+    """Seed a PR with an authoring commit followed by a rename, edit, and binary addition.
 
-    main: base1 -> base2 -> base3; refs/pull/1/head off base2 with one commit
-    that (a) renames ``old.py`` to ``new.py`` with no content change, (b) edits
-    ``feature.py`` in place, and (c) adds a binary file. Returns
-    ``(bare, base2_sha, base3_sha, head_sha)`` where base2 is the PR's base tip
-    and base3 is an unrelated (non-ancestor-of-head) commit.
+    Return the bare origin, authoring SHA, unrelated main-tip SHA, and PR head.
     """
     repo = tmp_path / "facts_wt"
     repo.mkdir()
@@ -796,13 +641,6 @@ def _seed_facts_origin(tmp_path: Path) -> tuple[str, str, str, str]:
 
 
 def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path) -> None:
-    """Spike pin (task 0, plan #879): a plain bare mirror answers both fact
-    queries the prioritization extraction needs — ``merge-base --is-ancestor``
-    for the commit relation and ``diff --name-status -M`` / ``--numstat`` for
-    the anchor delta (with parseable path columns and binary detection). If any
-    probe's output shape deviates on a plain bare mirror, the extraction helper
-    design must be revised before Task 1."""
-
     origin, authoring_sha, unrelated_sha, head_sha = _seed_facts_origin(tmp_path)
     sn.ensure_mirror(tmp_path)
     sn.fetch_head_refs(tmp_path, "o/r", 1, explicit_shas=[head_sha], origin_url=origin)
@@ -810,13 +648,11 @@ def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path)
 
     # (a) commit relation: ancestor exits 0; unrelated commit exits non-zero.
     ancestor = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", head_sha, head_sha],
-        cwd=m, capture_output=True, text=True,
+        ["git", "merge-base", "--is-ancestor", head_sha, head_sha], cwd=m, capture_output=True, text=True,
     )
     assert ancestor.returncode == 0, ancestor.stderr
     unrelated = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", unrelated_sha, head_sha],
-        cwd=m, capture_output=True, text=True,
+        ["git", "merge-base", "--is-ancestor", unrelated_sha, head_sha], cwd=m, capture_output=True, text=True,
     )
     assert unrelated.returncode != 0
 
@@ -829,23 +665,14 @@ def test_mirror_answers_commit_relation_and_anchor_delta_queries(tmp_path: Path)
     assert edited == ["M", "feature.py"], statuses
     assert all(r[0] == "A" or len(r) >= 2 for r in rows), statuses
 
-    # (c) binary detection: numstat emits '-' for both added/deleted counts.
     numstat = _git(m, "diff", "--numstat", authoring_sha, head_sha)
     assert "-\t-\tblob.bin" in numstat.splitlines(), numstat
 
 
-
-
 def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:
-    """Bare origin seeded for the fact-helper tests (task 2, plan #879).
+    """Branch edit, rename, delete, binary, and unrelated heads from one shared base.
 
-    main: base1 (readme) -> base2 (base.py + a 10-line ``wide.py`` +
-    ``renamed.txt`` + ``deleted.txt``). Four heads branch off base2: ``edit``
-    (modifies wide.py line 10 in place), ``rename`` (``git mv renamed.txt`` ->
-    ``renamed2.txt``), ``delete`` (removes deleted.txt), and ``binary`` (adds a
-    binary ``bin.dat``). An ``orphan`` commit sits off base1 on a different
-    ancestry. Returns ``(bare, base2_sha, orphan_sha, heads)`` where ``heads``
-    maps scenario name -> head SHA.
+    Return the origin, base SHA, unrelated sibling SHA, and four scenario heads.
     """
     repo = tmp_path / "delta_wt"
     repo.mkdir()
@@ -883,93 +710,59 @@ def _seed_delta_origin(tmp_path: Path) -> tuple[str, str, str, dict[str, str]]:
     orphan_sha = seeded_commit(repo, "orphan")
 
     bare = tmp_path / "delta_origin.git"
-    _publish_origin(
-        repo, bare, "main:main",
+    _publish_origin(repo, bare, "main:main",
         *(f"{sha}:refs/heads/{name}" for name, sha in (
-            ("edit", edit_head), ("rename", rename_head),
-            ("delete", delete_head), ("binary", binary_head),
+            ("edit", edit_head), ("rename", rename_head), ("delete", delete_head), ("binary", binary_head),
             ("orphan", orphan_sha),
         )),
     )
-    heads = {"edit": edit_head, "rename": rename_head,
-             "delete": delete_head, "binary": binary_head}
+    heads = {"edit": edit_head, "rename": rename_head, "delete": delete_head, "binary": binary_head}
     return str(bare), base2_sha, orphan_sha, heads
 
 
 def _anchor(path: str | None, start: int | None, end: int | None,
             commit: str, status: str = "derived") -> dict[str, Any]:
-    return {"version": 1, "status": status, "commit_id": commit,
-            "path": path, "start_line": start, "end_line": end}
+    return {"version": 1, "status": status, "commit_id": commit, "path": path, "start_line": start, "end_line": end}
 
 
 def _delta_mirror(tmp_path: Path) -> tuple[Path, str, str, dict[str, str]]:
-
     origin, base, orphan, heads = _seed_delta_origin(tmp_path)
     m = sn.ensure_mirror(tmp_path)
-    sn._git_fetch(m, origin, [
-        f"{sha}:refs/heads/fact-{i}"
-        for i, sha in enumerate((base, orphan, *heads.values()))
-    ])
+    sn._git_fetch(m, origin, [f"{sha}:refs/heads/fact-{i}" for i, sha in enumerate((base, orphan, *heads.values()))])
     return sn.mirror(tmp_path), base, orphan, heads
 
 
 def test_commit_relation_classifies_ancestor_head_and_non_ancestor(tmp_path: Path) -> None:
-
     m, base, orphan, heads = _delta_mirror(tmp_path)
     assert sn.commit_relation(m, heads["edit"], heads["edit"]) == "at_head"
     assert sn.commit_relation(m, heads["edit"], base) == "ancestor"
     assert sn.commit_relation(m, heads["edit"], orphan) == "non_ancestor"
 
-
 def test_commit_relation_unavailable_on_missing_object(tmp_path: Path) -> None:
-
     m, base, orphan, heads = _delta_mirror(tmp_path)
     assert sn.commit_relation(m, heads["edit"], "f" * 40) == "unavailable"
 
-
-def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationless(
-    tmp_path: Path,
-) -> None:
-
+def test_anchor_delta_intersecting_vs_elsewhere_rename_delete_binary_locationless(tmp_path: Path,) -> None:
     m, base, orphan, heads = _delta_mirror(tmp_path)
-    # intersecting edit to the anchored range -> changed
-    assert sn.anchor_delta(m, base, heads["edit"],
-                           _anchor("wide.py", 10, 10, base)) == "changed"
-    # edit elsewhere in the same file -> unchanged
-    assert sn.anchor_delta(m, base, heads["edit"],
-                           _anchor("wide.py", 1, 5, base)) == "unchanged"
-    # anchored path renamed -> renamed
-    assert sn.anchor_delta(m, base, heads["rename"],
-                           _anchor("renamed.txt", 1, 1, base)) == "renamed"
-    # anchored file deleted -> deleted
-    assert sn.anchor_delta(m, base, heads["delete"],
-                           _anchor("deleted.txt", 1, 1, base)) == "deleted"
-    # binary content at the anchor -> binary
-    assert sn.anchor_delta(m, base, heads["binary"],
-                           _anchor("bin.dat", 1, 1, base)) == "binary"
-    # anchor with path=None or a non-derived status -> locationless
-    assert sn.anchor_delta(m, base, heads["edit"],
-                           _anchor(None, None, None, base)) == "locationless"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 10, 10, base)) == "changed"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 1, 5, base)) == "unchanged"
+    assert sn.anchor_delta(m, base, heads["rename"], _anchor("renamed.txt", 1, 1, base)) == "renamed"
+    assert sn.anchor_delta(m, base, heads["delete"], _anchor("deleted.txt", 1, 1, base)) == "deleted"
+    assert sn.anchor_delta(m, base, heads["binary"], _anchor("bin.dat", 1, 1, base)) == "binary"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor(None, None, None, base)) == "locationless"
     assert sn.anchor_delta(m, base, heads["edit"],
                            _anchor("wide.py", 1, 1, base, status="path-unavailable")) == "locationless"
 
-
-def test_anchor_delta_unavailable_on_git_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-
+def test_anchor_delta_unavailable_on_git_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     m, base, orphan, heads = _delta_mirror(tmp_path)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
         raise GitError("forced failure")
 
-    monkeypatch.setattr(git_ops, "_run_git", _boom)
-    assert sn.anchor_delta(m, base, heads["edit"],
-                           _anchor("wide.py", 10, 10, base)) == "unavailable"
+    monkeypatch.setattr(git_process, "_run_git", _boom)
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 10, 10, base)) == "unavailable"
 
-
-def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Two anchors on the same (base_tip, head) share the whole-tree
     name-status/numstat classification via diff_cache: only the per-path -U0
@@ -978,32 +771,22 @@ def test_anchor_delta_shared_classification_runs_whole_tree_diffs_once(
 
     m, base, orphan, heads = _delta_mirror(tmp_path)
     probes: list[list[str]] = []
-    real = git_ops._run_git
+    real = git_process._run_git
 
     def counting(repo: Any, args: list[str], **kw: Any) -> Any:
         if any(flag in args for flag in ("--name-status", "--numstat", "-U0")):
             probes.append(args)
         return real(repo, args, **kw)
 
-    monkeypatch.setattr(git_ops, "_run_git", counting)
+    monkeypatch.setattr(git_process, "_run_git", counting)
     cache: dict[tuple[str, str], sn.AnchorDiff] = {}
-    assert sn.anchor_delta(
-        m, base, heads["edit"], _anchor("wide.py", 10, 10, base), diff_cache=cache
-    ) == "changed"
-    assert sn.anchor_delta(
-        m, base, heads["edit"], _anchor("wide.py", 1, 5, base), diff_cache=cache
-    ) == "unchanged"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 10, 10, base), diff_cache=cache) == "changed"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 1, 5, base), diff_cache=cache) == "unchanged"
     assert len([a for a in probes if "--name-status" in a]) == 1
     assert len([a for a in probes if "--numstat" in a]) == 1
-    # one per-path -U0 probe per modified record stays
     assert len([a for a in probes if "-U0" in a]) == 2
-    # without the shared cache each record pays the whole-tree fan-out anew
     probes.clear()
-    assert sn.anchor_delta(
-        m, base, heads["edit"], _anchor("wide.py", 10, 10, base)
-    ) == "changed"
-    assert sn.anchor_delta(
-        m, base, heads["edit"], _anchor("wide.py", 1, 5, base)
-    ) == "unchanged"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 10, 10, base)) == "changed"
+    assert sn.anchor_delta(m, base, heads["edit"], _anchor("wide.py", 1, 5, base)) == "unchanged"
     assert len([a for a in probes if "--name-status" in a]) == 2
     assert len([a for a in probes if "--numstat" in a]) == 2

@@ -10,7 +10,7 @@ from typing import Any
 
 import pytest
 
-from daydream import cli, runner
+from daydream import runner
 from daydream.backends import (
     CostEvent,
     MetricsEvent,
@@ -21,8 +21,9 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
+from daydream.commands import review as cli_review
 from daydream.observability.config import ObservabilityConfig
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import TraceCollector, attributes, otlp_collector
@@ -65,8 +66,7 @@ def _backend() -> ScriptedBackend:
         ThinkingEvent(text="Inspect the sample's return value."),
         ToolStartEvent(id="call-one", name="read_file", input={"path": "sample.py", "api_key": _SECRET}),
         ToolResultEvent(id="call-one", output=f"return 'safe'; credential={_SECRET}", is_error=False),
-        TextEvent(text=_REPLY),
-        MetricsEvent(message_id="message-one", prompt_tokens=100, completion_tokens=12,
+        TextEvent(text=_REPLY), MetricsEvent(message_id="message-one", prompt_tokens=100, completion_tokens=12,
                      cached_tokens=20, cache_creation_tokens=5, cost_usd=0.004,
                      model_name="observed-model", provider_name="observed-provider"),
         CostEvent(cost_usd=0.004, input_tokens=100, output_tokens=12, cached_tokens=20,
@@ -87,15 +87,10 @@ def _configure(monkeypatch: pytest.MonkeyPatch, base_url: str, destination: str)
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_PROTOCOL", "http/protobuf")
     monkeypatch.setenv("DAYDREAM_TRACE_TO", destination)
 
-
 @pytest.mark.parametrize("destination", ["otlp", "langsmith", "honeyhive"])
 async def test_runner_exports_complete_portable_trace(
-    destination: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    destination: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_FLOW)
     install_backend(_backend())
@@ -173,13 +168,9 @@ async def test_runner_exports_complete_portable_trace(
         assert usage["input_token_details"]["cache_creation"] == 5
         assert usage["total_cost"] == 0.004
 
-
 async def test_runner_preserves_redacted_scalar_arrays_and_encodes_nested_attributes(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     probe = _FLOW.replace(
         "async def trace_probe(ctx):",
@@ -219,15 +210,10 @@ async def test_runner_preserves_redacted_scalar_arrays_and_encodes_nested_attrib
     assert json.loads(attrs["probe.nested"]) == {"items": ["safe", "[REDACTED_CREDENTIAL]"]}
     assert _SECRET not in json.dumps([request["body"] for request in receiver.requests])
 
-
 @pytest.mark.parametrize("endpoint_setting", ["UPSTREAM_API_URL", "UPSTREAM_ENDPOINT"])
 async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malformed_unrelated_url(
-    endpoint_setting: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    endpoint_setting: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     credentials = ("operator%2Fname", "operator/name", "opaque%2Fsecret", "opaque/secret")
     exposed_text = "Observed values: " + " then ".join(credentials)
@@ -235,10 +221,8 @@ async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malfor
     monkeypatch.setenv("BROKEN_API_URL", "https://[malformed-ipv6")
     ext_dir.write_module(_FLOW)
     install_backend(ScriptedBackend(events=[
-        RequestEvent(exposed_text),
-        ToolStartEvent("credential-probe", "Read", {"note": exposed_text}),
-        ToolResultEvent("credential-probe", exposed_text, False),
-        TextEvent(exposed_text), CostEvent(0.005, 20, 4),
+        RequestEvent(exposed_text), ToolStartEvent("credential-probe", "Read", {"note": exposed_text}),
+        ToolResultEvent("credential-probe", exposed_text, False), TextEvent(exposed_text), CostEvent(0.005, 20, 4),
         ResultEvent({"answer": "safe"}, None),
     ]))
     with otlp_collector() as receiver:
@@ -267,13 +251,9 @@ async def test_runner_redacts_encoded_and_decoded_url_credentials_despite_malfor
     ):
         assert "Observed values:" in text and "[REDACTED_CREDENTIAL]" in text
 
-
 async def test_runner_metadata_policy_preserves_structure_and_omits_content(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_FLOW)
     install_backend(_backend())
@@ -282,7 +262,6 @@ async def test_runner_metadata_policy_preserves_structure_and_omits_content(
         config = make_config(feature_branch_repo, flow_name="trace-probe",
                              observability=ObservabilityConfig(destinations=("otlp",), capture_content=False))
         assert await runner.run(config) == 0
-
     assert len(receiver.spans) >= 5
     payload = json.dumps([request["body"] for request in receiver.requests])
     for content in (_PROMPT, _SYSTEM, _REPLY, _SECRET, "sample.py", "return 'safe'", "Inspect the sample"):
@@ -294,13 +273,9 @@ async def test_runner_metadata_policy_preserves_structure_and_omits_content(
             "gen_ai.input.messages", "gen_ai.output.messages", "traceloop.entity.input", "traceloop.entity.output",
         ))
 
-
 async def test_explicit_off_overrides_environment_and_repository_cannot_enable_tracing(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_FLOW)
     install_backend(_backend())
@@ -313,7 +288,7 @@ async def test_explicit_off_overrides_environment_and_repository_cannot_enable_t
             'model = "file-config-was-loaded"\n'
             '[observability]\ndestinations = ["otlp"]\nendpoint = "' + receiver.base_url + '"\n'
         )
-        config = cli._parse_args([
+        config = cli_review._parse_args([
             str(feature_branch_repo), "--flow", "trace-probe", "--non-interactive", "--no-archive",
         ])
         assert config.file_config is not None
@@ -321,13 +296,9 @@ async def test_explicit_off_overrides_environment_and_repository_cannot_enable_t
         assert await runner.run(config) == 0
     assert receiver.requests == []
 
-
 async def test_multiple_destinations_receive_same_trace(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_FLOW)
     install_backend(_backend())
@@ -339,13 +310,9 @@ async def test_multiple_destinations_receive_same_trace(
     assert {span["spanId"] for span in generic.spans} == {span["spanId"] for span in langsmith.spans}
     assert {span["traceId"] for span in generic.spans} == {span["traceId"] for span in langsmith.spans}
 
-
 async def test_extension_factory_exports_real_runner_spans(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     custom_flow = _FLOW.replace(
         'def register(r):',
@@ -362,16 +329,10 @@ async def test_extension_factory_exports_real_runner_spans(
         assert await runner.run(make_config(feature_branch_repo, flow_name="trace-probe")) == 0
     assert any(attributes(span).get("gen_ai.tool.name") == "read_file" for span in receiver.spans)
 
-
 @pytest.mark.parametrize("destination", ["unknown-exporter", "langsmith", "honeyhive"])
 async def test_invalid_destination_setup_fails_before_agent_work(
-    destination: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    destination: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ext_dir.write_module(_FLOW)
     backend = _backend()
@@ -383,11 +344,8 @@ async def test_invalid_destination_setup_fails_before_agent_work(
     assert backend.calls == []
     assert destination in capsys.readouterr().out.lower()
 
-
 async def test_workspace_failure_exports_root_before_a_trajectory_exists(
-    tmp_path: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with otlp_collector() as receiver:
         _configure(monkeypatch, receiver.base_url, "otlp")
@@ -414,13 +372,9 @@ def receiver_requests_resource(request: dict[str, Any]) -> dict[str, Any]:
 def resources_on_wire(receiver: TraceCollector) -> list[dict[str, Any]]:
     return [receiver_requests_resource(request) for request in receiver.requests]
 
-
 async def test_all_destinations_receive_same_sanitized_resource(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv(
         "OTEL_RESOURCE_ATTRIBUTES",

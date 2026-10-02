@@ -1,14 +1,4 @@
-"""Canonical fail-closed adjudication harvest (issue #984, Task 10).
-
-Verifies the preview ledger's per-finding evidence digests against a freshly
-built queue over the hydrated index and merges human judgments from the
-observation store under three-tier precedence. Digest drift raises
-:class:`AnnotationDriftError` before anything is written (delta on
-``corpus_projection.projector.build_frozen_corpus``'s digest-pinned snapshot flow:
-harvest verifies the *preview ledger's* digests rather than re-pinning its
-own, so preview identities and digests are stable into the export by
-construction).
-"""
+"""Export adjudications against the preview ledger's pinned finding identities and evidence."""
 
 from __future__ import annotations
 
@@ -37,15 +27,10 @@ def build_export_entries(
     *,
     observations_path: Path | None = None,
 ) -> list[dict[str, Any]]:
-    """Build the projector-shape export rows over a hydrated index.
-
-    Builder for the ``corpus adjudicate export`` CLI verb:
-    verifies every preview-ledger ``record_id``'s evidence digest
-    against the fresh queue, merges human judgments from the observation
-    store under three-tier precedence, and returns the rows in the
-    ``project_findings`` adjudication entry shape (plus ``record_id`` and
-    ``evidence_digest``), sorted by ``record_id``. Raises digest drift, a
-    missing ledger, and unknown record ids.
+    """Build corpus adjudicate export rows sorted by record_id. Verify preview digests against a fresh
+    hydrated-index queue before applying effective_adjudication precedence; never re-pin drifted
+    evidence. Missing ledgers, unknown IDs, and digest drift fail before writing. Rows use the
+    projector adjudication shape plus record_id and evidence_digest.
     """
     observations = load_observations(observations_path) if observations_path is not None else []
     items = build_queue(
@@ -126,8 +111,8 @@ def build_export_entries(
         }
         tier = classify_tier(entry)
         if tier == "gold" and not gold_eligible:
-            # Structural gate passed but the human gate did not (rater
-            # conflict or review-required): the finding stays out of gold.
+            # A failed human gate (conflict or review-required) withholds structurally eligible
+            # gold.
             tier = "task-only"
         entry["tier"] = tier
         if tier == "task-only":

@@ -41,12 +41,7 @@ if TYPE_CHECKING:
 def print_fix_progress(
     console: Console, item_num: int, total: int, description: str
 ) -> None:
-    """Print fix progress indicator.
-
-    Args:
-        item_num: Current item number (1-indexed).
-
-    """
+    """Print progress for the 1-based item number."""
     text = Text()
     text.append("  ", style=Style())
     text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
@@ -62,20 +57,9 @@ def print_fix_complete(
     total: int,
     outcome: str | None = None,
 ) -> None:
-    """Print per-finding fix completion, gated on the fix-verify verdict.
+    """Report a fix attempt until its verifier returns a terminal verdict.
 
-    At fix time the verdict is not yet known (issue #744): the post-fix
-    fix-verify step has not run, so a neutral line is printed instead of
-    claiming an unverified "applied". Only a ``resolved`` verdict may claim
-    "✔ Fix applied"; any other verdict is reported honestly as
-    attempted-not-fixed.
-
-    Args:
-        item_num: Current item number (1-indexed).
-        outcome: The finding's terminal fix-verify verdict (``resolved`` /
-            ``unresolved`` / ``wrong_target`` / ``regressed``), or ``None``
-            during the fix turn when it is not yet known.
-    """
+    Only resolved means applied; other verdicts remain attempted, not fixed."""
     text = Text()
     text.append("  ", style=Style())
     text.append(f"[{item_num}/{total}] ", style=STYLE_BOLD_CYAN)
@@ -89,13 +73,7 @@ def print_fix_complete(
 
 
 def print_issues_table(console: Console, issues: list[dict[str, Any]]) -> None:
-    """Display issues as a numbered Rich table.
-
-    Args:
-        issues: List of issue dicts with id, title, severity, description,
-                recommendation, files keys.
-
-    """
+    """Render an issue table followed by each issue’s details."""
     table = Table(
         box=box.SIMPLE_HEAVY,
         border_style=STYLE_PURPLE,
@@ -142,23 +120,10 @@ def format_verdict_join(
     other: list[int | None],
     total: int,
 ) -> Table:
-    """Build a table summarizing how merged items joined to verifier verdicts.
+    """Show verdict categories and ids, plus an independently computed total.
 
-    One row per category (Matched / Unmatched / Skipped / Structural / Other)
-    showing the count and, dimly, the ids; a final Total row. The Unmatched,
-    Skipped, and Other rows are omitted when empty. Mirrors the print_summary
-    table style.
-
-    Args:
-        matched: Ids of items that matched a verifier verdict.
-        unmatched: Ids of selected, verdict-eligible items with no verifier verdict.
-        skipped: Ids of items the selection predicate skipped (never rendered to
-            the verifier); a skip is distinct from an unmatched verdict.
-        structural: Ids of structural (verdict-exempt) items.
-        other: Leftover ids that fit no other bucket.
-        total: Total number of items to fix (len(items)).
-
-    """
+    Matched and Structural always appear; other empty categories are omitted.
+    Skipped findings were not selected, whereas unmatched findings lack verdicts."""
     table = Table(
         title="Verdict Join",
         title_style=STYLE_BOLD_GREEN,
@@ -171,24 +136,17 @@ def format_verdict_join(
     table.add_column("Count", style=STYLE_FG)
     table.add_column("IDs", style=STYLE_DIM)
 
-    def _ids(values: list[int | None]) -> str:
-        return ", ".join(str(v) for v in values)
-
-    n_matched = len(matched)
-    n_unmatched = len(unmatched)
-    n_skipped = len(skipped)
-    n_structural = len(structural)
-    n_other = len(other)
-    computed_total = n_matched + n_unmatched + n_skipped + n_structural + n_other
-
-    table.add_row("Matched", str(n_matched), _ids(matched))
-    if unmatched:
-        table.add_row("Unmatched", str(n_unmatched), _ids(unmatched))
-    if skipped:
-        table.add_row("Skipped", str(n_skipped), _ids(skipped))
-    table.add_row("Structural", str(n_structural), _ids(structural))
-    if other:
-        table.add_row("Other", str(n_other), _ids(other))
+    categories = (
+        ("Matched", matched),
+        ("Unmatched", unmatched),
+        ("Skipped", skipped),
+        ("Structural", structural),
+        ("Other", other),
+    )
+    computed_total = sum(len(values) for _, values in categories)
+    for label, values in categories:
+        if values or label in {"Matched", "Structural"}:
+            table.add_row(label, str(len(values)), ", ".join(str(value) for value in values))
     mismatch = f"  [expected {total}]" if computed_total != total else ""
     table.add_row("Total", str(computed_total) + mismatch, "")
 
@@ -199,20 +157,7 @@ _EXPLORATION_LIST_CAP = 8
 
 
 def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
-    """Build a renderable summarising the pre-scan exploration context.
-
-    Replaces the raw structured-output JSON dump with a counts header plus
-    compact lists of conventions, dependencies, and affected files. Mirrors
-    the field shapes and label wording of ExplorationContext.to_prompt_section.
-
-    Args:
-        ctx: Aggregated exploration results (read-only).
-
-    Returns:
-        A rich renderable (Table wrapped in a Group, or a plain Text for the
-        empty case) ready to pass to console.print.
-
-    """
+    """Show context counts and capped lists; render a quiet message when empty."""
     if not (ctx.affected_files or ctx.conventions or ctx.dependencies or ctx.guidelines):
         return Text("Exploration: no codebase context gathered", style=STYLE_DIM)
 
@@ -276,29 +221,14 @@ def render_exploration_summary(ctx: "ExplorationContext") -> "Group | Text":
 
 
 def print_stage_progress(console: Console, current: int, total: int, name: str) -> None:
-    """Print a ``[stage N/M: name]`` banner at deep-mode stage boundaries (D-44).
-
-    Args:
-        current: Current stage number (1-indexed).
-
-    """
+    """Print the 1-based stage boundary banner."""
     console.print(f"[neon.cyan]▶[/] [neon.fg][stage {current}/{total}: {name}][/]")
 
 
 def print_verification_summary(console: Console, verdicts_path: Path) -> None:
-    """Print a one-line summary of recommendation-verifier verdicts.
+    """Summarize verifier flags and optional selected/skipped counts.
 
-    Reads the verdicts JSON written by ``phase_verify_recommendations`` and
-    emits a single dim line of the form ``Recommendation verification: N
-    findings · M flagged (X contradicts, Y uncertain)``, appending
-    ``· S selected / K skipped`` when the artifact carries the sibling
-    ``selection`` block. Missing, empty, or malformed files are treated as a
-    no-op so the fix gate is never blocked by verifier output.
-
-    Args:
-        verdicts_path: Path to the ``recommendation-verdicts.json`` file.
-
-    """
+    Missing or malformed artifacts produce no output and cannot block fixing."""
     try:
         data = json.loads(verdicts_path.read_text())
     except (OSError, json.JSONDecodeError):
@@ -334,25 +264,8 @@ def print_preflight_notice(
     stack_lines: list[str],
     agent_count: int,
     exploration_available: bool,
-    sweep_note: str | None = None,
 ) -> None:
-    """Print the deep-mode pre-flight notice (D-30).
-
-    Lists the stages, detected stacks, skill per stack, and total agent
-    count. Per-model unpriceable cases surface via the renderer's
-    "cost unavailable" marker at render time.
-
-    Args:
-        agent_count: Total agent invocation count (D-30 formula).
-        exploration_available: True when the exploration infrastructure is
-            available and the pre-scan is wired in.
-        sweep_note: Optional additive line for the uncovered-file sweep agent
-            estimate (issue #309 finding 8). Uncovered files are not known at
-            pre-flight time, so the sweep's review + parse invocations are
-            shown as an explicit upper-bound note rather than folded into the
-            count.
-
-    """
+    """Show selected stages, stack skills, and total agent count before review."""
     console.print("[neon.cyan]▶[/] [neon.fg]Deep-review pipeline pre-flight[/]")
     if exploration_available:
         console.print("Exploration pre-scan: enabled (runs before stage 1)", style="dim")
@@ -368,5 +281,3 @@ def print_preflight_notice(
     for line in stack_lines:
         console.print(f"    - {line}")
     console.print(f"[neon.fg]  Total agents: {agent_count}[/]")
-    if sweep_note:
-        console.print(f"  {sweep_note}", style="dim")

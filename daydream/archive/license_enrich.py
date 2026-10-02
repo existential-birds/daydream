@@ -1,25 +1,12 @@
-"""License evidence enrichment for issue #1094 (Task 3).
+"""Enrich missing license evidence before the pure license-policy gate.
 
-Fills legacy records' missing ``license_evidence`` from normalized repo identity
-via an injectable :class:`RepoLicenseResolver` protocol before the license gate
-runs. The production adapter targets the GitHub license API using a commit-pinned
-request; ``GITHUB_TOKEN`` is read from the environment only and never persisted,
-never placed on a URL, and never embedded in an error message (every exception
-message passes through :func:`daydream.trajectory.redact_text`).
+GitHub requests are commit-pinned. Tokens come only from the environment,
+never URLs or persisted data; surfaced errors are redacted.
 
-Enrichment is a separate stage so ``apply_license_gate`` stays a pure function
-of policy + evidence: the gate consumes enriched evidence exactly like declared
-evidence via the existing ``_session_identity`` manifest path.
-
-Results are appended to ``stage/_enrich/evidence.jsonl`` — one JSON line per
-session with a stable status code — deduped per ``(repo_slug, repo_commit)`` so
-repeated sessions in one repo hit the cache, not the resolver. The cache
-survives re-runs (load-before-query), so same-VM re-runs are decision-identical,
-and is published into the curated prefix as ``license-evidence.jsonl`` by
-:func:`publish_enrichment_cache` — the pinned evidence record of that curation,
-consumed by audit and replay harnesses. Fresh-VM production runs re-enrich from
-the live resolver; upstream license/default-branch drift therefore yields a new
-v2 curation id, never a silent rewrite of a previous curation.
+The persistent staging cache dedupes by repo/commit and records one status per
+session. Its published ``license-evidence.jsonl`` pins this curation's evidence
+for audit and replay. Fresh staging resolves again; changed upstream decisions
+produce a different curation identity.
 """
 
 from __future__ import annotations
@@ -59,13 +46,7 @@ _FULL_COMMIT_IN_SOURCE_RE = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{40}(?![0-9a
 
 
 def _commit_from_source(source: str) -> str | None:
-    """Extract a full 40-hex Git commit from a declared evidence source string.
-
-    Enrichment-written sources are ``github:<owner>/<repo>@<commit>``; declared
-    producer sources may carry a commit in the same or a URL shape. Returns the
-    lowercased commit, or ``None`` when the source pins no full SHA (the
-    resolution map can never fabricate one).
-    """
+    """Extract a lowercased full Git SHA from a declared source; never invent an unresolved pin."""
     match = _FULL_COMMIT_IN_SOURCE_RE.search(source or "")
     return match.group(0).lower() if match else None
 
@@ -95,12 +76,10 @@ class RepoLicenseResolver(Protocol):
 
 
 class GithubLicenseResolver:
-    """Production adapter against the GitHub license API.
+    """Resolve commit-pinned GitHub license evidence using the ambient token.
 
-    ``GITHUB_TOKEN`` is read from ``os.environ`` only — never an argument, never
-    persisted. 404 → ``None`` (a stable-code miss, not an exception). Rate-limit
-    responses are retried with bounded exponential backoff (3 attempts, 2s base)
-    honoring ``Retry-After``; every surfaced error message is redacted.
+    404 is a miss. Rate limits receive three attempts with bounded exponential
+    backoff and Retry-After support; surfaced errors are redacted.
     """
 
     def resolve(self, repo_slug: str, repo_commit: str | None) -> EnrichedEvidence | None:
@@ -259,22 +238,13 @@ def _write_resolved(
 def enrich_license_evidence(
     stage: Path, *, resolver: RepoLicenseResolver
 ) -> dict[str, dict[str, str]]:
-    """Fill missing ``license_evidence`` on admitted derivatives under ``stage/runs/``.
+    """Enrich admitted manifests with missing license evidence, caching by repo/commit.
 
-    Records with well-formed declared evidence are left untouched (out of scope
-    per spec); when the declared source pins a full 40-hex Git commit, a
-    resolved cache row is still recorded so a repo that appears only with
-    declared evidence remains resolvable in the published resolution map.
-    Legacy records with a canonical repo slug are resolved through
-    ``resolver`` (dedup per ``(repo_slug, repo_commit)``); resolved evidence is
-    written into the session's ``manifest.json`` so the gate consumes it exactly
-    like declared evidence. Every processed session gets a stable-code cache
-    entry: ``resolved`` | ``repo_identity_missing`` | ``repo_commit_unresolved``.
-
-    Resolver network failures propagate as redacted :class:`HydrationError`s
-    (fatal); a resolver returning ``None`` is a recorded miss, never an
-    exception — the gate rejects it. Returns resolved evidence per session id
-    (``spdx_id``/``source``/``repo_commit``/``origin: enriched``).
+    Well-formed declared evidence stays unchanged; a declared full commit still
+    gets a resolution-map cache row. Each session records resolved evidence,
+    missing repo identity, or unresolved commit. Return enriched evidence by
+    session. Resolver misses remain gate-rejected evidence; network errors
+    propagate as redacted HydrationError exceptions.
     """
     runs_dir = stage / RUNS_DIRNAME
     by_session, by_repo = _load_cache(stage)
@@ -359,18 +329,10 @@ def enrich_license_evidence(
 def publish_enrichment_cache(
     stage: Path, *, revision: str | None = None, curated_dir: Path | None = None,
 ) -> Path | None:
-    """Copy the staging-internal enrichment cache into the curated prefix.
+    """Publish the staging cache as license-evidence.jsonl for audit and replay.
 
-    The cache at ``stage/_enrich/`` is VM-local bookkeeping (mirroring
-    ``_dedupe``'s published-set exclusion); the curated copy
-    ``license-evidence.jsonl`` is the published pinned record of this
-    curation's evidence, consumed by audit and replay harnesses (production
-    fresh-VM runs re-enrich from the live resolver). Returns the published
-    path, or ``None`` when nothing was cached.
-
-    Issue #1094: publication passes the post-gate v2 ``curated_dir`` (the
-    curation id is only known after the gate); callers without one fall back
-    to the pre-identity v1-shaped location.
+    Use the supplied post-gate curated directory, or the historical pre-identity
+    location when absent. Return None when no cache exists.
     """
     cache = _cache_path(stage)
     if not cache.is_file():

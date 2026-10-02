@@ -1,17 +1,7 @@
-"""Reconcile current review findings against the bot's prior PR comments.
-
-Stateless cross-run dedup: GitHub is the store. Prior findings are recovered
-from the hidden ``daydream-finding`` markers embedded in posted comment bodies
-(see `daydream.pr_review.finding_marker`), then partitioned against the
-current run's fingerprints into new / matched / stale.
-
-Stale inline findings are minimized via the GraphQL ``minimizeComment``
-mutation with classifier ``OUTDATED``. The least-privilege App installation
-token (``pull_requests: write, contents: read, metadata: read``) permits this
-operation while ``resolveReviewThread`` is unavailable.
-
-This module performs no posting and no artifact I/O; it talks to GitHub only
-through `daydream.git_ops.gh_api`.
+"""Reconcile marked findings against bot-authored GitHub history. GitHub is the cross-run
+store; current fingerprints partition into new, matched, and stale. Minimize stale
+inline comments as OUTDATED using least-privilege App access, which cannot resolve
+review threads.
 """
 
 from __future__ import annotations
@@ -32,19 +22,8 @@ if TYPE_CHECKING:
 
 @dataclass
 class PriorFinding:
-    """One prior daydream finding recovered from the PR.
-
-    Attributes:
-        fingerprint: The 64-hex finding fingerprint parsed from the hidden
-            comment marker.
-        thread_id: GraphQL review-thread node id for inline findings; None
-            for body-only findings (review bodies have no thread).
-        is_resolved: True when the finding is already closed — the thread was
-            resolved (e.g. by a human) or the comment was previously
-            minimized by a daydream run.
-        comment_node_id: GraphQL node id of the carrying comment; the
-            ``minimizeComment`` mutation subject for stale resolution. None
-            when unknown.
+    """Recovered fingerprint plus carrying comment/thread identity. A resolved thread or
+    minimized comment is already closed; body-only findings have no thread.
     """
 
     fingerprint: str
@@ -55,17 +34,8 @@ class PriorFinding:
 
 @dataclass(frozen=True)
 class PriorDiagramComment:
-    """One prior daydream diagram comment recovered from the PR (issue #1113).
-
-    Carries no ``is_minimized``: the REST issue-comments endpoint does not
-    expose it, and ``minimizeComment`` is idempotent server-side, so
-    re-minimizing an already-folded comment is accepted rather than avoided.
-
-    Attributes:
-        node_id: GraphQL node id of the comment -- the ``minimizeComment``
-            mutation subject.
-        kinds: The diagram kinds the comment's hidden markers claim, in marker
-            order and de-duplicated.
+    """Bot-authored diagram comment with ordered unique marker kinds. REST omits minimized
+    state; repeated minimizeComment calls are server-idempotent.
     """
 
     node_id: str
@@ -74,14 +44,8 @@ class PriorDiagramComment:
 
 @dataclass
 class ReconcilePlan:
-    """Partition of current fingerprints against prior findings.
-
-    Attributes:
-        new: Current fingerprints never posted before, in current order.
-        matched: Current fingerprints that already have a prior comment
-            (left untouched, even when resolved by a human).
-        stale: Prior inline findings absent from the current run and not yet
-            resolved — the minimization targets.
+    """New fingerprints retain current order; matched findings stay closed even after human
+    resolution. Only unresolved stale inline findings become minimization targets.
     """
 
     new: list[str]
@@ -125,15 +89,8 @@ def _graphql(
     idempotent: bool = False,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> dict[str, Any]:
-    """Run a GraphQL operation via ``gh api graphql`` and return the response.
-
-    Args:
-        idempotent: Set True for read-only *queries* so the call is retried on
-            host-load timeouts; leave False for *mutations*, which must not be
-            re-run after a timeout.
-
-    Raises:
-        GitError: If the call fails or the response carries GraphQL errors.
+    """Call GraphQL through the shared GitHub boundary and reject response errors. Only
+    idempotent reads opt into timeout retries; mutations must not retry.
     """
     response = git_ops.gh_api(
         repo,
@@ -149,17 +106,10 @@ def _graphql(
 
 
 def _authored_by_bot(login: str | None, viewer_did_author: bool, bot_login: str | None) -> bool:
-    """True iff GitHub proves the bot authored this node.
-
-    ``viewerDidAuthor`` is decided server-side from the installation token
-    (GraphQL only); the ``[bot]``-tolerant login match covers REST reviews
-    and acts as defense-in-depth on GraphQL. Either proof suffices. When
-    ``bot_login`` is None only ``viewerDidAuthor`` can save a node — REST
-    nodes are never trusted in that case (safe degradation).
+    """Accept server-proven viewer authorship or a normalized bot-login match. Without bot
+    identity, REST cannot prove authorship and no marker is trusted.
     """
-    if viewer_did_author:
-        return True
-    return bot_login is not None and bot_login_matches(login, bot_login)
+    return viewer_did_author or (bot_login is not None and bot_login_matches(login, bot_login))
 
 
 def fetch_prior_findings(
@@ -170,32 +120,10 @@ def fetch_prior_findings(
     bot_login: str | None = None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> dict[str, PriorFinding]:
-    """Inventory the bot's prior findings on a PR, keyed by fingerprint.
-
-    Combines two sources:
-
-    1. GraphQL ``pullRequest.reviewThreads`` (paginated via ``endCursor``)
-       for inline findings — each thread comment whose body carries a
-       ``daydream-finding`` marker.
-    2. REST ``GET /repos/<owner>/<repo>/pulls/<n>/reviews`` for body-only
-       findings embedded in review bodies (``thread_id=None``).
-
-    A marker is trusted **only** when GitHub proves the bot authored it:
-    ``viewerDidAuthor == true`` (GraphQL) or ``author.login`` / ``user.login``
-    matching *bot_login* via the ``[bot]``-suffix-tolerant comparator. When
-    ``bot_login`` is None, GraphQL is still protected by ``viewerDidAuthor``
-    and REST harvests nothing (a misconfigured bot double-posts rather than
-    ever suppressing a real finding).
-
-    The first occurrence of a fingerprint wins on duplicates. A finding
-    reads as resolved when its thread is resolved (human action) or its
-    comment was minimized (a prior daydream run marked it stale).
-
-    Returns:
-        Mapping of fingerprint to `PriorFinding`, in discovery order.
-
-    Raises:
-        GitError: If a GitHub API call fails.
+    """Inventory authenticated markers from paginated GraphQL threads and REST review
+    bodies. Viewer authorship or matching bot login is required; unresolved identity
+    admits only viewer-proven GraphQL nodes. First fingerprint occurrence wins. Thread
+    resolution or comment minimization closes inline findings; API failures propagate.
     """
     owner, name = repo_slug.split("/", 1)
     prior: dict[str, PriorFinding] = {}
@@ -254,15 +182,8 @@ def fetch_prior_findings(
 
 
 def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> ReconcilePlan:
-    """Partition the current run's fingerprints against prior findings.
-
-    Semantics:
-        - new: in ``current`` but never posted before — to be posted.
-        - matched: in both, regardless of ``is_resolved`` — a finding a human
-          resolved is not re-posted, and its closure is respected.
-        - stale: prior inline findings (``thread_id`` set) absent from
-          ``current`` and not yet resolved — to be minimized. Body-only
-          findings have no thread and simply stop appearing.
+    """Keep prior matches closed, including human-resolved findings. Only absent,
+    unresolved inline findings become stale; body-only findings simply stop appearing.
     """
     current_set = set(current)
     return ReconcilePlan(
@@ -279,21 +200,8 @@ def partition(current: Sequence[str], prior: dict[str, PriorFinding]) -> Reconci
 def minimize_comment(
     target_dir: Path, node_id: str, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
 ) -> bool:
-    """Mark one comment outdated via the GraphQL ``minimizeComment`` mutation.
-
-    The single minimization primitive, shared by stale-finding resolution and
-    by prior-diagram-comment superseding (issue #1113).
-    ``resolveReviewThread`` is unavailable to the least-privilege installation
-    token, so the carrying comment's node id is the subject.
-
-    Args:
-        target_dir: Repository directory the ``gh`` call runs in.
-        node_id: GraphQL node id of the comment to fold.
-
-    Returns:
-        True when GitHub reports the comment minimized. Any transport, shape,
-        or "not minimized" outcome returns False -- the caller decides how loud
-        that is.
+    """Mark one carrying comment OUTDATED; transport, shape, or unsuccessful-result errors
+    return False. The least-privilege token cannot use resolveReviewThread.
     """
     try:
         response = _graphql(
@@ -312,31 +220,9 @@ def fetch_prior_diagram_comments(
     bot_login: str | None,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> list[PriorDiagramComment]:
-    """Inventory the bot's prior standalone diagram comments on a PR (issue #1113).
-
-    A diagram comment is an *issue* comment, not a review and not a review
-    thread, so neither of ``fetch_prior_findings``' two sources sees it. Read
-    over REST (``GET /repos/{o}/{r}/issues/{n}/comments``, paginated): the
-    PR-level ``comments`` GraphQL connection would have to be added to the
-    schema surface, and REST's only loss is ``isMinimized``, which
-    :class:`PriorDiagramComment` does not need.
-
-    A comment is trusted only when it carries a ``daydream-diagram`` marker AND
-    ``bot_login_matches`` accepts its author. REST has no ``viewerDidAuthor``,
-    so an unresolved ``bot_login`` harvests nothing -- the caller then skips
-    minimization entirely rather than folding a comment it cannot attribute.
-
-    Args:
-        target_dir: Repository directory the ``gh`` call runs in.
-        repo_slug: ``owner/repo``.
-        pr_number: Target PR number.
-        bot_login: Bot login for author attribution, or None.
-
-    Returns:
-        The matching comments in API order.
-
-    Raises:
-        GitError: If the GitHub API call fails.
+    """Read paginated issue comments and retain marked comments with proven bot authorship.
+    Unresolved bot identity returns nothing without querying. Preserve API order and
+    unique marker-kind order; API failures propagate.
     """
     if bot_login is None:
         return []
@@ -356,13 +242,10 @@ def fetch_prior_diagram_comments(
             continue
         if not bot_login_matches((comment.get("user") or {}).get("login"), bot_login):
             continue
-        kinds: list[str] = []
-        for kind, _sha in parse_diagram_markers(comment.get("body") or ""):
-            if kind not in kinds:
-                kinds.append(kind)
+        kinds = tuple(dict.fromkeys(kind for kind, _sha in parse_diagram_markers(comment.get("body") or "")))
         node_id = comment.get("node_id")
         if kinds and isinstance(node_id, str) and node_id:
-            prior.append(PriorDiagramComment(node_id=node_id, kinds=tuple(kinds)))
+            prior.append(PriorDiagramComment(node_id=node_id, kinds=kinds))
     return prior
 
 
@@ -372,15 +255,8 @@ def resolve_threads(
     *,
     auth: GitHubAuth = INHERIT_GITHUB_AUTH,
 ) -> tuple[int, int]:
-    """Mark stale findings outdated via GraphQL ``minimizeComment``.
-
-    One mutation per stale finding, keyed on the carrying comment's GraphQL
-    node id (``resolveReviewThread`` is unavailable to the least-privilege
-    installation token). Best-effort: a failure on one
-    finding warns and continues, matching the `daydream.pr_review` posture.
-
-    Returns:
-        ``(resolved_count, failed_count)``.
+    """Minimize stale comments best-effort and return success/failure counts. Missing ids
+    or failed mutations warn and do not stop later findings.
     """
     from daydream.agent import console
 

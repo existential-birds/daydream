@@ -64,10 +64,11 @@ def _register_builtin_prompts(registry: Registry) -> None:
     """
     from daydream import phases
     from daydream.deep import prompts as deep_prompts
+    from daydream.phases import testing
 
     registry.override_prompt("intent", phases.build_intent_prompt)
     registry.override_prompt("alternatives", phases.build_alternative_review_prompt)
-    registry.override_prompt("fix", phases._build_fix_prompt)
+    registry.override_prompt("fix", testing._build_fix_prompt)
     registry.override_prompt("per-stack", deep_prompts.build_per_stack_prompt)
     registry.override_prompt("structural", deep_prompts.build_structural_prompt)
     registry.override_prompt("generic-fallback", deep_prompts.build_generic_fallback_prompt)

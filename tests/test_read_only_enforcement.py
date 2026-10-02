@@ -1,14 +1,8 @@
-"""Cross-backend gate: each backend enforces its read-only profile under read_only.
+"""Read-only enforcement through each backend's real execution boundary.
 
-Claude refuses mutation at the tool layer (PreToolUse guard). Codex combines
-its ``--sandbox read-only`` sandbox with a disposable standalone clone whenever
-the cwd is a Git worktree root: a ``git commit`` inside that cwd can advance
-only the disposable clone's refs and index — the caller's HEAD, staged index,
-refs, and remotes are physically unreachable and deleted with the clone at
-exit. The audit worktree remains, and Codex now additionally gets this hard
-disposable-clone boundary. The real committing-subprocess regression proves
-the caller's Git state survives a read-only Codex commit byte-for-byte; the
-Claude guard tests pin the tool-layer denial surface.
+Claude denies mutating tools. Codex combines its sandbox with a disposable clone
+for linked-worktree inputs, isolating the caller's HEAD/index/refs/remotes.
+A committing subprocess proves the caller's Git state survives byte-for-byte.
 """
 
 import os
@@ -54,9 +48,7 @@ _COMMITTING_CODEX = textwrap.dedent(
 )
 
 
-def _install_committing_codex(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: Path,
-) -> None:
+def _install_committing_codex(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, marker: Path,) -> None:
     """Put a real fake `codex` on $PATH that commits inside its cwd and records
     cwd/before/after/remotes to *marker*. Shebang pinned to sys.executable."""
     bin_dir = tmp_path / "fakebin"
@@ -69,7 +61,6 @@ def _install_committing_codex(
     script.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     monkeypatch.setenv("COMMIT_MARKER", str(marker))
-
 
 def test_claude_read_only_profile_refuses_mutation() -> None:
     """Claude's observable refusal is the Bash-guard decision."""
@@ -84,7 +75,6 @@ def test_claude_read_only_profile_refuses_mutation() -> None:
     assert _is_read_only_command("git log") is True
     assert _is_read_only_command("git blame -L 1,1 f.py") is True
 
-
 @pytest.mark.asyncio
 async def test_claude_read_only_guard_blocks_write_tool() -> None:
     """Under read_only, the guard denies the Write tool outright (not just Bash)."""
@@ -93,12 +83,9 @@ async def test_claude_read_only_guard_blocks_write_tool() -> None:
     ))
     assert decision["hookSpecificOutput"]["permissionDecision"] == "deny"
 
-
 @pytest.mark.asyncio
 async def test_codex_read_only_commit_cannot_change_source_head_or_index(
-    tmp_path: Path,
-    linked_worktree: tuple[Path, Path],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A real fake Codex commits in its isolated cwd; the caller's linked-worktree
     HEAD and cached index stay byte-for-byte identical."""
@@ -108,22 +95,13 @@ async def test_codex_read_only_commit_cannot_change_source_head_or_index(
     _harness_git(source, "add", "services/taste/parser.go")
     before_head = _harness_git(source, "rev-parse", "HEAD")
     before_index = _harness_git(source, "diff", "--cached", "--binary")
-
     marker = tmp_path / "marker.txt"
     _install_committing_codex(tmp_path, monkeypatch, marker)
-
     await run_agent(
-        CodexBackend(model="test-model"),
-        source,
-        f"Audit {source}",
-        phase=DaydreamPhase.AUDIT,
-        read_only=True,
+        CodexBackend(model="test-model"), source, f"Audit {source}", phase=DaydreamPhase.AUDIT, read_only=True,
         persist_session=False,
     )
-
-    record = dict(
-        line.split("=", 1) for line in marker.read_text().splitlines() if "=" in line
-    )
+    record = dict(line.split("=", 1) for line in marker.read_text().splitlines() if "=" in line)
     assert Path(record["cwd"]) != source
     assert record["before"] != record["after"]  # the fake really committed
     assert record["remotes"].strip() == ""  # no origin/source remote

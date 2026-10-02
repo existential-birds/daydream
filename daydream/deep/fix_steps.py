@@ -3,13 +3,8 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
-
-import anyio
-from rich.markup import escape as escape_markup
 
 from daydream import git_ops
 from daydream.agent import console
@@ -18,41 +13,33 @@ from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
     DEFAULT_GROUP_MAX_WALL_S,
     DEFAULT_QUALITY_GATE_ENABLED,
-    DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE,
-    DEFAULT_QUALITY_GATE_EROSION_DELTA,
-    DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE,
-    DEFAULT_QUALITY_GATE_VERBOSITY_DELTA,
     DEFAULT_VERIFY_ALL,
     REVIEW_OUTPUT_FILE,
 )
+from daydream.deep import fix_state
 from daydream.deep.artifacts import (
     fix_failures_path,
     fix_footprint_path,
     fix_leftover_untracked_path,
     fix_outcomes_path,
-    fix_quality_gate_path,
     generated_file_violations_path,
     push_verdict_path,
     recommended_capture_path,
-    remote_ci_handoff_path,
-    remote_ci_verdict_path,
     stabilization_failed_path,
     test_verdict_path,
 )
+from daydream.deep.fix_state import EvidenceKey, FixCycleState
+from daydream.deep.quality_gate import QualityGateThresholds, _evaluate_quality_gate, capture_quality
 from daydream.deep.records import item_uid, stamp_item_uids
 from daydream.deep.scope_issues import (
-    ScopeEnforcementResult,
     _resolve_changed_files,
-    enforce_authorized_fix_footprint,
 )
-from daydream.deep.settings import _resolve_config_value, _resolve_non_negative_float, _resolve_opt_in
+from daydream.deep.settings import _resolve_config_value, _resolve_opt_in
 from daydream.deep.state import DeepState
 from daydream.deep.verify_selection import SelectionConfig, resolve_selection_config
 from daydream.extensions.api import BreakLoop, Stop
 from daydream.fix_footprint import AuthorizedFixFootprint
 from daydream.flows.engine import FlowContext
-from daydream.generated_files import is_generated_file, related_manifest_paths
-from daydream.git_ops import GitError, GitPathState, IndexSnapshot, WorktreeRollbackSnapshot
 from daydream.json_utils import atomic_write_json
 from daydream.phases import (
     FIX_VERIFY_ACTIONABLE_VERDICTS,
@@ -69,14 +56,11 @@ from daydream.phases import (
     require_empty_staged_index,
     severity_sorted,
 )
-from daydream.quote_scrub import scrub_smart_quotes_changed_files
 from daydream.repository_paths import strip_dot_slash
 from daydream.run_context import resolve_run_context
-from daydream.test_execution import TestRecipe
 from daydream.trajectory import (
     DaydreamPhase,
     current_session_id,
-    host_phase_scope,
     now_iso,
     phase_scope,
     redact_structured_text,
@@ -85,35 +69,20 @@ from daydream.ui import (
     format_verdict_join,
     print_error,
     print_fix_complete,
-    print_info,
     print_success,
     print_verification_summary,
     print_warning,
 )
-from daydream.workspace import WorkContext
 
 if TYPE_CHECKING:
-    from daydream.remote_ci import RemoteCITarget, RemoteCIVerdict
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 
 def _attach_verdicts(items: list[dict[str, Any]], payload: dict[str, Any]) -> list[dict[str, Any]]:
-    """Attach verifier verdicts to feedback items by matching `id` to `issue_id`.
+    """Attach advisory verifier fields in place by canonical id/issue_id.
 
-    `phase_fix` reads the `verifier_verdict` / `evidence` / `unverified_assumptions`
-    keys (advisory) and augments its prompt when present; items without a matching
-    verdict are left untouched. Correctness rests on `normalize_items` having made
-    item ids unique, so structural and per-stack findings can no longer collide on
-    the same id.
-
-    Args:
-        items: Canonical feedback items, each with an integer `id`.
-        payload: Verifier output; `payload["verdicts"]` is a list of entries each
-            carrying `issue_id`, `verdict`, `evidence`, `unverified_assumptions`.
-
-    Returns:
-        The same `items` list (mutated in place) with verdict keys attached to any
-        item whose `id` matched a verdict's `issue_id`.
+    Normalization must make item ids unique across all lenses. Unmatched items
+    remain unchanged; return the same list.
     """
     payload = payload if isinstance(payload, dict) else {"verdicts": []}
     verdict_lookup: dict[int, dict[str, Any]] = {}
@@ -212,12 +181,7 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     # they are ordinary tagged items that reach phase_fix like any other.
     items_file: Path = deep_state.items_file
     items: list[dict[str, Any]] = json.loads(items_file.read_text())["items"]
-    # A leading ``./`` is a legal path spelling since the grammar relaxed
-    # (#572/#573), but the reviewed-diff file set and the git tree are always
-    # bare (never ``./``-prefixed). Normalize each finding's file once here so
-    # a ``./x`` finding is not misfiled as out-of-scope by the fix gate (and
-    # its own fix edit not reverted by the post-fix residual net), both of
-    # which compare against bare git-derived paths.
+    # Normalize legal ./ prefixes once to match Git-derived footprint paths.
     for _item in items:
         _file = _item.get("file")
         if isinstance(_file, str):
@@ -227,11 +191,8 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
         print_success(console, "No actionable items -- done.")
         return Stop(0)
 
-    # The footprint deliberately admits canonical finding primary/related
-    # paths even when they were not themselves in the reviewed diff. This is
-    # the explicit authorization that lets a regression test or sibling source
-    # file travel with a finding without turning every reviewed file into every
-    # fixer's edit scope.
+    # Authorize canonical primary/related paths even outside the diff, without
+    # widening each fixer to every reviewed file.
     changed_files = _resolve_changed_files(ctx)
 
     try:
@@ -261,8 +222,8 @@ async def _step_fix_gate(ctx: FlowContext) -> Stop | None:
     )
     deep_state.fix_cycle_state = state
     try:
-        initial_key = EvidenceKey(_capture_full_delta_key(ctx.work, state), footprint.policy_revision)
-        _write_footprint_audit(ctx, state, initial_key)
+        initial_key = EvidenceKey(fix_state._capture_full_delta_key(ctx.work, state), footprint.policy_revision)
+        fix_state._write_footprint_audit(ctx, state, initial_key)
     except (OSError, git_ops.GitError) as exc:
         _record_fix_preflight_rejection(dd, items)
         print_error(console, "Fix preflight failed", str(exc))
@@ -280,11 +241,8 @@ async def _step_verify(ctx: FlowContext) -> None:
     dd = deep_state.dd
     items: list[dict[str, Any]] = deep_state.items
 
-    # Recommendation verification (#83). Runs ONLY after the apply-fixes
-    # gate accepts, so a declined run (non-interactive / EOF / explicit "N")
-    # skips both the verify pass and the recommendation-verdicts.json
-    # artifact. A --start-at fix resume still produces verdicts whenever
-    # fixes are applied (the gate still runs on resume; accept => verify runs).
+    # Accepted fresh and resumed fix gates verify recommendations; declined gates
+    # produce neither a verifier call nor its artifact.
     selection = _resolve_verify_selection(ctx.config)
     async with phase_scope(DaydreamPhase.VERIFY):
         verdicts_file, verdicts_payload = await phase_verify_recommendations(
@@ -304,11 +262,8 @@ async def _step_verify(ctx: FlowContext) -> None:
     matched_ids, unmatched_ids, skipped_ids, structural_ids, other_ids = _verdict_buckets(
         items, verdicts_payload
     )
-    # Selection skips and structural findings are both verdict-exempt, but they are
-    # distinct: a skip was never rendered to the verifier, while a structural
-    # finding is exempt by lens. Itemize both so the "X/Y matched" ratio isn't read
-    # as a total that under-counts the items the fix loop iterates; the decisions
-    # the verify phase persisted are the single source for the split.
+    # Use persisted selection decisions to distinguish operator skips from exempt
+    # lenses, so coverage accounting includes every fix-loop item.
     console.print(
         format_verdict_join(
             matched=matched_ids,
@@ -322,14 +277,10 @@ async def _step_verify(ctx: FlowContext) -> None:
 
 
 def _resolve_verify_selection(config: RunConfig) -> SelectionConfig:
-    """Resolve the verify-selection knobs: RunConfig > file config > built-in default.
+    """Resolve CLI-over-file verification selection, then built-in defaults.
 
-    ``verify_all`` is a real-bool-only optional; a non-bool at either tier is
-    ignored (the loader already degrades it to ``None``), so an absent value
-    resolves fail-safe to ``DEFAULT_VERIFY_ALL``. ``extra_risk_categories`` is
-    additive, and an unrecognised name raises ``UnknownRiskCategoryError`` here
-    -- before the verify pass -- so the operator gets a failed run naming the
-    value rather than a silently narrowed or widened selection (MH13).
+    Only real booleans control verify_all. Extra risk categories are additive;
+    unknown names raise before verification instead of changing selection silently.
     """
     file_config = config.file_config
     verify_all = config.verify_all
@@ -347,20 +298,11 @@ def _resolve_verify_selection(config: RunConfig) -> SelectionConfig:
 def _verdict_buckets(
     items: list[dict[str, Any]], payload: object
 ) -> tuple[list[int | None], list[int | None], list[int | None], list[int | None], list[int | None]]:
-    """Bucket canonical items for the Verdict Join table.
+    """Partition every canonical item into matched, unmatched, skipped, structural or other.
 
-    The verify phase's persisted ``selection`` decisions are the single source
-    for the skip/structural split -- a selection skip is never re-reported as an
-    unmatched verdict. When the artifact predates the selection block or the
-    block is malformed, the field-based accounting this step always used is the
-    fallback (Pattern B), so a distinct summary can never fail a run.
-
-    Returns ``(matched, unmatched, skipped, structural, other)``; every item
-    lands in exactly one bucket, so the four plus ``other`` reconcile to
-    ``len(items)``. Both lens exemptions (``exempt:structural`` and
-    ``exempt:wonder``) land in the structural bucket -- matching the selection
-    block's ``skipped`` counter, which counts only ``SKIP_REASON_CODE`` -- so a
-    lens exemption is never reported as an operator-chosen skip.
+    Persisted selection decisions own the skip/lens split; absent or malformed
+    legacy decisions fall back to field-based accounting. Structural and wonder
+    lens exemptions both use the structural bucket, never operator skips.
     """
     decisions_by_uid = _selection_decisions(payload)
     matched: list[int | None] = []
@@ -372,23 +314,15 @@ def _verdict_buckets(
         item_id = item.get("id")
         verdict = item.get("verifier_verdict")
         decision = decisions_by_uid.get(item_uid(item))
-        if decision is not None:
-            reason = decision.get("reason_code")
-            if reason in ("exempt:structural", "exempt:wonder"):
-                structural.append(item_id)
-            elif decision.get("selected") is False:
-                skipped.append(item_id)
-            elif verdict is not None:
-                matched.append(item_id)
-            elif isinstance(item_id, int) and not isinstance(item_id, bool):
-                unmatched.append(item_id)
-            else:
-                other.append(item_id)
-            continue
-        # No decision for this item (pre-change artifact / malformed block):
-        # fall back to today's field-based accounting.
-        if item.get("lens") == "structural":
+        # Older artifacts lack selection decisions; preserve their field-based split.
+        exempt = (
+            decision.get("reason_code") in ("exempt:structural", "exempt:wonder")
+            if decision is not None else item.get("lens") == "structural"
+        )
+        if exempt:
             structural.append(item_id)
+        elif decision is not None and decision.get("selected") is False:
+            skipped.append(item_id)
         elif verdict is not None:
             matched.append(item_id)
         elif isinstance(item_id, int) and not isinstance(item_id, bool):
@@ -418,506 +352,22 @@ def _selection_decisions(payload: object) -> dict[str, dict[str, Any]]:
     return out
 
 
-async def _capture_quality_before(
-    daydream_dir: Path, code_workspace: Path, candidate_paths: set[str] | None
-) -> tuple[dict[str, Any] | None, str | None]:
-    """Best-effort pre-fix quality snapshot; ``(None, reason)`` when unavailable.
-
-    ``analyze_quality`` is pure and deterministic (no backend, no network), but
-    any failure here degrades to "gate unavailable" rather than failing the run
-    -- the anti-degradation gate is fail-open by design (#315). The failure
-    reason is returned so the gate can persist an auditable unavailable entry
-    instead of leaving a silent blank (#329). The sync tree-walk runs off the
-    event loop so parallel fix fan-out is never blocked by the analyzer
-    (#329 / CodeRabbit Finding D). *candidate_paths* (issue #457) scopes the
-    snapshot's parse/aggregate to the reviewed ``*.py`` set resolved by
-    ``_step_fix`` before the capture; ``None`` keeps the whole-workspace
-    snapshot (e.g. a resume that lost the diff context).
-    """
-    try:
-        from daydream.eval.analyzer import analyze_quality
-
-        return await anyio.to_thread.run_sync(
-            partial(analyze_quality, daydream_dir, candidate_paths, code_workspace=code_workspace)
-        ), None
-    except Exception as exc:  # noqa: BLE001 -- fail-open: never fail the run
-        return None, f"{type(exc).__name__}: {exc}"
-
-
-@dataclass(frozen=True)
-class QualityGateThresholds:
-    """The four resolved quality-gate thresholds threaded through one fix round."""
-
-    erosion_delta: float
-    verbosity_delta: float
-    erosion_absolute: float
-    verbosity_absolute: float
-
-    @classmethod
-    def from_config(cls, config: RunConfig) -> "QualityGateThresholds":
-        return cls(
-            erosion_delta=_resolve_non_negative_float(
-                config, "quality_gate_erosion_delta", DEFAULT_QUALITY_GATE_EROSION_DELTA
-            ),
-            verbosity_delta=_resolve_non_negative_float(
-                config, "quality_gate_verbosity_delta", DEFAULT_QUALITY_GATE_VERBOSITY_DELTA
-            ),
-            erosion_absolute=_resolve_non_negative_float(
-                config, "quality_gate_erosion_absolute", DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE
-            ),
-            verbosity_absolute=_resolve_non_negative_float(
-                config, "quality_gate_verbosity_absolute", DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE
-            ),
-        )
-
-    def payload(self) -> dict[str, float]:
-        """The threshold fields exactly as persisted in the gate artifact."""
-        return {
-            "erosion_delta_threshold": self.erosion_delta,
-            "verbosity_delta_threshold": self.verbosity_delta,
-            "erosion_absolute_threshold": self.erosion_absolute,
-            "verbosity_absolute_threshold": self.verbosity_absolute,
-        }
-
-
-def _quality_delta(before: float | None, after: float | None) -> float | None:
-    """Rounded per-file metric delta; ``None`` when either side is undefined."""
-    if before is None or after is None:
-        return None
-    return round(after - before, 4)
-
-
-def _quality_flagged(
-    *,
-    erosion_before: float | None,
-    erosion_after: float | None,
-    erosion_delta: float | None,
-    verbosity_before: float | None,
-    verbosity_after: float | None,
-    verbosity_delta: float | None,
-    thresholds: QualityGateThresholds,
-) -> bool:
-    """Whether a fixed file regressed past a threshold (#315).
-
-    A file is flagged when its delta exceeds the threshold (both sides
-    defined), or on its absolute AFTER value vs the absolute threshold when the
-    BEFORE metric is undefined -- no functions / no non-blank lines pre-fix --
-    but the AFTER metric is numeric. The absolute yardstick is a SEPARATE knob
-    from the delta one (#329 / CodeRabbit Finding D): an undefined baseline has
-    no delta, so a delta threshold is the wrong ruler for the absolute
-    comparison. The absolute fallback fires on ANY file with an undefined
-    baseline, not just new ones, so an EXISTING file that gains a CC>10
-    function (erosion ``None`` pre-fix) is still caught. A metric with both
-    sides undefined never flags.
-    """
-    if erosion_delta is not None and erosion_delta > thresholds.erosion_delta:
-        return True
-    if verbosity_delta is not None and verbosity_delta > thresholds.verbosity_delta:
-        return True
-    if erosion_before is None and erosion_after is not None and erosion_after > thresholds.erosion_absolute:
-        return True
-    if verbosity_before is None and verbosity_after is not None and verbosity_after > thresholds.verbosity_absolute:
-        return True
-    return False
-
-
-def _load_quality_gate_rounds(gate_p: Path, session_id: str | None) -> list[dict[str, Any]]:
-    """Load prior rounds for the CURRENT session, or start fresh when rebound.
-
-    Rounds are carried forward only when the artifact's stored ``session_id``
-    matches the current run's session (issue #329 / Finding 5): a ``--start-at
-    fix`` resume of the SAME session appends rather than clobbers, while an
-    artifact left by a DIFFERENT run is discarded with a warning so the first
-    run's verdicts can never be archived as the new run's (corrupting the
-    manifest / SQLite audit history). An artifact with no stored session is
-    treated as belonging to another session.
-
-    Never raises, and a malformed artifact is never treated as authoritative
-    prior rounds (issue #329 / Finding 6): invalid JSON, a non-object payload
-    (``[]``, ``42``, ...), a missing ``rounds`` list, or non-object round
-    entries all degrade to an empty round list WITH a warning, so the current
-    run repairs the artifact instead of silently losing the gate.
-    """
-    try:
-        raw = gate_p.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    try:
-        existing = json.loads(raw)
-    except (json.JSONDecodeError, AttributeError, TypeError):
-        existing = None
-    if not isinstance(existing, dict):
-        print_warning(console, f"Quality gate artifact {gate_p} is malformed; starting rounds fresh")
-        return []
-    if existing.get("session_id") != session_id:
-        print_warning(
-            console,
-            f"Quality gate artifact {gate_p} belongs to another run's session; "
-            "its rounds were not carried forward",
-        )
-        return []
-    existing_rounds = existing.get("rounds")
-    if not isinstance(existing_rounds, list):
-        print_warning(console, f"Quality gate artifact {gate_p} has no rounds list; starting rounds fresh")
-        return []
-    valid = [r for r in existing_rounds if isinstance(r, dict)]
-    if len(valid) != len(existing_rounds):
-        print_warning(console, f"Quality gate artifact {gate_p} has non-object round entries; dropping them")
-    return valid
-
-
-def _persist_quality_gate_unavailable(
-    *,
-    gate_p: Path,
-    rounds: list[dict[str, Any]],
-    round_no: int,
-    stage: str,
-    reason: str,
-    session_id: str | None,
-    thresholds: QualityGateThresholds,
-) -> None:
-    """Persist an auditable ``unavailable`` round entry for THIS round.
-
-    Any existing entry with the same round number is dropped first, so an
-    unavailable verdict supersedes a stale successful one from the same round
-    (e.g. a ``--start-at fix`` resume). Never raises.
-    """
-    rounds = [r for r in rounds if r.get("round") != round_no]
-    rounds.append({"round": round_no, "unavailable": {"stage": stage, "reason": reason}})
-    gate_p.write_text(
-        json.dumps(
-            {
-                "enabled": True,
-                **thresholds.payload(),
-                "session_id": session_id,
-                "rounds": rounds,
-            },
-            indent=2,
-        )
-    )
-    print_warning(
-        console,
-        f"Quality gate unavailable (round {round_no}, {stage}): {reason}",
-    )
-
-
-async def _evaluate_quality_gate(
-    *,
-    enabled: bool,
-    thresholds: QualityGateThresholds,
-    daydream_dir: Path,
-    code_workspace: Path,
-    dd: Path,
-    candidates: set[str] | None,
-    before: dict[str, Any] | None,
-    before_unavailable_reason: str | None,
-    iteration: int | None,
-) -> None:
-    """Compute and persist the fix-phase quality-gate verdict (issue #315).
-
-    Fail-open by design: never raises, never stops the run. Every payload is
-    bound to the current run's ``session_id`` so a later archive step cannot
-    attribute another run's verdict to this one (#329). When disabled, writes
-    ``{"enabled": false}``. When the gate would run but cannot be evaluated --
-    a pre-fix capture failure, a post-fix capture failure, a changed-file
-    enumeration failure (``candidates`` is ``None``, #329 / Finding 6), or a
-    persist failure -- an explicit ``unavailable`` round entry is persisted for
-    THIS round with the failed stage and reason, superseding any stale verdict
-    for that round and keeping the failure auditable instead of reading as a
-    clean gate. Each ``_step_fix`` invocation appends one ``rounds`` entry
-    (keyed by the flow's loop iteration when present, else the next sequence
-    number), so a resume or loop preserves the per-round trend. Flagged files
-    are surfaced as warnings with their before/after numbers. A candidate the
-    pre-fix snapshot did not cover -- the snapshot is scoped to the reviewed
-    ``*.py`` set (#457), so an out-of-diff secondary edit the fix pass made has
-    no baseline -- is recorded as flagged with a missing-baseline reason: an
-    unverifiable edit must not read as a clean pass. The post-fix sync
-    tree-walk runs off the event loop so parallel fix fan-out is never blocked
-    by the analyzer (#329 / CodeRabbit Finding D).
-    """
-    session_id = current_session_id()
-    try:
-        gate_p = fix_quality_gate_path(dd)
-        if not enabled:
-            gate_p.write_text(
-                json.dumps({"enabled": False, "session_id": session_id}, indent=2)
-            )
-            return
-        rounds = _load_quality_gate_rounds(gate_p, session_id)
-        round_no = iteration if iteration is not None else len(rounds) + 1
-
-        def _unavailable(stage: str, reason: str) -> None:
-            _persist_quality_gate_unavailable(
-                gate_p=gate_p,
-                rounds=rounds,
-                round_no=round_no,
-                stage=stage,
-                reason=reason,
-                session_id=session_id,
-                thresholds=thresholds,
-            )
-
-        if candidates is None:
-            _unavailable(
-                "candidates",
-                "could not enumerate files changed by the fix pass against the pre-fix snapshot",
-            )
-            return
-        if before is None:
-            _unavailable(
-                "before",
-                before_unavailable_reason or "pre-fix quality snapshot unavailable",
-            )
-            return
-        try:
-            from daydream.eval.analyzer import analyze_quality
-
-            # Issue #457: scope the post-fix capture to the candidate set
-            # (reviewed *.py + files changed by the fix pass). ``candidates``
-            # is always a set here -- the ``candidates is None`` branch above
-            # returned already.
-            after = await anyio.to_thread.run_sync(
-                partial(analyze_quality, daydream_dir, candidates, code_workspace=code_workspace)
-            )
-        except Exception as exc:  # noqa: BLE001 -- fail-open: the gate must never fail the run
-            _unavailable("after", f"{type(exc).__name__}: {exc}")
-            return
-        before_per_file: dict[str, Any] = before.get("per_file") or {}
-        after_per_file: dict[str, Any] = after.get("per_file") or {}
-
-        per_file: dict[str, dict[str, Any]] = {}
-        for rel in sorted(candidates):
-            before_entry = before_per_file.get(rel)
-            after_entry = after_per_file.get(rel)
-            if before_entry is None and after_entry is None:
-                continue
-            erosion_before = before_entry.get("erosion") if before_entry is not None else None
-            erosion_after = after_entry.get("erosion") if after_entry is not None else None
-            verbosity_before = before_entry.get("verbosity") if before_entry is not None else None
-            verbosity_after = after_entry.get("verbosity") if after_entry is not None else None
-            erosion_delta = _quality_delta(erosion_before, erosion_after)
-            verbosity_delta = _quality_delta(verbosity_before, verbosity_after)
-            entry: dict[str, Any] = {
-                "erosion_before": erosion_before,
-                "erosion_after": erosion_after,
-                "erosion_delta": erosion_delta,
-                "verbosity_before": verbosity_before,
-                "verbosity_after": verbosity_after,
-                "verbosity_delta": verbosity_delta,
-            }
-            # Issue #329 / Finding 5: a candidate that parsed pre-fix but is
-            # MISSING from the post-fix analyzer output is unparseable after the
-            # fix (analyze_quality omits malformed files). Recording null
-            # after-metrics with ``flagged=false`` would read as a clean
-            # verdict, so mark it explicitly unavailable and flagged -- a fix
-            # that breaks a file is a regression, never a pass. Still fail-open:
-            # never raises, never stops the run.
-            if before_entry is not None and after_entry is None:
-                entry["unparseable"] = True
-                entry["flagged"] = True
-                entry["reason"] = "file missing from post-fix analyzer output (unparseable?)"
-            # A missing pre-fix baseline (e.g. a secondary edit outside the
-            # reviewed diff) means the delta is unknowable: flag the file, never
-            # read it as a clean pass. Fail-open (issue #329 / #457).
-            elif before_entry is None and after_entry is not None:
-                entry["flagged"] = True
-                entry["reason"] = (
-                    "missing pre-fix baseline: file edited by the fix pass but not "
-                    "covered by the pre-fix quality snapshot"
-                )
-            else:
-                entry["flagged"] = _quality_flagged(
-                    erosion_before=erosion_before,
-                    erosion_after=erosion_after,
-                    erosion_delta=erosion_delta,
-                    verbosity_before=verbosity_before,
-                    verbosity_after=verbosity_after,
-                    verbosity_delta=verbosity_delta,
-                    thresholds=thresholds,
-                )
-            per_file[rel] = entry
-        rounds = [r for r in rounds if r.get("round") != round_no]
-        rounds.append({"round": round_no, "per_file": per_file})
-        payload = {
-            "enabled": True,
-            **thresholds.payload(),
-            "session_id": session_id,
-            "rounds": rounds,
-        }
-        gate_p.write_text(json.dumps(payload, indent=2))
-        flagged = [rel for rel, entry in per_file.items() if entry["flagged"]]
-        if flagged:
-            lines = []
-            for rel in flagged:
-                entry = per_file[rel]
-                # Unparseable and missing-baseline entries carry a ``reason``
-                # naming the failure; surface it instead of before/after
-                # numbers that would read like a normal regression.
-                if entry.get("reason"):
-                    lines.append(f"  - {rel}: {entry['reason']}")
-                else:
-                    lines.append(
-                        f"  - {rel}: erosion {entry['erosion_before']} -> "
-                        f"{entry['erosion_after']}, verbosity "
-                        f"{entry['verbosity_before']} -> {entry['verbosity_after']}"
-                    )
-            print_warning(
-                console,
-                f"Quality gate flagged {len(flagged)} file(s) after fixes:\n" + "\n".join(lines),
-            )
-    except Exception as exc:  # noqa: BLE001 - fail-open: the gate must never fail the run
-        # Stage "persist": the payload itself could not be written. Record the
-        # failure as an unavailable round when the write path still works, and
-        # ALWAYS warn -- a gate failure that surfaces nothing reads as a clean
-        # pass, which is the exact hazard #329 describes.
-        try:
-            gate_p = fix_quality_gate_path(dd)
-            rounds = _load_quality_gate_rounds(gate_p, session_id)
-            round_no = iteration if iteration is not None else len(rounds) + 1
-            _persist_quality_gate_unavailable(
-                gate_p=gate_p,
-                rounds=rounds,
-                round_no=round_no,
-                stage="persist",
-                reason=f"{type(exc).__name__}: {exc}",
-                session_id=session_id,
-                thresholds=thresholds,
-            )
-        except Exception as inner:  # noqa: BLE001 - nothing left to persist; stay fail-open
-            print_warning(
-                console,
-                f"Quality gate unavailable (round {iteration if iteration is not None else '?'}, "
-                f"persist): {type(exc).__name__}: {exc}; could not persist unavailable verdict "
-                f"({type(inner).__name__}: {inner})",
-            )
-
 MAX_POST_TEST_STABILIZATION_PASSES = 2
 ACTIONABLE_VERDICTS = frozenset(FIX_VERIFY_ACTIONABLE_VERDICTS)
 RETARGETABLE_VERDICTS = frozenset(FIX_VERIFY_RETARGETABLE_VERDICTS)
 
 
-@dataclass(frozen=True)
-class EvidenceKey:
-    """Tree and policy identity required by verifier evidence."""
-
-    tree_key: str
-    policy_revision: int
-
-
-@dataclass(frozen=True)
-class RetainedTreeSnapshot:
-    """Authorized retained patch plus full observed-tree identity."""
-
-    paths: frozenset[str]
-    states: tuple[GitPathState, ...]
-    tree_key: str
-    verifier_patch: str
-    recommended_patch: bytes
-
-
-@dataclass
-class FixCycleState:
-    """One accepted fix gate's stable policy, baseline, and evidence."""
-
-    session_id: str
-    stable_ref: str
-    stable_head: str
-    initial_index: IndexSnapshot
-    preexisting_untracked: dict[str, GitPathState]
-    preexisting_gitlinks: tuple[GitPathState, ...]
-    footprint: AuthorizedFixFootprint
-    latest_retained: RetainedTreeSnapshot | None = None
-    latest_test_evidence: TestAttemptEvidence | None = None
-    verifier_key: EvidenceKey | None = None
-    last_fix_target_by_uid: dict[str, str] = field(default_factory=dict)
-
-
-def _fix_cycle_state(ctx: FlowContext) -> FixCycleState:
-    return DeepState(ctx.data).fix_cycle_state
-
-
-def _capture_full_delta_key(work: WorkContext, state: FixCycleState) -> str:
-    return git_ops.tree_key(
-        git_ops.snapshot_worktree_delta(
-            work.repo,
-            state.stable_ref,
-            preexisting_untracked=state.preexisting_untracked,
-            preexisting_gitlinks=state.preexisting_gitlinks,
-        )
-    )
-
-
-def capture_retained_tree(work: WorkContext, state: FixCycleState) -> RetainedTreeSnapshot:
-    """Capture the authorized HEAD delta while keying the run-relative tree.
-
-    ``stable_ref`` includes pre-gate tracked edits so it remains the authority
-    for mutation attribution, rollback, and test identity.  Commit selection is
-    deliberately relative to the original HEAD: authorized reviewed edits that
-    predate the gate are part of the result even when no fixer touches them.
-    Pre-existing untracked owner files remain protected even when a finding
-    names them; authorization cannot silently enroll that private draft in a
-    commit. New related files created after the gate are still retained.
-    """
-    changed = set(git_ops.changed_paths_z(work.repo, state.stable_head))
-    paths = frozenset(
-        (changed & set(state.footprint.run_allowed_paths)) - set(state.preexisting_untracked)
-    )
-    states = git_ops.snapshot_worktree_paths(work.repo, paths)
-    full_states = git_ops.snapshot_worktree_delta(
-        work.repo,
-        state.stable_ref,
-        preexisting_untracked=state.preexisting_untracked,
-        preexisting_gitlinks=state.preexisting_gitlinks,
-    )
-    recommended = git_ops.build_recommended_patch_strict(
-        work.repo, state.stable_head, paths
-    )
-    return RetainedTreeSnapshot(
-        paths=paths,
-        states=states,
-        tree_key=git_ops.tree_key(full_states),
-        verifier_patch=recommended.decode("utf-8", errors="replace"),
-        recommended_patch=recommended,
-    )
-
-
-def _evidence_payload(key: EvidenceKey) -> dict[str, Any]:
-    return {"tree_key": key.tree_key, "policy_revision": key.policy_revision}
-
-
-def _write_footprint_audit(ctx: FlowContext, state: FixCycleState, key: EvidenceKey) -> None:
-    deep_state = DeepState(ctx.data)
-    atomic_write_json(
-        fix_footprint_path(deep_state.dd),
-        state.footprint.audit_payload(state.session_id, evidence_key=_evidence_payload(key)),
-    )
-
-
-def _persist_stabilization_failure(ctx: FlowContext, state: FixCycleState, reason: str) -> None:
-    deep_state = DeepState(ctx.data)
-    atomic_write_json(
-        stabilization_failed_path(deep_state.dd),
-        {"session_id": state.session_id, "reason": reason},
-    )
-
-
 def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Derive THIS round's fix dispatch set from prior fix-verify outcomes (#744).
+    """Copy the canonical items selected for this fix round.
 
-    Round 1 (iteration unset or 1) dispatches the full canonical list. Round
-    N+1 re-dispatches ONLY the actionable subset — findings whose prior-round
-    verdict was ``unresolved`` / ``wrong_target`` / ``regressed`` — each
-    carrying the verifier's reason forward into the fix prompt. A
-    ``wrong_target(path)`` retarget applies only when *path* stays inside the
-    allowed edit set (``changed_files ∪ {finding files}`` — the same set the
-    residual net and allowed-files clause use); otherwise the item keeps its
-    original file and the retarget is treated as not actionable (the #336 scope
-    net is never widened). Never mutates the canonical items (copies only).
+    The first round dispatches all findings. Later rounds retain only actionable
+    verdicts and carry their reasons into prompts. Retargeting is confined to the
+    authorized edit set and cannot widen it; canonical items remain unchanged.
     """
     deep_state = DeepState(ctx.data)
     iteration = deep_state.iteration
     outcomes = deep_state.fix_outcomes or {}
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     if iteration in (None, 1) or not outcomes:
         initial_dispatch = [dict(i) for i in canonical]
         for item in initial_dispatch:
@@ -954,132 +404,6 @@ def _round_dispatch_items(ctx: FlowContext, canonical: list[dict[str, Any]]) -> 
     return dispatched
 
 
-
-
-def _round_rollback_snapshot(state: FixCycleState, work: WorkContext) -> WorktreeRollbackSnapshot:
-    """Capture one exact rollback point for all authorized group paths."""
-    return WorktreeRollbackSnapshot(
-        ref=state.stable_ref,
-        index=git_ops.snapshot_index(work.repo),
-        path_states=git_ops.snapshot_worktree_paths(
-            work.repo, state.footprint.run_allowed_paths
-        ),
-        untracked=git_ops.snapshot_untracked_paths(
-            work.repo, include_runtime_artifacts=False
-        ),
-    )
-
-
-def _enforce_footprint(
-    ctx: FlowContext,
-    state: FixCycleState,
-    *,
-    phase: str,
-    round_number: int | None,
-) -> ScopeEnforcementResult:
-    """Restore unauthorized state and return the enforced footprint result."""
-    return enforce_authorized_fix_footprint(
-        ctx.work,
-        state.stable_ref,
-        state.footprint,
-        preexisting_untracked=state.preexisting_untracked,
-        preexisting_gitlinks=state.preexisting_gitlinks,
-        phase=phase,
-        round_number=round_number,
-        file_scope_issues=_resolve_opt_in(ctx.config, "scope_issue_filing"),
-        auth=ctx.github_execution.auth,
-    )
-
-
-def _strict_scope_and_scrub(
-    ctx: FlowContext,
-    state: FixCycleState,
-    *,
-    phase: str,
-    round_number: int | None,
-) -> bool:
-    """Apply the run-wide guard and quote scrub, returning whether bytes changed."""
-    deep_state = DeepState(ctx.data)
-
-    before = _capture_full_delta_key(ctx.work, state)
-    generated_restores: list[str] = []
-    for path in git_ops.changed_paths_z(ctx.work.repo, state.stable_ref):
-        if path.startswith(".daydream/") or path == REVIEW_OUTPUT_FILE:
-            continue
-        try:
-            baseline = git_ops.show(ctx.work.repo, state.stable_ref, path)
-        except git_ops.GitError:
-            absolute = ctx.work.repo / path
-            try:
-                current = absolute.read_bytes()
-            except OSError:
-                current = None
-            if current is not None and is_generated_file(path, current):
-                state.footprint.authorize_new_generated(
-                    ctx.work.repo,
-                    path,
-                    phase=phase,
-                    round_number=round_number,
-                    reason="new generated output approved by generated-file policy",
-                )
-            continue
-        if is_generated_file(path, baseline):
-            generated_restores.append(path)
-            generated_restores.extend(related_manifest_paths(path))
-    if generated_restores:
-        restore_paths = sorted(set(generated_restores))
-        git_ops.restore_worktree_paths_from_ref(
-            ctx.work.repo, state.stable_ref, restore_paths
-        )
-        for path in restore_paths:
-            state.footprint.record_git_event(
-                action="restore",
-                path=path,
-                origin="guard",
-                phase=phase,
-                round_number=round_number,
-                reason="restored an edit to existing generated output or its manifest",
-            )
-        atomic_write_json(
-            generated_file_violations_path(deep_state.dd),
-            {
-                "session_id": state.session_id,
-                "violations": restore_paths,
-                "phase": phase,
-                "round_number": round_number,
-            },
-            sort_keys=True,
-        )
-    enforced = _enforce_footprint(ctx, state, phase=phase, round_number=round_number)
-    scrub_smart_quotes_changed_files(
-        ctx.work.repo,
-        sorted(enforced.retained_paths),
-        pre_fix_ref=state.stable_ref,
-    )
-    after = _capture_full_delta_key(ctx.work, state)
-    return bool(generated_restores) or enforced.mutated or before != after
-
-
-def _enforce_terminal_confinement(
-    ctx: FlowContext,
-    state: FixCycleState,
-    *,
-    phase: str,
-    round_number: int | None,
-) -> str | None:
-    """Restore all out-of-run/protected state and durably audit a failed exit."""
-    try:
-        _enforce_footprint(ctx, state, phase=phase, round_number=round_number)
-        key = EvidenceKey(
-            _capture_full_delta_key(ctx.work, state),
-            state.footprint.policy_revision,
-        )
-        _write_footprint_audit(ctx, state, key)
-    except Exception as exc:
-        return str(exc)
-    return None
-
-
 def _confinement_stop(
     ctx: FlowContext,
     state: FixCycleState,
@@ -1091,7 +415,7 @@ def _confinement_stop(
     warning: bool = False,
 ) -> Stop:
     """Restore protected state, report the terminal failure, and stop the flow."""
-    confinement_error = _enforce_terminal_confinement(
+    confinement_error = fix_state._enforce_terminal_confinement(
         ctx,
         state,
         phase=phase,
@@ -1119,7 +443,7 @@ def _stabilization_stop(
     round_number: int | None,
 ) -> Stop:
     """Fail closed after finalization while still restoring and auditing scope."""
-    confinement_error = _enforce_terminal_confinement(
+    confinement_error = fix_state._enforce_terminal_confinement(
         ctx,
         state,
         phase="post_test_failure",
@@ -1128,7 +452,7 @@ def _stabilization_stop(
     if confinement_error is not None:
         reason = f"{reason}; confinement failed: {confinement_error}"
     try:
-        _persist_stabilization_failure(ctx, state, reason)
+        fix_state._persist_stabilization_failure(ctx, state, reason)
     except OSError as exc:
         print_error(console, "Stabilization failure audit failed", str(exc))
     return Stop(1)
@@ -1136,13 +460,13 @@ def _stabilization_stop(
 
 async def _step_fix(ctx: FlowContext) -> Stop | None:
     """Run one policy-bound fix round using its own complete rollback point."""
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     deep_state = DeepState(ctx.data)
     items = _round_dispatch_items(ctx, deep_state.items)
     if not items:
         return None
     try:
-        round_snapshot = _round_rollback_snapshot(state, ctx.work)
+        round_snapshot = fix_state._round_rollback_snapshot(state, ctx.work)
     except Exception as exc:
         print_error(console, "Fix snapshot failed", str(exc))
         return Stop(1)
@@ -1154,7 +478,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
         path for path in (_resolve_changed_files(ctx) or []) if path.endswith(".py")
     }
     if quality_enabled:
-        quality_before, quality_unavailable = await _capture_quality_before(
+        quality_before, quality_unavailable = await capture_quality(
             _artifact_dir(ctx),
             ctx.work.repo,
             reviewed_python,
@@ -1192,6 +516,8 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
                 test_map_path=test_map_path,
                 footprint=state.footprint,
                 round_snapshot=round_snapshot,
+                file_scope_issues=_resolve_opt_in(config, "scope_issue_filing"),
+                auth=ctx.github_execution.auth,
                 run_context=ctx.run_context,
             )
         except Exception as exc:
@@ -1211,7 +537,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
     except Exception as exc:
         return _confinement_stop(ctx, state, "fix_failure", deep_state.iteration, "Fix failure audit failed", str(exc))
     if exception_failures:
-        confinement_error = _enforce_terminal_confinement(
+        confinement_error = fix_state._enforce_terminal_confinement(
             ctx,
             state,
             phase="fix_failure",
@@ -1242,13 +568,13 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
             print_error(console, "Fix failure audit failed", "; ".join(artifact_errors))
         return Stop(1)
     try:
-        _strict_scope_and_scrub(
+        fix_state._strict_scope_and_scrub(
             ctx,
             state,
             phase="fix",
             round_number=deep_state.iteration,
         )
-        snapshot = capture_retained_tree(ctx.work, state)
+        snapshot = fix_state.capture_retained_tree(ctx.work, state)
     except Exception as exc:
         return _confinement_stop(
             ctx, state, "fix_failure", deep_state.iteration, "Fix scope enforcement failed", str(exc)
@@ -1280,7 +606,7 @@ async def _step_fix(ctx: FlowContext) -> Stop | None:
 
 async def verify_retained_tree(
     ctx: FlowContext,
-    snapshot: RetainedTreeSnapshot,
+    snapshot: fix_state.RetainedTreeSnapshot,
     items: list[dict[str, Any]],
     *,
     pass_number: int,
@@ -1302,7 +628,7 @@ async def verify_retained_tree(
         for item in items
         if isinstance(item.get("id"), int) and isinstance(item.get("item_uid"), str)
     }
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     outcomes: dict[str, dict[str, Any]] = {}
     for verdict in verdicts:
         item = by_id.get(verdict.get("issue_id"))
@@ -1330,7 +656,7 @@ def _persist_fix_outcomes_current(
         fix_outcomes_path(deep_state.dd),
         {
             "session_id": state.session_id,
-            "evidence_key": _evidence_payload(key),
+            "evidence_key": fix_state._evidence_payload(key),
             "outcomes": outcomes,
         },
         sort_keys=True,
@@ -1338,12 +664,12 @@ def _persist_fix_outcomes_current(
 
 
 async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     deep_state = DeepState(ctx.data)
     snapshot = deep_state.fix_round_snapshot
     if snapshot is None:
         try:
-            snapshot = capture_retained_tree(ctx.work, state)
+            snapshot = fix_state.capture_retained_tree(ctx.work, state)
         except Exception as exc:
             return _confinement_stop(
                 ctx, state, "fix_verify_failure", deep_state.iteration, "Fix verification capture failed", str(exc)
@@ -1359,7 +685,7 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
         state.verifier_key = key
         deep_state.fix_outcomes = outcomes
         _persist_fix_outcomes_current(ctx, state, key, outcomes)
-        _write_footprint_audit(ctx, state, key)
+        fix_state._write_footprint_audit(ctx, state, key)
     except Exception as exc:
         return _confinement_stop(ctx, state, "fix_verify_failure", round_number, "Fix verification failed", str(exc))
     actionable = _actionable_verdicts(outcomes)
@@ -1381,7 +707,7 @@ async def _step_fix_verify(ctx: FlowContext) -> BreakLoop | Stop | None:
     return BreakLoop()
 
 
-def _actionable_verdicts(outcomes: dict[Any, dict[str, Any]]) -> list[str]:
+def _actionable_verdicts(outcomes: dict[str, dict[str, Any]]) -> list[str]:
     """Verdicts that schedule re-dispatch in a later round (issue #744)."""
     return [
         v["verdict"]
@@ -1390,31 +716,17 @@ def _actionable_verdicts(outcomes: dict[Any, dict[str, Any]]) -> list[str]:
     ]
 
 
-
-
 def _render_fix_outcome_summary(
     items: list[dict[str, Any]],
-    outcomes: dict[Any, dict[str, Any]],
+    outcomes: dict[str, dict[str, Any]],
 ) -> None:
-    """Render the terminal per-finding fix-verdict lines (issue #744).
+    """Render final verdicts with the last dispatch round's numbering.
 
-    Single production call site exercising ``print_fix_complete``'s verdict
-    gating, so the honest ``resolved``/attempted-not-fixed branches are
-    actually reached rather than dead next to a separate aggregate summary.
-    ``items`` is the final round's dispatch set, so numbering reuses the same
-    1-based counters printed during that round's fix turn: each terminal
-    verdict line matches the neutral "Fix attempted" line for a finding
-    dispatched that round. ``fix-outcomes.json`` (keyed by canonical id)
-    remains the durable record, so a finding resolved in an earlier round but
-    not re-dispatched may be absent from this terminal render.
+    Previously resolved findings absent from that round remain in the durable
+    fix-outcomes artifact but are omitted from these terminal lines.
     """
     if not outcomes:
         return
-    numbering_by_id = {
-        item["id"]: num
-        for num, item in enumerate(items, start=1)
-        if isinstance(item.get("id"), int)
-    }
     numbering_by_uid = {
         item["item_uid"]: num
         for num, item in enumerate(items, start=1)
@@ -1422,13 +734,7 @@ def _render_fix_outcome_summary(
     }
     total = len(items)
     for outcome_key, verdict in outcomes.items():
-        num = (
-            numbering_by_uid.get(outcome_key)
-            if isinstance(outcome_key, str)
-            else numbering_by_id.get(outcome_key)
-        )
-        if num is None:
-            num = numbering_by_id.get(verdict.get("issue_id"))
+        num = numbering_by_uid.get(outcome_key)
         if num is None:
             continue
         print_fix_complete(console, num, total, outcome=verdict.get("verdict"))
@@ -1487,24 +793,12 @@ def _authorize_final_red_override(ctx: FlowContext) -> bool:
     )
 
 
-def _published_test_recipe(ctx: FlowContext) -> TestRecipe | None:
-    """Read the run's once-resolved test recipe, fail-open (issue #1408).
-
-    The recipe is resolved in the deep preamble and published on the flow data
-    mapping; a missing publication (or a pre-#1408 resume) degrades to the
-    legacy per-call resolution rather than raising. The published value is
-    typed, so a wrong-typed entry is ignored rather than threaded through.
-    """
-    recipe = getattr(DeepState(ctx.data), "test_recipe", None)
-    return recipe if isinstance(recipe, TestRecipe) else None
-
-
 async def finalize_retained_tree_after_test(
     ctx: FlowContext, result: TestAndHealResult
 ) -> Stop | None:
     """Strictly stabilize post-heal state in at most two guard passes."""
     deep_state = DeepState(ctx.data)
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     attempts = list(result.attempts)
     if not attempts:
         return _stabilization_stop(
@@ -1518,15 +812,15 @@ async def finalize_retained_tree_after_test(
 
     for pass_number in range(1, MAX_POST_TEST_STABILIZATION_PASSES + 1):
         try:
-            mutated = _strict_scope_and_scrub(
+            mutated = fix_state._strict_scope_and_scrub(
                 ctx,
                 state,
                 phase="post_test",
                 round_number=pass_number,
             )
-            snapshot = capture_retained_tree(ctx.work, state)
+            snapshot = fix_state.capture_retained_tree(ctx.work, state)
             key = EvidenceKey(snapshot.tree_key, state.footprint.policy_revision)
-            _write_footprint_audit(ctx, state, key)
+            fix_state._write_footprint_audit(ctx, state, key)
         except Exception as exc:
             return _stop(f"guard/capture/audit failed: {exc}")
 
@@ -1565,8 +859,8 @@ async def finalize_retained_tree_after_test(
                     ctx.work,
                     config=ctx.config,
                     session_id=state.session_id,
-                    capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
-                    recipe=_published_test_recipe(ctx),
+                    capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
+                    recipe=deep_state.test_recipe,
                     run_context=ctx.run_context,
                 )
             except Exception as exc:
@@ -1602,7 +896,7 @@ async def finalize_retained_tree_after_test(
                     "session_id": state.session_id,
                     "capture_point": "post_test",
                     "tree_key": snapshot.tree_key,
-                    "evidence_key": _evidence_payload(key),
+                    "evidence_key": fix_state._evidence_payload(key),
                 },
                 sort_keys=True,
             )
@@ -1627,11 +921,10 @@ async def finalize_retained_tree_after_test(
     )
 
 
-
 async def _step_test(ctx: FlowContext) -> Stop | None:
     """Run typed, identity-bound tests and strictly finalize the retained tree."""
     deep_state = DeepState(ctx.data)
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     async with phase_scope(DaydreamPhase.TEST):
         try:
             result = await phase_test_and_heal(
@@ -1640,12 +933,12 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 feedback_items=deep_state.items,
                 config=ctx.config,
                 session_id=state.session_id,
-                capture_tree_key=lambda: _capture_full_delta_key(ctx.work, state),
+                capture_tree_key=lambda: fix_state._capture_full_delta_key(ctx.work, state),
                 footprint=state.footprint,
                 run_context=ctx.run_context,
                 artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
-                recipe=_published_test_recipe(ctx),
+                recipe=deep_state.test_recipe,
             )
             if not isinstance(result, TestAndHealResult):
                 raise TypeError("phase_test_and_heal returned an invalid evidence result")
@@ -1673,7 +966,7 @@ def _persist_push_verdict(
 ) -> None:
     """Replace the current session's exact push-attempt outcome atomically."""
     deep_state = DeepState(ctx.data)
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     payload: dict[str, object] = {
         "schema_version": 1,
         "session_id": state.session_id,
@@ -1699,7 +992,7 @@ def _persist_push_verdict(
 async def _step_commit(ctx: FlowContext) -> Stop | None:
     """Stage the finalized retained paths once, then commit and push them."""
     deep_state = DeepState(ctx.data)
-    state = _fix_cycle_state(ctx)
+    state = DeepState(ctx.data).fix_cycle_state
     snapshot = state.latest_retained
     if snapshot is None:
         print_error(console, "Commit/Push Failed", "retained tree was not finalized")
@@ -1715,7 +1008,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
                 round_number=None,
                 reason="final retained path selected for the validated index",
             )
-        _write_footprint_audit(ctx, state, key)
+        fix_state._write_footprint_audit(ctx, state, key)
     except Exception as exc:
         print_error(console, "Commit/Push Failed", str(exc))
         return Stop(1)
@@ -1724,7 +1017,6 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
         receipt = await phase_commit_push(
             ctx.backend_for("fix"),
             ctx.work,
-            preexisting_untracked=set(state.preexisting_untracked),
             config=ctx.config,
             items=[
                 item for item in deep_state.items_or_empty or []
@@ -1734,7 +1026,7 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
             retained_paths=snapshot.paths,
             retained_states=snapshot.states,
             initial_index=state.initial_index,
-            recipe=_published_test_recipe(ctx),
+            recipe=deep_state.test_recipe,
             evidence=state.latest_test_evidence,
             retained_tree_key=snapshot.tree_key,
             run_context=ctx.run_context,
@@ -1770,236 +1062,11 @@ async def _step_commit(ctx: FlowContext) -> Stop | None:
     return None
 
 
-def _resolve_remote_ci_target(ctx: FlowContext, receipt: PushReceipt) -> RemoteCITarget:
-    """Bind the pushed repository/ref to one configured P04 pull request."""
-    from daydream import pr_review
-    from daydream.remote_ci import RemoteCITarget
-
-    configured_repo = ctx.config.pr_repo
-    configured_pr = ctx.config.pr_number
-    if git_ops.split_owner_repo(configured_repo or "") is None:
-        raise GitError("remote CI requires a configured GitHub base repository")
-    assert configured_repo is not None
-    if not isinstance(configured_pr, int) or isinstance(configured_pr, bool) or configured_pr <= 0:
-        raise GitError("remote CI requires a configured pull request number")
-    if receipt.pushed_repository is None:
-        raise GitError("the successful push remote has no GitHub repository identity")
-
-    pr = pr_review.find_pr_by_number(
-        ctx.work.repo, configured_pr, auth=ctx.github_execution.auth
-    )
-    if pr is None:
-        raise GitError(f"configured pull request #{configured_pr} was not found")
-    base_repository = f"{pr.owner}/{pr.repo}"
-    expected = {
-        "pull request": (configured_pr, pr.number),
-        "configured base repository": (configured_repo.lower(), base_repository.lower()),
-        "base ref": (ctx.work.base_branch, pr.base_ref),
-        "head repository": (receipt.pushed_repository.lower(), (pr.head_repo or "").lower()),
-        "head ref": (receipt.branch, pr.head_ref),
-    }
-    mismatches = [name for name, (wanted, actual) in expected.items() if wanted != actual]
-    if mismatches:
-        raise GitError(
-            "remote CI identity does not match the pushed target: "
-            + ", ".join(mismatches)
-        )
-    if pr.head_repo is None:
-        raise GitError("pull request head repository is unavailable")
-    return RemoteCITarget(
-        target_dir=ctx.work.repo.resolve(),
-        base_repository=base_repository,
-        base_ref=pr.base_ref,
-        head_repository=pr.head_repo,
-        head_ref=pr.head_ref,
-        pr_number=pr.number,
-        pr_url=pr.url,
-        remote=receipt.remote,
-        pushed_sha=receipt.sha,
-    )
-
-
-def _print_remote_ci_result(verdict: RemoteCIVerdict) -> None:
-    """Render only normalized GitHub evidence and its explicit limitations."""
-    target = verdict.target
-    if target is not None:
-        print_info(
-            console,
-            escape_markup(
-                f"Remote CI target: {target.base_repository} PR #{target.pr_number} "
-                f"at {target.pushed_sha}"
-            ),
-        )
-    print_info(
-        console,
-        escape_markup(f"Remote CI result: {verdict.status} — {verdict.reason}"),
-    )
-    if verdict.evidence_sha is not None:
-        print_info(
-            console,
-            escape_markup(f"Remote CI evidence SHA: {verdict.evidence_sha}"),
-        )
-    if verdict.failing_contexts:
-        print_warning(console, f"Failing CI: {', '.join(verdict.failing_contexts)}")
-    if verdict.pending_contexts:
-        print_warning(console, f"Pending CI: {', '.join(verdict.pending_contexts)}")
-    if verdict.missing_contexts:
-        print_warning(console, f"Missing CI: {', '.join(verdict.missing_contexts)}")
-    advisory = [
-        item.context
-        for item in verdict.advisory_observations
-        if item.state in {"fail", "pending"}
-    ]
-    if advisory:
-        print_warning(console, f"Advisory CI not green: {', '.join(advisory)}")
-    for url in verdict.urls:
-        print_info(console, escape_markup(f"CI details: {url}"))
-
-
-async def _step_remote_ci(ctx: FlowContext) -> Stop | None:
-    """Bind and wait for exact pushed-SHA GitHub CI, failing closed."""
-    deep_state = DeepState(ctx.data)
-    from daydream.remote_ci import (
-        DEFAULT_LIMITS,
-        GitHubRemoteCIFetcher,
-        pending_remote_ci_verdict,
-        unavailable_remote_ci_verdict,
-        wait_for_remote_ci,
-        write_remote_ci_handoff,
-        write_remote_ci_verdict,
-    )
-
-    receipt = deep_state.push_receipt
-    if not isinstance(receipt, PushReceipt):
-        return None
-    state = _fix_cycle_state(ctx)
-    limits = DEFAULT_LIMITS
-    started_at = now_iso()
-    monotonic_started = anyio.current_time()
-    discovery_deadline = monotonic_started + limits.discovery_seconds
-    completion_deadline = monotonic_started + limits.completion_seconds
-    poll_count = 0
-    verdict: RemoteCIVerdict | None = None
-
-    def write_verdict(path: Path, snapshot: RemoteCIVerdict, count: int) -> None:
-        write_remote_ci_verdict(
-            path,
-            snapshot,
-            session_id=state.session_id,
-            poll_count=count,
-            started_at=started_at,
-            updated_at=now_iso(),
-            discovery_deadline=discovery_deadline,
-            completion_deadline=completion_deadline,
-            limits=limits,
-        )
-
-    def persist(snapshot: RemoteCIVerdict) -> None:
-        nonlocal poll_count, verdict
-        poll_count += 1
-        verdict = snapshot
-        write_verdict(remote_ci_verdict_path(DeepState(ctx.data).dd), snapshot, poll_count)
-
-    caught: BaseException | None = None
-    cancelled_type = anyio.get_cancelled_exc_class()
-    try:
-        async with host_phase_scope(DaydreamPhase.REMOTE_CI) as phase:
-            try:
-                target = _resolve_remote_ci_target(ctx, receipt)
-            except Exception as exc:
-                verdict = unavailable_remote_ci_verdict(
-                    reason="remote CI target identity is unavailable",
-                    diagnostic=str(exc),
-                )
-                write_verdict(remote_ci_verdict_path(deep_state.dd), verdict, 0)
-            else:
-                # One monotonic start owns both the durable deadline metadata
-                # and the waiter's request budgets.  Resolution above is a
-                # separate bounded P04 lookup and does not consume CI polling
-                # time; persisting the initial state below does.
-                started_at = now_iso()
-                monotonic_started = anyio.current_time()
-                discovery_deadline = monotonic_started + limits.discovery_seconds
-                completion_deadline = monotonic_started + limits.completion_seconds
-                write_verdict(remote_ci_verdict_path(deep_state.dd), pending_remote_ci_verdict(target), 0)
-                # The new target is durable before the previous attempt's
-                # guidance is retired. Do this before any CI request so a
-                # blocked or abruptly interrupted resume cannot expose it.
-                remote_ci_handoff_path(deep_state.dd).unlink(missing_ok=True)
-                print_info(
-                    console,
-                    f"Verifying remote CI for {target.base_repository} PR "
-                    f"#{target.pr_number} at {target.pushed_sha}",
-                )
-                try:
-                    verdict = await wait_for_remote_ci(
-                        target,
-                        fetcher=GitHubRemoteCIFetcher(
-                            limits=limits, auth=ctx.github_execution.auth
-                        ),
-                        limits=limits,
-                        monotonic_started_at=monotonic_started,
-                        on_snapshot=persist,
-                    )
-                except (cancelled_type, KeyboardInterrupt) as exc:
-                    phase.stop_reason = (
-                        "cancelled" if isinstance(exc, cancelled_type) else "interrupted"
-                    )
-                    caught = exc
-                else:
-                    phase.stop_reason = verdict.status
-            if caught is None and verdict is not None:
-                phase.stop_reason = verdict.status
-    except Exception as exc:
-        print_error(console, "Remote CI verification failed", str(exc))
-        return Stop(1)
-    if caught is not None:
-        if verdict is not None:
-            try:
-                with anyio.CancelScope(shield=True):
-                    write_remote_ci_handoff(
-                        remote_ci_handoff_path(deep_state.dd),
-                        verdict,
-                        session_id=state.session_id,
-                    )
-            except Exception as exc:
-                print_error(console, "Remote CI handoff persistence failed", str(exc))
-        raise caught
-    if verdict is None:
-        print_error(console, "Remote CI verification failed", "no verdict was produced")
-        return Stop(1)
-
-    _print_remote_ci_result(verdict)
-    handoff = remote_ci_handoff_path(deep_state.dd)
-    if verdict.status in {"passed", "no_ci"}:
-        try:
-            handoff.unlink(missing_ok=True)
-        except OSError as exc:
-            print_error(console, "Remote CI handoff cleanup failed", str(exc))
-            return Stop(1)
-        if verdict.status == "passed":
-            print_success(console, "Exact pushed-SHA remote CI passed.")
-        else:
-            print_success(console, "Remote CI was observably not configured.")
-        return None
-    try:
-        write_remote_ci_handoff(handoff, verdict, session_id=state.session_id)
-    except Exception as exc:
-        print_error(console, "Remote CI handoff persistence failed", str(exc))
-    return Stop(1)
-
-
 async def _perform_cleanup(ctx: FlowContext) -> None:
-    """Terminal cleanup: remove the review output when enabled (#330).
+    """Remove review output on successful exits when cleanup is enabled.
 
-    Restores the shallow ``commit-gate`` semantics the single-flow collapse
-    dropped: ``--cleanup`` removes ``.review-output.md`` after a successful
-    run, ``--no-cleanup`` keeps it, and an unspecified flag falls back to the
-    old preamble gate (``--yes`` cleans up, unattended runs keep the artifact
-    via ``safe_default=False``, interactive runs prompt). Not a flow step: it
-    is invoked by ``_run_review_spine`` on any successful exit, so an early
-    ``Stop(0)`` (e.g. a declined fix gate) still honors ``--cleanup`` while
-    every failure path (a non-zero exit) skips it to keep evidence.
+    Explicit flags win; otherwise --yes accepts, unattended runs retain it, and
+    interactive runs prompt. Early Stop(0) honors cleanup; failures keep evidence.
     """
     config = ctx.config
     target_dir = ctx.work.repo

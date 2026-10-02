@@ -129,7 +129,7 @@ before tools, SDK-end exactly once after billing-owner resolution.
 ## Attempt aggregate, usage, billing (decision 5)
 
 `AttemptObserver` configured reconciliation with the trajectory
-pending-generation ledger (`daydream/trajectory.py` T2); exactly one
+pending-generation ledger (`daydream/trajectory/generation.py`); exactly one
 (single billing) owner per attempt — NO double billing and no parent/child
 usage duplicate — usage on the owner only. Accounting is complete/partial:
 standard totals are emitted only when complete; known partial custom

@@ -12,6 +12,9 @@ import copy
 from pathlib import Path
 from typing import Any
 
+import pytest
+
+from daydream import phases
 from daydream.deep import reuse_key
 
 _UNSET = object()
@@ -42,11 +45,7 @@ def _mutate(payload: dict[str, Any], dotted: str, value: Any = _UNSET) -> dict[s
 
 
 def _identity() -> reuse_key.PhaseIdentity:
-    return reuse_key.PhaseIdentity(
-        backend="claude",
-        model="claude-sonnet-4-5",
-        effort="high",
-        profile_digest="d" * 64,
+    return reuse_key.PhaseIdentity(backend="claude", model="claude-sonnet-4-5", effort="high", profile_digest="d" * 64,
     )
 
 
@@ -62,30 +61,13 @@ def _shard_diff(run_id: str) -> str:
 
 
 def _hunk_index() -> dict[str, Any]:
-    return {
-        "a.py": {
-            "hunks": [
-                {
-                    "old_start": 1,
-                    "old_end": 1,
-                    "new_start": 1,
-                    "new_end": 2,
-                    "added": 1,
-                    "removed": 0,
-                }
-            ],
-            "added_total": 1,
-            "removed_total": 0,
+    return {"a.py": {"hunks": [{"old_start": 1, "old_end": 1, "new_start": 1, "new_end": 2, "added": 1, "removed": 0}],
+            "added_total": 1, "removed_total": 0,
         }
     }
 
 
-def _shard_payload(
-    tmp_path: Path,
-    *,
-    files: list[str],
-    frontier: list[str],
-    blob: bytes,
+def _shard_payload(tmp_path: Path, *, files: list[str], frontier: list[str], blob: bytes,
     run_id: str = "11111111-1111-1111-1111-111111111111",
 ) -> dict[str, Any]:
     worktree = tmp_path / "worktree"
@@ -97,29 +79,15 @@ def _shard_payload(
     exploration = tmp_path / "exploration"
     exploration.mkdir(parents=True, exist_ok=True)
     (exploration / "files.json").write_text("pre-scan")
-    payload = reuse_key.shard_key_payload(
-        stack_name="python",
-        files=files,
-        frontier_files=frontier,
-        docs_only=False,
-        diff_path_or_hunks=_shard_diff(run_id),
-        hunk_index=_hunk_index(),
-        exploration_dir=exploration,
+    payload = reuse_key.shard_key_payload(stack_name="python", files=files, frontier_files=frontier, docs_only=False,
+        diff_path_or_hunks=_shard_diff(run_id), hunk_index=_hunk_index(), exploration_dir=exploration,
         worktree_root=worktree,
         identity=reuse_key.PhaseIdentity(
-            backend="claude",
-            model="claude-sonnet-4-5",
-            effort="high",
-            profile_digest="d" * 64,
-        ),
-        intent_authoritative=True,
-        include_alternatives=False,
-        prior_commits=None,
-        intent_text=None,
+            backend="claude", model="claude-sonnet-4-5", effort="high", profile_digest="d" * 64,
+        ), intent_authoritative=True, include_alternatives=False, prior_commits=None, intent_text=None,
         alternatives_text=None,
     )
     return payload
-
 
 def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> None:
     base = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
@@ -127,7 +95,7 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
     assert key is not None and len(key) == 64
     for name in ("format", "hunk_slice", "assigned_files", "assigned_blobs", "frontier_files",
                  "frontier_blobs", "profile", "model", "effort", "intent_authoritative",
-                 "include_alternatives", "exploration_present", "docs_only"):
+                 "include_alternatives", "exploration_present", "docs_only", "schema"):
         assert reuse_key.unit_key(_mutate(base, f"components.{name}")) != key, name
     # MH2/MH16, both directions: every re-derived input is grounding, never a key input.
     for name in ("exploration", "intent", "alternatives", "settled_decisions"):
@@ -150,10 +118,8 @@ def test_components_move_the_key_and_grounding_never_does(tmp_path: Path) -> Non
 
 
 def test_run_scoped_identifiers_are_normalized_out_of_text() -> None:
-    assert reuse_key.normalize_run_scoped(
-        "see /runs/11111111-1111-1111-1111-111111111111/output.json now"
+    assert reuse_key.normalize_run_scoped("see /runs/11111111-1111-1111-1111-111111111111/output.json now"
     ) == "see /output.json now"
-
 
 def test_exploration_digest_excludes_cache_key(tmp_path: Path) -> None:
     directory = tmp_path / "exploration"
@@ -166,17 +132,13 @@ def test_exploration_digest_excludes_cache_key(tmp_path: Path) -> None:
     (directory / "files.json").write_text("y")
     assert reuse_key.exploration_digest(directory) != first
 
-
 def test_blob_map_missing_file_is_none(tmp_path: Path) -> None:
     (tmp_path / "a.py").write_text("A = 1\n")
     assert reuse_key.blob_map_digest(tmp_path, ["missing.py"]) is None
     assert reuse_key.blob_map_digest(tmp_path, ["a.py"]) is not None
     assert reuse_key.blob_map_digest(tmp_path, []) is not None
 
-
-def test_intent_key_tracks_its_contract_inputs_and_ignores_the_exploration_content(
-    tmp_path: Path,
-) -> None:
+def test_intent_key_tracks_its_contract_inputs_and_ignores_the_exploration_content(tmp_path: Path,) -> None:
     intent = reuse_key.intent_key_payload(
         diff_text="+ x = 1\n", commit_log="abc fix", exploration_dir=None, pr_description="absent",
         branch_name="b", worktree_root=tmp_path, identity=_identity(),
@@ -194,83 +156,32 @@ def test_intent_key_tracks_its_contract_inputs_and_ignores_the_exploration_conte
                                                      "exploration": {"digest": "absent"}})
     assert reuse_key.unit_key(
         reuse_key.wonder_key_payload(diff_text="+ x = 1\n", horse_mode=False, identity=_identity(),
-                                     grounding={"intent": {"digest": "b" * 64},
-                                                "exploration": {"digest": "absent"}})
+                                     grounding={"intent": {"digest": "b" * 64}, "exploration": {"digest": "absent"}})
     ) == reuse_key.unit_key(wonder)
     assert reuse_key.unit_key(
         reuse_key.wonder_key_payload(diff_text="+ x = 2\n", horse_mode=False, identity=_identity(),
-                                     grounding={"intent": {"digest": "a" * 64},
-                                                "exploration": {"digest": "absent"}})
+                                     grounding={"intent": {"digest": "a" * 64}, "exploration": {"digest": "absent"}})
     ) != reuse_key.unit_key(wonder)
-
 
 def test_grounding_is_recorded_even_when_absent(tmp_path: Path) -> None:
     payload = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
-    assert set(reuse_key.grounding_digests(payload)) == {
-        "exploration", "intent", "alternatives", "settled_decisions",
-    }
+    assert set(reuse_key.grounding_digests(payload)) == {"exploration", "intent", "alternatives", "settled_decisions"}
     assert reuse_key.grounding_digests(payload)["exploration"] != "absent"
     assert reuse_key.grounding_digests(payload)["intent"] == "absent"
 
 
-def _sweep_payload(
-    *,
-    records: dict[str, bytes],
-    uncovered: list[str],
-    hunk_digest: str,
-    intent: str,
-) -> dict[str, Any]:
-    hunk_index = {name: {"hunks": [{"digest": hunk_digest}]} for name in uncovered}
-    return reuse_key.sweep_key_payload(
-        contributing_records=records,
-        uncovered_files=uncovered,
-        hunk_index=hunk_index,
-        bounds={"min_hunk_lines": 5, "max_files": 10},
-        identity=_identity(),
-        grounding={"intent": {"digest": intent}, "exploration": {"digest": "absent"}},
-    )
-
-
-def test_sweep_key_tracks_contributing_records_not_this_runs_counters() -> None:
-    base = _sweep_payload(records={"stack-python#0-records.json": b"{}"},
-                          uncovered=["mod0.py"], hunk_digest="h" * 64, intent="i" * 64)
-    key = reuse_key.unit_key(base)
-    assert key is not None
-    assert reuse_key.unit_key(_sweep_payload(
-        records={"stack-python#0-records.json": b'{"verdicts": []}'},
-        uncovered=["mod0.py"], hunk_digest="h" * 64, intent="i" * 64)) != key
-    assert reuse_key.unit_key(_sweep_payload(
-        records={"stack-python#0-records.json": b"{}"},
-        uncovered=["mod0.py", "mod1.py"], hunk_digest="h" * 64, intent="i" * 64)) != key
-    # The two artifacts the loop re-derives are grounding, not key inputs (MH2).
-    assert reuse_key.unit_key(_sweep_payload(
-        records={"stack-python#0-records.json": b"{}"},
-        uncovered=["mod0.py"], hunk_digest="h" * 64, intent="j" * 64)) == key
-
-
-def _arbiter_payload(
-    *,
-    records: dict[str, bytes | None] | None = None,
-    structural: bytes | None = b'{"issues": []}',
-    plan: dict[str, Any] | None = None,
-    precision_mode: bool = False,
-    intent: str = "i" * 64,
+def _arbiter_payload(*, records: dict[str, bytes | None] | None = None, structural: bytes | None = b'{"issues": []}',
+    plan: dict[str, Any] | None = None, precision_mode: bool = False, intent: str = "i" * 64,
 ) -> dict[str, Any]:
     return reuse_key.arbiter_key_payload(
-        contributing_records=(
-            records if records is not None else {"stack-python-records.json": b"{}"}
-        ),
+        contributing_records=(records if records is not None else {"stack-python-records.json": b"{}"}),
         structural_records=structural,
         plan=plan if plan is not None else {"sharded": True, "groups": [["python:1"], ["react:1"]]},
-        precision_mode=precision_mode,
-        identity=_identity(),
+        precision_mode=precision_mode, identity=_identity(),
         grounding={
-            "intent": {"digest": intent},
-            "alternatives": {"digest": "absent"},
-            "exploration": {"digest": "absent"},
+            "intent": {"digest": intent}, "alternatives": {"digest": "absent"}, "exploration": {"digest": "absent"},
         },
     )
-
 
 def test_arbiter_key_tracks_records_plan_and_precision_but_not_grounding() -> None:
     """MH8: the arbiter is one content key over its own inputs (all contributing
@@ -279,20 +190,14 @@ def test_arbiter_key_tracks_records_plan_and_precision_but_not_grounding() -> No
     base = _arbiter_payload()
     key = reuse_key.unit_key(base)
     assert key is not None and len(key) == 64
-    assert reuse_key.unit_key(
-        _arbiter_payload(records={"stack-python-records.json": b'{"issues": [1]}'})
-    ) != key
+    assert reuse_key.unit_key(_arbiter_payload(records={"stack-python-records.json": b'{"issues": [1]}'})) != key
     # A contributing records file that could not be read is a named miss, never
     # a partial key over the files that did read.
-    assert reuse_key.unit_key(
-        _arbiter_payload(records={"stack-python-records.json": None})
-    ) is None
+    assert reuse_key.unit_key(_arbiter_payload(records={"stack-python-records.json": None})) is None
     # A structural stack appearing or moving is a subject change.
     assert reuse_key.unit_key(_arbiter_payload(structural=None)) != key
     assert reuse_key.unit_key(_arbiter_payload(structural=b'{"issues": [1]}')) != key
-    assert reuse_key.unit_key(
-        _arbiter_payload(plan={"sharded": False, "groups": [["python:1"]]})
-    ) != key
+    assert reuse_key.unit_key(_arbiter_payload(plan={"sharded": False, "groups": [["python:1"]]})) != key
     assert reuse_key.unit_key(_arbiter_payload(precision_mode=True)) != key
     # Grounding is recorded on every payload, never read by the key (MH2/MH16).
     moved = _arbiter_payload(intent="j" * 64)
@@ -301,75 +206,50 @@ def test_arbiter_key_tracks_records_plan_and_precision_but_not_grounding() -> No
     assert set(reuse_key.grounding_digests(base)) == {"intent", "alternatives", "exploration"}
 
 
-def _merge_payload(
-    *,
-    records: dict[str, bytes | None] | None = None,
-    structural_present: bool = True,
-    failed_stacks: list[str] | None = None,
-    intent: str = "i" * 64,
+def _merge_payload(*, records: dict[str, bytes | None] | None = None, structural_present: bool = True,
+    failed_stacks: list[str] | None = None, intent: str = "i" * 64,
 ) -> dict[str, Any]:
-    return reuse_key.merge_key_payload(
-        contributing_records=(
-            records
+    return reuse_key.merge_key_payload(contributing_records=(records
             if records is not None
-            else {
-                "stack-python-records.json": b"{}",
-                "stack-uncovered-records.json": b"[]",
+            else {"stack-python-records.json": b"{}", "stack-react-records.json": b"[]",
                 "stack-structure-records.json": b'{"issues": []}',
             }
-        ),
-        structural_records_present=structural_present,
-        failed_stacks=failed_stacks if failed_stacks is not None else ["react"],
-        identity=_identity(),
+        ), structural_records_present=structural_present,
+        failed_stacks=failed_stacks if failed_stacks is not None else ["react"], identity=_identity(),
         grounding={
-            "intent": {"digest": intent},
-            "alternatives": {"digest": "absent"},
-            "exploration": {"digest": "absent"},
+            "intent": {"digest": intent}, "alternatives": {"digest": "absent"}, "exploration": {"digest": "absent"},
         },
     )
 
-
 def test_merge_key_tracks_records_failures_and_structural_but_not_grounding() -> None:
     """MH8/MH16: the cross-stack merge keys on every contributing record file
-    (including the uncovered and structural units), the failed-stack set and the
+    (including the language and structural units), the failed-stack set and the
     structural presence flag; the loop-re-derived intent/alternatives/pre-scan
     are recorded grounding that can never move it."""
     base = _merge_payload()
     key = reuse_key.unit_key(base)
     assert key is not None and len(key) == 64
-    assert reuse_key.unit_key(
-        _merge_payload(
-            records={
-                "stack-python-records.json": b'{"issues": [1]}',
-                "stack-uncovered-records.json": b"[]",
+    assert reuse_key.unit_key(_merge_payload(records={
+                "stack-python-records.json": b'{"issues": [1]}', "stack-react-records.json": b"[]",
                 "stack-structure-records.json": b'{"issues": []}',
             }
         )
     ) != key, "a recomputed shard must move the merge key"
-    assert reuse_key.unit_key(
-        _merge_payload(
-            records={
-                "stack-python-records.json": b"{}",
-                "stack-uncovered-records.json": b'[1]',
+    assert reuse_key.unit_key(_merge_payload(records={
+                "stack-python-records.json": b"{}", "stack-react-records.json": b'[1]',
                 "stack-structure-records.json": b'{"issues": []}',
             }
         )
-    ) != key, "the uncovered unit's records are subject"
-    assert reuse_key.unit_key(
-        _merge_payload(
-            records={
-                "stack-python-records.json": b"{}",
-                "stack-uncovered-records.json": b"[]",
+    ) != key, "the language unit's records are subject"
+    assert reuse_key.unit_key(_merge_payload(records={
+                "stack-python-records.json": b"{}", "stack-react-records.json": b"[]",
                 "stack-structure-records.json": b'{"issues": [1]}',
             }
         )
     ) != key, "the structural unit's records are subject"
     # A contributing records file that could not be read is a named miss.
-    assert reuse_key.unit_key(
-        _merge_payload(
-            records={
-                "stack-python-records.json": None,
-                "stack-uncovered-records.json": b"[]",
+    assert reuse_key.unit_key(_merge_payload(records={
+                "stack-python-records.json": None, "stack-react-records.json": b"[]",
                 "stack-structure-records.json": b'{"issues": []}',
             }
         )
@@ -381,3 +261,11 @@ def test_merge_key_tracks_records_failures_and_structural_but_not_grounding() ->
     assert reuse_key.unit_key(moved) == key
     assert reuse_key.grounding_digests(moved)["intent"] == "j" * 64
     assert set(reuse_key.grounding_digests(base)) == {"intent", "alternatives", "exploration"}
+
+def test_shard_key_invalidates_when_findings_schema_changes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
+    current = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
+    schema = copy.deepcopy(phases.PER_STACK_RECORD_SCHEMA)
+    schema["properties"]["issues"]["items"]["properties"]["severity"]["enum"].remove("low")
+    monkeypatch.setattr(phases, "PER_STACK_RECORD_SCHEMA", schema)
+    changed = _shard_payload(tmp_path, files=["a.py"], frontier=[], blob=b"A = 1\n")
+    assert reuse_key.unit_key(changed) != reuse_key.unit_key(current)

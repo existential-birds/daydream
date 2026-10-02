@@ -6,27 +6,17 @@ from daydream import clock
 
 
 def _wall_start() -> float:
-    """Read the shared clock seam at construction.
-
-    A function default factory (rather than a direct call) keeps the read late
-    so a fake clock installed after class definition still applies.
-    """
+    """Read the shared clock at instance construction so late-installed fake clocks apply."""
     return clock.monotonic()
 
 
 @dataclass
 class FileGroupBudget:
-    """Aggregate guard over all fix ``run_agent`` calls for one file group (#201).
+    """Bound aggregate wall time and completed fix calls for one file group.
 
-    Where the per-invocation guard bounds each turn,
-    ``DEFAULT_WALL_BUDGET_S``/this bounds their *sum* in one group so a file
-    with many findings cannot dominate a run. Two axes bound the group:
-    cumulative wall-clock (started at construction via the shared clock seam)
-    and serial-item count (bumped per completed call by :meth:`record_item`).
-    Output tokens are deliberately not an axis, being collinear with wall-time
-    and call-count here. Enforced by the pure between-calls :meth:`check` and
-    the absolute :attr:`deadline` threaded into a fix call for mid-call abort.
-    """
+    The clock starts at construction; record_item increments the serial count.
+    check enforces limits between calls; deadline enables mid-call cancellation.
+    Tokens add no independent bound beyond wall time and call count."""
 
     max_wall_seconds: float
     max_serial_items: int
@@ -43,20 +33,12 @@ class FileGroupBudget:
         return max(0.0, self.deadline - clock.monotonic())
 
     def elapsed_s(self) -> float:
-        """Wall-clock seconds consumed by the group so far (unclamped).
-
-        The recorded duration, not the remaining budget: a stop event states how
-        much of the ceiling the group actually consumed.
-        """
+        """Unclamped wall time consumed, for stop-event reporting."""
         return clock.monotonic() - self._wall_start
 
     def check(self) -> str | None:
-        """Return a budget-reason string if any ceiling is reached, else None.
-
-        Pure read (no side effects): safe to call before every fix call. The
-        checks are ordered items → wall so the reason is deterministic when both
-        ceilings are simultaneously breached.
-        """
+        """Return the exceeded ceiling's reason without mutation, or None.
+        Check items before wall time to resolve simultaneous breaches deterministically."""
         if self._items_processed >= self.max_serial_items:
             return "group_serial_item_limit"
         if clock.monotonic() - self._wall_start >= self.max_wall_seconds:

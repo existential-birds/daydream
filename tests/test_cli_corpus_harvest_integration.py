@@ -20,12 +20,8 @@ from tests.harness.trajectory import make_manifest
 
 @pytest.mark.parametrize("outcome", ["accepted", "unanswered", "malformed", "rate_limited"])
 def test_corpus_harvest_archive_and_resume_journey(
-    tmp_path: Path,
-    archive_dir: Path,
-    git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-    outcome: str,
+    tmp_path: Path, archive_dir: Path, git_repo: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], outcome: str,
 ) -> None:
     session = "cli-harvest-session"
     head = git(git_repo, "rev-parse", "HEAD")
@@ -35,20 +31,12 @@ def test_corpus_harvest_archive_and_resume_journey(
         json.dumps({"verdicts": [{"verdict": "consistent"}]}), encoding="utf-8"
     )
     fingerprint = "a" * 64
-    (run_dir / "findings.json").write_text(
-        json.dumps({"findings": [{"fingerprint": fingerprint}]}), encoding="utf-8"
-    )
+    (run_dir / "findings.json").write_text(json.dumps({"findings": [{"fingerprint": fingerprint}]}), encoding="utf-8")
     manifest = make_manifest(
-        session_id=session,
-        archive_path=str(run_dir),
-        source_path=str(git_repo),
-        repo_slug="org/repo",
-        branch="main",
-        base_branch="main",
-        head_sha=head,
-        grounding_rate=1.0,
-        pr_number=None,
-        pr_repo=None,
+        session_id=session, archive_path=str(run_dir), source_path=str(git_repo), repo_slug="org/repo", branch="main",
+        base_branch="main", head_sha=head,
+
+        pr_number=None, pr_repo=None,
     )
     manifest_path = run_dir / "manifest.json"
     manifest_path.write_text(json.dumps(manifest.to_dict()), encoding="utf-8")
@@ -61,28 +49,15 @@ def test_corpus_harvest_archive_and_resume_journey(
 
     endpoints: list[str] = []
     rate_limited = outcome == "rate_limited"
-    comments: list[dict[str, Any]] = [{
-        "id": 1,
-        "user": {"login": "daydream-runner"},
+    comments: list[dict[str, Any]] = [{"id": 1, "user": {"login": "daydream-runner"},
         "body": f"finding\n\n{finding_marker(fingerprint)}\n\n{DAYDREAM_FOOTER}",
     }]
     if outcome != "unanswered":
-        comments.append({
-            "id": 2,
-            "in_reply_to_id": 1,
-            "user": {"login": "reviewer"},
-            "author_association": "OWNER",
-            "body": "Good catch, applied.",
-            "created_at": "2026-09-10T10:00:00Z",
+        comments.append({"id": 2, "in_reply_to_id": 1, "user": {"login": "reviewer"}, "author_association": "OWNER",
+            "body": "Good catch, applied.", "created_at": "2026-09-10T10:00:00Z",
         })
 
-    def github_boundary(
-        repo: Path,
-        endpoint: str,
-        *,
-        auth: git_ops.GitHubAuth,
-        **kwargs: Any,
-    ) -> Any:
+    def github_boundary(repo: Path, endpoint: str, *, auth: git_ops.GitHubAuth, **kwargs: Any,) -> Any:
         assert repo == Path(".")
         assert auth is git_ops.INHERIT_GITHUB_AUTH
         endpoints.append(endpoint)
@@ -105,8 +80,7 @@ def test_corpus_harvest_archive_and_resume_journey(
 
     def harvest(cache: Path) -> int:
         with pytest.raises(SystemExit) as exit_info:
-            cli.main([
-                "corpus", "harvest", "--archive-dir", str(archive_dir),
+            cli.main(["corpus", "harvest", "--archive-dir", str(archive_dir),
                 "--cache-dir", str(cache), "--gh-spacing-sec", "0",
             ])
         return int(exit_info.value.code or 0)
@@ -146,9 +120,7 @@ def test_corpus_harvest_archive_and_resume_journey(
     assert marker["session_id"] == session
     assert marker["labeler_policy_version"] == labeler_versions.LABELER_POLICY_VERSION
     assert set(endpoints) == {
-        f"repos/org/repo/commits/{head}/pulls",
-        "repos/org/repo/pulls/7",
-        "repos/org/repo/pulls/7/reviews",
+        f"repos/org/repo/commits/{head}/pulls", "repos/org/repo/pulls/7", "repos/org/repo/pulls/7/reviews",
         "repos/org/repo/pulls/7/comments",
     }
 

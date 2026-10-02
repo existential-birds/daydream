@@ -17,7 +17,8 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
 from daydream.deep.settings import _resolve_opt_in
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _batched_group_size,
     _install_accept_gate_pipeline,
@@ -50,29 +51,20 @@ from tests.test_deep_orchestrator import (
 )
 
 
-@pytest.mark.parametrize(
-    ("precision_mode", "suppression_keep", "low_survives", "suppression_count"),
-    [
-        pytest.param(True, False, False, 1, id="on-drops-unconfirmed"),
+@pytest.mark.parametrize(("precision_mode", "suppression_keep", "low_survives", "suppression_count"),
+    [pytest.param(True, False, False, 1, id="on-drops-unconfirmed"),
         pytest.param(False, False, True, 0, id="off-keeps-low"),
         pytest.param(True, True, True, 1, id="on-keeps-confirmed"),
     ],
 )
 async def test_precision_routes_borderline_low_finding(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    precision_mode: bool,
-    suppression_keep: bool,
-    low_survives: bool,
-    suppression_count: int,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, precision_mode: bool, suppression_keep: bool,
+    low_survives: bool, suppression_count: int,
 ) -> None:
     """Precision reviews borderline low findings only when enabled, then applies its verdict."""
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(
-        monkeypatch,
-        multi_stack_target,
-        merge_echo_records=True,
-        parse_by_stack=_PRECISION_STACKS,
+        monkeypatch, multi_stack_target, merge_echo_records=True, parse_by_stack=_PRECISION_STACKS,
         suppression_keep=suppression_keep,
     )
     assert await _run_deep(multi_stack_target, precision_mode=precision_mode) == 0
@@ -88,20 +80,14 @@ async def test_precision_routes_borderline_low_finding(
     assert len(arbiters) == 1
     assert arbiters[0]["model"] == "claude-opus-5"
 
-
 @pytest.mark.parametrize("widened", [False, True], ids=["default-low-only", "include-medium"])
 async def test_precision_confidence_classes_control_medium_suppression(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    widened: bool,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, widened: bool,
 ) -> None:
     """The confidence setting decides whether an uncontested medium finding is reviewed."""
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(
-        monkeypatch,
-        multi_stack_target,
-        merge_echo_records=True,
-        parse_by_stack=_CONFIDENCE_KNOB_STACKS,
+        monkeypatch, multi_stack_target, merge_echo_records=True, parse_by_stack=_CONFIDENCE_KNOB_STACKS,
         suppression_keep=False,
     )
     profile = _profile_with_pipeline(suppression_confidence_classes=("LOW", "MEDIUM")) if widened else None
@@ -113,12 +99,9 @@ async def test_precision_confidence_classes_control_medium_suppression(
     suppression = [c for c in calls if "you are the suppression reviewer" in c["prompt"].lower()]
     assert len(suppression) == int(widened)
 
-
 @pytest.mark.parametrize("enabled", [False, True], ids=["default", "opt-in"])
 async def test_deep_flow_forwards_approve_on_clean(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    enabled: bool,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, enabled: bool,
 ) -> None:
     """The deep flow forwards the default or opted-in approval flag to posting."""
     _silence(monkeypatch)
@@ -136,18 +119,15 @@ TABLED_OPT_IN_FLAGS = ("precision_mode", "approve_on_clean", "scope_issue_filing
 
 # Boolean settings mirrored on both config dataclasses that deliberately do NOT use the
 # truthiness opt-in rule. Every entry carries the reason it is exempt.
-OPT_IN_GUARD_EXEMPTIONS: dict[str, str] = {
-    "deep_shard_enabled": (
+OPT_IN_GUARD_EXEMPTIONS: dict[str, str] = {"deep_shard_enabled": (
         "sentinel tiers with an explicit False authoritative and a diff-driven default; "
         "pinned by test_deep_shard_enabled_default_off"
     ),
-    "review_cache_enabled": (
-        "sentinel tiers with an explicit False authoritative (--no-review-cache) and a "
+    "review_cache_enabled": ("sentinel tiers with an explicit False authoritative (--no-review-cache) and a "
         "built-in default of on; uses _resolve_config_value, not _resolve_opt_in; "
         "pinned by test_review_cache_enablement_and_budget_resolve_cli_then_file_then_default"
     ),
-    "verify_all": (
-        "sentinel tiers with an explicit False authoritative and a built-in default of "
+    "verify_all": ("sentinel tiers with an explicit False authoritative and a built-in default of "
         "False (flipped once the verify-selection report gate went green); uses "
         "_resolve_config_value, not _resolve_opt_in; pinned by "
         "test_verify_all_reproduces_the_conservative_item_set"
@@ -161,7 +141,6 @@ def _mirrored_boolean_names(run_config: type, file_config: type) -> set[str]:
     file_bools = {name for name, hint in get_type_hints(file_config).items() if "bool" in str(hint)}
     return run_bools & file_bools
 
-
 def test_mirrored_boolean_opt_ins_are_tabled_or_exempt() -> None:
     """#1225: a boolean mirrored on both config surfaces must join the opt-in table or carry an exemption reason."""
     mirrored = _mirrored_boolean_names(RunConfig, DaydreamFileConfig)
@@ -171,7 +150,6 @@ def test_mirrored_boolean_opt_ins_are_tabled_or_exempt() -> None:
         f"mirrored boolean opt-ins neither tabled nor exempt: {sorted(untabled)}"
     )
 
-
 def test_mirrored_boolean_names_reads_declared_types() -> None:
     """The guard's derivation is real: a shared bool is found; a file-only bool and a non-bool are not."""
     probe_run = dataclasses.make_dataclass("_ProbeRun", [("shared_flag", bool, False)])
@@ -180,12 +158,9 @@ def test_mirrored_boolean_names_reads_declared_types() -> None:
     )
     assert _mirrored_boolean_names(probe_run, probe_file) == {"shared_flag"}
 
-
 @pytest.mark.parametrize("flag", TABLED_OPT_IN_FLAGS)
-@pytest.mark.parametrize(
-    ("cli_tier", "file_value", "expected"),
-    [
-        pytest.param("true", None, True, id="T1-cli-true-file-absent"),
+@pytest.mark.parametrize(("cli_tier", "file_value", "expected"),
+    [pytest.param("true", None, True, id="T1-cli-true-file-absent"),
         pytest.param("unset", None, False, id="T2-cli-default-file-absent"),
         pytest.param("true", True, True, id="T3-cli-true-file-true"),
         pytest.param("true", False, True, id="T4-cli-true-outranks-file-false"),
@@ -194,21 +169,12 @@ def test_mirrored_boolean_names_reads_declared_types() -> None:
         pytest.param("false", True, True, id="T7-explicit-cli-false-is-unset"),
     ],
 )
-def test_opt_in_tiers_resolve_cli_then_file(
-    flag: str, cli_tier: str, file_value: bool | None, expected: bool
+def test_opt_in_tiers_resolve_cli_then_file(flag: str, cli_tier: str, file_value: bool | None, expected: bool
 ) -> None:
-    """#1225: pin the precedence rule of ``daydream/deep/settings.py:_resolve_opt_in``.
+    """Opt-ins use truthy CLI > truthy file > False, without a None sentinel.
 
-    One table over all three deep-mode opt-ins: a truthy ``RunConfig`` attr (CLI tier)
-    outranks a truthy ``DaydreamFileConfig`` attr, which outranks the built-in ``False``;
-    an explicit file-config ``False`` falls through to the default rather than forcing it
-    off. T5 and T7 are the two rows that separate this truthiness rule from the
-    ``is not None`` sentinel rule of the sibling ``_resolve_config_value``: both put the
-    CLI tier at its built-in ``False`` while the file tier says ``True``. T7 constructs the
-    CLI tier as an explicit ``False`` and T5 as an unset field; because ``RunConfig``'s
-    fields are ``bool = False`` with no ``None`` sentinel, the two are indistinguishable by
-    design — which is why a CLI ``False`` cannot mask a repo that opted in. T4 covers the
-    opposite inversion (a rule where the file tier outranks an explicit CLI ``True``).
+    Unset and explicit CLI False are equivalent and cannot mask file True; CLI True
+    still wins over file False. All three opt-ins share this rule.
     """
     run_kwargs: dict[str, Any] = {"target": "/t"}
     if file_value is not None:
@@ -218,16 +184,12 @@ def test_opt_in_tiers_resolve_cli_then_file(
         run_kwargs[flag] = cli_tier == "true"
     assert _resolve_opt_in(RunConfig(**run_kwargs), flag) is expected
 
-
-async def test_merge_resume_reruns_arbiter_when_marker_absent(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_merge_resume_reruns_arbiter_when_marker_absent(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#175 real-path: a `--start-at merge` resume whose on-disk records carry a high-severity finding and NO
     completion marker must re-run the arbiter."""
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
-
     deep = _prime_merge_resume_records(multi_stack_target, python_severity="high")
     assert not (deep / "arbiter-complete.marker").exists()
 
@@ -241,48 +203,32 @@ async def test_merge_resume_reruns_arbiter_when_marker_absent(
     report = (multi_stack_target / ".review-output.md").read_text()
     assert "ARBITRATED:" in report, f"arbitrated finding missing from merge-resume report:\n{report}"
 
-
-async def test_merge_resume_skips_arbiter_when_marker_present(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_merge_resume_skips_arbiter_when_marker_present(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#175 real-path: when the completion marker proves the records were already
     finalised, a `--start-at merge` resume must NOT re-run the arbiter."""
     _silence(monkeypatch)
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target, merge_echo_records=True)
-
     deep = _prime_merge_resume_records(multi_stack_target, python_severity="high")
     (deep / "arbiter-complete.marker").write_text("")
-
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 0
-
     arbiter_calls = [c for c in calls if "you are the arbiter" in c["prompt"].lower()]
     assert arbiter_calls == [], "arbiter must not re-run when the completion marker is present"
 
-
-@pytest.mark.parametrize(
-    ("budget_attr", "budget_value", "sleep_s", "stop_reason"),
-    [
-        pytest.param("DEFAULT_TOOL_CALL_BUDGET", 3, 0.0, "tool_call_budget_exceeded", id="tool-calls"),
+@pytest.mark.parametrize(("budget_attr", "budget_value", "sleep_s", "stop_reason"),
+    [pytest.param("DEFAULT_TOOL_CALL_BUDGET", 3, 0.0, "tool_call_budget_exceeded", id="tool-calls"),
         pytest.param("DEFAULT_WALL_BUDGET_S", 0.3, 0.05, "wall_budget_exceeded", id="wall-clock"),
     ],
 )
 async def test_run_terminates_under_fix_turn_budget(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-    budget_attr: str,
-    budget_value: int | float,
-    sleep_s: float,
-    stop_reason: str,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute, budget_attr: str, budget_value: int | float, sleep_s: float, stop_reason: str,
 ) -> None:
     """A runaway fix records the specific tool-call or wall-clock budget that stopped it."""
 
     _silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases." + budget_attr, budget_value)
+    monkeypatch.setattr("daydream.config." + budget_attr, budget_value)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_fix = True
     stub.runaway_fix_sleep_s = sleep_s
@@ -296,16 +242,13 @@ async def test_run_terminates_under_fix_turn_budget(
     assert stop_reason in stop_reasons, stop_reasons
 
 
-def _assert_group_budget_failure(
-    target: Path, traj: Path, *, reason: str, processed: int, skipped: int
-) -> None:
+def _assert_group_budget_failure(target: Path, traj: Path, *, reason: str, processed: int, skipped: int) -> None:
     """Assert the skipped ``api.py`` group landed in both artifact and trajectory."""
     fix_failures_p = target / ".daydream" / "deep" / "fix-failures.json"
     assert fix_failures_p.is_file(), "budget-skipped group must write the fix-failures artifact"
     recorded = json.loads(fix_failures_p.read_text())
     assert "api.py" in recorded
     assert recorded["api.py"].startswith(f"file_group_budget_exceeded: {reason}")
-
     events = _scan_phase_events(target / ".daydream", traj, "file_group_budget_exceeded")
     assert events, "no file_group_budget_exceeded event emitted"
     meta = events[0]["metadata"]
@@ -314,12 +257,8 @@ def _assert_group_budget_failure(
     assert meta["items_processed"] == processed
     assert meta["items_skipped"] == skipped
 
-
 async def test_run_caps_runaway_file_group_serial_fixes(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     no_ci_remote: NoCIRemote,
 ) -> None:
     """#201 real-path: a runaway file group is capped by the serial-item budget."""
@@ -336,20 +275,13 @@ async def test_run_caps_runaway_file_group_serial_fixes(
     bare = _add_bare_remote(multi_stack_target)
     no_ci_remote.connect(multi_stack_target, bare)
     head_before = _git(multi_stack_target, "rev-parse", "HEAD")
-
     traj = tmp_path / "trajectory.json"
     # Preserve the original work watchdog in addition to the newly required,
     # separately bounded remote-CI wait. The no-CI harness keeps its truthful
     # discovery window; reducing it previously failed under parallel load.
     with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
-        exit_code = await run(
-            make_config(
-                multi_stack_target,
-                trajectory_path=traj,
-                assume="yes",
-                output_mode="loop",
-                pr_number=no_ci_remote.pr_number,
-                pr_repo=no_ci_remote.base_repository,
+        exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
+                pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
             )
         )
     assert exit_code == 0
@@ -372,16 +304,11 @@ async def test_run_caps_runaway_file_group_serial_fixes(
 
     # The skipped group is recorded as a budget failure (surfaces to the user).
     _assert_group_budget_failure(
-        multi_stack_target, traj,
-        reason="group_serial_item_limit", processed=3, skipped=group_size - 3,
+        multi_stack_target, traj, reason="group_serial_item_limit", processed=3, skipped=group_size - 3,
     )
 
-
 async def test_run_leaves_small_file_group_unbudgeted(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: under a high ceiling the group budget is purely additive."""
@@ -405,12 +332,8 @@ async def test_run_leaves_small_file_group_unbudgeted(
     events = _scan_phase_events(multi_stack_target / ".daydream", traj, "file_group_budget_exceeded")
     assert events == [], "no budget event should fire when the group stays within budget"
 
-
 async def test_run_batched_wall_trip_carries_into_group_fallback(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """#201 real-path: a batched turn's OWN wall trip carries into the fallback."""
@@ -418,7 +341,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     _silence(monkeypatch)
     # Tiny per-invocation wall so the batched turn (scaled to N * 0.3s) trips after
     # ~1.8s of real wall; patch the binding read at the fix call site.
-    monkeypatch.setattr("daydream.phases.DEFAULT_WALL_BUDGET_S", 0.3)
+    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
     # Group wall ceiling below the batched turn's scaled per-invocation budget, so
     # the wall the batched turn already burned guarantees the fallback's first
     # check trips (deterministic: 1.0 < 0.3 * 6).
@@ -446,8 +369,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
 
     # The skipped group is recorded as a WALL budget failure (surfaces to the user).
     _assert_group_budget_failure(
-        multi_stack_target, traj,
-        reason="group_wall_budget_exceeded", processed=0, skipped=group_size,
+        multi_stack_target, traj, reason="group_wall_budget_exceeded", processed=0, skipped=group_size,
     )
 
     # Discriminator: the batched turn failed via run_agent's REAL per-invocation
@@ -457,12 +379,8 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     stop_reasons = _scan_trajectory_extra(run_root, traj, "stop_reason")
     assert "wall_budget_exceeded" in stop_reasons, "batched turn did not trip its own per-invocation wall budget"
 
-
 async def test_run_batches_same_file_findings_into_one_fix_turn(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """#202 real-path: N findings on ONE file collapse to a single FIX run_agent turn."""
 
@@ -471,9 +389,7 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     setattr(stub, "concise_fix_prompts", True)
     stub.merge_items = [
-        _merge_item(1, "api.py", "high"),
-        _merge_item(2, "api.py", "medium"),
-        _merge_item(3, "api.py", "low"),
+        _merge_item(1, "api.py", "high"), _merge_item(2, "api.py", "medium"), _merge_item(3, "api.py", "low"),
         _merge_item(4, "App.tsx", "high"),
     ]
     mute_side_effects()
@@ -497,12 +413,8 @@ async def test_run_batches_same_file_findings_into_one_fix_turn(
     assert Path(m.group(2)).name == "api.py"
     assert "CONCISE MODE" in batched[0]
 
-
 async def test_environmental_failure_aborts_heal_loop(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """AC#6b real-path: an environmental test failure aborts heal without a fix turn."""
@@ -540,32 +452,19 @@ async def test_environmental_failure_aborts_heal_loop(
     saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
 
-
-@pytest.mark.parametrize(
-    ("trajectory_mode", "response_kind"),
-    [
-        pytest.param("default", "clean", id="default-clean"),
+@pytest.mark.parametrize(("trajectory_mode", "response_kind"),
+    [pytest.param("default", "clean", id="default-clean"),
         pytest.param("custom-public", "clean", id="custom-public-clean"),
         pytest.param("external", "clean", id="external-clean"),
         pytest.param("default", "known-leaf", id="default-known-leaf-private-fallback"),
-        pytest.param(
-            "custom-public",
-            "known-leaf",
-            id="custom-public-known-leaf-private-fallback",
-        ),
+        pytest.param("custom-public", "known-leaf", id="custom-public-known-leaf-private-fallback",),
         pytest.param("external", "known-leaf", id="external-known-leaf-preserved"),
         pytest.param("default", "unknown-private", id="unknown-private-fallback"),
     ],
 )
 async def test_ephemeral_failure_handoff_projects_public_refs_without_private_paths(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    artifact_runtime_root: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-    trajectory_mode: str,
-    response_kind: str,
+    multi_stack_target: Path, tmp_path: Path, artifact_runtime_root: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute, trajectory_mode: str, response_kind: str,
 ) -> None:
     """The real runner reads live bytes and persists only durable handoff paths."""
     _silence(monkeypatch, prompts=False)
@@ -577,8 +476,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         def intercept(self, cwd: Path, prompt: str) -> Sequence[AgentEvent] | None:
             if response_kind == "unknown-private" and "run the project's test suite" in prompt.lower():
                 self.test_suite_calls += 1
-                return [
-                    TextEvent(text=f"1 failed at {cwd / '.daydream' / 'unreported.log'}"),
+                return [TextEvent(text=f"1 failed at {cwd / '.daydream' / 'unreported.log'}"),
                     ResultEvent(structured_output=None, continuation=None),
                 ]
             if "read-only failure-summarizer" not in prompt.lower():
@@ -604,44 +502,30 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
             elif response_kind == "unknown-private":
                 model_body += f"\nUnknown evidence: {private_partial}.unknown\n"
             private_partial_payloads.append(private_partial.read_bytes())
-            summarizer_observations.append(
-                {
-                    "private_partial": str(private_partial),
-                    "cwd": str(cwd),
+            summarizer_observations.append({"private_partial": str(private_partial), "cwd": str(cwd),
                     "session_id": str(partial_payload["session_id"]),
-                    "changed_body": (cwd / changed_relative).read_text(encoding="utf-8"),
-                    "prompt": prompt,
-                    "future_trajectory": future_trajectory,
-                    "future_children": future_children,
+                    "changed_body": (cwd / changed_relative).read_text(encoding="utf-8"), "prompt": prompt,
+                    "future_trajectory": future_trajectory, "future_children": future_children,
                     "model_body": model_body,
                 }
             )
             return [ResultEvent(structured_output={"handoff_prompt": model_body}, continuation=None)]
 
     stub = _HandoffReadingStub(multi_stack_target)
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: stub,
-    )
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.fail_all_test_runs = True
     mute_side_effects(heal=False)
     _add_bare_remote(multi_stack_target)
 
-    trajectory_path = (
-        tmp_path / "external trajectory.json"
+    trajectory_path = (tmp_path / "external trajectory.json"
         if trajectory_mode == "external"
         else multi_stack_target / ".daydream" / "custom trajectory.json"
         if trajectory_mode == "custom-public"
         else None
     )
-    exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            force_worktree=True,
-            trajectory_path=trajectory_path,
+    exit_code = await run(make_config(
+            multi_stack_target, assume="yes", output_mode="loop", force_worktree=True, trajectory_path=trajectory_path,
         )
     )
 
@@ -689,9 +573,7 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
         assert private_partial not in body
     assert observation["cwd"] not in body
 
-
-@pytest.mark.parametrize(
-    ("target_fixture", "independent", "alternatives_run", "latency_profile"),
+@pytest.mark.parametrize(("target_fixture", "independent", "alternatives_run", "latency_profile"),
     [
         # The legacy trivial-diff wonder gate survives only under `forensic`
         # (latency.py `wonder_decision`); the `balanced` default runs wonder on a
@@ -702,14 +584,8 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     ],
 )
 async def test_alternatives_phase_follows_diff_size(
-    request: pytest.FixtureRequest,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-    target_fixture: str,
-    independent: bool,
-    alternatives_run: bool,
+    request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute, target_fixture: str, independent: bool, alternatives_run: bool,
     latency_profile: str | None,
 ) -> None:
     """Independent wonder remains tiered; the default shares structural review."""
@@ -717,27 +593,22 @@ async def test_alternatives_phase_follows_diff_size(
     target = cast(Path, request.getfixturevalue(target_fixture))
     stub = _install_accept_gate_pipeline(monkeypatch, target, mute_side_effects)
     traj = tmp_path / "trajectory.json"
-    assert (
-        await run(make_config(
-            target, trajectory_path=traj, assume="yes", output_mode="loop", non_interactive=False,
-            latency_profile=latency_profile,
-            review_profile=independent_alternatives_profile() if independent else None,
+    assert (await run(make_config(target, trajectory_path=traj, assume="yes", output_mode="loop", non_interactive=False,
+            latency_profile=latency_profile, review_profile=independent_alternatives_profile() if independent else None,
         ))
         == 0
     )
 
     phases = _scan_trajectory_extra(target / ".daydream", traj, "daydream_phase")
     assert ("alternatives" in phases) is alternatives_run, phases
-    wonder_calls = [
-        c
+    wonder_calls = [c
         for c in stub.calls
         if "would you have done this differently" in c["prompt"].lower()
         or "evaluate the implementation" in c["prompt"].lower()
     ]
     assert bool(wonder_calls) is alternatives_run, wonder_calls
     if not independent:
-        assert any(
-            "you are the structural reviewer" in call["prompt"].lower()
+        assert any("you are the structural reviewer" in call["prompt"].lower()
             and "Within this same boundary review, check design choices" in call["prompt"]
             for call in stub.calls
         )
@@ -746,10 +617,8 @@ async def test_alternatives_phase_follows_diff_size(
         assert json.loads(artifact.read_text()) == []
         assert "intent" in phases
 
-
 def test_shallow_fanout_threshold_precedence() -> None:
     """AC7: SHALLOW_FANOUT_THRESHOLD honors CLI (RunConfig) > config file > default."""
-
     # Default: no CLI field, no file_config.
     assert _shallow_fanout_threshold(RunConfig()) == DEFAULT_SHALLOW_FANOUT_THRESHOLD
     # Explicit 0 on RunConfig disables the short-circuit (must NOT be ignored as falsy).

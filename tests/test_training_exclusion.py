@@ -12,11 +12,7 @@ from daydream.training.exclusion import (
 )
 
 SEED_EXCLUSION_REPOS = {
-    "getsentry/sentry",
-    "grafana/grafana",
-    "calcom/cal.com",
-    "discourse/discourse",
-    "keycloak/keycloak",
+    "getsentry/sentry", "grafana/grafana", "calcom/cal.com", "discourse/discourse", "keycloak/keycloak",
 }
 
 
@@ -24,10 +20,7 @@ def test_load_exclusion_list_contains_seed_repos() -> None:
     excluded = load_exclusion_list()
     assert SEED_EXCLUSION_REPOS.issubset(excluded)
 
-
-def test_load_exclusion_list_ignores_blank_and_comment_lines(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_load_exclusion_list_ignores_blank_and_comment_lines(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     tmp_file = tmp_path / "test_excl.txt"
     tmp_file.write_text(
         "# leading comment\n"
@@ -40,16 +33,12 @@ def test_load_exclusion_list_ignores_blank_and_comment_lines(
     monkeypatch.setattr("daydream.training.exclusion.EXCLUSION_PATH", tmp_file)
     assert load_exclusion_list() == frozenset({"foo/bar", "baz/qux"})
 
-
-def test_is_copyleft_opt_in_overrides_skip(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_is_copyleft_opt_in_overrides_skip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     tmp_file = tmp_path / "test_copyleft.txt"
     tmp_file.write_text("gnu/coreutils\n", encoding="utf-8")
     monkeypatch.setattr("daydream.training.exclusion.COPYLEFT_PATH", tmp_file)
     assert is_copyleft("gnu/coreutils", frozenset()) is True
     assert is_copyleft("gnu/coreutils", frozenset({"gnu/coreutils"})) is False
-
 
 def test_is_copyleft_returns_false_for_none() -> None:
     assert is_copyleft(None, frozenset()) is False

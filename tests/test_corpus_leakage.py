@@ -1,14 +1,7 @@
-"""Unit tests for the corpus projection's temporal-leakage guard.
+"""Posterior-derived labels must not leak into a corpus pinned before their outcome.
 
-Exercises the ``_is_posterior_leak`` boundary semantics in isolation: an
-annotation whose outcome only became true *after* the ``as_of`` pin must not
-leak its posterior-derived ``outcome_label`` into a corpus pinned to that
-``as_of``. The guard compares parsed datetimes chronologically, so ``Z``/
-``+00:00`` spellings, sub-second precision, and non-UTC offsets can never
-mis-order it.
-
-(#1093: the legacy emission path these guards fed is deleted; the guard
-itself is canonical shared infrastructure for the corpus projection.)
+The shared projection guard compares parsed datetimes, including equivalent zone
+spellings, fractional seconds, and non-UTC offsets.
 """
 from __future__ import annotations
 
@@ -31,42 +24,23 @@ def _ann(valid_at: str | None) -> dict[str, Any]:
 def test_leak_guard_equal_instant_is_not_a_leak() -> None:
     assert _is_posterior_leak(_ann(AS_OF), AS_OF) is False
 
-
-@pytest.mark.parametrize(
-    ("first_valid_at", "first_expected", "second_valid_at", "second_expected"),
-    [
-        pytest.param(
-            "2026-04-01T00:00:00.000001+00:00",
-            True,
-            "2026-03-31T23:59:59.999999+00:00",
-            False,
-            id="strict-boundary",
-        ),
-        pytest.param(
-            "2026-04-01T05:00:00+05:00",
-            False,
-            "2026-04-01T05:00:01+05:00",
-            True,
-            id="non-utc-offset",
-        ),
+@pytest.mark.parametrize(("first_valid_at", "first_expected", "second_valid_at", "second_expected"),
+    [pytest.param(
+            "2026-04-01T00:00:00.000001+00:00", True, "2026-03-31T23:59:59.999999+00:00", False, id="strict-boundary",
+        ), pytest.param("2026-04-01T05:00:00+05:00", False, "2026-04-01T05:00:01+05:00", True, id="non-utc-offset"),
     ],
 )
 def test_leak_guard_chronological_comparison(
-    first_valid_at: str,
-    first_expected: bool,
-    second_valid_at: str,
-    second_expected: bool,
+    first_valid_at: str, first_expected: bool, second_valid_at: str, second_expected: bool,
 ) -> None:
     """Compare posterior timestamps across offsets and subsecond precision."""
     assert _is_posterior_leak(_ann(first_valid_at), AS_OF) is first_expected
     assert _is_posterior_leak(_ann(second_valid_at), AS_OF) is second_expected
 
-
 def test_leak_guard_none_inputs_never_leak() -> None:
     assert _is_posterior_leak(None, AS_OF) is False
     assert _is_posterior_leak(_ann(None), AS_OF) is False
     assert _is_posterior_leak(_ann("2026-09-01T00:00:00+00:00"), None) is False
-
 
 def test_leak_guard_mixed_z_and_offset_spellings_compare_chronologically() -> None:
     # Same instant spelled "Z" vs "+00:00", both directions: never a leak.
@@ -74,7 +48,6 @@ def test_leak_guard_mixed_z_and_offset_spellings_compare_chronologically() -> No
     assert _is_posterior_leak(_ann(AS_OF), "2026-04-01T00:00:00Z") is False
     # One second later, spelled "Z": still detected as a leak.
     assert _is_posterior_leak(_ann("2026-04-01T00:00:01Z"), AS_OF) is True
-
 
 def test_leak_guard_subsecond_precision_compares_chronologically() -> None:
     # ".000000" and no-fraction are the same instant — not a leak in either

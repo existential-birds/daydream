@@ -1,15 +1,7 @@
-"""Shared real-git subprocess helpers for the test suite.
+"""Real Git helpers and deterministic seed repositories.
 
-Consolidates the ``_git`` helper (and its repo-building family) that was
-previously duplicated across tests/conftest.py and several test modules.
-tests/test_workspace.py builds on these too, keeping only the extra plumbing
-its bare-origin push semantics genuinely need.
-
-The seed family (``SEED_ENV`` + :func:`write_and_stage` +
-:func:`seeded_commit`) is the single source of truth for deterministic
-test seed repositories. Deliberate exceptions are migrate's dateless
-identity, ``harbor_build``'s bundle identity, and the identities in
-production ``daydream/benchmark/snapshot.py`` and RL ``fixture.py``.
+SEED_ENV fixes seed identity and timestamps. Migrate's dateless identity,
+Harbor bundle identity, and production snapshot/RL fixtures remain distinct.
 """
 
 from __future__ import annotations
@@ -23,11 +15,8 @@ from daydream import git_ops
 from daydream.workspace import WorkContext
 
 SEED_ENV: dict[str, str] = {
-    "GIT_AUTHOR_NAME": "Tester",
-    "GIT_AUTHOR_EMAIL": "test@example.com",
-    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_NAME": "Tester",
-    "GIT_COMMITTER_EMAIL": "test@example.com",
+    "GIT_AUTHOR_NAME": "Tester", "GIT_AUTHOR_EMAIL": "test@example.com", "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
+    "GIT_COMMITTER_NAME": "Tester", "GIT_COMMITTER_EMAIL": "test@example.com",
     "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
 }
 
@@ -36,11 +25,7 @@ def git(repo: Path, *args: str, check: bool = True, env: dict[str, str] | None =
     """Run a git command in *repo* and return stripped stdout (test helper)."""
     proc = subprocess.run(  # noqa: S603 - arguments are not user-controlled
         ["git", *args],  # noqa: S607 - git is a trusted command
-        cwd=repo,
-        capture_output=True,
-        text=True,
-        env={**os.environ, **env} if env else None,
-        check=check,
+        cwd=repo, capture_output=True, text=True, env={**os.environ, **env} if env else None, check=check,
     )
     return proc.stdout.strip()
 
@@ -58,23 +43,12 @@ def commit(repo: Path, message: str, *, env: dict[str, str] | None = None) -> st
 def work_context(repo: Path, *, run_id: str) -> WorkContext:
     """A real-HEAD, non-ephemeral ``WorkContext`` for a source checkout."""
     head = git(repo, "rev-parse", "HEAD")
-    return WorkContext(
-        repo=repo,
-        source=repo,
-        base_branch="main",
-        base_sha=head,
-        head_branch="main",
-        head_sha=head,
-        is_ephemeral=False,
-        run_id=run_id,
+    return WorkContext(repo=repo, source=repo, base_branch="main", base_sha=head, head_branch="main", head_sha=head,
+        is_ephemeral=False, run_id=run_id,
     )
 
 
 def write_and_stage(repo: Path, name: str, content: str | bytes) -> None:
-    """Write *name* under *repo* and stage it (``str`` or ``bytes``).
-
-    Half of the deterministic seed family — see the module docstring.
-    """
     path = repo / name
     path.parent.mkdir(parents=True, exist_ok=True)
     if isinstance(content, bytes):
@@ -89,14 +63,9 @@ def seeded_commit(repo: Path, message: str) -> str:
     return commit(repo, message, env=SEED_ENV)
 
 
-def seed_pr_origin(
-    tmp_path: Path,
-    *,
-    repo_name: str = "local_wt",
-    bare_name: str = "origin_local.git",
+def seed_pr_origin(tmp_path: Path, *, repo_name: str = "local_wt", bare_name: str = "origin_local.git",
     feature_body: str = "FEATURE = 1\n",
-    feature_message: str = "feature",
-    number: int = 101,
+    feature_message: str = "feature", number: int = 101,
 ) -> tuple[str, str, str]:
     """Build a real local bare origin whose base/head are the PR's SHAs."""
     import shutil as _sh
@@ -134,20 +103,10 @@ def init_repo(repo: Path) -> None:
     configure_identity(repo)
 
 
-def seed_feature_branch(
-    repo: Path,
-    *,
-    base: dict[str, str],
-    feature: dict[str, str],
-    base_message: str = "base",
+def seed_feature_branch(repo: Path, *, base: dict[str, str], feature: dict[str, str], base_message: str = "base",
     feature_message: str = "feature",
 ) -> str:
-    """Seed *repo* with a base commit on ``main`` then a feature commit on ``feature``.
-
-    *base* and *feature* map repo-relative paths to the exact content each commit
-    stages; the branch is created from the base commit. Returns the feature HEAD
-    SHA. Part of the deterministic seed family (see module docstring).
-    """
+    """Create main and feature commits from path/content maps; return feature HEAD."""
     init_repo(repo)
     for name, content in base.items():
         write_and_stage(repo, name, content)
@@ -159,33 +118,17 @@ def seed_feature_branch(
 
 
 def refreshing_session(name: str, refresh_calls: dict[str, int]) -> git_ops.RefreshingGitHubAuth:
-    """An expired-token session that mints ``ghs_<name>_fresh_token_...`` on refresh.
-
-    Bumps ``refresh_calls[name]`` each time so callers can assert per-session
-    credential isolation without rebuilding the closure.
-    """
+    """Create an expired session whose refresh increments its counter and returns a fresh token."""
 
     def refresh() -> tuple[git_ops.StaticGitHubAuth, float]:
         refresh_calls[name] += 1
-        return (
-            git_ops.StaticGitHubAuth(
-                {
-                    "PATH": f"/{name}/tools",
-                    "GH_TOKEN": f"ghs_{name}_fresh_token_1234567890",
-                }
-            ),
+        return (git_ops.StaticGitHubAuth({"PATH": f"/{name}/tools", "GH_TOKEN": f"ghs_{name}_fresh_token_1234567890"}),
             float("inf"),
         )
 
     return git_ops.RefreshingGitHubAuth(
-        git_ops.StaticGitHubAuth(
-            {
-                "PATH": f"/{name}/tools",
-                "GH_TOKEN": f"ghs_{name}_expired_token_1234567890",
-            }
-        ),
-        expires_at=0,
-        refresh=refresh,
+        git_ops.StaticGitHubAuth({"PATH": f"/{name}/tools", "GH_TOKEN": f"ghs_{name}_expired_token_1234567890"}),
+        expires_at=0, refresh=refresh,
     )
 
 
@@ -198,10 +141,7 @@ def bare_remote(path: Path) -> Path:
 def tracked_source_state(repo: Path) -> dict[str, Any]:
     """Everything a review run must never mutate in the source checkout."""
     tracked = git(repo, "ls-files").splitlines()
-    return {
-        "head": git(repo, "rev-parse", "HEAD"),
-        "refs": git(repo, "show-ref"),
-        "index": git(repo, "ls-files", "--stage"),
-        "diff": git(repo, "diff", "--binary", "HEAD"),
+    return {"head": git(repo, "rev-parse", "HEAD"), "refs": git(repo, "show-ref"),
+        "index": git(repo, "ls-files", "--stage"), "diff": git(repo, "diff", "--binary", "HEAD"),
         "bytes": {name: (repo / name).read_bytes() for name in tracked},
     }

@@ -1,10 +1,7 @@
-"""Deterministic host enumeration of repository build/test/lint commands.
+"""Host enumeration of build/test/lint commands from Makefiles and package manifests.
 
-Make targets and package-manifest scripts are fully enumerable from disk, so
-the host derives those command records itself instead of asking a model to
-cite evidence for them and then re-deriving the same invocation to check the
-citation. Only prose-sourced commands (a README, a CI workflow) still need a
-model-authored ``literal-command`` evidence citation.
+Prose sources such as README and CI workflows still require model-authored
+``literal-command`` evidence; enumerable declarations are derived directly.
 """
 
 from __future__ import annotations
@@ -99,16 +96,11 @@ def enumerate_repository_commands(
     directories: Sequence[str] = (".",),
     reserved_ids: Iterable[str] = (),
 ) -> list[dict[str, Any]]:
-    """Return recon command records derived from Makefiles and manifests.
+    """Read recon commands without shadowing model-supplied ``reserved_ids``.
 
-    ``directories`` are repository-relative working directories (``"."`` for
-    the repository root). ``reserved_ids`` are ids already spoken for by
-    model-supplied records, so a derived id never shadows one of those. Output
-    is deterministic: directories in the given order, Makefile targets then
-    manifest scripts, each in source order.
-
-    Reads only. Every source file is confinement-checked before it is opened,
-    so a directory or symlink pointing outside ``repo`` yields nothing.
+    Visit repo-relative directories in input order (``"."`` is the root), then Make
+    targets and manifest scripts in source order. Confinement is checked before
+    opening each source; paths or symlinks escaping the repo yield no records.
     """
     records: list[dict[str, Any]] = []
     used_ids: set[str] = set(reserved_ids)

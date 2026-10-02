@@ -1,13 +1,4 @@
-"""TEST-07: Subagent trajectory shape validation.
-
-Drives the recorder's fork() path across the parallel
-fan-out phases it must support: deep-mode per-stack reviews and exploration
-pre_scan specialists. Validates the resulting root + sibling trajectory file
-sets against the vendored ATIF validator.
-
-Per D-03, these tests exercise the real recorder code with fake backends.
-No pre-recorded fixture files.
-"""
+"""Validate real root/sibling recorder output for deep review and exploration fan-out."""
 
 from __future__ import annotations
 
@@ -48,8 +39,7 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
 
     parent_traj = read_trajectory(recorder.path)
 
-    dispatch_steps = [
-        s for s in parent_traj["steps"]
+    dispatch_steps = [s for s in parent_traj["steps"]
         if s["source"] == "agent" and "Dispatching" in s.get("message", "")
     ]
     assert len(dispatch_steps) == 1
@@ -68,14 +58,8 @@ async def test_deep_mode_produces_per_stack_siblings(tmp_path: Path) -> None:
         assert len(agent_steps) >= 1
         assert agent_steps[0]["extra"]["daydream_run_flow"] == "deep"
 
-
 async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> None:
-    """Exploration fork: 3 specialist children produce 3 valid sibling files.
-
-    Also covers what the deleted fix-parallel test uniquely asserted: sibling
-    trajectory files land in the per-run trajectories/ subdir, and each child
-    inherits the parent's session_id.
-    """
+    """Three specialists produce valid siblings in the per-run directory, sharing the parent session."""
     recorder = make_recorder(tmp_path)
     children: list[TrajectoryRecorder] = []
     descriptors = ("explore-pattern-scanner", "explore-dependency-tracer", "explore-test-mapper")
@@ -91,8 +75,7 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     parent_traj = read_trajectory(recorder.path)
     assert atif_validate(parent_traj) is True
 
-    dispatch_steps = [
-        s for s in parent_traj["steps"]
+    dispatch_steps = [s for s in parent_traj["steps"]
         if s["source"] == "agent" and "Dispatching" in s.get("message", "")
     ]
     assert len(dispatch_steps) == 1
@@ -118,7 +101,6 @@ async def test_exploration_produces_per_specialist_siblings(tmp_path: Path) -> N
     traj_dir = tmp_path / ".daydream" / "runs" / recorder.session_id / "trajectories"
     sibling_files = sorted(traj_dir.iterdir())
     assert len(sibling_files) == 3
-
 
 async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> None:
     """SUBA-08: Concurrent siblings have independent step_id sequences starting at 1."""
@@ -152,24 +134,15 @@ async def test_step_id_isolation_across_concurrent_siblings(tmp_path: Path) -> N
     assert all_child_ids[0][0] == 1
     assert all_child_ids[1][0] == 1
 
-
 async def test_parent_final_metrics_includes_sibling_steps(tmp_path: Path) -> None:
-    """Parent FinalMetrics.total_prompt_tokens folds in child contributions.
-
-    Supersedes the original SUBA-09 expectation: the root trajectory is
-    whole-run truth, while the sibling file keeps its own share.
-    """
+    """Root metrics represent the whole run; sibling metrics retain only their own share."""
     recorder = make_recorder(tmp_path)
 
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(TextEvent(text="parent-text"))
             inv.observe(MetricsEvent(
-                message_id="m-parent",
-                prompt_tokens=100,
-                completion_tokens=10,
-                cached_tokens=5,
-                cost_usd=0.001,
+                message_id="m-parent", prompt_tokens=100, completion_tokens=10, cached_tokens=5, cost_usd=0.001,
             ))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
 
@@ -177,11 +150,7 @@ async def test_parent_final_metrics_includes_sibling_steps(tmp_path: Path) -> No
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
                 inv.observe(TextEvent(text="child-text"))
                 inv.observe(MetricsEvent(
-                    message_id="m-child",
-                    prompt_tokens=500,
-                    completion_tokens=50,
-                    cached_tokens=25,
-                    cost_usd=0.005,
+                    message_id="m-child", prompt_tokens=500, completion_tokens=50, cached_tokens=25, cost_usd=0.005,
                 ))
                 inv.observe(ResultEvent(structured_output=None, continuation=None))
 
@@ -190,7 +159,6 @@ async def test_parent_final_metrics_includes_sibling_steps(tmp_path: Path) -> No
 
     assert parent_traj["final_metrics"]["total_prompt_tokens"] == 600
     assert child_traj["final_metrics"]["total_prompt_tokens"] == 500
-
 
 async def test_continuation_appends_to_same_trajectory_no_sibling(tmp_path: Path) -> None:
     """SUBA-05: Sequential invocations (continuation) stay in one file, no siblings."""

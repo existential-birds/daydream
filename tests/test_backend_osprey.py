@@ -43,7 +43,6 @@ from tests.harness.protocol_cli_assertions import assert_protocol_cli_invariants
 from tests.harness.trajectory import make_recorder
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("sandbox", [False, True])
 async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_terminal_envelope(
     tmp_path: Path, sandbox: bool,
@@ -58,9 +57,7 @@ async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_term
         sandbox=sandbox, allowed_roots=[allowed] if sandbox else (),
     )
     prompt = "Inspect the committed source only."
-
     events = [event async for event in backend.execute(target, prompt)]
-
     observation = assert_protocol_cli_invariants(fixture, target, prompt, events, backend)
     argv = observation["argv"]
     assert argv[:2] == ["agent", "--events-jsonl"]
@@ -70,106 +67,62 @@ async def test_artifact_visibility_protocol_cli_preserves_sandbox_roots_and_term
     else:
         assert "--allowed-root" not in argv
 
-
 def _over_limit_reader(payload: bytes) -> asyncio.StreamReader:
     reader = asyncio.StreamReader(limit=64)
     reader.feed_data(payload)
     reader.feed_eof()
     return reader
 
-
 async def _collect(
-    backend: OspreyBackend,
-    lines: list[dict[str, object]],
-    *,
-    returncode: int = 0,
-    output_schema: dict[str, Any] | None = None,
-    continuation: ContinuationToken | None = None,
-    agents: dict[str, Any] | None = None,
-    max_turns: int | None = None,
-    read_only: bool = False,
-    persist_session: bool = True,
-    stderr_lines: list[str] | None = None,
-    stderr_held_open: bool = False,
-    stdout_reader: asyncio.StreamReader | None = None,
-    stderr_reader: asyncio.StreamReader | None = None,
+    backend: OspreyBackend, lines: list[dict[str, object]], *, returncode: int = 0,
+    output_schema: dict[str, Any] | None = None, continuation: ContinuationToken | None = None,
+    agents: dict[str, Any] | None = None, max_turns: int | None = None, read_only: bool = False,
+    persist_session: bool = True, stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
+    stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
     workspace: Path = Path("/repo"),
 ) -> tuple[list[AgentEvent], FakeCliSpawner]:
     spawner = FakeCliSpawner()
-
     async def fake_exec(*args: Any, **kwargs: Any) -> Any:
         proc = FakeCliProcess(
-            [json.dumps(line) for line in lines],
-            exit_code=returncode,
-            stderr_lines=stderr_lines,
-            stderr_held_open=stderr_held_open,
-            stdout_reader=stdout_reader,
-            stderr_reader=stderr_reader,
+            [json.dumps(line) for line in lines], exit_code=returncode, stderr_lines=stderr_lines,
+            stderr_held_open=stderr_held_open, stdout_reader=stdout_reader, stderr_reader=stderr_reader,
         )
         spawner.procs.append(proc)
         spawner.argvs.append(tuple(str(a) for a in args))
         spawner.kwargs.append(kwargs)
         return proc
-
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec):
         events = [
             event
             async for event in backend.execute(
-                workspace,
-                "prompt",
-                output_schema=output_schema,
-                continuation=continuation,
-                agents=agents,
-                max_turns=max_turns,
-                read_only=read_only,
-                persist_session=persist_session,
+                workspace, "prompt", output_schema=output_schema, continuation=continuation, agents=agents,
+                max_turns=max_turns, read_only=read_only, persist_session=persist_session,
             )
         ]
     return events, spawner
 
-
-@pytest.mark.asyncio
 async def test_oversized_stdout_line_is_categorized_as_protocol_error() -> None:
     stdout = _over_limit_reader(b"x" * 65)
     backend = OspreyBackend(osprey_binary="fake")
-
     with pytest.raises(OspreyError, match=r"(?i)stdout.*limit") as exc_info:
-        await _collect(
-            backend,
-            [],
-            stdout_reader=stdout,
-        )
-
+        await _collect(backend, [], stdout_reader=stdout)
     assert exc_info.value.category == "PROTOCOL"
     assert backend._transports == []
 
-
-@pytest.mark.asyncio
 async def test_non_utf8_stdout_line_is_non_json_protocol_error_not_over_limit() -> None:
-    """A non-UTF-8 byte must surface as a non-JSON line, not an over-limit line.
-
-    Osprey decodes stdout with errors="replace" (its historical contract), so
-    a 0xff byte in a line that still fails JSON parsing after repair is
-    diagnosed as non-JSON — never mislabeled as the 10485760-byte-limit error.
+    """Replacement decoding may still leave invalid JSON; diagnose that as non-JSON rather than an
+    oversized line.
     """
     stdout = _over_limit_reader(b'{"event"' + b"\xff" + b"}\n")
     backend = OspreyBackend(osprey_binary="fake")
-
     with pytest.raises(OspreyError, match=r"non-JSON line in JSONL mode") as exc_info:
         await _collect(backend, [], stdout_reader=stdout)
-
     assert exc_info.value.category == "PROTOCOL"
     assert "byte limit" not in str(exc_info.value)
     assert "\ufffd" in str(exc_info.value)
     assert backend._transports == []
 
-
-@pytest.mark.asyncio
 async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes() -> None:
-    """A non-UTF-8 byte inside a JSON string is repaired with U+FFFD and the
-    event is processed normally (the historical errors="replace" contract),
-    never hard-failed as a protocol error.
-    """
     lines = osprey_session({"event": "text_delta", "content": "x"})
     payload: list[bytes] = []
     for event in lines:
@@ -180,47 +133,23 @@ async def test_non_utf8_byte_inside_json_event_is_repaired_and_session_completes
     stdout = asyncio.StreamReader(limit=2_048)
     stdout.feed_data(b"\n".join(payload) + b"\n")
     stdout.feed_eof()
-
-    events, _ = await _collect(
-        OspreyBackend(osprey_binary="fake"),
-        [],
-        stdout_reader=stdout,
-    )
-
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), [], stdout_reader=stdout)
     text = next(event for event in events if isinstance(event, TextEvent))
     assert text.text == "x\ufffd"
     assert type(events[-1]) is ResultEvent
 
-
-@pytest.mark.asyncio
 async def test_oversized_stderr_diagnostic_does_not_fail_successful_run() -> None:
     lines = osprey_session()
     stderr = _over_limit_reader(b"diagnostic" * 8)
-
-    events, _ = await _collect(
-        OspreyBackend(osprey_binary="fake"),
-        lines,
-        stderr_reader=stderr,
-    )
-
+    events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines, stderr_reader=stderr)
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
 
-
-@pytest.mark.asyncio
 async def test_oversized_stderr_diagnostic_is_reported_on_process_failure() -> None:
     lines = osprey_session()
     stderr = _over_limit_reader(b"provider authentication failed" * 3)
-
     with pytest.raises(OspreyError, match="stderr diagnostic line exceeded stream limit"):
-        await _collect(
-            OspreyBackend(osprey_binary="fake"),
-            lines,
-            returncode=1,
-            stderr_reader=stderr,
-        )
+        await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_reader=stderr)
 
-
-@pytest.mark.asyncio
 async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> None:
     secret = "sk-realvalue123"
     diagnostics: list[str] = []
@@ -229,41 +158,25 @@ async def test_stderr_diagnostics_are_redacted_and_capped_while_draining() -> No
     sink = _stderr_diagnostic_sink(diagnostics)
     for _ in range(12):
         sink("OPENAI_API_KEY=" + secret + " " + "x" * 1_024)
-
     assert len(diagnostics) == 10
     assert len(diagnostics[0]) <= 500
     assert secret not in diagnostics[0]
     assert "[REDACTED_ENV_VAR]" in diagnostics[0]
 
-
-@pytest.mark.asyncio
 async def test_stderr_is_drained_separately_from_jsonl_stdout() -> None:
     lines = osprey_session()
-
     events, spawner = await _collect(
-        OspreyBackend(osprey_binary="fake"),
-        lines,
-        stderr_lines=[
-            "2026-08-27T23:07:54Z INFO osprey_cli::headless: "
-            "restoring remembered model preference"
-        ],
+        OspreyBackend(osprey_binary="fake"), lines,
+        stderr_lines=["2026-08-27T23:07:54Z INFO osprey_cli::headless: " "restoring remembered model preference"],
     )
-
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
     assert spawner.kwargs[0]["stderr"] is asyncio.subprocess.PIPE
 
-
-@pytest.mark.asyncio
 async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> None:
-    """Valid-JSONL run: spawn opts reach the transport, and the unconditional
-    lifecycle holds even after a clean exit: wait reaps the child, terminate
-    closes the pipe fds, and the finally drops the transport from the backend
-    list, the only cleanup exclusive to the finally block (pi/codex parity)."""
+    """Even successful children must be reaped, their pipes closed, and their transport removed."""
     lines = osprey_session()
-
     backend = OspreyBackend(osprey_binary="fake")
     events, spawner = await _collect(backend, lines, workspace=tmp_path)
-
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
     kwargs = spawner.kwargs[0]
     assert kwargs["start_new_session"] is True
@@ -277,89 +190,40 @@ async def test_execute_spawns_detached_and_reaps_on_success(tmp_path: Path) -> N
     assert proc._transport.closed, "the transport terminate must release the pipe fds even after a clean exit"
     assert backend._transports == [], "the finally must drop the transport from the backend list"
 
-
-@pytest.mark.asyncio
 async def test_process_cleanup_releases_inherited_stderr_before_waiting_for_eof() -> None:
     lines = osprey_session()
-
     events, _ = await asyncio.wait_for(
-        _collect(
-            OspreyBackend(osprey_binary="fake"),
-            lines,
-            stderr_held_open=True,
-        ),
-        timeout=0.5,
+        _collect(OspreyBackend(osprey_binary="fake"), lines, stderr_held_open=True), timeout=0.5,
     )
-
     assert [type(event) for event in events] == [RequestEvent, CostEvent, ResultEvent]
 
-
 def test_factory_builds_verified_osprey_jsonl_command() -> None:
-    backend = create_backend(
-        "osprey",
-        model="test-model",
-        osprey_binary="fake-osprey",
-    )
+    backend = create_backend("osprey", model="test-model", osprey_binary="fake-osprey")
     assert isinstance(backend, OspreyBackend)
-
     assert backend.model == "test-model"
     assert backend.build_command("hello") == [
-        "fake-osprey",
-        "agent",
-        "--events-jsonl",
-        "--observation-budget-update-bytes",
-        "65536",
-        "--observation-budget-inline-bytes",
-        "262144",
-        "--observation-budget-admission-bytes",
-        "2097152",
-        "--model",
-        "test-model",
-        "hello",
+        "fake-osprey", "agent", "--events-jsonl", "--observation-budget-update-bytes", "65536",
+        "--observation-budget-inline-bytes", "262144", "--observation-budget-admission-bytes", "2097152", "--model",
+        "test-model", "hello",
     ]
 
-
-@pytest.mark.asyncio
 async def test_translates_text_thinking_tool_identity_metrics_and_result() -> None:
     lines = osprey_session(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": "checking"},
-        {"event": "text_delta", "content": "done"},
+        {"event": "thinking_delta", "content": "checking"}, {"event": "text_delta", "content": "done"},
+        {"event": "tool_call", "tool_call_id": "c-1", "tool_name": "tool_search", "arguments": {"query": "MCP"}},
         {
-            "event": "tool_call",
-            "tool_call_id": "c-1",
-            "tool_name": "tool_search",
-            "arguments": {"query": "MCP"},
+            "event": "tool_result", "tool_call_id": "c-1", "tool_name": "mcp.fetch", "status": "success",
+            "content": "payload", "duration_ms": 4,
         },
         {
-            "event": "tool_result",
-            "tool_call_id": "c-1",
-            "tool_name": "mcp.fetch",
-            "status": "success",
-            "content": "payload",
-            "duration_ms": 4,
-        },
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "cached_tokens": None,
-            "usage_reported": False,
-            "duration_ms": 4,
+            "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": None,
+            "usage_reported": False, "duration_ms": 4,
         },
     )
     events, _ = await _collect(OspreyBackend(model="custom-model", osprey_binary="fake"), lines)
-
     assert [type(event) for event in events] == [
-        RequestEvent,
-        ThinkingEvent,
-        TextEvent,
-        ToolStartEvent,
-        ToolResultEvent,
-        TurnEndEvent,
-        CostEvent,
-        ResultEvent,
+        RequestEvent, ThinkingEvent, TextEvent, ToolStartEvent, ToolResultEvent, TurnEndEvent, CostEvent, ResultEvent,
     ]
     tool_start = next(event for event in events if isinstance(event, ToolStartEvent))
     tool_result = next(event for event in events if isinstance(event, ToolResultEvent))
@@ -370,152 +234,83 @@ async def test_translates_text_thinking_tool_identity_metrics_and_result() -> No
     assert tool_result.is_error is False
     assert not any(isinstance(event, MetricsEvent) for event in events)
 
-
-@pytest.mark.asyncio
 async def test_coalesces_streaming_thinking_deltas_before_text() -> None:
     lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": "Let"},
-        {"event": "thinking_delta", "content": " me"},
-        {"event": "thinking_delta", "content": " think."},
-        {"event": "text_delta", "content": "Done."},
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "usage_reported": False,
-        },
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"}, {"event": "thinking_delta", "content": " think."},
+        {"event": "text_delta", "content": "Done."}, {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
     )
-
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-
     assert [type(event) for event in events] == [
-        RequestEvent,
-        ThinkingEvent,
-        TextEvent,
-        TurnEndEvent,
-        CostEvent,
-        ResultEvent,
+        RequestEvent, ThinkingEvent, TextEvent, TurnEndEvent, CostEvent, ResultEvent,
     ]
-    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [
-        "Let me think."
-    ]
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["Let me think."]
 
-
-@pytest.mark.asyncio
 async def test_ignores_blank_thinking_deltas() -> None:
     lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": ""},
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "thinking_delta", "content": ""},
         {"event": "thinking_delta", "content": "  \n"},
-        {"event": "text_delta", "content": "Done."},
-        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
+        {"event": "text_delta", "content": "Done."}, {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
     )
-
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-
     assert not any(isinstance(event, ThinkingEvent) for event in events)
 
-
-@pytest.mark.asyncio
 async def test_result_exposes_session_model_without_usage_metrics() -> None:
     lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "text_delta", "content": "Done."},
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "text_delta", "content": "Done."},
         {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
     )
-
     backend = OspreyBackend(osprey_binary="fake")
     assert backend.model == "unknown"
     events, _ = await _collect(backend, lines)
     result = next(event for event in events if isinstance(event, ResultEvent))
-
     assert result.model_name == "custom-model"
     assert backend.model == "custom-model"
 
-
-@pytest.mark.asyncio
 async def test_separates_thinking_runs_at_protocol_boundaries() -> None:
     lines = osprey_session(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": "first attempt"},
-        {"event": "driver_retry"},
-        {"event": "thinking_delta", "content": "second attempt"},
-        {"event": "text_delta", "content": "Done."},
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "usage_reported": False,
-        },
+        {"event": "thinking_delta", "content": "first attempt"}, {"event": "driver_retry"},
+        {"event": "thinking_delta", "content": "second attempt"}, {"event": "text_delta", "content": "Done."},
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
     )
-
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
+    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == ["first attempt", "second attempt"]
 
-    assert [event.text for event in events if isinstance(event, ThinkingEvent)] == [
-        "first attempt",
-        "second attempt",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_trajectory_records_coalesced_thinking_as_prose(tmp_path: Path) -> None:
     lines = osprey_session(
-        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {"event": "thinking_delta", "content": "Let"},
-        {"event": "thinking_delta", "content": " me"},
-        {"event": "thinking_delta", "content": " think."},
-        {
-            "event": "message_end",
-            "messages": [{"type": "result", "data": {"content": "Done."}}],
-        },
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "usage_reported": False,
-        },
+        {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}, {"event": "thinking_delta", "content": "Let"},
+        {"event": "thinking_delta", "content": " me"}, {"event": "thinking_delta", "content": " think."},
+        {"event": "message_end", "messages": [{"type": "result", "data": {"content": "Done."}}]},
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
     )
     recorder = make_recorder(
-        tmp_path, path=tmp_path / "trajectory.json",
-        agent_model_name="osprey", session_id="daydream-session",
+        tmp_path, path=tmp_path / "trajectory.json", agent_model_name="osprey", session_id="daydream-session",
     )
-
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             invocation.observe_user_step("prompt")
             events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
             for event in events:
                 invocation.observe(event)
-
     trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
     assert trajectory["steps"][1]["reasoning_content"] == "Let me think."
     assert trajectory["agent"]["model_name"] == "custom-model"
     assert trajectory["steps"][1]["model_name"] == "custom-model"
 
-
-@pytest.mark.asyncio
 async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
     lines = osprey_session(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
         {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "prompt_tokens": 12,
-            "completion_tokens": 7,
-            "cached_tokens": None,
-            "cache_write_tokens": None,
-            "usage_reported": True,
-            "provider": "openai-compatible",
-            "model": "custom-model",
-            "duration_ms": 0,
-            "thinking_tokens": 3,
-            "tool_calls": 0,
-            "cost_usd": "0.125",
+            "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 12, "completion_tokens": 7, "cached_tokens": None,
+            "cache_write_tokens": None, "usage_reported": True, "provider": "openai-compatible",
+            "model": "custom-model", "duration_ms": 0, "thinking_tokens": 3, "tool_calls": 0, "cost_usd": "0.125",
         },
     )
     lines[-1]["structured_output"] = {"ok": True}
     events, _ = await _collect(OspreyBackend(model="custom-model", osprey_binary="fake"), lines)
     metrics = next(event for event in events if isinstance(event, MetricsEvent))
     result = next(event for event in events if isinstance(event, ResultEvent))
-
     assert metrics.prompt_tokens == 12
     assert metrics.completion_tokens == 7
     assert metrics.reasoning_tokens == 3
@@ -525,103 +320,57 @@ async def test_usage_and_structured_output_preserve_optional_metrics() -> None:
     assert result.continuation is not None
     assert result.continuation.data["session_id"] == "s-137"
     assert result.continuation.data == {
-        "session_id": "s-137",
-        "provider": "openai-compatible",
-        "model": "custom-model",
-        "outcome": "completed",
+        "session_id": "s-137", "provider": "openai-compatible", "model": "custom-model", "outcome": "completed",
         "exit_code": 0,
     }
 
-
-@pytest.mark.asyncio
 async def test_unreported_usage_permits_omitted_optional_telemetry() -> None:
     lines = osprey_session(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "usage_reported": False,
-        },
+        {"event": "turn_end", "turn_id": "t-1", "usage_reported": False},
     )
-
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
-
     assert [event.message_id for event in events if isinstance(event, TurnEndEvent)] == ["t-1"]
     assert not any(isinstance(event, MetricsEvent) for event in events)
 
-
-@pytest.mark.asyncio
 async def test_message_end_reconstructs_result_when_no_text_delta_arrives() -> None:
     lines = osprey_session(
         {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
+        {"event": "message_end", "messages": [{"type": "result", "data": {"content": "from message_end"}}]},
         {
-            "event": "message_end",
-            "messages": [{"type": "result", "data": {"content": "from message_end"}}],
-        },
-        {
-            "event": "turn_end",
-            "turn_id": "t-1",
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "cached_tokens": None,
-            "usage_reported": False,
-            "duration_ms": 0,
+            "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": None,
+            "usage_reported": False, "duration_ms": 0,
         },
     )
     events, _ = await _collect(OspreyBackend(osprey_binary="fake"), lines)
     assert [event.text for event in events if isinstance(event, TextEvent)] == ["from message_end"]
 
-
-@pytest.mark.asyncio
 async def test_protocol_version_and_unknown_events_fail_closed() -> None:
     backend = OspreyBackend(osprey_binary="fake")
     bad_version = [{"event": "protocol", "version": 99}]
-    with pytest.raises(
-        OspreyProtocolError, match="unsupported Osprey JSONL protocol version"
-    ):
+    with pytest.raises(OspreyProtocolError, match="unsupported Osprey JSONL protocol version"):
         await _collect(backend, bad_version)
-
     unknown: list[dict[str, object]] = [
         {"event": "protocol", "version": 2},
         {
-            "event": "session_start",
-            "session_id": "s",
-            "started_at": "2026-08-15T00:00:00Z",
-            "model": "m",
+            "event": "session_start", "session_id": "s", "started_at": "2026-08-15T00:00:00Z", "model": "m",
             "provider": "p",
-        },
-        {"event": "not-a-real-event"},
+        }, {"event": "not-a-real-event"},
     ]
     with pytest.raises(OspreyProtocolError, match="unknown Osprey JSONL event"):
         await _collect(backend, unknown)
 
-
 def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path: Path) -> None:
     backend = OspreyBackend(
-        model="m",
-        osprey_binary="fake",
-        approval="deny-untrusted",
-        sandbox=True,
-        allowed_roots=[tmp_path],
+        model="m", osprey_binary="fake", approval="deny-untrusted", sandbox=True, allowed_roots=[tmp_path],
     )
     command = backend.build_command(
-        "prompt",
-        output_schema_path=tmp_path / "schema.json",
-        continuation=ContinuationToken("osprey", {"session_id": "s", "mode": "fork"}),
-        max_turns=3,
-        read_only=True,
+        "prompt", output_schema_path=tmp_path / "schema.json",
+        continuation=ContinuationToken("osprey", {"session_id": "s", "mode": "fork"}), max_turns=3, read_only=True,
     )
     assert command[:11] == [
-        "fake",
-        "agent",
-        "--events-jsonl",
-        "--observation-budget-update-bytes",
-        "65536",
-        "--observation-budget-inline-bytes",
-        "262144",
-        "--observation-budget-admission-bytes",
-        "2097152",
-        "--model",
+        "fake", "agent", "--events-jsonl", "--observation-budget-update-bytes", "65536",
+        "--observation-budget-inline-bytes", "262144", "--observation-budget-admission-bytes", "2097152", "--model",
         "m",
     ]
     assert "--read-only" in command
@@ -630,19 +379,13 @@ def test_command_forwards_verified_policy_resume_fork_and_schema_flags(tmp_path:
     assert command[command.index("--max-turns") + 1] == "3"
     assert command[command.index("--approval") + 1] == "deny-untrusted"
 
-
-@pytest.mark.asyncio
 async def test_output_schema_is_temp_file_forwarded_and_cleaned() -> None:
     lines = osprey_session()
-    _, spawner = await _collect(
-        OspreyBackend(osprey_binary="fake"), lines, output_schema={"type": "object"}
-    )
+    _, spawner = await _collect(OspreyBackend(osprey_binary="fake"), lines, output_schema={"type": "object"})
     command = list(spawner.argvs[0])
     schema_path = Path(command[command.index("--output-schema") + 1])
     assert not schema_path.exists()
 
-
-@pytest.mark.asyncio
 async def test_output_schema_temp_file_is_cleaned_when_serialization_fails(tmp_path: Path) -> None:
     schema_path = tmp_path / "schema.json"
     schema_path.touch()
@@ -656,7 +399,6 @@ async def test_output_schema_temp_file_is_cleaned_when_serialization_fails(tmp_p
         await _collect(OspreyBackend(osprey_binary="fake"), [], output_schema={"type": object})
     assert not schema_path.exists()
 
-
 def test_unsupported_policy_and_tool_search_options_fail_closed() -> None:
     with pytest.raises(OspreyUnsupportedOption, match="interactive approver"):
         OspreyBackend(approval="on-request").build_command("prompt")
@@ -665,8 +407,6 @@ def test_unsupported_policy_and_tool_search_options_fail_closed() -> None:
     with pytest.raises(OspreyUnsupportedOption, match="ephemeral-session"):
         OspreyBackend().build_command("prompt", persist_session=False)
 
-
-@pytest.mark.asyncio
 async def test_non_success_terminal_outcome_is_not_reported_as_success() -> None:
     lines = osprey_session()
     lines[-1]["outcome"] = "budget_expired"
@@ -674,8 +414,6 @@ async def test_non_success_terminal_outcome_is_not_reported_as_success() -> None
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
     assert exc_info.value.outcome == "budget_expired"
 
-
-@pytest.mark.asyncio
 async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process_failure() -> None:
     lines = osprey_session()
     lines[-1]["outcome"] = "budget_expired"
@@ -683,59 +421,35 @@ async def test_non_success_terminal_outcome_with_nonzero_process_exit_is_process
         await _collect(OspreyBackend(osprey_binary="fake"), lines, returncode=1)
     assert exc_info.value.category == "PROCESS_EXIT"
 
-
-@pytest.mark.asyncio
 async def test_nonzero_process_exit_includes_stderr_diagnostics() -> None:
     lines = osprey_session()
-
     with pytest.raises(OspreyError, match="provider authentication failed"):
         await _collect(
-            OspreyBackend(osprey_binary="fake"),
-            lines,
-            returncode=1,
-            stderr_lines=["provider authentication failed"],
+            OspreyBackend(osprey_binary="fake"), lines, returncode=1, stderr_lines=["provider authentication failed"],
         )
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "events, message",
     [
+        ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}], "active turn"),
         (
-            [{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"}],
-            "active turn",
-        ),
-        (
-            [
-                {
-                    "event": "tool_call",
-                    "tool_call_id": "c-1",
-                    "tool_name": "tool_search",
-                    "arguments": {},
-                }
-            ],
+            [{ "event": "tool_call", "tool_call_id": "c-1", "tool_name": "tool_search", "arguments": {}, }],
             "pending tool calls",
         ),
     ],
 )
 async def test_successful_session_end_requires_a_quiescent_stream(
-    events: list[dict[str, object]],
-    message: str,
+    events: list[dict[str, object]], message: str,
 ) -> None:
     lines = osprey_session(*events)
-
     with pytest.raises(OspreyError, match=message):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
-
-@pytest.mark.asyncio
 async def test_terminal_exit_code_must_match_process_status() -> None:
     lines = osprey_session()
     lines[-1]["exit_code"] = 1
-
     with pytest.raises(OspreyError, match="exit_code"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
-
 
 def test_non_negative_int_helpers_reject_below_zero() -> None:
     event = {"event": "turn_end", "k": -1}
@@ -747,17 +461,12 @@ def test_non_negative_int_helpers_reject_below_zero() -> None:
     assert _required_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
     assert _optional_non_negative_int({"event": "turn_end", "k": 0}, "k") == 0
 
-
-@pytest.mark.asyncio
 async def test_negative_session_total_cost_is_rejected() -> None:
     lines = osprey_session()
     lines[-1]["total_cost_usd"] = "-0.125"
-
     with pytest.raises(OspreyError, match="total_cost_usd"):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "events, field",
     [
@@ -765,8 +474,7 @@ async def test_negative_session_total_cost_is_rejected() -> None:
           {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
            "duration_ms": -1, "prompt_tokens": 0, "completion_tokens": 0}], "duration_ms"),
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
-          {"event": "turn_end", "turn_id": "t-1", "usage_reported": False,
-           "duration_ms": -1}], "duration_ms"),
+          {"event": "turn_end", "turn_id": "t-1", "usage_reported": False, "duration_ms": -1}], "duration_ms"),
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
           {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
            "duration_ms": 0, "prompt_tokens": -1, "completion_tokens": 0}], "prompt_tokens"),
@@ -775,92 +483,61 @@ async def test_negative_session_total_cost_is_rejected() -> None:
            "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": -1}], "completion_tokens"),
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
           {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
-           "cached_tokens": -1}], "cached_tokens"),
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": -1}], "cached_tokens"),
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
           {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
-           "thinking_tokens": -1}], "thinking_tokens"),
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "thinking_tokens": -1}], "thinking_tokens"),
         ([{"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
           {"event": "turn_end", "turn_id": "t-1", "usage_reported": True,
-           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0,
-           "cost_usd": "-0.125"}], "cost_usd"),
+           "duration_ms": 0, "prompt_tokens": 0, "completion_tokens": 0, "cost_usd": "-0.125"}], "cost_usd"),
     ],
 )
-async def test_negative_osprey_telemetry_is_rejected(
-    events: list[dict[str, object]], field: str
-) -> None:
+async def test_negative_osprey_telemetry_is_rejected(events: list[dict[str, object]], field: str) -> None:
     lines = osprey_session(*events)
-
     with pytest.raises(OspreyError, match=field):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "events, message",
     [
         (
             [
                 {
-                    "event": "turn_end",
-                    "turn_id": "t-1",
-                    "prompt_tokens": 0,
-                    "completion_tokens": 0,
-                    "usage_reported": False,
-                    "duration_ms": 0,
+                    "event": "turn_end", "turn_id": "t-1", "prompt_tokens": 0, "completion_tokens": 0,
+                    "usage_reported": False, "duration_ms": 0,
                 }
-            ],
-            "turn_end without turn_start",
+            ], "turn_end without turn_start",
         ),
         (
             [
                 {"event": "turn_start", "turn_id": "t-1", "timestamp": "now"},
                 {"event": "turn_start", "turn_id": "t-2", "timestamp": "now"},
-            ],
-            "turn_start before prior turn_end",
+            ], "turn_start before prior turn_end",
         ),
     ],
 )
-async def test_invalid_turn_event_order_fails_closed(
-    events: list[dict[str, object]], message: str
-) -> None:
+async def test_invalid_turn_event_order_fails_closed(events: list[dict[str, object]], message: str) -> None:
     lines = osprey_session(*events)
     with pytest.raises(OspreyProtocolError, match=message):
         await _collect(OspreyBackend(osprey_binary="fake"), lines)
 
-
-@pytest.mark.asyncio
 async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     lines = osprey_session(
+        {"event": "tool_call", "tool_call_id": "c-2", "tool_name": "mcp.fetch", "arguments": {"id": "7"}},
         {
-            "event": "tool_call",
-            "tool_call_id": "c-2",
-            "tool_name": "mcp.fetch",
-            "arguments": {"id": "7"},
-        },
-        {
-            "event": "tool_result",
-            "tool_call_id": "c-2",
-            "tool_name": "mcp.fetch",
-            "status": "success",
-            "content": "payload",
-            "duration_ms": 1,
+            "event": "tool_result", "tool_call_id": "c-2", "tool_name": "mcp.fetch", "status": "success",
+            "content": "payload", "duration_ms": 1,
         },
     )
     recorder = make_recorder(
-        tmp_path, path=tmp_path / "trajectory.json",
-        agent_model_name="osprey", session_id="daydream-session",
+        tmp_path, path=tmp_path / "trajectory.json", agent_model_name="osprey", session_id="daydream-session",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
             invocation.observe_user_step("prompt")
-            events, _ = await _collect(
-                OspreyBackend(model="requested", osprey_binary="fake"), lines
-            )
+            events, _ = await _collect(OspreyBackend(model="requested", osprey_binary="fake"), lines)
             for event in events:
                 invocation.observe(event)
-
     trajectory = recorder.build_trajectory().model_dump(exclude_none=True)
     tool_call = trajectory["steps"][1]["tool_calls"][0]
     assert tool_call["function_name"] == "mcp.fetch"
@@ -868,19 +545,13 @@ async def test_trajectory_preserves_tool_identity(tmp_path: Path) -> None:
     assert trajectory["steps"][1]["observation"]["results"][0]["source_call_id"] == "c-2"
     assert "cost_usd" not in trajectory["final_metrics"]
 
-
-@pytest.mark.asyncio
 async def test_cancel_delegates_to_shared_transport_lifecycle() -> None:
-    """cancel() reaps every tracked transport's process group and pipes."""
     backend, proc = make_cancel_probe("osprey")
     await backend.cancel()
-
     proc.terminate.assert_called_once()
     proc.kill.assert_called_once()
 
-
 # --- P18 Task 1: effective request-config admission at the Osprey argv seam --
-
 
 def _p18_osprey_events() -> list[dict[str, object]]:
     """Session events for a temperature-0, persona+toolset Osprey run."""
@@ -889,41 +560,30 @@ def _p18_osprey_events() -> list[dict[str, object]]:
         {"event": "text_delta", "content": "T0 answer"},
         {
             "event": "turn_end", "turn_id": "turn-1", "usage_reported": True,
-            "duration_ms": 10, "prompt_tokens": 5, "completion_tokens": 3,
-            "model": "custom-model",
+            "duration_ms": 10, "prompt_tokens": 5, "completion_tokens": 3, "model": "custom-model",
         },
     ]
 
-
-@pytest.mark.asyncio
 async def test_osprey_request_event_temperature_and_label_presence_rules() -> None:
     """Explicit 0.0 is admitted; labels reduce to presence; mode closed values."""
     backend = OspreyBackend(
-        model="custom-model", osprey_binary="fake",
-        temperature=0.0, persona="PATTERN_PERSONA_PLACEHOLDER",
+        model="custom-model", osprey_binary="fake", temperature=0.0, persona="PATTERN_PERSONA_PLACEHOLDER",
         toolset="TOOLSET_PLACEHOLDER", approval="deny-untrusted",
         sandbox=True, immutable_runtime_surface=True, compress_context=False,
-        ultracode=True, max_subagents=3, llm_rpm=0,
-        vars=(("k", "v"), ("k2", "v2")),
+        ultracode=True, max_subagents=3, llm_rpm=0, vars=(("k", "v"), ("k2", "v2")),
     )
     events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     argv = list(spawner.argvs[-1])
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
-
-    # Temperature: exact zero preserved (the argv carries it).
     assert config.temperature == 0.0
     assert argv[argv.index("--temperature") + 1] == "0.0"
-
-    # Persona/toolset: exact argv values present in argv, presence booleans in
-    # telemetry, and NO label-carrying field exists.
+    # Arbitrary labels belong in argv; telemetry records only their presence.
     assert argv[argv.index("--persona") + 1] == "PATTERN_PERSONA_PLACEHOLDER"
     assert argv[argv.index("--toolset") + 1] == "TOOLSET_PLACEHOLDER"
     assert config.persona_present is True and config.toolset_present is True
     assert not hasattr(config, "persona") and not hasattr(config, "toolset")
-
-    # Closed modes and booleans from exact argv.
     assert config.approval_mode == "deny-untrusted"
     assert config.sandbox is True
     assert config.immutable_surface is True
@@ -934,46 +594,31 @@ async def test_osprey_request_event_temperature_and_label_presence_rules() -> No
     assert config.vars_count == 2
     assert config.continuation_mode == "fresh"
     assert config.model_mode == "single"
-
-    # Provenance: all four identity fields are native (session_start).
     assert request.model_source == "native"
     assert request.provider_source == "native"
     assert request.session_source == "native"
     assert request.timestamp_source == "native"
 
-
-@pytest.mark.asyncio
-async def test_osprey_hidden_temperature_stays_absent_in_telemetry() -> None:
-    """Without explicit --temperature, the config carries temperature=None."""
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake")
+@pytest.mark.parametrize("temperature", [None, 0.7])
+async def test_osprey_temperature_telemetry_matches_explicit_option(temperature: float | None) -> None:
+    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=temperature)
     events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
     argv = list(spawner.argvs[-1])
-    assert "--temperature" not in argv
+    if temperature is None:
+        assert "--temperature" not in argv
+    else:
+        assert argv[argv.index("--temperature") + 1] == "0.7"
     request = next(e for e in events if isinstance(e, RequestEvent))
     config = request.config
     assert isinstance(config, OspreyRequestConfig)
-    assert config.temperature is None  # config-resolved temperature is hidden
+    if temperature is None:
+        assert config.temperature is None
+    else:
+        assert config.temperature == 0.7
 
-
-@pytest.mark.asyncio
-async def test_osprey_nonzero_temperature_is_admitted_verbatim() -> None:
-    """An explicit nonzero temperature passes through exactly."""
-    backend = OspreyBackend(model="custom-model", osprey_binary="fake", temperature=0.7)
-    events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
-    argv = list(spawner.argvs[-1])
-    assert argv[argv.index("--temperature") + 1] == "0.7"
-    request = next(e for e in events if isinstance(e, RequestEvent))
-    config = request.config
-    assert isinstance(config, OspreyRequestConfig)
-    assert config.temperature == 0.7
-
-
-@pytest.mark.asyncio
 async def test_osprey_turn_end_model_override_is_native() -> None:
-    """turn_end model becomes the native TurnEnd identity; no finish reason."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
     events, _spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
-
     turn_ends = [e for e in events if isinstance(e, TurnEndEvent)]
     assert len(turn_ends) == 1
     turn_end = turn_ends[0]
@@ -985,31 +630,20 @@ async def test_osprey_turn_end_model_override_is_native() -> None:
     # Session outcome is not a model finish reason — stays unset.
     assert turn_end.finish_reason is None
 
-
-@pytest.mark.asyncio
 async def test_osprey_session_end_usage_is_session_sourced() -> None:
-    """Terminal totals carry session measurement source and reported cost."""
     backend = OspreyBackend(model="custom-model", osprey_binary="fake")
     events, _spawner = await _collect(backend, osprey_session(*_p18_osprey_events()))
-
     costs = [e for e in events if isinstance(e, CostEvent)]
     assert len(costs) == 1
     assert costs[0].measurement_source == "session"
     # The base fixture session_end carries no cost -> no provenance claim.
     assert costs[0].cost_source is None
 
-
-@pytest.mark.asyncio
 async def test_osprey_resume_and_fork_continuation_modes() -> None:
-    """Resume and fork continuation tokens map to closed config modes."""
     for mode, flag in (("resume", "--resume"), ("fork", "--fork-from")):
         backend = OspreyBackend(model="custom-model", osprey_binary="fake")
-        token = ContinuationToken(
-            backend="osprey", data={"session_id": "s-9", "mode": mode},
-        )
-        events, spawner = await _collect(
-            backend, osprey_session(*_p18_osprey_events()), continuation=token
-        )
+        token = ContinuationToken(backend="osprey", data={"session_id": "s-9", "mode": mode})
+        events, spawner = await _collect(backend, osprey_session(*_p18_osprey_events()), continuation=token)
         argv = list(spawner.argvs[-1])
         assert flag in argv
         assert argv[argv.index(flag) + 1] == "s-9"  # token session drives argv

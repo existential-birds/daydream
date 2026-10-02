@@ -40,10 +40,7 @@ from tests.test_deep_orchestrator import (
 
 
 async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: a fix group that raises MaxTurnsError mid-edit is rolled back, its partial content saved, and the
@@ -55,20 +52,10 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_edit_line = "# retained successful group\n"
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high"),
-        _merge_item(2, "App.tsx", "high"),
-    ]
+    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high")]
     pre_fix_apptsx = (multi_stack_target / "App.tsx").read_text()
-
     exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=True,
-        )
+        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
     )
     assert exit_code == 1  # dropped fix group => nonzero
 
@@ -91,12 +78,8 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     assert manifest["fix_failures"], "manifest must record the dropped fix group"
     assert any("App.tsx" in key for key in manifest["fix_failures"])
 
-
 async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """Footprint preflight blocks unsafe paths before fixing and records why."""
@@ -117,17 +100,9 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
     _add_to_reviewed_diff(multi_stack_target, ["src/handler.py"])
 
     stub.merge_items = [_merge_item(1, "src/handler.py", "high")]
-
     warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
-
     exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=True,
-        )
+        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
     )
     assert exit_code == 1  # handled failure => Stop(1), not a raise
 
@@ -148,12 +123,8 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
     # Unsafe path values are not reflected into diagnostics.
     assert not any("src/handler.py" in warning for warning in warnings)
 
-
 async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archive(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """Real runner confines a failed fixer and archives its restore audit."""
@@ -168,19 +139,9 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     scratch = multi_stack_target / "owner-scratch.bin"
     scratch.write_bytes(b"\x00owner-original")
     stub.fix_damage_protected_file = "owner-scratch.bin"
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high"),
-        _merge_item(2, "App.tsx", "high"),
-    ]
-
+    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high")]
     exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=True,
-        )
+        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
     )
     assert exit_code == 1
 
@@ -200,37 +161,26 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
     restored = {event["path"] for event in run_audit["events"] if event["action"] in {"remove", "restore"}}
     assert {"store/uuid.go", "owner-scratch.bin"} <= restored
 
-
 async def test_fix_quality_gate_flags_verbosity_regression(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315): a fix that raises a file's verbosity is flagged, not fatal."""
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
     # (b) the fix landed on the tracked file.
     assert "def choose(x):" in (multi_stack_target / "api.py").read_text()
-
     gate = _read_quality_gate(multi_stack_target)
     assert gate["enabled"] is True
     entry = gate["rounds"][0]["per_file"]["api.py"]
     assert entry["verbosity_after"] > entry["verbosity_before"]
     assert entry["flagged"] is True
 
-
 async def test_fix_quality_gate_carries_to_manifest(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#315): the archived manifest carries the gate verdict + flagged file."""
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
-
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
     gate = manifest["fix_quality_gate"]
@@ -240,25 +190,14 @@ async def test_fix_quality_gate_carries_to_manifest(
     assert entry["flagged"] is True
     assert entry["verbosity_after"] > entry["verbosity_before"]
 
-
 async def test_fix_quality_gate_threshold_config(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315): configurable delta thresholds flip the flag on the SAME edit."""
 
     tolerant_target = _build_gate_target(tmp_path, "gate_tolerant")
-    tolerant = await _run_quality_gate_fixture(
-        tolerant_target,
-        monkeypatch,
-        make_config,
-        mute_side_effects,
-        file_config=DaydreamFileConfig(
-            quality_gate_erosion_delta=100.0,
-            quality_gate_verbosity_delta=100.0,
-        ),
+    tolerant = await _run_quality_gate_fixture(tolerant_target, monkeypatch, make_config, mute_side_effects,
+        file_config=DaydreamFileConfig(quality_gate_erosion_delta=100.0, quality_gate_verbosity_delta=100.0,),
     )
     assert tolerant == 0
     gate = _read_quality_gate(tolerant_target)
@@ -267,52 +206,30 @@ async def test_fix_quality_gate_threshold_config(
     assert entry["flagged"] is False
 
     strict_target = _build_gate_target(tmp_path, "gate_strict")
-    strict = await _run_quality_gate_fixture(
-        strict_target,
-        monkeypatch,
-        make_config,
-        mute_side_effects,
-        file_config=DaydreamFileConfig(
-            quality_gate_erosion_delta=0.0,
-            quality_gate_verbosity_delta=0.0,
-        ),
+    strict = await _run_quality_gate_fixture(strict_target, monkeypatch, make_config, mute_side_effects,
+        file_config=DaydreamFileConfig(quality_gate_erosion_delta=0.0, quality_gate_verbosity_delta=0.0,),
     )
     assert strict == 0
     gate = _read_quality_gate(strict_target)
     entry = gate["rounds"][0]["per_file"]["api.py"]
     assert entry["flagged"] is True
 
-
 async def test_fix_quality_gate_fail_open(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315/#329): an analyzer failure degrades to an auditable unavailable round."""
 
     real_analyze = analyzer_mod.analyze_quality
 
-    def _boom(
-        daydream_dir: Path,
-        candidate_paths: set[str] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
+    def _boom(daydream_dir: Path, candidate_paths: set[str] | None = None, **kwargs: Any,) -> dict[str, Any]:
         if candidate_paths is not None:
             raise RuntimeError("analyzer down")
         return real_analyze(daydream_dir, candidate_paths, **kwargs)
 
 
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _boom)
-    exit_code = await _run_quality_gate_fixture(
-        multi_stack_target,
-        monkeypatch,
-        make_config,
-        mute_side_effects,
-        file_config=DaydreamFileConfig(
-            quality_gate_erosion_absolute=1.25,
-            quality_gate_verbosity_absolute=2.5,
-        ),
+    exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects,
+        file_config=DaydreamFileConfig(quality_gate_erosion_absolute=1.25, quality_gate_verbosity_absolute=2.5,),
     )
     assert exit_code == 0
 
@@ -324,12 +241,8 @@ async def test_fix_quality_gate_fail_open(
     assert unavailable["stage"] == "before"
     assert "analyzer down" in unavailable["reason"]
 
-
 async def test_fix_quality_gate_flags_undefined_baseline_erosion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 5): an EXISTING file with an undefined baseline is flagged."""
     target = _build_gate_target_no_functions(tmp_path, "gate_undefined_baseline")
@@ -347,26 +260,16 @@ async def test_fix_quality_gate_flags_undefined_baseline_erosion(
     assert entry["erosion_delta"] is None
     assert entry["flagged"] is True
 
-
 async def test_fix_quality_gate_flags_undefined_baseline_verbosity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329): an empty file uses the verbosity absolute fallback."""
 
     target = _build_gate_target_no_functions(tmp_path, "gate_undefined_verbosity")
     (target / "api.py").write_text("\n")
-    exit_code = await _run_quality_gate_fixture(
-        target,
-        monkeypatch,
-        make_config,
-        mute_side_effects,
+    exit_code = await _run_quality_gate_fixture(target, monkeypatch, make_config, mute_side_effects,
         file_config=DaydreamFileConfig(
-            quality_gate_erosion_absolute=100.0,
-            quality_gate_erosion_delta=100.0,
-            quality_gate_verbosity_delta=100.0,
+            quality_gate_erosion_absolute=100.0, quality_gate_erosion_delta=100.0, quality_gate_verbosity_delta=100.0,
             quality_gate_verbosity_absolute=0.0,
         ),
     )
@@ -379,25 +282,15 @@ async def test_fix_quality_gate_flags_undefined_baseline_verbosity(
     assert entry["verbosity_delta"] is None
     assert entry["flagged"] is True
 
-
 async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#315/#329): the ABSOLUTE knob, not the delta one, gates undefined baselines."""
 
     target = _build_gate_target_no_functions(tmp_path, "gate_absolute_threshold")
     exit_code = await _run_quality_gate_fixture(
-        target,
-        monkeypatch,
-        make_config,
-        mute_side_effects,
-        fix_edit_line=_FIX_EDIT_ERODED,
-        file_config=DaydreamFileConfig(
-            quality_gate_erosion_absolute=100.0,
-            quality_gate_verbosity_absolute=100.0,
+        target, monkeypatch, make_config, mute_side_effects, fix_edit_line=_FIX_EDIT_ERODED,
+        file_config=DaydreamFileConfig(quality_gate_erosion_absolute=100.0, quality_gate_verbosity_absolute=100.0,
             quality_gate_verbosity_delta=100.0,
         ),
     )
@@ -418,15 +311,10 @@ async def test_fix_quality_gate_absolute_threshold_controls_undefined_baseline(
         "the absolute threshold (100.0), not the delta default (0.05), must decide the undefined-baseline branch"
     )
 
-
 async def test_fix_quality_gate_artifact_bound_to_current_session(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    archive_dir: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, archive_dir: Path,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 7): the gate artifact is bound to the run that wrote it."""
     alpha = _build_gate_target(tmp_path, "gate_alpha")
     exit_code = await _run_quality_gate_fixture(alpha, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
@@ -440,8 +328,7 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
     assert beta_gate["session_id"]
     assert beta_gate["session_id"] != alpha_gate["session_id"]
 
-    manifests = [
-        json.loads((d / "manifest.json").read_text(encoding="utf-8")) for d in (archive_dir / "runs").iterdir()
+    manifests = [json.loads((d / "manifest.json").read_text(encoding="utf-8")) for d in (archive_dir / "runs").iterdir()
     ]
     # Per-manifest correspondence: the manifest that carries session A's
     # verdict must BE session A's manifest, and vice versa. manifest["session_id"]
@@ -455,29 +342,21 @@ async def test_fix_quality_gate_artifact_bound_to_current_session(
     # The two verdicts are distinct artifacts: alpha's manifest never carries beta's verdict.
     assert by_session[alpha_gate["session_id"]]["fix_quality_gate"]["session_id"] != beta_gate["session_id"]
 
-
 async def test_fix_quality_gate_flags_unparseable_post_fix_file(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 5): a file missing from post-fix analyzer output is flagged."""
 
     real_analyze = analyzer_mod.analyze_quality
 
-    def _stub(
-        daydream_dir: Any,
-        candidate_paths: set[str] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
+    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None, **kwargs: Any,) -> dict[str, Any]:
         result = real_analyze(daydream_dir, candidate_paths, **kwargs)
         if "def choose(x):" in (multi_stack_target / "api.py").read_text(encoding="utf-8"):
             result["per_file"] = {rel: entry for rel, entry in result["per_file"].items() if rel != "api.py"}
         return result
 
     monkeypatch.setattr(analyzer_mod, "analyze_quality", _stub)
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
     exit_code = await _run_quality_gate_fixture(multi_stack_target, monkeypatch, make_config, mute_side_effects)
     assert exit_code == 0
 
@@ -489,12 +368,8 @@ async def test_fix_quality_gate_flags_unparseable_post_fix_file(
     assert "post-fix analyzer output" in entry["reason"]
     assert any("api.py" in w for w in warnings), "the unparseable file must be named in a warning"
 
-
 async def test_fix_quality_gate_malformed_resume_artifact_repairs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 6): a malformed resume artifact can't silently disable the gate."""
 
@@ -511,10 +386,9 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     mute_side_effects()
     _install_stub_backend(monkeypatch, target)
 
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
     exit_code = await run(make_config(target, start_at="fix", assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
-
     assert any("fix-quality-gate.json" in w and "malformed" in w for w in warnings), (
         "a malformed artifact must surface a warning, never fail silently"
     )
@@ -523,14 +397,9 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     assert gate["session_id"]
     assert len(gate["rounds"]) == 1
 
-
 async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 5): a new session never inherits a prior session's rounds."""
 
     target = _build_gate_target(tmp_path, "gate_session_resume")
     _silence(monkeypatch)
@@ -539,9 +408,7 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
     stub = _install_stub_backend(monkeypatch, target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_edit_line = _FIX_EDIT_VERBOSE
-
-    warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
-
+    warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
     first = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False))
     assert first == 0
     first_gate = _read_quality_gate(target)
@@ -567,21 +434,19 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
         "a session-mismatched artifact must surface a warning, never silently merge rounds"
     )
 
-
-async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+async def test_fix_quality_gate_covers_authorized_secondary_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#329/Finding 6): a file edited OUTSIDE its finding group is gated."""
 
     target = _build_gate_target_with_helper(tmp_path, "gate_secondary_edit")
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
     stub = _ExtraEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
-    stub.merge_items = [_merge_item(1, "api.py", "high")]
+    # A single-stack run consumes parsed findings directly, without merge.
+    stub.parse_by_stack = {"python": {
+        "severity": "high", "confidence": "MEDIUM", "issue": {"related_files": ["helper.py"]},
+    }}
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
@@ -591,7 +456,7 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     gate = _read_quality_gate(target)
     assert gate["enabled"] is True
     per_file = gate["rounds"][0]["per_file"]
-    assert "helper.py" in per_file, "a file the fix agent edited outside its finding group must be gated"
+    assert "helper.py" in per_file, "an authorized secondary file must still pass the quality gate"
     helper = per_file["helper.py"]
     assert helper["verbosity_delta"] is not None, "the secondary file's delta must be computed"
     assert helper["verbosity_after"] > helper["verbosity_before"]
@@ -599,24 +464,15 @@ async def test_fix_quality_gate_covers_secondary_edit_outside_finding_group(
     assert "api.py" in per_file, "a finding target must stay covered even when unchanged on disk"
     assert per_file["api.py"]["flagged"] is False
 
-
 async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path (#457): both gate captures call analyze_quality with the reviewed *.py set only."""
 
     target = _build_scope_creep_target(tmp_path, "gate_scoped")
     real_analyze = analyzer_mod.analyze_quality
     calls: list[set[str] | None] = []
 
-    def _stub(
-        daydream_dir: Any,
-        candidate_paths: set[str] | None = None,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
+    def _stub(daydream_dir: Any, candidate_paths: set[str] | None = None, **kwargs: Any,) -> dict[str, Any]:
         calls.append(candidate_paths)
         return real_analyze(daydream_dir, candidate_paths, **kwargs)
 
@@ -632,12 +488,8 @@ async def test_fix_quality_gate_scopes_analyzer_to_reviewed_python_files(
     assert calls[0] == {"api.py"}, f"pre-fix capture must be scoped to reviewed .py, got {calls[0]}"
     assert calls[1] == {"api.py"}, f"post-fix capture must be scoped to reviewed .py, got {calls[1]}"
 
-
 async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """An out-of-diff module created by the fixer is scrubbed before the quality gate records candidates."""
 
@@ -649,17 +501,10 @@ async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
+    _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
 
-    exit_code = await run(
-        make_config(
-            target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            file_config=DaydreamFileConfig(
-                quality_gate_erosion_absolute=100.0,
-                quality_gate_verbosity_absolute=100.0,
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False,
+            file_config=DaydreamFileConfig(quality_gate_erosion_absolute=100.0, quality_gate_verbosity_absolute=100.0,
             ),
         )
     )

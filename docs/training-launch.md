@@ -24,6 +24,18 @@ fixture-scale validation run:
 | `run_identity.split_digest` | `903de487711c6be182d582cee898570c5635c75e2c6c3dbcdf622af1236b33ee` |
 | `run_identity.reward_version` | `2026.09.04-1` |
 
+That version describes the historical fixture run, not the current reducer.
+The current intrinsic reward version is `2026.10.01-1`: verifier correctness
+is the mean of `consistent = 1.0`, `uncertain = 0.5`, and `contradicts = 0.0`.
+The composite is `round(clip(correctness - 0.2 * length_penalty, 0, 1), 4)`,
+where `length_penalty = clip((length - 2000) / 8000, 0, 1)`.
+Invalid format floors it at `0.0`; missing verdicts make it uncomputable
+(`None`), and missing length contributes no penalty. Grounding is no longer
+a reward axis. Posterior cost remains separate; `w_fp = 0.3` does not enter
+the intrinsic composite. Historical observations retain their original version.
+Current RFT threshold axes are `composite`, `correctness_per_finding` (mean),
+and `length_penalty`, all interpreted as minimums.
+
 Corpus-side loading goes through `daydream.training.stacks.load_v2_projection`,
 which fail-closes on the C5 exclusion list and C8 copyleft opt-in before any
 record is returned, and re-verifies the projection's `_SUCCESS` marker,
@@ -106,18 +118,19 @@ dominated by localization — grounded, diff-anchored findings — not by long-f
 generation. A rank-64 bf16 LoRA over Qwen3-8B with 32768-token sequences fits
 comfortably on a single 80 GB accelerator (matching the shipped `sft.toml` /
 `rl.toml` recipes at `seq_len = 32768`), which keeps the whole SFT→RFT→GRPO
-loop on one GPU and makes per-finding economics favorable, while preserving the
-grounding-weighted reward signal (`w_grounding` 0.4, `w_fp` 0.3,
-`w_correctness` 0.6 in `run_identity.reward_weights`). Larger bases would
-multiply GPU-hours for gains on axes the rubric down-weights; smaller bases
-measurably lose thread-level localization on the held-out split.
+loop on one GPU and makes per-finding economics favorable. Current reward
+credit comes from verifier correctness, reduced by the length penalty described
+above; the earlier fixture's grounding weights are historical provenance.
+The model and hardware measurements here do not establish comparative quality
+under the current reward formula.
 
 ## Hardware
 
 The offline stages (Stage-0 gate, all dry-path validation, CI) ran on the
-development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU** — the dry path
-imports no pynvml and never initializes CUDA (asserted by
-`tests/training/test_stage1_sft_config.py::test_dry_run_passes_without_gpu`).
+development VM: AMD EPYC 9554P 64-core, 7 GiB RAM, **no GPU**. The committed
+projection dry run is covered by `tests/test_training_dry_fixture.py`. The
+separate `tests/training/test_stage1_sft_config.py` checks the SFT recipe's
+dry run when a prime-rl workspace is available.
 
 GPU stages (Stage-1 dataset SFT, Stage-2 deterministic RFT replay, Stage-3
 online GRPO) are planned for a single-GPU 80 GB node (H100 or A100 80 GB);

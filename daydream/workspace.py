@@ -1,28 +1,15 @@
-"""WorkContext abstraction for in-place vs ephemeral worktree execution.
+"""Open in-place, ephemeral worktree, and independent audit workspaces.
 
-This module is the single entry point daydream uses to *open* the directory
-it operates on for a single run.  Two modes are supported:
-
-* **In-place** -- daydream operates on the user's checked-out worktree.
-* **Ephemeral** -- daydream creates a detached worktree in the source-owned
-  private operational namespace and removes it on exit.
-
-The resolution rules and ordering live in :func:`open_workspace` and are
-deliberately fixed.
-
-The module shells out via :mod:`daydream.git_ops` only.
+All Git operations pass through git_ops.
 """
 
 from __future__ import annotations
 
 import logging
-import re
 import secrets
 import shutil
-import stat
 import tempfile
-import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -30,9 +17,7 @@ from typing import AsyncIterator, Iterable
 
 from daydream import git_ops
 from daydream.artifact_visibility import (
-    ArtifactVisibilityError,
     PrivateWorkspaceOwner,
-    operational_worktree_path,
     operational_worktree_root,
     private_root_locations,
     resolve_private_workspace_owner,
@@ -40,7 +25,7 @@ from daydream.artifact_visibility import (
 )
 from daydream.config_file import load_toml_or_empty
 from daydream.git_ops import BranchNotFoundError, GitError
-from daydream.json_utils import _fsync_directory
+from daydream.workspace_legacy import _retire_legacy_operational_worktrees
 
 _logger = logging.getLogger(__name__)
 
@@ -50,21 +35,8 @@ _logger = logging.getLogger(__name__)
 # worktree checkout itself.
 _DEFAULT_COPY_PATHS: tuple[str, ...] = (".env", ".env.local")
 _DEFAULT_COPY_GLOB = ".env.*"
-_LEGACY_REANCHOR_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}-reanchor$")
-_LEGACY_AUDIT_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$")
-_OPERATIONAL_LOCK_STALE_AFTER_S = 24 * 3600
-
-
-
-
 class WorkspaceCopyPathError(GitError):
-    """Raised when a ``[tool.daydream.workspace] copy`` / ``--copy`` entry
-    escapes the source checkout or the ephemeral destination worktree.
-
-    This is the fail-closed boundary of :func:`copy_files_into_ephemeral`:
-    no workspace-copy entry may read a file outside the source checkout or
-    write outside the ephemeral worktree. Raised before any file is copied.
-    """
+    """A copy entry escapes either workspace; all entries are checked before any copy."""
 
 
 class UnbornWorkspaceError(GitError):
@@ -73,22 +45,11 @@ class UnbornWorkspaceError(GitError):
 
 @dataclass(frozen=True)
 class WorkContext:
-    """Resolved working environment for a daydream run.
+    """Resolved working repository and its source, with commit anchors captured at open.
 
-    Attributes:
-        repo: The directory daydream operates on (the source for in-place
-            runs, the ephemeral worktree path otherwise).
-        source: The original ``cwd`` the user invoked daydream from. Equal to
-            :attr:`repo` for in-place runs.
-        base_branch: Resolved base ref name (e.g. ``"main"``).
-        base_sha: Merge-base SHA between :attr:`base_branch` and the working
-            ``HEAD``, captured at workspace open time; None only for unborn improve.
-        head_branch: Branch name at :attr:`repo`'s ``HEAD``, or ``None`` when
-            ``HEAD`` is detached (e.g. ephemeral worktrees).
-        head_sha: Full SHA of :attr:`repo`'s ``HEAD``, or None for unborn improve.
-        is_ephemeral: True when :attr:`repo` is an ephemeral worktree.
-        run_id: ``<UTC YYYYMMDDHHMMSS>-<hex8>`` identifier used for the
-            ephemeral path and intent files.
+    ``base_sha`` is the merge-base, ``head_branch`` is None for detached HEAD,
+    and both SHA anchors are None only for explicitly admitted unborn Improve.
+    ``run_id`` identifies ephemeral paths and intent files.
     """
 
     repo: Path
@@ -125,49 +86,15 @@ async def open_workspace(
     private_owner: PrivateWorkspaceOwner | None = None,
     auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
 ) -> AsyncIterator[WorkContext]:
-    """Open a workspace for a daydream run, yielding a :class:`WorkContext`.
+    """Open in-place unless ``branch`` or ``force_ephemeral`` requests a detached worktree.
 
-    Resolution rules (locked):
+    Ephemeral runs fetch first: a branch selects origin/<branch>, otherwise HEAD.
+    The base defaults to an open PR's base, then the repository default branch.
+    Ignored support files are copied unless skip_tests; cleanup runs on every exit.
 
-    * ``branch is None`` and not ``force_ephemeral`` -> in-place at *source*;
-      no fetch; no cleanup.
-    * ``branch is None`` and ``force_ephemeral`` -> ephemeral at *source*'s
-      current ``HEAD``.
-    * ``branch`` provided -> ALWAYS ephemeral, detached at ``origin/<branch>``
-      after a fetch. When ``branch`` is also currently checked out in
-      *source*, a staleness warning is emitted.
-
-    Args:
-        source: User's worktree (the directory daydream was invoked from).
-        branch: Optional branch name to review.
-        base: Optional base branch name. When ``None``, resolved via the open
-            PR head (if any) or :func:`git_ops.default_branch`.
-        force_ephemeral: Run ephemerally even when no branch is given.
-        extra_copy: Additional paths supplied via ``--copy`` flags.
-        skip_tests: When True, suppress copying gitignored files into the
-            ephemeral worktree (used by ``--comment`` / ``--review`` flows).
-        allow_unborn: Improve-only opt-in to an in-place unborn context with
-            both SHA anchors absent. Other modes keep their born-HEAD requirement.
-        private_owner: Pre-resolved source owner for private operational
-            worktrees. Standalone callers may omit it to resolve the default
-            private locations once from *source*.
-
-    Yields:
-        A :class:`WorkContext` describing the resolved working environment.
-
-    Raises:
-        NotAWorktreeError: If *source* is not the top-level of a worktree.
-        BranchNotFoundError: If *branch* or the resolved *base* cannot be
-            located locally or on ``origin``.
-        GitError: For other unexpected git failures.
-
-    Note:
-        The design doc (``2026-04-30-worktree-isolation-and-mode-consolidation.md``)
-        specifies a ``WrongBranchError`` check here when ``branch is None`` and
-        ``current_branch == base_branch``. That check lives in
-        :func:`daydream.runner._dispatch` instead because it must fire only for
-        ``output_mode="loop"`` (not ``--comment`` or ``--review``), and this
-        function is deliberately mode-agnostic.
+    Validate/resolve the source's private owner before any mutation. Unborn Improve
+    requires explicit opt-in, a symbolic HEAD, and no branch/base/ephemeral override.
+    Mode-specific wrong-branch checks belong to the runner.
     """
     git_ops.assert_is_worktree(source)
     if private_owner is None:
@@ -374,42 +301,6 @@ async def open_audit_workspace(
             _logger.warning("audit snapshot cleanup failed during primary error: %s", type(exc).__name__)
 
 
-def _prune_stale_locked_worktrees(
-    repo: Path,
-    paths: Iterable[Path],
-    *,
-    stale_after_s: int,
-) -> int:
-    """Remove stale locked worktrees from a discovery iterable, tolerating failures.
-
-    Single source of truth for the lock-aware prune policy shared by the
-    audit prune (this module) and the re-anchor prune
-    (``daydream.improve.plans.prune_stale_reanchor_worktrees``), so the
-    staleness window, live-lock skip rule, and unlock-before-remove ordering
-    live in one place and cannot silently drift. A live worktree (lock age
-    near zero) is skipped without any removal attempt, so a concurrent run
-    mid-write is never destroyed. A worktree whose lock is older than
-    ``stale_after_s`` is a crashed run's leftover: it is reclaimed via
-    ``git_ops.worktree_remove_unlocked`` (unlock, then force-remove) rather
-    than wedged forever. Unlocked worktrees are removed the same way, the
-    unlock being a no-op for them. Individual failures are tolerated so one
-    stale worktree never blocks a plan run.
-    """
-    removed = 0
-    for path in paths:
-        try:
-            locked_at = git_ops.worktree_lock_mtime(path)
-            if locked_at is not None and time.time() - locked_at <= stale_after_s:
-                # Live worktree (lock age near zero): never unlock or remove
-                # it, so a concurrent run mid-write is not destroyed.
-                continue
-            git_ops.worktree_remove_unlocked(repo, path)
-        except git_ops.GitError:
-            continue
-        removed += 1
-    return removed
-
-
 def copy_files_into_ephemeral(
     source: Path,
     dest: Path,
@@ -417,31 +308,13 @@ def copy_files_into_ephemeral(
     extra: list[Path] | None = None,
     skip: bool = False,
 ) -> list[Path]:
-    """Copy gitignored support files (e.g. ``.env``) into an ephemeral worktree.
+    """Copy configured support files, then additive ``extra`` entries, in first-seen order.
 
-    The list of files to copy is, in order:
-
-    1. ``[tool.daydream.workspace] copy`` from ``source/pyproject.toml`` if set.
-    2. Otherwise, the default list (``.env``, ``.env.local``) plus any
-       ``.env.*`` siblings -- restricted to gitignored files only.
-    3. Any *extra* paths supplied (e.g. via ``--copy``) -- additive.
-
-    Files that do not exist in *source* (or are not regular files) are
-    skipped silently.
-
-    Before anything is copied, every entry (de-duplicated, first-occurrence
-    order) is validated fail-closed against BOTH *source* and *dest* roots by
-    :func:`_resolve_workspace_copy_path`. An absolute/``..`` entry or one that
-    resolves outside either root raises :class:`WorkspaceCopyPathError` and
-    aborts the whole copy, leaving nothing partially copied.
-
-    Args:
-        extra: Optional additional relative paths from CLI flags.
-        skip: When True, return ``[]`` immediately (no-op for read-only
-            review flows that do not need test fixtures).
-
-    Returns:
-        The list of paths actually copied (relative to *source*).
+    The pyproject workspace.copy list replaces defaults; defaults include only
+    ignored .env/.env.local/.env.* files. Missing/non-files are skipped.
+    Validate every entry against both roots before copying anything: absolute,
+    parent-traversing, unresolved or outward-symlink paths abort the whole copy.
+    ``skip`` returns immediately without inspecting either workspace.
     """
     if skip:
         return []
@@ -481,18 +354,10 @@ def _dedupe_ordered(entries: Iterable[str | Path]) -> list[Path]:
 
 
 def _resolve_workspace_copy_path(entry: Path, root: Path, root_label: str) -> None:
-    """Validate a workspace-copy entry against *root*, fail-closed.
+    """Require a relative, parent-free path whose resolved target stays within root.
 
-    Unlike ``daydream/improve/command_contract.py::path_is_confined`` -- which
-    walks each path part and rejects symlink edges up-front before its final
-    canonical containment check -- this helper relies solely on
-    ``resolve(strict=False)`` + ``is_relative_to(root)`` to detect containment
-    violations. On a violation it raises a :class:`WorkspaceCopyPathError`
-    naming *root_label* instead of returning a bool.
-
-    Raises:
-        WorkspaceCopyPathError: If *entry* is absolute or contains ``..``, or
-            resolves outside *root*, or cannot be resolved at all.
+    Inward symlinks are allowed. Resolution errors and escapes raise
+    WorkspaceCopyPathError naming the affected root.
     """
     if entry.is_absolute() or ".." in entry.parts:
         raise WorkspaceCopyPathError(f"workspace copy path must be relative and must not contain '..': {entry}")
@@ -512,205 +377,6 @@ def _make_run_id() -> str:
     """Return a unique ``<UTC YYYYMMDDHHMMSS>-<hex8>`` identifier."""
     timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
     return f"{timestamp}-{secrets.token_hex(4)}"
-
-
-def _legacy_operational_root(
-    source: Path,
-    name: str,
-    *,
-    label: str = "legacy operational namespace",
-) -> Path:
-    """Return one legacy root after no-follow lexical directory validation."""
-    if name not in {"worktrees", "audit"}:
-        raise ArtifactVisibilityError(f"{label} name is invalid")
-    ancestor = source / ".daydream"
-    root = ancestor / name
-    try:
-        ancestor_metadata = ancestor.lstat()
-    except FileNotFoundError:
-        return root
-    except OSError as exc:
-        raise ArtifactVisibilityError(f"{label} is inaccessible") from exc
-    if stat.S_ISLNK(ancestor_metadata.st_mode) or not stat.S_ISDIR(
-        ancestor_metadata.st_mode
-    ):
-        raise ArtifactVisibilityError(f"{label} ancestor must be a real directory")
-    try:
-        root_metadata = root.lstat()
-    except FileNotFoundError:
-        return root
-    except OSError as exc:
-        raise ArtifactVisibilityError(f"{label} is inaccessible") from exc
-    if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
-        raise ArtifactVisibilityError(f"{label} must be a real directory")
-    return root
-
-
-def _retire_legacy_operational_worktrees(
-    source: Path,
-    owner: PrivateWorkspaceOwner,
-) -> None:
-    """Move or retire exact legacy Git worktrees before model-visible work.
-
-    Retires (never hard-fails on) unrecognized residue: junk left by crashed
-    ``git worktree add`` invocations or stray operator files inside a
-    daydream-created, untracked namespace is pruned with a warning, so one
-    stale entry cannot wedge every subsequent run on the repository. A
-    freshly-locked (live) worktree still fails closed — a concurrent run
-    mid-write must never be destroyed — and so does a registered worktree
-    whose ownership/lock probe fails outright (an unanswered safety
-    question, not provable residue). After all entries are moved or
-    retired, the emptied ``.daydream/worktrees`` / ``.daydream/audit`` root
-    directories themselves are removed, because ``_validate_legacy_public``
-    refuses any ``.daydream`` child named in the operational namespace and
-    an empty residue root would otherwise wedge every future run.
-    """
-    actions: list[tuple[str, Path, Path | None]] = []
-    destinations: set[Path] = set()
-    for root, kind in (
-        (_legacy_operational_root(source, "worktrees"), "reanchor"),
-        (_legacy_operational_root(source, "audit"), "audit"),
-    ):
-        if not root.exists():
-            continue
-        try:
-            entries = tuple(root.iterdir())
-        except OSError as exc:
-            raise ArtifactVisibilityError("legacy operational namespace is inaccessible") from exc
-        for entry in entries:
-            pattern = _LEGACY_REANCHOR_NAME if kind == "reanchor" else _LEGACY_AUDIT_NAME
-            try:
-                metadata = entry.lstat()
-            except OSError as exc:
-                raise ArtifactVisibilityError("legacy operational entry is inaccessible") from exc
-            if stat.S_ISLNK(metadata.st_mode):
-                # A symlink inside a daydream-created namespace is residue,
-                # not operator data: refuse to follow it, prune it. Data
-                # actually reachable through the link stays untouched.
-                actions.append(("retire-entry", entry, None))
-                continue
-            if not stat.S_ISDIR(metadata.st_mode):
-                # A plain file cannot be a registered git worktree, so it is
-                # provable residue regardless of name.
-                actions.append(("retire-entry", entry, None))
-                continue
-            # Real directory: probe FIRST, before trusting the name pattern.
-            # The retire gate must never delete a registered worktree without
-            # the ownership/lock probe — a live-locked worktree whose name
-            # does not match the legacy reanchor shape is still a concurrent
-            # run mid-write and must fail closed, not be silently removed.
-            try:
-                git_ops.assert_is_worktree(entry)
-                if git_ops.git_common_dir(entry) != owner.git_common_dir:
-                    # Registered to a different repository: not residue we
-                    # may destroy. Its checkout can hold that repo's
-                    # uncommitted operator work, so fail closed and keep it.
-                    raise ArtifactVisibilityError(
-                        "legacy operational worktree has different Git ownership"
-                    )
-                locked_at = git_ops.worktree_lock_mtime(entry)
-            except ArtifactVisibilityError:
-                raise
-            except git_ops.NotAWorktreeError as exc:
-                # Provably not a registered worktree of any repository
-                # (crashed ``git worktree add``, bare directory, stray
-                # file): residue, safe to retire. Cross-check the git
-                # registry first: a registered worktree whose ``.git`` link
-                # chain is temporarily broken can raise NotAWorktreeError,
-                # and destroying it would lose uncommitted operator work.
-                if git_ops.registered_worktree_containing(source, entry) is not None:
-                    raise ArtifactVisibilityError(
-                        "legacy operational entry is registry-listed but unprobeable"
-                    ) from exc
-                _logger.warning(
-                    "retiring unrecognized legacy operational entry %s (%s)",
-                    entry,
-                    exc,
-                )
-                actions.append(("retire-entry", entry, None))
-                continue
-            except git_ops.GitError as exc:
-                # The entry IS (or may be) a registered worktree but its
-                # ownership/lock probe failed: an UNANSWERED safety
-                # question — it could be live-locked mid-write holding
-                # uncommitted operator work. Fail closed, destroy nothing.
-                raise ArtifactVisibilityError(
-                    "legacy operational worktree could not be probed safely"
-                ) from exc
-            if locked_at is not None and time.time() - locked_at <= _OPERATIONAL_LOCK_STALE_AFTER_S:
-                # Live and locked: a concurrent run is mid-write. Fail closed.
-                raise ArtifactVisibilityError("legacy operational worktree is live and locked")
-            if kind == "reanchor" and pattern.fullmatch(entry.name) is not None and locked_at is None:
-                target = operational_worktree_path(owner) / entry.name
-                if target in destinations or target.exists() or target.is_symlink():
-                    raise ArtifactVisibilityError("legacy operational migration destination is occupied")
-                destinations.add(target)
-                actions.append(("move", entry, target))
-            else:
-                actions.append(("retire-worktree", entry, None))
-
-    if any(action == "move" for action, _, _ in actions):
-        operational_worktree_root(owner)
-    retired_worktrees = [entry for action, entry, _ in actions if action == "retire-worktree"]
-    if retired_worktrees and _prune_stale_locked_worktrees(
-        source,
-        retired_worktrees,
-        stale_after_s=_OPERATIONAL_LOCK_STALE_AFTER_S,
-    ) != len(retired_worktrees):
-        raise ArtifactVisibilityError("legacy operational worktree could not be retired")
-    for action, entry, action_destination in actions:
-        if action == "move":
-            assert action_destination is not None
-            git_ops.worktree_move(source, entry, action_destination)
-        elif action == "retire-entry":
-            _logger.warning("retiring unrecognized legacy operational entry %s", entry)
-            if entry.is_symlink() or not entry.is_dir():
-                entry.unlink(missing_ok=True)
-            else:
-                shutil.rmtree(entry, ignore_errors=True)
-            if entry.exists() or entry.is_symlink():
-                # Partial rmtree (EACCES/EBUSY): say so loudly instead of
-                # silently re-wedging the next run. Removal is NOT retried
-                # here and does not fail the session — the residue root is
-                # left for _validate_legacy_public to refuse with its
-                # actionable diagnostic naming the leftover.
-                _logger.warning(
-                    "residue remains at %s after retirement attempt; the next "
-                    "session open will refuse it naming the leftover",
-                    entry,
-                )
-    _remove_emptied_legacy_roots(source)
-
-
-def _remove_emptied_legacy_roots(source: Path) -> None:
-    """Remove the legacy operational roots after their entries are retired.
-
-    ``_validate_legacy_public`` refuses any ``.daydream`` child named in the
-    operational namespace, so an emptied ``.daydream/worktrees`` or
-    ``.daydream/audit`` root left behind by the migration would wedge every
-    subsequent run on the repository. Removal is best-effort and
-    non-following: a root that still holds unknown residue is left in place
-    (validation will refuse it, naming the residue), and a vanished root is
-    fine.
-    """
-    for name in ("worktrees", "audit"):
-        root = source / ".daydream" / name
-        try:
-            metadata = root.lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            raise ArtifactVisibilityError("legacy operational namespace is inaccessible") from exc
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-            continue
-        try:
-            root.rmdir()
-        except OSError:
-            # Residue remains: leave the root for _validate_legacy_public to
-            # refuse with its actionable diagnostic.
-            continue
-        with suppress(OSError):
-            _fsync_directory(root.parent)
 
 
 def _resolve_ref(source: Path, branch: str | None) -> str:
@@ -765,12 +431,7 @@ def _resolve_base(
 
 
 def _resolve_copy_entries(source: Path) -> list[Path]:
-    """Return the configured copy list (pyproject override or defaults).
-
-    The pyproject override -- when present -- replaces the default ``.env*``
-    list entirely.  Defaults apply only when ``[tool.daydream.workspace]
-    copy`` is missing.
-    """
+    """A configured workspace.copy replaces defaults; use ignored .env* defaults only when absent."""
     pyproject = source / "pyproject.toml"
     if pyproject.is_file():
         data = load_toml_or_empty(pyproject)

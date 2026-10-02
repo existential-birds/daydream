@@ -13,7 +13,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_REPO_IDENTITY_MISSING,
 )
 from daydream.archive.sanitize import _derivative_digest
-from daydream.cli import _CORPUS_SUBVERBS
+from daydream.commands.corpus import _CORPUS_SUBVERBS
 from daydream.training.corpus_projection.bundle import (
     BundleBatch,
     BundleError,
@@ -38,33 +38,17 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
     """Parse a JSONL file, ignoring blank lines (compiler/projector output)."""
     return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
-
-_MANIFEST = {
-    "schema_version": "1",
-    "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
-    "curation_id": "cur-0123456789abcdef",
-    "sanitizer_version": "1",
-    "hydration_index_schema_version": "1",
-    "admission_policy_version": "1",
-    "publication_prefix": "curated/cur-0123456789abcdef/",
-    "batches": [
-        {
-            "session_id": "sess-a",
-            "content_digest": "1111111111111111111111111111111111111111111111111111111111111111",
-            "status": "admitted",
-            "reason_code": None,
-            "artifact_relpath": "batches/sess-a",
-            "artifact_digest": None,
+_MANIFEST = {"schema_version": "1", "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+    "curation_id": "cur-0123456789abcdef", "sanitizer_version": "1", "hydration_index_schema_version": "1",
+    "admission_policy_version": "1", "publication_prefix": "curated/cur-0123456789abcdef/",
+    "batches": [{"session_id": "sess-a",
+            "content_digest": "1111111111111111111111111111111111111111111111111111111111111111", "status": "admitted",
+            "reason_code": None, "artifact_relpath": "batches/sess-a", "artifact_digest": None,
             "manifest_relpath": "batches/sess-a/manifest.json",
-        },
-        {
-            "session_id": "sess-b",
+        }, {"session_id": "sess-b",
             "content_digest": "3333333333333333333333333333333333333333333333333333333333333333",
-            "status": "quarantined",
-            "reason_code": "secrets_scan_dirty",
-            "artifact_relpath": "batches/sess-b",
-            "artifact_digest": None,
-            "manifest_relpath": None,
+            "status": "quarantined", "reason_code": "secrets_scan_dirty", "artifact_relpath": "batches/sess-b",
+            "artifact_digest": None, "manifest_relpath": None,
         },
     ],
 }
@@ -87,15 +71,9 @@ def _write_sumsums(bundle_dir: Path, *, exclude: frozenset[str] = frozenset()) -
     (bundle_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
-def _write_ann_sumsums(
-    root: Path, *, skip: frozenset[str] = frozenset({"SHA256SUMS"})
-) -> None:
+def _write_ann_sumsums(root: Path, *, skip: frozenset[str] = frozenset({"SHA256SUMS"})) -> None:
     """Regenerate an annotation bundle's SHA256SUMS listing in fixture format."""
-    rel = sorted(
-        p.relative_to(root).as_posix()
-        for p in root.rglob("*")
-        if p.is_file() and p.name not in skip
-    )
+    rel = sorted(p.relative_to(root).as_posix() for p in root.rglob("*") if p.is_file() and p.name not in skip)
     (root / "SHA256SUMS").write_text(
         "".join(f"{hashlib.sha256((root / p).read_bytes()).hexdigest()}  {p}\n" for p in rel),
         encoding="utf-8",
@@ -115,15 +93,10 @@ def _repin_annotation_bundle(bundle_dir: Path) -> None:
     (ann_dir / "lineage.json").write_text(json.dumps(ann_lineage, sort_keys=True) + "\n")
     _write_ann_sumsums(ann_dir, skip=frozenset({"SHA256SUMS", "_SUCCESS"}))
 
-
 _SEED_REPO_SLUGS = {"sess-a": "owner/repo-a"}
 
 
-def _write_bundle(
-    tmp_path: Path,
-    *,
-    with_success: bool = True,
-    corrupt_digest: bool = False,
+def _write_bundle(tmp_path: Path, *, with_success: bool = True, corrupt_digest: bool = False,
     repo_slugs: dict[str, str] | None = _SEED_REPO_SLUGS,
 ) -> Path:
     bundle_dir = tmp_path / "curated" / "cur-0123456789abcdef"
@@ -150,24 +123,16 @@ def _write_bundle(
 
 
 def _write_annotations_snapshot(
-    bundle_dir: Path,
-    *,
-    valid_at: str = "2026-01-01T00:00:00+00:00",
-    session_id: str = "sess-a",
-    dispositions: list[str] | None = None,
-    stack: str = "python",
-    n_siblings: int = 1,
+    bundle_dir: Path, *, valid_at: str = "2026-01-01T00:00:00+00:00", session_id: str = "sess-a",
+    dispositions: list[str] | None = None, stack: str = "python", n_siblings: int = 1,
 ) -> Path:
     """Two-bundle shape: a self-verified annotation bundle (its own
     SHA256SUMS + _SUCCESS + lineage.json) whose ``annotations.jsonl``
     carries per-finding resolution records keyed by ``record_id``. Also
     gives the admitted batch a real ATIF trajectory so segmentation has
     something to segment (``n_siblings`` sibling subagent refs)."""
-    trajectory = {
-        "session_id": session_id,
-        "trajectory_id": f"{session_id}:root",
-        "subagent_trajectory_ref": [
-            {"trajectory_id": f"{session_id}:fix-{i}", "session_id": session_id, "steps": [
+    trajectory = {"session_id": session_id, "trajectory_id": f"{session_id}:root",
+        "subagent_trajectory_ref": [{"trajectory_id": f"{session_id}:fix-{i}", "session_id": session_id, "steps": [
                 {"step_id": 1, "source": "agent", "message": "fix"},
             ]}
             for i in range(n_siblings)
@@ -175,9 +140,7 @@ def _write_annotations_snapshot(
     }
     # Producer-realistic batch shape: the ATIF trajectory lives at
     # ``batches/<session_id>/trajectory.json`` (single JSON object).
-    (bundle_dir / "batches" / session_id / "trajectory.json").write_text(
-        json.dumps(trajectory) + "\n"
-    )
+    (bundle_dir / "batches" / session_id / "trajectory.json").write_text(json.dumps(trajectory) + "\n")
     ann_dir = bundle_dir.parent / f"{bundle_dir.name}-annotations"
     ann_dir.mkdir(parents=True, exist_ok=True)
     # Merge with any rows a previous call wrote (per-session helper called
@@ -198,17 +161,14 @@ def _write_annotations_snapshot(
         sess_prefix = hashlib.sha256(session_id.encode()).hexdigest()[:2] if prior else ""
         fps = [sess_prefix + fp for fp in ("a1" * 32, "b2" * 32, "c3" * 32)]
         for i, disposition in enumerate(dispositions or ["accepted", "rejected", "ambiguous"]):
-            evidence = (
-                [{"comment_id": i + 1, "created_at": "2026-02-01T00:00:00+00:00",
+            evidence = ([{"comment_id": i + 1, "created_at": "2026-02-01T00:00:00+00:00",
                   "classifier_label": disposition, "valid_at": valid_at}]
                 if disposition in ("accepted", "rejected")
                 else []
             )
             fingerprint = fps[i % len(fps)]
-            rows.append({
-                "record_id": record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
-                "session_id": session_id, "fingerprint": fingerprint,
-                "disposition": disposition, "evidence": evidence,
+            rows.append({"record_id": record_id(session_id, f"{session_id}:root", "seg-0", fingerprint),
+                "session_id": session_id, "fingerprint": fingerprint, "disposition": disposition, "evidence": evidence,
                 # Real canonical-record shape (adjudication/snapshot.py:
                 # build_canonical_record): the four review-profile fields nest
                 # under "profile" with only "stack" at top level — the projector
@@ -224,10 +184,7 @@ def _write_annotations_snapshot(
     # content_digest uses) — computed AFTER the bundle is final so the gate's
     # equality check against the bundle dir passes.
     _write_annotation_bundle(
-        ann_dir,
-        rows,
-        curation_id=manifest["curation_id"],
-        sanitized_commit=manifest["source_hub_commit"],
+        ann_dir, rows, curation_id=manifest["curation_id"], sanitized_commit=manifest["source_hub_commit"],
         batch_fileset_digest=_derivative_digest(bundle_dir),
     )
     return ann_dir / "annotations.jsonl"
@@ -248,7 +205,6 @@ def test_load_bundle_refuses_batches_missing_repo_identity(tmp_path: Path) -> No
     with pytest.raises(BundleError, match=REASON_CODE_REPO_IDENTITY_MISSING):
         load_curated_bundle(bundle_dir)
 
-
 def test_load_bundle_refuses_missing_license_evidence(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
     # Strip license_evidence from sess-a's row only, keeping repo_slug.
@@ -262,12 +218,10 @@ def test_load_bundle_refuses_missing_license_evidence(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match=REASON_CODE_LICENSE_EVIDENCE_MISSING):
         load_curated_bundle(bundle_dir)
 
-
 def test_load_bundle_admission_gate_passes_wellformed_bundle(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path, repo_slugs={"sess-a": "owner/repo-a"})
     loaded = load_curated_bundle(bundle_dir)  # no raise
     assert all(b.repo_slug for b in loaded.admitted)
-
 
 def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_path: Path) -> None:
     # The merge path prefixes a NEW session's fingerprints so distinct
@@ -279,10 +233,8 @@ def test_repeated_annotation_snapshot_session_does_not_fabricate_duplicates(tmp_
     # rows projected as distinct records. A repeated session must be an
     # idempotent no-op instead.
     bundle_dir = _write_bundle(tmp_path)
-    _write_annotations_snapshot(bundle_dir, session_id="sess-a",
-                                dispositions=["accepted", "rejected"])
-    snap = _write_annotations_snapshot(bundle_dir, session_id="sess-a",
-                                       dispositions=["accepted", "rejected"])
+    _write_annotations_snapshot(bundle_dir, session_id="sess-a", dispositions=["accepted", "rejected"])
+    snap = _write_annotations_snapshot(bundle_dir, session_id="sess-a", dispositions=["accepted", "rejected"])
     rows = _read_jsonl(snap)
     assert len(rows) == 2  # one per finding, not a prefixed duplicate pair
     assert [r["session_id"] for r in rows] == ["sess-a", "sess-a"]
@@ -303,23 +255,18 @@ def existing_bundle_fixture(tmp_path: Path) -> tuple[Path, list[dict[str, Any]],
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
     rows = _read_jsonl(snap)
     manifest = json.loads((bundle_dir / "curation-manifest.json").read_text())
-    kwargs = {"curation_id": manifest["curation_id"],
-              "hub_commit": manifest["source_hub_commit"]}
+    kwargs = {"curation_id": manifest["curation_id"], "hub_commit": manifest["source_hub_commit"]}
     return bundle_dir, rows, kwargs
 
 
 def _write_annotation_bundle(root: Path, rows: list[dict[str, Any]], *, curation_id: str,
-                             sanitized_commit: str, batch_fileset_digest: str,
-                             success: bool = True) -> Path:
+                             sanitized_commit: str, batch_fileset_digest: str, success: bool = True) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     (root / "annotations.jsonl").write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8")
-    (root / "lineage.json").write_text(json.dumps({
-        "curation_id": curation_id, "sanitized_hub_commit": sanitized_commit,
-        "schema_version": "annotation-snapshot/1055-snapshot-r1",
-        "batch_fileset_digest": batch_fileset_digest,
-        "labeler_version": "v1", "rubric_version": "v1",
-        "classifier_version": "v1", "as_of": None,
+    (root / "lineage.json").write_text(json.dumps({"curation_id": curation_id, "sanitized_hub_commit": sanitized_commit,
+        "schema_version": "annotation-snapshot/1055-snapshot-r1", "batch_fileset_digest": batch_fileset_digest,
+        "labeler_version": "v1", "rubric_version": "v1", "classifier_version": "v1", "as_of": None,
     }, sort_keys=True) + "\n", encoding="utf-8")
     _write_ann_sumsums(root)
     if success:
@@ -334,18 +281,15 @@ def test_load_bundle_carries_repo_slug_and_license_evidence(tmp_path: Path) -> N
     assert sess_a.repo_slug == "owner/repo-a"
     assert sess_a.license_evidence == {"spdx_id": "MIT", "source": "manifest"}
 
-
 def test_bundle_batch_tolerates_absent_new_fields() -> None:
     # Legacy manifests (pre-gate bundles) still parse; the *gate* (Task 4)
     # rejects them, not the schema parser — keep KD7's refusal at the gate
     # layer so the error names the reason code, not a pydantic traceback.
     batch = BundleBatch(
-        session_id="s", content_digest="1" * 64, status="admitted",
-        reason_code=None, artifact_relpath="batches/s",
+        session_id="s", content_digest="1" * 64, status="admitted", reason_code=None, artifact_relpath="batches/s",
     )
     assert batch.repo_slug is None
     assert batch.license_evidence is None
-
 
 def test_load_bundle_requires_success_marker(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
@@ -353,12 +297,10 @@ def test_load_bundle_requires_success_marker(tmp_path: Path) -> None:
     with pytest.raises(BundleError, match="_SUCCESS"):
         load_curated_bundle(bundle_dir)
 
-
 def test_load_bundle_rejects_digest_mismatch(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path, corrupt_digest=True)
     with pytest.raises(BundleError, match="digest mismatch"):
         load_curated_bundle(bundle_dir)
-
 
 def test_load_bundle_rejects_incompatible_schema_version(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
@@ -371,7 +313,6 @@ def test_load_bundle_rejects_incompatible_schema_version(tmp_path: Path) -> None
     with pytest.raises(BundleError, match="schema_version"):
         load_curated_bundle(bundle_dir)
 
-
 def test_load_bundle_uses_relative_paths_only(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     loaded = load_curated_bundle(bundle_dir)
@@ -380,7 +321,6 @@ def test_load_bundle_uses_relative_paths_only(tmp_path: Path) -> None:
         assert not str(batch.artifact_relpath).startswith("/")
         assert ".." not in Path(batch.artifact_relpath).parts
         assert (bundle_dir / batch.artifact_relpath).exists()
-
 
 def test_load_bundle_rejects_missing_batches_file(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
@@ -396,20 +336,16 @@ def test_record_id_is_stable_and_discriminating() -> None:
     assert record_id(session_id="s1", trajectory_id="s1:fix-0", segment_id="seg-1", fingerprint="ab" * 32) != a
     assert record_id(session_id="s1", trajectory_id="s1:fix-0", segment_id="seg-0", fingerprint="cd" * 32) != a
 
-
 def test_record_id_is_deterministic_sha256_of_canonical_join() -> None:
     expected = hashlib.sha256(b"s1\x1fs1:fix-0\x1fseg-0\x1f" + b"ab" * 32).hexdigest()
     assert record_id("s1", "s1:fix-0", "seg-0", "ab" * 32) == expected
 
 
-def _resolution(
-    disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None,
+def _resolution(disposition: str, *, reward: dict[str, object] | None = None, score: float | None = None,
     evidence_after_as_of: bool = False,
 ) -> dict[str, object]:
     r: dict[str, object] = {
-        "fingerprint": "ab" * 32,
-        "disposition": disposition,
-        "evidence": [{"created_at": "2026-02-01T00:00:00+00:00"}],
+        "fingerprint": "ab" * 32, "disposition": disposition, "evidence": [{"created_at": "2026-02-01T00:00:00+00:00"}],
     }
     if evidence_after_as_of:
         r["evidence_after_as_of"] = True
@@ -424,12 +360,10 @@ def test_decisive_dispositions_are_gold() -> None:
     assert classify_tier(_resolution("accepted")) == "gold"
     assert classify_tier(_resolution("rejected")) == "gold"
 
-
 def test_non_decisive_dispositions_never_gold() -> None:
     for d in ("ambiguous", "unanswered", "missing"):
         assert classify_tier(_resolution(d)) != "gold"
         assert classify_tier(_resolution(d)) == "task-only"
-
 
 def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
     # C5: a perfect intrinsic score or a confident self-score with a
@@ -440,7 +374,6 @@ def test_intrinsic_reward_and_llm_score_cannot_promote_gold() -> None:
     with pytest.raises(GoldGateError):
         classify_tier({"fingerprint": "ab" * 32, "disposition": "accepted", "evidence": []})
 
-
 def test_evidence_after_as_of_rows_are_never_gold() -> None:
     # C5/M9 recorded-and-flagged edge: evidence observed after the pin's
     # as_of keeps its evidence but is never gold-eligible — a decisive
@@ -449,7 +382,6 @@ def test_evidence_after_as_of_rows_are_never_gold() -> None:
     assert classify_tier(_resolution("rejected", evidence_after_as_of=True)) == "silver"
     assert classify_tier(_resolution("accepted", evidence_after_as_of=False)) == "gold"
     assert classify_tier(_resolution("accepted")) == "gold"
-
 
 def test_tiers_are_disjoint_classes() -> None:
     # process-trace tier is silver, never gold; eligibility is a separate field
@@ -470,39 +402,32 @@ def test_segment_order_is_fork_registration_then_descriptor() -> None:
     assert [s.segment_id for s in segs] == ["seg-0", "seg-1"]
     assert [s.trajectory_id for s in segs] == ["s1:fix-1", "s1:fix-0"]
 
-
 def test_segment_ids_qualify_session_and_descriptor() -> None:
     traj = _traj([("s1:fix-0", "a.jsonl")])
     seg = segment(traj)[0]
     assert seg.trajectory_id == "s1:fix-0" and seg.session_id == "s1"
-
 
 def test_root_alone_is_seg0() -> None:
     segs = segment({"trajectory_id": "s1:root", "session_id": "s1"})
     assert [s.segment_id for s in segs] == ["seg-0"]
     assert segs[0].trajectory_id == "s1:root"
 
-
 def test_duplicate_sibling_keys_raise() -> None:
     traj = _traj([("s1:fix-0", "a.jsonl"), ("s1:fix-0", "a.jsonl")])
     with pytest.raises(ValueError, match="s1:fix-0"):
         segment(traj)
 
-
 # Task 6: profile + stack provenance
 
 
 def test_native_profile_fields_surface_from_manifest() -> None:
-    manifest_row = {
-        "profile_schema_version": 2, "profile_name": "deep-review",
-        "profile_source_kind": "builtin", "profile_digest": "d" * 64,
-        "skill": None,
+    manifest_row = {"profile_schema_version": 2, "profile_name": "deep-review",
+        "profile_source_kind": "builtin", "profile_digest": "d" * 64, "skill": None,
     }
     prov = extract_provenance(manifest_row)
     assert prov["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
                                "profile_source_kind": "builtin", "profile_digest": "d" * 64}
     assert "skill" not in prov or prov["skill"] is None  # optional provenance only
-
 
 def test_native_profile_run_without_legacy_skill_validates() -> None:
     v2_record = {"profile": {"profile_schema_version": 2, "profile_name": "n",
@@ -518,7 +443,6 @@ def test_native_profile_run_without_legacy_skill_validates() -> None:
     assert prov["profile"] == {"profile_schema_version": None, "profile_name": None,
                                "profile_source_kind": None, "profile_digest": None}
 
-
 def test_legacy_skill_carried_as_provenance_never_required() -> None:
     prov = extract_provenance({"skill": "beagle-python:review-python", "profile_schema_version": None,
                                "profile_name": None, "profile_source_kind": None,
@@ -527,11 +451,9 @@ def test_legacy_skill_carried_as_provenance_never_required() -> None:
     assert prov["stack"] == "python"
     assert all(v is None for v in prov["profile"].values())
 
-
 def test_stack_falls_back_to_none_when_unresolvable() -> None:
     prov = extract_provenance({"skill": "unknown-thing", "stack": None})
     assert prov["stack"] is None
-
 
 # Task 7: per-finding projection + adjudication routing
 
@@ -551,14 +473,11 @@ def test_mixed_session_yields_two_distinct_gold_records() -> None:
     assert {r["record_id"] for r in gold} and len({r["record_id"] for r in gold}) == 2
     assert {r["disposition"] for r in gold} == {"accepted", "rejected"}
 
-
 def test_reply_existence_never_constitutes_acceptance() -> None:
     # ambiguous: a reply exists but the classifier did not map accepted/rejected
     records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
-                                     "segment_id": "seg-0",
-                                     "resolutions": [_res("c3" * 32, "ambiguous")]}))
+                                     "segment_id": "seg-0", "resolutions": [_res("c3" * 32, "ambiguous")]}))
     assert all(r["tier"] != "gold" for r in records)
-
 
 def test_non_decisive_findings_route_to_adjudication() -> None:
     session = {"session_id": "s1", "trajectory_id": "s1:root", "segment_id": "seg-0",
@@ -568,16 +487,13 @@ def test_non_decisive_findings_route_to_adjudication() -> None:
     assert {a["fingerprint"] for a in adjudication} == {"d4" * 32, "e5" * 32}
     assert all(a["evidence"] == [] for a in adjudication)  # evidence carried for the human pass
 
-
 def test_run_level_contested_aggregate_never_erases_split() -> None:
     # v1 collapse: outcome_label="contested". v2 must never produce that shape.
     records = list(project_findings({"session_id": "s1", "trajectory_id": "s1:root",
                                      "segment_id": "seg-0",
-                                     "resolutions": [_res("a1" * 32, "accepted"),
-                                                     _res("b2" * 32, "rejected")]}))
+                                     "resolutions": [_res("a1" * 32, "accepted"), _res("b2" * 32, "rejected")]}))
     assert all(r["outcome_label"] != "contested" for r in records)
     assert sorted(str(r["disposition"]) for r in records) == ["accepted", "rejected"]
-
 
 # Task 9: summary + full lineage + adjudication report
 
@@ -585,8 +501,7 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected", "ambiguous"])
     summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
-    assert set(summary) >= {"records_by_type", "records_by_tier", "records_by_split",
-                            "caps", "exclusions_by_reason"}
+    assert set(summary) >= {"records_by_type", "records_by_tier", "records_by_split", "caps", "exclusions_by_reason"}
     assert summary["records_by_type"]["outcome-finding"] >= 2
     lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
     for key in ("hub_commit", "curation_id", "content_digests", "labeler_policy_version",
@@ -595,7 +510,6 @@ def test_build_summary_and_lineage_are_complete(tmp_path: Path) -> None:
     adj_report = tmp_path / "out" / "adjudication-report.json"
     assert adj_report.is_file()
     assert "missing" in adj_report.read_text()
-
 
 # Task 5: per-repo license decisions on projected records
 
@@ -607,19 +521,12 @@ def _policy_file(tmp_path: Path, *, spdx_decisions: dict[str, str] | None = None
     if spdx_decisions is None:
         spdx_decisions = {"MIT": "accepted"}
     policy_path = tmp_path / "license-policy.json"
-    policy_path.write_text(
-        json.dumps({"policy_version": "1", "spdx_decisions": spdx_decisions}) + "\n"
-    )
+    policy_path.write_text(json.dumps({"policy_version": "1", "spdx_decisions": spdx_decisions}) + "\n")
     return policy_path
 
 
 def _config_for(
-    bundle_dir: Path,
-    tmp_path: Path,
-    license_policy: Any = _UNSET,
-    *,
-    out_dir: Path | None = None,
-    **kw: Any,
+    bundle_dir: Path, tmp_path: Path, license_policy: Any = _UNSET, *, out_dir: Path | None = None, **kw: Any,
 ) -> Any:
     """BuildFrozenCorpusConfig over the fixture's bundle + annotation bundle.
 
@@ -629,12 +536,8 @@ def _config_for(
     if license_policy is _UNSET:
         license_policy = _policy_file(bundle_dir.parent)
     snap = bundle_dir.parent / (bundle_dir.name + "-annotations") / "annotations.jsonl"
-    return BuildFrozenCorpusConfig(
-        out_dir=out_dir if out_dir is not None else tmp_path / "out",
-        bundle_dir=bundle_dir,
-        annotation_bundle_dir=snap.parent,
-        license_policy_path=license_policy,
-        **kw,
+    return BuildFrozenCorpusConfig(out_dir=out_dir if out_dir is not None else tmp_path / "out", bundle_dir=bundle_dir,
+        annotation_bundle_dir=snap.parent, license_policy_path=license_policy, **kw,
     )
 
 
@@ -654,14 +557,12 @@ def test_projected_records_carry_per_repo_license_decision(
         assert decision["policy_version"] == "1"
         assert decision["repo_slug"] == "owner/repo-a"
 
-
 def test_build_with_only_global_license_and_no_policy_is_refused(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
     with pytest.raises(ValueError, match="license_policy"):
         _config_for(bundle_dir, tmp_path, license_policy=None)
-
 
 def test_schema_validation_accepts_evolved_v2_records(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
@@ -674,7 +575,6 @@ def test_schema_validation_accepts_evolved_v2_records(
     for rec in _read_jsonl(tmp_path / "out" / "corpus.jsonl"):
         jsonschema.validate(rec, schema)  # no raise
 
-
 def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) -> None:
     bundle_dir = _write_bundle(tmp_path)
     _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
@@ -685,7 +585,6 @@ def test_projected_records_carry_profile_and_stack_provenance(tmp_path: Path) ->
         assert rec["profile"] == {"profile_schema_version": 2, "profile_name": "deep-review",
                                    "profile_source_kind": "builtin", "profile_digest": "d" * 64}
         assert "stack" in rec  # schema-required provenance key, never dropped
-
 
 def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     """The emission boundary honors the canonical harvest's flag: a decisive
@@ -709,7 +608,6 @@ def test_evidence_after_as_of_findings_never_emit_gold(tmp_path: Path) -> None:
     assert records and records[0]["tier"] == "silver"
     assert records[0]["outcome_label"] is None
 
-
 # Frozen-corpus loader surface (stacks.py)
 
 def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
@@ -722,7 +620,6 @@ def test_v2_loader_loads_projected_manifest_fail_closed(tmp_path: Path) -> None:
     assert all(r["schema_version"] == "2" for r in records)
     assert all(r["tier"] in {"gold", "silver", "task-only"} for r in records)
 
-
 def test_v2_loader_refuses_non_v2_record_namingrecord_id(tmp_path: Path) -> None:
     out = tmp_path / "proj"
     out.mkdir()
@@ -732,7 +629,6 @@ def test_v2_loader_refuses_non_v2_record_namingrecord_id(tmp_path: Path) -> None
     with pytest.raises(ValueError, match="deadbeef"):
         load_dataset_v2(out)
 
-
 def test_v2_loader_refuses_malformed_line_verbatim(tmp_path: Path) -> None:
     out = tmp_path / "proj"
     out.mkdir()
@@ -740,7 +636,6 @@ def test_v2_loader_refuses_malformed_line_verbatim(tmp_path: Path) -> None:
     (out / "train.jsonl").write_text("{not json\n")
     with pytest.raises(json.JSONDecodeError):
         load_dataset_v2(out)
-
 
 def test_v2_loader_refuses_partial_projection_without_success_marker(tmp_path: Path) -> None:
     # A mid-write failure leaves a partial file set behind; without the
@@ -751,7 +646,6 @@ def test_v2_loader_refuses_partial_projection_without_success_marker(tmp_path: P
     (out / "train.jsonl").write_text("{}\n")
     with pytest.raises(ValueError, match="_SUCCESS"):
         load_dataset_v2(out)
-
 
 def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None:
     # The projector copies schema/record-schema.json beside its output, so every emitted
@@ -767,9 +661,7 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
     validator = Draft202012Validator(json.loads(schema_path.read_text()))
     records = _read_jsonl(out / "corpus.jsonl")
     assert records
-    errors = sorted(
-        (err.json_path, err.message) for rec in records for err in validator.iter_errors(rec)
-    )
+    errors = sorted((err.json_path, err.message) for rec in records for err in validator.iter_errors(rec))
     assert not errors, errors
     # every split-manifest record must validate too
     for name in ("train.jsonl", "validation.jsonl", "holdout.jsonl"):
@@ -777,14 +669,11 @@ def test_emitted_records_validate_against_shipped_schema(tmp_path: Path) -> None
             errors = list(validator.iter_errors(rec))
             assert not errors, (name, errors)
 
-
 def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
     # The snapshot resolutions are session-scoped, so one finding must never
     # fan out into per-segment copies that could land in different splits.
     bundle_dir = _write_bundle(tmp_path)
-    _write_annotations_snapshot(
-        bundle_dir, dispositions=["accepted", "rejected"], n_siblings=2
-    )
+    _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"], n_siblings=2)
     out = tmp_path / "proj"
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
     records = _read_jsonl(out / "corpus.jsonl")
@@ -794,7 +683,6 @@ def test_one_record_per_finding_across_segments(tmp_path: Path) -> None:
     for rec in records:
         by_fp.setdefault(str(rec["finding_fingerprint"]), []).append(rec)
     assert all(len(v) == 1 for v in by_fp.values())
-
 
 def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -> None:
     # Non-decisive findings are report output only (D8): excluded from
@@ -815,7 +703,6 @@ def test_task_only_findings_are_adjudication_only_not_training(tmp_path: Path) -
     assert [a["fingerprint"] for a in adjudication] == ["b2" * 32]
     assert (out / "_SUCCESS").is_file()
 
-
 # Task 11: CLI wiring — ``daydream corpus build``
 # ---------------------------------------------------------------------------
 
@@ -831,14 +718,12 @@ def test_cli_build_v2_projects_real_bundle(tmp_path: Path) -> None:
     assert (tmp_path / "out" / "corpus.jsonl").is_file()
     assert (tmp_path / "out" / "lineage.json").is_file()
 
-
 def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None:
     rc = cli_main(["corpus", "build", "--bundle-root", str(tmp_path / "nope"),
                    "--annotation-bundle-root", str(tmp_path / "nope" / "ann"),
                    "--out", str(tmp_path / "out" / "c.jsonl")])
     assert rc != 0
     assert not (tmp_path / "out" / "lineage.json").exists()
-
 
 # ---------------------------------------------------------------------------
 # Task 7: two-bundle build contract (annotation bundle self-verification +
@@ -847,35 +732,28 @@ def test_cli_build_v2_refuses_missing_bundle_fail_closed(tmp_path: Path) -> None
 
 
 def test_build_v2_accepts_separate_annotation_bundle_with_exact_linkage(
-    tmp_path: Path,
-    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
 ) -> None:
     bundle_dir, snapshot_rows, kwargs = existing_bundle_fixture
     ann = _write_annotation_bundle(
-        tmp_path / "ann", snapshot_rows,
-        curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
+        tmp_path / "ann", snapshot_rows, curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
         batch_fileset_digest=_derivative_digest(bundle_dir))
     config = BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
-                                 annotation_bundle_dir=ann,
-                                 license_policy_path=_policy_file(tmp_path))
+                                 annotation_bundle_dir=ann, license_policy_path=_policy_file(tmp_path))
     summary = build_frozen_corpus(config)
     assert summary["emitted"] > 0
     # curation bundle untouched (K3: no mutation of the finalized bundle)
     sums_before = (bundle_dir / "SHA256SUMS").read_bytes()
     assert (bundle_dir / "SHA256SUMS").read_bytes() == sums_before
 
-
 @pytest.mark.parametrize("mutate", ["missing_success", "wrong_curation", "wrong_commit",
                                     "wrong_fileset", "corrupt_checksum", "missing_success_after"])
 def test_build_v2_refuses_broken_annotation_bundles(
-    tmp_path: Path,
-    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
-    mutate: str,
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]], mutate: str,
 ) -> None:
     bundle_dir, snapshot_rows, kwargs = existing_bundle_fixture
     ann = _write_annotation_bundle(
-        tmp_path / "ann", snapshot_rows,
-        curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
+        tmp_path / "ann", snapshot_rows, curation_id=kwargs["curation_id"], sanitized_commit=kwargs["hub_commit"],
         batch_fileset_digest=_derivative_digest(bundle_dir),
         success=mutate not in ("missing_success", "missing_success_after"))
     lineage = json.loads((ann / "lineage.json").read_text())
@@ -892,25 +770,20 @@ def test_build_v2_refuses_broken_annotation_bundles(
     if mutate in ("wrong_curation", "wrong_commit", "wrong_fileset"):
         (ann / "lineage.json").write_text(json.dumps(lineage, sort_keys=True) + "\n", encoding="utf-8")
     config = BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir,
-                                 annotation_bundle_dir=ann,
-                                 license_policy_path=_policy_file(tmp_path))
+                                 annotation_bundle_dir=ann, license_policy_path=_policy_file(tmp_path))
     with pytest.raises(ValueError):
         build_frozen_corpus(config)
 
-
 def test_build_v2_still_works_without_annotation_bundle_dir_raises(
-    tmp_path: Path,
-    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
 ) -> None:
     bundle_dir, _rows, _ = existing_bundle_fixture
     with pytest.raises(ValueError, match="annotation_bundle_dir"):
         BuildFrozenCorpusConfig(out_dir=tmp_path / "out", bundle_dir=bundle_dir)
 
-
 # Task 6: projection re-enforces C5/C8, accounts rejections, gates _SUCCESS
 
-def _inject_admitted_repo_slug(
-    bundle_dir: Path, slug: str, *, spdx_id: str = "MIT"
+def _inject_admitted_repo_slug(bundle_dir: Path, slug: str, *, spdx_id: str = "MIT"
 ) -> None:
     """Rewrite every admitted batch's repo identity + license evidence in the
     curation manifest (defence-in-depth probe: admission should have caught
@@ -942,7 +815,6 @@ def test_projection_rejects_c5_repo_and_refuses_success(
     assert not (tmp_path / "out" / "_SUCCESS").exists()
     assert not (tmp_path / "out" / "corpus.jsonl").exists()  # refuse = write nothing
 
-
 def test_unopted_copyleft_repo_refuses_projection(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
@@ -957,7 +829,6 @@ def test_unopted_copyleft_repo_refuses_projection(
         build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=policy))
     assert not (tmp_path / "out" / "_SUCCESS").exists()
     assert not (tmp_path / "out" / "corpus.jsonl").exists()  # refuse = write nothing
-
 
 def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
@@ -974,7 +845,6 @@ def test_mixed_repo_with_one_unopted_copyleft_batch_refuses_and_names_pairs(
     # The clean batch is named nowhere in the refusal — only offenders are.
     assert "'sess-a'" not in str(excinfo.value)
 
-
 def test_build_lineage_pins_license_policy_and_decisions(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
 ) -> None:
@@ -983,29 +853,17 @@ def test_build_lineage_pins_license_policy_and_decisions(
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     lineage = json.loads((out / "lineage.json").read_text())
     assert lineage["license_policy"]["policy_version"] == "1"
-    assert lineage["license_policy"]["path_digest"] == hashlib.sha256(
-        _policy_file(tmp_path).read_bytes()
-    ).hexdigest()
-    assert lineage["exclusion_list_digest"] == hashlib.sha256(
-        EXCLUSION_PATH.read_bytes()
-    ).hexdigest()
+    assert lineage["license_policy"]["path_digest"] == hashlib.sha256(_policy_file(tmp_path).read_bytes()).hexdigest()
+    assert lineage["exclusion_list_digest"] == hashlib.sha256(EXCLUSION_PATH.read_bytes()).hexdigest()
     assert lineage["copyleft_opt_ins"] == []
-    assert lineage["license_decisions"] == {
-        "sess-a": {
-            "status": "admitted",
-            "reason_code": None,
-            "spdx_id": "MIT",
-            "policy_version": "1",
-            "evidence_ref": "manifest",
-            "repo_slug": "owner/repo-a",
+    assert lineage["license_decisions"] == {"sess-a": {
+            "status": "admitted", "reason_code": None, "spdx_id": "MIT", "policy_version": "1",
+            "evidence_ref": "manifest", "repo_slug": "owner/repo-a",
         }
     }
     assert lineage["license_decision_distribution"] == {"admitted": 1}
 
-
-def test_multi_session_repo_license_decisions_all_recorded(
-    tmp_path: Path,
-) -> None:
+def test_multi_session_repo_license_decisions_all_recorded(tmp_path: Path,) -> None:
     # Two admitted batches sharing one repo_slug must both appear in the
     # lineage's license_decisions and the license report: the decisions dict
     # is session-scoped (keyed by session_id), so a repo_slug-keyed collapse
@@ -1022,15 +880,11 @@ def test_multi_session_repo_license_decisions_all_recorded(
     build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=tmp_path / "out"))
     lineage = json.loads((tmp_path / "out" / "lineage.json").read_text())
     assert set(lineage["license_decisions"]) == {"sess-a", "sess-b"}
-    assert all(
-        decision["repo_slug"] == "owner/repo-a"
-        for decision in lineage["license_decisions"].values()
-    )
+    assert all(decision["repo_slug"] == "owner/repo-a" for decision in lineage["license_decisions"].values())
     assert lineage["license_decision_distribution"] == {"admitted": 2}
     report = json.loads((tmp_path / "out" / "license-report.json").read_text())
     assert set(report["decisions"]) == {"sess-a", "sess-b"}
     assert report["distribution"] == {"admitted": 2}
-
 
 # Task 9: digest-pinned license report artifact
 
@@ -1049,9 +903,7 @@ def test_license_report_artifact_is_deterministic(
     assert report_path.is_file()
     report = json.loads(report_path.read_text())
     assert report["policy"]["policy_version"] == "1"
-    assert report["policy"]["digest"] == hashlib.sha256(
-        _policy_file(tmp_path).read_bytes()
-    ).hexdigest()
+    assert report["policy"]["digest"] == hashlib.sha256(_policy_file(tmp_path).read_bytes()).hexdigest()
     assert report["exclusion_list_digest"] == _sha256_of_exclusion_txt()
     assert report["copyleft_opt_ins"] == []
     assert report["decisions"]["sess-a"]["status"] == "admitted"
@@ -1060,10 +912,8 @@ def test_license_report_artifact_is_deterministic(
     # Byte-identical replay of the report alone (pure function of the
     # bundle + policy + exclusion.txt bytes):
     first = report_path.read_bytes()
-    build_frozen_corpus(_config_for(bundle_dir, tmp_path / "again",
-                                    license_policy=_policy_file(tmp_path)))
+    build_frozen_corpus(_config_for(bundle_dir, tmp_path / "again", license_policy=_policy_file(tmp_path)))
     assert (tmp_path / "again" / "out" / "license-report.json").read_bytes() == first
-
 
 def test_license_report_written_before_success_marker(
     tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]]
@@ -1071,20 +921,16 @@ def test_license_report_written_before_success_marker(
     # The completeness gate covers the report: it exists on every clean build
     # that publishes _SUCCESS, and the summary exposes the distribution.
     bundle_dir, _rows, _kwargs = existing_bundle_fixture
-    summary = build_frozen_corpus(
-        _config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path))
-    )
+    summary = build_frozen_corpus(_config_for(bundle_dir, tmp_path, license_policy=_policy_file(tmp_path)))
     assert (tmp_path / "out" / "_SUCCESS").is_file()
     assert (tmp_path / "out" / "license-report.json").is_file()
     assert summary["license_distribution"] == {"admitted": 1}
-
 
 # Task 10: publication gate end-to-end (AC6) + real-path verification
 
 
 def _run_build_v2_cli(
-    bundle_dir: Path, tmp_path: Path, policy: Path, capsys: pytest.CaptureFixture[str],
-    *, out_name: str = "pub",
+    bundle_dir: Path, tmp_path: Path, policy: Path, capsys: pytest.CaptureFixture[str], *, out_name: str = "pub",
 ) -> tuple[int, str]:
     """Drive ``daydream corpus build`` (the production entrypoint) over the
     fixture's bundle + annotation bundle, returning (exit code, combined
@@ -1092,9 +938,7 @@ def _run_build_v2_cli(
     out = tmp_path / out_name / "corpus.jsonl"
     ann = bundle_dir.parent / (bundle_dir.name + "-annotations")
     rc = cli_main(["corpus", "build", "--bundle-root", str(bundle_dir),
-                   "--annotation-bundle-root", str(ann),
-                   "--license-policy", str(policy),
-                   "--out", str(out)])
+                   "--annotation-bundle-root", str(ann), "--license-policy", str(policy), "--out", str(out)])
     captured = capsys.readouterr()
     return rc, captured.out + captured.err
 
@@ -1117,11 +961,8 @@ def _admit_second_batch(bundle_dir: Path, slug: str, *, spdx_id: str = "Apache-2
     manifest_path.write_text(json.dumps(manifest))
     batch_dir = bundle_dir / "batches" / "sess-b"
     (batch_dir / "manifest.json").write_text(json.dumps({"session_id": "sess-b"}) + "\n")
-    (batch_dir / "trajectory.json").write_text(json.dumps({
-        "session_id": "sess-b",
-        "trajectory_id": "sess-b:root",
-        "subagent_trajectory_ref": [
-            {"trajectory_id": "sess-b:fix-0", "session_id": "sess-b", "steps": [
+    (batch_dir / "trajectory.json").write_text(json.dumps({"session_id": "sess-b", "trajectory_id": "sess-b:root",
+        "subagent_trajectory_ref": [{"trajectory_id": "sess-b:fix-0", "session_id": "sess-b", "steps": [
                 {"step_id": 1, "source": "agent", "message": "fix"},
             ]},
         ],
@@ -1131,8 +972,7 @@ def _admit_second_batch(bundle_dir: Path, slug: str, *, spdx_id: str = "Apache-2
 
 
 def test_end_to_end_mixed_repo_publication_gated(
-    tmp_path: Path,
-    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Real-path: entering from the CLI (``daydream corpus build``, the
@@ -1157,10 +997,8 @@ def test_end_to_end_mixed_repo_publication_gated(
     assert not (tmp_path / "pub-gpl" / "_SUCCESS").exists()
     assert "c8_copyleft_unopted" in out
 
-
 def test_end_to_end_clean_mixed_repo_publishes(
-    tmp_path: Path,
-    existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
+    tmp_path: Path, existing_bundle_fixture: tuple[Path, list[dict[str, Any]], dict[str, str]],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Real-path happy path: a clean mixed-repo bundle (two admitted slugs,
@@ -1182,10 +1020,7 @@ def test_end_to_end_clean_mixed_repo_publishes(
         assert lineage["license_decision"]["repo_slug"] == "owner/repo-a"
         assert lineage["license_decision"]["policy_version"] == "1"
 
-
-def test_gold_accepted_record_carries_finding_text_and_task_identity(
-    tmp_path: Path,
-) -> None:
+def test_gold_accepted_record_carries_finding_text_and_task_identity(tmp_path: Path,) -> None:
     """A bundle whose admitted batch carries findings.json / diff.patch /
     manifest.json (git head_sha / code_context base_sha) enriches the
     gold-accepted record
@@ -1197,11 +1032,9 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     # Producer-realistic manifest: head SHA under "git", base SHA under
     # "code_context" (archive/manifest.py:374-387).
     (batch_dir / "manifest.json").write_text(json.dumps({
-        "git": {"head_sha": "2" * 40},
-        "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
+        "git": {"head_sha": "2" * 40}, "code_context": {"base_sha": "1" * 40, "head_sha": "2" * 40},
     }))
-    (batch_dir / "findings.json").write_text(json.dumps({
-        "findings": [
+    (batch_dir / "findings.json").write_text(json.dumps({"findings": [
             {"fingerprint": "a1" * 32, "body": "exact localized finding body"},
             {"fingerprint": "c3" * 32, "body": "ambiguous finding body"},
         ],
@@ -1215,15 +1048,12 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     accepted = next(r for r in records if r["outcome_label"] == "accepted")
     assert accepted["finding_fingerprint"] == "a1" * 32
     assert accepted["finding_text"] == "exact localized finding body"
-    assert accepted["finding_text_sha256"] == hashlib.sha256(
-        b"exact localized finding body"
-    ).hexdigest()
+    assert accepted["finding_text_sha256"] == hashlib.sha256(b"exact localized finding body").hexdigest()
     task_identity = accepted["task_identity"]
     assert task_identity["repo_slug"] == "owner/repo-a"
     assert task_identity["base_sha"] == "1" * 40
     assert task_identity["head_sha"] == "2" * 40
-    assert task_identity["diff_ref"] == {
-        "batch": "1111111111111111111111111111111111111111111111111111111111111111",
+    assert task_identity["diff_ref"] == {"batch": "1111111111111111111111111111111111111111111111111111111111111111",
         "relpath": "batches/sess-a/diff.patch",
     }
     assert task_identity["diff_digest"] == hashlib.sha256(diff_text.encode()).hexdigest()
@@ -1237,7 +1067,6 @@ def test_gold_accepted_record_carries_finding_text_and_task_identity(
     rejected = next(r for r in records if r["outcome_label"] == "rejected")
     assert "finding_text" not in rejected
     assert "finding_text_sha256" not in rejected
-
 
 def test_corpus_build_verb_gone() -> None:
     """#1093: the legacy `daydream corpus build` verb no longer dispatches.

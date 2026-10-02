@@ -1,25 +1,8 @@
-"""Run archive manifest builder.
+"""Build archive manifests from immutable run snapshots.
 
-Assembles a ``manifest.json`` from an immutable public run snapshot, git
-context, and optional evaluation results. The manifest is the single source
-of truth for what's in an archive bundle.
-
-Provenance namespaces: ``git.*`` and ``code_context.*`` record provenance
-of the repository under review (target ``base_sha``/``head_sha``); the
-``daydream.*`` block records the immutable Daydream executable that
-produced the run. The two must never be conflated.
-
-Status split: ``status`` is a backward-compat alias of ``archive_status``
-(archive finalization — was the run cleanly archived?); ``pipeline_status``
-is the pipeline-outcome signal (succeeded/failed/partial/cancelled) — a run
-that merged-failed and never tested is cleanly archived but its pipeline
-failed.
-
-Exports:
-    MANIFEST_SCHEMA_VERSION: Current schema version string.
-    Manifest: Dataclass representing the manifest.
-    build_manifest_from_snapshot: Construct a Manifest from one frozen run
-        snapshot and its run context.
+``git`` and ``code_context`` describe the reviewed repository; ``daydream``
+describes the executable. ``status`` aliases archive finalization, while
+``pipeline_status`` records the independent workflow outcome.
 """
 
 from __future__ import annotations
@@ -90,183 +73,54 @@ def archive_recorder_provenance_from_snapshot(
 
 
 def _omit_falsy(**fields: Any) -> dict[str, Any]:
-    """Return only the fields whose values are truthy.
-
-    Collapses the repeated ``**({k: v} if v else {})`` conditional-splat guard
-    used for optional manifest fields: ``None`` (and any other falsy value)
-    drops the key entirely, mirroring the old inline pattern exactly.
-    """
+    """Omit optional fields with falsy values, preserving the manifest wire format."""
     return {k: v for k, v in fields.items() if v}
 
 
 @dataclass
 class Manifest:
-    """Archive bundle manifest written to ``manifest.json``.
+    """Archive metadata with separate executable, repository, and workflow provenance.
 
-    Attributes:
-        schema_version: Manifest schema version for forward compatibility.
-        recommended_patch_supported: Provenance flag read by training signals.
-            ``True`` for every manifest written by recommended.patch-aware
-            daydream. When ``True``, a missing ``recommended.patch`` means the
-            run made no recommendation (review-only / all-declined / wash), not
-            a legacy archive — so ``_read_recommended_patch`` returns ``""``
-            instead of falling back to ``diff.patch``. Legacy manifests omit the
-            key.
-        session_id: UUID4 session identifier from the trajectory recorder.
-        archived_at: ISO 8601 timestamp of when the archive was created.
-        status: Run status — ``complete`` alias of ``archive_status``, kept
-            byte-identical for backward compatibility (archive finalization),
-            never conflated with ``pipeline_status``.
-        run_flow: Run flow type (normal, ttt, pr, deep).
-        skill: Review skill used (python, react, etc.).
-        model: Model name (opus, sonnet, haiku).
-        backend: Phase-agnostic general default backend (claude, codex) resolved
-            from config, never a per-phase override.
-        review_backend: Review-specific backend override marker, ``None`` when
-            review ran on the general default. NOT the effective review
-            backend: a CLI ``--backend`` masks a file-config review override,
-            so review may have run on ``backend`` even when this is set.
-        fix_backend: Effective backend for the fix phase (override or general
-            default), or ``None`` for flows whose executed step pipeline has no
-            fix phase (improve, custom flows without fix, and TTT whose fix/test
-            steps are gated off at runtime; #648).
-        test_backend: Effective backend for the test phase (override or general
-            default), or ``None`` for flows whose executed step pipeline has no
-            test phase (improve, custom flows without test, and TTT/PR which
-            never run the test step; #648).
-        per_stack_review_backend: Per-stack review tier backend for runs that
-            execute per-stack reviews (issue #646), resolved from the
-            ``per_stack_review`` phase key — the key that actually drives
-            per-stack execution — kept distinct from ``review_backend`` so
-            "who reviewed" is never a misstatement. Every deep-flow mode
-            executes per-stack reviews — loop, shallow (single collapsed
-            stack), review, and comment; only improve/custom flows (which
-            never invoke the deep orchestrator) have no per-stack fan-out and
-            leave this ``None`` (omitted from ``to_dict()``).
-        per_stack_review_model: Per-stack review tier model for runs that
-            execute per-stack reviews (issue #646), resolved from the
-            ``per_stack_review`` phase key. The model is the load-bearing part
-            of the identity: per-stack defaults to Sonnet vs the ``review``
-            tier's Opus, which a pure backend name cannot distinguish. ``None``
-            (and omitted from ``to_dict()``) only for runs that never execute
-            per-stack reviews (improve / custom flows). For a Pi run
-            with no explicit override the backend default (``DEFAULT_PI_MODEL``)
-            is recorded: Pi's default intentionally lives outside
-            ``PHASE_DEFAULT_MODELS``, so ``_resolved_model`` alone would leave
-            the load-bearing model NULL.
-        review_only: Whether the run was review-only.
-        deep: Whether deep review mode was used.
-        source_path: Absolute path to the source repository at archive time.
-        remote_url: Git remote origin URL.
-        repo_slug: ``owner/repo`` extracted from remote URL.
-        branch: Git branch name at run time.
-        base_branch: Default branch (main/master).
-        head_sha: Git HEAD commit SHA.
-        base_sha: Merge-base SHA between ``base_branch`` and HEAD at archive
-            time. ``None`` when no merge-base could be resolved.
-        changed_files: Repo-relative paths changed between ``base_sha`` and
-            ``head_sha``. Empty list when ``base_sha`` is ``None``.
-        pr_number: GitHub PR number if applicable.
-        pr_repo: GitHub repo slug for PR.
-        total_cost_usd: Total cost from trajectory final metrics.
-        total_prompt_tokens: Non-cached prompt tokens.
-        total_completion_tokens: Completion tokens.
-        total_cached_tokens: Cached tokens.
-        wall_clock_seconds: Wall-clock duration derived from step timestamps
-            on every run; refined by eval's fork-inclusive value when available.
-        phase_timings: Per-phase wall-clock breakdown derived from explicit
-            ``phase_start``/``phase_end`` events (issue #203). ``None`` when no
-            phase events were emitted (pre-#203 runs or runs that skip phase
-            wrapping). Each entry: ``{"wall_clock_seconds": float, "occurrences": int}``.
-        fix_failures: Map of file-group -> failure reason for fix groups that
-            were dropped (``phase_fix_parallel`` raised). ``None`` when every
-            fix applied. When populated, ``status`` is forced to ``partial``
-            because the working tree holds reverted/unapplied edits and must not
-            be presented as a clean ``complete`` run.
-        fix_leftover_untracked: Sorted list of untracked paths that appeared
-            during a failed fix pass and survived tree-protection. Because
-            parallel groups share one working tree these cannot be attributed to
-            a specific group, so they are recorded (never deleted) to make the
-            partial run fully auditable. ``None`` when none were left behind.
-        fix_quality_gate: The fix-phase anti-degradation quality-gate verdict
-            (issue #315): ``{"enabled": bool, "rounds": [...]}`` written to
-            ``deep/fix-quality-gate.json`` by the orchestrator, covering
-            per-file before/after erosion + verbosity deltas over the files the
-            fix phase edited. ``None`` when the gate artifact is absent or
-            malformed.
-        total_findings: Number of findings (from eval, if available).
-        grounding_rate: Grounding rate (from eval, if available).
-        coverage_ratio: File coverage ratio (from eval, if available).
-        cost_per_finding_usd: Cost per finding (from eval, if available).
-        erosion: Structural erosion ratio of the post-fix workspace (from eval,
-            if available).
-        verbosity: Line-flagging verbosity ratio of the post-fix workspace
-            (from eval, if available).
-        location_in_hunk_rate: Share of scored shipped findings whose
-            originally cited line -- ``location_cited_line`` when the
-            validator snapped/demoted it, else ``line``; never the validator's
-            post-snap position, see ``eval.analyzer._cited_line`` -- landed
-            inside a diff hunk, i.e. the location validator's headline
-            accuracy axis (from eval, if available). ``None`` when the
-            run scored no locatable findings — undefined, never 0.0, so the
-            reward pipeline renormalizes over present axes instead of reading
-            an imputed perfect/zero score.
-        shipped_duplicate_pairs: Number of near-duplicate finding pairs
-            (similarity >= 0.5) that survived dedup into the shipped set (from
-            eval, if available) — the escaped-duplication axis. ``None`` when
-            the eval pass did not compute it.
-        outcome_labels: JSON-encoded list of outcome labels.
-        labeled_at: ISO 8601 timestamp of last label update.
-        composite_reward: Cached composite reward scalar mirrored from the
-            latest ``label_observations`` annotation; ``None`` until a
-            ``harvest`` pass scores the run.
-        archive_path: Absolute path to the archive directory.
+    ``backend`` is the general default. ``review_backend`` records an override
+    marker, which a CLI default may mask; fix/test fields record effective
+    backends only for executed phases. Per-stack backend/model identify the
+    actual review tier, including the Pi default, and are absent for flows
+    without per-stack review.
+
+    Missing metrics mean uncomputed or undefined, never an imputed zero.
+    ``location_in_hunk_rate`` scores the originally cited line before snapping;
+    ``shipped_duplicate_pairs`` counts surviving near-duplicate findings.
+    ``composite_reward`` caches the winning label observation.
+
+    Fix failures and surviving untracked paths retain evidence of partial
+    work; the latter cannot be attributed to an individual parallel group.
+    ``phase_timings`` maps phases to wall seconds and occurrence counts.
+    Optional profile and provenance blocks are omitted on legacy manifests.
     """
 
     schema_version: str = MANIFEST_SCHEMA_VERSION
-    # Provenance flag consumed by labeler_signals._read_recommended_patch:
-    # when True, a missing recommended.patch means "no recommendation"
-    # (review-only / all-declined / wash), NOT a legacy archive, so the
-    # diff.patch fallback must not fire. Defaults True for every new manifest;
-    # legacy manifests simply omit the key.
+    # Missing recommended.patch means no recommendation when supported; only legacy
+    # manifests fall back to diff.patch.
     recommended_patch_supported: bool = True
-    # Provenance flag recording which capture produced the archived
-    # recommended.patch (issue #743): ``"post_test"`` = the post-heal
-    # re-capture (the exact tree committed), ``"pre_test"`` = the fix-phase
-    # fallback capture. ``None`` on legacy manifests (which predate the field).
+    # Capture provenance: post_test is the exact post-heal committed tree; pre_test is
+    # the fix-phase fallback. Legacy manifests use None.
     recommended_patch_capture: str | None = None
     session_id: str = ""
     archived_at: str = ""
     status: str = "complete"
-    # archive_status is byte-identical to the legacy ``status`` alias (spec Key
-    # Decision 1): archive finalization, distinct from pipeline_status. Kept as a
-    # separate key so consumers distinguishing "cleanly archived" from "pipeline
-    # succeeded" do not repurpose the legacy field.
+    # Archive finalization, byte-identical to the legacy status alias.
     archive_status: str = "complete"
-    # pipeline_status is the pipeline-outcome signal: succeeded / failed /
-    # partial / cancelled / unknown. Distinct from archive_status: a run that
-    # merged-failed and never tested is cleanly archived but its pipeline
-    # failed.
+    # Independent workflow outcome: succeeded/failed/partial/cancelled/unknown.
     pipeline_status: str = "unknown"
-    # Per-phase terminal states (``merge``/``fix``/``test``), each
-    # ``{"ran": bool, "status": str}`` where status is one of
-    # succeeded/failed/partial/absent/unknown. ``None``/omitted for legacy
-    # manifests.
+    # Phase states carry ran/status; legacy manifests omit them.
     phase_states: dict[str, Any] | None = None
-    # Per-run retry/circuit summary reduced from the frozen ``agent_budget_stop``
-    # phase events (retry-stop reason counts, attempts/backoff/backend/recovery
-    # totals, distinct circuit states). ``None``/omitted when the run recorded no
-    # retry-ladder stop, keeping a legacy manifest byte-identical.
+    # Frozen agent_budget_stop summary; omitted when no retry ladder stopped.
     retry_summary: dict[str, Any] | None = None
-    # Executable provenance: the immutable Daydream executable that produced
-    # this run (vendor ``ExecutableProvenance``). Never merged into the
-    # target-repo ``git.*`` / ``code_context.*`` blocks.
+    # Executable identity remains separate from reviewed-repository provenance.
     daydream: Any | None = None
 
-    # Review-profile provenance (issue #885, R12): the resolved profile this
-    # run executed under (schema version, name, source kind, canonical digest).
-    # ``None`` on legacy manifests (which predate the fields) and omitted
-    # entirely from ``to_dict()``; required on new runs.
+    # Resolved profile identity is required for new runs and omitted on legacy
+    # manifests.
     profile_schema_version: int | None = None
     profile_name: str | None = None
     profile_source_kind: str | None = None
@@ -308,15 +162,12 @@ class Manifest:
     total_completion_tokens: int | None = None
     total_cached_tokens: int | None = None
 
-    # wall_clock_seconds and phase_timings are derived from step/phase events
-    # on every run; the remaining metrics below are populated by the eval pass,
-    # which runs by default (skipped only with --no-eval).
+    # Timing comes from frozen events; evaluation supplies the remaining metrics unless
+    # disabled.
     wall_clock_seconds: float | None = None
     phase_timings: dict[str, Any] | None = None
     timing_coverage: dict[str, Any] | None = None
     total_findings: int | None = None
-    grounding_rate: float | None = None
-    coverage_ratio: float | None = None
     cost_per_finding_usd: float | None = None
     erosion: float | None = None
     verbosity: float | None = None
@@ -399,8 +250,6 @@ class Manifest:
                 "phase_timings": self.phase_timings,
                 **_omit_falsy(timing_coverage=self.timing_coverage),
                 "total_findings": self.total_findings,
-                "grounding_rate": self.grounding_rate,
-                "coverage_ratio": self.coverage_ratio,
                 "cost_per_finding_usd": self.cost_per_finding_usd,
                 "erosion": self.erosion,
                 "verbosity": self.verbosity,
@@ -501,9 +350,7 @@ def build_manifest_from_snapshot(
         archive_path=str(archive_path),
     )
 
-    # Lifecycle timing comes from the immutable write snapshot. A snapshot the
-    # reducer cannot span (no lifecycle stamps, or a cutoff it cannot match)
-    # leaves the span unset for evaluation to fill below.
+    # Prefer immutable lifecycle timing; evaluation fills only an unavailable span.
     if timing_summary is not None:
         m.wall_clock_seconds = timing_summary.wall_clock_seconds
         m.phase_timings = timing_summary.phase_timings
@@ -523,23 +370,14 @@ def build_manifest_from_snapshot(
 
         findings = evaluation.get("findings", {})
         m.total_findings = findings.get("total")
-        # Escaped-duplication axis: near-duplicate pairs that survived dedup
-        # into the shipped set. Absent on every run archived before the axis
-        # existed, so the chained .get() must yield None (not 0).
+        # Uncomputed duplicate counts remain None, including legacy archives.
         shipped_duplication = findings.get("shipped_duplication", {})
         m.shipped_duplicate_pairs = shipped_duplication.get("near_duplicate_pairs")
 
-        # Location-validator accuracy axis. ``in_hunk_rate`` is deliberately
-        # None when no finding was scorable; that None is preserved as
-        # "undefined" rather than coerced, same as every other eval metric.
+        # No scorable location means undefined, preserving None for reward
+        # renormalization.
         location = evaluation.get("location", {})
         m.location_in_hunk_rate = location.get("in_hunk_rate")
-
-        grounding = evaluation.get("grounding", {})
-        m.grounding_rate = grounding.get("grounding_rate")
-
-        coverage = evaluation.get("coverage", {})
-        m.coverage_ratio = coverage.get("coverage_ratio")
 
         quality = evaluation.get("quality", {})
         m.erosion = quality.get("erosion")

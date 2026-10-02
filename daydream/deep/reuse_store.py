@@ -1,17 +1,8 @@
-"""Crash-safe, workspace-local store for completed deep review results.
+"""Workspace-local completed review cache under .daydream/review-cache/.
 
-The store owns ``.daydream/review-cache/``. Each entry lives in
-``<store>/entries/<key>/`` and is published in the same order as the merge
-step's own completion contract (``deep/merge_steps.py``): the payload files
-first, then ``manifest.json`` (payload digests **plus** the grounding digests
-the result was produced under, MH16), then ``complete.marker`` last. A lookup is
-a hit only when the manifest parses, names the directory it was found in, every
-recorded payload digest matches the on-disk bytes, and the marker exists; a
-crash before the marker therefore leaves a rerun, never a half-hit.
-
-Reads are tolerant (an unreadable store is a named miss, never an exception);
-writes are fail-loud (an ``OSError`` propagates so a caller can warn that it
-did not cache what it claimed to).
+Publish payload files, then their manifest and digests, then complete.marker.
+Hits require a matching key, every payload digest, and the marker; incomplete
+entries are misses. Read failures become named misses; write errors propagate.
 """
 
 from __future__ import annotations
@@ -45,7 +36,7 @@ from daydream.json_utils import atomic_write_bytes, read_json_object
 
 if TYPE_CHECKING:
     from daydream.flows.engine import FlowContext
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 logger = logging.getLogger(__name__)
 
@@ -83,11 +74,9 @@ class ReuseHit:
 
 
 def restore_entry_payload(hit: ReuseHit, dest_dir: Path) -> str | None:
-    """Copy a verified entry's payload files into ``dest_dir``.
+    """Restore payload files; return an error reason on partial failure, else None.
 
-    Returns ``None`` on success or a reason string when the restore could not
-    complete; a partial restore is a miss, so the unit then does its own real
-    work rather than shipping half of an entry.
+    A partial restore is a cache miss and the unit must recompute.
     """
     recorded = hit.manifest.get("payload")
     if not isinstance(recorded, dict):
@@ -131,12 +120,7 @@ def record_absent_components(reuse: ReuseCache, unit: str, payload: Mapping[str,
 
 
 def reuse_grounding_statuses(reuse: ReuseCache, payload: Mapping[str, Any]) -> dict[str, str]:
-    """Per-unit reuse status for every grounding row a payload records (MH16).
-
-    Reads the run's provenance once and answers every recorded grounding unit:
-    an outcome that served the unit is ``reused``; anything else (including a
-    unit the run never recorded) is ``regenerated``.
-    """
+    """Classify recorded grounding as reused only for served-unit provenance outcomes."""
     units = reuse.provenance().get("units")
     units = units if isinstance(units, dict) else {}
     return {
@@ -174,13 +158,7 @@ def lookup_reuse_entry(
     *,
     on_restore_failure: Callable[[str], None] | None = None,
 ) -> ReuseHit | None:
-    """Look up and restore one reuse entry, recording a miss on any failure.
-
-    Returns the hit when both the lookup and the payload restore succeed, and
-    ``None`` otherwise (the miss is already recorded). ``on_restore_failure``
-    receives the restore reason so the caller can surface it; merge leaves it
-    unset because it is silent on a failed restore.
-    """
+    """Return a restored hit or record a miss; optionally report restore failures."""
     hit = reuse.lookup(key)
     if not isinstance(hit, ReuseHit):
         reuse.record(unit, outcome="miss", reason=hit.reason, key=key)
@@ -200,13 +178,7 @@ def lookup_reuse_entry(
 
 
 def review_cache_enabled(config: RunConfig) -> bool:
-    """Resolve the reuse-cache enable flag (MH13).
-
-    Precedence mirrors :func:`daydream.deep.settings._resolve_config_value`: 1)
-    ``RunConfig.review_cache_enabled`` (CLI ``--no-review-cache``), 2)
-    ``DaydreamFileConfig.review_cache_enabled`` (file-config scalar), 3) the
-    built-in default (reuse on). An explicit ``False`` at either tier wins.
-    """
+    """Resolve CLI > file config > enabled default, preserving explicit False."""
     value = _resolve_config_value(
         config, "review_cache_enabled", DEFAULT_REVIEW_CACHE_ENABLED
     )
@@ -214,12 +186,7 @@ def review_cache_enabled(config: RunConfig) -> bool:
 
 
 def review_cache_budget(config: RunConfig) -> ReuseBudget:
-    """Resolve the three retention bounds independently (MH12).
-
-    Each bound rides the same three tiers as :func:`review_cache_enabled`; the
-    enable flag never affects the budget and each bound resolves on its own.
-    Config-file values are days since last use; the returned budget is seconds.
-    """
+    """Resolve each bound independently; convert configured age in days to seconds."""
     return ReuseBudget(
         max_entries=_resolve_non_negative_int(
             config, "review_cache_max_entries", DEFAULT_REVIEW_CACHE_MAX_ENTRIES
@@ -235,13 +202,9 @@ def review_cache_budget(config: RunConfig) -> ReuseBudget:
 
 
 def build_reuse_cache(ctx: FlowContext) -> ReuseCache:
-    """Build the run's store handle rooted beside the run's ``deep/`` directory.
+    """Create the run's private cache root beside deep/, bound to its artifact session.
 
-    The directory is a sibling of ``.daydream/deep``; the handle carries the
-    run id and active artifact session so per-run provenance is attributable.
-    The store root is created with the handle so the artifact layer publishes
-    it back into the tree; its ``entries/`` and ``provenance/`` children stay
-    lazy until a unit actually writes.
+    entries/ and provenance/ remain lazy; the root exists for artifact publication.
     """
     deep_dir_path = ctx.data.get("dd")
     if not isinstance(deep_dir_path, Path):
@@ -259,12 +222,7 @@ def build_reuse_cache(ctx: FlowContext) -> ReuseCache:
 
 
 def reuse_cache_for(ctx: FlowContext) -> ReuseCache | None:
-    """The run's published store handle, or ``None`` when disabled or absent.
-
-    Every unit reaches the store through this accessor, so a disabled run (or a
-    direct flow caller that never published a handle) skips lookup and write
-    uniformly and takes the unchanged path.
-    """
+    """Return the published cache only when enabled; otherwise skip both reads and writes."""
     value = ctx.data.get("reuse_cache")
     if not isinstance(value, ReuseCache):
         return None
@@ -332,11 +290,7 @@ def _payload_bytes(data: bytes | bytearray | str) -> bytes:
 
 
 class ReuseCache:
-    """A content-keyed store rooted at ``store_dir``.
-
-    ``budget`` is optional here so the pure store can be exercised without
-    retention; the configured default is supplied by the run's factory.
-    """
+    """Content-keyed completed results; an omitted budget disables retention limits."""
 
     def __init__(
         self,
@@ -448,12 +402,9 @@ class ReuseCache:
             logger.debug("reuse cache: could not evict %s", entry, exc_info=True)
 
     def prune(self, *, keep_key: str) -> None:
-        """Evict oldest-last-used entries while any retention bound is exceeded.
+        """Evict oldest entries after writes until retention bounds are met.
 
-        Runs after a write, never on a timer. ``keep_key`` (the entry just
-        written) is never a candidate, so the run's own result survives. A
-        removal failure is logged and skipped: a cache that cannot prune
-        slightly is still a correct cache.
+        Never evict keep_key. Log and skip removal failures, then age out provenance.
         """
         if self.budget is None:
             return
@@ -556,12 +507,10 @@ class ReuseCache:
         origin_run_id: str | None = None,
         detail: Mapping[str, Any] | None = None,
     ) -> None:
-        """Merge one unit's outcome into this run's provenance record (MH5).
+        """Atomically merge one unit's outcome into per-run provenance.
 
-        The write mirrors :func:`daydream.deep.routing_record.write_routing_record`:
-        read-modify-write with the per-unit key replaced, so units written by
-        different steps never clobber each other. Read/write failure is
-        best-effort — provenance is evidence, never an input.
+        Other units survive. Read/write errors are best-effort: provenance is evidence,
+        never an input to the work the cache stores.
         """
         path = provenance_path(self.store_dir, self._provenance_run_id())
         entry: dict[str, Any] = {"outcome": outcome, "reason": reason}
@@ -595,12 +544,9 @@ class ReuseCache:
                 self._provenance_warned = True
 
     def provenance(self) -> dict[str, Any]:
-        """The run's provenance record with live store statistics attached.
+        """Read per-unit provenance and attach run identity and live store statistics.
 
-        ``units`` carries every named unit's outcome plus, for a reused unit,
-        the grounding delta and per-input status it was recorded with (MH16).
-        The record itself lives inside the store, so it survives the fresh-run
-        ``.daydream/deep/`` wipe (MH5).
+        Records live in the cache so a fresh-run deep/ wipe preserves them.
         """
         record = read_json_object(provenance_path(self.store_dir, self._provenance_run_id()))
         record["run_id"] = self.run_id
@@ -612,11 +558,7 @@ class ReuseCache:
     def grounding_delta(
         self, hit: ReuseHit, current: Mapping[str, str]
     ) -> dict[str, dict[str, str | bool]]:
-        """Compare a hit's produced-under grounding with the current iteration's.
-
-        Pure: reads only the manifest and the caller's digests, performs no I/O.
-        A grounding input missing on either side is the literal ``"absent"``.
-        """
+        """Compare current and produced-under digests without I/O; missing means "absent"."""
         produced = hit.manifest.get("grounding")
         if not isinstance(produced, dict):
             produced = {}

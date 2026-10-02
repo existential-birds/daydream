@@ -1,23 +1,4 @@
-"""Shared stub backend for deep-pipeline integration tests.
-
-Canonical home of the prompt-dispatching stub backend and its install helpers.
-Previously these lived as ``_``-private symbols at the top of
-``tests/test_deep_orchestrator.py`` and were imported across modules; lifting
-them here gives every consumer a single public, documented stub to import.
-
-Public surface:
-
-* ``StubBackend`` -- prompt-dispatching mock backend. Writes realistic per-stack
-  review output and a merged report so the orchestrator progresses through every
-  stage, and records every call so tests can assert ordering, ``agents=``
-  absence, and per-stack isolation.
-* ``install_stub_backend`` -- patch ``create_backend`` to return one stub
-  instance, with optional exploration pinning.
-* ``silence`` -- silence noise-only UI helpers in the deep orchestrator and
-  phases (``prompts=False`` leaves the real prompt seam in place).
-* ``force_interactive`` -- pin a TTY stdin and unset ``CI`` so a test drives the
-  real interactive prompt path.
-"""
+"""Prompt-dispatching backend and UI helpers for deep-pipeline integration tests."""
 from __future__ import annotations
 
 import json
@@ -38,8 +19,7 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.deep.records import record_uid, stack_name_from_uid
-from daydream.eval.analyzer import _records_issues_or_empty
+from daydream.deep.records import record_issues_or_empty, record_uid, stack_name_from_uid
 
 PARTIAL_FIX_MARKER = "// PARTIAL BROKEN EDIT -- max turns exhausted mid-fix\n"
 
@@ -51,159 +31,93 @@ class _StubRetryableError(RuntimeError):
 
 
 class StubBackend:
-    """Prompt-dispatching fake backend.
-
-    Writes realistic per-stack review outputs and a merged report so the
-    orchestrator can progress through every stage. Records every call so
-    tests can assert ordering, agents-kwarg absence, and per-stack isolation.
-
-    Every knob declared on ``__init__`` defaults to the pre-existing behaviour;
-    in particular ``per_stack_read_command``, ``per_stack_loop_reads``, and
-    ``read_result_extra`` are ``None``/empty/``None`` by default, so emitted
-    read events stay byte-identical unless a test opts in.
-    """
+    """Emit realistic review/fix results and record calls for pipeline assertions."""
 
     model = "mock-model"
 
-    def __init__(
-        self,
-        target: Path,
-        *,
-        model: str = "mock-model",
-        shared_calls: list[dict[str, Any]] | None = None,
+    def __init__(self, target: Path, *, model: str = "mock-model", shared_calls: list[dict[str, Any]] | None = None,
     ) -> None:
         self.model = model
         self._target = target
-        # Mirrors the real Backend protocol's fan-out hint; the router reads it via
-        # ``effective_fanout_concurrency(ceiling, backend)``. Tests override it to
-        # force a deterministic file-group ordering (#734).
+        # Backend fan-out hint; tests override it for deterministic group ordering.
         self.fanout_concurrency: int = 4
-        # When set, every execute() call is also appended (model-tagged) to this
-        # shared list so a per-(name, model) factory can capture which model ran
-        # each phase even though backends are cached by (name, model) (#168).
+        # Optional model-tagged call log shared across cached backend instances.
         self._shared = shared_calls
-        # #168 knobs: per-stack parse severity to emit (drives arbiter selection),
-        # and whether the merge agent echoes the on-disk per-stack records (so the
-        # rendered artifact reflects arbiter revisions instead of fixed items).
+        # Parse severity selects arbiter targets; merge_echo_records exposes revisions.
         self.parse_severity: str | None = None
         self.merge_echo_records: bool = False
-        # When True, the arbiter branch returns an empty findings list (omits every
-        # verdict), simulating a truncated/lazy Opus response so a test can assert
-        # the selected high-severity record fails open and survives (#175).
+        # Omit all arbiter verdicts to exercise fail-open retention of selected records.
         self.arbiter_omit_verdicts: bool = False
-        # When set to a sharded group id (e.g. ``arbiter-group-1``), the arbiter
-        # branch raises for that group only, so a test can force one group's
-        # failure and observe fail-open recording plus resume behaviour (#732).
+        # Fail only this shard (e.g. arbiter-group-1) for fail-open/resume tests.
         self.arbiter_fail_group: str | None = None
-        # #232 knobs: per-stack parse override (drives suppression selection with a
-        # distinct file/severity/confidence per stack, so a HIGH and a borderline
-        # LOW finding coexist at NON-colliding locations -> uncontested), and the
-        # keep verdict the suppression-reviewer stub returns for every sup_id.
+        # Per-stack findings can vary file/severity/confidence to control suppression
+        # selection. suppression_keep applies to every suppression-review verdict.
         self.parse_by_stack: dict[str, dict[str, Any]] | None = None
         self.suppression_keep: bool = True
         self.calls: list[dict[str, Any]] = []
-        # Verdict the recommendation-verifier branch emits for issue_id=1; flip to
-        # "contradicts" to exercise verdict propagation into the phase_fix prompt.
+        # Recommendation verdict for issue 1; "contradicts" changes the fix prompt.
         self.verifier_verdict: str = "consistent"
         self.verifier_unverified_assumptions: list[str] = []
-        # Post-fix fix-verifier knobs (#744). fix_verify_verdicts overrides the
-        # verdict for a finding id (default: resolved) on round 1 only; when
-        # None every dispatched finding resolves.
-        # fix_verify_resolve_after_round returns unresolved for rounds below
-        # the threshold, resolved thereafter (drives the re-dispatch loop).
+        # Per-finding verdict overrides apply only on round 1. Otherwise findings
+        # resolve at fix_verify_resolve_after_round and remain unresolved before it.
         self.fix_verify_verdicts: dict[int, dict[str, Any]] | None = None
         self.fix_verify_resolve_after_round: int = 1
-        # Counts test-suite invocations so a test can fail the FIRST run (driving
-        # the heal loop into choice "2") and pass the SECOND.
+        # Test invocation count supports first-run failures followed by healing.
         self.test_suite_calls: int = 0
-        # When True, the test-suite branch fails the first call and passes after.
+        # Fail the first test call, then pass.
         self.fail_first_test_run: bool = False
-        # When True, EVERY test-suite run fails (permanently-red suite).
+        # Fail every test call.
         self.fail_all_test_runs: bool = False
         # Override for the merge agent's item list (None -> default three-item payload).
         self.merge_items: list[dict[str, Any]] | None = None
-        # When set, the cross-stack merge branch emits unparseable prose text
-        # (no structured output) -- drives the "got str" salvage path (#361).
+        # Emit unstructured prose to exercise merge salvage.
         self.merge_emit_str: str | None = None
-        # When set, the cross-stack merge branch emits a BARE item list (not
-        # wrapped in {"items": [...]}) -- the R1 parseable-list shape (#361).
+        # Emit a bare item list instead of the {"items": [...]} envelope.
         self.merge_emit_bare_list: list[dict[str, Any]] | None = None
         # Optional LLM supervisor verdicts keyed by canonical item id.
         self.supervise_verdicts: dict[int, dict[str, Any]] | None = None
         # Optional deferred Write tool pairs for the built-in tool-supervisor tests.
         self.deferred_write_pairs: list[str] | None = None
-        # When set, the fix branch appends the prompt's marker token to this file
-        # via read-modify-write with an anyio.sleep(0) interleave point -- a
-        # per-ITEM fan-out would lose/reorder appends; correct per-file
-        # serialization preserves marker order.
+        # Append prompt markers with a read/write interleave: per-file serialization
+        # must preserve order, while per-item fan-out would lose or reorder appends.
         self.fix_append_path: Path | None = None
-        # When set, the fix branch raises for the matching file, isolating one
-        # file-group's failure so a test can assert the others still applied.
+        # Fail this file's fix while allowing sibling groups to finish.
         self.fix_fail_file: str | None = None
-        # When set, ONLY the batched fix turn ("Fix these N issues in <file>")
-        # for the matching file raises, forcing phase_fix_parallel into its
-        # per-finding fallback loop -- the #186 pattern the group budget bounds.
-        # The per-finding retries ("Fix this issue") for that file then succeed.
+        # Fail this file's batched turn; its per-finding fallback turns succeed.
         self.fail_batched_fix_file: str | None = None
-        # When set, ONLY the batched fix turn for the matching file emits a slow
-        # runaway burst (never a ResultEvent) so run_agent's OWN per-invocation
-        # WALL budget trips and returns a budget_reason -- the batched call then
-        # raises and phase_fix_parallel falls back to per-finding fixes. Unlike
-        # fail_batched_fix_file (a synchronous stub raise), this exercises the
-        # real budget_reason -> raise path AND consumes time that carries into
-        # the fallback via the shared FileGroupBudget (#201): a real per-event
-        # sleep when no clock is injected, or ``clock_advance`` per event when
-        # one is (see ``clock_advance_per_event_s`` below). Per-finding fallback
-        # turns for that file are NOT runaway.
+        # Run away only during this file's batch. The real run_agent wall timeout
+        # raises into per-finding fallback, which shares the time already consumed.
+        # Events sleep runaway_batched_sleep_s or advance the injected clock.
         self.runaway_batched_fix_file: str | None = None
         self.runaway_batched_sleep_s: float = 0.05
-        # When set, ONLY a single-item "Fix this issue" turn naming this file
-        # emits the same never-a-ResultEvent burst as ``runaway_fix`` -- a
-        # one-call group whose own turn burns the shared group clock, so a test
-        # can prove a single-item group is cut without a fallback loop (#734).
+        # Run away only for a single-item turn naming this file, testing a group
+        # deadline without a fallback loop.
         self.runaway_single_fix_file: str | None = None
-        # When set, a runaway burst waits -- yielding nothing and
-        # ``anyio.sleep(0)``-ing -- until this gate returns truthy; only then
-        # does the burst begin. Lets a test make a sibling group's completion a
-        # deterministic precondition instead of a timing race (#734).
+        # Yield no events and sleep(0) until this gate opens, so a sibling can
+        # finish deterministically before the runaway begins.
         self.runaway_gate: Callable[[], bool] | None = None
-        # Basenames of files whose fix turn ran to completion (a ResultEvent was
-        # consumed and the generator returned). The sentinel files are removed by
-        # the fix-footprint guard, so this is the surviving proof a sibling's fix
-        # turn finished when a concurrent group's deadline fires (#734).
+        # Completed fix basenames, recorded after ResultEvent consumption. Unlike
+        # sentinel files, this evidence survives the fix-footprint guard.
         self.completed_fix_files: list[str] = []
-        # When set, ``clock_advance`` is called once per emitted event with
-        # ``clock_advance_per_event_s`` seconds, charging an injected fake clock
-        # instead of sleeping real wall time. The clock-advance path takes
-        # precedence over ``runaway_*_sleep_s`` so a test never both sleeps and
-        # jumps; the stub enforces no deadline itself (that belongs to run_agent).
+        # Charge clock_advance_per_event_s through the injected clock instead of
+        # runaway sleeps; never both. Only run_agent enforces deadlines.
         self.clock_advance: Callable[[float], None] | None = None
         self.clock_advance_per_event_s: float = 0.0
-        # Raise ``fix_retryable_error`` (or a default retryable error) for the
-        # first N fix turns for each file, then apply the normal fix. Models a
-        # retry ladder that must be bounded by the group deadline rather than
-        # exhausted; each failed attempt charges one ``clock_advance_per_event_s``
-        # step for the backend time it burns before raising.
+        # Fail each file's first N fix turns with fix_retryable_error (or the
+        # default). Each failure charges one clock step before raising; later turns
+        # succeed, unless the real group deadline cuts the retry ladder first.
         self.fix_retryable_failures: int = 0
         self.fix_retryable_error: Exception | None = None
-        # When set, only the fix turns naming this file basename take the
-        # retryable-failure ladder; every other file's fix succeeds on its first
-        # turn. Lets a test make one file group fail while a sibling group
-        # completes -- the shared-circuit/restart-nothing proof (#734).
+        # Restrict retry failures to this basename; sibling files succeed at once.
         self.fix_retryable_file: str | None = None
         self._fix_retry_counts: dict[str, int] = {}
-        # When set, the fix branch WRITES a broken partial edit to the matching
-        # file and THEN raises MaxTurnsError -- simulating an agent that mutated
-        # the tree before exhausting its turn budget, so a test can assert the
-        # orchestrator reverts that partial edit and saves a recovery patch.
+        # Write a broken partial edit, then raise MaxTurnsError. The orchestrator
+        # must restore the file and save a recovery patch.
         self.fix_partial_then_maxturns: str | None = None
-        # Turns this stub's fix agent needs to finish. Models the CLI contract:
-        # a turn ceiling below this raises MaxTurnsError instead of applying the
-        # edit. Set above a former ceiling to prove the fix is no longer capped.
+        # Required fix turns; a lower max_turns raises before applying the edit.
         self.fix_turns_needed: int = 0
-        # Repo-relative path of a stray untracked file the failing group creates
-        # before raising (e.g. "store/uuid.go") -- NOT the group's key file, so
-        # it survives tree-protection and must surface in fix_leftover_untracked.
+        # Stray untracked path created by the failing group, outside its key file;
+        # it survives tree protection and must appear in fix_leftover_untracked.
         self.fix_orphan_file: str | None = None
         # Existing untracked user file damaged by the same failed turn.  The
         # run-wide terminal guard must restore its exact pre-run bytes.
@@ -214,162 +128,55 @@ class StubBackend:
         # fix turn, plus an optional new generated path created by that turn.
         self.heal_fix_generated: str | None = None
         self.heal_fix_new_generated: str | None = None
-        # When True, the fix branch yields a long burst of ToolStartEvents and
-        # NEVER emits a ResultEvent -- simulating a runaway turn. Without the
-        # in-loop tool-call budget in run_agent this stream never completes and
-        # the run hangs; with it, the loop aborts after tool_call_budget calls.
+        # Emit a runaway ToolStartEvent burst without a result to exercise budgets.
         self.runaway_fix: bool = False
-        # Real per-event sleep for the runaway burst (default 0.0 == anyio.sleep(0),
-        # an interleave point with no wall time). A small positive value lets the
-        # wall-clock budget trip before the tool-call budget in the wall real-path
-        # test. When ``clock_advance`` is set the burst advances the injected clock
-        # instead and never sleeps.
+        # Runaway pacing; zero still yields via sleep(0). Positive values can trip
+        # the wall limit before the tool limit. An injected clock replaces sleeps.
         self.runaway_fix_sleep_s: float = 0.0
-        # When True, the test-suite branch emits a Postgres-unreachable signature
-        # (infra down, not a code bug) so phase_test_and_heal's
-        # is_environmental_failure() short-circuit fires. The heal-fix branch then
-        # writes ``.daydream-heal-fix-applied`` -- a sentinel that MUST be absent
-        # when the short-circuit aborts before re-entering a fix turn (AC#6b).
+        # Emit a Postgres-unreachable test failure. The environmental short-circuit
+        # must abort before healing writes .daydream-heal-fix-applied.
         self.environmental_test_failure: bool = False
-        # When set, the fix branch APPENDS this text to the fixed TRACKED file
-        # (in addition to the sentinels), producing a real tracked-tree change so
-        # a test can assert the recommended-change patch captures daydream's edit.
+        # Append a real tracked edit so recommended-change patches can capture it.
         self.fix_edit_line: str | None = None
-        # Runaway knobs mirroring ``runaway_fix`` for the deep-review phases: an
-        # unbounded ToolStartEvent burst with no ResultEvent, so run_agent's
-        # tool-call budget trips and returns a budget_reason.
-        # ``runaway_alternatives``: the wonder turn.
-        # ``runaway_stack``: the per-stack review turn for that stack name.
+        # Runaway wonder or named per-stack review: tool events without a result.
         self.runaway_alternatives: bool = False
         self.runaway_stack: str | None = None
-        # ``runaway_test``: the test-suite turn (a hung suite, never a result).
+        # Runaway test-suite turn.
         self.runaway_test: bool = False
-        # When >0, the wonder turn emits this many ToolStartEvents and THEN its
-        # normal structured result -- a long but terminating turn, unlike the
-        # runaway knobs. Set above a tool-call ceiling to prove the ceiling does
-        # (or no longer does) truncate a legitimately exploratory pass.
+        # Emit this many tool calls before a normal wonder result, testing whether
+        # a tool-call ceiling truncates a long but terminating review.
         self.alternatives_tool_calls: int = 0
         # When True, the alternatives branch raises instead of answering.
         self.fail_alternatives: bool = False
-        # When set, the arbiter branch mints a ContinuationToken carrying this
-        # session id, so a test can assert the merge call resumes it.
+        # Arbiter continuation session that merge can resume.
         self.arbiter_session_id: str | None = None
-        # When set, the pattern-scanner specialist names this convention, so a
-        # test can prove WHICH run produced the on-disk exploration artifacts.
+        # Convention name identifying the run that wrote exploration artifacts.
         self.exploration_sentinel: str | None = None
-        # When True, the exploration specialists raise instead of answering, so
-        # the real pre_scan degrade path runs: specialist_failed -> completed
-        # False -> exploration dir materialized without a cache-key.
+        # Fail exploration specialists: pre_scan must degrade to incomplete
+        # artifacts without a cache key.
         self.fail_exploration: bool = False
-        # Issue #309 (uncovered-file sweep): knobs for the per-stack review
-        # branches' simulated reads and the sweep branch/parse.
-        # When True, the per-stack / generic review branch emits a Read
-        # ToolStartEvent per file in its scope (except `per_stack_unread`), so
-        # analyze_coverage sees per-stack reviewers as having read their own
-        # files -- leaving only genuinely-unread files uncovered.
+        # Paired source reads let recovery tests exercise real review evidence.
         self.per_stack_emit_reads: bool = False
-        # Files in a stack's scope to NOT emit a read for, even when
-        # per_stack_emit_reads is on (the uncovered-file-sweep test uses this to
-        # leave one diff file unread by every reviewer).
-        self.per_stack_unread: frozenset[str] = frozenset()
-        # Issue #1397: when set, a per-stack/generic branch whose scope
-        # contains any file in ``per_stack_loop_reads`` emits exactly one
-        # completed ``Bash`` command (this string) reading the loop-listed
-        # files together, and skips the per-file ``Read`` for those files.
-        # ``None`` (the default) emits no batched command, leaving the event
-        # stream byte-identical to today.
-        self.per_stack_read_command: str | None = None
-        # Files in a stack's scope read by ``per_stack_read_command`` rather
-        # than one ``Read`` each. Empty by default (no batched read).
-        self.per_stack_loop_reads: frozenset[str] = frozenset()
-        # Issue #1397 (requirement 5): when set, every read ToolResultEvent the
-        # stub emits -- per-file ``Read``, the batched shell command, and the
-        # sweep read alike -- carries these metadata fields, so a test can
-        # simulate a damaged observation (e.g. ``{"is_error": True}``) and prove
-        # the coverage outcome gate refuses it credit. ``None`` (the default)
-        # emits byte-identical successful reads.
-        self.read_result_extra: dict[str, Any] | None = None
-        # Issue #742: when set, the per-stack parse branch emits these as the
-        # declared per-file verdicts in its structured_output
-        # (``{"issues": issues, "verdicts": self.parse_declared_verdicts}``),
-        # so the orchestrator's ``include_verdicts=True`` parse surfaces them
-        # and the clean-verdict gate reconciles them against completed reads.
-        # Default ``None`` keeps the existing parse output (no ``verdicts``
-        # key), so all current tests are unchanged.
-        self.parse_declared_verdicts: list[dict[str, Any]] | None = None
-        # When set, the sweep parse branch emits its finding for this file
-        # (instead of the default api.py), so stack-uncovered-records.json names
-        # the swept file.
-        self.sweep_file: str | None = None
-        # When True, the uncovered-file-sweep branch returns success without
-        # either structured output or a review file -- a backend can return
-        # normally while producing nothing (issue #309 finding 7). A successful
-        # return must NOT be recorded as completed coverage.
-        self.sweep_no_output: bool = False
-        # When True, the sweep still returns valid structured output but omits
-        # the legacy Markdown review sidecar. Real structured-output backends
-        # can behave this way; the host-owned records artifact remains the
-        # authoritative finding source.
-        self.sweep_no_review_file: bool = False
-        # When True, the uncovered-file-sweep branch writes its review output
-        # but emits NO Read tool call -- a successful hunk-only review (issue
-        # #309 finding 6). The file must be recorded as a completed ATTEMPT
-        # ("completed without verified source read"), never as covered.
-        self.sweep_no_read: bool = False
-        # When True, the uncovered-file-sweep branch raises -- exercising the
-        # sweep's fail-open contract.
-        self.fail_sweep: bool = False
-        # Issue #1113 (grounded diagrams). Per-kind queue of specs the diagram
-        # author branch returns: index 0 answers the first turn, index 1 the
-        # repair turn (the last entry repeats if the queue is shorter). A kind
-        # with no queue entry gets the empty spec for its shape, which grounds
-        # to an omission rather than a failure.
+        # Per-kind author/repair spec queue; repeat its last entry when exhausted.
+        # An absent queue returns an empty spec, which grounds to an omission.
         self.diagram_specs: dict[str, list[dict[str, Any]]] = {}
-        # When True, the diagram branch emits a COMPLETED Read (paired start +
-        # result) for every file its returned spec cites, so the grounding
-        # pass's read receipts are satisfied. Off by default, which is the
-        # fail-closed case: every citation fails FILE_NOT_READ_BY_MODEL.
-        self.diagram_emit_reads: bool = False
-        # Explicit per-kind read paths, replacing the spec-derived list above
-        # (for tests that need a read of a file the spec does not cite).
-        self.diagram_reads: dict[str, list[str]] = {}
-        # Files to withhold a read for even when diagram_emit_reads is on --
-        # the FILE_NOT_READ_BY_MODEL knob.
-        self.diagram_unread: frozenset[str] = frozenset()
-        # When set, the diagram author branch mints a ContinuationToken with
-        # this session id, so the repair turn can resume the session. Without
-        # it there is no continuation and the repair turn never runs.
+        # Author continuation required for a repair turn to run.
         self.diagram_session_id: str | None = None
         # Diagram kinds whose author turn raises (the fail-open/exit-1 knob).
         self.diagram_fail: frozenset[str] = frozenset()
         # Turn counter per kind, so the repair turn reads the next queued spec.
         self.diagram_turns: dict[str, int] = {}
-        # Transport-capability flag the sanctioned-input resolver reads
-        # (``getattr(backend, "sandbox", False)``). Set True to force the INLINE
-        # transport independent of the disposable-clone read-only flag.
+        # Force INLINE sanctioned-input transport independently of read_only.
         self.sandbox: bool = False
 
     @staticmethod
     def _prompt_record_uid_groups(prompt: str) -> list[list[str]]:
-        """Read the record ``uid``s the merge prompt points this turn at (#1111).
+        """Read nonempty UID groups from prompted records files in prompt order.
 
-        ``build_merge_prompt`` renders its records block as one ``  - <path>``
-        line per per-stack records file (structural records are deliberately
-        absent -- the host appends those items itself), so re-reading those files
-        here is exactly what the production merge agent does when it copies a
-        ``uid`` verbatim out of a record to fill ``source_uids``. Returning one
-        group PER FILE (rather than one flat list) is what lets the default
-        payload below attribute a per-stack item to a single stack and a
-        cross-stack item to several -- the real shapes ``source_uids`` exists to
-        carry.
-
-        A records file that is missing or malformed contributes nothing: the
-        phase-level merge tests point the prompt at paths that were never
-        written, and a stub that raised there would fail tests about something
-        else entirely.
-
-        Returns:
-            One list of uids per records file that had any, in prompt order.
+        Structural records are host-appended and absent from the merge prompt.
+        Grouping by file supports both per-stack and cross-stack provenance.
+        Missing or malformed files contribute nothing, allowing phase tests to
+        use unwritten prompt paths.
         """
 
         groups: list[list[str]] = []
@@ -378,9 +185,8 @@ class StubBackend:
                 loaded = json.loads(Path(path_str).read_text())
             except (OSError, json.JSONDecodeError):
                 continue
-            uids = [
-                uid
-                for rec in _records_issues_or_empty(loaded)
+            uids = [uid
+                for rec in record_issues_or_empty(loaded)
                 if isinstance(rec, dict) and (uid := record_uid(rec))
             ]
             if uids:
@@ -389,12 +195,7 @@ class StubBackend:
 
     @staticmethod
     def _diagram_dispatch(pl: str) -> tuple[str, bool] | None:
-        """Classify a diagram prompt as ``(kind, is_repair)``, or None.
-
-        Keys on the role sentences the production builders open with and on the
-        repair prompt's ``Diagram repair turn (<kind>):`` opener -- the
-        deliberate discriminators (issue #1113 D17), not incidental wording.
-        """
+        """Return (kind, is_repair) from stable role/repair prompt openers."""
         for kind in ("sequence", "flowchart"):
             if f"diagram repair turn ({kind})" in pl:
                 return kind, True
@@ -404,73 +205,17 @@ class StubBackend:
             return "flowchart", False
         return None
 
-    @staticmethod
-    def _diagram_spec_paths(spec: dict[str, Any]) -> list[str]:
-        """Every repo-relative path the spec cites, de-duplicated, in spec order.
-
-        The paths a truthful author agent would have read. Repo-relative is
-        fine: the coverage matcher accepts an exact relative match.
-        """
-        paths: list[str] = []
-
-        def _add(value: Any) -> None:
-            if isinstance(value, str) and value and value not in paths:
-                paths.append(value)
-
-        for participant in spec.get("participants") or []:
-            if isinstance(participant, dict):
-                for path in participant.get("files") or []:
-                    _add(path)
-        for message in spec.get("messages") or []:
-            if isinstance(message, dict) and isinstance(message.get("evidence"), dict):
-                _add(message["evidence"].get("file"))
-        for block in spec.get("blocks") or []:
-            if not isinstance(block, dict):
-                continue
-            for branch in block.get("branches") or []:
-                if isinstance(branch, dict) and isinstance(branch.get("evidence"), dict):
-                    _add(branch["evidence"].get("file"))
-        root = spec.get("root")
-        if isinstance(root, dict):
-            _add(root.get("file"))
-        for node in spec.get("nodes") or []:
-            if isinstance(node, dict) and isinstance(node.get("evidence"), dict):
-                _add(node["evidence"].get("file"))
-        return paths
 
     @staticmethod
     def _stack_scope_files(prompt: str) -> list[str]:
-        """Extract the file list from a per-stack/generic scope instruction.
-
-        ``_stack_scope_instruction`` renders the files comma-joined on the
-        ``Assigned files:`` marker line (``  Assigned files: api.py, README.md``),
-        so the single line is split on commas.
-        """
+        """Split the comma-separated Assigned files marker in a scope instruction."""
         m = re.search(r"Assigned files:\s*([^\n]+)", prompt)
         if m is None:
             return []
         return [part.strip() for part in m.group(1).split(",") if part.strip()]
 
-    def _read_result(self, *, id: str, output: str) -> ToolResultEvent:
-        """Build a read ``ToolResultEvent``, applying :attr:`read_result_extra`.
-
-        Default ``None`` yields the same ``is_error=False`` result as before;
-        when set, its keys (typically ``is_error``/``exit_code``/``status``/
-        ``cancelled``/``truncated``) override the successful defaults so a test
-        can simulate a damaged read observation.
-        """
-        fields: dict[str, Any] = {"id": id, "output": output, "is_error": False}
-        if self.read_result_extra is not None:
-            fields.update(self.read_result_extra)
-        return ToolResultEvent(**fields)
-
     def _tick(self) -> None:
-        """Charge one emitted event's worth of injected clock time, if configured.
-
-        A no-op unless a test installed :attr:`clock_advance`; the runaway
-        branches call it in place of a real sleep so the shared group clock
-        advances deterministically.
-        """
+        """Charge one configured event step to the injected clock, if present."""
         if self.clock_advance is not None:
             self.clock_advance(self.clock_advance_per_event_s)
 
@@ -480,8 +225,7 @@ class StubBackend:
             "would you have done this differently" in pl or "evaluate the implementation" in pl
         ):
             return True
-        if (
-            self.runaway_stack is not None
+        if (self.runaway_stack is not None
             and "you are reviewing the" in pl
             and f"you are reviewing the {self.runaway_stack} stack" in pl
         ):
@@ -490,19 +234,11 @@ class StubBackend:
             return True
         return False
 
-    def _apply_parse_by_stack_override(
-        self, prompt: str, issue: dict[str, Any]
-    ) -> list[dict[str, Any]]:
-        """#232: per-stack override keyed off the review-file path the prompt
-        points at (``stack-<name>-review.md``). Lets one stack emit a HIGH
-        finding and another a borderline LOW one at DISTINCT locations, so they
-        stay uncontested and drive the suppression predicate.
+    def _apply_parse_by_stack_override(self, prompt: str, issue: dict[str, Any]) -> list[dict[str, Any]]:
+        """Apply the named stack's override and optional same-location extra issue.
 
-        Shared by the per-stack review branch and the parse-feedback branch so
-        the ``parse_by_stack`` knob is honored identically in both (issue #745
-        split them; this hoist re-unifies the duplicated body). Returns the
-        issue list -- the base issue, optionally with an ``extra`` sibling at the
-        same (file, line).
+        Review and parse dispatch share this contract; stack names come from
+        stack-<name>-review.md paths in the prompt.
         """
         if self.parse_by_stack is None:
             return [issue]
@@ -521,34 +257,23 @@ class StubBackend:
         issue["evidence"] = f"{issue['file']}:{issue['line']}"
         issue["rationale"] = "stub"
         issues: list[dict[str, Any]] = [issue]
-        # #232: an ``extra`` sibling lets ONE stack emit a second finding at the
-        # SAME (file, line) as its HIGH finding. Single stack -> uncontested, so
-        # only the HIGH one is an arbiter target; the borderline sibling must
-        # still reach suppression, which only holds if exclusion is keyed by
-        # record identity, not by (file, line).
+        # A same-location sibling tests record-identity exclusion: selecting the
+        # HIGH finding for arbitration must not exclude its borderline sibling
+        # from suppression.
         extra = ov.get("extra")
         if extra is not None:
             ex_file = extra.get("file", issue["file"])
             ex_line = extra.get("line", issue["line"])
-            issues.append(
-                {
-                    "id": 2,
-                    "description": extra.get("description", "extra finding"),
-                    "file": ex_file,
-                    "line": ex_line,
-                    "severity": extra["severity"],
-                    "confidence": extra["confidence"],
-                    "rationale": "stub",
+            issues.append({
+                    "id": 2, "description": extra.get("description", "extra finding"), "file": ex_file, "line": ex_line,
+                    "severity": extra["severity"], "confidence": extra["confidence"], "rationale": "stub",
                     "evidence": f"{ex_file}:{ex_line}",
                 }
             )
         return issues
 
-    async def _runaway_burst(
-        self, prefix: str, sleep_s: float
-    ) -> AsyncIterator[AgentEvent]:
-        """Emit 500 unbounded tool calls, never a ResultEvent, pacing each on the
-        stub clock when installed (else sleeping *sleep_s*)."""
+    async def _runaway_burst(self, prefix: str, sleep_s: float) -> AsyncIterator[AgentEvent]:
+        """Emit 500 tool calls without a result, advancing the injected clock or sleeping."""
         for n in range(500):
             yield ToolStartEvent(id=f"{prefix}-{n}", name="Bash", input={"command": "find /"})
             if self.clock_advance is not None:
@@ -557,25 +282,11 @@ class StubBackend:
                 await anyio.sleep(sleep_s)
 
     async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: bool = False,
-        persist_session: bool = True,
+        self, cwd: Path, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncIterator[AgentEvent]:
-        call = {
-            "cwd": cwd,
-            "prompt": prompt,
-            "output_schema": output_schema,
-            "agents": agents,
-            "model": self.model,
-            "continuation": continuation,
-            "max_turns": max_turns,
-            "read_only": read_only,
+        call = {"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
+            "continuation": continuation, "max_turns": max_turns, "read_only": read_only,
             "persist_session": persist_session,
         }
         self.calls.append(call)
@@ -584,14 +295,12 @@ class StubBackend:
         pl = prompt.lower()
 
         if self._is_runaway(prompt, pl):
-            # Unbounded burst, never a ResultEvent -- run_agent's tool-call
-            # budget is the only thing that ends this stream.
+            # No ResultEvent: run_agent must terminate this burst through its budgets.
             async for event in self._runaway_burst("tc", 0):
                 yield event
             return
 
-        # TTT alternative-review -> structured output. Checked BEFORE intent: the
-        # alt prompt embeds the intent summary, defeating a naive substring check.
+        # Check alternatives before intent: their prompt embeds the intent summary.
         if "would you have done this differently" in pl or "evaluate the implementation" in pl:
             if self.fail_alternatives:
                 raise RuntimeError("alternatives blew up")
@@ -599,26 +308,16 @@ class StubBackend:
                 yield ToolStartEvent(id=f"alt-tc-{n}", name="Read", input={"file_path": "api.py"})
                 await anyio.sleep(0)
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "title": "Inconsistent greeting wording",
-                            "description": "'universe' diverges from 'world' in docs",
-                            "recommendation": "align copy",
-                            "severity": "low",
-                            "files": ["api.py", "README.md"],
+            yield ResultEvent(structured_output={"issues": [{"id": 1, "title": "Inconsistent greeting wording",
+                            "description": "'universe' diverges from 'world' in docs", "recommendation": "align copy",
+                            "severity": "low", "files": ["api.py", "README.md"],
                         }
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
 
-        # Issue #1113: grounded-diagram author + repair turns. Returns the
-        # queued spec as structured output, optionally with completed Reads of
-        # every file it cites and a resumable continuation token.
+        # Return the queued diagram spec and optional repair continuation.
         dispatch = self._diagram_dispatch(pl)
         if dispatch is not None:
             kind, is_repair = dispatch
@@ -633,44 +332,24 @@ class StubBackend:
                 spec = {"participants": [], "messages": [], "blocks": []}
             else:
                 spec = {"root": None, "nodes": [], "edges": []}
-            if self.diagram_emit_reads:
-                read_paths = self.diagram_reads.get(kind) or self._diagram_spec_paths(spec)
-                for index, path in enumerate(read_paths):
-                    if path in self.diagram_unread:
-                        continue
-                    call_id = f"diagram-{kind}-{turn}-read-{index}"
-                    yield ToolStartEvent(id=call_id, name="Read", input={"file_path": path})
-                    # Paired result: a bare start is an INTERRUPTED read and
-                    # yields no coverage, so grounding would reject the citation.
-                    yield self._read_result(id=call_id, output="file content")
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output=spec,
-                continuation=(
-                    ContinuationToken(
-                        backend="claude", data={"session_id": self.diagram_session_id}
-                    )
+            yield ResultEvent(structured_output=spec,
+                continuation=(ContinuationToken(backend="claude", data={"session_id": self.diagram_session_id})
                     if self.diagram_session_id
                     else None
                 ),
             )
             return
 
-        # Exploration specialists. Each returns its envelope sub-dict as
-        # structured_output (keyed into results[name] by _run_specialist) plus a
-        # TextEvent of raw JSON the production gate must suppress from the terminal.
+        # Specialists emit structured payloads plus raw JSON text, which the
+        # production display gate must suppress.
         if "you are the **pattern-scanner** specialist" in pl:
             if self.fail_exploration:
                 raise RuntimeError("exploration unavailable")
-            payload = {
-                "conventions": [
-                    {
-                        "name": self.exploration_sentinel or "OpenAPI First",
-                        "description": "openapi.yaml is the HTTP contract",
-                        "source": "CLAUDE.md",
+            payload = {"conventions": [{"name": self.exploration_sentinel or "OpenAPI First",
+                        "description": "openapi.yaml is the HTTP contract", "source": "CLAUDE.md",
                     }
-                ],
-                "guidelines": [],
+                ], "guidelines": [],
             }
             yield TextEvent(text=json.dumps({"conventions": payload["conventions"], "guidelines": []}))
             yield ResultEvent(structured_output=payload, continuation=None)
@@ -678,14 +357,9 @@ class StubBackend:
         if "you are the **dependency-tracer** specialist" in pl:
             if self.fail_exploration:
                 raise RuntimeError("exploration unavailable")
-            payload = {
-                "affected_files": [],
+            payload = {"affected_files": [],
                 "dependencies": [
-                    {
-                        "source": "App.tsx",
-                        "target": "api.py",
-                        "relationship": self.exploration_sentinel or "calls",
-                    }
+                    {"source": "App.tsx", "target": "api.py", "relationship": self.exploration_sentinel or "calls"}
                 ],
             }
             yield TextEvent(text=json.dumps(payload))
@@ -699,10 +373,7 @@ class StubBackend:
 
         # TTT intent phase -> plain text. Discriminator unique to build_intent_prompt.
         if "understand the intent of these changes" in pl:
-            # Echo the author's PR description (when build_intent_prompt injected
-            # one) into the returned intent summary so it lands verbatim in the
-            # on-disk confirmed-intent file (intent_p) and downstream stages —
-            # including the fix prompt — read it back.
+            # Echo the PR description into persisted intent for downstream prompts.
             summary = "The PR updates greetings across stacks."
             _tag = "<pr_description>\n"
             if _tag in prompt:
@@ -713,152 +384,45 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Issue #309: uncovered-file sweep reviewer. Dispatch marker phrase is
-        # unique to build_uncovered_sweep_prompt. Emits a Read of the swept
-        # file (so post-run analyze_coverage counts it as read) and writes a
-        # review the sweep parse pass turns into a PER_STACK_RECORD_SCHEMA
-        # finding for that file. fail_sweep raises to exercise the fail-open
-        # contract.
-        if "uncovered file sweep" in pl:
-            if self.fail_sweep:
-                raise RuntimeError("stub: uncovered-file sweep blew up")
-            file_match = re.search(r"changed file (\S+) was NOT read", prompt)
-            swept_file = file_match.group(1) if file_match else "notes.txt"
-            if not self.sweep_no_output and not self.sweep_no_review_file:
-                out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
-                if out_match is not None:
-                    out_path = Path(out_match.group(1).rstrip("."))
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    out_path.write_text(
-                        f"# Review (uncovered)\n\n## Issues\n\n"
-                        f"1. [{swept_file}:1] Uncovered-file finding for {swept_file}\n"
-                    )
-            if not self.sweep_no_read:
-                yield ToolStartEvent(
-                    id=f"sweep-read-{swept_file}", name="Read", input={"file_path": swept_file}
-                )
-                yield self._read_result(id=f"sweep-read-{swept_file}", output="sweep read returned")
-            # Issue #745 (AC4): the sweep reviewer emits UNCOVERED_SWEEP_SCHEMA
-            # structured output directly (no parse-uncovered-<n> fork).
-            yield TextEvent(text="")
-            if self.sweep_no_output:
-                # Backend succeeds but produces nothing: no structured output
-                # either, so the sweep must not claim coverage (issue #309 f7).
-                yield ResultEvent(structured_output=None, continuation=None)
-                return
-            yield ResultEvent(
-                structured_output={
-                    "issues": [
-                        {
-                            "id": 1,
-                            "description": f"Sweep finding for {swept_file}",
-                            "file": swept_file,
-                            "line": 1,
-                            "severity": self.parse_severity or "low",
-                            "confidence": "MEDIUM",
-                            "rationale": "stub",
-                            "evidence": f"{swept_file}:1",
-                        }
-                    ]
-                },
-                continuation=None,
-            )
-            return
-
         # Per-stack review -> write a markdown file + emit done.
-        m = re.search(r"you are reviewing the (\S+) stack", pl)
-        if m is None:
-            m = re.search(r"you are reviewing the (generic-fallback) stack", pl)
-        if m is None and "you are the structural reviewer" in pl:
-            # Structural meta-stack: same review-file contract, no language label.
-            class _M:
-                @staticmethod
-                def group(_: int) -> str:
-                    return "structure"
-
-            m = _M()  # type: ignore[assignment]
-        if m is not None:
+        stack_match = re.search(r"you are reviewing the (\S+) stack", pl)
+        stack_label = stack_match.group(1) if stack_match else None
+        if stack_label is None and "you are the structural reviewer" in pl:
+            stack_label = "structure"
+        if stack_label is not None:
             if self.per_stack_emit_reads:
                 scope_files = self._stack_scope_files(prompt)
-                if self.per_stack_read_command and any(
-                    scope_file in self.per_stack_loop_reads for scope_file in scope_files
-                ):
-                    # One shell read of the loop-listed files (issue #1397). The
-                    # analyzer resolves the literal ``for`` binding so the
-                    # coverage computation credits each listed file when the
-                    # paired observation is undamaged.
-                    loop_id = f"loop-{len(scope_files)}"
-                    yield ToolStartEvent(
-                        id=loop_id,
-                        name="Bash",
-                        input={"command": self.per_stack_read_command},
-                    )
-                    yield self._read_result(id=loop_id, output="loop read returned")
                 for scope_file in scope_files:
-                    if (
-                        scope_file in self.per_stack_unread
-                        or scope_file in self.per_stack_loop_reads
-                    ):
-                        continue
-                    yield ToolStartEvent(
-                        id=f"read-{scope_file}", name="Read", input={"file_path": scope_file}
-                    )
-                    # Paired result: the sweep's coverage computation credits
-                    # the file only when this observation is not damaged.
-                    yield self._read_result(id=f"read-{scope_file}", output="file content")
+                    yield ToolStartEvent(id=f"read-{scope_file}", name="Read", input={"file_path": scope_file})
+                    # Budget recovery retains only completed source reads.
+                    yield ToolResultEvent(id=f"read-{scope_file}", output="file content", is_error=False)
             out_match = re.search(r"write your full review to (\S+)", prompt, flags=re.IGNORECASE)
             if out_match is not None:
                 raw = out_match.group(1).rstrip(".")
                 out_path = Path(raw)
                 out_path.parent.mkdir(parents=True, exist_ok=True)
-                stack = m.group(1)
                 out_path.write_text(
-                    f"# Review ({stack})\n\n## Issues\n\n1. [api.py:1] Sample issue for {stack}\n"
+                    f"# Review ({stack_label})\n\n## Issues\n\n1. [api.py:1] Sample issue for {stack_label}\n"
                 )
-            # Issue #745 (AC4): the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
-            # structured output directly (no separate parse-<stack> fork). Build a
-            # schema-valid payload with every required issue field.
-            # The structural meta-stack reads the same code through a different
-            # lens, so it words its finding differently. Emitting the language
-            # stacks' byte-identical description here would be a genuine
-            # structural/language duplicate, which the merge host now folds into
-            # a single item (issue #1103) -- erasing the structural item that
-            # every structural-lens test looks for.
-            stack_label = m.group(1)
-            issue: dict[str, Any] = {
-                "id": 1,
-                "description": (
-                    "Structural maintainability concern"
+            # Reviewers emit schema-valid records directly. Structural findings use a
+            # distinct description so host dedup does not fold them into language
+            # findings and erase the structural-lens test case.
+            issue: dict[str, Any] = {"id": 1,
+                "description": ("Structural maintainability concern"
                     if stack_label == "structure"
                     else "Sample issue"
-                ),
-                "file": "api.py",
-                "line": 1,
-                "severity": self.parse_severity or "medium",
-                "confidence": "MEDIUM",
-                "rationale": "stub",
-                "evidence": "api.py:1",
+                ), "file": "api.py", "line": 1, "severity": self.parse_severity or "medium", "confidence": "MEDIUM",
+                "rationale": "stub", "evidence": "api.py:1",
             }
-            issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(
-                prompt, issue
-            )
+            issues: list[dict[str, Any]] = self._apply_parse_by_stack_override(prompt, issue)
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "issues": issues,
-                    "verdicts": self.parse_declared_verdicts or [],
-                },
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"issues": issues}, continuation=None,)
             return
 
-        # Scoped Opus arbiter (#168). Reads the arbiter-input.json path the prompt
-        # points at, echoes every arb_id back with keep=true, and stamps the
-        # description so the arbitrated finding is observable downstream.
+        # Echo arbiter IDs with keep=True; stamp descriptions so revisions remain
+        # observable in downstream artifacts.
         if "you are the arbiter" in pl:
-            # #732: the sharded fan-out names one ``<group_id>-input.json`` per
-            # call while the unsharded path keeps naming ``arbiter-input.json``;
-            # the branch reads whichever file the prompt points at.
+            # Read either the unsharded or group-specific arbiter input path.
             in_match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
             if self.arbiter_fail_group is not None and in_match is not None:
                 group_match = re.search(r"(arbiter-group-\d+)", in_match.group(1))
@@ -868,50 +432,34 @@ class StubBackend:
             if in_match is not None and not self.arbiter_omit_verdicts:
                 arb_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in arb_inputs:
-                    findings.append(
-                        {
-                            "arb_id": entry["arb_id"],
-                            "keep": True,
-                            "severity": entry.get("severity") or "high",
+                    findings.append({
+                            "arb_id": entry["arb_id"], "keep": True, "severity": entry.get("severity") or "high",
                             "confidence": entry.get("confidence") or "HIGH",
                             "description": f"ARBITRATED: {entry.get('description')}",
                             "rationale": "arbiter second opinion",
                         }
                     )
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={"findings": findings},
-                continuation=(
-                    ContinuationToken(
-                        backend="claude", data={"session_id": self.arbiter_session_id}
-                    )
+            yield ResultEvent(structured_output={"findings": findings},
+                continuation=(ContinuationToken(backend="claude", data={"session_id": self.arbiter_session_id})
                     if self.arbiter_session_id
                     else None
                 ),
             )
             return
 
-        # Precision-mode suppression reviewer (#232). Reads suppression-input.json,
-        # echoes every sup_id back with keep=self.suppression_keep. keep=False drops
-        # the borderline finding (fail-closed apply); keep=True with cited evidence
-        # retains it. Dispatch phrase must not collide with the arbiter or merge
-        # branches above/below.
+        # Echo suppression IDs. keep=False drops borderline findings; keep=True
+        # retains cited findings. Its role sentence uniquely selects this branch.
         if "you are the suppression reviewer" in pl:
             in_match = re.search(r"listed in (\S+suppression-input\.json)", prompt)
             sup_findings: list[dict[str, Any]] = []
             if in_match is not None:
                 sup_inputs = json.loads(Path(in_match.group(1)).read_text())
                 for entry in sup_inputs:
-                    sup_findings.append(
-                        {
-                            "sup_id": entry["sup_id"],
-                            "keep": self.suppression_keep,
-                            "severity": entry.get("severity") or "low",
-                            "confidence": entry.get("confidence") or "LOW",
+                    sup_findings.append({"sup_id": entry["sup_id"], "keep": self.suppression_keep,
+                            "severity": entry.get("severity") or "low", "confidence": entry.get("confidence") or "LOW",
                             "description": entry.get("description") or "finding",
-                            "rationale": (
-                                "confirmed by code" if self.suppression_keep else "no confirming evidence"
-                            ),
+                            "rationale": ("confirmed by code" if self.suppression_keep else "no confirming evidence"),
                             "evidence": entry.get("evidence") or "",
                         }
                     )
@@ -931,35 +479,20 @@ class StubBackend:
                 yield ResultEvent(structured_output=self.merge_emit_bare_list, continuation=None)
                 return
             if self.merge_echo_records:
-                # Echo the on-disk per-stack records as merged items so the
-                # rendered artifact reflects any arbiter revisions (#168).
-                # Issue #742: fresh-run records files carry the dict shape
-                # {"issues": [...], "verdicts": [...]}; normalize to the
-                # bare issues list (legacy files stay bare lists).
+                # Echo arbiter revisions from current envelope or legacy bare records.
                 echoed: list[dict[str, Any]] = []
                 next_id = 1
                 for path_str in re.findall(r"  - (\S+-records\.json)", prompt):
                     loaded = json.loads(Path(path_str).read_text())
-                    recs = _records_issues_or_empty(loaded)
+                    recs = record_issues_or_empty(loaded)
                     for rec in recs:
-                        echoed.append(
-                            {
-                                "id": next_id,
-                                "lens": "per-stack",
-                                "file": rec.get("file"),
-                                "line": rec.get("line"),
-                                "severity": rec.get("severity", "medium"),
-                                "description": rec.get("description"),
+                        echoed.append({
+                                "id": next_id, "lens": "per-stack", "file": rec.get("file"), "line": rec.get("line"),
+                                "severity": rec.get("severity", "medium"), "description": rec.get("description"),
                                 "confidence": rec.get("confidence", "MEDIUM"),
                                 "rationale": rec.get("rationale", "rationale"),
                                 "evidence": rec.get("evidence", "api.py:1"),
-                                # Issue #1111: an echoed item IS one record, so
-                                # its provenance is that record's own uid. The
-                                # merge agent never emits ``uid`` (the host owns
-                                # it and re-mints nothing post-merge), so the
-                                # link is carried by ``source_uids`` only --
-                                # copied verbatim, which is what the prompt
-                                # demands and what host-side validation checks.
+                                # Copy host-owned record provenance verbatim through source_uids.
                                 "source_uids": [uid] if (uid := record_uid(rec)) else [],
                             }
                         )
@@ -967,21 +500,11 @@ class StubBackend:
                 yield ResultEvent(structured_output={"items": echoed}, continuation=None)
                 return
             if self.merge_items is not None:
-                yield ResultEvent(
-                    structured_output={"items": self.merge_items},
-                    continuation=None,
-                )
+                yield ResultEvent(structured_output={"items": self.merge_items}, continuation=None,)
                 return
-            # Issue #1111: attribute the default payload to REAL record uids
-            # read off disk, so the default multi-stack fixtures exercise the
-            # production ``source_uids`` shape rather than the "agent emitted
-            # nothing" degenerate case. The two per-stack items cite the stack
-            # they name (``Python issue`` -> a ``python:*`` record); the
-            # cross-stack item cites one record from EVERY stack, which is the
-            # consolidation the field exists to express. A run whose stacks
-            # collapsed (tiny-diff / shallow, where the only stack is
-            # ``generic``) has no python/react record to cite, so the lookup
-            # falls back to the first stack present rather than emitting ``[]``.
+            # Default items cite real record UIDs: per-stack items cite their named
+            # stack and cross-stack items cite every stack. Collapsed generic runs
+            # fall back to the first available stack.
             lead_uids = [group[0] for group in self._prompt_record_uid_groups(prompt)]
             leads_by_stack = {stack_name_from_uid(uid): uid for uid in reversed(lead_uids)}
 
@@ -989,48 +512,20 @@ class StubBackend:
                 uid = leads_by_stack.get(stack) or (lead_uids[0] if lead_uids else "")
                 return [uid] if uid else []
 
-            yield ResultEvent(
-                structured_output={
-                    "items": [
-                        {
-                            "id": 1,
-                            "lens": "per-stack",
-                            "file": "api.py",
-                            "line": 1,
-                            "severity": "medium",
-                            "description": "Python issue",
-                            "confidence": "MEDIUM",
-                            "rationale": "rationale",
-                            "evidence": "api.py:1",
-                            "source_uids": _lead("python"),
-                        },
-                        {
-                            "id": 2,
-                            "lens": "per-stack",
-                            "file": "App.tsx",
-                            "line": 1,
-                            "severity": "medium",
-                            "description": "React issue",
-                            "confidence": "MEDIUM",
-                            "rationale": "rationale",
-                            "evidence": "App.tsx:1",
-                            "source_uids": _lead("react"),
-                        },
-                        {
-                            "id": 3,
-                            "lens": "cross-stack",
-                            "file": "api.py",
-                            "line": 1,
-                            "severity": "high",
+            yield ResultEvent(structured_output={"items": [{
+                            "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "medium",
+                            "description": "Python issue", "confidence": "MEDIUM", "rationale": "rationale",
+                            "evidence": "api.py:1", "source_uids": _lead("python"),
+                        }, {"id": 2, "lens": "per-stack", "file": "App.tsx", "line": 1, "severity": "medium",
+                            "description": "React issue", "confidence": "MEDIUM", "rationale": "rationale",
+                            "evidence": "App.tsx:1", "source_uids": _lead("react"),
+                        }, {"id": 3, "lens": "cross-stack", "file": "api.py", "line": 1, "severity": "high",
                             "description": "Contract drift between Python handler and React caller",
-                            "confidence": "HIGH",
-                            "rationale": "rationale",
-                            "evidence": "api.py:1",
+                            "confidence": "HIGH", "rationale": "rationale", "evidence": "api.py:1",
                             "source_uids": list(lead_uids),
                         },
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
 
@@ -1046,13 +541,10 @@ class StubBackend:
             yield ResultEvent(structured_output={"verdicts": verdicts}, continuation=None)
             return
 
-        # phase_fix -> "apply" the edit by writing a sentinel file, the observable
-        # consequence the --yes real-path test asserts the fix gate auto-approved.
+        # Fix sentinels make gate authorization observable in real-path tests.
         if pl.startswith("fix this issue") or pl.startswith("fix these"):
             if self.runaway_fix:
-                # Emit a long burst of tool calls and NEVER a ResultEvent. A
-                # generator that never returns models the 1.5-5h time-tail the
-                # tool-call budget exists to cut; the budget breaks the loop.
+                # A missing result lets the real budgets terminate the fix turn.
                 async for event in self._runaway_burst("tc", self.runaway_fix_sleep_s):
                     yield event
                 return
@@ -1065,25 +557,16 @@ class StubBackend:
             fixed_file = m.group(1).strip() if m else "unknown"
             # phase_fix emits an absolute path when the file exists on disk; the stub keys fixes by basename.
             fixed_name = Path(fixed_file).name
-            # A retry ladder for this file: fail the first N turns retryably so
-            # run_agent's retry loop is bounded by the invocation deadline rather
-            # than exhausting every attempt. Charge one event's worth of clock for
-            # the failed attempt before raising (the backend time a real failure
-            # burns), then let subsequent turns apply the normal fix.
-            if (
-                (self.fix_retryable_file is None or self.fix_retryable_file == fixed_name)
+            # Charge failed backend time before raising; the real invocation deadline
+            # must bound retries. Later attempts apply the normal fix.
+            if ((self.fix_retryable_file is None or self.fix_retryable_file == fixed_name)
                 and self._fix_retry_counts.get(fixed_name, 0) < self.fix_retryable_failures
             ):
                 self._fix_retry_counts[fixed_name] = self._fix_retry_counts.get(fixed_name, 0) + 1
                 self._tick()
-                raise self.fix_retryable_error or _StubRetryableError(
-                    f"stub: retryable fix failure for {fixed_name}"
-                )
-            # Runaway ONLY the single-item turn for the marked file: same burst
-            # shape as the batched runaway below, but for a group with exactly
-            # one finding (no "Fix these N issues" header).
-            if (
-                self.runaway_single_fix_file is not None
+                raise self.fix_retryable_error or _StubRetryableError(f"stub: retryable fix failure for {fixed_name}")
+            # Run away for this file only when no batched header is present.
+            if (self.runaway_single_fix_file is not None
                 and m is not None
                 and batched_hdr is None
                 and fixed_name == self.runaway_single_fix_file
@@ -1093,21 +576,16 @@ class StubBackend:
                 async for event in self._runaway_burst("stc", self.runaway_fix_sleep_s):
                     yield event
                 return
-            # Runaway ONLY the batched turn for the marked file: burn real wall so
-            # run_agent's per-invocation wall budget trips, returns a budget_reason,
-            # and phase_fix_batched raises into the per-finding fallback (#201).
-            if (
-                self.runaway_batched_fix_file is not None
+            # The real wall timeout raises into per-finding fallback.
+            if (self.runaway_batched_fix_file is not None
                 and batched_hdr is not None
                 and fixed_name == self.runaway_batched_fix_file
             ):
                 async for event in self._runaway_burst("btc", self.runaway_batched_sleep_s):
                     yield event
                 return
-            # Fail ONLY the batched turn for the marked file so the group falls
-            # back to per-finding fixes (the #186 pattern under budget test).
-            if (
-                self.fail_batched_fix_file is not None
+            # Fail this file's batch so its per-finding fallback runs.
+            if (self.fail_batched_fix_file is not None
                 and batched_hdr is not None
                 and fixed_name == self.fail_batched_fix_file
             ):
@@ -1131,9 +609,7 @@ class StubBackend:
             if self.deferred_write_pairs is not None:
                 for index, path in enumerate(self.deferred_write_pairs, start=1):
                     edit_target = Path(path) if Path(path).is_absolute() else cwd / path
-                    yield ToolStartEvent(
-                        id=f"deferred-write-{index}",
-                        name="Write",
+                    yield ToolStartEvent(id=f"deferred-write-{index}", name="Write",
                         input={"file_path": str(edit_target), "content": "backend resumed"},
                     )
                     self._tick()
@@ -1154,13 +630,12 @@ class StubBackend:
                 if edit_target.exists():
                     edit_target.write_text(edit_target.read_text() + self.fix_edit_line)
             if self.fix_append_path is not None and fixed_name == self.fix_append_path.name:
-                # A batched fix turn addresses EVERY finding it is handed, so append
-                # each marker the prompt names (in prompt/severity order), not just
-                # the first. A single-finding prompt names exactly one marker.
+                # Append all handed-off markers in prompt/severity order.
                 toks = re.findall(r"marker-\d+", prompt) or ["?"]
-                cur = self.fix_append_path.read_text() if self.fix_append_path.exists() else ""
+                append_path = cwd / self.fix_append_path.relative_to(self._target)
+                cur = append_path.read_text() if append_path.exists() else ""
                 await anyio.sleep(0)  # deterministic interleave point
-                self.fix_append_path.write_text(cur + "".join(t + "\n" for t in toks))
+                append_path.write_text(cur + "".join(t + "\n" for t in toks))
             yield TextEvent(text="Applied the fix.")
             self._tick()
             yield ResultEvent(structured_output=None, continuation=None)
@@ -1168,40 +643,23 @@ class StubBackend:
             self.completed_fix_files.append(fixed_name)
             return
 
-        # Recommendation verifier (#83). Discriminator is the verifier's role
-        # sentence — the schema dump it used to key off was removed from the
-        # prompt (the schema reaches backends via output_schema). The stub only
-        # emits a well-formed payload; the phase persists it to
-        # recommendation-verdicts.json itself.
+        # Role-based recommendation dispatch; the phase persists the verdicts.
         if "you are the recommendation-verifier agent" in pl:
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "verdicts": [
-                        {
-                            "issue_id": 1,
-                            "verdict": self.verifier_verdict,
-                            "evidence": "stub",
+            yield ResultEvent(structured_output={"verdicts": [{
+                            "issue_id": 1, "verdict": self.verifier_verdict, "evidence": "stub",
                             "unverified_assumptions": list(self.verifier_unverified_assumptions),
                         }
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
 
-        # Post-fix fix-verifier (issue #744). Discriminator is the role sentence
-        # of build_fix_verify_prompt. Returns one verdict per dispatched finding
-        # id rendered in the prompt (default resolved), honoring the
-        # fix_verify_verdicts override map. The phase must ALWAYS pass
-        # read_only=True.
+        # Post-fix verification must be read-only and covers every dispatched ID.
         if "post-fix fix-verifier agent" in pl:
             if not read_only:
                 raise AssertionError("fix-verify turn must arrive read_only=True")
-            round_match = re.search(
-                r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))",
-                prompt,
-            )
+            round_match = re.search(r"(?:Round (\d+) of up to 3 check passes|Verification pass (\d+))", prompt,)
             round_num = int(next(group for group in round_match.groups() if group)) if round_match else 1
             ids = [int(i) for i in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             verdicts = []
@@ -1214,16 +672,11 @@ class StubBackend:
                 else:
                     verdicts.append({"issue_id": i, "verdict": "resolved", "reason": "stub"})
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={"verdicts": verdicts},
-                continuation=None,
-            )
+            yield ResultEvent(structured_output={"verdicts": verdicts}, continuation=None,)
             return
 
-        # Heal-loop fix turn (prompt starts with "The tests failed."). Writes a
-        # distinct sentinel so a test can assert the heal loop DID re-enter a fix
-        # turn -- and, by its ABSENCE, that the environmental short-circuit aborted
-        # before any fix turn ran (AC#6b).
+        # The healing sentinel proves re-entry; environmental failures must leave
+        # it absent.
         if pl.startswith("the tests failed"):
             (cwd / ".daydream-heal-fix-applied").write_text("healed\n")
             if self.heal_fix_generated is not None:
@@ -1238,17 +691,12 @@ class StubBackend:
             yield ResultEvent(structured_output=None, continuation=None)
             return
 
-        # Test-and-heal run. The prompt is constant, so a call counter drives the
-        # result: with fail_first_test_run set, the FIRST run fails (heal loop
-        # reaches choice "2") and subsequent runs pass. With
-        # environmental_test_failure set, every run emits a Postgres-unreachable
-        # signature -- detect_test_success() is False AND is_environmental_failure()
-        # is True, so the heal loop must abort before a fix turn.
+        # Test failures can be first-only, permanent, or environmental. The
+        # Postgres signature must stop healing before another fix turn.
         if "run the project's test suite" in pl:
             self.test_suite_calls += 1
             if self.environmental_test_failure:
-                yield TextEvent(
-                    text=(
+                yield TextEvent(text=(
                         "could not connect to server: Connection refused\n"
                         "\tIs the server running on host localhost (127.0.0.1) "
                         "and accepting TCP/IP connections on port 5432?\n"
@@ -1290,37 +738,19 @@ def silence(monkeypatch: pytest.MonkeyPatch, *, prompts: bool = True) -> None:
 
 
 def force_interactive(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Pin the run's interactivity axis to interactive for prompt-path tests.
-
-    ``runner.run`` now auto-resolves non-interactive from a non-TTY stdin or a
-    truthy ``CI`` env var (Task 4). Under pytest, stdin is not a TTY (and ``CI``
-    is set in CI), so a test that drives the REAL interactive prompt path must
-    explicitly establish a TTY stdin and unset ``CI`` -- otherwise the gate
-    short-circuits to its safe default and the interactive branch never runs.
-    """
+    """Set TTY stdin and clear CI so prompt tests exercise real interactive gates."""
     monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
     monkeypatch.delenv("CI", raising=False)
 
 
-def install_stub_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-    *,
-    pin_skill_availability: bool = True,
+def install_stub_backend(monkeypatch: pytest.MonkeyPatch, target: Path, *, pin_skill_availability: bool = True,
     enable_exploration: bool = False,
 ) -> StubBackend:
-    """Patch create_backend to return a single stub backend instance.
+    """Install one backend instance and optionally pin exploration availability.
 
-    Args:
-        pin_skill_availability: When True (default), disables the exploration
-            pre-scan so it doesn't add unexpected backend calls. Pass False when
-            a test wants to leave ``EXPLORATION_AVAILABLE`` at its module value.
-            Kept for call-site compatibility; stack detection is now
-            registry-independent, so there is no skill-availability gate to pin.
-        enable_exploration: When True, leaves ``EXPLORATION_AVAILABLE`` True so
-            the real ``pre_scan`` branch runs and the stub answers the
-            specialist prompts. Default False preserves the existing behavior
-            (exploration disabled) that the rest of the suite relies on.
+    With pin_skill_availability=True, enable_exploration selects whether the
+    pre-scan runs (default False). Otherwise leave module availability intact.
+    The historical parameter name remains for call-site compatibility.
     """
     stub = StubBackend(target)
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)

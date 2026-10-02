@@ -15,21 +15,15 @@ from daydream.artifact_visibility import private_root_locations
 from daydream.backends import AUDIT_ROOT_ISOLATION, BackendExecutionInput
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.improve_backend import ImproveStubBackend, improve_artifact
 
 
-@pytest.mark.parametrize(
-    ("flow", "injected"),
-    [("factory-probe", True), ("improve", True), ("factory-probe", False)],
-)
+@pytest.mark.parametrize(("flow", "injected"), [("factory-probe", True), ("improve", True), ("factory-probe", False)])
 async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback(
-    flow: str,
-    injected: bool,
-    improve_monorepo_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    flow: str, injected: bool, improve_monorepo_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     ext_dir: ExtDir,
 ) -> None:
     repo = improve_monorepo_target
@@ -58,40 +52,26 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
         "    registry.insert_before('improve', anchor='recon', step='factory-probe')\n"
     )
     source = {
-        "PATH": os.environ["PATH"],
-        "HOME": str(tmp_path / "execution-home"),
-        "ANTHROPIC_API_KEY": "factory-owned-private-key",
-        "DAYDREAM_PI_RETRY_ATTEMPTS": "0",
+        "PATH": os.environ["PATH"], "HOME": str(tmp_path / "execution-home"),
+        "ANTHROPIC_API_KEY": "factory-owned-private-key", "DAYDREAM_PI_RETRY_ATTEMPTS": "0",
     }
     backend_input = BackendExecutionInput.from_environment(source, backend="claude")
     github_input = GitHubExecutionInput(
-        git_ops.StaticGitHubAuth(
-            {
-                "PATH": os.environ["PATH"],
-                "HOME": source["HOME"],
-            }
-        )
+        git_ops.StaticGitHubAuth({ "PATH": os.environ["PATH"], "HOME": source["HOME"], })
     )
     execution = runner.RunnerExecutionInput(backend_input, github_input) if injected else None
     created: list[Any] = []
     github_environments: list[dict[str, str] | None] = []
     real_subprocess_run = subprocess.run
-
     def github_subprocess(args: list[str], *pargs: Any, **kwargs: Any) -> Any:
         if args[0] != "gh":
             return real_subprocess_run(args, *pargs, **kwargs)
         assert args[1:3] == ["api", "/user"]
         github_environments.append(kwargs["env"])
         return subprocess.CompletedProcess(args, 0, json.dumps({"login": login}), "")
-
     def create_backend(
-        name: str,
-        model: str | None = None,
-        *,
-        execution_input: Any = None,
-        audit_root: Path | None = None,
-        audit_outward_symlinks: frozenset[Path] = frozenset(),
-        **kwargs: Any,
+        name: str, model: str | None = None, *, execution_input: Any = None, audit_root: Path | None = None,
+        audit_outward_symlinks: frozenset[Path] = frozenset(), **kwargs: Any,
     ) -> Any:
         assert name == "claude"
         assert model == "factory-model"
@@ -110,31 +90,20 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
             backend.retry_policy = execution_input.retry_policy
         created.append(backend)
         return backend
-
     monkeypatch.setattr(subprocess, "run", github_subprocess)
     monkeypatch.setattr(runner, "create_backend", create_backend)
     if injected:
         # An injected GitHub capability must bypass ambient App validation/mint.
         monkeypatch.setenv("DAYDREAM_APP_ID", "malformed-parent-app-id")
         monkeypatch.setenv("DAYDREAM_APP_PRIVATE_KEY", "parent-private-key")
-    config = runner.RunConfig(
-        target=str(repo),
-        flow_name=flow,
-        base="main",
-        backend="claude",
-        model="factory-model",
-        archive=False,
-        run_eval=False,
-        non_interactive=True,
-        file_config=DaydreamFileConfig(),
+    config = RunConfig(
+        target=str(repo), flow_name=flow, base="main", backend="claude", model="factory-model", archive=False,
+        run_eval=False, non_interactive=True, file_config=DaydreamFileConfig(),
         trajectory_path=tmp_path / "trajectory.json",
     )
     result = await runner.run(
-        config,
-        execution=execution,
-        private_roots=private_root_locations(base=tmp_path / "private"),
+        config, execution=execution, private_roots=private_root_locations(base=tmp_path / "private"),
     )
-
     assert result == 0
     assert created and any(backend.calls for backend in created)
     assert len(github_environments) == 1

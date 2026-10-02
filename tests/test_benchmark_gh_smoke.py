@@ -18,9 +18,7 @@ from daydream.benchmark.storage import load_yaml_strict
 from daydream.benchmark.workspace import init_workspace
 
 _run = shutil.which("gh") is not None and os.environ.get("DAYDREAM_LIVE_GH") == "1"
-pytestmark = pytest.mark.skipif(
-    not _run, reason="live gh smoke test disabled (DAYDREAM_LIVE_GH=1 + gh required)"
-)
+pytestmark = pytest.mark.skipif(not _run, reason="live gh smoke test disabled (DAYDREAM_LIVE_GH=1 + gh required)")
 
 # The module-level skipif already gates on gh + DAYDREAM_LIVE_GH=1.
 _SMOKE_PRS = os.environ.get("DAYDREAM_SMOKE_PRS", "")
@@ -37,7 +35,6 @@ def test_private_preflight_smoke_with_installed_gh(tmp_path: Path) -> None:
     raw = load_yaml_strict(ws / "benchmark.yaml")
     assert raw["source"]["repository_id"].startswith("R_kgD")
     assert "password=" not in json.dumps(raw)     # no credential leakage into the manifest
-
 
 def test_import_prs_two_prs_smoke_with_installed_gh(tmp_path: Path) -> None:
     """Opt-in: import two PRs from an accessible repo with the installed gh; both

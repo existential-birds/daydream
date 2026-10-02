@@ -23,7 +23,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.observability.config import ObservabilityConfig
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import attributes, otlp_collector
@@ -33,50 +33,28 @@ from tests.test_observability_integration import _FLOW, _PROMPT, _REPLY, _SECRET
 @pytest.mark.parametrize("capture_content", [True, False])
 @pytest.mark.parametrize("tool_failed", [False, True])
 async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
-    capture_content: bool,
-    tool_failed: bool,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    capture_content: bool, tool_failed: bool, ext_dir: ExtDir, feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig], install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     ext_dir.write_module(_FLOW)
-    install_backend(
-        ScriptedBackend(
-            events=[
+    install_backend(ScriptedBackend(events=[
                 RequestEvent(_PROMPT, model_name="effective-model", provider_name="observed-provider"),
                 ToolStartEvent("call-one", "read_file", {"path": "sample.py", "api_key": _SECRET}),
                 ToolResultEvent("call-one", f"Tool output includes credential {_SECRET}", tool_failed),
                 TextEvent(_REPLY),
-                MetricsEvent(
-                    message_id="message-one",
-                    prompt_tokens=100,
-                    completion_tokens=12,
-                    cached_tokens=20,
-                    cache_creation_tokens=5,
-                    reasoning_tokens=6,
-                    cost_usd=0.004,
+                MetricsEvent(message_id="message-one", prompt_tokens=100, completion_tokens=12, cached_tokens=20,
+                    cache_creation_tokens=5, reasoning_tokens=6, cost_usd=0.004,
                 ),
-                CostEvent(
-                    cost_usd=0.004,
-                    input_tokens=100,
-                    output_tokens=12,
-                    cached_tokens=20,
-                    cache_creation_tokens=5,
-                    reasoning_tokens=6,
-                    measurement_source="terminal",
-                ),
-                ResultEvent({"answer": "safe"}, None, finish_reason="stop"),
+                CostEvent(cost_usd=0.004, input_tokens=100, output_tokens=12, cached_tokens=20, cache_creation_tokens=5,
+                    reasoning_tokens=6, measurement_source="terminal",
+                ), ResultEvent({"answer": "safe"}, None, finish_reason="stop"),
             ]
         )
     )
     with otlp_collector() as honeyhive, otlp_collector() as generic:
         _configure(monkeypatch, generic.base_url, "honeyhive,otlp")
         monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
-        config = make_config(
-            feature_branch_repo,
-            flow_name="trace-probe",
+        config = make_config(feature_branch_repo, flow_name="trace-probe",
             observability=ObservabilityConfig(destinations=("honeyhive", "otlp"), capture_content=capture_content),
         )
         assert await runner.run(config) == 0
@@ -124,11 +102,8 @@ async def test_honeyhive_native_mapping_is_isolated_from_generic_export(
     assert all(request["path"] == "/opentelemetry/v1/traces" for request in honeyhive.requests)
     assert all(request["headers"]["authorization"] == f"Bearer {_SECRET}" for request in honeyhive.requests)
 
-
 async def test_honeyhive_early_workspace_failure_materializes_session_from_run_identity(
-    tmp_path: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     with otlp_collector() as honeyhive, otlp_collector() as generic:
         _configure(monkeypatch, generic.base_url, "honeyhive,otlp")
@@ -151,14 +126,9 @@ async def test_honeyhive_early_workspace_failure_materializes_session_from_run_i
     assert not any(key.startswith("honeyhive_metadata.") for key in native)
     assert not (tmp_path / ".daydream/runs").exists()
 
-
 async def test_honeyhive_outage_preserves_result_and_generic_export(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     ext_dir.write_module(_FLOW)
     install_backend(ScriptedBackend(events=[RequestEvent(_PROMPT), ResultEvent({"answer": "safe"}, None)]))
@@ -172,53 +142,23 @@ async def test_honeyhive_outage_preserves_result_and_generic_export(
     assert "Failed to export" in caplog.text
     assert _SECRET not in caplog.text
 
-
 async def test_honeyhive_generation_child_is_model_and_attempt_stays_chain(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real Pi-style stream yields one model child per approved generation.
-
-    The structural attempt and the logical agent remain chain; only the sealed
-    generation becomes a HoneyHive model event, and the exactly-once historical
-    end survives to the wire (issue #1156 AC-10/AC-18).
-    """
+    """Only the sealed Pi generation becomes a model event; agent/attempt remain chains."""
 
     ext_dir.write_module(_FLOW)
-    install_backend(
-        ScriptedBackend(
-            events=[
-                RequestEvent(_PROMPT, model_name="pi-model", provider_name="pi"),
+    install_backend(ScriptedBackend(events=[RequestEvent(_PROMPT, model_name="pi-model", provider_name="pi"),
                 GenerationStartEvent(generation_id="gen-one", observed_at_unix_ns=1788690314289000000),
-                GenerationEndEvent(
+                GenerationEndEvent(generation_id="gen-one", native_started_at_unix_ms=1788690314289,
+                    ended_at_unix_ns=1788690709621000000, end_source="host_observed_message_end",
+                    choice_parts=(TextChoicePart(text=_REPLY),), response_id="late-response", model_name="pi-model",
+                    provider_name="pi", finish_reason="stop",
+                ), TextEvent(_REPLY),
+                MetricsEvent(message_id="", prompt_tokens=10, completion_tokens=2, cached_tokens=None, cost_usd=0.001,
                     generation_id="gen-one",
-                    native_started_at_unix_ms=1788690314289,
-                    ended_at_unix_ns=1788690709621000000,
-                    end_source="host_observed_message_end",
-                    choice_parts=(TextChoicePart(text=_REPLY),),
-                    response_id="late-response",
-                    model_name="pi-model",
-                    provider_name="pi",
-                    finish_reason="stop",
-                ),
-                TextEvent(_REPLY),
-                MetricsEvent(
-                    message_id="",
-                    prompt_tokens=10,
-                    completion_tokens=2,
-                    cached_tokens=None,
-                    cost_usd=0.001,
-                    generation_id="gen-one",
-                ),
-                CostEvent(
-                    cost_usd=0.001,
-                    input_tokens=10,
-                    output_tokens=2,
-                    measurement_source="terminal",
-                ),
+                ), CostEvent(cost_usd=0.001, input_tokens=10, output_tokens=2, measurement_source="terminal",),
                 ResultEvent({"answer": "safe"}, None, finish_reason="stop"),
             ]
         )

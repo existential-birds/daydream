@@ -1,28 +1,10 @@
-"""Stage-2 deterministic RFT (M11, M12): offline replay with breakdown-filtered
-byte-identical winners.
+"""Replay frozen task identities and write deterministic, breakdown-filtered winners.
 
-Each task is **reconstructed from the frozen base/head/diff identity recorded
-in the corpus** (M16) — never from live repo state — and candidate completions
-are sampled deterministically (seeded per record) against the Stage-0 rubric
-inputs. Every candidate is scored through :func:`score_trajectory`
-(``reward.py`` — the same hook the offline pipeline and the Stage-3 env use),
-so the winner filter reads the full breakdown, never a bare scalar (M12).
-
-The winner threshold is a **breakdown-shaped spec**: a mapping of breakdown
-axis names to minimum values (e.g. ``{"composite": 0.6, "grounding": 0.5}``).
-A plain float is a :class:`TypeError` at config time.
-
-Determinism contract: given the same inputs file, model id, seed, and rubric
-version, reruns produce **byte-identical** winners files. All iteration is
-sorted (records by stable id), serialization uses ``sort_keys=True`` with
-fixed float formatting, and the header stamps the model id, seed, rubric
-version, and a sha256 digest of the inputs file. Candidate scoring derives
-its breakdown inputs (verdicts + grounding rate) from the *sampled* findings
-subset, so a sampled completion is scored on what varies, never on a
-byte-identical copy of the record.
-
-A record missing base/head/diff identity raises :class:`ValueError` naming
-the record id — never skipped silently.
+Given identical input bytes, model, seed, and rubric, winners are byte-identical:
+records and winners are sorted, floats use fixed formatting, and the header
+stamps input digest and sampling settings. Candidate findings drive their own
+scores. Missing identity raises with the record id; thresholds name axes and
+cannot be a bare scalar.
 """
 
 from __future__ import annotations
@@ -49,13 +31,10 @@ _FULL_SHA_RE = re.compile(r"[0-9a-f]{40,}")
 
 
 def validate_full_sha(record_id: str, field: str, value: object) -> str:
-    """Validate one task-identity SHA as a full-length hex SHA (at least a full
-    40-char git commit SHA; longer sha256-style content-address stamps are
-    tolerated).
+    """Require lowercase hexadecimal identity of at least 40 characters.
 
-    Raises:
-        ValueError: When ``value`` is absent, truncated, or non-hex — naming
-            the record id and field. Never returns a fabricated fallback.
+    Longer content-address stamps are accepted; invalid values raise ValueError
+    naming the record and field without a fabricated fallback.
     """
     if not isinstance(value, str) or not _FULL_SHA_RE.fullmatch(value):
         raise ValueError(
@@ -68,7 +47,7 @@ def validate_full_sha(record_id: str, field: str, value: object) -> str:
 # Breakdown axes the winner spec may constrain: exactly the attribute names of
 # ``score_trajectory``'s ``RewardBreakdown`` (reward.py:316). Anything else is a
 # typo — fail closed at config time rather than silently filtering on nothing.
-_SPEC_AXES = ("composite", "grounding", "correctness_per_finding", "length_penalty")
+_SPEC_AXES = ("composite", "correctness_per_finding", "length_penalty")
 
 # Minimum candidates sampled per record (full finding set + seeded subsets).
 DEFAULT_CANDIDATES_PER_TASK = 4
@@ -76,23 +55,10 @@ DEFAULT_CANDIDATES_PER_TASK = 4
 
 @dataclass(frozen=True)
 class RftConfig:
-    """Configuration for one deterministic RFT replay.
+    """Frozen replay inputs, sampling settings, and per-axis winner thresholds.
 
-    Attributes:
-        inputs: Path to the frozen replay corpus (JSONL, one record per line)
-            whose records carry ``id``, ``base_sha``, ``head_sha``, ``diff``,
-            and the intrinsic signals ``score_trajectory`` consumes.
-        seed: Master seed; per-record seeds are derived deterministically.
-        rubric_version: Rubric version stamped into the winners header.
-        output_dir: Directory the winners file is written to.
-        min_breakdown: Breakdown-shaped winner threshold — a mapping of
-            breakdown axis names to minimum values. A bare scalar is rejected.
-        model_id: Identifier of the model whose completions are replayed;
-            stamped into the winners header.
-        candidates_per_task: Number of deterministic candidates sampled per
-            record (the full finding set is always candidate 0).
-        temperature: Sampling temperature carried for provenance; deterministic
-            replay pins it to 0.0.
+    Candidate zero always contains every finding. model_id, seed, rubric_version,
+    and temperature are stamped into the output; thresholds have no scalar form.
     """
 
     inputs: str | Path
@@ -108,7 +74,8 @@ class RftConfig:
         if isinstance(self.min_breakdown, (int, float, bool)) or not isinstance(self.min_breakdown, Mapping):
             raise TypeError(
                 "min_breakdown must be a breakdown-shaped mapping of axis names to minimums "
-                f"(e.g. {{'composite': 0.6, 'grounding': 0.5}}); got {type(self.min_breakdown).__name__!r}. "
+                "(e.g. {'composite': 0.6, 'correctness_per_finding': 0.5}); "
+                f"got {type(self.min_breakdown).__name__!r}. "
                 "A bare scalar cannot name the axes it constrains (M12)."
             )
         unknown = sorted(set(self.min_breakdown) - set(_SPEC_AXES))
@@ -147,18 +114,8 @@ class RftResult:
     inputs_sha256: str
 
 
-def _record_sort_key(rec: Mapping[str, Any]) -> str:
-    return str(rec.get("id", ""))
-
-
 def _reconstruct_task(rec: Mapping[str, Any]) -> str:
-    """Return the record id, failing closed on malformed task identity.
-
-    ``repo_slug``, ``base_sha``, ``head_sha``, and ``diff`` are validated
-    (including the full 40-hex contract via :func:`validate_full_sha`) *before*
-    any task or image work — a truncated or non-hex SHA raises like a missing
-    one.
-    """
+    """Validate repo/base/head/diff identity and full SHAs before replaying a record."""
     rid = str(rec.get("id", ""))
     repo_slug = rec.get("repo_slug")
     base_sha = rec.get("base_sha")
@@ -200,29 +157,20 @@ def _sample_candidates(rec: Mapping[str, Any], rid: str, cfg: RftConfig) -> list
 
 
 def _score_candidate(rec: Mapping[str, Any]) -> RewardBreakdown:
-    """Score one candidate through the canonical ``score_trajectory`` hook.
+    """Score candidate findings through the canonical intrinsic-reward hook.
 
-    The sampled ``findings`` subset is the candidate-varying input: verdicts
-    and grounding rate are derived from it (mirroring ``rubric.score_review``),
-    so candidates that differ only in their findings subset score differently
-    and the winner filter can prefer one sampled completion over another.
-    Record-level signals are used only when the record carries no findings.
-    The derivation is a pure function of the candidate, so byte-identical
-    determinism on rerun is preserved (M11).
+    Derive verdicts from sampled findings when available; otherwise retain record
+    signals. Candidate variation can therefore affect winner selection.
     """
     findings = [f for f in rec.get("findings", []) if isinstance(f, Mapping)]
     if findings:
-        grounded = sum(1 for f in findings if f.get("grounded"))
-        grounding_rate: float | None = grounded / len(findings)
         verdicts_derived = [{"verdict": str(f["verdict"])} for f in findings if f.get("verdict")]
         verifier_verdicts: Any = verdicts_derived or rec.get("verifier_verdicts")
     else:
-        grounding_rate = rec.get("grounding_rate")
         verifier_verdicts = rec.get("verifier_verdicts")
     breakdown = score_trajectory(
         ScoringInputs(
             verifier_verdicts=verifier_verdicts,
-            grounding_rate=grounding_rate,
             format_valid=bool(rec.get("format_valid", False)),
             length=rec.get("length"),
         )
@@ -260,25 +208,16 @@ def _fixed(value: Any) -> Any:
 
 
 def run_rft(config: RftConfig) -> RftResult:
-    """Run one deterministic Stage-2 RFT replay over the frozen inputs.
+    """Validate frozen task identities, sample/score candidates, and write stable winners.
 
-    Reconstructs each task from its recorded repo/base/head/diff identity —
-    validating ``repo_slug`` and full-length hex ``base_sha``/``head_sha``
-    (:func:`validate_full_sha`) before any task/image work (Req 7, the #714
-    rebase target) — samples deterministic candidates, scores every candidate
-    through :func:`score_trajectory`, filters winners by the breakdown-shaped
-    spec, and writes a byte-identical-on-rerun winners JSON file.
-
-    Raises:
-        ValueError: When any record lacks or carries malformed base/head/diff
-            identity (named by record id and field) — never skipped silently.
+    Missing or malformed identity raises ValueError naming the record and field.
     """
     inputs_path = Path(config.inputs)
     raw = inputs_path.read_text(encoding="utf-8")
     records: list[dict[str, Any]] = [json.loads(line) for line in raw.splitlines() if line.strip()]
 
     winners: list[RftWinner] = []
-    for rec in sorted(records, key=_record_sort_key):
+    for rec in sorted(records, key=lambda record: str(record.get("id", ""))):
         rid = _reconstruct_task(rec)
         for index, candidate in enumerate(_sample_candidates(rec, rid, config)):
             breakdown = _score_candidate(candidate)

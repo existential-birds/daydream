@@ -36,7 +36,6 @@ def test_runtime_lock_header_and_render(tmp_path: Path, monkeypatch: pytest.Monk
     assert f"source_uv_lock_sha256: {hashlib.sha256(uv_lock.read_bytes()).hexdigest()}" in header
     assert f"daydream_version: {ver}" in header
 
-
 def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
     root = Path(__file__).resolve().parents[1]
     repo = tmp_path / "repo"
@@ -52,11 +51,7 @@ def test_runtime_lock_regeneration_is_noop_on_unchanged(tmp_path: Path) -> None:
     regenerated2 = "".join(pkg.render_runtime_lock(uv_lock, daydream_version=ver)).encode()
     assert regenerated2 != committed
 
-
 def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) -> None:
-
-
-
     good, ver = _stub_wheel(tmp_path)
     info = pkg.validate_wheel(good, daydream_version=ver)
     assert info.distribution == "daydream" and info.version == ver
@@ -73,12 +68,8 @@ def test_validate_wheel_accepts_matching_and_rejects_mismatch(tmp_path: Path) ->
         pkg.validate_wheel(tmp_path / "absent.whl", daydream_version=ver)
     assert "absent.whl" in str(missing.value)
 
-
 def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.MonkeyPatch) -> None:
-
-
     pytest.importorskip("harbor")
-
 
     monkeypatch.setattr(importlib.metadata, "version", lambda d: "0.23.0")
     exe = pkg.resolve_harbor()
@@ -97,11 +88,8 @@ def test_resolve_harbor_checks_same_interpreter_and_version(monkeypatch: pytest.
         pkg.resolve_harbor()
     assert "[0.23, 0.24)" in str(wrong.value)
 
-
 def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
-    text = pkg.render_task_toml(
-        "case-abc123def456",
-        reviewer_hosts=["api.anthropic.com"],
+    text = pkg.render_task_toml("case-abc123def456", reviewer_hosts=["api.anthropic.com"],
         judge_hosts=["openrouter.ai"]).decode()
     doc = tomllib.loads(text)
     assert doc["agent"]["allowed_hosts"] == ["api.anthropic.com"]
@@ -111,16 +99,11 @@ def test_render_task_toml_threads_reviewer_and_judge_hosts() -> None:
                                 reviewer_hosts=["api.anthropic.com"],
                                 judge_hosts=["openrouter.ai"]) == \
            pkg.render_task_toml("case-abc123def456",
-                                reviewer_hosts=["api.anthropic.com"],
-                                judge_hosts=["openrouter.ai"])
-
+                                reviewer_hosts=["api.anthropic.com"], judge_hosts=["openrouter.ai"])
 
 def test_render_task_toml_fails_closed_on_empty_or_missing_hosts() -> None:
-
-
     bad_cases: tuple[dict[str, Any], ...] = (
-        {"reviewer_hosts": [], "judge_hosts": ["h.example"]},
-        {"reviewer_hosts": ["h.example"], "judge_hosts": []},
+        {"reviewer_hosts": [], "judge_hosts": ["h.example"]}, {"reviewer_hosts": ["h.example"], "judge_hosts": []},
         {"reviewer_hosts": [], "judge_hosts": []},
     )
     for kw in bad_cases:
@@ -129,76 +112,42 @@ def test_render_task_toml_fails_closed_on_empty_or_missing_hosts() -> None:
     with pytest.raises(pkg.PackageError):
         pkg.render_task_toml("case-abc")   # missing required kwargs
 
-
 def test_render_task_toml_normalizes_and_sorts_hosts() -> None:
-
-
-
     doc = tomllib.loads(pkg.render_task_toml(
-        "case-abc",
-        reviewer_hosts=["HTTPS://B.Example.com", "a.example.com"],
-        judge_hosts=["openrouter.ai"],
+        "case-abc", reviewer_hosts=["HTTPS://B.Example.com", "a.example.com"], judge_hosts=["openrouter.ai"],
     ).decode())
     assert doc["agent"]["allowed_hosts"] == ["a.example.com", "b.example.com"]
     assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
     with pytest.raises(pkg.PackageError):
-        pkg.render_task_toml("case-abc",
-                             reviewer_hosts=["not-a-host"],
-                             judge_hosts=["openrouter.ai"])
+        pkg.render_task_toml("case-abc", reviewer_hosts=["not-a-host"], judge_hosts=["openrouter.ai"])
     with pytest.raises(pkg.PackageError):
-        pkg.render_task_toml("case-abc",
-                             reviewer_hosts=["api.anthropic.com"],
-                             judge_hosts=["*.example.com"])
-
+        pkg.render_task_toml("case-abc", reviewer_hosts=["api.anthropic.com"], judge_hosts=["*.example.com"])
 
 def test_render_task_toml_matches_plan_s8() -> None:
     text = pkg.render_task_toml(
-        "case-4f7c81d922a0",
-        reviewer_hosts=["api.anthropic.com"],
-        judge_hosts=["api.anthropic.com"],
+        "case-4f7c81d922a0", reviewer_hosts=["api.anthropic.com"], judge_hosts=["api.anthropic.com"],
     ).decode()
     doc = tomllib.loads(text)
     assert doc["schema_version"] == "1.4"
-    assert doc["metadata"] == {
-        "benchmark_case_key": "case-4f7c81d922a0",
-        "source_kind": "historic-github-pr",
-    }
-    assert doc["agent"] == {
-        "timeout_sec": 1800.0,
-        "network_mode": "allowlist",
-        "allowed_hosts": ["api.anthropic.com"],
-    }
+    assert doc["metadata"] == {"benchmark_case_key": "case-4f7c81d922a0", "source_kind": "historic-github-pr"}
+    assert doc["agent"] == {"timeout_sec": 1800.0, "network_mode": "allowlist", "allowed_hosts": ["api.anthropic.com"]}
     env = doc["environment"]
-    assert env == {
-        "network_mode": "no-network",
-        "build_timeout_sec": 1200.0,
-        "workdir": "/workspace/repo",
-        "cpus": 2,
-        "memory_mb": 4096,
-        "storage_mb": 10240,
-        "env": {
-            "DAYDREAM_REVIEW_CASE_ID": "case-4f7c81d922a0",
-            "DAYDREAM_REVIEW_BASE_REF": "base",
+    assert env == {"network_mode": "no-network", "build_timeout_sec": 1200.0, "workdir": "/workspace/repo", "cpus": 2,
+        "memory_mb": 4096, "storage_mb": 10240,
+        "env": {"DAYDREAM_REVIEW_CASE_ID": "case-4f7c81d922a0", "DAYDREAM_REVIEW_BASE_REF": "base",
             "DAYDREAM_REVIEW_HEAD_REF": "head",
         },
     }
     assert doc["verifier"]["timeout_sec"] == 900.0
     assert doc["verifier"]["environment_mode"] == "separate"
     assert doc["verifier"]["environment"] == {
-        "network_mode": "allowlist",
-        "allowed_hosts": ["api.anthropic.com"],
-        "build_timeout_sec": 1200.0,
-        "cpus": 1,
-        "memory_mb": 2048,
-        "storage_mb": 4096,
+        "network_mode": "allowlist", "allowed_hosts": ["api.anthropic.com"], "build_timeout_sec": 1200.0, "cpus": 1,
+        "memory_mb": 2048, "storage_mb": 4096,
     }
     assert "dataset.toml" not in text and "registry" not in text
 
-
 def test_render_environment_dockerfile_clones_bundle_no_remote() -> None:
-
-    dockerfile = pkg.render_environment_dockerfile(
-        base_image=pkg.ENV_BASE_IMAGE, daydream_version="0.27.0", wheel=True
+    dockerfile = pkg.render_environment_dockerfile(base_image=pkg.ENV_BASE_IMAGE, daydream_version="0.27.0", wheel=True
     ).decode()
     assert dockerfile.startswith("FROM " + pkg.ENV_BASE_IMAGE)
     assert "git clone" in dockerfile and "repository.bundle" in dockerfile
@@ -213,9 +162,7 @@ def test_render_environment_dockerfile_clones_bundle_no_remote() -> None:
     for forbidden in ("Task.md", "solution/", "tests/score_review", "COPY .."):
         assert forbidden not in dockerfile
 
-
 def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned() -> None:
-
     text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
     assert text.startswith("FROM " + pkg.VERIFIER_BASE_IMAGE)
     assert "ENTRYPOINT" not in text and "CMD" not in text
@@ -225,9 +172,7 @@ def test_verifier_dockerfile_is_entrypoint_free_and_digest_pinned() -> None:
     assert "verifier-metadata.json" in text
     assert "httpx" in text and "httpx>=" not in text and "httpx==0.28.1" in text
 
-
 def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
-
     text = pkg.render_verifier_dockerfile(base_image=pkg.VERIFIER_BASE_IMAGE).decode()
     assert "node-v22." in text                     # version-pinned Node tarball
     # The CLI installs via `npm ci` from the embedded package-lock.json, so
@@ -236,7 +181,6 @@ def test_verifier_dockerfile_ships_pinned_node_and_claude_cli() -> None:
     assert "@anthropic-ai/claude-code" in text and "2.1.250" in text
     assert "ENTRYPOINT" not in text and "CMD" not in text and "/verifier" not in text  # guard set still clean
     assert "httpx==0.28.1" in text and "httpx>=" not in text
-
 
 def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     job = yaml.safe_load(pkg.render_job_config(oracle=False))
@@ -249,8 +193,7 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     assert agent["env"]["DAYDREAM_REVIEW_API_KEY"] == "${DAYDREAM_REVIEW_API_KEY:-}"
     assert agent["env"]["DAYDREAM_REVIEW_BASE_URL"] == "${DAYDREAM_REVIEW_BASE_URL:-}"
     assert agent["env"]["DAYDREAM_REVIEW_MODEL"] == "${DAYDREAM_REVIEW_MODEL}"
-    assert agent["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] == (
-        "${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}"
+    assert agent["env"]["DAYDREAM_REVIEW_PROFILE_CANDIDATE"] == ("${DAYDREAM_REVIEW_PROFILE_CANDIDATE:-}"
     )
     assert job["datasets"] == [{"path": "."}]
     assert job["metrics"] == [{"type": "uv-script", "kwargs": {"script_path": "metric.py"}}]
@@ -268,10 +211,7 @@ def test_render_job_config_matches_plan_s8_and_oracle_differs() -> None:
     assert oracle["verifier"] == job["verifier"]
     assert oracle["metrics"] == job["metrics"]
 
-
-def test_render_job_config_resolves_with_only_selected_provider_credential(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_render_job_config_resolves_with_only_selected_provider_credential(monkeypatch: pytest.MonkeyPatch,) -> None:
     """An unset *alternative* credential never aborts rendering (issue #979)."""
 
     pytest.importorskip("harbor")
@@ -280,8 +220,7 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
 
     # Judge: anthropic selected -> CLAUDE_CODE_OAUTH_TOKEN must be optional.
     for var in (
-        "DAYDREAM_JUDGE_API_KEY", "DAYDREAM_JUDGE_BASE_URL",
-        "CLAUDE_CODE_OAUTH_TOKEN", "DAYDREAM_REVIEW_API_KEY",
+        "DAYDREAM_JUDGE_API_KEY", "DAYDREAM_JUDGE_BASE_URL", "CLAUDE_CODE_OAUTH_TOKEN", "DAYDREAM_REVIEW_API_KEY",
         "DAYDREAM_REVIEW_BASE_URL", "ANTHROPIC_API_KEY",
     ):
         monkeypatch.delenv(var, raising=False)
@@ -301,10 +240,7 @@ def test_render_job_config_resolves_with_only_selected_provider_credential(
     assert verifier_env["CLAUDE_CODE_OAUTH_TOKEN"] == ""  # alternative, unused, unset
     assert verifier_env["DAYDREAM_JUDGE_MODEL"] == "claude-x"
 
-
-def test_render_job_config_still_requires_selection_vars(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_render_job_config_still_requires_selection_vars(monkeypatch: pytest.MonkeyPatch,) -> None:
     """Selection vars stay bare: unset provider/model still abort rendering."""
 
     pytest.importorskip("harbor")
@@ -317,10 +253,7 @@ def test_render_job_config_still_requires_selection_vars(
     with pytest.raises(ValueError, match="DAYDREAM_JUDGE_PROVIDER"):
         resolve_env_vars(dict(job["verifier"]["env"]))
 
-
 def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
-
-
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     wheel, ver = _stub_wheel(tmp_path)
     lock = build.compile_workspace(ws, wheel=wheel)
@@ -338,22 +271,14 @@ def test_compile_with_wheel_emits_full_packaged_tree(tmp_path: Path, fake_gh: Fa
     build.compile_workspace(ws, wheel=wheel)
     assert _harbor_tree_bytes(ws) == tree1
 
-
 def test_build_harbor_refuses_without_ready_workspace(tmp_path: Path, fake_gh: FakeGh) -> None:
-
-
-
     ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)
     wheel, _ = _stub_wheel(tmp_path, content=b"x")
     with pytest.raises(pkg.PackageError) as rejected:
         pkg.build_harbor(ws, wheel=wheel)
     assert "validate" in str(rejected.value).lower() or "ready" in str(rejected.value).lower()
 
-
 def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch: pytest.MonkeyPatch) -> None:
-
-
-
     def absent(distribution: Any) -> None:
         raise importlib.metadata.PackageNotFoundError(distribution)
 
@@ -362,10 +287,7 @@ def test_validate_compiled_rejects_missing_harbor_with_remediation(monkeypatch: 
         pkg.validate_compiled(None)
     assert "pip install 'daydream[benchmark]'" in str(rejected.value)
 
-
 def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: Path, fake_gh: FakeGh) -> None:
-
-
     pytest.importorskip("harbor")
     from harbor.models.job.config import JobConfig
 
@@ -373,7 +295,6 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
         from harbor.models.task import Task
     except ImportError:  # Harbor exposes task as a namespace package in some wheels.
         from harbor.models.task.task import Task
-
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     wheel, _ = _stub_wheel(tmp_path)
@@ -388,29 +309,20 @@ def test_validate_compiled_instantiates_harbor_tasks_and_job_configs(tmp_path: P
         pkg.validate_compiled(ws)
     assert "harbor-job.yaml" in str(rejected.value)
 
-
 def test_templates_and_lock_readable_via_importlib_resources() -> None:
     assert pkg.template_text("tests/Dockerfile")
     assert pkg.template_text("environment/Dockerfile")
     assert pkg.lock_text()
-    resource = importlib.resources.files("daydream.benchmark.harbor.templates").joinpath(
-        "tests/Dockerfile"
-    )
+    resource = importlib.resources.files("daydream.benchmark.harbor.templates").joinpath("tests/Dockerfile")
     assert "FROM" in resource.read_text()
 
-
 def test_audit_execution_proofs_harbor_gated(tmp_path: Path, fake_gh: FakeGh) -> None:
-
-
     pytest.importorskip("harbor")
 
     root = Path(__file__).resolve().parents[1]
     wheels = tmp_path / "wheels"
     subprocess.run(
-        ["uv", "build", "--wheel", "--out-dir", str(wheels), str(root)],
-        check=True,
-        capture_output=True,
-        text=True,
+        ["uv", "build", "--wheel", "--out-dir", str(wheels), str(root)], check=True, capture_output=True, text=True,
     )
     ver = importlib.metadata.version("daydream")
     wheel = wheels / f"daydream-{ver}-py3-none-any.whl"
@@ -430,48 +342,33 @@ def test_audit_execution_proofs_harbor_gated(tmp_path: Path, fake_gh: FakeGh) ->
     environment_tag = f"dd-env-{key}"
     subprocess.run(["docker", "build", "-t", verifier_tag, str(case / "tests")], check=True)
     subprocess.run(["docker", "build", "-t", environment_tag, str(case / "environment")], check=True)
-    subprocess.run(
-        [
-            "docker", "run", "--rm", environment_tag, "sh", "-c",
+    subprocess.run(["docker", "run", "--rm", environment_tag, "sh", "-c",
             "test ! -e /workspace/repo/Task.md && test ! -e /workspace/repo/solution "
             "&& test ! -e /workspace/repo/tests",
-        ],
-        check=True,
+        ], check=True,
     )
-    subprocess.run(
-        [
-            "docker", "run", "--rm", verifier_tag, "sh", "-c",
+    subprocess.run(["docker", "run", "--rm", verifier_tag, "sh", "-c",
             "test ! -e /workspace/repo && test ! -e /instruction.md "
             "&& test -z \"${DAYDREAM_REVIEW_API_KEY:-}\"",
-        ],
-        check=True,
+        ], check=True,
     )
     container = subprocess.run(
-        ["docker", "run", "-d", verifier_tag, "sh", "-c", "sleep infinity"],
-        check=True,
-        capture_output=True,
-        text=True,
+        ["docker", "run", "-d", verifier_tag, "sh", "-c", "sleep infinity"], check=True, capture_output=True, text=True,
     ).stdout.strip()
     try:
         state = subprocess.run(
-            ["docker", "inspect", "-f", "{{.State.Status}}", container],
-            check=True,
-            capture_output=True,
-            text=True,
+            ["docker", "inspect", "-f", "{{.State.Status}}", container], check=True, capture_output=True, text=True,
         ).stdout.strip()
         assert state == "running"
     finally:
         subprocess.run(["docker", "rm", "-f", container], check=False, capture_output=True)
 
     rewards = tmp_path / "rewards.jsonl"
-    rewards.write_text(json.dumps({
-        "verifier_error": 0, "tp": 1, "fp": 0, "fn": 0, "reward": 1.0, "clean_task": 0
+    rewards.write_text(json.dumps({"verifier_error": 0, "tp": 1, "fp": 0, "fn": 0, "reward": 1.0, "clean_task": 0
     }) + "\n")
     out = tmp_path / "metric.json"
     subprocess.run(
-        ["uv", "run", str(ws / "harbor/metric.py"), "-i", str(rewards), "-o", str(out)],
-        check=True,
-        cwd=ws / "harbor",
+        ["uv", "run", str(ws / "harbor/metric.py"), "-i", str(rewards), "-o", str(out)], check=True, cwd=ws / "harbor",
     )
     metric = json.loads(out.read_text())
     assert metric["task_count"] == 1 and metric["micro_f1"] == 1.0

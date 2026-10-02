@@ -1,12 +1,6 @@
-"""Candidate artifact builder for the privacy-safe Harbor review agent (issue #780).
-
-Pure, stdlib-only, host-testable: converts the deep pipeline's canonical
-``merged-items.json`` entries into the strict §9 candidate artifact. No Harbor
-import; the verifier's own ``verifier_core`` derivation and caps are reused so
-the agent produces exactly what the verifier re-derives (a drift would fail
-every trial). Every failure carries a ``kind`` so a failed run reports which
-failure class occurred (missing/corrupt merged output, over-limit, invalid
-candidate, write failure) instead of presenting silence.
+"""Build privacy-safe Harbor candidates from canonical merged findings. Reuse verifier
+identity/cap rules. Typed failures distinguish missing/corrupt input, invalid findings,
+size limits, and write errors.
 """
 
 from __future__ import annotations
@@ -21,13 +15,7 @@ from daydream.pr_review import extract_item_fields
 
 
 class CandidateError(Exception):
-    """Typed agent-failure carrier for candidate artifact production.
-
-    Attributes:
-        kind: The failure class -- ``"over_limit"``, ``"invalid_finding"`` or
-            ``"write_failure"`` (``"missing_merged"`` / ``"corrupt_merged"``
-            are raised by the entrypoint's publish step with the same carrier).
-    """
+    """Candidate failure with a stable kind, also used for missing/corrupt merged output."""
 
     def __init__(self, message: str, *, kind: str) -> None:
         super().__init__(message)
@@ -35,12 +23,8 @@ class CandidateError(Exception):
 
 
 def _candidate_title(description: str) -> str:
-    """Return a verifier-bounded display title without dropping review content.
-
-    Canonical Daydream descriptions can be paragraph-length. The full text is
-    retained in the candidate body; the title uses its first non-empty line and
-    is shortened deterministically only when that line exceeds the verifier's
-    500-character display bound.
+    """Bound the first nonempty description line to 500 characters; retain full content in
+    the body.
     """
     first_line = next(
         (line.strip() for line in description.splitlines() if line.strip()),
@@ -52,13 +36,8 @@ def _candidate_title(description: str) -> str:
 
 
 def _assemble_body(fields: Any) -> str:
-    """Assemble the candidate body from the canonical finding fields.
-
-    The body leads with the finding description, followed by the
-    ``**Severity:**`` / ``**Confidence:**`` badges, and the rationale only when
-    it differs from the description; sections are joined with ``"\\n\\n"``. This
-    guarantees a non-blank body whenever the title is non-blank (the verifier
-    rejects blank titles and bodies) and mirrors the canonical consumers.
+    """Join description, severity/confidence badges, and distinct rationale into a nonblank
+    body.
     """
     parts: list[str] = []
     if fields.description:
@@ -73,19 +52,10 @@ def _assemble_body(fields: Any) -> str:
 
 
 def build_candidate_findings(items: list[dict[str, Any]], *, case_id: str) -> list[dict[str, Any]]:
-    """Convert canonical merged items into candidate findings.
-
-    Each item is mapped through ``pr_review.extract_item_fields`` (the shared
-    item contract). Skipped items: an empty ``file`` (``extract_item_fields``
-    returns ``None``), a ``line`` that is not a positive int (a null/invalid
-    line would emit a partially-populated location the verifier rejects), and
-    an item whose mapped title or body is blank (the verifier rejects blanks).
-    Never fabricates a path or line.
-
-    ``candidate_id`` mirrors ``verifier_core.derive_candidate_id`` byte-for-byte:
-    the canonical six-field tuple (each ``or ""``) with a zero-based ordinal per
-    identical tuple in merged-item order, hashed with the opaque ``case_id``
-    salt, so the hidden verifier re-derives identical ids.
+    """Project canonical findings without inventing locations. Skip missing files,
+    nonpositive/noninteger lines, and blank title/body. Derive ids with opaque case salt
+    and per-identical-content ordinals in merged order, normalizing nullable tuple
+    values like the verifier.
     """
     findings: list[dict[str, Any]] = []
     groups: dict[tuple[object, ...], int] = {}
@@ -125,15 +95,9 @@ def build_candidate_artifact(
     base_ref: str = "base",
     head_ref: str = "head",
 ) -> dict[str, Any]:
-    """Assemble the strict §9 candidate artifact, enforcing the caps fail-closed.
-
-    Returns ``{"schema_version": 1, "case_id": case_id, "base_ref": base_ref,
-    "head_ref": head_ref, "findings": findings}`` -- an empty ``findings`` list
-    is a clean review. ``base_ref``/``head_ref`` default to ``"base"``/`"head"`
-    per the bound-task contract and are threaded from the container env key on
-    the entrypoint path. Exceeding the 100-finding cap or the 1 MiB
-    serialized-artifact cap raises ``CandidateError(kind="over_limit")`` --
-    never silently truncates to fit.
+    """Build schema-1 candidates with opaque case and bound base/head refs. Empty findings
+    mean a clean review. Enforce 100 findings and 1 MiB serialized size by raising
+    over_limit; never truncate evidence to fit.
     """
     artifact = {
         "schema_version": 1,
@@ -163,13 +127,8 @@ def build_candidate_artifact(
 
 
 def write_candidate_artifact_atomic(dest: str | Path, artifact: dict[str, Any]) -> None:
-    """Write *artifact* to *dest* atomically (shared temp + rename).
-
-    The shared :func:`daydream.json_utils.atomic_write_bytes` primitive supplies
-    the same-directory temp file, its cleanup, and the atomic rename, so a reader
-    sees either the prior complete artifact or the complete new artifact -- never
-    a torn write. Any ``OSError`` raises ``CandidateError(kind="write_failure")``;
-    a failure is never silently discarded.
+    """Atomically replace complete candidate bytes; OSError becomes a write_failure
+    CandidateError.
     """
     dest = Path(dest)
     payload = json.dumps(artifact).encode("utf-8")

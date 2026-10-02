@@ -1,24 +1,10 @@
-"""Enumerated per-unit reuse-key payload for the deep review pipeline.
+"""Pure content keys for completed deep review units.
 
-A re-review may restore a completed review unit byte-for-byte when the unit's
-review **subject** and **contract** are unchanged. This module builds the pure
-payload that decides that, and keeps the distinction structural rather than a
-convention:
-
-* ``components`` — the subject (assigned hunks, assigned/frontier file names and
-  their worktree blob hashes, contributing record bytes) and the contract
-  (cache format version, resolved ``ReviewProfile.digest``, resolved model,
-  resolved effort, prompt-affecting run flags). ``unit_key`` hashes exactly
-  ``{"format", "unit", "components"}``.
-* ``grounding`` — the inputs the fix loop re-derives every iteration (the
-  exploration pre-scan, intent, alternatives, the settled-decisions block).
-  Their digests are *recorded and compared on every hit* but are never read by
-  ``unit_key``, so a grounding move can never move a key (MH16).
-
-A required component that is absent or unreadable becomes ``None`` and
-``unit_key`` then returns ``None`` — a named miss (``absent_components``), never
-a placeholder digest. Grounding absence is a value (the literal ``"absent"``),
-not a miss.
+Keys cover subject and contract: assigned hunks/files/blobs/records, format,
+profile, model, effort, and prompt flags. Re-derived exploration, intent,
+alternatives, and settled decisions are grounding: recorded and compared on
+hits, but excluded from keys. Missing required components are None and prevent
+a key; missing grounding is the valid literal "absent".
 """
 
 from __future__ import annotations
@@ -50,11 +36,7 @@ _ABSENT = "absent"
 
 @dataclass(frozen=True)
 class PhaseIdentity:
-    """The resolved contract identity of one model-bearing phase.
-
-    ``backend`` is informational; ``model``, ``effort`` and ``profile_digest``
-    are the contract rows keyed per unit.
-    """
+    """Resolved phase contract; backend is informational, other fields participate in keys."""
 
     backend: str
     model: str
@@ -86,11 +68,9 @@ def normalize_run_scoped(
     session_id: str | None = None,
     run_root: str | Path | None = None,
 ) -> str | bytes:
-    """Strip run-scoped identifiers from a digest input (A9).
+    """Remove run IDs, artifact-run segments, run_root, and cwd from digest inputs.
 
-    Removes the ``/runs/<id>/`` artifact segment, a known ``session_id``, a known
-    ``run_root`` prefix and the current working directory. Normalization is
-    digest-only: stored payload bytes are always restored verbatim.
+    Stored payloads are restored verbatim; normalization affects only their keys.
     """
     if isinstance(text_or_bytes, bytes):
         text: str = text_or_bytes.decode("utf-8", "surrogateescape")
@@ -163,7 +143,7 @@ def diff_blocks_digest(full_diff: str, files: Sequence[str]) -> str | None:
     Returns ``None`` when the blocks are unavailable (no match, or over the
     inline byte budget) so the caller can fall back to the hunk index.
     """
-    from daydream.deep.prompts import _diff_blocks_for_files
+    from daydream.deep.diff import _diff_blocks_for_files
 
     blocks = _diff_blocks_for_files(full_diff, list(files))
     if blocks is None:
@@ -172,12 +152,7 @@ def diff_blocks_digest(full_diff: str, files: Sequence[str]) -> str | None:
 
 
 def hunk_slice_digest(hunk_index: Mapping[str, Any], files: Sequence[str]) -> str | None:
-    """Digest the persisted hunk-index entries for exactly ``files``.
-
-    A requested file missing from the index makes the slice ``None`` — the
-    subject is not fully known, so the unit must miss rather than key a
-    partial slice.
-    """
+    """Hash exactly the requested persisted hunks; an empty or incomplete slice is absent."""
     wanted = sorted(set(files))
     if not wanted:
         return None
@@ -190,12 +165,7 @@ def hunk_slice_digest(hunk_index: Mapping[str, Any], files: Sequence[str]) -> st
 
 
 def exploration_digest(exploration_dir: str | Path | None) -> str:
-    """Digest the exploration pre-scan directory's content, excluding ``cache-key``.
-
-    ``cache-key`` records how the directory was produced and must never enter a
-    digest (spec Constraints). A missing directory or unreadable file is the
-    ``"absent"`` sentinel.
-    """
+    """Hash pre-scan files except cache-key; missing/unreadable content yields "absent"."""
     if exploration_dir is None:
         return _ABSENT
     root = Path(exploration_dir)
@@ -297,11 +267,7 @@ def _identity_components(identity: PhaseIdentity) -> dict[str, Any]:
 def _record_digests(
     contributing_records: Mapping[str, bytes | None],
 ) -> dict[str, str] | None:
-    """Digest ``name -> bytes`` records, or ``None`` when any record is unreadable.
-
-    ``None`` makes the whole record component absent, so ``unit_key`` returns
-    ``None`` (a named miss) rather than keying the subset that did read.
-    """
+    """Hash every contributing record, or None if any record is unreadable."""
     if any(data is None for data in contributing_records.values()):
         return None
     return {
@@ -363,6 +329,7 @@ def shard_key_payload(
         "include_alternatives": include_alternatives,
         "exploration_present": exploration_present,
         "docs_only": docs_only,
+        "schema": _phases_schema_digest("PER_STACK_RECORD_SCHEMA"),
     }
     grounding = {
         "exploration": {"digest": exploration_digest(exploration_dir)},
@@ -383,13 +350,9 @@ def intent_key_payload(
     worktree_root: str | Path,
     identity: PhaseIdentity,
 ) -> dict[str, Any]:
-    """Build the whole-change intent payload.
+    """Key diff, commit log, branch, and PR description; record exploration as grounding.
 
-    The diff, the commit log, the branch name and the PR description are all
-    prompt inputs of this unit, so they are hard components. The exploration
-    pre-scan is the loop's own re-derived grounding and is recorded, never
-    keyed (MH2/MH16). ``worktree_root`` scopes the run-path normalization of
-    the diff digest (A9); the payload stores no path.
+    worktree_root normalizes the diff's run paths and is never stored in the payload.
     """
     components: dict[str, Any] = {
         "format": REUSE_KEY_FORMAT,
@@ -415,12 +378,7 @@ def wonder_key_payload(
     identity: PhaseIdentity,
     grounding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the whole-change alternatives/wonder payload.
-
-    The intent artifact is grounding *inside a grounding unit* — the tie-breaker
-    that closes the classification table. Only the diff and ``horse_mode`` are
-    subject; ``grounding`` is stored verbatim and never read by ``unit_key``.
-    """
+    """Key diff and horse_mode; intent and other loop grounding stay outside the key."""
     components: dict[str, Any] = {
         "format": REUSE_KEY_FORMAT,
         "diff": digest_text(diff_text),
@@ -431,67 +389,16 @@ def wonder_key_payload(
 
 
 def _schema_digest(schema: Any) -> str:
-    """Digest of a strict schema contract under canonical JSON.
-
-    The schema is part of its unit's contract, so a schema change must miss
-    rather than serve output the new schema would have rejected.
-    """
+    """Hash the strict schema contract so changed schemas invalidate cached output."""
     return digest_text(_canonical_json(schema))
 
 
 def _phases_schema_digest(name: str) -> str:
-    """Digest one of ``daydream.phases``' strict schema contracts by name.
-
-    Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    import would be a cycle.
-    """
+    """Read phase schemas lazily to avoid the phase/reuse import cycle."""
     from daydream import phases
 
     return _schema_digest(getattr(phases, name))
 
-
-def sweep_key_payload(
-    *,
-    contributing_records: Mapping[str, bytes],
-    uncovered_files: Sequence[str],
-    hunk_index: Mapping[str, Any],
-    bounds: Mapping[str, Any],
-    identity: PhaseIdentity,
-    grounding: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build the uncovered-sweep payload.
-
-    ``contributing_records`` are the project-stack records the sweep runs
-    beside (structural excluded, matching what it consumes) and are *subject*:
-    a recomputed shard moves the sweep's key (MH8). ``uncovered_files`` is
-    the run's current uncovered set -- derived by
-    ``compute_uncovered_files`` from the durable hunk index, this
-    session's completed reviewer reads and the coverage
-    receipts/records -- and ``hunk_index`` supplies its hunks. Because
-    that set is a hard component, reads the reuse path does not replay
-    (a hit restores a shard's artifacts and returns before any fork,
-    leaving its origin-run reads out of the new session) can move this
-    key on an unchanged diff, miss the entry, and recompute the sweep
-    plus the downstream arbiter/merge units (A8/MH9; issue #733
-    review). Intent and
-    exploration are the loop's own re-derived grounding, so they are recorded
-    and never keyed (MH2/MH16). ``bounds`` is the resolved sweep budget
-    (``min_hunk_lines``/``max_files``), so a changed budget misses.
-    """
-    ordered_uncovered = sorted(set(uncovered_files))
-    components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
-        "records": _record_digests(contributing_records),
-        "uncovered_set": ordered_uncovered,
-        "hunk_slice": hunk_slice_digest(hunk_index, ordered_uncovered),
-        "schema": _phases_schema_digest("UNCOVERED_SWEEP_SCHEMA"),
-        **_identity_components(identity),
-        "bounds": {
-            "min_hunk_lines": bounds.get("min_hunk_lines"),
-            "max_files": bounds.get("max_files"),
-        },
-    }
-    return _unit_payload("sweep", components, grounding)
 
 
 def arbiter_key_payload(
@@ -503,20 +410,11 @@ def arbiter_key_payload(
     identity: PhaseIdentity,
     grounding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the whole-arbiter payload.
+    """Key all input records, the group plan, precision mode, schema, and phase identity.
 
-    ``contributing_records`` is the canonical ``name -> bytes`` map of every
-    per-stack records file the arbiter reads (structural included) and is
-    *subject*: a recomputed shard moves the arbiter's key (MH8). A named file
-    that could not be read maps to ``None``, which makes the whole payload an
-    absent component and so a named miss rather than a partial key. ``structural``
-    is the structural records digest, or the literal ``"absent"`` when the run
-    has no structural stack (a value, not a miss). ``plan`` carries the group
-    plan's target user ids and the sharded flag, and ``precision_mode`` the
-    resolved suppression opt-in; both are contract. Intent, alternatives and
-    the pre-scan are the loop's own re-derived grounding, so they are recorded
-    and never keyed (MH2/MH16). ``#732``'s per-group identity is left to the
-    group markers and is not adjudicated here.
+    One unreadable contributing file prevents reuse. An absent structural stack
+    uses the valid "absent" sentinel. Grounding is recorded but not keyed; per-group
+    completion identity remains the group markers' responsibility.
     """
     # A record that could not be read makes the whole component absent, so
     # ``unit_key`` returns ``None`` (a named miss) rather than keying the subset
@@ -543,19 +441,10 @@ def merge_key_payload(
     identity: PhaseIdentity,
     grounding: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """Build the cross-stack merge payload.
+    """Key all input records, structural presence, uncovered stacks, schema, and identity.
 
-    ``contributing_records`` is the canonical ``name -> bytes`` map of every
-    per-stack record file the merge reads -- the primary stacks, the uncovered
-    sweep's records, and the structural meta-stack -- and is *subject*: a
-    recomputed shard moves the merge's key (MH8), so the aggregation unit misses
-    and recomputes rather than serving output synthesized from stale records. A
-    named file that could not be read maps to ``None``, which makes the whole
-    unit a named miss rather than a partial key. ``structural_records_present``
-    records whether the run had a structural meta-stack at all, and
-    ``failed_stacks`` the sorted uncovered-stack names (an empty list is a
-    value). Intent, alternatives and the pre-scan are the loop's own re-derived
-    grounding, so they are recorded and never keyed (MH2/MH16).
+    One unreadable contributing file prevents reuse. Empty failed_stacks is valid;
+    loop grounding is recorded but never keyed.
     """
     components: dict[str, Any] = {
         "format": REUSE_KEY_FORMAT,
@@ -571,7 +460,7 @@ def merge_key_payload(
 def phase_identity_for(ctx: Any, phase: str) -> PhaseIdentity:
     """Resolve ``phase``'s contract identity from the live flow context."""
     from daydream.review_profile import build_default_profile
-    from daydream.runner import _resolved_backend_name, _resolved_reasoning_effort
+    from daydream.run_config import _resolved_backend_name, _resolved_reasoning_effort
 
     backend = ctx.backend_for(phase)
     profile = getattr(ctx, "review_profile", None)

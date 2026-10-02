@@ -38,7 +38,6 @@ def test_privacy_placeholders_only() -> None:
     assert re.search(r"ghp_[A-Za-z0-9]", text) is None
     assert re.search(r"github\.com/[A-Za-z0-9_-]+/[A-Za-z0-9_-]+/pull/\d+", text) is None
 
-
 def test_harbor_env_policy_docs_point_at_the_declaration() -> None:
     """S2: the docs name the single source without restating the sets."""
     runbook = RUNBOOK.read_text(encoding="utf-8")
@@ -46,12 +45,10 @@ def test_harbor_env_policy_docs_point_at_the_declaration() -> None:
     guidance = (ROOT / "CLAUDE.md").read_text(encoding="utf-8")
     assert "daydream/benchmark/harbor/env_policy.py" in guidance
 
-
 # --- Objectives & suites (MH-9, MH-10) ---
 
 def test_objective_example_is_privacy_safe() -> None:
     blob = json.dumps(_objective_example())
     assert "OWNER" not in blob and "github.com" not in blob
     assert not re.search(r"pull/\d+|pr-\d", blob)
-
 

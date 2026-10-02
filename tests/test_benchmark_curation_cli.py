@@ -21,22 +21,17 @@ from tests.test_benchmark_curation import _seed_ready_case
 
 
 def test_cli_curate_apply_gold_writes_0600_and_never_ready(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
     ws, case_id, head_sha = _seed_ready_case(tmp_path, fake_gh, lines=4, candidate=True)
     cand = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     frag_path = tmp_path / "gold.yaml"
-    frag_path.write_text(yaml.safe_dump({
-        "findings": [{"title": cand["title"], "body": cand["body"], "severity": None,
+    frag_path.write_text(yaml.safe_dump({"findings": [{"title": cand["title"], "body": cand["body"], "severity": None,
                       "location": cand["location"], "source_ids": [cand["source_id"]]}],
         "exclusions": [], "case_exclusion": None, "clean": False,
     }, sort_keys=False))
 
-    rc = _handle_benchmark_command(
-        ["curate", str(ws), "--case", case_id, "--apply-gold", str(frag_path)])
+    rc = _handle_benchmark_command(["curate", str(ws), "--case", case_id, "--apply-gold", str(frag_path)])
     assert rc == 0
     out = capsys.readouterr()
     assert "ready" not in out.err                      # no error printed
@@ -47,11 +42,8 @@ def test_cli_curate_apply_gold_writes_0600_and_never_ready(
     assert raw["curation"]["state"] == "draft" and raw["curation"]["snapshot_attested"] is False
     assert raw["curation"]["findings"][0]["provenance"]["kind"] == "historical"
 
-
 def test_cli_curate_apply_gold_malformed_fragment_clean_exit(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A malformed fragment (missing required keys) maps to exit 1, no traceback."""
 
@@ -63,36 +55,27 @@ def test_cli_curate_apply_gold_malformed_fragment_clean_exit(
         "case_exclusion": {"note": "no reason"},       # dereferences case_exclusion['reason']
     }, sort_keys=False))
 
-    rc = _handle_benchmark_command(
-        ["curate", str(ws), "--case", case_id, "--apply-gold", str(frag_path)])
+    rc = _handle_benchmark_command(["curate", str(ws), "--case", case_id, "--apply-gold", str(frag_path)])
     assert rc == 1
     assert "Traceback" not in capsys.readouterr().err
 
-
 def test_curate_on_tty_dispatches_to_tui(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
-
     ws, case_id, _h = _seed_ready_case(tmp_path, fake_gh, lines=3, candidate=True)
     called: dict[str, Any] = {}
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: True)
-    monkeypatch.setattr(
-        "daydream.benchmark.curate_tui.run_curate_tui",
+    monkeypatch.setattr("daydream.benchmark.curate_tui.run_curate_tui",
         lambda root, cid=None, **k: called.update(root=str(root), cid=cid) or 0,
     )
     rc = cli._handle_benchmark_command(["curate", str(ws), "--case", case_id])
     assert rc == 0 and called == {"root": str(ws), "cid": case_id}
 
-
 def test_curate_non_tty_keeps_guidance_and_exit_1(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws, case, _ = _seed_ready_case(tmp_path, fake_gh, lines=2)
     monkeypatch.setattr(cli, "_is_interactive_tty", lambda: False)
     rc = cli._handle_benchmark_command(["curate", str(ws), "--case", case])
     assert rc == 1 and "apply-gold" in capsys.readouterr().err.lower()
-
 
 def test_is_interactive_tty_detects_stdin_and_stdout(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(sys.stdin, "isatty", lambda: True)

@@ -1,14 +1,9 @@
 #!/usr/bin/env python3
-"""Re-drive PR comment posting from the canonical deep merged-items file.
+"""Re-post canonical deep/merged-items.json via the shared review publication path.
 
-Usage:
-    uv run python scripts/redrive_post.py /path/to/target/repo --pr N [--yes]
-
-The sole input is `.daydream/deep/merged-items.json` — the canonical,
-schema-validated finding list produced by the cross-stack merge. Conversion,
-classification, confirmation, and submission are delegated to
-`daydream.pr_review.post_review_to_pr_from_report`, so a redrive can never
-reintroduce deduped findings or drop structural ones.
+Usage: uv run python scripts/redrive_post.py /target/repo --pr N [--yes]
+Delegate validation, conversion, classification, confirmation, and submission
+to post_review_to_pr_from_report so findings are neither revived nor dropped.
 """
 
 from __future__ import annotations

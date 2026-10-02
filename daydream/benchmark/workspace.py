@@ -1,13 +1,6 @@
-"""Benchmark workspace orchestration: ``init`` / ``status`` / ``validate``.
-
-``workspace.py`` owns the three user-facing commands of the private benchmark
-workspace. ``init_workspace`` builds the private layout + manifest through the
-transaction journal under the workspace lock; ``workspace_status``
-reads the derived state (recovery + read under the lock, so it serializes
-safely against a concurrent writer); ``validate_workspace`` returns the
-``0/2/1`` classification. Expected workspace errors are never
-surfaced as bare tracebacks — ``InitError``/``WorkspaceCorrupt``/schema
-failures map to the documented exit codes.
+"""Initialize, recover, inspect, and validate private benchmark workspaces. Mutations and
+recovery run under the workspace lock. Validation classifies ready/incomplete/corrupt as
+0/2/1; expected failures become labeled results.
 """
 
 from __future__ import annotations
@@ -88,22 +81,8 @@ def _manifest_bytes(privacy: Privacy, source: Source, benchmark_id: str) -> byte
         "schema_version": 1,
         "benchmark_id": benchmark_id,
         "created_at": schema.rfc3339_now(),
-        "source": {
-            "provider": source.provider,
-            "hostname": source.hostname,
-            "repository": source.repository,
-            "repository_id": None,
-            "visibility": "unresolved",
-        },
-        "privacy": {
-            "classification": privacy.classification,
-            "reviewer_data": privacy.reviewer_data,
-            "reviewer_allowed_hosts": privacy.reviewer_allowed_hosts,
-            "judge_data": privacy.judge_data,
-            "judge_allowed_hosts": privacy.judge_allowed_hosts,
-            "archive": privacy.archive,
-            "uploads": privacy.uploads,
-        },
+        "source": source.model_dump(mode="json") | {"repository_id": None, "visibility": "unresolved"},
+        "privacy": privacy.model_dump(mode="json"),
         "pull_requests": [],
         "cases": [],
     }
@@ -116,13 +95,9 @@ def init_workspace(
     reviewer_hosts: list[str],
     judge_hosts: list[str],
 ) -> BenchmarkManifest:
-    """Create a private benchmark workspace at ``root``.
-
-    Refuses a pre-existing nonempty directory, builds the ``0700`` private
-    layout + self-ignoring ``.gitignore``, and persists ``.gitignore`` +
-    ``benchmark.yaml`` through the transaction journal under the workspace
-    lock (``benchmark.yaml`` replaced last). A crash mid-init rolls back to an
-    empty/absent workspace.
+    """Create a private workspace, refusing a nonempty destination. Journal the 0700
+    scaffold, self-ignoring .gitignore, and manifest under the lock, replacing the
+    manifest last. Interrupted init rolls back to empty.
     """
     root = Path(root)
     # Heal any interrupted prior init journal so the rollback-to-empty/absent
@@ -197,13 +172,7 @@ class WorkspaceStatus:
 
 
 def workspace_status(root: Path) -> WorkspaceStatus:
-    """Return a read-only ``WorkspaceStatus`` for ``root``.
-
-    Runs startup recovery, then reads + strictly validates ``benchmark.yaml``.
-    Recovery mutates the tree (it rolls back interrupted journals), so it runs
-    under the workspace lock; a status is safe to run concurrently because
-    each call holds the lock only for the duration of its recovery+read.
-    """
+    """Recover and strictly read workspace state under one lock acquisition."""
     root = Path(root)
     with WorkspaceLock(root):
         recover_startup(root)
@@ -242,16 +211,9 @@ def _last_preflight_verified_at(root: Path) -> str | None:
 
 
 def validate_workspace(root: Path) -> tuple[int, str]:
-    """Validate a workspace, returning a ``(exit_code, human_label)`` pair.
-
-    ``0`` ready; ``2`` structurally valid but incomplete (e.g. unresolved
-    repository identity); ``1`` corrupt (invalid/missing ``benchmark.yaml``,
-    an orphan/missing indexed file, a checksum-mismatched import/case, or a
-    corrupted/missing/checksum-mismatched ready-snapshot bundle). The exit
-    code comes from :func:`classify_validation`, so the documented
-    ``0``/``2``/``1`` classifier has a single source of truth. Expected
-    workspace errors map to ``1`` + a label — a raw traceback is the wrong
-    surface for a bench validation.
+    """Return (exit code, label): ready=0, incomplete=2, corrupt=1. Schema, orphan,
+    checksum, and ready-bundle failures are corruption; expected workspace errors are
+    returned as labels.
     """
     root = Path(root)
     with WorkspaceLock(root):
@@ -312,15 +274,9 @@ def validate_workspace(root: Path) -> tuple[int, str]:
 def _derived_state(
     root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> tuple[str, bool]:
-    """Shared (workspace state, identity-resolved) derivation for status+validate.
-
-    Loading each indexed case document with the shared model-gated loader,
-    resolving every indexed authoring file exactly once, and verifying each
-    fetched import's on-disk sha256, each ``ready`` snapshot's bundle fidelity,
-    and (when retained) local source-mirror provenance keeps the two read-only
-    call paths on one rule, so a state/resolution rule can't diverge between
-    them. An unreadable/invalid case or failed proof surfaces as
-    :class:`WorkspaceCorrupt`.
+    """Derive state and identity resolution from one validated document/path inventory.
+    Verify import bytes, ready bundle fidelity, and any retained source mirror.
+    Unreadable documents or failed proofs raise WorkspaceCorrupt.
     """
     pr_dicts = [{"import_state": pr.import_state} for pr in manifest.pull_requests]
     state = derive_workspace_state(
@@ -345,15 +301,8 @@ def _derived_state(
 
 
 def load_case_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, CaseDocument]:
-    """Load every indexed case document as a strict ``CaseDocument`` model.
-
-    Shared by the validate/status read path and the ``harbor`` compile path,
-    keyed by ``case_file``. Each case file is resolved through
-    :func:`resolve_authoring_path` (containment enforced) and validated with
-    ``CaseDocument.model_validate`` after the persisted ``gold_mode`` audit
-    field is stripped via :func:`schema._schema_ready` — a present-but-corrupt
-    case raises :class:`WorkspaceCorrupt` naming the ``case_file``, never a
-    defaulted/skipped read.
+    """Load indexed cases through containment, strict YAML, and CaseDocument validation.
+    Strip persisted audit fields via _schema_ready; report corrupt cases by path.
     """
     docs: dict[str, CaseDocument] = {}
     for case in manifest.cases:
@@ -380,17 +329,9 @@ def _load_authoring_document(
     model: type[_ModelT],
     preprocess: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
 ) -> _ModelT:
-    """Resolve one authoring document and model-gate it through the strict loader.
-
-    The single definition of the resolve -> strict-load -> model-validate ->
-    wrap-in-:class:`WorkspaceCorrupt` block shared by the case and import
-    authoring loaders: resolution through :func:`resolve_authoring_path`, the
-    strict ``loader``, then ``model.model_validate`` (with an optional
-    ``preprocess`` of the raw dict, e.g. :func:`schema._schema_ready`). A
-    present-but-invalid document raises :class:`WorkspaceCorrupt` naming only
-    ``what`` + the authoring file -- the diagnostic never embeds the pydantic
-    error, whose repr embeds the input document (PR bodies/evidence) that the
-    CLI's no-disclosure contract keeps off stderr.
+    """Resolve, strictly load, optionally preprocess, and model-validate an authoring file.
+    Wrap failures with only the document kind/path: Pydantic reprs can disclose private
+    PR bodies and evidence and must never reach CLI diagnostics.
     """
     path = resolve_authoring_path(root, rel)
     try:
@@ -410,28 +351,10 @@ def _verify_snapshot_checksums(
     docs: dict[str, CaseDocument],
     paths: dict[str, Path],
 ) -> None:
-    """Verify each indexed ``ready`` snapshot's bundle + sha256 digest.
-
-    A missing ``bundle_file`` or a ``bundle_sha256`` mismatch for a committed
-    ``ready`` case is :class:`WorkspaceCorrupt` — it is corruption surfacing,
-    never curatable staleness, and never mutates the case document or ledger.
-
-    A ``ready`` snapshot with no ``bundle_file``/``bundle_sha256`` is itself
-    structurally invalid and reported corrupt. ``paths`` is the shared
-    single-resolution pass (:func:`_resolved_authoring_paths`); a ``ready``
-    bundle absent from it is a missing file.
-
-    Beyond the checksum, every ``ready`` snapshot is validated with the
-    authoritative offline-clone fidelity contract
-    (:func:`daydream.benchmark.snapshot.validate_offline_clone`) on a
-    disposable network-disabled clone under ``root/cache`` — exact refs, two
-    synthetic reachable commits, root base, head-parented-on-base, tree IDs
-    and the canonical diff digest. A fidelity failure is corruption (exit 1),
-    never curatable staleness; only a checksum-restamped tampered bundle
-    passes the sha256 gate yet still fails here. Source-commit provenance is
-    the separate, local-only check in
-    :func:`_verify_snapshot_source_provenance`; this helper owns the portable
-    self-contained bundle contract.
+    """Verify ready bundle bytes and the portable offline-clone fidelity contract. Require
+    bundle path/digest, exact refs, two synthetic commits, root base, head parentage,
+    tree ids, and canonical diff. A restamped but tampered bundle is corruption, never
+    curatable staleness. Source-mirror provenance is checked separately.
     """
     for case in manifest.cases:
         snapshot = docs[case.case_file].snapshot
@@ -485,12 +408,9 @@ def _verify_snapshot_source_provenance(
     manifest: BenchmarkManifest,
     docs: dict[str, CaseDocument],
 ) -> None:
-    """Re-attest ready snapshot commit linkage from the local mirror when present.
-
-    The ready marker records that the merge-base algorithm was already proven.
-    A retained authoring mirror lets status/validate repeat that proof without
-    network access.  Once disposable cache is cleaned, the required marker and
-    offline bundle-fidelity check remain the portable contract.
+    """Repeat ready snapshot linkage proofs from a retained local mirror when available.
+    After cache cleanup, the required provenance marker and self-contained
+    bundle-fidelity check remain the portable contract.
     """
     mirror = snapshot_mod.mirror(root)
     if not mirror.exists():
@@ -532,16 +452,8 @@ def _verify_snapshot_source_provenance(
 
 
 def _import_documents(root: Path, manifest: BenchmarkManifest) -> dict[str, ImportDocument]:
-    """Load every fetched import once through the shared model gate.
-
-    Each fetched import is resolved through :func:`resolve_authoring_path` and
-    model-validated with ``ImportDocument.model_validate`` on the strict JSON
-    read (see :func:`_load_authoring_document`); a present-but-invalid import
-    raises :class:`WorkspaceCorrupt` naming only the import file -- the
-    diagnostic never embeds the document body (the CLI's no-disclosure
-    contract). ``_derived_state`` precomputes the validated set so the checksum
-    and cross-document verifiers consume the same models instead of each
-    re-reading and re-model-validating every fetched import per call.
+    """Load fetched imports once through containment and strict model validation, without
+    body disclosure.
     """
     return {
         pr.import_file: _load_authoring_document(
@@ -561,14 +473,8 @@ def _verify_import_checksums(
     manifest: BenchmarkManifest,
     paths: dict[str, Path],
 ) -> None:
-    """Verify each fetched import's on-disk sha256 against ``import_sha256``.
-
-    A missing import file or a checksum mismatch is a :class:`WorkspaceCorrupt`
-    failure — it is never folded into an incomplete/curating result. Each
-    import is model-validated exactly once per call by :func:`_import_documents`
-    before the verifiers run (see :func:`_derived_state`), and ``paths`` is
-    the shared single-resolution pass (:func:`_resolved_authoring_paths`);
-    an import absent from it is a missing file.
+    """Require every fetched import file and its recorded digest; mismatches are
+    corruption.
     """
     for pr in manifest.pull_requests:
         if pr.import_state != "fetched" or pr.import_file is None or pr.import_sha256 is None:
@@ -590,20 +496,10 @@ def _verify_cross_document(
     docs: dict[str, CaseDocument],
     imports: dict[str, ImportDocument],
 ) -> None:
-    """Verify every cross-document identity link and exact index membership.
-
-    Each ``cases[]`` row must reference exactly ``cases/<case_id>.yaml`` and
-    agree with its case document's ``pull_request.number``, and its PR must be
-    a fetched ledger entry whose import path/digest and immutable PR metadata
-    exactly match the case's source block and copied PR block. Every case_id a ledger entry
-    claims must be backed by an indexed ``cases[]`` row naming the same PR —
-    the reverse (every indexed case covered by ``case_ids``) is not required,
-    because a fetched->fetched narrower re-import (shrink) rewrites the
-    ledger's ``case_ids`` to the newly requested heads while the previously
-    imported case rows stay indexed, so the index legitimately outgrows the
-    claim. Each fetched import document must name the same PR number and
-    repository as its ledger entry. Any mismatch is
-    :class:`WorkspaceCorrupt` — never a logged skip.
+    """Verify PR/repository identity, source hashes, canonical case paths, and ledger
+    claims. Every ledger-claimed case must be indexed for that PR. The index may contain
+    additional cases retained after a narrower re-import. All other identity or
+    membership disagreements are corruption.
     """
     ledger = {pr.number: pr for pr in manifest.pull_requests}
     for case in manifest.cases:
@@ -666,15 +562,8 @@ def _verify_cross_document(
 
 
 def _case_index_paths(manifest: BenchmarkManifest, docs: dict[str, CaseDocument]) -> set[str]:
-    """Every authoring file the workspace index owns, across all three trees.
-
-    The manifest index covers each indexed case document **plus** every
-    ``fetched`` ledger import file **plus** every ``ready`` snapshot bundle
-    referenced by the model-validated case docs. Orphan detection then spans
-    ``cases/``, ``imports/``, and ``snapshots/``, so an unindexed import or
-    bundle — and a referenced-but-missing one — surfaces as
-    :class:`WorkspaceCorrupt` instead of being silently adopted or reported
-    ``incomplete``.
+    """Collect indexed cases, fetched imports, and ready bundles for complete orphan
+    detection.
     """
     paths = {c.case_file for c in manifest.cases}
     for pr in manifest.pull_requests:
@@ -690,15 +579,8 @@ def _case_index_paths(manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 def _resolved_authoring_paths(
     root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> dict[str, Path]:
-    """Resolve every indexed authoring file exactly once, omitting missing ones.
-
-    One :func:`resolve_authoring_path` + existence check per indexed rel,
-    shared by the checksum and duplicate-inode verifiers so each
-    validate/status call makes a single resolve+stat pass over the index
-    instead of one per verifier. Missing files never enter the map — the
-    checksum verifiers report them as corrupt (a missing import/bundle is
-    :class:`WorkspaceCorrupt`), and the inode verifier only collides files
-    that actually exist.
+    """Resolve indexed authoring files once, omitting absent files. Checksum/orphan checks
+    report missing files; inode checks consume present ones.
     """
     paths: dict[str, Path] = {}
     for rel in _case_index_paths(manifest, docs):
@@ -709,17 +591,8 @@ def _resolved_authoring_paths(
 
 
 def _verify_duplicate_inodes(root: Path, paths: dict[str, Path]) -> None:
-    """Reject two distinct indexed authoring files sharing one ``(st_dev, st_ino)``.
-
-    A hard link (or any duplicate-inode surprise) between two differently-
-    named indexed authoring files is corruption: ``Path.resolve()`` cannot
-    distinguish the names (both resolve inside ``root``), so the batch inode
-    cross-check across every resolved indexed authoring file is the enforcement
-    point (Task 0 spike 4). ``paths`` is the shared single-resolution pass
-    (:func:`_resolved_authoring_paths`): missing files are already omitted
-    there (they are corruption via the orphan rule / checksum gates), so only
-    files that actually exist are collided. Every check here is a hard
-    failure — never a skip.
+    """Reject distinct indexed authoring paths sharing a device/inode, including hard
+    links.
     """
     seen: dict[tuple[int, int], str] = {}
     for rel in sorted(paths):
@@ -736,17 +609,7 @@ def _verify_duplicate_inodes(root: Path, paths: dict[str, Path]) -> None:
 def _case_curation_states(
     root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> list[dict[str, str]]:
-    """The ``curation.state`` per indexed case, for workspace-state derivation.
-
-    ``derive_workspace_state`` needs the real curation states (its ``ready`` /
-    ``stale`` / ``curating`` branches are driven by them); passing ``[]`` made
-    those branches unreachable so a fully curated workspace could never report
-    ``ready``. Each case document is loaded through the shared model-gated
-    loader — an unreadable/invalid case surfaces as
-    :class:`WorkspaceCorrupt` rather than being silently folded into ``draft``
-    (storage's strict-loader invariant: a corrupt file is an error, never
-    defaulted). A validated model always carries a concrete ``curation.state``.
-    """
+    """Read validated case curation states for workspace-state derivation."""
     states: list[dict[str, str]] = []
     for case in manifest.cases:
         doc = docs[case.case_file]
@@ -760,14 +623,7 @@ def _case_curation_states(
 def _case_snapshot_summaries(
     root: Path, manifest: BenchmarkManifest, docs: dict[str, CaseDocument]
 ) -> list[dict[str, str]]:
-    """Per-case snapshot summary for ``status``: snapshot state + frozen head.
-
-    For each indexed case, loads the case through the shared model-gated
-    loader and reports its snapshot ``status``, the frozen head prefix
-    (``original_head_sha[:12]``) when present, and the typed failure reason for
-    unreplayable snapshots. An unreadable/invalid case surfaces as
-    :class:`WorkspaceCorrupt` (shared with the validate path).
-    """
+    """Summarize validated snapshot state, frozen head prefix, and unreplayable reason."""
     summaries: list[dict[str, str]] = []
     for case in manifest.cases:
         doc = docs[case.case_file]
@@ -797,12 +653,8 @@ def _task_spec_approval_state(doc: CaseDocument) -> str:
 
 
 def _scan_authoring_files(root: Path) -> set[Path]:
-    """Every regular file under the authoring trees: ``cases/``, ``imports/``, ``snapshots/``.
-
-    Runtime/cache/transaction residue is not authoring content, so it is never
-    scanned — an unindexed authoring file in one of the three trees is
-    orphan corruption, while internal state under ``runtime/``/``cache/``/
-    ``transactions/`` stays out of the orphan rule.
+    """Scan cases/imports/snapshots for orphans; exclude disposable runtime, cache, and
+    transaction state.
     """
     found: set[Path] = set()
     for sub in ("cases", "imports", "snapshots"):

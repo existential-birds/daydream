@@ -57,12 +57,11 @@ def _is_negated(text: str, start: int) -> bool:
 
 
 def _match_rules(text: str, rules: tuple[str, ...]) -> bool:
-    for pattern in rules:
-        for m in re.finditer(pattern, text, re.IGNORECASE):
-            if _is_negated(text, m.start()):
-                continue
-            return True
-    return False
+    return any(
+        not _is_negated(text, match.start())
+        for pattern in rules
+        for match in re.finditer(pattern, text, re.IGNORECASE)
+    )
 
 
 def _direction(body: str) -> str:

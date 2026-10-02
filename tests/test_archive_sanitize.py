@@ -9,9 +9,7 @@ from daydream.archive import sanitize, scan as scan_module
 from daydream.training.corpus_projection.bundle import BundleError, load_curated_bundle
 
 
-def _seed_bronze_bundle(
-    archive_dir: Path, session_id: str, remote_url: str, *, dir_name: str | None = None
-) -> Path:
+def _seed_bronze_bundle(archive_dir: Path, session_id: str, remote_url: str, *, dir_name: str | None = None) -> Path:
     run_dir = archive_dir / "runs" / (dir_name or session_id)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "manifest.json").write_text(
@@ -19,7 +17,6 @@ def _seed_bronze_bundle(
     )
     (run_dir / "diff.patch").write_text("+TOKEN=ghp_canaryfake123\n")
     return run_dir
-
 
 def test_derivative_is_credential_free_and_source_untouched(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
@@ -33,7 +30,6 @@ def test_derivative_is_credential_free_and_source_untouched(tmp_path: Path) -> N
     assert "ghp_canaryfake123" not in (out_dir / "manifest.json").read_text()
     assert "ghp_canaryfake123" not in (out_dir / "diff.patch").read_text()
 
-
 def test_digest_is_stable_and_audit_record_links(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
     src = _seed_bronze_bundle(archive_dir, "s1", "https://github.com/o/r")
@@ -43,7 +39,6 @@ def test_digest_is_stable_and_audit_record_links(tmp_path: Path) -> None:
     ledger = json.loads((archive_dir / "sanitized" / "audit.jsonl").read_text().splitlines()[-1])
     assert ledger["source"] == str(src)
     assert ledger["derivative_digest"] == d1.derivative_digest
-
 
 def test_resume_skips_completed_items(tmp_path: Path) -> None:
     archive_dir = tmp_path / "archive"
@@ -63,12 +58,7 @@ def test_resume_skips_completed_items(tmp_path: Path) -> None:
     assert (archive_dir / "sanitized" / "b-session" / "manifest.json").exists()
     assert len(audit_path.read_text().splitlines()) == 3  # only b re-processed
 
-
-def test_text_file_token_only_userinfo_and_query_credentials_are_sanitized(
-    tmp_path: Path,
-) -> None:
-    """M16: extended text rules (token-only userinfo, query credentials) are
-    applied so the derivative passes the release scan instead of quarantining."""
+def test_text_file_token_only_userinfo_and_query_credentials_are_sanitized(tmp_path: Path,) -> None:
     archive_dir = tmp_path / "archive"
     run_dir = archive_dir / "runs" / "s1"
     run_dir.mkdir(parents=True)
@@ -87,7 +77,6 @@ def test_text_file_token_only_userinfo_and_query_credentials_are_sanitized(
     assert "token=abc123" not in text
     assert "access_token=abcdef" not in text
 
-
 def test_archive_pass_continues_past_unreadable_bundle(tmp_path: Path) -> None:
     """One bad bundle never stops the pass (M19): a bundle whose binary file
     fails UTF-8 decode is quarantined and later bundles are still sanitized."""
@@ -100,47 +89,31 @@ def test_archive_pass_continues_past_unreadable_bundle(tmp_path: Path) -> None:
     results = sanitize.sanitize_archive(archive_dir)
     assert [r.session_id for r in results] == ["good"]
     assert results[0].released
-    audit = [
-        json.loads(line)
-        for line in (archive_dir / "sanitized" / "audit.jsonl").read_text().splitlines()
-    ]
+    audit = [json.loads(line) for line in (archive_dir / "sanitized" / "audit.jsonl").read_text().splitlines()]
     statuses = {line["session_id"]: line["status"] for line in audit}
     assert statuses == {"bad": "quarantined", "good": "sanitized"}
 
-
-def test_derivative_stays_quarantined_until_scan_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_derivative_stays_quarantined_until_scan_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     archive_dir = tmp_path / "archive"
     src = _seed_bronze_bundle(archive_dir, "s1", "https://github.com/o/r")
     # force the release scan to fail closed during sanitization
-    monkeypatch.setattr(
-        scan_module, "scan_run_dir", lambda _: scan_module.ScanResult(clean=False)
-    )
+    monkeypatch.setattr(scan_module, "scan_run_dir", lambda _: scan_module.ScanResult(clean=False))
     result = sanitize.sanitize_bundle(src, archive_dir)
     assert result.released is False  # M16
     assert (archive_dir / "quarantine" / "s1").is_dir()
     assert not (archive_dir / "sanitized" / "s1" / "manifest.json").exists()
 
-
 def test_advisory_only_derivative_is_released(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Issue #1170: an advisory-only release scan releases instead of quarantining.
+    """Release an advisory-only derivative using the real scanner and severity reducer.
 
-    The rule *table* is the seam, not ``scan_run_dir``: the real scanner walks
-    the real derivative, mints real ``Finding`` objects and resolves severity
-    through the real ``ScanResult.blocking`` property — only the rule that fires
-    is swapped for an advisory one. A rule table is needed because the
-    sanitizer's own transform now scrubs every shape the tiering can demote
-    (``env_var`` is redacted, the three userinfo shapes are substituted), so a
-    derivative that legitimately carries an advisory-only finding is by
-    construction unreachable through real content.
+    Swap only its rule: normal sanitization scrubs every built-in advisory shape,
+    so content alone cannot reach this release-gate outcome.
     """
     advisory_rule = (
         re.compile(r"\bFEATURE_FLAG_OVERRIDE_KEY\b"),
-        "env_var",
-        scan_module.SEVERITY_ADVISORY,
+        "env_var", scan_module.SEVERITY_ADVISORY,
     )
     monkeypatch.setattr(scan_module, "_RULES", (advisory_rule,))
     archive_dir = tmp_path / "archive"
@@ -163,17 +136,7 @@ def test_advisory_only_derivative_is_released(
     assert "diff.patch" in out
     assert "override_flag" not in out  # M11: never a matched value
 
-
 def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path) -> None:
-    """Issue #1170 F5: the JSON branch applies the scan-local substitutions.
-
-    A trajectory tool observation is a JSON string leaf, and JSON leaves used to
-    run only through ``_sanitize_json_value`` + ``redact_value`` — neither of
-    which carries the three scanner-local rewrites. A bundle whose
-    ``trajectory.json`` holds a token-only userinfo remote, the issue's f-string
-    DSN template, or a credential-bearing query param was therefore quarantined
-    on every pass, deterministically, because ``_mark_done`` was never reached.
-    """
     archive_dir = tmp_path / "archive"
     run_dir = archive_dir / "runs" / "s1"
     run_dir.mkdir(parents=True)
@@ -181,12 +144,8 @@ def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path)
         json.dumps({"session_id": "s1", "git": {"remote_url": "https://github.com/o/r"}})
     )
     dsn = 'return f"postgresql://{cfg.DB_USER}:{cfg.DB_PASSWORD}@{cfg.DB_HOST}:{cfg.DB_PORT}/x"'
-    (run_dir / "trajectory.json").write_text(
-        json.dumps(
-            {
-                "steps": [
-                    {"observation": dsn},
-                    {"observation": "fetch https://example.com/repo?token=abc123"},
+    (run_dir / "trajectory.json").write_text(json.dumps({"steps": [
+                    {"observation": dsn}, {"observation": "fetch https://example.com/repo?token=abc123"},
                     {"observation": "clone https://x-access-token@github.com/o/r.git"},
                 ]
             }
@@ -206,7 +165,6 @@ def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path)
     # M14: the source bundle is never modified.
     assert "x-access-token" in (run_dir / "trajectory.json").read_text()
 
-
 def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
     """M17 successor: the projection layer's admission boundary refuses a
     bundle whose batch rows are not all ``admitted`` — a quarantined
@@ -215,23 +173,12 @@ def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
     bundle_dir = tmp_path / "bundle"
     bundle_dir.mkdir()
     (bundle_dir / "_SUCCESS").write_text("ok\n")
-    (bundle_dir / "curation-manifest.json").write_text(
-        json.dumps({
-            "schema_version": "1",
-            "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
-            "curation_id": "cur-0123456789abcdef",
-            "sanitizer_version": "1",
-            "hydration_index_schema_version": "1",
-            "admission_policy_version": "1",
-            "publication_prefix": "curated/cur-0123456789abcdef/",
-            "batches": [
-                {
-                    "session_id": "s1",
-                    "content_digest": "1" * 64,
-                    "status": "quarantined",
-                    "reason_code": "secrets_scan_dirty",
-                    "artifact_relpath": "batches/s1",
-                    "artifact_digest": None,
+    (bundle_dir / "curation-manifest.json").write_text(json.dumps({
+            "schema_version": "1", "source_hub_commit": "0123456789abcdef0123456789abcdef01234567",
+            "curation_id": "cur-0123456789abcdef", "sanitizer_version": "1", "hydration_index_schema_version": "1",
+            "admission_policy_version": "1", "publication_prefix": "curated/cur-0123456789abcdef/",
+            "batches": [{"session_id": "s1", "content_digest": "1" * 64, "status": "quarantined",
+                    "reason_code": "secrets_scan_dirty", "artifact_relpath": "batches/s1", "artifact_digest": None,
                     "manifest_relpath": None,
                 },
             ],
@@ -240,15 +187,11 @@ def test_corpus_projection_admits_only_clean_batches(tmp_path: Path) -> None:
     with pytest.raises(BundleError):
         load_curated_bundle(bundle_dir)
 
-
 def test_import_bundle_refuses_affected_bundle_without_derivative(tmp_path: Path) -> None:
     """M17 successor (fail-closed): an affected bronze bundle with no
     released derivative is quarantined at ingest — never imported raw."""
-
     archive_dir = tmp_path / "archive"
-    run_dir = _seed_bronze_bundle(
-        archive_dir, "s1", "https://user:***@github.com/o/r"
-    )
+    run_dir = _seed_bronze_bundle(archive_dir, "s1", "https://user:***@github.com/o/r")
     result = sanitize.import_bundle(run_dir, archive_dir)
     assert result.quarantined is True
     assert result.imported is False
@@ -256,10 +199,7 @@ def test_import_bundle_refuses_affected_bundle_without_derivative(tmp_path: Path
     assert not run_dir.exists()
     assert (archive_dir / "quarantine" / "s1" / "manifest.json").exists()
 
-
-def test_inventory_counts_by_category_without_values(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_inventory_counts_by_category_without_values(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     archive_dir = tmp_path / "archive"
     _seed_bronze_bundle(archive_dir, "s1", "https://user:p@github.com/o/r")
     _seed_bronze_bundle(archive_dir, "s2", "https://x-access-token@github.com/o/r")

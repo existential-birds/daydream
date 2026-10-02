@@ -1,17 +1,8 @@
-"""Offline GenAI semantic-convention contract pin (P18 Task 0).
+"""Derive GenAI name/type/enum contracts from hash-verified pinned registry fixtures.
 
-Derives every allowed ``gen_ai.*`` name, type, and enum member from the pinned
-``registry.yaml`` bytes checked in under ``tests/fixtures/observability_semconv/``
-(OpenTelemetry semantic-conventions-genai commit ``94f432d7126f5884d30a2cdde6f4e89908ebb6fd``).
-The fixture bytes are verified against the SHA-256 manifest in
-``tests/fixtures/observability_contract/manifest.json`` before any derivation runs.
-
-This test intentionally contains NO duplicated hardcoded attribute allowlist:
-production literals are scanned from ``daydream/observability/`` and each must be
-provable from the parsed registry (name, scalar/array type, and enum membership).
-Requirement expressions come from the pinned ``spans.yaml`` semantic conventions
-downloaded into the same fixture directory at the same commit.
-"""
+The pin is recorded in observability_contract/manifest.json. Production attributes
+must match registry.yaml; required fields come from spans.yaml at the same revision.
+Keep the allowed vocabulary derived rather than copying it into the test."""
 
 from __future__ import annotations
 
@@ -43,28 +34,21 @@ def _load_manifest() -> dict[str, Any]:
     data: dict[str, Any] = json.loads(manifest_path.read_text(encoding="utf-8"))
     return data
 
-
 def test_manifest_pins_expected_commit_and_files() -> None:
     manifest = _load_manifest()
     assert manifest["source"]["commit"] == SEMCONV_COMMIT
     assert manifest["source"]["type"] == "git_commit"
     assert manifest["source"]["repo"] == "open-telemetry/semantic-conventions-genai"
     files = manifest["files"]
-    expected = {
-        "registry.yaml",
-        "spans.yaml",
-        "gen-ai-input-messages.json",
-        "gen-ai-output-messages.json",
-        "gen-ai-system-instructions.json",
-        "gen-ai-tool-definitions.json",
+    expected = {"registry.yaml", "spans.yaml", "gen-ai-input-messages.json", "gen-ai-output-messages.json",
+        "gen-ai-system-instructions.json", "gen-ai-tool-definitions.json",
     }
     assert expected <= set(files), f"manifest missing entries: {expected - set(files)}"
     for name, entry in files.items():
         raw = (SEMCONV_DIR / name).read_bytes()
         assert entry["bytes"] == len(raw), f"{name}: byte length drifted"
         assert hashlib.sha256(raw).hexdigest() == entry["sha256"], f"{name}: sha256 drifted"
-        assert (
-            entry["url"].startswith("https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/")
+        assert (entry["url"].startswith("https://raw.githubusercontent.com/open-telemetry/semantic-conventions-genai/")
             and SEMCONV_COMMIT in entry["url"]
         ), f"{name}: url not pinned to {SEMCONV_COMMIT[:12]}"
 
@@ -109,7 +93,6 @@ _DAYDREAM_OWNED = {
     "gen_ai.usage.total_tokens",  # derived total, daydream-owned, never a subset sum
 }
 
-
 def test_registry_covers_every_production_genai_literal() -> None:
     attrs = _registry_attributes()
     reg_names = set(attrs)
@@ -124,28 +107,14 @@ def test_registry_covers_every_production_genai_literal() -> None:
     assert not literals & reg_names & _DOCUMENTED_ALIASES
     assert not literals & reg_names & _DAYDREAM_OWNED
     # The canonical standard names the plan adopts must exist in the registry.
-    for canonical in (
-        "gen_ai.request.reasoning.level",
-        "gen_ai.usage.cache_write.input_tokens",
-        "gen_ai.usage.cache_read.input_tokens",
-        "gen_ai.usage.reasoning.output_tokens",
-        "gen_ai.agent.name",
-        "gen_ai.operation.name",
-        "gen_ai.provider.name",
-        "gen_ai.conversation.id",
-        "gen_ai.system_instructions",
-        "gen_ai.input.messages",
-        "gen_ai.output.messages",
-        "gen_ai.tool.name",
-        "gen_ai.tool.call.id",
-        "gen_ai.response.finish_reasons",
-        "gen_ai.response.model",
-        "gen_ai.response.id",
-        "gen_ai.request.model",
+    for canonical in ("gen_ai.request.reasoning.level", "gen_ai.usage.cache_write.input_tokens",
+        "gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.reasoning.output_tokens", "gen_ai.agent.name",
+        "gen_ai.operation.name", "gen_ai.provider.name", "gen_ai.conversation.id", "gen_ai.system_instructions",
+        "gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.tool.name", "gen_ai.tool.call.id",
+        "gen_ai.response.finish_reasons", "gen_ai.response.model", "gen_ai.response.id", "gen_ai.request.model",
         "gen_ai.output.type",
     ):
         assert canonical in reg_names, f"canonical {canonical} missing from pinned registry"
-
 
 def test_registry_types_match_production_literal_usage() -> None:
     attrs = _registry_attributes()
@@ -154,39 +123,24 @@ def test_registry_types_match_production_literal_usage() -> None:
     # (the canonical cache_write spelling arrives with Task 1's alias rename —
     # at baseline only the documented legacy alias is emitted, and the pinned
     # alias mapping below must keep matching it).
-    for name in (
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.output_tokens",
-        "gen_ai.usage.reasoning.output_tokens",
-        "gen_ai.usage.cache_read.input_tokens",
-        "gen_ai.usage.cache_write.input_tokens",
+    for name in ("gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning.output_tokens",
+        "gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_write.input_tokens",
     ):
         assert name in attrs
         assert attrs[name]["type"] == "int", f"{name} registry type drifted from int"
-    emitted_usage = {
-        "gen_ai.usage.input_tokens",
-        "gen_ai.usage.output_tokens",
-        "gen_ai.usage.reasoning.output_tokens",
-        "gen_ai.usage.cache_read.input_tokens",
-        "gen_ai.usage.cache_creation.input_tokens",
+    emitted_usage = {"gen_ai.usage.input_tokens", "gen_ai.usage.output_tokens", "gen_ai.usage.reasoning.output_tokens",
+        "gen_ai.usage.cache_read.input_tokens", "gen_ai.usage.cache_creation.input_tokens",
     }
     for name in emitted_usage:
         assert f'"{name}"' in source, f"{name} no longer emitted by production source"
     # identity/name attributes are strings
-    for name in (
-        "gen_ai.request.model",
-        "gen_ai.response.model",
-        "gen_ai.response.id",
-        "gen_ai.conversation.id",
-        "gen_ai.agent.name",
-        "gen_ai.tool.name",
-        "gen_ai.tool.call.id",
+    for name in ("gen_ai.request.model", "gen_ai.response.model", "gen_ai.response.id", "gen_ai.conversation.id",
+        "gen_ai.agent.name", "gen_ai.tool.name", "gen_ai.tool.call.id",
     ):
         assert attrs[name]["type"] == "string", f"{name} registry type drifted from string"
     # message/instruction payloads are template-typed (any)
     for name in ("gen_ai.input.messages", "gen_ai.output.messages", "gen_ai.system_instructions"):
         assert attrs[name]["type"] == "any", f"{name} registry type drifted from any"
-
 
 def test_operation_name_enum_contains_daydream_operations() -> None:
     attrs = _registry_attributes()
@@ -199,23 +153,12 @@ def test_operation_name_enum_contains_daydream_operations() -> None:
     provider_members = _attr_enum_members(attrs["gen_ai.provider.name"])
     assert {"anthropic", "openai"} <= provider_members
 
-
 def test_client_invoke_agent_requires_provider_name() -> None:
-    """CLIENT invoke_agent spans MUST carry gen_ai.provider.name (spans.yaml).
-
-    Internal invoke_agent spans must NOT fabricate provider evidence: the
-    required attribute only applies to the client span class.
-    """
+    """CLIENT invoke_agent requires provider.name; INTERNAL spans must not invent that evidence."""
     spans = yaml.safe_load((SEMCONV_DIR / "spans.yaml").read_text(encoding="utf-8"))
     span_defs: list[dict[str, Any]] = list(spans.get("spans", []))
-    client = next(
-        (g for g in span_defs if g.get("type") == "gen_ai.invoke_agent.client"),
-        None,
-    )
-    internal = next(
-        (g for g in span_defs if g.get("type") == "gen_ai.invoke_agent.internal"),
-        None,
-    )
+    client = next((g for g in span_defs if g.get("type") == "gen_ai.invoke_agent.client"), None,)
+    internal = next((g for g in span_defs if g.get("type") == "gen_ai.invoke_agent.internal"), None,)
     assert client is not None, "pinned spans.yaml lost the client invoke_agent group"
     assert internal is not None, "pinned spans.yaml lost the internal invoke_agent group"
     assert client.get("kind") == "client"
@@ -249,76 +192,37 @@ def _schema(name: str) -> dict[str, Any]:
 def _validate(name: str, instance: Any) -> None:
     jsonschema.validate(instance, _schema(name))
 
-
 def test_representative_input_messages_validate() -> None:
-    _validate(
-        "gen-ai-input-messages.json",
-        [
-            {
-                "role": "system",
-                "parts": [{"type": "text", "content": "Use the declared answer schema."}],
-            },
-            {
-                "role": "user",
-                "parts": [{"type": "text", "content": "Review the sample."}],
-            },
-            {
-                "role": "assistant",
-                "parts": [
-                    {"type": "reasoning", "content": "checking"},
+    _validate("gen-ai-input-messages.json",
+        [{"role": "system", "parts": [{"type": "text", "content": "Use the declared answer schema."}]},
+            {"role": "user", "parts": [{"type": "text", "content": "Review the sample."}]}, {"role": "assistant",
+                "parts": [{"type": "reasoning", "content": "checking"},
                     {"type": "tool_call", "id": "call_01", "name": "read", "arguments": {"path": "a.py"}},
                 ],
-            },
-            {
-                "role": "tool",
-                "parts": [{"type": "tool_call_response", "id": "call_01", "response": "ok"}],
-            },
+            }, {"role": "tool", "parts": [{"type": "tool_call_response", "id": "call_01", "response": "ok"}]},
         ],
     )
 
-
 def test_representative_output_messages_validate() -> None:
-    _validate(
-        "gen-ai-output-messages.json",
-        [
-            {
-                "role": "assistant",
-                "parts": [{"type": "text", "content": "Done."}],
-                "finish_reason": "stop",
-            },
-            {
-                "role": "assistant",
+    _validate("gen-ai-output-messages.json",
+        [{"role": "assistant", "parts": [{"type": "text", "content": "Done."}], "finish_reason": "stop"},
+            {"role": "assistant",
                 "parts": [{"type": "tool_call", "id": "call_02", "name": "grep", "arguments": {"p": "x"}}],
                 "finish_reason": "tool_call",
             },
         ],
     )
 
-
 def test_representative_system_instructions_validate() -> None:
-    _validate(
-        "gen-ai-system-instructions.json",
-        [{"type": "text", "content": "Daydream phase preamble."}],
-    )
-
+    _validate("gen-ai-system-instructions.json", [{"type": "text", "content": "Daydream phase preamble."}],)
 
 def test_representative_tool_definitions_validate() -> None:
-    _validate(
-        "gen-ai-tool-definitions.json",
-        [
-            {
-                "type": "function",
-                "name": "read",
-                "description": "Read a file.",
-                "parameters": {
-                    "type": "object",
-                    "properties": {"path": {"type": "string"}},
-                    "required": ["path"],
-                },
+    _validate("gen-ai-tool-definitions.json",
+        [{"type": "function", "name": "read", "description": "Read a file.",
+                "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
             }
         ],
     )
-
 
 def test_output_finish_reason_members_are_registry_derived() -> None:
     schema = _schema("gen-ai-output-messages.json")

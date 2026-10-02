@@ -1,17 +1,7 @@
-"""Projector-format export + dry-run validation for adjudication results (issue #984, Task 12).
+"""Validate and serialize projector-format adjudication rows.
 
-One serializer for the ``corpus adjudicate export`` CLI verb:
-:func:`~daydream.training.adjudication.harvest.build_export_entries` produces
-the rows and
-:func:`write_export_rows` writes them, so the on-disk shape — the
-``corpus_projection.projector.project_findings`` adjudication entry shape plus
-``record_id``/``evidence_digest`` — is produced by exactly one code path.
-
-``validate_export_rows`` is the dry-run gate: every row's required keys are
-checked, ``record_id`` is recomputed from its four identity components, and a
-non-empty ``evidence_digest`` is required. A violation raises ``ValueError``
-naming the offending key and ``record_id`` — never a silent skip, which could
-overstate gold coverage.
+Recompute record identity, require all export fields and a nonempty evidence
+digest. Fail with the offending key/record ID; never silently skip rows.
 """
 
 from __future__ import annotations

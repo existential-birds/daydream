@@ -1,21 +1,8 @@
-"""Endpoint injection, one strategy per daydream backend.
+"""Inject interception endpoints using each backend's native configuration.
 
-The interception server serves all three wire dialects at once and the ROUTE
-selects the format (verifiers 0.2.1 ``dialects/__init__.py:14-16``,
-``interception/server.py:186-190``): Chat Completions at ``/v1/chat/completions``,
-Responses at ``/v1/responses``, Anthropic Messages at ``/v1/messages``. So the
-question is never "which backend can this environment drive" but "how does this
-backend's CLI learn a base URL and a key" — and every one of them answers with
-env vars or a config file, which is why no daydream code changes to run any of
-them under RL.
-
-``claude`` is the day-one default only because its CLI is the one the base image
-already carries and its injection needs no provisioning file. It is a row in this
-table, not a design commitment.
-
-A future ``osprey`` row is one class: env ``OSPREY_OPENAI_BASE_URL={endpoint}``
-(osprey ``core/osprey-cli/src/config.rs:633``), landing when daydream grows
-``--backend osprey``. No harness change.
+The interception server selects the wire dialect by route: Chat Completions at
+/v1/chat/completions, Responses at /v1/responses, Messages at /v1/messages.
+Strategies provide CLI environment and provisioning; the harness is shared.
 """
 
 from __future__ import annotations
@@ -61,13 +48,9 @@ class BackendStrategy(Protocol):
 
 
 class ClaudeStrategy:
-    """Anthropic Messages dialect, env only.
+    """Route Anthropic Messages through the inherited CLI environment.
 
-    The claude-agent-sdk spawns its CLI with the full parent environment
-    (``subprocess_cli.py:491``), so the same two variables verifiers' own
-    ``claude_code`` harness sets (``harnesses/claude_code/harness.py:63-71``)
-    reach the CLI unchanged.
-    """
+    The CLI appends /v1/messages; its base URL must omit the /v1 suffix."""
 
     name = "claude"
     required_binaries: tuple[str, ...] = ("claude",)
@@ -91,12 +74,7 @@ class ClaudeStrategy:
 
 
 def codex_provider_toml(endpoint: str) -> str:
-    """``$HOME/.codex/config.toml`` naming the interception server as the provider.
-
-    Mirrors the provider block verifiers' codex harness passes as ``-c``
-    overrides (``harnesses/codex/harness.py:134-167``). daydream's codex backend
-    forwards no provider flags of its own, so the file is the seam.
-    """
+    """Declare the interception provider in Codex config; Daydream passes no provider flags."""
     return (
         f'model_provider = "{INTERCEPT_PROVIDER}"\n'
         "\n"
@@ -110,21 +88,10 @@ def codex_provider_toml(endpoint: str) -> str:
 
 
 class CodexStrategy:
-    """OpenAI Responses dialect, via a written provider block.
+    """Route Responses through an explicit CODEX_HOME provider configuration.
 
-    daydream's codex backend passes no ``env=`` to ``create_subprocess_exec``
-    (``daydream/backends/codex.py:198``), so the child inherits the harness's
-    environment and reads ``$CODEX_HOME/config.toml``.
-
-    ``CODEX_HOME`` is set explicitly rather than left to fall out of ``HOME``.
-    A live rollout proved why: with only ``HOME`` moved, codex resolved its own
-    config directory some other way, never saw the provider block, and talked to
-    the provider directly — 531k tokens billed and ZERO calls recorded in the
-    trace. A silently-uncaptured rollout is worse than a failed one, so the
-    variable codex documents as authoritative is the one this sets. It also
-    scopes codex's credential lookup to the same directory, so the rollout cannot
-    fall back to a developer's stored login.
-    """
+    HOME alone does not reliably control Codex configuration lookup. Pinning
+    CODEX_HOME both captures requests and excludes a developer's stored login."""
 
     name = "codex"
     required_binaries: tuple[str, ...] = ("codex",)
@@ -152,20 +119,11 @@ class CodexStrategy:
 
 
 def pi_extension_ts(endpoint: str, model: str, *, context_window: int, max_tokens: int) -> str:
-    """A pi provider extension pointing at the interception endpoint.
+    """Declare the rollout model in a Pi provider extension for Chat Completions.
 
-    Shape follows pi's shipped provider extensions: a default-exported function
-    taking the ``ExtensionAPI`` and calling ``registerProvider``, with ``apiKey``
-    given as a ``$VAR`` reference rather than a literal. The key variable is the
-    extension's own, NOT ``PI_API_KEY``: daydream only remaps that one for the
-    built-in ``zai`` provider (``daydream/backends/pi.py:84``) and drops it with a
-    warning for anything else.
-
-    pi resolves a model id against the provider's declared catalogue, so the
-    policy model is declared here per rollout. No id is hardcoded (C1) — it
-    arrives as ``ctx.model``, and the two size numbers are harness config rather
-    than constants, because they are claims about a model this code cannot know.
-    """
+    Use the extension's own key variable: Daydream remaps PI_API_KEY only for
+    its built-in zai provider. Model identity comes from ctx.model; catalogue
+    limits are configured capabilities of the actual endpoint."""
     provider = {
         "name": INTERCEPT_PROVIDER,
         "baseUrl": endpoint,
@@ -193,16 +151,9 @@ def pi_extension_ts(endpoint: str, model: str, *, context_window: int, max_token
 
 
 class PiStrategy:
-    """Chat Completions dialect, via an installed pi provider extension.
+    """Install a Chat Completions provider extension and Pi's fan-out environment hint.
 
-    pi is the one backend that already speaks an arbitrary OpenAI-compatible base
-    URL, but the URL lives outside daydream in a TypeScript extension, so the
-    rollout provisions and installs one. Two pi-specific facts the harness must
-    not have to know: its fan-out hint has its own variable
-    (``DAYDREAM_PI_FANOUT_CONCURRENCY``, ``daydream/backends/pi.py:178-198``), and
-    it refuses subagents outright (``pi.py:560``), so an exploration pre-scan
-    cannot run under it.
-    """
+    Pi refuses subagents, so an exploration pre-scan cannot run under it."""
 
     name = "pi"
     required_binaries: tuple[str, ...] = ("pi",)

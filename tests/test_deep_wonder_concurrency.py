@@ -10,27 +10,22 @@ import anyio
 import pytest
 
 from daydream.backends import AgentEvent
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.review_profile import independent_alternatives_profile as _independent_alternatives
 from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 
 
 async def _run_deep(target: Path) -> int:
-
     return await run(RunConfig(target=str(target), cleanup=False, review_profile=_independent_alternatives()))
-
 
 def _install_raw(monkeypatch: pytest.MonkeyPatch, stub: StubBackend) -> None:
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kw: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
-
 async def test_tool_heavy_wonder_is_bounded_and_publishes_incomplete_review(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A backend ignoring the finalization instruction cannot keep investigating."""
@@ -51,12 +46,8 @@ async def test_tool_heavy_wonder_is_bounded_and_publishes_incomplete_review(
     assert any("tool_call_budget" in str(v)
                    for v in _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason"))
 
-
 async def test_root_trajectory_step_ids_survive_concurrent_wonder(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A wonder turn outliving the per-stack fan-out still writes a valid trajectory."""
@@ -69,32 +60,26 @@ async def test_root_trajectory_step_ids_survive_concurrent_wonder(
     with anyio.fail_after(60):
         await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop",
                               review_profile=_independent_alternatives()))
-
     payload = json.loads(traj.read_text())
     ids = [s["step_id"] for s in payload["steps"]]
     assert ids == list(range(1, len(ids) + 1)), ids
     phases = [(s.get("extra") or {}).get("daydream_phase") for s in payload["steps"]]
     assert "alternatives" in phases, phases
 
-
 async def test_budget_truncated_wonder_keeps_review_results(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A budget stop preserves completed stack findings and finishes the review."""
 
     silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_alternatives = True
     mute_side_effects()
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
-        assert await run(make_config(
-            multi_stack_target, trajectory_path=traj, assume="yes", output_mode="review",
+        assert await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="review",
             review_profile=_independent_alternatives(),
         )) == 0
 
@@ -104,7 +89,6 @@ async def test_budget_truncated_wonder_keeps_review_results(
     assert json.loads(alts.read_text()) == []
     assert "incomplete" in (multi_stack_target / ".review-output.md").read_text().lower()
 
-
 class _WonderRendezvousStub(StubBackend):
     """Wonder and per-stack reviews each block until the other has started."""
 
@@ -113,13 +97,7 @@ class _WonderRendezvousStub(StubBackend):
         self.per_stack_started = anyio.Event()
         self.wonder_started = anyio.Event()
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
         pl = prompt.lower()
         if "you are reviewing the" in pl:
             self.per_stack_started.set()
@@ -130,10 +108,7 @@ class _WonderRendezvousStub(StubBackend):
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
-
-async def test_wonder_runs_concurrently_with_per_stack(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_wonder_runs_concurrently_with_per_stack(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Wonder and the fan-out overlap; alternatives.json lands before parse reads it."""
     silence(monkeypatch)
@@ -143,10 +118,8 @@ async def test_wonder_runs_concurrently_with_per_stack(
     alts = json.loads((multi_stack_target / ".daydream" / "deep" / "alternatives.json").read_text())
     assert alts, "wonder's artifact must be written before parse consumes it"
 
-
 async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Multi-stack reviewers drop the pointer; adjudication prompts keep it."""
     silence(monkeypatch)
@@ -163,10 +136,7 @@ async def test_concurrent_per_stack_prompts_omit_alternatives_pointer(
         assert matching, phrase
         assert all("alternatives.json" in p for p in matching), phrase
 
-
-async def test_single_stack_keeps_serial_order_and_pointer(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_single_stack_keeps_serial_order_and_pointer(tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Single-stack mode has no merge agent, so the reviewer pointer must survive."""
     silence(monkeypatch)
@@ -181,10 +151,8 @@ async def test_single_stack_keeps_serial_order_and_pointer(
     assert per_stack
     assert all("alternatives.json" in p for p in per_stack)
 
-
 async def test_wonder_failure_fails_run_with_fanout_outputs_on_disk(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A held wonder exception is re-raised after the join, original type intact."""
     silence(monkeypatch)

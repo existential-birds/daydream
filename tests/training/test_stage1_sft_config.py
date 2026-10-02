@@ -13,7 +13,6 @@ SFT = Path(__file__).parents[2] / "rl" / "train" / "sft.toml"
 def _cfg() -> dict[str, Any]:
     return tomllib.loads(SFT.read_text())
 
-
 def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: pathlib.Path) -> None:
     """PATTERN dry-path test: `sft @ <cfg> --dry-run` from inside the prime-rl
     workspace validates every pydantic schema without touching a GPU."""
@@ -21,11 +20,8 @@ def test_dry_run_passes_without_gpu(tmp_path: pathlib.Path, prime_rl_workspace: 
     # so the documented command validates the shipped file directly.
     out_dir = tmp_path / "outputs"
     r = subprocess.run(
-        ["uv", "run", "sft", "@", str(SFT), "--dry-run", "--output-dir", str(out_dir)],
-        cwd=prime_rl_workspace,
-        capture_output=True,
-        text=True,
-        timeout=600,
+        ["uv", "run", "sft", "@", str(SFT), "--dry-run", "--output-dir", str(out_dir)], cwd=prime_rl_workspace,
+        capture_output=True, text=True, timeout=600,
     )
     assert r.returncode == 0, r.stderr + r.stdout
     assert "Dry run complete" in r.stdout

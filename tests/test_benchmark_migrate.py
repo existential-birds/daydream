@@ -29,64 +29,35 @@ def _legacy_finding_id(title: Any, body: Any, severity: Any, path: Any, start_li
 
 
 def _seed_manifest() -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "benchmark_id": str(uuid.uuid4()),
-        "created_at": "2026-08-21T12:00:00Z",
+    return {"schema_version": 1, "benchmark_id": str(uuid.uuid4()), "created_at": "2026-08-21T12:00:00Z",
         "source": {"provider": "github", "hostname": "github.com",
-                   "repository": "OWNER/REPO", "repository_id": None,
-                   "visibility": "unresolved"},
-        "privacy": {
-            "classification": "confidential",
-            "reviewer_data": "source_snapshot",
-            "reviewer_allowed_hosts": ["api.anthropic.com"],
-            "judge_data": "finding_text_and_location_only",
-            "judge_allowed_hosts": ["api.anthropic.com"],
-            "archive": "disabled",
-            "uploads": "disabled",
-        },
-        "pull_requests": [],
+                   "repository": "OWNER/REPO", "repository_id": None, "visibility": "unresolved"},
+        "privacy": {"classification": "confidential", "reviewer_data": "source_snapshot",
+            "reviewer_allowed_hosts": ["api.anthropic.com"], "judge_data": "finding_text_and_location_only",
+            "judge_allowed_hosts": ["api.anthropic.com"], "archive": "disabled", "uploads": "disabled",
+        }, "pull_requests": [],
         "cases": [{"case_id": _CASE_ID, "pr_number": 101, "case_file": f"cases/{_CASE_ID}.yaml"}],
     }
 
 
 def _seed_v1_case() -> dict[str, Any]:
-    finding = {
-        "title": _TITLE,
-        "body": "The cache layers never populate.",
-        "severity": "high",
+    finding = {"title": _TITLE, "body": "The cache layers never populate.", "severity": "high",
         "location": {"path": "src/cache.py", "start_line": 2, "end_line": 2},
         "provenance": {"kind": "authored", "source_ids": []},
-        "finding_id": _legacy_finding_id(_TITLE, "The cache layers never populate.", "high",
-                                         "src/cache.py", 2, 2),
+        "finding_id": _legacy_finding_id(_TITLE, "The cache layers never populate.", "high", "src/cache.py", 2, 2),
     }
-    return {
-        "schema_version": 1,
-        "case_id": _CASE_ID,
-        "pull_request": {
-            "number": 101,
-            "url": "https://github.com/o/r/pull/101",
-            "title": "Fix cache",
-            "state": "open",
-            "base": {"ref": "main", "sha": "b" * 40},
-            "head": {"ref": "feature/cache", "sha": "h" * 40},
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
+    return {"schema_version": 1, "case_id": _CASE_ID,
+        "pull_request": {"number": 101, "url": "https://github.com/o/r/pull/101", "title": "Fix cache", "state": "open",
+            "base": {"ref": "main", "sha": "b" * 40}, "head": {"ref": "feature/cache", "sha": "h" * 40},
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
             "author": {"login": "alice", "type": "User"},
-        },
-        "snapshot": {
-            "status": "ready", "policy": "final_pr_head", "requested_head": "final",
-            "original_base_sha": _BASE, "requested_base_sha": _BASE,
-            "original_head_sha": _HEAD_HEX,
+        }, "snapshot": {"status": "ready", "policy": "final_pr_head", "requested_head": "final",
+            "original_base_sha": _BASE, "requested_base_sha": _BASE, "original_head_sha": _HEAD_HEX,
             "base_tree_sha": "0" * 40, "head_tree_sha": "0" * 40,
-            "diff_sha256": "a" * 64, "bundle_file": "snapshots/x.bundle",
-            "bundle_sha256": "b" * 64, "error": None,
-        },
-        "source": {"import_file": "imports/pr-101.json", "import_sha256": "c" * 64},
-        "curation": {
-            "state": "draft", "snapshot_attested": False, "clean_attested": False,
-            "gold_status": None, "findings": [finding], "exclusions": [],
-            "case_exclusion": None,
+            "diff_sha256": "a" * 64, "bundle_file": "snapshots/x.bundle", "bundle_sha256": "b" * 64, "error": None,
+        }, "source": {"import_file": "imports/pr-101.json", "import_sha256": "c" * 64},
+        "curation": {"state": "draft", "snapshot_attested": False, "clean_attested": False,
+            "gold_status": None, "findings": [finding], "exclusions": [], "case_exclusion": None,
         },
     }
 
@@ -97,12 +68,8 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     repo = tmp_path / "source"
     repo.mkdir()
     _git(repo, "init", "-b", "main")
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "Tester",
-        "GIT_AUTHOR_EMAIL": "test@example.com",
-        "GIT_COMMITTER_NAME": "Tester",
-        "GIT_COMMITTER_EMAIL": "test@example.com",
+    env = {**os.environ, "GIT_AUTHOR_NAME": "Tester", "GIT_AUTHOR_EMAIL": "test@example.com",
+        "GIT_COMMITTER_NAME": "Tester", "GIT_COMMITTER_EMAIL": "test@example.com",
     }
 
     def seed_file(name: str, content: str, message: str) -> str:
@@ -121,9 +88,7 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     head_tree = _git(repo, "rev-parse", f"{head_sha}^{{tree}}")
     case_id = f"pr-000101-{head_sha[:12]}"
     manifest = _seed_manifest()
-    manifest["cases"] = [
-        {"case_id": case_id, "pr_number": 101, "case_file": f"cases/{case_id}.yaml"}
-    ]
+    manifest["cases"] = [{"case_id": case_id, "pr_number": 101, "case_file": f"cases/{case_id}.yaml"}]
     storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
     case_dir = ws / "cases"
     storage.ensure_private_dir(case_dir)
@@ -131,23 +96,14 @@ def _seed_v1_workspace(tmp_path: Path) -> tuple[Any, ...]:
     case["case_id"] = case_id
     case["pull_request"]["base"]["sha"] = requested_tip
     case["pull_request"]["head"]["sha"] = head_sha
-    case["snapshot"].update(
-        original_base_sha=merge_base,
-        requested_base_sha=requested_tip,
-        original_head_sha=head_sha,
-        base_tree_sha=base_tree,
-        head_tree_sha=head_tree,
+    case["snapshot"].update(original_base_sha=merge_base, requested_base_sha=requested_tip, original_head_sha=head_sha,
+        base_tree_sha=base_tree, head_tree_sha=head_tree,
     )
     storage.atomic_write_yaml(case_dir / f"{case_id}.yaml", case)
     return ws, case_id, _TITLE
 
 
-def _write_legacy_unreplayable_case(
-    ws: Path,
-    case_id: str,
-    *,
-    schema_version: int,
-    curation_state: str = "draft",
+def _write_legacy_unreplayable_case(ws: Path, case_id: str, *, schema_version: int, curation_state: str = "draft",
 ) -> Path:
     case_path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(case_path)
@@ -156,21 +112,11 @@ def _write_legacy_unreplayable_case(
         finding = raw["curation"]["findings"][0]
         finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
     raw["snapshot"] = {
-        "status": "unreplayable",
-        "policy": "final_pr_head",
-        "requested_head": "final",
-        "original_base_sha": None,
+        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": None,
         "requested_base_sha": raw["pull_request"]["base"]["sha"],
-        "original_head_sha": raw["pull_request"]["head"]["sha"],
-        "base_tree_sha": None,
-        "head_tree_sha": None,
-        "diff_sha256": None,
-        "bundle_file": None,
-        "bundle_sha256": None,
-        "error": {
-            "reason": "head_not_on_pr",
-            "detail": "legacy producer detail must be preserved",
-        },
+        "original_head_sha": raw["pull_request"]["head"]["sha"], "base_tree_sha": None, "head_tree_sha": None,
+        "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": "head_not_on_pr", "detail": "legacy producer detail must be preserved"},
     }
     curation = raw["curation"]
     curation["state"] = curation_state
@@ -178,11 +124,7 @@ def _write_legacy_unreplayable_case(
     curation["clean_attested"] = False
     curation["gold_status"] = None if curation_state == "draft" else "findings"
     curation["exclusions"] = [
-        {
-            "source_id": "github:review:7",
-            "reason": "other",
-            "note": "authored exclusion note must be preserved",
-        }
+        {"source_id": "github:review:7", "reason": "other", "note": "authored exclusion note must be preserved"}
     ]
     curation["case_exclusion"] = None
     if curation_state == "ready":
@@ -205,7 +147,6 @@ def test_migrate_recomputes_finding_ids_and_bumps_version(tmp_path: Path) -> Non
     # migrated doc fully validates
     schema.CaseDocument.model_validate(_schema_ready(raw))
 
-
 def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Path) -> None:
     """The sole legacy base candidate is verified before splitting provenance."""
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
@@ -225,7 +166,6 @@ def test_migrate_backfills_requested_base_sha_on_v1_ready_snapshot(tmp_path: Pat
     assert raw["snapshot"]["original_base_sha"] == merge_base
     assert raw["snapshot"]["base_resolution"] == "merge_base_v1"
     schema.CaseDocument.model_validate(_schema_ready(raw))  # no longer corrupt
-
 
 def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Path) -> None:
     """An old v2 blind backfill is verified and repaired without touching ids."""
@@ -255,7 +195,6 @@ def test_migrate_backfills_requested_base_sha_on_v2_ready_snapshot(tmp_path: Pat
     second = migrate.migrate_workspace(ws)              # idempotent
     assert second.cases == [] and second.errors == []
 
-
 def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -> None:
     """Unreplayable snapshots carry requested_base_sha as nullable, so a v2
     case that omits it is left byte-unchanged (no repair needed, no rewrite)."""
@@ -263,11 +202,9 @@ def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -
     migrate.migrate_workspace(ws)                       # v1 -> v2 (field present)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw["snapshot"] = {
-        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final",
-        "original_base_sha": None,
+        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": None,
         "original_head_sha": raw["pull_request"]["head"]["sha"],
-        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None,
-        "bundle_file": None, "bundle_sha256": None,
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
         "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
     }
     raw["curation"]["state"] = "unreplayable"
@@ -281,18 +218,12 @@ def test_migrate_leaves_unreplayable_snapshot_without_backfill(tmp_path: Path) -
     assert case_path.read_bytes() == before
     assert "requested_base_sha" not in after["snapshot"]
 
-
 @pytest.mark.parametrize("legacy_version", [1, 2])
-def test_migrate_repairs_legacy_draft_unreplayable_curation(
-    tmp_path: Path, legacy_version: int
-) -> None:
+def test_migrate_repairs_legacy_draft_unreplayable_curation(tmp_path: Path, legacy_version: int) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(
-        ws, case_id, schema_version=legacy_version
-    )
+    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=legacy_version)
     before = storage.load_yaml_strict(case_path)
-    immutable_before = {
-        key: deepcopy(before[key])
+    immutable_before = {key: deepcopy(before[key])
         for key in ("pull_request", "snapshot", "source", "candidates", "prioritization")
         if key in before
     }
@@ -312,9 +243,7 @@ def test_migrate_repairs_legacy_draft_unreplayable_curation(
     assert migrated["curation"]["exclusions"] == exclusions_before
     if legacy_version == 1:
         expected_findings = deepcopy(findings_before)
-        expected_findings[0]["finding_id"] = schema.derive_finding_id(
-            expected_findings[0], case_id=case_id
-        )
+        expected_findings[0]["finding_id"] = schema.derive_finding_id(expected_findings[0], case_id=case_id)
         assert migrated["curation"]["findings"] == expected_findings
     else:
         assert migrated["curation"]["findings"] == findings_before
@@ -322,15 +251,10 @@ def test_migrate_repairs_legacy_draft_unreplayable_curation(
         assert migrated[key] == expected
     schema.CaseDocument.model_validate(schema._schema_ready(migrated))
 
-
 @pytest.mark.parametrize("curation_state", ["ready", "stale", "excluded"])
-def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(
-    tmp_path: Path, curation_state: str
-) -> None:
+def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(tmp_path: Path, curation_state: str) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(
-        ws, case_id, schema_version=2, curation_state=curation_state
-    )
+    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=2, curation_state=curation_state)
     before = case_path.read_bytes()
 
     report = migrate.migrate_workspace(ws)
@@ -340,11 +264,8 @@ def test_migrate_rejects_other_v2_unreplayable_curation_mismatches(
     assert "unreplayable snapshot and curation states must match" in report.errors[0]
     assert case_path.read_bytes() == before
 
-
-def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-
     parent = tmp_path / "workspace parent with spaces"
     parent.mkdir()
     ws, case_id, _ = _seed_v1_workspace(parent)
@@ -363,8 +284,7 @@ def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(
     assert "changed=True" in capsys.readouterr().out
     migrated = storage.load_yaml_strict(case_path)
     assert migrated["curation"]["state"] == "unreplayable"
-    assert migrated["curation"]["exclusions"][0]["note"] == (
-        "authored exclusion note must be preserved"
+    assert migrated["curation"]["exclusions"][0]["note"] == ("authored exclusion note must be preserved"
     )
     after = case_path.read_bytes()
 
@@ -373,15 +293,10 @@ def test_upgrade_cli_repairs_legacy_unreplayable_draft_atomically(
     assert second_exit.value.code == 0
     assert case_path.read_bytes() == after
 
-
-def test_upgrade_cli_reports_invalid_unchanged_v2_without_rewriting(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_upgrade_cli_reports_invalid_unchanged_v2_without_rewriting(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
-    case_path = _write_legacy_unreplayable_case(
-        ws, case_id, schema_version=2, curation_state="stale"
-    )
+    case_path = _write_legacy_unreplayable_case(ws, case_id, schema_version=2, curation_state="stale")
     before = case_path.read_bytes()
 
     with pytest.raises(SystemExit) as exc_info:
@@ -391,7 +306,6 @@ def test_upgrade_cli_reports_invalid_unchanged_v2_without_rewriting(
     assert "unreplayable snapshot and curation states must match" in capsys.readouterr().err
     assert case_path.read_bytes() == before
 
-
 def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path: Path) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     migrate.migrate_workspace(ws, dry_run=True)
@@ -399,7 +313,6 @@ def test_migrate_dry_run_writes_nothing_and_is_idempotent(tmp_path: Path) -> Non
     migrate.migrate_workspace(ws)
     second = migrate.migrate_workspace(ws)
     assert second.cases == []   # no-op second run
-
 
 def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
@@ -412,13 +325,8 @@ def test_migrate_surfaces_invalid_case_without_rewriting(tmp_path: Path) -> None
     assert any("duplicate" in e for e in report.errors)
     assert storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")["schema_version"] == 1  # untouched
 
-
 @pytest.mark.parametrize("failure", ["missing_mirror", "tree_mismatch"])
-def test_migrate_ready_provenance_failure_is_atomic(
-    tmp_path: Path, failure: str
-) -> None:
-    """A failed proof reports the case and leaves its v1 bytes unchanged."""
-
+def test_migrate_ready_provenance_failure_is_atomic(tmp_path: Path, failure: str) -> None:
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     case_path = ws / "cases" / f"{case_id}.yaml"
     if failure == "missing_mirror":
@@ -436,7 +344,6 @@ def test_migrate_ready_provenance_failure_is_atomic(
     assert "provenance" in report.errors[0] or "source trees" in report.errors[0]
     assert case_path.read_bytes() == before
 
-
 def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: Path) -> None:
     """Imported legacy snapshots have no trees to verify and keep their candidate."""
 
@@ -446,12 +353,8 @@ def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: 
     base_tip = raw["pull_request"]["base"]["sha"]
     head_sha = raw["snapshot"]["original_head_sha"]
     raw["snapshot"] = {
-        "status": "imported",
-        "policy": "final_pr_head",
-        "requested_head": "final",
-        "original_base_sha": base_tip,
-        "original_head_sha": head_sha,
-        "error": None,
+        "status": "imported", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": base_tip,
+        "original_head_sha": head_sha, "error": None,
     }
     storage.atomic_write_yaml(case_path, raw)
     shutil.rmtree(ws / "cache" / "repository.git")
@@ -464,8 +367,6 @@ def test_migrate_imported_snapshot_preserves_sole_base_without_mirror(tmp_path: 
     assert "base_resolution" not in migrated["snapshot"]
 
 def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """The ``upgrade`` verb drives migrate_workspace through the CLI seam (exit 0)."""
-
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
 
     # --dry-run reports the upgrade (finding recomputed, would change) without writing.
@@ -484,10 +385,7 @@ def test_upgrade_cli_wiring_dry_run_and_real_run(tmp_path: Path, capsys: pytest.
     rc = _handle_benchmark_command(["upgrade", str(ws)])
     assert rc == 0
 
-
 def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """An errored case surfaces on stderr and yields exit code 1."""
-
     ws, case_id, _ = _seed_v1_workspace(tmp_path)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     raw["schema_version"] = "bogus"
@@ -495,7 +393,6 @@ def test_upgrade_cli_error_returns_1(tmp_path: Path, capsys: pytest.CaptureFixtu
     rc = _handle_benchmark_command(["upgrade", str(ws)])
     assert rc == 1
     assert "error" in capsys.readouterr().err
-
 
 def test_migrate_heals_interrupted_journal_under_lock(tmp_path: Path) -> None:
     """migrate_workspace must recover_startup under the workspace lock (like every

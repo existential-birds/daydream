@@ -3,91 +3,47 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-import anyio
-
 from daydream.agent import console
 from daydream.artifact_visibility import review_output_path_for
-from daydream.backends import Backend, effective_fanout_concurrency
-from daydream.deep.adjudication_provenance import (
-    RecordProvenance,
-    find_revision_delta,
-    record_provenance,
-)
-from daydream.deep.arbiter import (
-    ArbiterGroup,
-    contested_indices,
-    partition_arbiter_targets,
-    select_arbiter_targets,
-    select_suppression_targets,
-)
 from daydream.deep.artifacts import (
     MERGE_FAILURE_KEY,
     _load_failures,
-    adjudication_complete_path,
-    arbiter_group_complete_path,
-    arbiter_group_input_path,
-    arbiter_group_verdicts_path,
     dedup_candidates_path,
     merged_items_path,
     merged_report_path,
     per_stack_failures_path,
-    per_stack_records_path,
 )
 from daydream.deep.dedup import (
-    CandidatePair,
-    RecordDuplicatePair,
     build_dedup_candidates,
     build_record_dedup_candidates,
 )
-from daydream.deep.latency import (
-    FAIL_SAFE_LATENCY_PROFILE,
-    PROFILE_ROUTES,
-    ArbiterPlan,
-    PlannedGroup,
-    arbiter_plan,
-)
 from daydream.deep.records import (
     record_uid,
-    stack_name_from_records_source,
-    stack_name_from_uid,
-    stamp_record_uids,
 )
 from daydream.deep.render import _PIPELINE_STAGE_NAMES, render_held_section, render_report
 from daydream.deep.reuse_key import (
-    PhaseIdentity,
-    arbiter_key_payload,
-    digest_or_absent,
-    exploration_digest,
-    grounding_digests,
     merge_key_payload,
     phase_identity_for,
-    unit_key,
 )
 from daydream.deep.reuse_store import (
-    ReuseCache,
-    lookup_reuse_entry,
-    record_absent_components,
-    record_reuse_hit,
     reuse_cache_for,
-    reuse_grounding_statuses,
 )
-from daydream.deep.routing_record import write_routing_record
+from daydream.deep.review_reuse import ReviewReuseUnit, _loop_grounding, _records_bytes_by_basename
 from daydream.deep.settings import _resolve_opt_in
 from daydream.deep.state import DeepState
-from daydream.eval.analyzer import _records_issues_or_empty
 from daydream.extensions.api import Stop
 from daydream.flows.engine import FlowContext
+from daydream.json_utils import dataclass_payload
 from daydream.phases import (
     CrossStackMergeError,
-    _write_single_stack_merged_items,
-    phase_arbiter_review,
     phase_cross_stack_merge,
     phase_supervise_review,
-    phase_suppression_review,
+)
+from daydream.phases.findings import (
+    _write_single_stack_merged_items,
 )
 from daydream.review_budget import (
     clear_review_budget_stop,
@@ -95,20 +51,18 @@ from daydream.review_budget import (
     render_review_warnings,
     review_warnings,
 )
-from daydream.supervision import RuleBasedSupervisor, apply_findings_verdicts, revise_finding_fields
+from daydream.supervision import RuleBasedSupervisor, apply_findings_verdicts
 from daydream.trajectory import (
     DaydreamPhase,
     LifecycleReasonCode,
     LifecycleStatus,
-    dispatch_scope,
     get_current_recorder,
-    maybe_fork,
     phase_scope,
 )
 from daydream.ui import print_error, print_info, print_stage_progress, print_warning
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 
 def _supervisor_mode(config: RunConfig) -> str:
@@ -118,781 +72,10 @@ def _supervisor_mode(config: RunConfig) -> str:
     return mode if mode in {"off", "rules", "llm"} else "off"
 
 
-def _candidate_pair_to_json(pair: CandidatePair | RecordDuplicatePair) -> dict[str, Any]:
-    """Serialize a CandidatePair dataclass into a JSON-compatible dict."""
-    data = asdict(pair)
-    # alt_files is a tuple -> convert to list for stable JSON.
-    if isinstance(data.get("alt_files"), tuple):
-        data["alt_files"] = list(data["alt_files"])
-    return data
-
-
-def _apply_adjudication_verdicts(
-    records: list[dict[str, Any]],
-    sources: list[str],
-    targets: list[int],
-    verdicts: dict[int, dict[str, Any]],
-    *,
-    pass_name: str,
-    id_field: str,
-    fail_closed: bool,
-) -> tuple[list[dict[str, Any]], list[str], list[RecordProvenance]]:
-    """Fold arbiter / suppression verdicts back into the per-stack record set.
-
-    The scoped arbiter (``#168``) and the precision-mode suppression pass
-    (``#232``) share an identical positional-rebuild shape; they differ ONLY in
-    the fail polarity of two branches -- a missing verdict and an ``id_field``
-    mismatch -- which is why this is one parameterised helper rather than two
-    ~80-line near-clones (that duplication is what let the stale-index bug at the
-    call site hide). Each selected record (``targets[k]`` for 1-based
-    ``id = k + 1``) is either revised in place (severity/confidence/description/
-    rationale/evidence taken from the verdict) or dropped. ``file``/``line`` are
-    never changed -- adjudication revises, it does not re-target findings.
-
-    Host-side identity is the record's ``uid`` (issue #1111), not its position:
-    the drop set holds uids, and the revise target is resolved through a uid map
-    snapshotted before anything mutates. The positional ``arb_id`` / ``sup_id``
-    is still the token the AGENT echoes, which is safe because the input
-    artifact is written in the same call that reads the verdicts back. The
-    hazard was only the host-side rebinding of indices *after* the compaction
-    below -- which is why the caller used to have to re-derive its
-    arbiter-exclusion set by ``id(record)`` object identity once this function
-    returned. It no longer does: a set of uids survives this rebuild untouched,
-    and survives a JSON round-trip or a dict copy that object identity would
-    not.
-
-    Fail polarity (the sole axis on which the two passes diverge):
-
-    - ``fail_closed=False`` (arbiter): a record reaches arbitration because it is
-      high-severity or contested, so a missing verdict or an ``id_field`` mismatch
-      must NOT delete it. The original record is retained unchanged with a warning
-      (fail OPEN); only an explicit ``keep:false`` drops it.
-    - ``fail_closed=True`` (suppression): a record reaches suppression precisely
-      because it is borderline (neither high-severity nor contested), so an
-      unconfirmable verdict -- missing, mismatched, or ``keep:false`` -- drops it
-      (fail CLOSED), the inverse polarity, safe because nothing important reaches
-      this pass.
-
-    Non-selected records always pass through untouched.
-
-    Args:
-        records: Per-stack records positionally aligned with ``sources``. Each
-            carries a ``uid`` (guaranteed by ``_step_per_stack_parse``).
-        sources: Per-record originating stack name.
-        targets: Indices into ``records`` selected for this pass; ``targets[k]``
-            carries 1-based ``id = k + 1`` echoed back in the verdict's
-            ``id_field``. Read once, up front, to snapshot each target's uid.
-        verdicts: ``id -> verdict`` mapping from the adjudication agent.
-        pass_name: Human-readable pass name (``"arbiter"`` / ``"suppression"``)
-            used only in warning text.
-        id_field: Verdict key carrying the echoed positional id (``"arb_id"`` for
-            the arbiter, ``"sup_id"`` for suppression).
-        fail_closed: Fail polarity for the missing-verdict / id-mismatch branches
-            (see above).
-
-    Returns:
-        ``(records, sources, outcomes)``. ``records``/``sources`` are the new
-        lists with the dropped uids' records removed and surviving selected
-        records carrying the verdict's fields, positional alignment preserved.
-        ``outcomes`` holds one :class:`RecordProvenance` per targeted record in
-        ``targets`` order -- ``uid`` snapshotted before mutation,
-        ``passes=(pass_name,)``, ``verdict_bound=True`` only where a verdict was
-        found AND its ``id_field`` matched, ``kept=False`` on an explicit
-        ``keep:false`` (or a fail-closed unconfirmable), and ``revised_fields``
-        from the fields a bound verdict materially rewrote.
-    """
-    import warnings
-
-    outcomes: list[RecordProvenance] = []
-
-    def _record_outcome(
-        uid: str,
-        *,
-        verdict_bound: bool,
-        kept: bool = True,
-        revised_fields: tuple[str, ...] = (),
-    ) -> None:
-        outcomes.append(
-            RecordProvenance(uid, (pass_name,), verdict_bound, kept, revised_fields)
-        )
-
-    polarity_action = (
-        "dropping the unconfirmed record"
-        if fail_closed
-        else "retaining the original record unchanged"
-    )
-    # Snapshot ``offset -> uid`` BEFORE anything mutates or drops a record
-    # (issue #1111). This loop is where ``targets``' indices stop being
-    # load-bearing: every host-side decision after it keys on the uid.
-    target_uids: dict[int, str] = {
-        offset: record_uid(records[record_index]) for offset, record_index in enumerate(targets)
-    }
-    # Revise targets resolve through this map rather than through
-    # ``records[record_index]``: the uid is the record's identity, the index is
-    # merely how it was selected. Built from the same list in the same call, so
-    # a lookup for a snapshotted uid cannot miss; the duplicate-uid guard in
-    # ``_step_per_stack_parse`` is what makes the mapping one-to-one.
-    by_uid: dict[str, dict[str, Any]] = {}
-    for record in records:
-        record_key = record_uid(record)
-        if record_key:
-            by_uid[record_key] = record
-    dropped: set[str] = set()
-    # A targeted record with no uid is impossible after the birth stamp plus the
-    # load-time backfill -- but "impossible" must not mean "silently
-    # mis-dropped". Such a record cannot be named in ``dropped``, so it gets a
-    # positional entry here, used ONLY to honour the caller's fail polarity for
-    # a record we are unable to identify.
-    dropped_positions: set[int] = set()
-
-    def _warn_unconfirmable(message: str, *, record_index: int, uid: str) -> None:
-        """Warn on an unconfirmable target and fail per ``fail_closed`` (#1111).
-
-        The three branches below (no uid, no verdict, mismatched id_field) all
-        warn, then either drop the record or retain it per the caller's fail
-        polarity, then move on -- the one shape this function's docstring
-        already unifies two ~80-line near-clones to avoid repeating. ``uid``
-        empty means the record itself is unidentifiable, so the drop (when
-        ``fail_closed``) can only be recorded positionally; otherwise it is
-        recorded by uid like every uid-keyed drop in this function.
-        """
-        warnings.warn(message, stacklevel=3)
-        _record_outcome(uid, verdict_bound=False, kept=not fail_closed)
-        if fail_closed:
-            if uid:
-                dropped.add(uid)
-            else:
-                dropped_positions.add(record_index)
-
-    for offset, record_index in enumerate(targets):
-        verdict_id = offset + 1
-        uid = target_uids[offset]
-        if not uid:
-            # Broken invariant, reported loudly and failed per the caller's
-            # polarity like every other unconfirmable branch here.
-            _warn_unconfirmable(
-                f"{pass_name.capitalize()} target {id_field}={verdict_id} "
-                f"(record_index={record_index}) carries no uid, so its verdict cannot be bound "
-                f"to a record identity; {polarity_action} (issue #1111).",
-                record_index=record_index,
-                uid="",
-            )
-            continue
-        verdict = verdicts.get(verdict_id)
-        if verdict is None:
-            # No verdict returned for this id -- fail per the caller's polarity.
-            _warn_unconfirmable(
-                f"{pass_name.capitalize()} returned no verdict for {id_field}={verdict_id} "
-                f"(record_index={record_index}, uid={uid}); {polarity_action}.",
-                record_index=record_index,
-                uid=uid,
-            )
-            continue
-        if verdict.get(id_field) != verdict_id:
-            # Secondary key guard: the id field in the verdict must match the key
-            # we looked it up by. A mismatch would silently bind the verdict to the
-            # wrong record -- fail per the caller's polarity rather than mis-apply.
-            _warn_unconfirmable(
-                f"{pass_name.capitalize()} verdict {id_field} mismatch: "
-                f"expected {id_field}={verdict_id} "
-                f"but verdict contains {id_field}={verdict.get(id_field)!r} "
-                f"(record_index={record_index}, uid={uid}); {polarity_action}.",
-                record_index=record_index,
-                uid=uid,
-            )
-            continue
-        if not verdict.get("keep", False):
-            _record_outcome(uid, verdict_bound=True, kept=False)
-            dropped.add(uid)
-            continue
-        # Revise IN PLACE rather than rebuilding the dict: the caller holds this
-        # same list and ``_rewrite_stack_records`` persists these very dicts, so
-        # a fresh dict would have to be threaded back into both.
-        before = dict(by_uid[uid])
-        revise_finding_fields(by_uid[uid], verdict)
-        _record_outcome(
-            uid,
-            verdict_bound=True,
-            revised_fields=find_revision_delta(before, by_uid[uid]),
-        )
-
-    new_records: list[dict[str, Any]] = []
-    new_sources: list[str] = []
-    for i, (record, source) in enumerate(zip(records, sources, strict=True)):
-        # Dropped by uid; the positional set covers only the unidentifiable
-        # records warned about above.
-        if record_uid(record) in dropped or i in dropped_positions:
-            continue
-        new_records.append(record)
-        new_sources.append(source)
-    return new_records, new_sources, outcomes
-
-
-def _rewrite_stack_records(
-    deep_dir_path: Path,
-    stack_record_paths: list[Path],
-    records: list[dict[str, Any]],
-    sources: list[str],
-) -> None:
-    """Persist arbiter-revised records back to each per-stack records file (#168).
-
-    The cross-stack merge reads per-stack records by path, so arbitration must
-    be reflected on disk, not just in memory. Every language stack file is
-    rewritten with its surviving records (an emptied stack becomes
-    ``{"issues": [], "verdicts": [...]}`` rather than retaining stale
-    pre-arbitration content).
-
-    Routing is by the stack name encoded in each record's ``uid`` (issue
-    #1111), falling back to the ``source`` string for a record carrying no uid
-    at all; a record that still routes outside ``stack_record_paths`` is
-    reported loudly instead of vanishing.
-    """
-    by_stack: dict[Path, list[dict[str, Any]]] = {path: [] for path in stack_record_paths}
-    for record, source in zip(records, sources, strict=True):
-        # Route by the uid's stack half (issue #1111): the ``source`` string has
-        # two spellings and cannot be trusted. ``sources`` stays zipped in to
-        # assert alignment and name the source in the warning below.
-        uid = record_uid(record)
-        if uid:
-            dest = per_stack_records_path(deep_dir_path, stack_name_from_uid(uid))
-        else:
-            # No uid: fall back to ``source`` rather than let the record be
-            # erased by the "unroutable" branch below.
-            dest = per_stack_records_path(deep_dir_path, stack_name_from_records_source(source))
-        if dest in by_stack:
-            by_stack[dest].append(record)
-        else:
-            # A record routing outside ``stack_record_paths`` would be silently
-            # ERASED (the file is rewritten wholesale), so warn loudly (issue
-            # #1111). Warn rather than raise: every other verdict is already
-            # computed and belongs on disk.
-            print_warning(
-                console,
-                f"Adjudicated record uid={record_uid(record) or '<none>'} (source {source}) "
-                f"routes to {dest.name}, which is not among the records files being rewritten "
-                f"({', '.join(sorted(path.name for path in stack_record_paths))}); "
-                "its adjudication will not reach disk (issue #1111).",
-            )
-    for dest_path, stack_records in by_stack.items():
-        # Issue #742: per-stack records files carry the dict shape
-        # ``{"issues": [...], "verdicts": [...]}``. Preserve the verdicts from
-        # the on-disk file (if a dict-shaped file is present) so arbitration
-        # does not silently drop them; the dict shape is written back
-        # regardless so every worker -- merge resume, the coverage evidence
-        # path -- reads the same shape whether or not arbitration fired.
-        verdicts: list[Any] = []
-        incomplete = False
-        if dest_path.is_file():
-            try:
-                existing = json.loads(dest_path.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                existing = None
-            if isinstance(existing, dict):
-                incomplete = existing.get("incomplete") is True
-                existing_verdicts = existing.get("verdicts", [])
-                if isinstance(existing_verdicts, list):
-                    verdicts = existing_verdicts
-        dest_path.write_text(
-            json.dumps({"issues": stack_records, "verdicts": verdicts,
-                        **({"incomplete": True} if incomplete else {})}, indent=2)
-        )
-
-
-def _rejoin_structural_records(
-    all_records: list[dict[str, Any]],
-    record_sources: list[str],
-    structural_records: list[dict[str, Any]],
-    structural_sources: list[str],
-    records_paths: list[Path],
-    structural_path: Path | None,
-) -> tuple[list[dict[str, Any]], list[str], set[str], list[Path], range]:
-    """Rejoin structural records with language records for adjudication (#1103).
-
-    The structural meta-stack is partitioned out of the dedup pool and the
-    merge agent's record pool (`_step_per_stack_parse`) so its lens cannot be
-    collapsed into a language bucket -- but that partition also made the
-    contested-location branch unreachable for the one pair it exists to
-    catch: a structural finding and a language finding reporting the same
-    defect at the same place. This reverses the partition for arbitration;
-    `_split_structural_records` restores it afterward so the dedup pre-filter
-    and the merge prompt see exactly what they saw before.
-
-    Returns the concatenated records/sources, the ``uid`` set of the structural
-    records (used by :func:`_split_structural_records`), ``records_paths``
-    extended with ``structural_path`` when present -- `_rewrite_stack_records`
-    cannot persist a record that routes outside this path list, so the
-    structural file must be included or an arbitrated structural verdict would
-    never reach disk, and merge re-reads that very file to build the report's
-    structural items -- and ``structural_range``: the positional index range
-    every structural record occupies in the returned, freshly concatenated
-    ``adjudicated`` list.
-
-    ``structural_range`` (not the uid set) is what the caller must pass as
-    :func:`~daydream.deep.arbiter.select_arbiter_targets`'s ``contested_only``:
-    it must cover EVERY structural record including the no-uid edge case below,
-    which a ``record_uid(rec) in structural_ids`` test would silently drop (its
-    uid is ``""``). The range is read before anything reorders ``adjudicated``.
-
-    The uid set holds uids rather than ``id()`` object identities (issue #1111):
-    ``_split_structural_records`` runs after adjudication may rebuild records,
-    and a uid survives any rebuild or JSON round-trip.
-    """
-    # A structural record with no uid cannot be named in this set and would come
-    # back out of `_split_structural_records` as a language record -- i.e. into
-    # the dedup pool the partition exists to keep it out of. Unreachable after
-    # the duplicate/absence guarantees established in `_step_per_stack_parse`,
-    # so this reports rather than stops: adjudication itself is still correct,
-    # only the post-split routing of that one record is degraded.
-    structural_ids = {uid for rec in structural_records if (uid := record_uid(rec))}
-    unidentified = len(structural_records) - len(structural_ids)
-    if unidentified:
-        print_warning(
-            console,
-            f"{unidentified} structural record(s) carry no uid; they will be adjudicated but "
-            "rejoin the language-stack pool after arbitration instead of the structural pool "
-            "(issue #1111).",
-        )
-    adjudicated = all_records + structural_records
-    adjudicated_sources = record_sources + structural_sources
-    rewrite_paths = list(records_paths)
-    if structural_path is not None:
-        rewrite_paths.append(structural_path)
-    structural_range = range(len(all_records), len(adjudicated))
-    return adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range
-
-
-def _split_structural_records(
-    adjudicated: list[dict[str, Any]],
-    adjudicated_sources: list[str],
-    structural_ids: set[str],
-) -> tuple[list[dict[str, Any]], list[str], list[dict[str, Any]], list[str]]:
-    """Split structural records back out after adjudication (#1103).
-
-    Everything downstream of adjudication -- the dedup pre-filter, the merge
-    prompt, the host-side structural append -- keeps the partitioned view it
-    had before. Records the arbiter rejected are simply absent from both sides.
-
-    The split keys on each record's ``uid`` against the set
-    :func:`_rejoin_structural_records` built (issue #1111), so it does not care
-    whether adjudication revised a record in place, replaced its dict, or
-    round-tripped it through the records files -- the uid rides along inside the
-    record either way. ``record_uid`` returns ``""`` for a record carrying none
-    and ``""`` is never in the set, so an unidentifiable record lands on the
-    language side, which is the outcome ``_rejoin_structural_records`` warns
-    about when it drops one.
-    """
-    all_records: list[dict[str, Any]] = []
-    record_sources: list[str] = []
-    structural_records: list[dict[str, Any]] = []
-    structural_sources: list[str] = []
-    for rec, src in zip(adjudicated, adjudicated_sources, strict=True):
-        if record_uid(rec) in structural_ids:
-            structural_records.append(rec)
-            structural_sources.append(src)
-        else:
-            all_records.append(rec)
-            record_sources.append(src)
-    return all_records, record_sources, structural_records, structural_sources
-
-
-def _load_group_verdicts(dd: Path, group: PlannedGroup) -> dict[int, dict[str, Any]] | None:
-    """Load a completed group's persisted verdicts, or ``None`` when it must rerun.
-
-    A group is reusable only when its completion marker *and* its verdicts file
-    exist and the file's persisted ``target_uids`` still match the planned
-    group. A membership mismatch means the diff/selection moved under the saved
-    group, so reusing it would bind verdicts to the wrong records -- rerun.
-    """
-    marker = arbiter_group_complete_path(dd, group.group_id)
-    verdicts_path = arbiter_group_verdicts_path(dd, group.group_id)
-    if not marker.is_file() or not verdicts_path.is_file():
-        return None
-    try:
-        payload = json.loads(verdicts_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    if list(payload.get("target_uids", [])) != list(group.target_uids):
-        return None
-    raw = payload.get("verdicts")
-    if not isinstance(raw, dict):
-        return None
-    loaded: dict[int, dict[str, Any]] = {}
-    for key, verdict in raw.items():
-        if not isinstance(verdict, dict):
-            return None
-        try:
-            loaded[int(key)] = verdict
-        except (TypeError, ValueError):
-            return None
-    return loaded
-
-
-def _persist_group_verdicts(
-    dd: Path, group: PlannedGroup, verdicts: dict[int, dict[str, Any]]
-) -> None:
-    """Persist one group's verdicts, then its completion marker.
-
-    The marker is written last so a crash between the two leaves a group that a
-    resume will rerun rather than reuse half-written verdicts.
-    """
-    payload = {
-        "group_id": group.group_id,
-        "target_uids": list(group.target_uids),
-        "verdicts": {str(key): verdict for key, verdict in sorted(verdicts.items())},
-    }
-    arbiter_group_verdicts_path(dd, group.group_id).write_text(
-        json.dumps(payload, indent=2) + "\n", encoding="utf-8"
-    )
-    arbiter_group_complete_path(dd, group.group_id).write_text("")
-
-
-def _merge_group_verdicts(
-    plan: ArbiterPlan,
-    arbiter_targets: list[int],
-    group_verdicts: dict[str, dict[int, dict[str, Any]]],
-    targets_by_group: dict[str, list[int]],
-) -> dict[int, dict[str, Any]]:
-    """Translate each group's local ``arb_id`` into the shared selection ordinal.
-
-    ``phase_arbiter_review`` numbers its records from 1 within the slice it is
-    given, so a group-local id is a position inside ``group.target_indices``.
-    ``_apply_adjudication_verdicts`` keys by the target's position in the
-    run-wide ``arbiter_targets`` list, so the two are bridged here. Doing it by
-    ordinal (never by re-deriving indices after compaction) is what makes the
-    merged mapping independent of the order groups completed in.
-    """
-    positions = {index: offset + 1 for offset, index in enumerate(arbiter_targets)}
-    merged: dict[int, dict[str, Any]] = {}
-    for group in plan.groups:
-        target_indices = targets_by_group.get(group.group_id, ())
-        for local_id, verdict in group_verdicts.get(group.group_id, {}).items():
-            if local_id < 1 or local_id > len(target_indices):
-                continue
-            global_index = target_indices[local_id - 1]
-            position = positions.get(global_index)
-            if position is None:
-                continue
-            revised = dict(verdict)
-            revised["arb_id"] = position
-            merged[position] = revised
-    return merged
-
-
-def _arbiter_groups_record(
-    plan: ArbiterPlan,
-    *,
-    effort_pin: str | None,
-    reused: dict[str, bool],
-) -> list[dict[str, Any]]:
-    """Serialize the plan's groups for the routing record.
-
-    An explicit effort pin (A4) replaces every group's planned effort and says
-    so in the reason, so the record states when a conscious user knob overrode
-    the route rather than silently reporting a route the run did not take.
-    """
-    records: list[dict[str, Any]] = []
-    for group in plan.groups:
-        if effort_pin is not None:
-            effort = effort_pin
-            reason = f"explicit {effort_pin} effort pin overrode the route (A4)"
-        else:
-            effort = group.effort
-            reason = group.reason
-        records.append(
-            {
-                "group_id": group.group_id,
-                "target_uids": list(group.target_uids),
-                "effort": effort,
-                "reason": reason,
-                "reused": reused.get(group.group_id, False),
-            }
-        )
-    return records
-
-
-def _review_context_kwargs(ctx: FlowContext, deep_state: DeepState, *, strategy: str) -> dict[str, Any]:
-    """Structured-review context shared by the arbiter and suppression calls."""
-    return {
-        "diff_path": deep_state.diff_path,
-        "intent_path": deep_state.intent_path,
-        "alternatives_path": deep_state.alts_path,
-        "exploration_dir": deep_state.exploration_dir,
-        "strategy": strategy,
-        "run_context": ctx.run_context,
-        "artifact_session": ctx.artifacts,
-        "allow_standalone": ctx.allow_standalone_artifacts,
-    }
-
-
-async def _run_sharded_arbiter(
-    ctx: FlowContext,
-    deep_state: DeepState,
-    plan: ArbiterPlan,
-    arbiter_targets: list[int],
-    adjudicated: list[dict[str, Any]],
-    *,
-    effort_pin: str | None,
-    targets_by_group: dict[str, list[int]],
-) -> tuple[dict[int, dict[str, Any]], dict[str, bool], list[str]]:
-    """Fan one arbiter call per incomplete group out under the run's ceiling.
-
-    Returns the merged verdict mapping (keyed by run-wide target ordinal), the
-    per-group ``reused`` flags, and the ids of groups whose call raised. A
-    group's exception is caught here rather than propagated: the run continues,
-    the group contributes no verdicts, and its targets retain their original
-    records (``_apply_adjudication_verdicts(..., fail_closed=False)``).
-    """
-    dd = deep_state.dd
-    group_verdicts: dict[str, dict[int, dict[str, Any]]] = {}
-    reused: dict[str, bool] = {}
-    failed_groups: list[str] = []
-    pending: list[PlannedGroup] = []
-    for group in plan.groups:
-        loaded = _load_group_verdicts(dd, group)
-        if loaded is None:
-            pending.append(group)
-        else:
-            group_verdicts[group.group_id] = loaded
-            reused[group.group_id] = True
-
-    if pending:
-        recorder = get_current_recorder()
-        arbiter_backend = ctx.backend_for("arbiter")
-        limiter = anyio.CapacityLimiter(effective_fanout_concurrency(10, arbiter_backend))
-        descriptors = tuple(f"deep-{group.group_id}" for group in pending)
-        async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-            async with dispatch_scope(
-                recorder, phase=DaydreamPhase.DEEP, descriptors=descriptors
-            ) as dispatch:
-                async with anyio.create_task_group() as tg:
-                    for group in pending:
-
-                        async def _arbitrate_one(
-                            planned: PlannedGroup = group,
-                        ) -> None:
-                            async with limiter:
-                                try:
-                                    async with maybe_fork(
-                                        recorder,
-                                        f"deep-{planned.group_id}",
-                                        dispatch=dispatch,
-                                    ):
-                                        call_backend = (
-                                            ctx.backend_for("arbiter")
-                                            if effort_pin is not None
-                                            else ctx.backend_for_effort("arbiter", planned.effort)
-                                        )
-                                        group_verdicts_call, _continuation = await phase_arbiter_review(
-                                            call_backend,
-                                            ctx.work,
-                                            selected_records=[
-                                                adjudicated[i]
-                                                for i in targets_by_group.get(planned.group_id, ())
-                                            ],
-                                            input_path=arbiter_group_input_path(
-                                                dd, planned.group_id
-                                            ),
-                                            **_review_context_kwargs(
-                                                ctx, deep_state, strategy=ctx.strategy("arbitration")
-                                            ),
-                                            intent_authoritative=deep_state.intent_authoritative,
-                                        )
-                                except Exception as exc:  # noqa: BLE001 -- per-group isolation; fail-open
-                                    failed_groups.append(planned.group_id)
-                                    reused[planned.group_id] = False
-                                    print_warning(
-                                        console,
-                                        f"Arbiter group {planned.group_id} failed "
-                                        f"({type(exc).__name__}: {exc}); its findings "
-                                        "remain unadjudicated.",
-                                    )
-                                    return
-                                _persist_group_verdicts(dd, planned, group_verdicts_call)
-                                group_verdicts[planned.group_id] = group_verdicts_call
-                                reused[planned.group_id] = False
-
-                        tg.start_soon(_arbitrate_one)
-
-    return (
-        _merge_group_verdicts(plan, arbiter_targets, group_verdicts, targets_by_group),
-        reused,
-        failed_groups,
-    )
-
-
-def _unsharded_arbiter_backend(ctx: FlowContext, *, effort_pin: str | None) -> Backend:
-    """Resolve the single-group arbiter call: an explicit pin wins, else today's ``xhigh``.
-
-    A6/MH9: a selection that fits one group is unsharded and keeps the pre-profile
-    arbiter effort whatever the latency profile -- the route's arbiter effort is a
-    per-group (sharded) knob, and the record written by :func:`arbiter_plan` names
-    ``xhigh`` for this path. A deliberate ``--reasoning-effort`` pin still outranks
-    it, and :func:`_resolve_backend` drops the override on backends the deep effort
-    table does not tune (Claude and Pi keep their ambient default).
-    """
-    if effort_pin is not None:
-        return ctx.backend_for("arbiter")
-    return ctx.backend_for_effort("arbiter", "xhigh")
-
-
-def _records_bytes_by_basename(paths: list[Path]) -> dict[str, bytes | None]:
-    """Map each records file by basename; an unreadable file maps to ``None``.
-
-    A ``None`` entry makes the whole reuse unit a named miss rather than keying
-    a partial set (see :func:`arbiter_key_payload` / :func:`merge_key_payload`).
-    """
-    records: dict[str, bytes | None] = {}
-    for path in paths:
-        try:
-            records[path.name] = path.read_bytes()
-        except OSError:
-            records[path.name] = None
-    return records
-
-
-def _arbiter_plan_component(plan: ArbiterPlan) -> dict[str, Any]:
-    """The keying view of the arbiter plan: sharded flag + each group's target uids."""
-    return {
-        "sharded": plan.sharded,
-        "groups": [list(group.target_uids) for group in plan.groups],
-    }
-
-
-def _loop_grounding(deep_state: DeepState) -> dict[str, Any]:
-    """The loop-re-derived inputs shared by the arbiter and merge units (MH2/MH16).
-
-    Intent and alternatives are read back as each prompt sees them (the restored
-    artifact on a hit), and the pre-scan is digested by directory content so
-    its ``cache-key`` bookkeeping can never move anything.
-    """
-    alts_path = deep_state.alts_path
-    try:
-        alternatives_text = alts_path.read_text(encoding="utf-8") if alts_path.is_file() else None
-    except OSError:
-        alternatives_text = None
-    return {
-        "intent": digest_or_absent(deep_state.intent_summary_or_none),
-        "alternatives": digest_or_absent(alternatives_text),
-        "exploration": {"digest": exploration_digest(deep_state.exploration_dir)},
-    }
-
-
-def _arbiter_store_payload(
-    dd: Path, rewrite_paths: list[Path], plan: ArbiterPlan
-) -> dict[str, bytes] | None:
-    """Collect a completed arbiter's on-disk outputs, or ``None`` if any is missing.
-
-    The unit is storable only as a whole: every rewritten records file, each
-    planned group's verdicts + marker when the plan sharded (the unsharded path
-    persists no group files), and the whole-block ``arbiter-complete`` marker.
-    A missing piece leaves no entry rather than a partial one.
-    """
-    payload: dict[str, bytes] = {}
-    for path in rewrite_paths:
-        try:
-            payload[path.name] = path.read_bytes()
-        except OSError:
-            return None
-    if plan.sharded:
-        for group in plan.groups:
-            verdicts_path = arbiter_group_verdicts_path(dd, group.group_id)
-            marker_path = arbiter_group_complete_path(dd, group.group_id)
-            try:
-                payload[verdicts_path.name] = verdicts_path.read_bytes()
-                payload[marker_path.name] = marker_path.read_bytes()
-            except OSError:
-                return None
-    marker_path = adjudication_complete_path(dd)
-    try:
-        payload[marker_path.name] = marker_path.read_bytes()
-    except OSError:
-        return None
-    return payload
-
-
-def _reload_adjudicated_records(deep_state: DeepState) -> bool:
-    """Refresh ``ctx.data`` from the restored post-arbitration records files.
-
-    A whole-unit hit must present exactly what a real adjudication left behind,
-    not the pre-arbitration in-memory copy, so dedup and merge see the revised
-    records. Returns ``False`` (leaving the caller's state untouched) when any
-    file cannot be parsed, which makes the hit a miss instead of a split brain.
-    """
-    language: list[dict[str, Any]] = []
-    sources: list[str] = []
-    for path in deep_state.records_paths:
-        try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        records = _records_issues_or_empty(loaded)
-        stamp_record_uids(records, path.name)
-        language.extend(records)
-        sources.extend(path.name for _ in records)
-    structural: list[dict[str, Any]] = []
-    structural_sources: list[str] = []
-    structural_path = deep_state.structural_records_path_or_none
-    if structural_path is not None:
-        try:
-            loaded = json.loads(structural_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return False
-        structural = _records_issues_or_empty(loaded)
-        stamp_record_uids(structural, structural_path.name)
-        structural_sources = [structural_path.name for _ in structural]
-    deep_state.records = language
-    deep_state.record_sources = sources
-    deep_state.structural_records = structural
-    deep_state.structural_record_sources = structural_sources
-    return True
-
-
-def _try_reuse_arbiter(
-    reuse: ReuseCache,
-    deep_state: DeepState,
-    plan: ArbiterPlan,
-    key: str,
-    payload: dict[str, Any],
-) -> bool:
-    """Try to restore a completed whole-arbiter unit; ``True`` when it hit.
-
-    A hit restores every rewritten records file, the per-group verdicts and
-    markers (a sharded payload), and the whole-block marker, then reloads
-    ``ctx.data`` from those files and records the hit with its grounding delta.
-    Any failure is recorded as a miss and the caller runs the real adjudication.
-    """
-    hit = lookup_reuse_entry(reuse, "arbiter", key, deep_state.dd)
-    if hit is None:
-        return False
-    if not _reload_adjudicated_records(deep_state):
-        reuse.record("arbiter", outcome="miss", reason="restored records unreadable", key=key)
-        return False
-    record_reuse_hit(reuse, "arbiter", key, hit, payload)
-    write_routing_record(
-        deep_state.dd,
-        {
-            "arbiter": {
-                "sharded": plan.sharded,
-                "reason": f"reused whole unit ({plan.reason})",
-                "groups": _arbiter_groups_record(
-                    plan,
-                    effort_pin=None,
-                    reused={group.group_id: True for group in plan.groups},
-                ),
-                "verdicts_applied": 0,
-                "failed_groups": [],
-            }
-        },
-    )
-    return True
-
-
 def _merge_contributing_records(deep_state: DeepState) -> dict[str, bytes | None]:
     """Every records file the merge reads, keyed by basename.
 
-    The primary-scope stacks (including the uncovered sweep's records) plus the
+    The primary-scope stacks (including the structural reviewer's records) plus the
     structural meta-stack. An unreadable file becomes a named miss (see
     :func:`_records_bytes_by_basename`).
     """
@@ -924,288 +107,6 @@ def _merge_store_payload(dd: Path) -> dict[str, bytes] | None:
     return payload
 
 
-def _try_reuse_merge(
-    reuse: ReuseCache,
-    deep_state: DeepState,
-    key: str,
-    payload: dict[str, Any],
-) -> bool:
-    """Try to restore a completed cross-stack merge; ``True`` when it hit.
-
-    A hit restores the canonical ``merged-items.json``, the ``dedup-candidates``
-    pre-filter output and the rendered deep-dir report, then records the hit with
-    its grounding delta. Any failure is recorded as a miss and the caller runs
-    the real merge; ``_step_load_items`` (which runs afterwards on every path)
-    copies the report to the repo and appends the coverage section, an
-    idempotent no-op because a restored report already carries it (A7).
-    """
-    hit = lookup_reuse_entry(reuse, "merge", key, deep_state.dd)
-    if hit is None:
-        return False
-    record_reuse_hit(reuse, "merge", key, hit, payload)
-    return True
-
-
-async def _step_arbiter(ctx: FlowContext) -> None:
-    """Scoped arbiter over high-severity/contested findings (#168).
-
-    Two shapes: the unsharded path (forensic, or a selection that fits one
-    co-located group) is today's single serial call at ``xhigh``; the sharded
-    path fans one call per planned group out under the run's fan-out ceiling,
-    applies one merged verdict mapping, and persists per-group artifacts so a
-    resume reruns only the incomplete groups.
-    """
-    deep_state = DeepState(ctx.data)
-    config = ctx.config
-    dd = deep_state.dd
-    all_records: list[dict[str, Any]] = deep_state.records
-    record_sources: list[str] = deep_state.record_sources
-    # Issue #1103: adjudicate over language AND structural records together.
-    # `_rejoin_structural_records` below reverses the partition applied in
-    # `_step_per_stack_parse` (so structural findings can contest a language
-    # finding restating them) and `_split_structural_records` restores it
-    # afterward so the dedup pre-filter and the merge prompt see exactly what
-    # they saw before.
-    structural_records: list[dict[str, Any]] = deep_state.structural_records
-    structural_sources: list[str] = deep_state.structural_record_sources
-
-    # Scoped Opus arbiter (#168): re-review ONLY high-severity / contested
-    # findings and write verdicts back before merge. A `--start-at merge`
-    # resume skips this block only when the completion marker proves a prior
-    # run already finalised the whole adjudication (arbiter + suppression,
-    # #175, #232).
-    adjudication_marker = adjudication_complete_path(dd)
-    if (
-        ctx.pipeline().arbitration.enabled
-        and (config.start_at != "merge" or not adjudication_marker.is_file())
-    ):
-        structural_path: Path | None = deep_state.structural_records_path_or_none
-        adjudicated, adjudicated_sources, structural_ids, rewrite_paths, structural_range = (
-            _rejoin_structural_records(
-                all_records, record_sources, structural_records, structural_sources,
-                deep_state.records_paths, structural_path,
-            )
-        )
-
-        arbiter_targets = select_arbiter_targets(
-            adjudicated, adjudicated_sources,
-            min_severity=ctx.pipeline().arbitration.min_severity,
-            contested_location=ctx.pipeline().arbitration.contested_location,
-            contested_only=structural_range,
-        )
-        # Key suppression exclusion on the record's `uid`, not the stale
-        # pre-compaction indices (which shift when records are dropped) or
-        # `(file, line)` (two findings can share a location while only one is
-        # arbitrated, #232, #1111). A uid rides inside the dict, so a rebuild or
-        # JSON round-trip cannot shake it off; empty-uid records are left out
-        # and handled at the exclusion site below.
-        arbitrated_ids = {uid for i in arbiter_targets if (uid := record_uid(adjudicated[i]))}
-        arbiter_slice: dict[str, Any] = {
-            "sharded": False,
-            "reason": "no arbiter targets selected",
-            "groups": [],
-            "verdicts_applied": 0,
-            "failed_groups": [],
-        }
-        adjudication_complete = True
-        # The resolved suppression opt-in is part of the arbiter unit's contract
-        # (MH8): a payload stored with it off must not be served to a run with it
-        # on, so it is keyed, not merely recorded.
-        precision_mode = bool(
-            ctx.pipeline().suppression.enabled or _resolve_opt_in(config, "precision_mode")
-        )
-        # The reuse handles are populated only when there are arbiter targets;
-        # the whole-unit store at the end of the block reads them back.
-        reuse: ReuseCache | None = None
-        arbiter_identity: PhaseIdentity | None = None
-        arbiter_payload: dict[str, Any] | None = None
-        arbiter_key: str | None = None
-        plan: ArbiterPlan | None = None
-        if arbiter_targets:
-            route = deep_state.latency_route or PROFILE_ROUTES[FAIL_SAFE_LATENCY_PROFILE]
-            # A route that does not shard never partitions: the unsharded path is
-            # today's single call over every selected target, and a non-sharding
-            # route's ``group_max_targets`` of 0 is not a valid partition bound
-            # (MH2/A6). Sharding is what the route turns on, so only a sharding
-            # route reaches ``partition_arbiter_targets``.
-            groups = (
-                partition_arbiter_targets(
-                    adjudicated,
-                    arbiter_targets,
-                    edges=deep_state.import_graph,
-                    max_targets=route.group_max_targets,
-                )
-                if route.arbiter_sharded
-                else [
-                    ArbiterGroup(
-                        "arbiter-group-0",
-                        tuple(arbiter_targets),
-                        tuple(record_uid(adjudicated[i]) for i in arbiter_targets),
-                    )
-                ]
-            )
-            contested = (
-                contested_indices(
-                    adjudicated,
-                    adjudicated_sources,
-                    contested_only=structural_range,
-                )
-                if ctx.pipeline().arbitration.contested_location
-                else frozenset()
-            )
-            plan = arbiter_plan(route, groups, records=adjudicated, contested=contested)
-            deep_state.arbiter_plan = plan
-            targets_by_group = {
-                group.group_id: list(group.target_indices) for group in groups
-            }
-            from daydream.runner import _explicit_reasoning_effort_pin
-
-            effort_pin = _explicit_reasoning_effort_pin(config, "arbiter")
-            # Issue #733 — the arbiter is one content-addressed unit over the
-            # pre-arbitration records it reads, its plan, and the precision-mode
-            # opt-in. Compute the key BEFORE dispatch, while those records are
-            # still what the arbiter would see, then reuse or run and store
-            # under that same key.
-            reuse = reuse_cache_for(ctx)
-            arbiter_identity = phase_identity_for(ctx, "arbiter")
-            if reuse is not None:
-                contributing = _records_bytes_by_basename(rewrite_paths)
-                arbiter_payload = arbiter_key_payload(
-                    contributing_records=contributing,
-                    structural_records=(
-                        contributing.get(structural_path.name)
-                        if structural_path is not None
-                        else None
-                    ),
-                    plan=_arbiter_plan_component(plan),
-                    precision_mode=precision_mode,
-                    identity=arbiter_identity,
-                    grounding=_loop_grounding(deep_state),
-                )
-                arbiter_key = unit_key(arbiter_payload)
-                if arbiter_key is None:
-                    record_absent_components(reuse, "arbiter", arbiter_payload)
-                elif _try_reuse_arbiter(reuse, deep_state, plan, arbiter_key, arbiter_payload):
-                    return
-            if plan.sharded:
-                verdicts, reused, failed_groups = await _run_sharded_arbiter(
-                    ctx,
-                    deep_state,
-                    plan,
-                    arbiter_targets,
-                    adjudicated,
-                    effort_pin=effort_pin,
-                    targets_by_group=targets_by_group,
-                )
-                adjudication_complete = not failed_groups
-            else:
-                failed_groups = []
-                reused = {plan.groups[0].group_id: False}
-                async with phase_scope(DaydreamPhase.DEEP, stage="arbiter"):
-                    arbiter_backend = _unsharded_arbiter_backend(ctx, effort_pin=effort_pin)
-                    verdicts, arbiter_continuation = await phase_arbiter_review(
-                        arbiter_backend,
-                        ctx.work,
-                        selected_records=[adjudicated[i] for i in arbiter_targets],
-                        **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("arbitration")),
-                        intent_authoritative=deep_state.intent_authoritative,
-                    )
-                    # Identity gate: only resume when merge runs on the very same
-                    # backend instance. A per-phase override that resolves a
-                    # different backend gets the cold path.
-                    if arbiter_continuation is not None and arbiter_backend is ctx.backend_for("merge"):
-                        deep_state.arbiter_continuation = arbiter_continuation
-            adjudicated, adjudicated_sources, arbiter_outcomes = _apply_adjudication_verdicts(
-                adjudicated, adjudicated_sources, arbiter_targets, verdicts,
-                pass_name="arbiter",
-                id_field="arb_id",
-                fail_closed=False,
-            )
-            _rewrite_stack_records(
-                dd, rewrite_paths, adjudicated, adjudicated_sources
-            )
-            record_provenance(dd, pass_name="arbiter", outcomes=arbiter_outcomes)
-            arbiter_slice = {
-                "sharded": plan.sharded,
-                "reason": plan.reason,
-                "groups": _arbiter_groups_record(plan, effort_pin=effort_pin, reused=reused),
-                "verdicts_applied": len(verdicts),
-                "failed_groups": list(failed_groups),
-            }
-        write_routing_record(dd, {"arbiter": arbiter_slice})
-
-        # Precision-mode suppression pass (#232), OPT-IN: a skeptical second
-        # opinion on borderline (LOW-confidence / low-severity uncontested)
-        # findings, dropping any it cannot confirm (fail-CLOSED). Excludes the
-        # arbiter's targets; one batched call via the cheaper `suppression` key.
-        if precision_mode:
-            # Exclude structural records (high-conviction by construction,
-            # #1103) and any record with no uid: suppression is fail-CLOSED, so
-            # unidentifiable records must be kept rather than droppable.
-            suppression_exclude = [
-                i
-                for i, r in enumerate(adjudicated)
-                if not (uid := record_uid(r)) or uid in arbitrated_ids or uid in structural_ids
-            ]
-            suppression_targets = select_suppression_targets(
-                adjudicated,
-                suppression_exclude,
-                severity_classes=ctx.pipeline().suppression.severity_classes,
-                confidence_classes=ctx.pipeline().suppression.confidence_classes,
-            )
-            if suppression_targets:
-                async with phase_scope(DaydreamPhase.DEEP, stage="suppression"):
-                    sup_verdicts = await phase_suppression_review(
-                        ctx.backend_for("suppression"),
-                        ctx.work,
-                        selected_records=[adjudicated[i] for i in suppression_targets],
-                        **_review_context_kwargs(ctx, deep_state, strategy=ctx.strategy("suppression")),
-                    )
-                adjudicated, adjudicated_sources, suppression_outcomes = _apply_adjudication_verdicts(
-                    adjudicated, adjudicated_sources, suppression_targets, sup_verdicts,
-                    pass_name="suppression",
-                    id_field="sup_id",
-                    fail_closed=True,
-                )
-                _rewrite_stack_records(
-                    dd, rewrite_paths, adjudicated, adjudicated_sources
-                )
-                record_provenance(dd, pass_name="suppression", outcomes=suppression_outcomes)
-        # Whole-block marker: written only when every planned group completed,
-        # so an interrupted sharded fan-out forces the block to re-enter and
-        # reruns only its incomplete groups (and the opt-in suppression pass).
-        if adjudication_complete:
-            adjudication_marker.write_text("")
-            # Store only a completed whole-unit adjudication (every planned
-            # group's files present) under the pre-dispatch key; a partial entry
-            # must never be served as this unit's output.
-            if (
-                reuse is not None
-                and plan is not None
-                and arbiter_payload is not None
-                and arbiter_key is not None
-                and arbiter_identity is not None
-            ):
-                store_payload = _arbiter_store_payload(dd, rewrite_paths, plan)
-                if store_payload is not None:
-                    reuse.store(
-                        arbiter_key,
-                        unit="arbiter",
-                        payload=store_payload,
-                        components=arbiter_payload["components"],
-                        identity=arbiter_identity,
-                        grounding=grounding_digests(arbiter_payload),
-                        grounding_status=reuse_grounding_statuses(reuse, arbiter_payload),
-                    )
-        all_records, record_sources, structural_records, structural_sources = (
-            _split_structural_records(adjudicated, adjudicated_sources, structural_ids)
-        )
-    deep_state.records = all_records
-    deep_state.record_sources = record_sources
-    deep_state.structural_records = structural_records
-    deep_state.structural_record_sources = structural_sources
-
-
 def _clear_merge_failure(dd: Path) -> None:
     """Clear a stale ``__merge__`` salvage record after a successful re-merge.
 
@@ -1235,29 +136,10 @@ _MAX_REPORTED_UNIDENTIFIABLE_PAIRS = 10
 
 
 def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Apply the D-27 dedup pre-filter to a host-written partial merge (issue #361).
+    """Deduplicate host-written salvage by dropping each pair's record_b_uid.
 
-    In a full merge the merge agent adjudicates ``record_duplicate_pairs``
-    (cross-stack records describing the same concern). A salvage writes the
-    partial list with no merge agent, so it must apply the pre-filter's computed
-    cross-stack duplicate pairs itself -- otherwise the partial
-    ``merged-items.json`` carries duplicates into the resume verifier and fix
-    gate. Keeps the ``record_a`` side of each pair (deterministic sort order)
-    and drops the ``record_b`` side, matched on ``record_b_uid``.
-
-    We used to match the b-side on ``(id, file)``, and that was our bug -- not a
-    limitation of the artifact. That tuple is not unique (a reviewer-assigned
-    ``id`` restarts at 1 in every stack), and the filter below is a
-    set-membership test over the whole record list, so it deleted EVERY record
-    matching a dropped key instead of the one b-side it meant to. Three stacks
-    each reporting ``id: 1`` on ``api.py`` for the same defect yield pairs
-    (0,1), (0,2) and (1,2), whose b-side keys are all ``("1", "api.py")`` --
-    and record 0, the a-side this function exists to KEEP, matches that key too
-    and died with them, leaving the partial report with zero language findings.
-    It looked identical to the records being deleted, which is precisely why it
-    had been paired with them. ``record_b_uid`` (issue #1111) names one record
-    and only that record, so the same input now drops the two b-sides and keeps
-    record 0.
+    Keep the deterministic a-side. Reviewer ids and locations are not globally
+    unique; only UID membership identifies the intended b-side across stacks.
     """
     dedup_p = dedup_candidates_path(dd)
     if not dedup_p.is_file():
@@ -1311,14 +193,11 @@ def _drop_cross_stack_duplicates(dd: Path, records: list[dict[str, Any]]) -> lis
 
 
 async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
-    """Dedup pre-filter (D-27) + cross-stack merge (D-23..D-26).
+    """Build dedup candidates and merge stack records, salvaging unparseable responses.
 
-    A genuinely unparseable merge response (issue #361) is salvaged rather than
-    aborting the run: the completed stacks' verdicts are consolidated into a
-    partial ``merged-items.json`` + failure record, and the run stops resumably
-    (``Stop(1)``) so a relaunch picks up without re-reviewing completed stacks.
-    Budget exhaustion uses the same salvage but continues to publish the partial
-    report successfully, with explicit incomplete-coverage diagnostics.
+    A malformed response persists partial items/report/failure and stops resumably.
+    Budget exhaustion persists the same salvage but publishes it successfully
+    with incomplete-coverage diagnostics.
     """
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
@@ -1341,9 +220,9 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         dedup_p.write_text(
             json.dumps(
                 {
-                    "record_alt_pairs": [_candidate_pair_to_json(p) for p in pairs],
+                    "record_alt_pairs": [dataclass_payload(p) for p in pairs],
                     "record_duplicate_pairs": [
-                        _candidate_pair_to_json(p) for p in record_pairs
+                        dataclass_payload(p) for p in record_pairs
                     ],
                 },
                 indent=2,
@@ -1351,7 +230,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         )
 
         # Issue #733 — the cross-stack merge is one content-addressed unit over
-        # every contributing records file (per-stack, uncovered and structural),
+        # every contributing records file (per-stack and structural),
         # the failed-stack set, the structural presence flag, and its
         # schema/profile/model/effort contract. Intent, alternatives and the
         # pre-scan are recorded grounding only, so a moved pre-scan can never
@@ -1366,9 +245,7 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         reuse = (
             reuse_cache_for(ctx) if ctx.config.start_at == "review" else None
         )
-        merge_payload: dict[str, Any] | None = None
-        merge_reuse_key: str | None = None
-        merge_identity: PhaseIdentity | None = None
+        merge_unit: ReviewReuseUnit | None = None
         if reuse is not None:
             merge_identity = phase_identity_for(ctx, "merge")
             merge_payload = merge_key_payload(
@@ -1378,10 +255,8 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
                 identity=merge_identity,
                 grounding=_loop_grounding(deep_state),
             )
-            merge_reuse_key = unit_key(merge_payload)
-            if merge_reuse_key is None:
-                record_absent_components(reuse, "merge", merge_payload)
-            elif _try_reuse_merge(reuse, deep_state, merge_reuse_key, merge_payload):
+            merge_unit = ReviewReuseUnit(reuse, "merge", merge_identity, merge_payload)
+            if merge_unit.restore(deep_state.dd):
                 _clear_merge_failure(dd)
                 clear_review_budget_stop(dd, "Cross-stack merge")
                 return None
@@ -1423,41 +298,17 @@ async def _step_cross_stack_merge(ctx: FlowContext) -> Stop | None:
         # Issue #733 — store only a completed merge, once the same artifacts a
         # fresh run leaves are final on disk. A failed or budget-exhausted
         # merge returns above and never reaches here.
-        if (
-            reuse is not None
-            and merge_payload is not None
-            and merge_reuse_key is not None
-            and merge_identity is not None
-        ):
-            store_payload = _merge_store_payload(dd)
-            if store_payload is not None:
-                reuse.store(
-                    merge_reuse_key,
-                    unit="merge",
-                    payload=store_payload,
-                    components=merge_payload["components"],
-                    identity=merge_identity,
-                    grounding=grounding_digests(merge_payload),
-                    grounding_status=reuse_grounding_statuses(reuse, merge_payload),
-                )
+        if merge_unit is not None:
+            merge_unit.store(lambda: _merge_store_payload(dd))
     return None
 
 
 def _salvage_merge_failure(ctx: FlowContext, exc: CrossStackMergeError) -> None:
-    """Persist a salvageable cross-stack merge failure (issue #361).
+    """Persist partial surviving findings and a structured MERGE_FAILURE_KEY entry.
 
-    The merge agent returned a response containing no parseable item list (e.g.
-    bare ``str`` prose/refusal/truncated JSON). Instead of aborting the run with
-    the completed stacks' verdicts stranded on disk, consolidate the surviving
-    per-stack records into a *partial* ``merged-items.json`` + ``review-output.md``
-    and record the failure as a structured entry under the reserved
-    ``MERGE_FAILURE_KEY`` in ``per-stack-failures.json``. The run then stops
-    resumably so a relaunch picks up without re-review.
-
-    Both fallible writes propagate through the project error type -- a genuinely
-    unwritable salvage must surface, not silently degrade. The only tolerance is
-    loading a missing/malformed existing ``per-stack-failures.json`` as ``{}``
-    (the "no prior failures" default); existing per-stack entries are preserved.
+    Deduplicate language records, retain structural findings and existing stack
+    failures. Missing/malformed prior failure data means no prior failures;
+    errors writing either salvage artifact propagate as the project error type.
     """
     deep_state = DeepState(ctx.data)
     dd = deep_state.dd
@@ -1551,11 +402,7 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
         if deep_copy.exists():
             merged_report.write_text(deep_copy.read_text())
 
-    # Issue #309: surface the uncovered-sweep coverage stats on the rendered
-    # report. The sweep runs BEFORE the merge writes review-output.md, so the
-    # section is appended here, once the report exists, to both the canonical
-    # report and its deep-dir copy.
-    _append_coverage_section(dd, merged_report, merged_report_path(dd))
+
 
     warning = render_review_warnings(review_warnings(dd))
     if warning:
@@ -1566,111 +413,6 @@ async def _step_load_items(ctx: FlowContext) -> Stop | None:
     deep_state.merged_report = merged_report
     deep_state.items_file = items_file
     return None
-
-
-def _emit_coverage_section(report: Path, deep_copy: Path, section: str) -> None:
-    """Write ``section`` into the canonical report and its deep-dir copy.
-
-    Shared by both branches of ``_append_coverage_section`` (the missing-index
-    and normal coverage paths) so the two write loops cannot drift. Appends
-    only when a target file does not already carry a ``## Coverage`` section;
-    an absent file is a silent no-op.
-    """
-    for target in (report, deep_copy):
-        if target.is_file():
-            text = target.read_text(encoding="utf-8")
-            if "## Coverage" not in text:
-                target.write_text(text.rstrip() + "\n\n" + section, encoding="utf-8")
-
-
-def _append_coverage_section(dd: Path, report: Path, deep_copy: Path) -> None:
-    """Append a short ``## Coverage`` section when the sweep produced stats.
-
-    Reads ``deep/coverage-stats.json`` and appends files_in_diff / files read /
-    ratio / swept files to both the canonical report and its deep-dir copy. The
-    ratio rendered is the POST-sweep value (recomputed after the sweep's forks
-    landed); only files whose sweep review produced completed output are labeled
-    covered. Failed sweep attempts are surfaced as failures, not claimed as
-    coverage. A missing or malformed stats file is a silent no-op -- coverage
-    surfacing is advisory, never a gate. ANY failure here (read error, invalid
-    JSON, structurally-malformed root, a non-dict shape) warns and returns; it
-    can never fail the merge step.
-    """
-    stats_p = dd / "coverage-stats.json"
-    if not stats_p.is_file():
-        return
-    try:
-        stats = json.loads(stats_p.read_text())
-        if not isinstance(stats, dict):
-            print_warning(
-                console,
-                "Ignoring malformed coverage stats (expected a JSON object): "
-                f"{stats_p}",
-            )
-            return
-        pre_sweep = stats.get("pre_sweep")
-        if not isinstance(pre_sweep, dict):
-            return
-        # Issue #336: a missing hunk index leaves the changed-file set
-        # unenumerated. Surface that gap instead of rendering an empty diff as
-        # a full-coverage pass (the coverage ratio is ``None`` when the index
-        # was absent, so no ratio line is emitted). ``load_hunk_index`` still
-        # fails open -- this is reporting only.
-        if pre_sweep.get("hunk_index_missing"):
-            lines = [
-                "## Coverage",
-                "- Coverage not available: hunk index is missing.",
-            ]
-            section = "\n".join(lines) + "\n"
-            _emit_coverage_section(report, deep_copy, section)
-            return
-        files_in_diff = pre_sweep.get("files_in_diff")
-        if not isinstance(files_in_diff, int):
-            return
-        lines = [
-            "## Coverage",
-            f"- Files in diff: {files_in_diff}",
-        ]
-        # Prefer the POST-sweep numbers (the ratio the sweep actually achieved);
-        # fall back to the pre-sweep snapshot when the sweep did not recompute.
-        post_sweep = stats.get("post_sweep")
-        read_source = post_sweep if isinstance(post_sweep, dict) else pre_sweep
-        files_read = read_source.get("files_read_by_reviewers")
-        if isinstance(files_read, int):
-            lines.append(f"- Files read by reviewers: {files_read}")
-        ratio = read_source.get("coverage_ratio")
-        if isinstance(ratio, (int, float)):
-            lines.append(f"- Coverage ratio: {ratio}")
-        # Issue #309 finding 6: only files with a verified completed read are
-        # labeled covered. A completed review output WITHOUT a read is a
-        # completed attempt -- rendered as "completed without verified source read" -- and never
-        # appears on the covered line nor moves the ratio above.
-        covered = stats.get("covered_files")
-        if isinstance(covered, list) and covered:
-            lines.append(f"- Second-pass sweep covered: {', '.join(str(f) for f in covered)}")
-        completed = stats.get("completed_files")
-        if isinstance(completed, list):
-            unverified = [
-                str(f) for f in completed if not (isinstance(covered, list) and f in covered)
-            ]
-            if unverified:
-                lines.append(
-                    f"- Second-pass sweep completed without verified source read: {', '.join(unverified)}"
-                )
-        failures = stats.get("sweep_failures")
-        if isinstance(failures, dict) and failures:
-            lines.append(f"- Best-effort sweep failures: {', '.join(sorted(str(f) for f in failures))}")
-        skipped = stats.get("sweep_skipped_capacity")
-        if isinstance(skipped, int) and skipped:
-            lines.append(f"- Sweep capacity-skipped files: {skipped}")
-        section = "\n".join(lines) + "\n"
-        _emit_coverage_section(report, deep_copy, section)
-    except Exception as exc:  # noqa: BLE001 -- advisory decoration: never fail the step
-        print_warning(
-            console,
-            "Skipping coverage stats render (advisory; run continues): "
-            f"{type(exc).__name__}: {exc}",
-        )
 
 
 async def _step_findings_out(ctx: FlowContext) -> Stop:

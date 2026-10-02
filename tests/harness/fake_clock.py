@@ -34,9 +34,7 @@ class FakeClock:
         self.monotonic_value += seconds
 
 
-def patch_retry_sleep(
-    monkeypatch: pytest.MonkeyPatch, clock: FakeClock
-) -> list[float]:
+def patch_retry_sleep(monkeypatch: pytest.MonkeyPatch, clock: FakeClock) -> list[float]:
     """Replace the retry backoff sleep with a recording, clock-advancing stub.
 
     Patches ``daydream.agent.anyio.sleep`` so a retry ladder consumes injected

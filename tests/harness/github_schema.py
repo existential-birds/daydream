@@ -1,66 +1,24 @@
-"""Minimal checked-in GitHub GraphQL field-set subset + query field extractor.
+"""Validate review-thread query fields against a checked-in GitHub GraphQL subset.
 
-The review-thread GraphQL queries in :mod:`daydream.benchmark.github_import`
-may only request fields GitHub's schema actually defines, *on the type they
-are requested under*. This module is the enforcement point:
-:func:`unknown_query_fields` parses a GraphQL query's selection set, binds
-each requested name to the type it appears under, and returns the names that
-are absent from that type's checked-in subset — a name valid on one type
-requested on another is flagged exactly like an invented one. It is shared by
-the contract test (``tests/test_github_schema.py``) and the fake ``gh``
-graphql handler (``tests/harness/fake_gh.py``), so reintroducing an invented
-field or misplacing a real one fails CI.
-
-The subset is intentionally minimal — it covers exactly the fields the
-review-thread queries that route through the fake ``gh`` touch (the import
-queries in ``github_import`` and the prior-finding inventory query in
-``reconcile``), per the issue-841 plan. A full GitHub introspection snapshot
-is impractical to maintain; a small field-set map is the sanctioned contract
-mechanism.
+Fields are checked on their enclosing type, never a global union. Import and
+reconciliation queries share this contract through the fake gh handler and
+schema tests; the subset deliberately excludes unused GitHub API surfaces.
 """
 
 from __future__ import annotations
 
 import re
 
-# Real GitHub GraphQL field names for the types the two review-thread queries
-# touch. ``resolvedBy`` is in the subset but must NOT be requested (nothing
-# reads it); it is present so a future *correct* addition is not falsely
-# rejected.
-SCHEMA_FIELDS: dict[str, set[str]] = {
-    "PullRequestReviewThread": {
-        "id",
-        "isResolved",
-        "isOutdated",
-        "resolvedBy",
-        "subjectType",
-        "path",
-        "line",
-        "originalLine",
-        "originalStartLine",
-        "diffSide",
-        "startDiffSide",
-        "comments",
-    },
-    "Comment": {
-        "id",
-        "databaseId",
-        "body",
-        "author",
-        "isMinimized",
-        "createdAt",
-        "updatedAt",
-        "url",
-        "replyTo",
+# resolvedBy is valid but unused; keeping it distinguishes unused from invented fields.
+SCHEMA_FIELDS: dict[str, set[str]] = {"PullRequestReviewThread": {
+        "id", "isResolved", "isOutdated", "resolvedBy", "subjectType", "path", "line", "originalLine",
+        "originalStartLine", "diffSide", "startDiffSide", "comments",
+    }, "Comment": {"id", "databaseId", "body", "author", "isMinimized", "createdAt", "updatedAt", "url", "replyTo",
         "viewerDidAuthor",
-    },
-    "Actor": {"login"},
+    }, "Actor": {"login"},
 }
 
-# Field name -> GraphQL object type of the value it selects, for the few
-# fields these queries use that carry a nested selection set. Together with
-# SCHEMA_FIELDS this is what binds a requested name to exactly one type: a
-# name is only acceptable on the type whose subset contains it.
+# Nested selections carry the selected value's type into field validation.
 _NESTED_SELECTION_TYPE: dict[str, str] = {
     # Query root
     "repository": "Repository",
@@ -72,55 +30,30 @@ _NESTED_SELECTION_TYPE: dict[str, str] = {
     # PullRequestReviewThread
     "comments": "PullRequestReviewCommentConnection",
     # Comment
-    "author": "Actor",
-    "replyTo": "Comment",
+    "author": "Actor", "replyTo": "Comment",
     # Connections
     "pageInfo": "PageInfo",
 }
 
-# The object type a connection's ``nodes`` selection resolves to, keyed by the
-# enclosing connection type (context-dependent, so it cannot live in the
-# single-name map above).
+# Unlike named fields, nodes resolves from its enclosing connection type.
 _CONNECTION_NODE_TYPE: dict[str, str] = {
-    "PullRequestReviewThreadConnection": "PullRequestReviewThread",
-    "PullRequestReviewCommentConnection": "Comment",
+    "PullRequestReviewThreadConnection": "PullRequestReviewThread", "PullRequestReviewCommentConnection": "Comment",
 }
 
-# Query/connection machinery every query relies on, plus ``__typename`` which
-# the GraphQL spec defines on every type. Machinery routes to the next
-# selection set, so it is acceptable in any type context; ``__typename`` is
-# never collected at all.
+# Routing fields are accepted in every context; __typename is never collected.
 _MACHINERY_FIELDS = {
-    "repository",
-    "pullRequest",
-    "reviewThreads",
-    "node",
-    "nodes",
-    "pageInfo",
-    "hasNextPage",
-    "endCursor",
+    "repository", "pullRequest", "reviewThreads", "node", "nodes", "pageInfo", "hasNextPage", "endCursor",
 }
 
 _SKIP_CHARS = " \t\r\n,?$"
 
 
 def _requested_fields(query: str) -> dict[str | None, set[str]]:
-    """Iterative descent over *query*'s selection sets; returns requested names
-    grouped by the GraphQL type they were requested on.
+    """Collect selected field names by enclosing GraphQL type.
 
-    Each selection set is parsed in the type context of its enclosing parent
-    field (``None`` when the subset does not model that type — the Query root,
-    Repository, PullRequest, connections, PageInfo), so a name is never
-    validated against a global union:
-
-    - ``alias: realName`` validates ``realName`` (the alias is not a schema
-      field, so only the real name is collected);
-    - ``__typename`` is always valid and never collected;
-    - ``(...)`` argument lists (including the query's variable declarations)
-      are skipped;
-    - ``... on Type`` inline fragments switch the type context; named fragment
-      spreads are skipped;
-    - ``nodes`` resolves to the enclosing connection's node type.
+    Resolve aliases and connection nodes, switch types for inline fragments,
+    and skip arguments, named fragment spreads, and __typename. Unmodeled types
+    retain their names so the caller permits only query machinery there.
     """
     out: dict[str | None, set[str]] = {}
     i, n = 0, len(query)
@@ -149,10 +82,7 @@ def _requested_fields(query: str) -> dict[str | None, set[str]]:
         return i
 
     def record_field(tok: str, i: int, type_ctx: str | None) -> tuple[str, int]:
-        """Resolve *tok*'s real name (stripping an alias), record it under
-        *type_ctx*, and return ``(real_name, cursor)`` with the cursor just
-        past any argument list — a nested selection set, if any, opens there.
-        """
+        """Record the real field name and return the cursor after aliases and arguments."""
         real = tok
         j = skip_ws(i)
         # strip an alias: "side: diffSide" validates "diffSide"
@@ -168,13 +98,7 @@ def _requested_fields(query: str) -> dict[str | None, set[str]]:
         j = skip_ws(j)
         return real, j
 
-    # Iterative descent with an explicit stack of type contexts: every ``{``
-    # that opens a selection set pushes the enclosing context and switches to
-    # the set's own context (``... on Type``, ``nodes``/connection machinery,
-    # or the unmodeled root operation type); the matching ``}`` pops it. The
-    # cursor is threaded as data, so there is no mutable index and no
-    # recursion — each decision point is a flat branch of this loop or a
-    # small cursor-returning helper above.
+    # Push the enclosing type for each nested selection; closing braces restore it.
     pending_types: list[str | None] = []
     type_ctx: str | None = None
     while True:
@@ -233,13 +157,7 @@ def _requested_fields(query: str) -> dict[str | None, set[str]]:
 
 
 def unknown_query_fields(query: str) -> set[str]:
-    """Return the requested field names *query* asks for that its type context
-    does not define: a name absent from the subset of the type it is requested
-    under, or — under a type the subset does not model — any name that is not
-    query machinery.
-
-    ``__typename`` is always valid; an alias is validated by its real name.
-    """
+    """Return fields absent from their enclosing type's subset or shared query machinery."""
     unknown: set[str] = set()
     for type_ctx, fields in _requested_fields(query).items():
         valid: set[str] = _MACHINERY_FIELDS | (SCHEMA_FIELDS.get(type_ctx or "") or set())

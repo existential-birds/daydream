@@ -69,22 +69,14 @@ def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
 def _observe_generation(attempt: Any, *, text: bool = False, metrics: bool = False) -> None:
     """Emit the canonical generation start/end pair shared by the generation tests."""
     attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-    attempt.observe(
-        GenerationEndEvent(
-            generation_id="gen-1",
-            native_started_at_unix_ms=1788690314289,
-            ended_at_unix_ns=1788690709621000000,
-            end_source="host_observed_message_end",
-            choice_parts=(TextChoicePart(text="hello"),) if text else (),
-            response_id="resp-1",
-            model_name="pi-model",
-            provider_name="pi",
-            finish_reason="stop",
+    attempt.observe(GenerationEndEvent(
+            generation_id="gen-1", native_started_at_unix_ms=1788690314289, ended_at_unix_ns=1788690709621000000,
+            end_source="host_observed_message_end", choice_parts=(TextChoicePart(text="hello"),) if text else (),
+            response_id="resp-1", model_name="pi-model", provider_name="pi", finish_reason="stop",
         )
     )
     if metrics:
         attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
-
 
 @pytest.mark.anyio
 async def test_owned_span_tree_usage_and_content() -> None:
@@ -119,8 +111,7 @@ async def test_owned_span_tree_usage_and_content() -> None:
     assert attrs["gen_ai.usage.cost"] == pytest.approx(0.3)
     assert attrs["gen_ai.request.model"] == "effective"
     assert attrs["gen_ai.response.model"] == "actual"
-    # T4: the invocation aggregate is structural, never a `chat` model call;
-    # it carries the standard invoke_agent operation and agent identity.
+    # Invocation aggregates are structural invoke_agent spans, never chat model calls.
     assert attrs["gen_ai.operation.name"] == "invoke_agent"
     assert attrs["gen_ai.agent.name"] == "review"
     assert attrs["daydream.billing.owner"] == "unresolved"
@@ -135,16 +126,10 @@ async def test_owned_span_tree_usage_and_content() -> None:
     tool_attrs = by_kind["tool"].attributes or {}
     assert tool_attrs["gen_ai.operation.name"] == "execute_tool"
     for key, value in {
-        "daydream.flow": "review",
-        "daydream.step": "review",
-        "daydream.phase": "review",
-        "daydream.iteration": 2,
-        "daydream.stack": "python",
-        "daydream.backend": "pi",
-        "daydream.attempt": 1,
+        "daydream.flow": "review", "daydream.step": "review", "daydream.phase": "review", "daydream.iteration": 2,
+        "daydream.stack": "python", "daydream.backend": "pi", "daydream.attempt": 1,
     }.items():
         assert tool_attrs[key] == value
-
 
 @pytest.mark.anyio
 async def test_attempt_and_nested_step_do_not_inherit_unobserved_request_metadata() -> None:
@@ -166,56 +151,34 @@ async def test_attempt_and_nested_step_do_not_inherit_unobserved_request_metadat
     assert nested["daydream.backend"] == "pi"
     assert nested["daydream.attempt"] == 1
 
-
 @pytest.mark.anyio
-async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(monkeypatch: pytest.MonkeyPatch,) -> None:
     secret = "opaque-diagnostic-secret"
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", secret)
     exporter, registry = _memory_tracing()
 
-    async with trace_run(
-        ObservabilityConfig(destinations=("memory",), capture_content=True),
-        registry,
-        flow="review",
+    async with trace_run(ObservabilityConfig(destinations=("memory",), capture_content=True), registry, flow="review",
     ):
         with agent_scope("review", backend="codex"):
             async with attempt_scope(1) as attempt:
-                attempt.observe(
-                    DiagnosticEvent(
-                        code=f"parser_{secret}",
-                        message=f"do not export {secret}",
+                attempt.observe(DiagnosticEvent(code=f"parser_{secret}", message=f"do not export {secret}",
                         metadata={"api_key": secret, "count": 99},
                     )
                 )
-                attempt.observe(
-                    DiagnosticEvent(
-                        code=f"parser_{secret}",
-                        message="another message",
-                        metadata={"raw": "not observable"},
+                attempt.observe(DiagnosticEvent(
+                        code=f"parser_{secret}", message="another message", metadata={"raw": "not observable"},
                     )
                 )
-                attempt.observe(
-                    DiagnosticEvent(
-                        code="codex_transport_coverage",
-                        message="transport detail",
-                        metadata={"occurrences": 4},
+                attempt.observe(DiagnosticEvent(
+                        code="codex_transport_coverage", message="transport detail", metadata={"occurrences": 4},
                     )
                 )
 
     spans = exporter.get_finished_spans()
-    assert sorted(str((span.attributes or {})["daydream.span.kind"]) for span in spans) == [
-        "agent",
-        "attempt",
-        "run",
-    ]
+    assert sorted(str((span.attributes or {})["daydream.span.kind"]) for span in spans) == ["agent", "attempt", "run"]
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
     attrs = dict(attempt_span.attributes or {})
-    assert attrs["daydream.backend_diagnostic.codes"] == (
-        "parser_[REDACTED_CREDENTIAL]",
-        "codex_transport_coverage",
-    )
+    assert attrs["daydream.backend_diagnostic.codes"] == ("parser_[REDACTED_CREDENTIAL]", "codex_transport_coverage",)
     assert attrs["daydream.backend_diagnostic.counts"] == (2, 1)
     encoded = str(spans)
     assert secret not in encoded
@@ -224,7 +187,6 @@ async def test_attempt_records_only_scrubbed_diagnostic_codes_and_counts(
     for span in spans:
         if span is not attempt_span:
             assert not any(key.startswith("daydream.backend_diagnostic") for key in (span.attributes or {}))
-
 
 def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogCaptureFixture) -> None:
     policy = PrivacyPolicy(environ={"LANGSMITH_API_KEY": "opaque-value"})
@@ -236,19 +198,12 @@ def test_diagnostics_scrub_formatted_arguments_and_exception(caplog: pytest.LogC
     assert "opaque-value" not in caplog.text
     assert "REDACTED" in caplog.text
 
-
 def test_flag_valued_secret_env_vars_are_not_harvested_as_credentials() -> None:
-    """A boolean/numeric flag under a secret-named env var is not a credential.
-
-    Harvesting e.g. ``HERMES_REDACT_SECRETS=true`` as a literal secret
-    literal-replaced every ``true`` in span content, corrupting JSON payloads
-    (``{"ok":true}`` read back as ``{"ok":[REDACTED_CREDENTIAL]}``).
-    """
+    """Boolean/numeric environment flags must not become secrets that corrupt ordinary JSON literals."""
     policy = PrivacyPolicy(environ={"HERMES_REDACT_SECRETS": "true", "LANGSMITH_API_KEY": "opaque-value"})
     assert json.loads(policy.json({"ok": True})) == {"ok": True}
     assert json.loads(policy.json({"flag": "true", "n": 1, "off": False})) == {"flag": "true", "n": 1, "off": False}
     assert "opaque-value" not in policy.text("carries opaque-value inside")
-
 
 @pytest.mark.anyio
 async def test_run_spans_survive_flag_valued_secret_env_var(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -265,12 +220,9 @@ async def test_run_spans_survive_flag_valued_secret_env_var(monkeypatch: pytest.
     )
     assert json.loads(str((agent_span.attributes or {})["traceloop.entity.output"])) == {"ok": True}
 
-
 @pytest.mark.anyio
 @pytest.mark.parametrize("stall_during", ["export", "shutdown"])
-async def test_shutdown_deadline_is_total_and_shutdown_once(
-    stall_during: str,
-    caplog: pytest.LogCaptureFixture,
+async def test_shutdown_deadline_is_total_and_shutdown_once(stall_during: str, caplog: pytest.LogCaptureFixture,
 ) -> None:
     release = threading.Event()
 
@@ -303,10 +255,7 @@ async def test_shutdown_deadline_is_total_and_shutdown_once(
 
     async def run() -> None:
         async with trace_run(
-            ObservabilityConfig(destinations=("first", "second")),
-            registry,
-            flow="review",
-            cleanup_timeout_s=0.03,
+            ObservabilityConfig(destinations=("first", "second")), registry, flow="review", cleanup_timeout_s=0.03,
         ):
             pass
         returned.set()
@@ -349,31 +298,22 @@ class _ScriptedBackend:
     async def cancel(self) -> None:
         self.cancelled = True
 
-
 @pytest.mark.anyio
 async def test_retry_keeps_failed_billing_and_agent_records_salvaged_result(tmp_path: Path) -> None:
     class RetryableError(RuntimeError):
         retryable = True
 
     exporter, registry = _memory_tracing()
-    backend = _ScriptedBackend(
-        [
+    backend = _ScriptedBackend([
             [TextEvent("failed content"), CostEvent(0.05, 4, 2), ResultEvent(None, None), RetryableError("retry")],
-            [
-                RequestEvent("effective prompt", system_prompt="effective system"),
-                TextEvent('{"ok":true}'),
-                ResultEvent({"wrong": True}, None),
-                MetricsEvent("", 30, 6, 4, 0.2, usage_scope="invocation"),
+            [RequestEvent("effective prompt", system_prompt="effective system"), TextEvent('{"ok":true}'),
+                ResultEvent({"wrong": True}, None), MetricsEvent("", 30, 6, 4, 0.2, usage_scope="invocation"),
                 CostEvent(None, 0, None),
             ],
         ]
     )
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        result = await run_agent(
-            backend,
-            tmp_path,
-            "original",
-            phase=DaydreamPhase.REVIEW,
+        result = await run_agent(backend, tmp_path, "original", phase=DaydreamPhase.REVIEW,
             output_schema={"type": "object", "required": ["ok"]},
         )
     assert result[0] == {"ok": True}
@@ -392,22 +332,15 @@ async def test_retry_keeps_failed_billing_and_agent_records_salvaged_result(tmp_
     )
     assert json.loads(str((agent.attributes or {})["traceloop.entity.output"])) == {"ok": True}
 
-
 @pytest.mark.anyio
-async def test_metadata_policy_omits_all_content_and_exception_strings(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_metadata_policy_omits_all_content_and_exception_strings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-secret")
     exporter, registry = _memory_tracing()
-    backend = _ScriptedBackend(
-        [
-            [
-                RequestEvent("PRIVATE PROMPT", system_prompt="PRIVATE SYSTEM"),
-                TextEvent("PRIVATE TEXT"),
-                ThinkingEvent("PRIVATE REASON"),
-                ToolStartEvent("tool", "Read", {"arg": "PRIVATE INPUT"}),
-                ToolResultEvent("tool", "PRIVATE OUTPUT", True),
-                CostEvent(0.1, 2, 3),
+    backend = _ScriptedBackend([[
+                RequestEvent("PRIVATE PROMPT", system_prompt="PRIVATE SYSTEM"), TextEvent("PRIVATE TEXT"),
+                ThinkingEvent("PRIVATE REASON"), ToolStartEvent("tool", "Read", {"arg": "PRIVATE INPUT"}),
+                ToolResultEvent("tool", "PRIVATE OUTPUT", True), CostEvent(0.1, 2, 3),
                 RuntimeError("PRIVATE ERROR opaque-secret"),
             ]
         ]
@@ -415,21 +348,14 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(
     with pytest.raises(RuntimeError, match="PRIVATE ERROR"):
         async with trace_run(
             ObservabilityConfig(destinations=("memory",), capture_content=False, service_name="service opaque-secret"),
-            registry,
-            flow="review",
+            registry, flow="review",
         ):
             await run_agent(backend, tmp_path, "PRIVATE ORIGINAL", phase=DaydreamPhase.REVIEW)
     for span in exporter.get_finished_spans():
         encoded = str(span.attributes) + str(span.events) + str(span.resource.attributes) + str(span.status)
         assert "PRIVATE" not in encoded and "opaque-secret" not in encoded
-        assert not any(
-            key.startswith(
-                (
-                    "traceloop.entity.input",
-                    "traceloop.entity.output",
-                    "gen_ai.input.messages",
-                    "gen_ai.output.messages",
-                    "daydream.error.message",
+        assert not any(key.startswith(("traceloop.entity.input", "traceloop.entity.output", "gen_ai.input.messages",
+                    "gen_ai.output.messages", "daydream.error.message",
                 )
             )
             for key in span.attributes or {}
@@ -442,7 +368,6 @@ async def test_metadata_policy_omits_all_content_and_exception_strings(
     assert attempt.events[-1].name == "exception"
     assert (attempt.events[-1].attributes or {})["exception.type"] == "RuntimeError"
     assert "exception.message" not in (attempt.events[-1].attributes or {})
-
 
 @pytest.mark.anyio
 async def test_cancelled_run_closes_open_tool_and_exporter(tmp_path: Path) -> None:
@@ -459,7 +384,6 @@ async def test_cancelled_run_closes_open_tool_and_exporter(tmp_path: Path) -> No
     assert (tool.attributes or {})["daydream.outcome"] == "cancelled"
     assert tool.status.description == "cancelled"
     assert tool.events[-1].name == "exception"
-
 
 @pytest.mark.anyio
 async def test_partial_initialization_cleans_first_destination_once() -> None:
@@ -482,7 +406,6 @@ async def test_partial_initialization_cleans_first_destination_once() -> None:
             pytest.fail("initialization must precede agent work")
     assert exporter.shutdowns == 1
 
-
 @pytest.mark.anyio
 @pytest.mark.parametrize("budget", ["wall", "tools", "supervisor"])
 async def test_budget_and_supervision_close_tools_with_reason(tmp_path: Path, budget: str) -> None:
@@ -498,13 +421,8 @@ async def test_budget_and_supervision_close_tools_with_reason(tmp_path: Path, bu
     try:
         backend = _ScriptedBackend([[ToolStartEvent("tool", "Write", {})]], stall=True)
         async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-            result = await run_agent(
-                backend,
-                tmp_path,
-                "inspect",
-                phase=DaydreamPhase.REVIEW,
-                wall_budget_s=0.02 if budget == "wall" else None,
-                tool_call_budget=0 if budget == "tools" else None,
+            result = await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW,
+                wall_budget_s=0.02 if budget == "wall" else None, tool_call_budget=0 if budget == "tools" else None,
             )
     finally:
         set_registry(previous_registry)
@@ -519,7 +437,6 @@ async def test_budget_and_supervision_close_tools_with_reason(tmp_path: Path, bu
     assert tool.status.status_code == StatusCode.ERROR
     assert tool.status.description == reason.split(":")[0]
     assert tool.events[-1].name == "exception"
-
 
 @pytest.mark.anyio
 async def test_concurrent_runs_and_fanout_are_isolated_from_ambient_span() -> None:
@@ -563,10 +480,8 @@ async def test_concurrent_runs_and_fanout_are_isolated_from_ambient_span() -> No
         assert len({(span.attributes or {})["daydream.run.id"] for span in spans}) == 1
     assert len(trace_ids) == 2 and 123 not in trace_ids
 
-
 @pytest.mark.anyio
-async def test_hydration_ignores_ambient_length_limit_and_serialization_is_fail_closed(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_hydration_ignores_ambient_length_limit_and_serialization_is_fail_closed(monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("OTEL_SPAN_ATTRIBUTE_VALUE_LENGTH_LIMIT", "2")
     exporter, registry = _memory_tracing()
@@ -584,7 +499,6 @@ async def test_hydration_ignores_ambient_length_limit_and_serialization_is_fail_
     assert text in str(attrs["gen_ai.output.messages"])
     assert json.loads(str(attrs["traceloop.entity.output"])) == "[UNSERIALIZABLE]"
 
-
 @pytest.mark.anyio
 async def test_failed_tool_exports_native_error_and_sanitized_message(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-secret")
@@ -592,8 +506,7 @@ async def test_failed_tool_exports_native_error_and_sanitized_message(monkeypatc
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         async with attempt_scope(1) as observer:
             observer.observe(ToolStartEvent("tool", "Read", {}, timestamp="2026-09-05T10:00:00Z"))
-            observer.observe(
-                ToolResultEvent(
+            observer.observe(ToolResultEvent(
                     "tool", "read failed opaque-secret", True, timestamp="2026-09-05T10:00:02Z", duration_ms=2000
                 )
             )
@@ -613,27 +526,15 @@ async def test_failed_tool_exports_native_error_and_sanitized_message(monkeypatc
 
 
 def _seed_ambient_openllmetry_context(
-    *,
-    workflow: str,
-    agent: str,
-    conversation: str,
-    entity_path: str,
-    association: dict[str, str],
-    managed_prompt: str,
+    *, workflow: str, agent: str, conversation: str, entity_path: str, association: dict[str, str], managed_prompt: str,
 ) -> list[Any]:
     """Seed ambient Traceloop decorator context exactly as its producers do."""
 
     api_key = "opaque-prompt-key"
     tokens: list[Any] = []
-    for key, value in (
-        ("workflow_name", workflow),
-        ("agent_name", agent),
-        ("conversation_id", conversation),
-        ("entity_path", entity_path),
-        ("association_properties", association),
-        ("managed_prompt", managed_prompt),
-        ("prompt_key", api_key),
-        ("prompt_version", "7"),
+    for key, value in (("workflow_name", workflow), ("agent_name", agent), ("conversation_id", conversation),
+        ("entity_path", entity_path), ("association_properties", association), ("managed_prompt", managed_prompt),
+        ("prompt_key", api_key), ("prompt_version", "7"),
     ):
         tokens.append(otel_context.attach(otel_context.set_value(key, value)))
     return tokens
@@ -646,11 +547,7 @@ def _reset_ambient_openllmetry_context(tokens: list[Any]) -> None:
 
 
 def _assert_no_ambient_enrichment(spans: Sequence[ReadableSpan], sentinel: str) -> None:
-    forbidden_exact = {
-        "gen_ai.agent.id",
-        "gen_ai.conversation.id",
-        "traceloop.prompt.managed",
-        "traceloop.prompt.key",
+    forbidden_exact = {"gen_ai.agent.id", "gen_ai.conversation.id", "traceloop.prompt.managed", "traceloop.prompt.key",
         "traceloop.prompt.version",
     }
     for span in spans:
@@ -666,14 +563,11 @@ def _assert_no_ambient_enrichment(spans: Sequence[ReadableSpan], sentinel: str) 
         association = attrs.get("traceloop.association.properties.ambient_key")
         assert association is None
 
-
 @pytest.mark.anyio
 async def test_ambient_openllmetry_context_never_reaches_owned_spans() -> None:
     sentinel = "ambient-workflow-secret-4481"
     tokens = _seed_ambient_openllmetry_context(
-        workflow=sentinel,
-        agent="ambient-agent-identity",
-        conversation="ambient-conversation-uuid",
+        workflow=sentinel, agent="ambient-agent-identity", conversation="ambient-conversation-uuid",
         entity_path="ambient.entity.path",
         association={"ambient_key": "ambient-value", "api_key": "ambient-api-key-secret"},
         managed_prompt="ambient-managed-prompt",
@@ -693,16 +587,12 @@ async def test_ambient_openllmetry_context_never_reaches_owned_spans() -> None:
     assert len(spans) == 4
     _assert_no_ambient_enrichment(spans, sentinel)
 
-
 @pytest.mark.anyio
 async def test_nested_disabled_run_shields_children_from_ambient_context() -> None:
     sentinel = "ambient-nested-secret-9931"
     tokens = _seed_ambient_openllmetry_context(
-        workflow=sentinel,
-        agent="nested-ambient-agent",
-        conversation="nested-ambient-conversation",
-        entity_path="nested.ambient.path",
-        association={"ambient_key": "nested-ambient-value"},
+        workflow=sentinel, agent="nested-ambient-agent", conversation="nested-ambient-conversation",
+        entity_path="nested.ambient.path", association={"ambient_key": "nested-ambient-value"},
         managed_prompt="nested-ambient-prompt",
     )
     outer = InMemorySpanExporter()
@@ -726,7 +616,6 @@ async def test_nested_disabled_run_shields_children_from_ambient_context() -> No
             assert "nested.ambient.path" not in str(attrs)
             assert sentinel not in str(attrs) + str(span.events)
 
-
 @pytest.mark.anyio
 async def test_ambient_context_restored_after_exception_and_cancellation() -> None:
 
@@ -743,15 +632,12 @@ async def test_ambient_context_restored_after_exception_and_cancellation() -> No
             async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
                 raise RuntimeError("boom")
         current = otel_trace.get_current_span()
-        # The exception path detached the run's span context: the ambient
-        # span after both failed runs is the INVALID span (span_id 0), not a
-        # leftover run scope masquerading as current.
+        # Failed runs must detach, restoring INVALID rather than leaving a stale run span.
         assert current.get_span_context().span_id == 0
         assert not current.is_recording()
         assert otel_context.get_value("workflow_name") == sentinel
     finally:
         otel_context.detach(ambient)
-
 
 @pytest.mark.anyio
 async def test_concurrent_runs_with_distinct_ambient_context_are_isolated() -> None:
@@ -767,8 +653,7 @@ async def test_concurrent_runs_with_distinct_ambient_context_are_isolated() -> N
     registry.register_trace_exporter("memory", factory)
 
     async def one_run(tag: str) -> None:
-        tokens = [
-            otel_context.attach(otel_context.set_value("workflow_name", f"ambient-{tag}")),
+        tokens = [otel_context.attach(otel_context.set_value("workflow_name", f"ambient-{tag}")),
             otel_context.attach(otel_context.set_value("entity_path", f"ambient.{tag}.path")),
             otel_context.attach(otel_context.set_value("association_properties", {"ambient_key": f"value-{tag}"})),
         ]
@@ -801,18 +686,12 @@ def _notebook_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr("traceloop.sdk.utils.is_notebook", lambda: True)
     monkeypatch.setattr("traceloop.sdk.tracing.tracing.is_notebook", lambda: True)
 
-
 @pytest.mark.anyio
-async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(
-    _notebook_environment: None,
-) -> None:
+async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(_notebook_environment: None,) -> None:
     sentinel = "notebook-ambient-secret-6612"
     tokens = _seed_ambient_openllmetry_context(
-        workflow=sentinel,
-        agent="notebook-ambient-agent",
-        conversation="notebook-ambient-conversation",
-        entity_path="notebook.ambient.path",
-        association={"ambient_key": "notebook-ambient-value"},
+        workflow=sentinel, agent="notebook-ambient-agent", conversation="notebook-ambient-conversation",
+        entity_path="notebook.ambient.path", association={"ambient_key": "notebook-ambient-value"},
         managed_prompt="notebook-ambient-prompt",
     )
     exporter, registry = _memory_tracing()
@@ -829,11 +708,7 @@ async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(
     spans = exporter.get_finished_spans()
     assert len(spans) == 4
     kinds = {(span.attributes or {})["daydream.span.kind"]: span for span in spans}
-    for kind, expected_parent in (
-        ("step", "run"),
-        ("agent", "step"),
-        ("attempt", "agent"),
-    ):
+    for kind, expected_parent in (("step", "run"), ("agent", "step"), ("attempt", "agent"),):
         parent = kinds[kind].parent
         assert parent is not None and parent.span_id == kinds[expected_parent].context.span_id
     run_attrs = kinds["run"].attributes or {}
@@ -845,20 +720,17 @@ async def test_notebook_mode_uses_same_owned_batch_path_and_metadata(
     agent_attrs = kinds["agent"].attributes or {}
     assert agent_attrs["traceloop.entity.path"] == "daydream.agent.review"
     assert agent_attrs["traceloop.span.kind"] == "agent"
-    # T4: the logical agent carries the standard public agent identity; the
-    # role is root because it is the outermost actual agent scope.
+    # The outermost logical agent owns standard identity and root role.
     assert agent_attrs["gen_ai.agent.name"] == "review"
     assert agent_attrs["daydream.agent.name"] == "review"
     assert agent_attrs["daydream.agent.role"] == "root"
     assert agent_attrs["gen_ai.operation.name"] == "invoke_agent"
-    tool_absent = all(
-        "traceloop.entity.path" not in (span.attributes or {})
+    tool_absent = all("traceloop.entity.path" not in (span.attributes or {})
         for span in spans
         if (span.attributes or {}).get("daydream.span.kind") in ("attempt",)
     )
     assert tool_absent
     _assert_no_ambient_enrichment(spans, sentinel)
-
 
 def test_notebook_detection_does_not_change_batching_or_privacy(_notebook_environment: None) -> None:
     policy = PrivacyPolicy(environ={"LANGSMITH_API_KEY": "opaque-value"})
@@ -879,14 +751,11 @@ def _pinned_semconv_revision() -> str:
     commit = manifest["source"]["commit"]
     return str(commit)[:7]
 
-
 @pytest.mark.anyio
-async def test_operator_resource_attributes_merge_with_authoritative_precedence(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_operator_resource_attributes_merge_with_authoritative_precedence(monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     sdk_version = version("opentelemetry-sdk")
-    monkeypatch.setenv(
-        "OTEL_RESOURCE_ATTRIBUTES",
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES",
         "deployment.environment.name=offline-audit,custom.zone=zone%2Done,"
         "empty.value=,zero.value=0,unicode.key=caf%C3%A9,"
         "service.name=false-operator,service.version=0.0.0-operator,"
@@ -915,11 +784,8 @@ async def test_operator_resource_attributes_merge_with_authoritative_precedence(
     assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
     assert "opaque-resource-secret" not in str(resource)
 
-
 @pytest.mark.anyio
-async def test_operator_service_instance_id_generated_once_when_absent(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_operator_service_instance_id_generated_once_when_absent(monkeypatch: pytest.MonkeyPatch,) -> None:
     monkeypatch.delenv("OTEL_RESOURCE_ATTRIBUTES", raising=False)
     registry = Registry()
     exporters = []
@@ -934,17 +800,9 @@ async def test_operator_service_instance_id_generated_once_when_absent(
     assert isinstance(first, str) and len(first) == 36 and first.count("-") == 4
     assert first != second
 
-
 @pytest.mark.anyio
-@pytest.mark.parametrize(
-    "raw",
-    [
-        "not-a-pair",
-        "key=%zz",
-        "=value",
-        "ke%Gy=value",
-        "dup.key=one,dup.key=two",
-        "dup.key=a%2Bone,dup.k%65y=two",
+@pytest.mark.parametrize("raw",
+    ["not-a-pair", "key=%zz", "=value", "ke%Gy=value", "dup.key=one,dup.key=two", "dup.key=a%2Bone,dup.k%65y=two",
         "bad\x01key=value",
         "key=bad\x02value",
         "key=val\nue",
@@ -966,11 +824,8 @@ async def test_invalid_operator_resource_rejects_entire_variable(
     for span in exporter.get_finished_spans():
         assert raw not in str(span.resource.attributes)
 
-
 @pytest.mark.anyio
-async def test_otel_service_name_overrides_service_name_resource(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_otel_service_name_overrides_service_name_resource(monkeypatch: pytest.MonkeyPatch,) -> None:
     monkeypatch.setenv("OTEL_SERVICE_NAME", "operator-service")
     monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES", "service.name=should-lose")
     exporter, registry = _memory_tracing()
@@ -983,9 +838,7 @@ async def test_otel_service_name_overrides_service_name_resource(
     assert resource["telemetry.sdk.name"] == "opentelemetry"
     assert resource["service.instance.id"]
 
-
-def test_repository_daydream_toml_cannot_set_resources_or_endpoints(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_repository_daydream_toml_cannot_set_resources_or_endpoints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 
     (tmp_path / ".daydream.toml").write_text(
@@ -1004,7 +857,6 @@ def test_repository_daydream_toml_cannot_set_resources_or_endpoints(
 
 # --- P18 Task 3: no global providers, ambient metrics/logs, or instrumentation -
 
-
 @pytest.mark.anyio
 async def test_owned_session_installs_no_global_signals_or_instrumentors() -> None:
 
@@ -1021,10 +873,8 @@ async def test_owned_session_installs_no_global_signals_or_instrumentors() -> No
         assert get_logger_provider() is logs_before
     assert trace.get_tracer_provider() is provider_before
     assert metrics.get_meter_provider() is meter_before
-    # The owned provider is never registered globally: the session's own
-    # provider object differs from the process-wide proxy.
+    # Owned providers must differ from the global proxy.
     assert exporter.get_finished_spans()
-
 
 def test_traceloop_default_helper_is_not_invoked() -> None:
 
@@ -1036,19 +886,14 @@ def test_traceloop_default_helper_is_not_invoked() -> None:
     assert "Traceloop.init" not in source
     assert "set_tracer_provider" not in source
     assert "Resource.create(" not in source
-    # NoOpMeterProvider is imported and passed to owned batch processors; the
-    # runtime never constructs an active MeterProvider of its own.
+    # Owned processors use NoOpMeterProvider; the runtime creates no active metrics provider.
     assert "get_meter_provider(" not in source
     assert "LoggerProvider(" not in source
 
-
 @pytest.mark.anyio
-async def test_resource_secret_values_never_reach_serialized_spans(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_resource_secret_values_never_reach_serialized_spans(monkeypatch: pytest.MonkeyPatch,) -> None:
 
-    monkeypatch.setenv(
-        "OTEL_RESOURCE_ATTRIBUTES",
+    monkeypatch.setenv("OTEL_RESOURCE_ATTRIBUTES",
         "api_key=opaque-resource-secret,custom.note=plain,deployment.environment.name=offline-audit",
     )
     monkeypatch.setenv("DAYDREAM_TEST_TOKEN", "opaque-resource-secret")
@@ -1067,7 +912,6 @@ async def test_resource_secret_values_never_reach_serialized_spans(
     assert resource["custom.note"] == "plain"
     assert resource["api_key"] == "[REDACTED_CREDENTIAL]"
 
-
 @pytest.mark.anyio
 async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> None:
 
@@ -1079,8 +923,7 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     spans = exporter.get_finished_spans()
     generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")
-    # Sealed native timing lands on the child; the historical end is the host
-    # message_end receipt, and the SDK end happens exactly once at that point.
+    # End once at the sealed historical message_end, preserving native child timing.
     attrs = generation.attributes or {}
     assert attrs["daydream.generation.native_started_at_unix_ms"] == 1788690314289
     assert attrs["daydream.generation.native_started_at_unix_ns"] == 1788690314289000000
@@ -1089,8 +932,7 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     assert generation.start_time == 1788690314289000000
     assert generation.end_time == 1788690709621000000
     assert generation.parent is not None and generation.parent.span_id == attempt_span.context.span_id
-    # No recorder => no resolved ledger => the child is explicitly non-billed,
-    # and its standard usage aliases stay absent (fail-closed, never guessed).
+    # Without a recorder’s frozen ledger, children remain unbilled with no usage aliases.
     assert attrs["daydream.generation.billed"] is False
     assert "gen_ai.usage.input_tokens" not in attrs
     assert "gen_ai.response.id" not in attrs
@@ -1099,16 +941,9 @@ async def test_generation_child_span_seals_and_ends_once_at_historical_end() -> 
     assert json.loads(output_messages)["parts"][0]["text"] == "hello"
     assert (attempt_span.attributes or {})["daydream.billing.owner"] == "unresolved"
 
-
 @pytest.mark.anyio
 async def test_generation_span_carries_session_identity_and_aliases() -> None:
-    """Matrix row ``daydream.run.id`` / association aliases: ``All spans``.
-
-    Sealed generation spans are SDK spans like any other kind, so the vendor
-    destinations can only route them into the run's session/tree when they
-    carry the same session identity keys every other span records (readback
-    gate evidence: generations were orphaned without them).
-    """
+    """Generation spans need the shared session identity to avoid orphaned vendor events."""
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
@@ -1124,23 +959,14 @@ async def test_generation_span_carries_session_identity_and_aliases() -> None:
     assert attrs["traceloop.association.properties.daydream_run_id"] == root_run_id
     assert attrs["traceloop.entity.name"] == generation.name
 
-
 @pytest.mark.anyio
 async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
-    """Scopes opened after ``associate_run_trajectory`` inherit the identity.
-
-    The run's trajectory session becomes known after the root opens. Children
-    opened afterwards must still carry the session identity even when no
-    trajectory recorder is active (the sanitized-replay tool has none): the
-    vendor destinations split the tree across sessions otherwise (readback
-    gate evidence: HH replay children fell back to a run-id session).
-    """
+    """New children inherit late-bound session identity even when no trajectory recorder is active."""
 
 
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        # Late-binding seam: mirrors the runner/replay tool association that
-        # happens after the root opened but before children do.
+        # Associate identity after the root opens, before children, as runner/replay does.
         runtime.associate_run_trajectory("late-session-identity")
         with step_scope("review", iteration=1, stack="python"):
             with agent_scope("review", backend="pi", model="requested"):
@@ -1159,36 +985,21 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
         assert attrs.get("daydream.trajectory.id") == "late-session-identity"
         assert attrs.get("daydream.run.id") is not None
 
-
 @pytest.mark.anyio
-async def test_generation_child_billed_only_when_ledger_owner_is_children(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_generation_child_billed_only_when_ledger_owner_is_children(monkeypatch: pytest.MonkeyPatch,) -> None:
 
     exporter, registry = _memory_tracing()
-    fabricated = {
-        "trajectory_id": "session:descriptor",
-        "invocation_id": "inv-1",
-        "phase": "review",
-        "generation_lifecycle": {
-            "drafts": [
-                {
-                    "generation_id": "gen-1",
-                    "billed": True,
-                    "sealed_end_unix_ns": 1788690709621000000,
+    fabricated = {"trajectory_id": "session:descriptor", "invocation_id": "inv-1", "phase": "review",
+        "generation_lifecycle": {"drafts": [{
+                    "generation_id": "gen-1", "billed": True, "sealed_end_unix_ns": 1788690709621000000,
                     "usage": {"input_tokens": 10, "output_tokens": 2},
                 }
-            ],
-            "billing_owner": "generation_children",
+            ], "billing_owner": "generation_children",
         },
     }
-    # Stand in for the T2 ledger having finalized inside the invocation
-    # manager: the observer reads the closed owner from the recorder's
-    # registered subtrajectory exactly once, at attempt finish.
+    # Simulate invocation finalization: the observer reads its frozen ledger at attempt finish.
     recorder = type(
-        "FakeRecorder",
-        (),
-        {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
+        "FakeRecorder", (), {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
     )()
 
     monkeypatch.setattr(spans_module, "get_current_recorder", lambda: recorder)
@@ -1207,20 +1018,17 @@ async def test_generation_child_billed_only_when_ledger_owner_is_children(
     assert (attempt_span.attributes or {})["daydream.billing.owner"] == "generation_children"
     assert generation.end_time == 1788690709621000000
 
-
 @pytest.mark.anyio
 async def test_actual_nested_agent_scope_is_subagent_siblings_are_not() -> None:
     exporter, registry = _memory_tracing()
     async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
-        # One real enclosing logical agent makes the inner scope a subagent;
-        # a sibling agent opened after it returns to root.
+        # Nesting makes a subagent; a subsequent sibling returns to root.
         with agent_scope("parent", backend="pi"):
             with agent_scope("child", backend="pi"):
                 pass
         with agent_scope("sibling", backend="pi"):
             pass
-    by_path = {
-        span.attributes["traceloop.entity.path"]: span.attributes
+    by_path = {span.attributes["traceloop.entity.path"]: span.attributes
         for span in exporter.get_finished_spans()
         if span.attributes and span.attributes.get("daydream.span.kind") == "agent"
     }

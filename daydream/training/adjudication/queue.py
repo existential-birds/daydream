@@ -1,9 +1,6 @@
-"""Per-finding adjudication queue generation (issue #984, Tasks 1 and 5).
+"""Build deterministic record_id-keyed queues using the projector's finding enumeration.
 
-Builds a deterministic, ``record_id``-keyed adjudication queue from segmented
-sessions by consuming the projector's ``return_adjudication=True`` second
-return value — the projector is the single enumeration authority for the
-non-decisive set, so the queue builder adds no second filtering pass.
+Its adjudication output owns the non-decisive set; do not add a second filter.
 """
 
 from collections.abc import Mapping, Sequence
@@ -25,16 +22,9 @@ __all__ = ["build_queue", "_NON_DECISIVE_DISPOSITIONS"]
 def _profile_label(
     resolution: Mapping[str, object], provenance: Mapping[str, Any]
 ) -> str | None:
-    """Resolve the string profile label queue/export consumers compare against.
+    """Read canonical profile_name or legacy flat/nested profile through extract_provenance.
 
-    Uses the same authority as the projector: ``extract_provenance`` derives
-    the profile from the canonical ``profile_*`` fields, and the label is the
-    canonical ``profile_name`` when present, else the legacy flat ``profile``
-    string a resolution may carry. A nested ``profile`` block (canonical
-    annotation records carry one — ``extract_provenance``'s shape) contributes
-    its ``profile_name`` too, so a resolution row stored after the #1095
-    canonical serialization resolves to the same label its provenance would.
-    Never ``str(None)``-coerced and never ``str(dict)``-coerced in the export.
+    Absent labels remain absent; never stringify None or a profile dictionary.
     """
     profile_name = provenance["profile"].get("profile_name")
     if profile_name is not None:
@@ -72,40 +62,18 @@ def build_queue(
     prior_observations: Mapping[str, Mapping[str, Any]] | None = None,
     include_decisive: bool = False,
 ) -> list[dict[str, object]]:
-    """Build the adjudication queue items for the given segmented sessions.
+    """Rebuild a record_id-sorted queue with evidence-drift reopening.
 
-    Each non-decisive (task-only) adjudication entry becomes one queue item
-    keyed by the recomputed ``record_id``. Decisive/gold resolutions never
-    enter the operator queue: only the projector's adjudication set is
-    consumed, and every entry's disposition is additionally asserted to be
-    non-decisive — a violation raises ``ValueError`` naming the fingerprint
-    (fail-closed).
+    Normally consume the projector's non-decisive adjudication entries, asserting
+    that disposition contract. Findings with prior observations also remain
+    available for human review, even when automatically decisive. include_decisive
+    adds the complete record set for drift checks using the same item shape,
+    status, and observation logic.
 
-    Pass ``include_decisive=True`` to widen the queue to the complete record
-    set: decisive entries are enumerated from ``project_findings``' first
-    return value (they never appear in the adjudication set) and become queue
-    items with the same ``_ITEM_KEYS``, ``status="open"``, and their decisive
-    disposition carried verbatim. This is for the complete-set drift gate, not
-    the operator labeling path; the default (False) preserves the CLI contract
-    byte-for-byte. Re-open/digest-drift logic applies to decisive items
-    identically — they flow through the same ``prior_observations`` block.
-
-    Findings with prior observations also enter the operator queue even when
-    automatically decisive, so imported conflicts, stale judgments, and legacy
-    review requirements remain accessible to human adjudication.
-
-    The queue is rebuilt deterministically, not immutable once built: when
-    ``prior_observations`` (``record_id`` -> stored observation) contains a
-    completed human judgment whose ``evidence_digest`` differs from the fresh
-    evidence digest, the item is marked ``status="reopened"`` with
-    ``prior_disposition`` carried as provenance — digest drift deterministically
-    reopens the item, putting it back in the open set for labeling. Items
-    without a prior human judgment keep ``status="open"``. A fresh evidence
-    entry missing ``evidence_digest`` raises ``ValueError`` naming the
-    fingerprint (never coerced to a digest that happens to match).
-
-    Ordering is by ``record_id`` (hex digest), so identical inputs produce
-    byte-identical queues regardless of session order.
+    A completed human judgment with an old evidence digest reopens with its prior
+    disposition retained. Other items start open. Missing fresh digests or invalid
+    dispositions raise ValueError naming the fingerprint. Identical inputs produce
+    identical queues regardless of session order.
     """
     items: list[dict[str, object]] = []
     for session in sessions:

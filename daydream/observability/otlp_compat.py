@@ -1,13 +1,7 @@
-"""Bounded OTLP transport compatibility boundary (P18 Task 4A).
+"""Bounded OTLP encoding, acknowledgments, HTTP transport and pinned gRPC bridge.
 
-Implements the Task-0-frozen composition contract: the pinned SDK encoder with
-an owned protobuf fidelity repair, an HTTPX/AnyIO whole-operation-deadline HTTP
-transport, a version-guarded gRPC delegate bridge, a shared acknowledgment
-decision contract, and per-destination delivery outcome ledgers.
-
-This is a bounded compatibility layer, not an SDK fork or global patch: no
-``os.environ`` mutation, no global encoder replacement, and no nested retry
-loops.
+Fidelity repair and retry/deadline handling are locally owned. Environment and
+SDK globals remain untouched; transports do not delegate nested retry loops.
 """
 
 from __future__ import annotations
@@ -131,12 +125,9 @@ class DeliveryLedger:
 
 
 def encode_batch(spans: Sequence[ReadableSpan]) -> ExportTraceServiceRequest:
-    """Encode once with the pinned SDK encoder, then repair proved losses.
+    """Encode with pinned OTel 1.44, validating span/link identity and position before repair.
 
-    Repairs only the verified protobuf fidelity gaps in OTel 1.44.0: the low
-    trace flags bits (sampled) on spans and links, and link trace state. Every
-    other field is left exactly as the pinned encoder wrote it. One-to-one
-    span/link identity and position are validated before any repair.
+    Restore lost trace flags and link trace state; preserve other encoded fields.
     """
     request = sdk_encode_spans(list(spans))
     wire_spans = [
@@ -172,11 +163,7 @@ def _repair_flags(wire_span: Any, trace_flags: Any, parent: Any) -> None:
 
 
 def _repair_link(wire_link: Any, source_link: Any) -> None:
-    flags = _FLAGS_HAS_IS_REMOTE
-    if source_link.context.is_remote:
-        flags |= _FLAGS_IS_REMOTE
-    flags |= int(source_link.context.trace_flags) & _FLAGS_TRACE_MASK
-    wire_link.flags = flags
+    _repair_flags(wire_link, source_link.context.trace_flags, source_link.context)
     state = source_link.context.trace_state
     if state is not None:
         wire_link.trace_state = ",".join(f"{key}={value}" for key, value in state.items())
@@ -189,19 +176,12 @@ def classify_http_ack(
     body: bytes | None,
     complete: bool,
 ) -> tuple[str, int]:
-    """Classify one HTTP acknowledgment. Returns (verdict, rejected).
+    """Return (verdict, rejected) for a complete, bounded HTTP 200 acknowledgment.
 
-    A complete zero-length 200 body is canonical full success for any (or no)
-    content type — vendors such as LangSmith ack with an empty body and no
-    Content-Type. Non-empty protobuf bodies must be a decodable protobuf ack.
-    A 200 + application/json body is accepted with warning when it parses as
-    a JSON object carrying a true boolean top-level "success" flag and no
-    "error"/"errors" key — the documented HoneyHive
-    {"success": true} shape; an explicitly falsy "success", JSON with an
-    error indication, non-object JSON, or an undecodable body stays terminal
-    malformed. The media-type comparison is case-insensitive per RFC 9110.
-    Positive rejection is a terminal partial result; zero rejection with a
-    warning is accepted with warning. Neither partial form is ever retried.
+    Empty bodies succeed regardless of content type. Nonempty bodies require a
+    protobuf response or JSON object with success=true and no error/errors key.
+    Media types are case-insensitive. Positive partial rejection is terminal failure;
+    zero-rejection partial success is accepted with a warning. Neither is retried.
     """
     if status != 200:
         return (_ACK_MALFORMED, 0)
@@ -220,8 +200,7 @@ def classify_http_ack(
             return (_ACK_MALFORMED, 0)
         if (
             isinstance(parsed, dict)
-            and isinstance(parsed.get("success"), bool)
-            and parsed["success"]  # vendor-documented flag; falsy success is a failure
+            and parsed.get("success") is True
             and "error" not in parsed
             and "errors" not in parsed
         ):
@@ -333,13 +312,10 @@ def resolve_ssl_context(
 
 
 class HttpxOtlpTransport:
-    """Owned HTTP transport with one whole-operation deadline per export.
+    """Own one portal/client and enforce a whole-operation deadline per export.
 
-    One persistent AnyIO BlockingPortal and one HTTPX AsyncClient are created
-    before batches and closed exactly once at shutdown. Each attempt encloses
-    send, the bounded decoded response read, and backoff inside one outer
-    ``fail_after(remaining)`` scope. A post-deadline ambiguous delivery is
-    recorded as unverified and never retried.
+    Sending, bounded response reads and backoff share the deadline. Ambiguous
+    post-send timeout is unverified and never retried; shutdown closes owners once.
     """
 
     def __init__(
@@ -413,18 +389,15 @@ class HttpxOtlpTransport:
     async def _attempt_loop(self, body: bytes, remaining: float) -> SpanExportResult:
         deadline = anyio.current_time() + remaining
         attempt = 0
-        last: SpanExportResult = SpanExportResult.FAILURE
         while True:
             now = anyio.current_time()
             left = deadline - now
             if left <= 0:
-                # Encode/budget exhaustion before (or between) sends: record
-                # the outcome like every other failure exit instead of
-                # dropping it silently from the delivery ledger.
+                # Account for exhaustion before the first send or between retries.
                 self._ledger.record_unverified(
                     "OTLP_RETRY_BUDGET_EXHAUSTED" if attempt else "OTLP_DEADLINE_EXCEEDED_BEFORE_SEND"
                 )
-                return last
+                return SpanExportResult.FAILURE
             try:
                 with anyio.fail_after(left):
                     verdict, rejected, retry_after = await self._attempt(body)
@@ -444,9 +417,7 @@ class HttpxOtlpTransport:
                 _logger.warning("Failed to export trace batch: %s", _VERDICT_DIAGNOSTIC[verdict])
                 self._ledger.record_unverified(_VERDICT_DIAGNOSTIC[verdict])
                 return verdict_result(verdict)
-            # Retryable malformed/status path: exponential backoff with jitter
-            # inside the same deadline, then reclassify as unverified on exit.
-            last = SpanExportResult.FAILURE
+            # Exponential backoff remains inside the original deadline.
             wait = self._backoff_s * (2**attempt)
             if retry_after is not None:
                 wait = max(wait, min(retry_after, max(0.0, deadline - anyio.current_time())))
@@ -503,11 +474,8 @@ class HttpxOtlpTransport:
             self._client = None
         try:
             if portal_cm is not None:
-                # Close the owned AsyncClient through the portal BEFORE the
-                # portal stops: the pool's keep-alive connections must be
-                # closed by the client itself, and once the portal's loop
-                # stops it can no longer run async cleanup. A close failure
-                # is logged and never blocks the exactly-once portal stop.
+                # Close the client before stopping its portal; cleanup failure
+                # must still permit the exactly-once portal stop.
                 if client is not None:
                     try:
                         self._portal.call(client.aclose)
@@ -572,12 +540,10 @@ def _grpc_retry_delay(exc: Any) -> float | None:
 
 
 class GrpcBridge:
-    """Fail-closed versioned bridge over the pinned OTel gRPC delegate.
+    """Own bounded retries over the pinned OTel 1.44 private unary Export surface.
 
-    Uses only the frozen private surface and never calls the delegate's
-    ``export()``/``_export()`` retry loop: each owned retry performs exactly one
-    unary ``Export(remaining)``. Version/surface drift is an initialization
-    failure, not a fallback.
+    Version/surface drift fails initialization. Each attempt uses remaining time;
+    the delegate's retry loop is never called.
     """
 
     def __init__(self, delegate: GrpcExporter, ledger: DeliveryLedger) -> None:
@@ -605,7 +571,7 @@ class GrpcBridge:
     def delegate(self) -> GrpcExporter:
         return self._delegate
 
-    def export(self, spans: Sequence[ReadableSpan], *, timeout_s: float) -> SpanExportResult:
+    def export_batch(self, spans: Sequence[ReadableSpan], *, timeout_s: float) -> SpanExportResult:
         """One owned export with a single-retry policy for RESOURCE_EXHAUSTED.
 
         Exactly one unary ``Export(remaining)`` per attempt, never the delegate's
@@ -654,6 +620,10 @@ class GrpcBridge:
                 return _partial_ack_result(self._ledger, rejected)
             self._ledger.record_unverified("OTLP_GRPC_MALFORMED_ACK")
             return SpanExportResult.FAILURE
+
+    def force_flush(self, timeout_millis: int = 30000) -> bool:
+        # Unary exports complete synchronously; no buffered work remains.
+        return True
 
     def shutdown(self) -> None:
         """Close the then-current channel exactly once via the delegate."""

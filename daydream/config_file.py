@@ -1,17 +1,7 @@
-"""Config-file loader for daydream.
+"""Load repository policy from pyproject's [tool.daydream] and .daydream.toml.
 
-Loads daydream settings from two on-disk sources, merged per-key:
-
-1. ``pyproject.toml`` under the ``[tool.daydream]`` table (low precedence).
-2. ``.daydream.toml`` at the repo root (root keys; high precedence).
-
-The dotfile's keys override pyproject's, merged **per-key** so a
-``[phases.fix]`` table in the dotfile does not wipe a ``[phases.review]``
-table declared in pyproject.
-
-Exports:
-    DaydreamFileConfig: frozen config snapshot with phase accessors.
-    load_file_config: read + merge both sources from a repo root.
+The dotfile wins per key. Phase tables merge individually; improve and diagram
+also merge per key, preserving lower-precedence siblings.
 """
 
 from __future__ import annotations
@@ -34,176 +24,35 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class DaydreamFileConfig:
-    """Immutable snapshot of file-sourced daydream configuration.
+    """Merged repository policy; None means the runtime default still applies.
 
-    Attributes:
-        model: Global default model, or None if unset.
-        backend: Global default backend name, or None if unset.
-        reasoning_effort: Global default reasoning-effort override, or None if
-            unset. Passed through to supported backends that accept it.
-        latency_profile: Issue #732. Latency profile selecting the wonder/arbiter
-            effort floor (``fast``, ``balanced``, or ``forensic``). ``None``
-            (absent key) means unset and lets the default (``balanced``) apply;
-            an unrecognised value is resolved fail-safe upward to ``forensic`` by
-            ``_resolved_latency_profile`` rather than rejected here.
-        phases: Per-phase sub-tables mapping phase name to a dict of keys
-            (e.g. ``{"fix": {"backend": "codex", "model": "..."}}``).
-        shallow_fanout_threshold: Max changed-file count that triggers the
-            tiny-diff short-circuit in deep mode (issue #172). ``None`` falls
-            through to the RunConfig field / orchestrator default. ``0``
-            explicitly disables the short-circuit.
-        precision_mode: Opt-in precision suppression (issue #232). ``None`` falls
-            through to the RunConfig field / orchestrator default; ``True`` runs
-            the skeptical suppression pass over borderline findings.
-        approve_on_clean: Opt-in approval of clean deep reviews (issue #343).
-            ``None`` falls through to the RunConfig field / orchestrator default;
-            ``True`` posts ``event: "APPROVE"`` when a deep review has zero
-            high/medium findings. Explicit opt-in: never coerced from a non-bool.
-        scope_issue_filing: Opt-in for out-of-scope issue filing (issue #1056).
-            ``None`` falls through to the RunConfig field / orchestrator default;
-            ``True`` re-enables filing GitHub issues for findings and edits
-            outside the reviewed diff. Never coerced from a non-bool.
-        review_profile: Repo-committed review-profile path (R9). A lenient path
-            read only — the strict profile parse + validation stays in
-            ``review_profile.py``. ``None`` (absent or non-str) means the key is
-            unset and the default profile applies.
-        group_max_wall_s: Per-file-group fix wall-clock ceiling in seconds
-            (issue #201), a global ``[tool.daydream]`` key. Bounds the cumulative
-            wall-clock of all fix ``run_agent`` turns targeting one file group so
-            a runaway file cannot dominate a run. Must be finite and
-            non-negative; ``0`` is valid and means "skip this group's fixes"
-            (the between-calls ``check()`` short-circuits before any fix turn).
-            ``None`` (the default when the key is absent or junk -- negative,
-            NaN, inf, bool, or non-number) falls through to
-            ``config.DEFAULT_GROUP_MAX_WALL_S`` (600.0).
-        group_max_serial_items: Per-file-group serial fix-call ceiling (#201), a
-            global ``[tool.daydream]`` key. Caps the number of per-finding fix
-            calls in one file group (the group is severity-sorted, so the dropped
-            tail is lowest-severity). ``None`` (the default when the key is absent
-            or junk) falls through to ``config.DEFAULT_GROUP_MAX_SERIAL_ITEMS`` (6).
-        retry_recovery_allowance_s: Issue #734. Cumulative retry-overhead
-            allowance for one invocation, in seconds, a global ``[tool.daydream]``
-            key. Bounds the whole retry ladder: once the first retryable failure
-            activates it, every backoff sleep and retry attempt is charged
-            against it. Must be finite and non-negative; ``0`` is valid and means
-            "no retry recovery". ``None`` (the default when the key is absent or
-            junk -- negative, NaN, inf, bool, or non-number) falls through to
-            ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S`` (300.0); an invalid
-            declared value is warned about so the degradation is observable.
-        quality_gate_enabled: Issue #315. Toggle the fix-phase anti-degradation
-            quality gate. ``None`` falls through to the orchestrator default
-            (``config.DEFAULT_QUALITY_GATE_ENABLED``, ``True``); ``False`` skips
-            the whole computation and writes ``{"enabled": false}``.
-        quality_gate_erosion_delta: Issue #315. Per-file erosion-delta threshold
-            above which a fixed file is flagged. Finite non-negative only: a
-            negative, NaN, or infinite value degrades to ``None`` (the named
-            default applies) so a bad threshold can neither flag every unchanged
-            file (a negative floor is exceeded by any delta) nor silently
-            disable the metric (every comparison against NaN is False).
-            ``None`` falls through to
-            ``config.DEFAULT_QUALITY_GATE_EROSION_DELTA`` (0.05).
-        quality_gate_verbosity_delta: Issue #315. Per-file verbosity-delta
-            threshold above which a fixed file is flagged. Finite non-negative
-            only, same degrade-to-``None`` rule as ``quality_gate_erosion_delta``.
-            ``None`` falls through to
-            ``config.DEFAULT_QUALITY_GATE_VERBOSITY_DELTA`` (0.05).
-        quality_gate_erosion_absolute: Issue #315. Absolute post-fix erosion
-            threshold for the undefined-baseline fallback -- the BEFORE erosion
-            metric is ``None`` (no functions pre-fix), so no delta exists and
-            the AFTER value is compared against this knob instead of the delta
-            one (#329 / CodeRabbit Finding D). Finite non-negative only, same
-            degrade-to-``None`` rule as ``quality_gate_erosion_delta``. ``None``
-            falls through to
-            ``config.DEFAULT_QUALITY_GATE_EROSION_ABSOLUTE`` (0.05).
-        quality_gate_verbosity_absolute: Issue #315. Absolute post-fix verbosity
-            threshold for the undefined-baseline fallback, the verbosity twin of
-            ``quality_gate_erosion_absolute``. Finite non-negative only, same
-            degrade-to-``None`` rule. ``None`` falls through to
-            ``config.DEFAULT_QUALITY_GATE_VERBOSITY_ABSOLUTE`` (0.05).
-        supervisor: Findings supervisor mode (``"off"``, ``"rules"``, or
-            ``"llm"``), or None when unset/invalid.
-        supervisor_deny_globs: Repository-relative deny globs shared by findings
-            and tool supervision.
-        tool_supervisor: Built-in tool supervisor mode (``"off"`` or ``"rules"``),
-            or None when unset/invalid.
-        tool_bash_deny: Regular expressions for denied Bash commands.
-        improve_service_roots: Repository-relative glob patterns identifying
-            service roots for the improve flow.
-        improve_service_groups: Named groups of repository-relative service roots.
-        improve_github_publish_issues: Whether Improve should publish each validated
-            local plan as a GitHub issue. This is an explicit repository-level
-            opt-in under ``[tool.daydream.improve.github]``; absent or malformed
-            values leave publishing disabled.
-        diagram_mode: Issue #1113. Grounded-diagram mode from
-            ``[tool.daydream.diagram] mode`` — ``"auto"`` or ``"off"`` only. A
-            repo file may enable or suppress diagrams but never force a kind on
-            every run (that is a per-invocation decision, so ``sequence`` /
-            ``flowchart`` / ``both`` are CLI-only). ``None`` when unset or
-            invalid; the orchestrator then applies ``"auto"``.
-        diagram_min_code_files: Issue #1113. Override for the sequence
-            cross-module rule's changed-code-file floor. ``None`` falls through
-            to ``config.DEFAULT_DIAGRAM_MIN_CODE_FILES`` (3).
-        diagram_min_modules: Issue #1113. Override for the sequence cross-module
-            rule's distinct-module floor. ``None`` falls through to
-            ``config.DEFAULT_DIAGRAM_MIN_MODULES`` (2).
-        diagram_min_branch_points: Issue #1113. Override for the flowchart
-            rule's changed-branch-point floor. ``None`` falls through to
-            ``config.DEFAULT_DIAGRAM_MIN_BRANCH_POINTS`` (3).
-        diagram_service_roots: Issue #1113. Repository-relative glob patterns
-            identifying service roots for diagram participant grouping. Empty
-            falls back to ``improve_service_roots``, then to layout inference,
-            so a repo that already declared its services need not repeat them.
-        test_command: Issue #726. Canonical shell test command run host-side
-            (real subprocess, exit-status pass/fail). ``None`` falls through:
-            CLI ``--test-command`` wins over this key; when both are unset the
-            host-side run is skipped and the deprecated agent-run fallback
-            applies (warned; issue #726).
-        test_command_wall_s: Issue #726. Wall-clock ceiling in seconds for one
-            host-side test-command run (the whole process group is killed on
-            expiry). A value overrides the orchestrator default
-            (``config.TEST_WALL_BUDGET_S``); ``None`` falls through to it.
-        test_required_suites: Issue #1408. Additive declaration of the suite ids
-            the single configured ``test_command`` is the authoritative gate
-            for. Parsed with ``_coerce_string_list`` from the same merged
-            root/``[tool.daydream]`` table as ``test_command``; empty declares
-            nothing beyond the command itself. Declaration only: there is no
-            second runner, and a targeted ``-k``/selector check can never
-            satisfy the required contract.
-        review_cache_enabled: Issue #733. Toggle the deep review's
-            content-addressed reuse store (MH13). ``None`` falls through to the
-            RunConfig field and then the built-in default
-            (``config.DEFAULT_REVIEW_CACHE_ENABLED``, ``True``); CLI
-            ``--no-review-cache`` sets ``False`` for one forensic run. An
-            explicit ``False`` at either tier wins, and a disabled run neither
-            reads nor writes a cache entry (it still records its own
-            ``disabled`` reuse provenance).
-        review_cache_max_entries: Issue #733. Retention bound: the maximum
-            number of entries retained, oldest-last-used evicted first (MH12).
-            Coerced non-negative; an absent, negative, or non-integer value
-            degrades to ``config.DEFAULT_REVIEW_CACHE_MAX_ENTRIES`` (1024). The
-            enable flag never affects the bounds.
-        review_cache_max_bytes: Issue #733. Retention bound: total store bytes,
-            same coercion and degrade-to-default rule as
-            ``review_cache_max_entries`` (``config.DEFAULT_REVIEW_CACHE_MAX_BYTES``,
-            1 GiB).
-        review_cache_max_age_days: Issue #733. Retention bound: days since an
-            entry's last use, converted to seconds by the store, same coercion
-            and degrade-to-default rule
-            (``config.DEFAULT_REVIEW_CACHE_MAX_AGE_DAYS``, 30). An entry past
-            the bound is a plain miss, never a truncated hit.
-        verify_all: Issue #735. Conservative toggle for selection-gated
-            recommendation verification. A real ``True`` restores today's
-            "verify every non-exempt finding" behaviour exactly; ``None`` leaves
-            the choice to ``RunConfig.verify_all`` and the built-in default
-            (``config.DEFAULT_VERIFY_ALL``). Real bool only, coerced through
-            ``_coerce_optional_bool``: ``verify_all = 1`` degrades to unset,
-            never enabled.
-        extra_risk_categories: Issue #735. Additive risk categories for the
-            verify-selection predicate. Coerced through ``_coerce_string_list``,
-            so a non-list (or a list carrying a non-string) degrades to empty,
-            never to a guess. Entries are validated fail-loud against the
-            mandatory vocabulary before the verify pass; a recognised entry can
-            only widen selection.
+    CLI globals outrank file phase overrides, which outrank file globals.
+    ``phases`` also accepts extension phase keys. Operator destinations and
+    credentials (tracing, Hub uploads) never come from repository settings.
+
+    Scalar policy is lenient: malformed values degrade to unset. Boolean
+    switches require actual booleans, never truthy numbers. Counts reject
+    booleans; budgets and quality thresholds also reject NaN and infinity.
+    Non-negative bounds preserve zero: a zero group budget intentionally skips
+    fixes. Test-command timeouts and diagram/improve bounds must be positive.
+    Invalid declared retry allowances warn before using the default.
+
+    ``latency_profile`` is deliberately parsed without validating its vocabulary:
+    the runtime resolver promotes unknown names to forensic. ``review_profile``
+    is only a path here; review_profile.py owns strict profile validation.
+    ``extra_risk_categories`` likewise gets fail-loud vocabulary validation at
+    verification, and can only widen mandatory selection.
+
+    Improve service roots/groups and partition bounds come from ``[improve]``;
+    issue publication requires explicit ``[improve.github] publish_issues=true``.
+    ``[diagram] mode`` allows auto/off; forcing a diagram kind is CLI-only.
+    Empty diagram service roots inherit Improve roots, then layout inference.
+
+    ``test_required_suites`` declares which suites the single configured command
+    covers; it never creates a second runner or substitutes a targeted check.
+    An explicit false review-cache switch wins at either CLI or file tier, while
+    cache retention bounds remain independent of the enable switch.
+    Field defaults and the full configuration reference live in config.py and README.
     """
 
     model: str | None = None
@@ -267,14 +116,10 @@ class DaydreamFileConfig:
 
 
 def load_toml_or_empty(path: Path) -> dict[str, Any]:
-    """Parse a TOML file into a dict, returning {} when absent or malformed.
+    """Read optional TOML without failing callers such as pricing and workspace-copy config.
 
-    Never raises: callers that must not break on a bad user file (e.g. price
-    overrides, workspace copy config) use this instead of the error-raising
-    :func:`_load_toml`.
-
-    Raises:
-        Never. Malformed TOML is logged as a warning and yields ``{}``.
+    Absent files return {}; malformed or unreadable files warn and return {}.
+    Use _load_toml when malformed configuration must raise.
     """
     try:
         return _load_toml(path)
@@ -287,12 +132,7 @@ def load_toml_or_empty(path: Path) -> dict[str, Any]:
 
 
 def _load_toml(path: Path) -> dict[str, Any]:
-    """Parse a TOML file into a dict, returning ``{}`` when the file is absent.
-
-    Raises:
-        ValueError: If the file exists but is malformed; the message names
-            the offending file.
-    """
+    """Read TOML or return {} when absent; malformed files raise ValueError naming the path."""
     if not path.is_file():
         return {}
     try:
@@ -303,15 +143,7 @@ def _load_toml(path: Path) -> dict[str, Any]:
 
 
 def _merge_section(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
-    """Merge two daydream config sections, override winning per-key.
-
-    Scalar keys (``model``, ``backend``) from ``override`` replace ``base``.
-    The ``phases`` sub-table is merged per-phase so an override phase table
-    does not discard phases declared only in ``base``. The ``improve`` and
-    ``diagram`` sub-tables are likewise merged per-key, so a dotfile that sets
-    only ``[diagram] mode`` does not discard thresholds declared in
-    ``pyproject.toml``.
-    """
+    """Merge scalar keys and improve/diagram tables, then merge phases individually."""
     merged: dict[str, Any] = dict(base)
     for key, value in override.items():
         if key == "phases" and isinstance(value, dict) and isinstance(merged.get("phases"), dict):
@@ -354,43 +186,25 @@ def _coerce_int(raw: Any) -> int | None:
 
 
 def _coerce_non_negative_int(raw: Any) -> int | None:
-    """Return ``raw`` as a non-negative int, or None otherwise (degrade to default).
-
-    Unlike :func:`_coerce_int`, a negative value degrades to ``None`` so the
-    named default applies (issue #309): a negative sweep capacity cap or hunk
-    floor is never a meaningful count. Explicit ``0`` is preserved — ``0`` max
-    files means "sweep nothing" and ``0`` min hunk lines means "no hunk-size
-    floor".
-    """
+    """Preserve integer zero; reject negative values, booleans, and non-integers."""
     if isinstance(raw, bool):
         return None
     return raw if isinstance(raw, int) and raw >= 0 else None
 
 
 def _coerce_optional_bool(raw: Any) -> bool | None:
-    """Return ``raw`` only when it is a real bool, else None (degrade to unset).
-
-    An accidental ``precision_mode = 1`` is treated as unset, never enabled.
-    """
+    """Accept only actual booleans: precision_mode=1 must remain unset."""
     return raw if isinstance(raw, bool) else None
 
 
 def _coerce_positive_int(table: dict[str, Any], key: str) -> int | None:
-    """Return a positive int bound from ``key``, accepting its hyphenated spelling.
-
-    Non-int and non-positive values degrade to None (the built-in default then
-    applies), matching the loader's lenient coercion style.
-    """
+    """Read a positive integer, with hyphenated spelling as fallback."""
     value = _coerce_int(table.get(key, table.get(key.replace("_", "-"))))
     return value if value is not None and value > 0 else None
 
 
 def _coerce_float(raw: Any) -> float | None:
-    """Return ``raw`` as a float, or None for bool/non-number (degrade to default).
-
-    Accepts TOML ints and floats (an int budget like ``test_command_wall_s = 600``
-    round-trips to ``600.0``); rejects bool and everything else.
-    """
+    """Accept integer/float budgets, rejecting booleans and non-numbers."""
     if isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
@@ -399,16 +213,7 @@ def _coerce_float(raw: Any) -> float | None:
 
 
 def _coerce_non_negative_float(raw: Any) -> float | None:
-    """Return ``raw`` as a finite non-negative float, else None (degrade to default).
-
-    A file-group wall ceiling may legitimately be ``0`` -- the intentional
-    "skip this group's fixes" escape hatch that ``FileGroupBudget.check()``
-    honours as a pre-call short-circuit. Negative, NaN, and inf values are not
-    meaningful ceilings (a negative or NaN wall makes every elapsed-time
-    comparison trip immediately or never; inf disables the bound), so they
-    degrade to ``None`` and let the ``config.py`` default apply. Everything
-    invalid -- negative, NaN, inf, bool, or non-number -- degrades to ``None``.
-    """
+    """Accept finite non-negative budgets, including zero to deliberately skip fixes."""
     value = _coerce_float(raw)
     if value is None or not math.isfinite(value) or value < 0:
         return None
@@ -416,16 +221,7 @@ def _coerce_non_negative_float(raw: Any) -> float | None:
 
 
 def _coerce_retry_recovery_allowance(merged: dict[str, Any]) -> float | None:
-    """Coerce ``retry_recovery_allowance_s``, warning when a declared value is invalid.
-
-    Delegates the decode rule to :func:`decode_retry_recovery_allowance`, so this
-    source accepts exactly what the argument, backend-attribute and env sources
-    accept. An absent key stays silent and degrades to ``None`` (the ``config.py``
-    default then applies). A present-but-invalid value -- negative, NaN, inf,
-    bool, or non-number -- also degrades to ``None`` but is logged with the rule's
-    shared wording, naming the key, the raw value, and the default that applies,
-    so an operator's typo is observable rather than a silent no-op.
-    """
+    """Use the shared retry decoder; invalid declared values warn, absent keys stay silent."""
     raw = merged.get("retry_recovery_allowance_s")
     value = None if raw is None else decode_retry_recovery_allowance(raw)
     if raw is not None and value is None:
@@ -438,15 +234,7 @@ def _coerce_retry_recovery_allowance(merged: dict[str, Any]) -> float | None:
 
 
 def _coerce_positive_float(raw: Any) -> float | None:
-    """Return ``raw`` as a finite positive float, else None (degrade to default).
-
-    Wall-clock budgets must be finite and positive (issue #726): a negative or
-    zero value makes ``asyncio.wait_for`` fire ``TimeoutError`` immediately,
-    instantly group-killing the suite and misreporting it as timed out, and
-    NaN/inf disable the ceiling. Anything invalid -- negative, zero, NaN, inf,
-    bool, or non-number -- degrades to ``None`` so the ``config.py`` default
-    applies.
-    """
+    """Reject non-finite or non-positive timeouts: they disable or immediately expire the deadline."""
     value = _coerce_float(raw)
     if value is None or not math.isfinite(value) or value <= 0:
         return None
@@ -473,27 +261,16 @@ def _coerce_choice(raw: Any, choices: set[str]) -> str | None:
 
 
 def _coerce_review_profile_path(raw: Any) -> Path | None:
-    """Leniently read a repo-committed review-profile path (R9).
-
-    A path string only — the strict profile parse stays in review_profile.py.
-    Malformed/non-string values degrade to None (unset).
-    """
+    """Read a nonblank profile path; strict profile validation belongs to review_profile.py."""
     if not isinstance(raw, str) or not raw.strip():
         return None
     return Path(raw)
 
 
 def load_file_config(root: Path) -> DaydreamFileConfig:
-    """Load and merge daydream file configuration from a repo root.
+    """Merge repository policy, returning empty defaults when neither file exists.
 
-    Reads ``root/pyproject.toml`` ``[tool.daydream]`` (low precedence) and
-    ``root/.daydream.toml`` (high precedence), merging the two per-key. The
-    dotfile wins on conflicting scalar keys; phase sub-tables merge so each
-    source contributes its own phases. Absent files yield an empty config.
-
-    Raises:
-        ValueError: If a present config file is malformed TOML; the message
-            names the offending file.
+    Malformed TOML raises ValueError naming the offending file.
     """
     pyproject = _load_toml(root / "pyproject.toml")
     tool_section = pyproject.get("tool", {})
@@ -504,10 +281,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
 
     merged = _merge_section(base, dotfile)
 
-    # The legacy `bench` table was removed with the Martian benchmark stack
-    # (issue-785). A stale `[tool.daydream.bench]` section is now ignored; warn
-    # so the upgrade path is not silent, mirroring cli.py's loud rejection of the
-    # removed legacy `bench` verb.
+    # Warn on removed policy rather than silently accepting a stale configuration.
     if "bench" in merged:
         logger.warning(
             "daydream: [tool.daydream.bench] is no longer a supported daydream "
@@ -518,15 +292,7 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     backend = merged.get("backend")
     reasoning_effort = merged.get("reasoning_effort")
     threshold = _coerce_int(merged.get("shallow_fanout_threshold"))
-    # Optional bool flags (precision_mode, approve_on_clean, scope_issue_filing,
-    # deep_shard_enabled, review_cache_enabled, verify_all, quality_gate_enabled)
-    # accept a real bool only; any other value degrades to None rather than
-    # crashing the loader, so an accidental ``verify_all = 1`` is treated as
-    # unset, not enabled. The shard and reuse-cache bounds beside them are
-    # non-negative ints; the quality-gate delta and absolute thresholds are
-    # finite non-negative floats.
-    # Grounded diagrams (#1113): the sub-table degrades to empty on junk, so
-    # every key falls through to its config.py default rather than raising.
+    # Non-table sections behave as absent, preserving defaults.
     diagram = merged.get("diagram")
     diagram = diagram if isinstance(diagram, dict) else {}
     improve = merged.get("improve")
@@ -541,13 +307,6 @@ def load_file_config(root: Path) -> DaydreamFileConfig:
     improve_github_publish_issues = (
         raw_improve_publish if isinstance(raw_improve_publish, bool) else False
     )
-    # Per-file-group fix budgets (#201): tolerate junk by degrading to None (the
-    # config.py default then applies). bool is excluded even though it subclasses
-    # int/float — ``group_max_serial_items = true`` is never a meaningful count.
-    # The serial ceiling goes through _coerce_non_negative_int like the wall
-    # ceiling goes through _coerce_non_negative_float: a negative value would
-    # trip ``group_serial_item_limit`` on the first check and silently disable
-    # every group's fixes, so it degrades to DEFAULT_GROUP_MAX_SERIAL_ITEMS.
     return DaydreamFileConfig(
         model=str(model) if model is not None else None,
         backend=str(backend) if backend is not None else None,

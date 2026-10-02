@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import base64
 import json
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 import grpc
@@ -15,8 +14,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
     ExportTraceServiceResponse,
 )
 from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace import ReadableSpan, SpanLimits, TracerProvider
-from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter, SpanExportResult
+from opentelemetry.sdk.trace import ReadableSpan, SpanLimits
+from opentelemetry.sdk.trace.export import SpanExporter, SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 
 from daydream.observability.config import ObservabilityConfig, ObservabilityError
@@ -28,42 +27,26 @@ from daydream.observability.exporters import (
     otlp_exporter,
 )
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
-from tests.harness.otlp import attributes, otlp_collector
+from tests.harness.otlp import attributes, exporting_provider, grpc_trace_server, otlp_collector
 
 
 def _emit(exporter: SpanExporter) -> None:
-    provider = TracerProvider(resource=Resource({"service.name": "daydream-test"}), shutdown_on_exit=False)
-    provider.add_span_processor(SimpleSpanProcessor(exporter))
-    try:
-        with provider.get_tracer("daydream-test").start_as_current_span(
-            "attempt",
-            attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "structural_attempt",
-                "gen_ai.usage.input_tokens": 100,
-                "gen_ai.usage.output_tokens": 10,
-                "gen_ai.usage.total_tokens": 110,
-                "gen_ai.usage.cache_read.input_tokens": 40,
-                "gen_ai.usage.cache_creation.input_tokens": 20,
-                "gen_ai.usage.reasoning.output_tokens": 5,
-                "gen_ai.usage.cost": 0.123,
+    with exporting_provider(exporter, resource=Resource({"service.name": "daydream-test"})) as provider:
+        with provider.get_tracer("daydream-test").start_as_current_span("attempt",
+            attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
+                "gen_ai.usage.input_tokens": 100, "gen_ai.usage.output_tokens": 10, "gen_ai.usage.total_tokens": 110,
+                "gen_ai.usage.cache_read.input_tokens": 40, "gen_ai.usage.cache_creation.input_tokens": 20,
+                "gen_ai.usage.reasoning.output_tokens": 5, "gen_ai.usage.cost": 0.123,
                 "gen_ai.input.messages": '[{"role":"user","parts":[{"type":"text","content":"hello"}]}]',
             },
         ):
             pass
-    finally:
-        provider.shutdown()
 
 
 def _emit_spans() -> list[ReadableSpan]:
     """One attributable attempt span for direct exporter.export() calls."""
-    return [
-        ReadableSpan(
-            "attempt",
-            resource=Resource({"service.name": "daydream-test"}),
-            attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "structural_attempt",
+    return [ReadableSpan("attempt", resource=Resource({"service.name": "daydream-test"}),
+            attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
                 "gen_ai.usage.input_tokens": 100,
             },
             context=trace_api.SpanContext(
@@ -71,7 +54,6 @@ def _emit_spans() -> list[ReadableSpan]:
             ),
         )
     ]
-
 
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive", "otlp"])
 def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,10 +84,7 @@ def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.M
             assert headers["x-tenant-id"] == "workspace-id"
             assert span["langsmith.span.kind"] == "chain"
             assert json.loads(span["langsmith.usage_metadata"]) == {
-                "input_tokens": 100,
-                "output_tokens": 10,
-                "total_tokens": 110,
-                "total_cost": 0.123,
+                "input_tokens": 100, "output_tokens": 10, "total_tokens": 110, "total_cost": 0.123,
                 "input_token_details": {"cache_read": 40, "cache_creation": 20},
                 "output_token_details": {"reasoning": 5},
             }
@@ -121,23 +100,16 @@ def test_destinations_emit_portable_otlp(destination: str, monkeypatch: pytest.M
         if destination != "otlp":
             assert "x-custom" not in headers
 
-
 def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage() -> None:
     sink = InMemorySpanExporter()
     exporter = LangSmithExporter(sink)
-    spans = [
-        ReadableSpan(
+    spans = [ReadableSpan(
             "scope", resource=Resource({}), attributes={"daydream.span.kind": kind, "gen_ai.usage.input_tokens": 0}
         )
         for kind in ("run", "phase", "agent", "tool")
     ]
-    spans.append(
-        ReadableSpan(
-            "attempt",
-            resource=Resource({}),
-            attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "structural_attempt",
+    spans.append(ReadableSpan("attempt", resource=Resource({}),
+            attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
                 "gen_ai.usage.input_tokens": 0,
             },
         )
@@ -145,11 +117,7 @@ def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage(
     assert exporter.export(spans) == SpanExportResult.SUCCESS
     result = sink.get_finished_spans()
     assert [span.attributes["langsmith.span.kind"] for span in result if span.attributes] == [
-        "chain",
-        "chain",
-        "chain",
-        "tool",
-        "chain",
+        "chain", "chain", "chain", "tool", "chain",
     ]
     for original, mapped in zip(spans, result, strict=True):
         assert original.attributes is not None and mapped.attributes is not None
@@ -160,7 +128,6 @@ def test_langsmith_mapping_preserves_original_spans_and_only_attempts_own_usage(
         )
     assert exporter.force_flush()
     exporter.shutdown()
-
 
 @pytest.mark.parametrize("known_usage", [False, True])
 @pytest.mark.parametrize("has_session", [False, True])
@@ -174,44 +141,27 @@ def test_honeyhive_mapping_preserves_spans_and_limits_native_usage_to_attempts(
         monkeypatch.setenv("HH_API_URL", receiver.base_url)
         monkeypatch.setenv("HH_API_KEY", "opaque-key")
         exporter = honeyhive_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        provider.add_span_processor(SimpleSpanProcessor(originals))
-        try:
+        with exporting_provider(exporter, originals) as provider:
             for kind in ("run", "step", "agent", "tool"):
                 span_attributes: dict[str, Any] = {
-                    "daydream.span.kind": kind,
-                    "daydream.run.id": run_id,
-                    "daydream.flow": "review",
+                    "daydream.span.kind": kind, "daydream.run.id": run_id, "daydream.flow": "review",
                 }
                 if has_session:
                     span_attributes["traceloop.association.properties.session_id"] = session_id
                 if known_usage:
                     span_attributes.update({
-                        "gen_ai.usage.input_tokens": 0,
-                        "gen_ai.usage.output_tokens": 0,
-                        "gen_ai.usage.cost": 0.0,
-                        "gen_ai.usage.cache_read.input_tokens": 0,
-                        "gen_ai.usage.cache_creation.input_tokens": 0,
+                        "gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "gen_ai.usage.cost": 0.0,
+                        "gen_ai.usage.cache_read.input_tokens": 0, "gen_ai.usage.cache_creation.input_tokens": 0,
                         "gen_ai.usage.reasoning.output_tokens": 0,
                     })
                 with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=span_attributes):
                     pass
-            with provider.get_tracer("daydream-test").start_as_current_span(
-                "attempt",
-                attributes={
-                    "daydream.span.kind": "attempt",
-                    "daydream.billing.owner": "structural_attempt",
-                    "daydream.run.id": run_id,
-                    "daydream.flow": "review",
+            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
+                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
+                    "daydream.run.id": run_id, "daydream.flow": "review",
                     **({"traceloop.association.properties.session_id": session_id} if has_session else {}),
-                    **(
-                        {
-                            "gen_ai.usage.input_tokens": 0,
-                            "gen_ai.usage.output_tokens": 0,
-                            "gen_ai.usage.cost": 0.0,
-                            "gen_ai.usage.cache_read.input_tokens": 0,
-                            "gen_ai.usage.cache_creation.input_tokens": 0,
+                    **({"gen_ai.usage.input_tokens": 0, "gen_ai.usage.output_tokens": 0, "gen_ai.usage.cost": 0.0,
+                            "gen_ai.usage.cache_read.input_tokens": 0, "gen_ai.usage.cache_creation.input_tokens": 0,
                             "gen_ai.usage.reasoning.output_tokens": 0,
                         }
                         if known_usage
@@ -222,8 +172,6 @@ def test_honeyhive_mapping_preserves_spans_and_limits_native_usage_to_attempts(
                 pass
             assert provider.force_flush()
             recorded = originals.get_finished_spans()
-        finally:
-            provider.shutdown()
     assert len(receiver.spans) == len(recorded) == 5
     assert [attributes(span)["honeyhive_event_type"] for span in receiver.spans] == [
         "chain", "chain", "chain", "tool", "chain"
@@ -238,40 +186,28 @@ def test_honeyhive_mapping_preserves_spans_and_limits_native_usage_to_attempts(
         assert native["honeyhive.session_auto_create"] is True
         assert native["honeyhive.session_name"] == "daydream.review"
         expected = known_usage and original.attributes["daydream.span.kind"] == "attempt"
-        for key in (
-            "prompt_tokens", "completion_tokens", "cost", "cache_read_input_tokens",
+        for key in ("prompt_tokens", "completion_tokens", "cost", "cache_read_input_tokens",
             "cache_write_input_tokens", "reasoning_tokens",
         ):
             assert (f"honeyhive_metadata.{key}" in native) == expected
             if expected:
                 assert native[f"honeyhive_metadata.{key}"] == 0
 
-
-@pytest.mark.parametrize(
-    "factory,env",
-    [
-        (langsmith_exporter, {}),
-        (honeyhive_exporter, {}),
-        (honeyhive_exporter, {"HH_API_KEY": "opaque-secret"}),
-        (
-            langsmith_exporter,
+@pytest.mark.parametrize("factory,env",
+    [(langsmith_exporter, {}), (honeyhive_exporter, {}), (honeyhive_exporter, {"HH_API_KEY": "opaque-secret"}),
+        (langsmith_exporter,
             {"LANGSMITH_API_KEY": "opaque-secret", "LANGSMITH_ENDPOINT": "https://user:opaque-secret@host"},
-        ),
-        (
-            langsmith_exporter,
+        ), (langsmith_exporter,
             {"LANGSMITH_API_KEY": "opaque-secret", "LANGSMITH_ENDPOINT": "https://host?opaque-secret"},
         ),
         (langsmith_exporter, {"LANGSMITH_API_KEY": "opaque-secret\nforged: header"}),
         (otlp_exporter, {"OTEL_EXPORTER_OTLP_PROTOCOL": "unsupported-opaque-secret"}),
-        (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "nan"}),
-        (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "0"}),
+        (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "nan"}), (otlp_exporter, {"OTEL_EXPORTER_OTLP_TIMEOUT": "0"}),
         (otlp_exporter, {"OTEL_EXPORTER_OTLP_ENDPOINT": "https://user:opaque-secret@host"}),
     ],
 )
 def test_setup_errors_are_actionable_and_do_not_echo_credentials(
-    factory: Any,
-    env: dict[str, str],
-    monkeypatch: pytest.MonkeyPatch,
+    factory: Any, env: dict[str, str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -279,7 +215,6 @@ def test_setup_errors_are_actionable_and_do_not_echo_credentials(
         factory(ObservabilityConfig())
     assert "opaque-secret" not in str(exc.value)
     assert str(exc.value)
-
 
 def test_generic_trace_specific_environment_takes_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
@@ -294,56 +229,33 @@ def test_generic_trace_specific_environment_takes_precedence(monkeypatch: pytest
         assert receiver.requests[0]["headers"]["x-selected"] == "active"
         assert "x-generic" not in receiver.requests[0]["headers"]
 
-
 def test_generic_grpc_exporter_uses_standard_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     received: list[ExportTraceServiceRequest] = []
     headers: list[tuple[str, str | bytes]] = []
 
-    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> bytes:
+    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
         received.append(request)
         headers.extend((item[0], item[1]) for item in context.invocation_metadata())
-        return ExportTraceServiceResponse().SerializeToString()
+        return ExportTraceServiceResponse()
 
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        server = grpc.server(pool)
-        server.add_generic_rpc_handlers(
-            (
-                grpc.method_handlers_generic_handler(
-                    "opentelemetry.proto.collector.trace.v1.TraceService",
-                    {
-                        "Export": grpc.unary_unary_rpc_method_handler(
-                            receive,
-                            request_deserializer=ExportTraceServiceRequest.FromString,
-                        ),
-                    },
-                ),
-            )
+    with grpc_trace_server(receive) as port:
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
+        monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-custom=grpc-credential")
+        exporter = otlp_exporter(ObservabilityConfig())
+        assert isinstance(exporter, GrpcCompatExporter)
+        _emit(exporter)
+        assert len(received) == 1
+        span = received[0].resource_spans[0].scope_spans[0].spans[0]
+        assert span.name == "attempt"
+        assert any(
+            attr.key == "gen_ai.usage.input_tokens" and attr.value.int_value == 100 for attr in span.attributes
         )
-        port = server.add_insecure_port("127.0.0.1:0")
-        server.start()
-        try:
-            monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", "grpc")
-            monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", f"http://127.0.0.1:{port}")
-            monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_HEADERS", "x-custom=grpc-credential")
-            exporter = otlp_exporter(ObservabilityConfig())
-            assert isinstance(exporter, GrpcCompatExporter)
-            _emit(exporter)
-            assert len(received) == 1
-            span = received[0].resource_spans[0].scope_spans[0].spans[0]
-            assert span.name == "attempt"
-            assert any(
-                attr.key == "gen_ai.usage.input_tokens" and attr.value.int_value == 100 for attr in span.attributes
-            )
-            assert ("x-custom", "grpc-credential") in headers
-        finally:
-            server.stop(grace=0).wait(timeout=2)
-
+        assert ("x-custom", "grpc-credential") in headers
 
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
 def test_presets_do_not_forward_redirected_payloads_or_credentials(
-    destination: str,
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    destination: str, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     with otlp_collector() as second:
         with otlp_collector(status=302, response_headers={"Location": second.base_url + "/stolen"}) as first:
@@ -360,15 +272,11 @@ def test_presets_do_not_forward_redirected_payloads_or_credentials(
             assert second.requests == []
             assert "redirected" in caplog.text
 
-
 @pytest.mark.parametrize("destination", ["langsmith", "honeyhive"])
-def test_presets_ignore_ambient_auth_and_generic_transport_settings(
-    destination: str,
-    monkeypatch: pytest.MonkeyPatch,
+def test_presets_ignore_ambient_auth_and_generic_transport_settings(destination: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def forbidden_netrc(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("preset must never consult ambient netrc authentication")
-
     monkeypatch.setattr("requests.sessions.get_netrc_auth", forbidden_netrc)
     monkeypatch.setenv("_OTEL_PYTHON_EXPORTER_OTLP_HTTP_TRACES_CREDENTIAL_PROVIDER", "nonexistent-provider")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_CERTIFICATE", "/does-not-exist.pem")
@@ -393,20 +301,16 @@ def test_presets_ignore_ambient_auth_and_generic_transport_settings(
             assert headers["authorization"] == "Bearer real-key"
         assert "content-encoding" not in headers
 
-
 def test_malformed_otlp_headers_never_log_credential_fragments(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_HEADERS", "x-valid=normal,opaque-broken-credential")
     with pytest.raises(ObservabilityError):
         otlp_exporter(ObservabilityConfig())
     assert "opaque-broken-credential" not in caplog.text
 
-
 def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-http-response-secret")
     with otlp_collector(status=400, reason="opaque-http-response-secret") as receiver:
@@ -418,13 +322,8 @@ def test_sdk_http_reason_is_sanitized_within_runtime_diagnostic_boundary(
         assert "opaque-http-response-secret" not in caplog.text
         assert "Failed to export" in caplog.text
 
-
-@pytest.mark.parametrize(
-    "kind,expected_hh,expected_ls",
-    [
-        ("agent", "chain", "chain"),
-        ("attempt", "chain", "chain"),
-        ("generation", "model", "llm"),
+@pytest.mark.parametrize("kind,expected_hh,expected_ls",
+    [("agent", "chain", "chain"), ("attempt", "chain", "chain"), ("generation", "model", "llm"),
         ("tool", "tool", "tool"),
     ],
 )
@@ -438,21 +337,18 @@ def test_vendor_chain_model_tool_classification(
         monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
         for exporter in (honeyhive_exporter(ObservabilityConfig()), langsmith_exporter(ObservabilityConfig())):
             sink = InMemorySpanExporter()
-            provider = TracerProvider(shutdown_on_exit=False)
-            provider.add_span_processor(SimpleSpanProcessor(exporter))
-            provider.add_span_processor(SimpleSpanProcessor(sink))
-            group: list[dict[str, Any]] = [
-                {"daydream.span.kind": kind, "daydream.run.id": "run-1", "daydream.flow": "review"},
-                {"daydream.span.kind": "tool", "daydream.run.id": "run-1", "daydream.flow": "review"},
-            ]
-            if kind == "attempt":
-                group[0]["daydream.billing.owner"] = "structural_attempt"
-            elif kind == "generation":
-                group[0]["daydream.generation.billed"] = True
-            for attributes0 in group:
-                with provider.get_tracer("daydream-test").start_as_current_span("span", attributes=attributes0):
-                    pass
-            provider.shutdown()
+            with exporting_provider(exporter, sink) as provider:
+                group: list[dict[str, Any]] = [
+                    {"daydream.span.kind": kind, "daydream.run.id": "run-1", "daydream.flow": "review"},
+                    {"daydream.span.kind": "tool", "daydream.run.id": "run-1", "daydream.flow": "review"},
+                ]
+                if kind == "attempt":
+                    group[0]["daydream.billing.owner"] = "structural_attempt"
+                elif kind == "generation":
+                    group[0]["daydream.generation.billed"] = True
+                for attributes0 in group:
+                    with provider.get_tracer("daydream-test").start_as_current_span("span", attributes=attributes0):
+                        pass
         hh_spans = [attributes(span) for span in honeyhive.spans if span["name"] == "span"]
         ls_spans = [attributes(span) for span in langsmith.spans if span["name"] == "span"]
         assert hh_spans[0]["honeyhive_event_type"] == expected_hh
@@ -460,39 +356,25 @@ def test_vendor_chain_model_tool_classification(
         assert hh_spans[1]["honeyhive_event_type"] == "tool"
         assert ls_spans[1]["langsmith.span.kind"] == "tool"
 
-
-def test_generation_billed_owner_carries_native_usage_only_on_resolved_owner(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_generation_billed_owner_carries_native_usage_only_on_resolved_owner(monkeypatch: pytest.MonkeyPatch,) -> None:
     with otlp_collector() as honeyhive, otlp_collector() as langsmith:
         monkeypatch.setenv("HH_API_URL", honeyhive.base_url)
         monkeypatch.setenv("HH_API_KEY", "opaque-key")
         monkeypatch.setenv("LANGSMITH_ENDPOINT", langsmith.base_url)
         monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
-        shared = TracerProvider(shutdown_on_exit=False)
-        for exporter in (honeyhive_exporter(ObservabilityConfig()), langsmith_exporter(ObservabilityConfig())):
-            shared.add_span_processor(SimpleSpanProcessor(exporter))
-        with shared.get_tracer("daydream-test").start_as_current_span(
-            "attempt",
-            attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "generation_children",
-                "gen_ai.usage.input_tokens": 100,
-            },
-        ) as attempt:
-            with shared.get_tracer("daydream-test").start_as_current_span(
-                "generation",
-                attributes={
-                    "daydream.span.kind": "generation",
-                    "daydream.generation.billed": True,
-                    "gen_ai.usage.input_tokens": 60,
-                    "gen_ai.usage.output_tokens": 10,
-                    "gen_ai.usage.cost": 0.05,
+        with exporting_provider(honeyhive_exporter(ObservabilityConfig()),
+                                langsmith_exporter(ObservabilityConfig())) as shared:
+            with shared.get_tracer("daydream-test").start_as_current_span("attempt",
+                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "generation_children",
+                    "gen_ai.usage.input_tokens": 100,
                 },
-                context=trace_api.set_span_in_context(attempt),
-            ):
-                pass
-        shared.shutdown()
+            ) as attempt:
+                with shared.get_tracer("daydream-test").start_as_current_span("generation",
+                    attributes={"daydream.span.kind": "generation", "daydream.generation.billed": True,
+                        "gen_ai.usage.input_tokens": 60, "gen_ai.usage.output_tokens": 10, "gen_ai.usage.cost": 0.05,
+                    }, context=trace_api.set_span_in_context(attempt),
+                ):
+                    pass
     hh = [attributes(span) for span in honeyhive.spans]
     ls = [attributes(span) for span in langsmith.spans]
     by_kind: dict[str, list[dict[str, Any]]] = {}
@@ -514,31 +396,18 @@ def test_generation_billed_owner_carries_native_usage_only_on_resolved_owner(
     assert "langsmith.usage_metadata" not in ls_by_kind["attempt"][0]
     assert ls_by_kind["generation"][0]["langsmith.span.kind"] == "llm"
     assert json.loads(ls_by_kind["generation"][0]["langsmith.usage_metadata"]) == {
-        "input_tokens": 60,
-        "output_tokens": 10,
-        "total_cost": 0.05,
+        "input_tokens": 60, "output_tokens": 10, "total_cost": 0.05,
     }
-
 
 def test_owner_none_and_unbilled_generation_get_no_native_usage() -> None:
     sink = InMemorySpanExporter()
     exporter = LangSmithExporter(sink)
-    spans = [
-        ReadableSpan(
-            "attempt",
-            resource=Resource({}),
+    spans = [ReadableSpan("attempt", resource=Resource({}),
             attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "none",
-                "gen_ai.usage.input_tokens": 100,
+                "daydream.span.kind": "attempt", "daydream.billing.owner": "none", "gen_ai.usage.input_tokens": 100,
             },
-        ),
-        ReadableSpan(
-            "generation",
-            resource=Resource({}),
-            attributes={
-                "daydream.span.kind": "generation",
-                "daydream.generation.billed": False,
+        ), ReadableSpan("generation", resource=Resource({}),
+            attributes={"daydream.span.kind": "generation", "daydream.generation.billed": False,
                 "gen_ai.usage.input_tokens": 60,
             },
         ),
@@ -553,49 +422,37 @@ def test_owner_none_and_unbilled_generation_get_no_native_usage() -> None:
     assert result[1].attributes is not None
     assert result[1].attributes["langsmith.span.kind"] == "llm"
 
-
-def test_honeyhive_agent_name_uses_standard_attribute_no_underscore_fields(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_honeyhive_agent_name_uses_standard_attribute_no_underscore_fields(monkeypatch: pytest.MonkeyPatch,) -> None:
     with otlp_collector() as receiver:
         monkeypatch.setenv("HH_API_URL", receiver.base_url)
         monkeypatch.setenv("HH_API_KEY", "opaque-key")
         exporter = honeyhive_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        with provider.get_tracer("daydream-test").start_as_current_span(
-            "agent",
-            attributes={
-                "daydream.span.kind": "agent",
-                "gen_ai.agent.name": "review",
-                "daydream.agent.name": "review",
-                "daydream.run.id": "run-1",
-                "daydream.flow": "review",
-            },
-        ):
-            pass
-        provider.shutdown()
+        with exporting_provider(exporter) as provider:
+            with provider.get_tracer("daydream-test").start_as_current_span("agent",
+                attributes={"daydream.span.kind": "agent", "gen_ai.agent.name": "review",
+                    "daydream.agent.name": "review",
+                    "daydream.run.id": "run-1", "daydream.flow": "review",
+                },
+            ):
+                pass
     native = attributes(receiver.spans[0])
     # The standard public attribute is preserved without any guessed
     # underscore-prefixed derived field (issue #1156 / AC-25).
     assert native["gen_ai.agent.name"] == "review"
     assert not any(key.startswith(("_", "honeyhive_metadata.agent_")) for key in native)
 
-
 def test_langsmith_ls_agent_type_only_on_actual_agent_scopes(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         monkeypatch.setenv("LANGSMITH_ENDPOINT", receiver.base_url)
         monkeypatch.setenv("LANGSMITH_API_KEY", "opaque-key")
         exporter = langsmith_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        for kind, role in (("agent", "root"), ("agent", "subagent"), ("attempt", "root"), ("step", None)):
-            attrs: dict[str, Any] = {"daydream.span.kind": kind, "daydream.run.id": "run-1"}
-            if role is not None:
-                attrs["daydream.agent.role"] = role
-            with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=attrs):
-                pass
-        provider.shutdown()
+        with exporting_provider(exporter) as provider:
+            for kind, role in (("agent", "root"), ("agent", "subagent"), ("attempt", "root"), ("step", None)):
+                attrs: dict[str, Any] = {"daydream.span.kind": kind, "daydream.run.id": "run-1"}
+                if role is not None:
+                    attrs["daydream.agent.role"] = role
+                with provider.get_tracer("daydream-test").start_as_current_span(kind, attributes=attrs):
+                    pass
     by_kind: dict[str, list[dict[str, Any]]] = {}
     for span in receiver.spans:
         span_attrs = attributes(span)
@@ -607,24 +464,20 @@ def test_langsmith_ls_agent_type_only_on_actual_agent_scopes(monkeypatch: pytest
     for native in by_kind["step"]:
         assert "langsmith.metadata.ls_agent_type" not in native
 
-
 def test_destination_copies_preserve_dropped_attribute_counts(monkeypatch: pytest.MonkeyPatch) -> None:
     with otlp_collector() as receiver:
         monkeypatch.setenv("HH_API_URL", receiver.base_url)
         monkeypatch.setenv("HH_API_KEY", "opaque-key")
         exporter = honeyhive_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False, span_limits=SpanLimits(max_attributes=4))
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        with provider.get_tracer("daydream-test").start_as_current_span(
-            "attempt", attributes={"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6"}
-        ):
-            pass
-        provider.shutdown()
+        with exporting_provider(exporter, span_limits=SpanLimits(max_attributes=4)) as provider:
+            with provider.get_tracer("daydream-test").start_as_current_span(
+                "attempt", attributes={"a": "1", "b": "2", "c": "3", "d": "4", "e": "5", "f": "6"}
+            ):
+                pass
     native = receiver.spans[0]
     # The HoneyHive clone keeps the exact original dropped-attribute count
     # (2 attributes dropped at the source) while adding vendor metadata.
     assert native["droppedAttributesCount"] == 2
-
 
 def test_honeyhive_session_derives_only_from_daydream_identity(monkeypatch: pytest.MonkeyPatch) -> None:
     """Session ID/name/autocreate never come from a native conversation id."""
@@ -632,20 +485,14 @@ def test_honeyhive_session_derives_only_from_daydream_identity(monkeypatch: pyte
         monkeypatch.setenv("HH_API_URL", receiver.base_url)
         monkeypatch.setenv("HH_API_KEY", "opaque-key")
         exporter = honeyhive_exporter(ObservabilityConfig())
-        provider = TracerProvider(shutdown_on_exit=False)
-        provider.add_span_processor(SimpleSpanProcessor(exporter))
-        with provider.get_tracer("daydream-test").start_as_current_span(
-            "attempt",
-            attributes={
-                "daydream.span.kind": "attempt",
-                "daydream.billing.owner": "structural_attempt",
-                "daydream.run.id": "run-abc",
-                "daydream.flow": "review",
-                "gen_ai.conversation.id": "native-conversation-7",
-            },
-        ):
-            pass
-        provider.shutdown()
+        with exporting_provider(exporter) as provider:
+            with provider.get_tracer("daydream-test").start_as_current_span("attempt",
+                attributes={"daydream.span.kind": "attempt", "daydream.billing.owner": "structural_attempt",
+                    "daydream.run.id": "run-abc", "daydream.flow": "review",
+                    "gen_ai.conversation.id": "native-conversation-7",
+                },
+            ):
+                pass
     native = attributes(receiver.spans[0])
     assert native["honeyhive.session_id"] == "run-abc"
     assert native["honeyhive.session_name"] == "daydream.review"

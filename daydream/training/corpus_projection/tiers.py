@@ -1,9 +1,5 @@
-"""Tier + eligibility classification for projection records.
-
-The gold gate is human-evidence-only and structural (C5): no intrinsic
-reward or LLM self-score input exists in this module's signature, so a
-score can never promote a record to gold. The module deliberately
-imports nothing from ``daydream.training.reward``.
+"""Classify projection tiers solely from record type, disposition, and human/developer evidence.
+Intrinsic rewards and LLM self-scores cannot promote records to gold.
 """
 
 from typing import Literal, Mapping
@@ -18,24 +14,17 @@ __all__ = ["GoldGateError", "classify_tier", "_NON_DECISIVE_DISPOSITIONS"]
 Tier = Literal["gold", "silver", "task-only"]
 
 class GoldGateError(ValueError):
-    """Raised when a decisive disposition lacks human/developer evidence.
+    """A decisive disposition without human/developer evidence is an error, never a silent demotion.
 
-    Fail-closed: a record that claims ``accepted``/``rejected`` but carries
-    no evidence is never silently demoted to silver — it is an error.
     """
 
 
 def classify_tier(resolution: Mapping[str, object], *, record_type: str = "outcome-finding") -> Tier:
-    """Classify a per-finding resolution into a disjoint tier.
+    """Process traces are always silver, regardless of disposition. Nondecisive findings are task-only
+    and go to adjudication.
 
-    - ``record_type == "process-trace"`` is always ``silver``: ATIF process
-      data is a separate class from outcome decisions, whatever its
-      disposition says.
-    - ``outcome-finding`` records are ``gold`` only when the disposition is
-      decisive (``accepted``/``rejected``) *and* the evidence list is
-      non-empty. Decisive-but-evidenceless raises :class:`GoldGateError`.
-    - Non-decisive dispositions are ``task-only`` (the projector routes
-      them to adjudication).
+    Decisive findings require a nonempty evidence list or raise GoldGateError. Evidence after as_of
+    is retained as silver; eligible decisive findings are gold.
     """
     if not isinstance(resolution, Mapping):
         raise TypeError(f"resolution must be a mapping, got {type(resolution).__name__}")
@@ -60,9 +49,6 @@ def classify_tier(resolution: Mapping[str, object], *, record_type: str = "outco
                 f"{resolution.get('fingerprint')!r} has empty evidence; "
                 "gold requires human/developer reply evidence"
             )
-        # C5/M9 temporal gate: evidence observed after the record's as_of
-        # pin cannot establish gold eligibility — keep the evidence but
-        # classify silver, never gold.
         if resolution.get("evidence_after_as_of") is True:
             return "silver"
         return "gold"

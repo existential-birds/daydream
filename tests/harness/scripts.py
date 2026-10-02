@@ -1,15 +1,7 @@
-"""Canonical-script synthesis with structured-output support.
+"""Canonical Codex scripts with structured-output or recorded-byte replay.
 
-Extends the single-script synthesis in ``tests/contract/_loaders.py`` to
-thread a script-level ``structured_output`` dict onto the final turn so the
-real backend parser extracts the PARSE phase's schema-constrained return.
-
-The structured-output path emits the final ``agent_message`` text as
-``json.dumps(structured_output)`` for Codex (the real parser ``json.loads`` the
-last agent text) and sets ``ResultMessage.structured_output`` for Claude. No
-``structured_output`` key => behaviour identical to today's single-script
-synthesis.
-"""
+Synthesized structured output replaces final agent-message text so the real
+backend parser can extract it. Recorded raw_lines bypass all synthesis."""
 
 from __future__ import annotations
 
@@ -40,13 +32,8 @@ def cli_main(argv: list[str]) -> int:
 
 
 def _with_structured_output(script: dict[str, Any]) -> dict[str, Any]:
-    """Return a script whose final turn carries ``json.dumps(structured_output)``.
-
-    The real Codex parser extracts structured output by loading the last
-    ``agent_message`` text. To satisfy it we
-    overwrite the final turn's ``text`` with the serialized structured payload.
-    Scripts without a ``structured_output`` key are returned unchanged.
-    """
+    """Copy turns and replace final text with serialized structured output.
+    Scripts without that payload retain their original identity."""
     structured = script.get("structured_output")
     if structured is None:
         return script
@@ -60,54 +47,26 @@ def _with_structured_output(script: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_codex_jsonl_for_phase(script: dict[str, Any]) -> list[str]:
-    """Synthesize Codex JSONL lines for one phase's script.
+    """Synthesize canonical turns or replay recorded raw_lines verbatim.
 
-    Reuses ``tests/contract/_loaders.py:_build_codex_jsonl``. When
-    ``script["structured_output"]`` is set, the final ``agent_message``
-    ``item.completed`` text is ``json.dumps(structured_output)`` so the real
-    backend parser extracts it on ``ResultEvent.structured_output``.
-
-    A script carrying ``raw_lines`` is a RECORDED-REAL passthrough: the lines
-    are replayed verbatim (no synthesis, no structured-output rewrite) so the
-    genuine parser sees the captured real-CLI bytes. ``raw_lines`` and the
-    synthesized keys (``turns``/``structured_output``) are mutually exclusive.
-    """
+    Raw replay cannot also request turns or structured_output synthesis."""
     raw_lines = script.get("raw_lines")
     if raw_lines is not None:
         if "turns" in script or "structured_output" in script:
-            raise AssertionError(
-                "a raw_lines passthrough script must not also carry synthesized "
+            raise AssertionError("a raw_lines passthrough script must not also carry synthesized "
                 "'turns' or 'structured_output'"
             )
         return list(raw_lines)
     return _build_codex_jsonl(_with_structured_output(script))
 
 
-async def drive_codex(
-    lines: list[str], output_schema: dict[str, Any] | None = None
-) -> list[AgentEvent]:
-    """Drive a real ``CodexBackend`` over *lines*, collecting emitted events.
-
-    Thin helper: ``make_mock_process`` +
-    a patch of the Codex subprocess boundary + a real ``CodexBackend``. No
-    swallowing — events flow straight from the genuine parser, so a missing or
-    malformed structured output surfaces as a failed assertion in the caller.
-
-    Args:
-        lines: JSONL lines to replay through the mocked subprocess stdout.
-        output_schema: Optional schema passed to ``execute`` so the backend
-            attempts structured-output extraction.
-
-    Returns:
-        The list of ``AgentEvent`` instances the backend emitted.
-    """
+async def drive_codex(lines: list[str], output_schema: dict[str, Any] | None = None) -> list[AgentEvent]:
+    """Collect real CodexBackend events over mocked process stdout, forwarding
+    the extraction schema and propagating parser failures."""
     mock_proc = make_mock_process(lines)
     backend = CodexBackend(model="codex-test-model")
     events: list[AgentEvent] = []
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec",
-        return_value=mock_proc,
-    ):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=mock_proc,):
         async for event in backend.execute(Path("/tmp"), "go", output_schema=output_schema):
             events.append(event)
     return events

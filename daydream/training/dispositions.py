@@ -1,11 +1,5 @@
-"""Single source of truth for adjudication disposition classification (issue #1078).
-
-Shared by the adjudication queue builder, the materialization step, and the
-projection tier classifier so the decisive/non-decisive split is defined once.
-
-Lives at ``daydream.training`` (not under ``adjudication``) so the projection
-tier classifier can consume it without triggering the adjudication package's
-eager import chain.
+"""Shared decisive/nondecisive classification for queues, materialization, and projection tiers. Keep
+this at training package level so projection avoids adjudication's eager import chain.
 """
 
 from typing import Final

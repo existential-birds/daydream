@@ -1,11 +1,6 @@
-"""The runs column set is declared once in ``_schema.RUNS_COLUMNS``.
+"""Fresh schema, migrations, and upserts share RUNS_COLUMNS.
 
-Every schema path — the ``CREATE TABLE`` text, the ``ALTER TABLE ADD COLUMN``
-entries ``_migrate_schema`` applies, and the run-upsert statement — is generated
-from that one declaration, so a column can no longer exist for fresh databases
-and be missing for every existing corpus. The witnesses below are frozen
-historical facts about the schema at the time of the refactor (issue #1219); a
-deliberate edit is required to change them, which is the point.
+Independent frozen column/type witnesses make compatibility changes explicit.
 """
 
 from __future__ import annotations
@@ -23,79 +18,33 @@ from daydream.archive._schema import RUNS_COLUMNS, RunColumn
 from daydream.archive.index import _get_connection, _run_upsert_values
 from tests.harness.trajectory import make_manifest
 
-# Frozen witness: the whole generated CREATE TABLE text at the refactor commit.
-FROZEN_DDL_SHA256 = "eac468a7be8b7830b245925e55e3be2d03abceeb3f443d9332404e0ff36e68c8"
+# Current fresh-database shape after removing reviewer-read metrics.
+CURRENT_DDL_SHA256 = "92d502a2e38d7147c30f0ca5c1d8ab89da92cc8f9c734fe84a9c3ebb6d4db41a"
 
 # Frozen witness: the columns of the original v1 runs table (every column that
 # is already present in any legacy database by construction, so it must never
 # be declared additive).
-V1_BASELINE_NAMES = frozenset(
-    {
-        "archive_path",
-        "archived_at",
-        "backend",
-        "base_branch",
-        "branch",
-        "cost_per_finding_usd",
-        "coverage_ratio",
-        "deep",
-        "grounding_rate",
-        "head_sha",
-        "labeled_at",
-        "model",
-        "outcome_labels",
-        "pr_number",
-        "pr_repo",
-        "remote_url",
-        "repo_slug",
-        "review_only",
-        "run_flow",
-        "schema_version",
-        "session_id",
-        "skill",
-        "status",
-        "total_cached_tokens",
-        "total_completion_tokens",
-        "total_cost_usd",
-        "total_findings",
-        "total_prompt_tokens",
+V1_BASELINE_NAMES = frozenset({
+        "archive_path", "archived_at", "backend", "base_branch", "branch", "cost_per_finding_usd", "coverage_ratio",
+        "deep", "grounding_rate", "head_sha", "labeled_at", "model", "outcome_labels", "pr_number", "pr_repo",
+        "remote_url", "repo_slug", "review_only", "run_flow", "schema_version", "session_id", "skill", "status",
+        "total_cached_tokens", "total_completion_tokens", "total_cost_usd", "total_findings", "total_prompt_tokens",
         "wall_clock_seconds",
     }
 )
 
 # Frozen witness: the (name, column type) pairs the migration applied before the
 # refactor — the equivalence bar for the generated entries.
-FROZEN_MIGRATION_ENTRIES = frozenset(
-    {
-        ("review_backend", "TEXT"),
-        ("fix_backend", "TEXT"),
-        ("test_backend", "TEXT"),
-        ("per_stack_review_backend", "TEXT"),
-        ("per_stack_review_model", "TEXT"),
-        ("rubric_json", "TEXT"),
-        ("base_sha", "TEXT"),
-        ("changed_files", "TEXT"),
-        ("composite_reward", "REAL"),
-        ("source_path", "TEXT"),
-        ("has_posterior", "INTEGER NOT NULL DEFAULT 0"),
-        ("erosion", "REAL"),
-        ("verbosity", "REAL"),
-        ("location_in_hunk_rate", "REAL"),
-        ("shipped_duplicate_pairs", "INTEGER"),
-        ("fix_quality_gate", "TEXT"),
-        ("recommended_patch_capture", "TEXT"),
-        ("archive_status", "TEXT NOT NULL DEFAULT 'complete'"),
-        ("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'"),
-        ("phase_states", "TEXT"),
-        ("daydream_version", "TEXT"),
-        ("daydream_install_source", "TEXT"),
-        ("daydream_commit", "TEXT"),
-        ("daydream_dirty", "INTEGER"),
-        ("daydream_container_digest", "TEXT"),
-        ("profile_schema_version", "INTEGER"),
-        ("profile_name", "TEXT"),
-        ("profile_source_kind", "TEXT"),
-        ("profile_digest", "TEXT"),
+FROZEN_MIGRATION_ENTRIES = frozenset({("review_backend", "TEXT"), ("fix_backend", "TEXT"), ("test_backend", "TEXT"),
+        ("per_stack_review_backend", "TEXT"), ("per_stack_review_model", "TEXT"), ("rubric_json", "TEXT"),
+        ("base_sha", "TEXT"), ("changed_files", "TEXT"), ("composite_reward", "REAL"), ("source_path", "TEXT"),
+        ("has_posterior", "INTEGER NOT NULL DEFAULT 0"), ("erosion", "REAL"), ("verbosity", "REAL"),
+        ("location_in_hunk_rate", "REAL"), ("shipped_duplicate_pairs", "INTEGER"), ("fix_quality_gate", "TEXT"),
+        ("recommended_patch_capture", "TEXT"), ("archive_status", "TEXT NOT NULL DEFAULT 'complete'"),
+        ("pipeline_status", "TEXT NOT NULL DEFAULT 'unknown'"), ("phase_states", "TEXT"), ("daydream_version", "TEXT"),
+        ("daydream_install_source", "TEXT"), ("daydream_commit", "TEXT"), ("daydream_dirty", "INTEGER"),
+        ("daydream_container_digest", "TEXT"), ("profile_schema_version", "INTEGER"), ("profile_name", "TEXT"),
+        ("profile_source_kind", "TEXT"), ("profile_digest", "TEXT"),
     }
 )
 
@@ -104,29 +53,27 @@ FROZEN_MIGRATION_ENTRIES = frozenset(
 WRITER_OWNED = frozenset({"rubric_json", "has_posterior"})
 
 ADDITIVE_NAMES = frozenset(name for name, _ in FROZEN_MIGRATION_ENTRIES)
-ALL_NAMES = V1_BASELINE_NAMES | ADDITIVE_NAMES
+OBSOLETE_NAMES = frozenset({"coverage_ratio", "grounding_rate"})
+CURRENT_BASELINE_NAMES = V1_BASELINE_NAMES - OBSOLETE_NAMES
+ALL_NAMES = CURRENT_BASELINE_NAMES | ADDITIVE_NAMES
 UPSERT_NAMES = ALL_NAMES - WRITER_OWNED
-
 
 def test_the_declaration_lists_every_column_exactly_once() -> None:
     names = [col.name for col in RUNS_COLUMNS]
     assert set(names) == ALL_NAMES
-    assert len(names) == len(set(names)) == 58
+    assert len(names) == len(set(names)) == 56
     assert all(col.definition.strip() for col in RUNS_COLUMNS)
-
 
 def test_the_declaration_partitions_additive_and_writer_owned_columns() -> None:
     assert {col.name for col in RUNS_COLUMNS if col.additive} == ADDITIVE_NAMES
     # The v1 witness: a column declared "already present" cannot be new.
-    assert {col.name for col in RUNS_COLUMNS if not col.additive} == V1_BASELINE_NAMES
+    assert {col.name for col in RUNS_COLUMNS if not col.additive} == CURRENT_BASELINE_NAMES
     assert {col.name for col in RUNS_COLUMNS if col.upserted} == UPSERT_NAMES
 
-
-def test_create_table_is_generated_and_byte_identical_to_the_frozen_text() -> None:
+def test_create_table_is_generated_with_obsolete_metrics_removed() -> None:
     assert _schema._CREATE_TABLE == _schema._create_table_sql(RUNS_COLUMNS)
-    assert (
-        hashlib.sha256(_schema._CREATE_TABLE.encode()).hexdigest() == FROZEN_DDL_SHA256
-    ), f"generated CREATE TABLE drifted from the frozen text:\n{_schema._CREATE_TABLE}"
+    assert (hashlib.sha256(_schema._CREATE_TABLE.encode()).hexdigest() == CURRENT_DDL_SHA256
+    ), f"generated CREATE TABLE drifted from the current text:\n{_schema._CREATE_TABLE}"
     lines = _schema._CREATE_TABLE.splitlines()
     assert lines[0] == "" and lines[1] == "CREATE TABLE IF NOT EXISTS runs ("
     assert lines[-1] == ")"
@@ -135,29 +82,21 @@ def test_create_table_is_generated_and_byte_identical_to_the_frozen_text() -> No
     assert all(line.startswith("    ") and not line.startswith("     ") for line in body)
     assert [line.strip().rstrip(",").split()[0] for line in body] == [col.name for col in RUNS_COLUMNS]
 
-
 def test_migration_entries_are_generated_and_match_the_frozen_pairs() -> None:
     entries = _schema._migration_entries(RUNS_COLUMNS)
     assert set(entries) == FROZEN_MIGRATION_ENTRIES
     assert entries == [(col.name, col.definition) for col in RUNS_COLUMNS if col.additive]
 
-
-def test_migrate_schema_applies_the_generated_entries_in_declaration_order(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_migrate_schema_applies_the_generated_entries_in_declaration_order(monkeypatch: pytest.MonkeyPatch,) -> None:
     captured: list[tuple[str, list[tuple[str, str]]]] = []
-
     def _capture(conn: sqlite3.Connection, table: str, migrations: list[tuple[str, str]]) -> None:
         captured.append((table, list(migrations)))
-
     monkeypatch.setattr(_schema, "_alter_add_missing", _capture)
     _schema._migrate_schema(sqlite3.connect(":memory:"))
     assert captured == [("runs", _schema._migration_entries(RUNS_COLUMNS))]
 
-
 def _split_sql_columns(block: str) -> list[str]:
     return [token.strip() for line in block.splitlines() for token in line.split(",") if token.strip()]
-
 
 def _upsert_statement_names() -> tuple[list[str], list[str]]:
     """Return (column names, parameter names) in the generated upsert statement."""
@@ -168,54 +107,47 @@ def _upsert_statement_names() -> tuple[list[str], list[str]]:
         token.lstrip(":") for token in _split_sql_columns(param_block.group(1))
     ]
 
-
 def test_upsert_statement_is_generated_from_the_declaration() -> None:
     columns, params = _upsert_statement_names()
     expected = [col.name for col in RUNS_COLUMNS if col.upserted]
     assert columns == params == expected
     assert _schema._UPSERT_SQL == _schema._upsert_sql(RUNS_COLUMNS)
 
-
 def test_writer_owned_columns_are_never_written_by_the_upsert() -> None:
     columns, params = _upsert_statement_names()
     assert not WRITER_OWNED & set(columns)
     assert not WRITER_OWNED & set(params)
 
-
 def test_upsert_values_mapping_covers_exactly_the_declared_upsert_columns() -> None:
     assert set(_run_upsert_values(make_manifest())) == UPSERT_NAMES
-
 
 def test_declaration_is_importable_from_both_module_paths() -> None:
     assert index.RUNS_COLUMNS is RUNS_COLUMNS
     assert "RUNS_COLUMNS" in index.__all__
 
-
 def _v1_baseline_sql() -> str:
     # Derived from the frozen V1_BASELINE_NAMES witness, never from the
     # ``additive`` flag under test: a column newly mis-marked
     # ``additive=False`` must stay absent here so fresh-vs-upgraded diverges.
-    return _schema._create_table_sql([col for col in RUNS_COLUMNS if col.name in V1_BASELINE_NAMES])
-
+    columns = [col for col in RUNS_COLUMNS if col.name in V1_BASELINE_NAMES]
+    columns.extend(RunColumn(name, "REAL") for name in sorted(OBSOLETE_NAMES))
+    return _schema._create_table_sql(columns)
 
 def _pre_v4_sql() -> str:
     return _schema._create_table_sql([col for col in RUNS_COLUMNS if col.name != "has_posterior"])
-
 
 def _open_legacy(archive_dir: Path, ddl: str) -> None:
     archive_dir.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(archive_dir / "index.db"))
     try:
         conn.execute(ddl)
-        conn.execute(
-            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
             ("legacy-row", "2026-01-01T00:00:00+00:00", "normal", "/x"),
         )
         conn.execute("PRAGMA user_version = 0")
         conn.commit()
     finally:
         conn.close()
-
 
 def _runs_columns(archive_dir: Path) -> set[str]:
     conn = _get_connection(archive_dir)
@@ -224,37 +156,30 @@ def _runs_columns(archive_dir: Path) -> set[str]:
     finally:
         conn.close()
 
-
 @pytest.mark.parametrize("column", [col for col in RUNS_COLUMNS if col.additive], ids=lambda col: col.name)
 def test_every_additive_column_is_alter_eligible_on_a_populated_table(column: RunColumn) -> None:
     conn = sqlite3.connect(":memory:")
     try:
         conn.execute(_v1_baseline_sql())
-        conn.execute(
-            "INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
+        conn.execute("INSERT INTO runs (session_id, archived_at, run_flow, archive_path) VALUES (?, ?, ?, ?)",
             ("populated", "2026-01-01T00:00:00+00:00", "normal", "/x"),
         )
         try:
             conn.execute(f"ALTER TABLE runs ADD COLUMN {column.name} {column.definition}")
         except sqlite3.OperationalError as exc:  # pragma: no cover - failure path
-            raise AssertionError(
-                f"declared additive column {column.name!r} cannot be added to a populated "
+            raise AssertionError(f"declared additive column {column.name!r} cannot be added to a populated "
                 f"table with definition {column.definition!r}: {exc}"
             ) from exc
     finally:
         conn.close()
 
-
 @pytest.mark.parametrize("build_legacy", [_v1_baseline_sql, _pre_v4_sql], ids=["v1-baseline", "pre-v4"])
-def test_fresh_and_upgraded_databases_end_with_the_same_column_set(
-    tmp_path: Path, build_legacy: Any
-) -> None:
+def test_fresh_and_upgraded_databases_end_with_the_same_column_set(tmp_path: Path, build_legacy: Any) -> None:
     legacy_dir = tmp_path / "legacy"
     fresh_dir = tmp_path / "fresh"
     _open_legacy(legacy_dir, build_legacy())
-
-    assert _runs_columns(legacy_dir) == _runs_columns(fresh_dir) == set(ALL_NAMES)
-
+    legacy_columns = _runs_columns(legacy_dir)
+    assert legacy_columns - OBSOLETE_NAMES == _runs_columns(fresh_dir) == set(ALL_NAMES)
 
 def test_generation_tracks_a_mutated_declaration() -> None:
     source = Path(_schema.__file__).read_text()
@@ -283,3 +208,27 @@ def test_generation_tracks_a_mutated_declaration() -> None:
     assert "    zzz_probe TEXT NOT NULL DEFAULT 'probe'\n" in namespace["_CREATE_TABLE"]
     assert ("zzz_probe", "TEXT NOT NULL DEFAULT 'probe'") in namespace["_migration_entries"](mutated_columns)
     assert ":zzz_probe" in namespace["_UPSERT_SQL"]
+
+def test_old_database_keeps_obsolete_values_without_recomputing(tmp_path: Path) -> None:
+    _open_legacy(tmp_path, _v1_baseline_sql())
+    conn = sqlite3.connect(str(tmp_path / "index.db"))
+    try:
+        conn.execute("ALTER TABLE runs ADD COLUMN composite_reward REAL")
+        conn.execute("UPDATE runs SET grounding_rate = 0.25, coverage_ratio = 0.75 " "WHERE session_id = 'legacy-row'")
+        conn.execute("UPDATE runs SET composite_reward = 0.4 WHERE session_id = 'legacy-row'")
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = _get_connection(tmp_path)
+    try:
+        row = conn.execute(
+            "SELECT grounding_rate, coverage_ratio, composite_reward FROM runs WHERE session_id = 'legacy-row'"
+        ).fetchone()
+        assert tuple(row) == (0.25, 0.75, 0.4)
+    finally:
+        conn.close()
+
+    rows = index.query_runs(archive_dir=tmp_path)
+    assert rows[0]["session_id"] == "legacy-row"
+    assert rows[0]["composite_reward"] == 0.4

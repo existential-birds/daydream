@@ -1,13 +1,4 @@
-"""Tests for daydream.eval.analyzer trajectory loading and grounding.
-
-Focused on session-id resolution semantics inside ``load_trajectories``:
-ambiguous prefixes must raise instead of silently picking one, exact
-matches must take precedence over prefix matches, and unique prefixes
-must still resolve.
-
-Also covers ``analyze_grounding``'s rate arithmetic, including the
-undefined (zero-findings) case, which must not report a perfect score.
-"""
+"""Trajectory resolution, finding/location arithmetic, and source-quality metrics."""
 import json
 import math
 import uuid
@@ -20,19 +11,12 @@ from daydream import _tree_sitter_safety as safety
 from daydream.artifact_visibility import ArtifactEvidenceProvenance
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.deep.records import RECORD_SOURCE_UIDS_KEY, mint_record_uid
-from daydream.eval import analyzer as analyzer_mod
+from daydream.eval import quality as quality_mod
 from daydream.eval.analyzer import (
     _agent_label,
-    _files_read,
     _latest_main_trajectory,
-    _quality_python_parser,
-    _semantic_tool_kind,
-    _tokenize_command,
     analyze_costs,
-    analyze_coverage,
-    analyze_exploration_utilization,
     analyze_findings,
-    analyze_grounding,
     analyze_location,
     analyze_quality,
     analyze_session,
@@ -43,10 +27,10 @@ from daydream.eval.analyzer import (
     collect_trajectory_paths,
     load_trajectories,
 )
+from daydream.eval.quality import _quality_python_parser
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
-    redact_text,
     run_directory,
     run_document_path,
     sibling_document_path,
@@ -55,29 +39,12 @@ from tests.harness.trajectory import make_recorder, trajectory_payload
 
 
 def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
-    trajectories = {
-        "main": {
-            "session_id": "session",
-            "trajectory_id": "session",
-            "steps": [
-                {"timestamp": "2026-01-01T00:00:40Z"},
-                {"timestamp": "2026-01-01T00:00:41Z"},
-            ],
-            "extra": {
-                "run_started_at": "2026-01-01T00:00:00Z",
-                "run_ended_at": "2026-01-01T00:00:10Z",
-            },
+    trajectories = {"main": {"session_id": "session", "trajectory_id": "session",
+            "steps": [{"timestamp": "2026-01-01T00:00:40Z"}, {"timestamp": "2026-01-01T00:00:41Z"}],
+            "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:10Z"},
             "_source_file": "trajectory.json",
-        },
-        "forked": [
-            {
-                "session_id": "session",
-                "trajectory_id": "child",
-                "steps": [
-                    {"timestamp": "2026-01-01T00:01:00Z"},
-                    {"timestamp": "2026-01-01T00:01:02Z"},
-                ],
-                "extra": {},
+        }, "forked": [{"session_id": "session", "trajectory_id": "child",
+                "steps": [{"timestamp": "2026-01-01T00:01:00Z"}, {"timestamp": "2026-01-01T00:01:02Z"}], "extra": {},
                 "_source_file": "child.json",
             }
         ],
@@ -85,23 +52,13 @@ def test_analyze_timing_prefers_root_lifecycle_over_misleading_steps() -> None:
 
     assert analyze_timing(trajectories)["total_wall_clock_seconds"] == 10.0
 
-
 def test_analyze_timing_keeps_fork_inclusive_legacy_step_fallback() -> None:
-    trajectories = {
-        "main": {
-            "session_id": "legacy",
-            "trajectory_id": "legacy",
-            "steps": [{"timestamp": "2026-01-01T00:00:02Z"}],
-            "extra": {},
-            "_source_file": "trajectory.json",
+    trajectories = {"main": {
+            "session_id": "legacy", "trajectory_id": "legacy", "steps": [{"timestamp": "2026-01-01T00:00:02Z"}],
+            "extra": {}, "_source_file": "trajectory.json",
         },
-        "forked": [
-            {
-                "session_id": "legacy",
-                "trajectory_id": "child",
-                "steps": [{"timestamp": "2026-01-01T00:00:08Z"}],
-                "extra": {},
-                "_source_file": "child.json",
+        "forked": [{"session_id": "legacy", "trajectory_id": "child", "steps": [{"timestamp": "2026-01-01T00:00:08Z"}],
+                "extra": {}, "_source_file": "child.json",
             }
         ],
     }
@@ -110,18 +67,12 @@ def test_analyze_timing_keeps_fork_inclusive_legacy_step_fallback() -> None:
 
 
 def _write_run(daydream_dir: Path, session_id: str, marker: str) -> Path:
-    """Create a minimal ``runs/<session_id>/trajectory.json`` fixture.
-
-    ``load_trajectories`` only reads the file with ``json.loads`` and
-    stuffs a ``_source_file`` key onto the returned dict, so any valid
-    JSON object is enough for the resolution path we're exercising.
-    """
+    """Write the minimal valid trajectory object needed for session resolution."""
     run_dir = daydream_dir / "runs" / session_id
     run_dir.mkdir(parents=True)
     traj = run_dir / "trajectory.json"
     traj.write_text(json.dumps({"session_id": session_id, "marker": marker}))
     return run_dir
-
 
 def test_ambiguous_prefix_raises(tmp_path: Path) -> None:
     daydream_dir = tmp_path / ".daydream"
@@ -130,7 +81,6 @@ def test_ambiguous_prefix_raises(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="matches multiple runs"):
         load_trajectories(daydream_dir, session_id="abcd1234")
-
 
 def test_unique_prefix_resolves(tmp_path: Path) -> None:
     daydream_dir = tmp_path / ".daydream"
@@ -143,11 +93,8 @@ def test_unique_prefix_resolves(tmp_path: Path) -> None:
     assert result["main"]["marker"] == "first"
     assert result["forked"] == []
 
-
 def test_exact_match_takes_precedence(tmp_path: Path) -> None:
-    """An exact dir name must win even if a longer dir would also prefix-match."""
     daydream_dir = tmp_path / ".daydream"
-    # Exact id and a sibling whose name starts with the same string.
     _write_run(daydream_dir, "abcd1234", "exact")
     _write_run(daydream_dir, "abcd1234-extra", "prefix-only")
 
@@ -159,9 +106,7 @@ def test_exact_match_takes_precedence(tmp_path: Path) -> None:
 
 SESSION = "11111111-2222-3333-4444-555555555555"
 
-
 def test_analyzer_resolution_keys_off_the_owned_names(tmp_path: Path) -> None:
-    """Resolution, the main/forked split and the glob all come from the surface."""
     daydream_dir = tmp_path / ".daydream"
     run_dir = run_directory(daydream_dir, SESSION)
     run_document_path(run_dir).parent.mkdir(parents=True)
@@ -170,27 +115,16 @@ def test_analyzer_resolution_keys_off_the_owned_names(tmp_path: Path) -> None:
     sibling.parent.mkdir(parents=True)
     sibling.write_bytes(trajectory_payload("fork-1"))
 
-    assert [p.name for p in collect_trajectory_paths(run_dir)] == [
-        RUN_DOCUMENT_NAME,
-        "deep-python.json",
-    ]
-    assert [p.name for p in collect_trajectory_paths(daydream_dir)] == [
-        RUN_DOCUMENT_NAME,
-        "deep-python.json",
-    ]
+    assert [p.name for p in collect_trajectory_paths(run_dir)] == [RUN_DOCUMENT_NAME, "deep-python.json"]
+    assert [p.name for p in collect_trajectory_paths(daydream_dir)] == [RUN_DOCUMENT_NAME, "deep-python.json"]
     loaded = load_trajectories(daydream_dir, SESSION)
     assert loaded["main"]["trajectory_id"] == SESSION
     assert [d["_source_file"] for d in loaded["forked"]] == ["deep-python.json"]
     assert _latest_main_trajectory(daydream_dir) == run_document_path(run_dir)
 
-
 def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
     trajectories = {
-        "main": {
-            "_source_file": "trajectory.json",
-            "final_metrics": {"total_cost_usd": 0.00006},
-        },
-        "forked": [],
+        "main": {"_source_file": "trajectory.json", "final_metrics": {"total_cost_usd": 0.00006}}, "forked": [],
     }
 
     result = analyze_costs(trajectories)
@@ -198,45 +132,27 @@ def test_analyze_costs_preserves_fractional_aggregate_precision() -> None:
     assert result["total_cost_usd"] == 0.00006
     assert sum(agent["cost_usd"] for agent in result["by_agent"]) == result["total_cost_usd"]
 
-
-@pytest.mark.parametrize(
-    ("name", "expected"),
-    [
-        ("Write", "write"),
-        ("write", "write"),
-        ("Edit", "write"),
-        ("edit", "write"),
-        ("MultiEdit", "write"),
-        ("multiedit", "write"),
-        ("NotebookEdit", "write"),
-        ("notebookedit", "write"),
-        ("patch", "write"),
-        ("apply_patch", "write"),
-        ("Read", "read"),
-        ("read", "read"),
-        ("shell", "other"),
-        ("bash", "other"),
+@pytest.mark.parametrize(("name", "expected"),
+    [("Write", "write"), ("write", "write"), ("Edit", "write"), ("edit", "write"), ("MultiEdit", "write"),
+        ("multiedit", "write"), ("NotebookEdit", "write"), ("notebookedit", "write"), ("patch", "write"),
+        ("apply_patch", "write"), ("Read", "read"), ("read", "read"), ("shell", "other"), ("bash", "other"),
         ("custom", "other"),
     ],
 )
-def test_semantic_tool_kind_is_backend_neutral(name: str, expected: str) -> None:
-    assert _semantic_tool_kind(name) == expected
-
+def test_write_tool_counts_are_backend_neutral(name: str, expected: str) -> None:
+    result = analyze_tools({"main": None,
+        "forked": [{"_source_file": "deep-python.json", "steps": [{
+            "step_id": 1, "tool_calls": [{"function_name": name, "arguments": {}}],
+        }]}],
+    })
+    assert result["by_type"] == {name: 1}
+    assert result["write_ratio"] == (1.0 if expected == "write" else 0.0)
 
 def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
-    shell_calls = [
-        {"function_name": "shell", "arguments": {"command": f"echo {i}"}}
-        for i in range(311)
-    ]
-    patch_calls = [
-        {"function_name": "patch", "arguments": {"patch": f"change {i}"}}
-        for i in range(15)
-    ]
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
+    shell_calls = [{"function_name": "shell", "arguments": {"command": f"echo {i}"}} for i in range(311)]
+    patch_calls = [{"function_name": "patch", "arguments": {"patch": f"change {i}"}} for i in range(15)]
+    trajectories = {"main": None,
+        "forked": [{"_source_file": "deep-python.json",
                 "steps": [{"step_id": 1, "tool_calls": [*shell_calls, *patch_calls]}],
             }
         ],
@@ -251,59 +167,25 @@ def test_analyze_tools_uses_semantic_writes_and_preserves_raw_names() -> None:
 
 
 def _training_flags(steps: list[dict[str, Any]]) -> list[str]:
-    result = analyze_training_signals(
-        {
-            "main": None,
-            "forked": [{"_source_file": "deep-python.json", "steps": steps}],
-        },
-        {"ungrounded": []},
+    result = analyze_training_signals({"main": None, "forked": [{"_source_file": "deep-python.json", "steps": steps}]},
     )
     return cast(list[str], result["trajectories"][0]["noise_flags"])
 
-
-@pytest.mark.parametrize(
-    ("result_extra", "expected"),
-    [
-        ({"is_error": True}, "failed_tool_result"),
-        ({"status": "interrupted"}, "incomplete_tool_call"),
+@pytest.mark.parametrize(("result_extra", "expected"),
+    [({"is_error": True}, "failed_tool_result"), ({"status": "interrupted"}, "incomplete_tool_call"),
         ({"cancelled": True}, "incomplete_tool_call"),
     ],
 )
-def test_training_flags_linked_tool_failures(
-    result_extra: dict[str, Any], expected: str
-) -> None:
-    steps = [
-        {
-            "step_id": 1,
-            "tool_calls": [
-                {"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}
-            ],
-            "observation": {
-                "results": [
-                    {
-                        "source_call_id": "call-1",
-                        "content": "output",
-                        "extra": result_extra,
-                    }
-                ]
-            },
+def test_training_flags_linked_tool_failures(result_extra: dict[str, Any], expected: str) -> None:
+    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
+            "observation": {"results": [{"source_call_id": "call-1", "content": "output", "extra": result_extra}]},
         }
     ]
     assert _training_flags(steps) == [expected]
 
-
 def test_training_flags_unpaired_calls_and_null_interrupted_marker_once() -> None:
-    steps = [
-        {
-            "step_id": 1,
-            "tool_calls": [
-                {"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}
-            ],
-            "observation": {
-                "results": [
-                    {
-                        "source_call_id": None,
-                        "content": "interrupted",
+    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "Read", "arguments": {}}],
+            "observation": {"results": [{"source_call_id": None, "content": "interrupted",
                         "extra": {"is_error": True, "status": "interrupted"},
                     }
                 ]
@@ -312,89 +194,40 @@ def test_training_flags_unpaired_calls_and_null_interrupted_marker_once() -> Non
     ]
     assert _training_flags(steps) == ["incomplete_tool_call"]
 
-
 def test_training_correlations_are_step_local_and_detect_unmatched_results() -> None:
-    steps = [
-        {
-            "step_id": 1,
-            "tool_calls": [
-                {"tool_call_id": "same", "function_name": "Read", "arguments": {}}
-            ],
-        },
-        {
-            "step_id": 2,
-            "observation": {
-                "results": [
-                    {
-                        "source_call_id": "same",
-                        "content": "late",
-                        "extra": {"is_error": False},
-                    }
-                ]
-            },
-            "extra": {"unmatched_tool_results": ["another"]},
+    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "same", "function_name": "Read", "arguments": {}}]},
+        {"step_id": 2,
+            "observation": {"results": [{"source_call_id": "same", "content": "late", "extra": {"is_error": False}}]
+            }, "extra": {"unmatched_tool_results": ["another"]},
         },
     ]
-    assert _training_flags(steps) == [
-        "incomplete_tool_call",
-        "unmatched_tool_result",
-    ]
-
+    assert _training_flags(steps) == ["incomplete_tool_call", "unmatched_tool_result"]
 
 def test_training_diagnostics_map_only_recognized_codes_in_fixed_order() -> None:
-    steps = [
-        {
-            "step_id": 1,
-            "extra": {
-                "backend_diagnostics": [
-                    {"code": "codex_parser_coverage"},
-                    {"code": "arbitrary_backend_note"},
-                    {"code": "codex_transport_coverage"},
-                    {"code": "codex_parser_coverage"},
+    steps = [{"step_id": 1,
+            "extra": {"backend_diagnostics": [{"code": "codex_parser_coverage"}, {"code": "arbitrary_backend_note"},
+                    {"code": "codex_transport_coverage"}, {"code": "codex_parser_coverage"},
                 ]
             },
         }
     ]
-    assert _training_flags(steps) == [
-        "incomplete_telemetry",
-        "parser_coverage_gap",
-    ]
+    assert _training_flags(steps) == ["incomplete_telemetry", "parser_coverage_gap"]
 
-
-@pytest.mark.parametrize(
-    "legacy_extra", [None, {}, {"is_error": "true"}, {"cancelled": 1}, []]
-)
-def test_clean_training_tolerates_missing_or_malformed_legacy_result_metadata(
-    legacy_extra: Any,
-) -> None:
-    result: dict[str, Any] = {
-        "source_call_id": "call-1",
-        "content": "ok",
-    }
+@pytest.mark.parametrize("legacy_extra", [None, {}, {"is_error": "true"}, {"cancelled": 1}, []])
+def test_clean_training_tolerates_missing_or_malformed_legacy_result_metadata(legacy_extra: Any,) -> None:
+    result: dict[str, Any] = {"source_call_id": "call-1", "content": "ok"}
     if legacy_extra is not None:
         result["extra"] = legacy_extra
-    steps = [
-        {
-            "step_id": 1,
-            "tool_calls": [
-                {"tool_call_id": "call-1", "function_name": "read", "arguments": {}}
-            ],
+    steps = [{"step_id": 1, "tool_calls": [{"tool_call_id": "call-1", "function_name": "read", "arguments": {}}],
             "observation": {"results": [result]},
         }
     ]
     assert _training_flags(steps) == []
 
-
 def test_analyze_costs_includes_cached_tokens_when_prompt_dominates() -> None:
-    trajectories = {
-        "main": {
-            "_source_file": "trajectory.json",
-            "final_metrics": {
-                "total_prompt_tokens": 140,
-                "total_cached_tokens": 14,
-            },
-        },
-        "forked": [],
+    trajectories = {"main": {
+            "_source_file": "trajectory.json", "final_metrics": {"total_prompt_tokens": 140, "total_cached_tokens": 14},
+        }, "forked": [],
     }
 
     result = analyze_costs(trajectories)
@@ -402,34 +235,20 @@ def test_analyze_costs_includes_cached_tokens_when_prompt_dominates() -> None:
     assert result["total_input_tokens"] == 140
     assert result["cache_hit_rate"] == 0.1
 
-
 def test_analyze_costs_aggregates_legacy_fork_metrics() -> None:
-    trajectories = {
-        "main": {
-            "_source_file": "trajectory.json",
-            "final_metrics": {"total_cost_usd": 1.0},
-        },
-        "forked": [
-            {
-                "_source_file": "fork.json",
-                "final_metrics": {"total_cost_usd": 0.5},
-            }
-        ],
+    trajectories = {"main": {"_source_file": "trajectory.json", "final_metrics": {"total_cost_usd": 1.0}},
+        "forked": [{"_source_file": "fork.json", "final_metrics": {"total_cost_usd": 0.5}}],
     }
 
     result = analyze_costs(trajectories)
 
     assert result["total_cost_usd"] == 1.5
 
-
-async def test_analyze_costs_assigns_nested_forks_their_own_metrics(
-    tmp_path: Path,
-) -> None:
+async def test_analyze_costs_assigns_nested_forks_their_own_metrics(tmp_path: Path,) -> None:
     session = "nested-forks"
     daydream_dir = tmp_path / ".daydream"
     recorder = make_recorder(
-        tmp_path, path=daydream_dir / "runs" / session / "trajectory.json",
-        agent_model_name="opus", session_id=session,
+        tmp_path, path=daydream_dir / "runs" / session / "trajectory.json", agent_model_name="opus", session_id=session,
     )
 
     async with recorder:
@@ -459,57 +278,40 @@ async def test_analyze_costs_assigns_nested_forks_their_own_metrics(
     assert by_agent["main"]["steps"] == 1
     assert by_agent["outer"]["steps"] == 1
     assert by_agent["inner"]["steps"] == 1
-    assert sum(agent["cost_usd"] for agent in result["by_agent"]) == pytest.approx(
-        result["total_cost_usd"]
-    )
+    assert sum(agent["cost_usd"] for agent in result["by_agent"]) == pytest.approx(result["total_cost_usd"])
     assert sum(agent["steps"] for agent in result["by_agent"]) == 3
 
 
-
-
 def _read_traj(source_file: str, *read_paths: str, pi_style: bool = False) -> dict[str, Any]:
-    """Forked-trajectory fixture whose agent Read each of ``read_paths``.
-
-    Shaped for ``_extract_tool_calls``: every step needs a ``step_id`` and its
-    ``tool_calls`` need ``function_name``/``arguments``. ``_files_read`` keeps
-    only the ``file_path`` of ``Read`` calls, and ``_agent_label`` derives the
-    ``deep-<stack>`` key from ``_source_file``. With ``pi_style=True`` the
-    calls use the pi style ``read``/``arguments.path`` shape.
-    """
+    """Build a fork with Read calls; pi_style uses read/arguments.path instead."""
     steps = []
     for i, path in enumerate(read_paths):
         if pi_style:
             tc = {"function_name": "read", "arguments": {"path": path}}
         else:
             tc = {"function_name": "Read", "arguments": {"file_path": path}}
-        steps.append({"step_id": f"s{i}", "tool_calls": [tc]})
+        tc["tool_call_id"] = f"read-{i}"
+        steps.append({"step_id": f"s{i}", "tool_calls": [tc],
+            "observation": {"results": [{"source_call_id": f"read-{i}", "content": "source"}]},
+        })
     return {"_source_file": source_file, "steps": steps}
 
 
 def _artifact_provenance(
-    *,
-    public_source: Path,
-    private_base: Path,
-    workspace_key: str = "workspace-key",
-    session_id: str = "session-id",
+    *, public_source: Path, private_base: Path, workspace_key: str = "workspace-key", session_id: str = "session-id",
 ) -> Any:
     """Construct exact current-owner provenance without assuming a default root."""
 
     live = private_base / workspace_key / "runs" / session_id / "live"
     return ArtifactEvidenceProvenance(
-        workspace_key=workspace_key,
-        session_id=session_id,
-        public_source=public_source,
-        live_root=live,
+        workspace_key=workspace_key, session_id=session_id, public_source=public_source, live_root=live,
     )
 
 
 def _owned_source(tmp_path: Path, **kwargs: Any) -> tuple[Path, Path, Any]:
     """(public source, its ``.daydream`` dir, current-owner provenance) for one run."""
     public_source = tmp_path / "source"
-    provenance = _artifact_provenance(
-        public_source=public_source, private_base=tmp_path / "private", **kwargs
-    )
+    provenance = _artifact_provenance(public_source=public_source, private_base=tmp_path / "private", **kwargs)
     return public_source, public_source / ".daydream", provenance
 
 
@@ -529,261 +331,31 @@ def _seed_diff(daydream_dir: Path, *files: str) -> None:
     )
 
 
-# Owner-scoped artifact paths that belong to a DIFFERENT owner than the current
-# run's provenance: a different workspace key, and a different session under the
-# same key. Both must stay eligible repository reads.
-_OTHER_WORKSPACE_ARTIFACT = "{base}/other-workspace/runs/session-id/live/.daydream/deep/src/api.py"
-_OTHER_SESSION_ARTIFACT = "{base}/workspace-key/runs/other-session/live/.daydream/deep/src/api.py"
-
-
-def _forked(*trajectories: dict[str, Any]) -> dict[str, Any]:
-    """A trajectory bundle with no root and the given forked children."""
-    return {"main": None, "forked": list(trajectories)}
+# Other workspaces and other sessions under the same key remain eligible repository reads.
 
 
 def _write_records(deep: Path, **overrides: Any) -> None:
     """Write one per-stack python record, defaulted to a grounded src/api.py claim."""
     record: dict[str, Any] = {
-        "id": "py-1",
-        "file": "src/api.py",
-        "line": 1,
-        "confidence": "HIGH",
-        "rationale": "src/api.py needs a guard",
+        "id": "py-1", "file": "src/api.py", "line": 1, "confidence": "HIGH", "rationale": "src/api.py needs a guard",
     }
     record.update(overrides)
-    (deep / "stack-python-records.json").write_text(
-        json.dumps([record]), encoding="utf-8"
-    )
+    (deep / "stack-python-records.json").write_text(json.dumps([record]), encoding="utf-8")
 
 
 def _root_trajectory(session_id: str) -> dict[str, Any]:
     """A minimal ATIF root trajectory ``analyze_session`` accepts as frozen input."""
-    return {
-        "_source_file": "trajectory.json",
-        "session_id": session_id,
-        "trajectory_id": session_id,
-        "agent": {"name": "daydream", "model_name": "test"},
-        "steps": [],
-        "final_metrics": {},
+    return {"_source_file": "trajectory.json", "session_id": session_id, "trajectory_id": session_id,
+        "agent": {"name": "daydream", "model_name": "test"}, "steps": [], "final_metrics": {},
     }
 
 
-_READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "osprey": ("read", "path")}
+_READ_TOOL_SHAPES = {"claude": ("Read", "file_path"), "pi": ("read", "path"), "osprey": ("read", "path")}
 
-
-def _backend_read_trajectory(backend: str, paths: list[str]) -> dict[str, Any]:
-    """One deep-python trajectory using a real supported backend read shape."""
-    if backend in _READ_TOOL_SHAPES:
-        name, argument = _READ_TOOL_SHAPES[backend]
-        calls = [{"function_name": name, "arguments": {argument: path}} for path in paths]
-    else:  # codex/pi read through their shell tool
-        calls = [
-            {
-                "function_name": "shell" if backend == "codex" else "bash",
-                "arguments": {"command": "cat " + " ".join(paths)},
-            }
-        ]
-    return {
-        "_source_file": "deep-python.json",
-        "steps": [{"step_id": "s0", "tool_calls": calls}],
-    }
-
-
-@pytest.mark.parametrize("backend", ["claude", "codex", "pi", "osprey"])
-def test_artifact_evidence_never_earns_backend_coverage_or_grounding(
-    tmp_path: Path,
-    backend: str,
-) -> None:
-    """Every supported read shape credits source while excluding run artifacts."""
-    public_source, daydream_dir, provenance = _owned_source(tmp_path)
-    _seed_diff(daydream_dir, "src/api.py")
-    private_live = provenance.live_root
-    paths = [
-        str(public_source / "src/api.py"),
-        ".daydream/deep/stack-python-review.md",
-        ".review-output.md",
-        str(public_source / ".daydream/deep/src/api.py"),
-        str(private_live / ".daydream/deep/src/api.py"),
-    ]
-    trajectories = _forked(_backend_read_trajectory(backend, paths))
-    findings = [
-        {
-            "id": "py-1",
-            "_stack": "python",
-            "file": "src/api.py",
-            "rationale": "The implementation in src/api.py lacks a guard.",
-            "confidence": "HIGH",
-        }
-    ]
-
-    coverage = analyze_coverage(trajectories, daydream_dir, artifact_provenance=provenance)
-    grounding = analyze_grounding(
-        trajectories, findings, daydream_dir, artifact_provenance=provenance
-    )
-
-    assert coverage["coverage_ratio"] == 1.0
-    assert coverage["artifact_reads_rejected"] == 4
-    assert grounding["grounded_count"] == 1
-    assert grounding["artifact_evidence_rejections"] == 0
-
-
-def test_artifact_evidence_in_primary_and_redacted_rationale_is_rejected() -> None:
-    """Exact raw/redacted owner paths stay visible but cannot earn grounding."""
-
-    public_source = Path("/Users/alice/project")
-    daydream_dir = public_source / ".daydream"
-    provenance = _artifact_provenance(
-        public_source=public_source, private_base=Path("/Users/alice/private")
-    )
-    private_live = provenance.live_root
-    artifact_primary = str(private_live / ".daydream/deep/src/api.py")
-    artifact_rationale = redact_text(
-        str(private_live / ".daydream/deep/stack-python-review.md")
-    )
-    trajectories = _forked(
-        _read_traj(
-            "deep-python.json",
-            str(public_source / "src/api.py"),
-            artifact_primary,
-            artifact_rationale,
-        )
-    )
-    findings = [
-        {
-            "id": "py-primary",
-            "_stack": "python",
-            "file": artifact_primary,
-            "rationale": "Artifact-backed claim",
-            "confidence": "HIGH",
-        },
-        {
-            "id": "py-rationale",
-            "_stack": "python",
-            "file": "src/api.py",
-            "rationale": f"Source claim derived from {artifact_rationale}",
-            "confidence": "HIGH",
-        },
-    ]
-
-    result = analyze_grounding(
-        trajectories, findings, daydream_dir, artifact_provenance=provenance
-    )
-
-    assert result["grounded_count"] == 0
-    assert result["artifact_evidence_rejections"] == 2
-    entries = {entry["id"]: entry for entry in result["ungrounded"]}
-    assert entries["py-primary"]["file_was_read"] is False
-    assert entries["py-primary"]["artifact_file_ref"] == redact_text(artifact_primary)
-    assert entries["py-rationale"]["file_was_read"] is True
-    assert entries["py-rationale"]["file"] == "src/api.py"
-    assert entries["py-rationale"]["artifact_rationale_refs"] == [artifact_rationale]
-    assert entries["py-rationale"]["unread_rationale_refs"] == []
-
-
-def test_external_exploration_counts_only_current_owner_and_safe_relative_paths(
-    tmp_path: Path,
-) -> None:
-    """Exploration utilization shares the exact owner-bound path classifier."""
-
-    public_source, daydream_dir, provenance = _owned_source(tmp_path)
-    private_live = provenance.live_root
-    other_live = private_live.parents[2] / "other-key/runs/other-session/live"
-    trajectories = _forked(
-        _read_traj(
-            "deep-python.json",
-            str(private_live / ".daydream/exploration/summary.md"),
-            ".daydream/exploration/affected_files.md",
-            str(other_live / ".daydream/exploration/summary.md"),
-            "src/exploration/parser.py",
-            "../.daydream/exploration/escape.md",
-        )
-    )
-
-    result = analyze_exploration_utilization(
-        trajectories, daydream_dir=daydream_dir, artifact_provenance=provenance
-    )
-
-    assert result["by_agent"][0]["total_reads"] == 5
-    assert result["by_agent"][0]["exploration_reads"] == 2
-    assert result["by_agent"][0]["utilized"] is True
-
-
-def test_artifact_evidence_lexical_negatives_remain_repository_reads(
-    tmp_path: Path,
-) -> None:
-    """Names resembling private storage do not trigger broad substring rejection."""
-    _, daydream_dir, provenance = _owned_source(tmp_path)
-    _seed_diff(
-        daydream_dir,
-        ".daydream.toml",
-        ".daydream_helper.py",
-        "runtime/src/api.py",
-        "exploration/src/parser.py",
-        "src/api.py",
-    )
-    private_base = provenance.live_root.parents[3]
-    other_workspace = _OTHER_WORKSPACE_ARTIFACT.format(base=private_base)
-    other_session = _OTHER_SESSION_ARTIFACT.format(base=private_base)
-    trajectories = _forked(
-        _read_traj(
-            "deep-python.json",
-            "./.daydream.toml",
-            "./.daydream_helper.py",
-            "./runtime/src/api.py",
-            "./exploration/src/parser.py",
-            other_workspace,
-            other_session,
-            "./src/api.py",
-            "./.daydream/deep/report.md",
-            "../.daydream/deep/src/api.py",
-            ".daydream/../src/api.py",
-            "src/../src/api.py",
-        )
-    )
-
-    result = analyze_coverage(trajectories, daydream_dir, artifact_provenance=provenance)
-
-    assert result["coverage_ratio"] == 1.0
-    assert result["uncovered_files"] == []
-    assert result["artifact_reads_rejected"] == 4
-
-
-def test_artifact_evidence_other_owner_and_similar_names_stay_eligible(
-    tmp_path: Path,
-) -> None:
-    """Each false-positive control independently earns repository coverage."""
-    _, daydream_dir, provenance = _owned_source(tmp_path)
-    private_base = provenance.live_root.parents[3]
-    cases = [
-        (_OTHER_WORKSPACE_ARTIFACT.format(base=private_base), "src/api.py"),
-        (_OTHER_SESSION_ARTIFACT.format(base=private_base), "src/api.py"),
-        ("/repo/runtime/src/api.py", "src/api.py"),
-        ("/repo/exploration/src/api.py", "src/api.py"),
-        (".daydream.toml", ".daydream.toml"),
-        (".daydream_helper.py", ".daydream_helper.py"),
-    ]
-
-    for read_path, diff_path in cases:
-        _seed_diff(daydream_dir, diff_path)
-        result = analyze_coverage(
-            _forked(_read_traj("deep-python.json", read_path)),
-            daydream_dir,
-            artifact_provenance=provenance,
-        )
-
-        assert result["coverage_ratio"] == 1.0, read_path
-        assert result["artifact_reads_rejected"] == 0, read_path
-
-
-def test_artifact_evidence_analyze_session_threads_one_classifier_to_all_consumers(
-    tmp_path: Path,
-) -> None:
-    """Coverage, grounding, exploration, and training share frozen provenance."""
+def test_analyze_session_preserves_source_quality_without_read_metrics(tmp_path: Path,) -> None:
     public_source, _, provenance = _owned_source(tmp_path, session_id="session")
     (public_source / "src").mkdir(parents=True)
-    (public_source / "src/api.py").write_text(
-        "def api(value):\n    return value\n", encoding="utf-8"
-    )
+    (public_source / "src/api.py").write_text("def api(value):\n    return value\n", encoding="utf-8")
     # Frozen evaluation input lives apart from the post-fix source workspace.
     daydream_dir = tmp_path / "frozen" / ".daydream"
     deep = daydream_dir / "deep"
@@ -793,565 +365,17 @@ def test_artifact_evidence_analyze_session_threads_one_classifier_to_all_consume
     artifact_ref = str(private_live / ".daydream/deep/stack-python-review.md")
     exploration_ref = str(private_live / ".daydream/exploration/summary.md")
     _write_records(deep, rationale=f"Evidence came from {artifact_ref}")
-    trajectories = {
-        "main": _root_trajectory("session"),
-        "forked": [
-            _read_traj(
-                "deep-python.json",
-                str(public_source / "src/api.py"),
-                artifact_ref,
-                exploration_ref,
-            )
-        ],
+    trajectories = {"main": _root_trajectory("session"),
+        "forked": [_read_traj("deep-python.json", str(public_source / "src/api.py"), artifact_ref, exploration_ref,)],
     }
 
     result = analyze_session(
-        daydream_dir,
-        session_id="session",
-        frozen_trajectories=trajectories,
-        artifact_provenance=provenance,
+        daydream_dir, session_id="session", frozen_trajectories=trajectories, artifact_provenance=provenance,
         code_workspace=public_source,
     )
 
-    assert result["coverage"]["coverage_ratio"] == 1.0
-    assert result["coverage"]["artifact_reads_rejected"] == 2
-    assert result["grounding"]["artifact_evidence_rejections"] == 1
-    assert result["grounding"]["grounded_count"] == 0
-    assert result["exploration_utilization"]["by_agent"][0]["exploration_reads"] == 1
-    assert "ungrounded_findings:1" in result["training_signals"]["trajectories"][0][
-        "noise_flags"
-    ]
+    assert not {"coverage", "grounding", "exploration_utilization"} & result.keys()
     assert result["tools"]["total_calls"] == 3
-
-
-def test_analyze_session_redacts_artifact_primary_from_entire_result(
-    tmp_path: Path,
-) -> None:
-    """A private primary citation never survives in serialized evaluation."""
-
-    public_source = tmp_path / "source"
-    public_source.mkdir()
-    daydream_dir = tmp_path / "frozen" / ".daydream"
-    deep = daydream_dir / "deep"
-    deep.mkdir(parents=True)
-    provenance = _artifact_provenance(
-        public_source=public_source,
-        private_base=Path("/Users/alice/private"),
-        session_id="session",
-    )
-    artifact_primary = str(provenance.live_root / ".daydream/deep/stack-python-review.md")
-    _write_records(
-        deep,
-        id="py-private-primary",
-        file=artifact_primary,
-        rationale="The private review artifact supports this claim.",
-    )
-    trajectories = {
-        "main": _root_trajectory("session"),
-        "forked": [_read_traj("deep-python.json")],
-    }
-
-    result = analyze_session(
-        daydream_dir,
-        session_id="session",
-        frozen_trajectories=trajectories,
-        artifact_provenance=provenance,
-        code_workspace=public_source,
-    )
-
-    entry = result["grounding"]["ungrounded"][0]
-    redacted_primary = redact_text(artifact_primary)
-    assert entry["artifact_file_ref"] == redacted_primary
-    assert entry["file"] == redacted_primary
-    serialized = json.dumps(result, sort_keys=True)
-    assert artifact_primary not in serialized
-    assert "/Users/alice/private" not in serialized
-
-
-def test_exploration_utilization_counts_reads_beneath_exploration_dir() -> None:
-
-    trajectories = {
-        "main": None,
-        "forked": [
-            _read_traj("deep-python.json", "/repo/.daydream/exploration/summary.md"),
-            _read_traj("deep-ts.json", "/repo/.daydream/exploration/affected_files.md"),
-            _read_traj("deep-rust.json", "/repo/.daydream/exploration/conventions.md"),
-            _read_traj(
-                "deep-c.json",
-                "/repo/.daydream/exploration/affected_files.md",
-                pi_style=True,
-            ),
-            _read_traj("deep-go.json", "/repo/src/main.go"),
-        ],
-    }
-    result = analyze_exploration_utilization(
-        trajectories,
-        daydream_dir=Path("/repo/.daydream"),
-    )
-    by_agent = {agent["agent"]: agent for agent in result["by_agent"]}
-    assert by_agent["deep-python"]["utilized"] is True
-    assert by_agent["deep-ts"]["utilized"] is True
-    assert by_agent["deep-rust"]["utilized"] is True
-    assert by_agent["deep-c"]["utilized"] is True
-    assert by_agent["deep-go"]["utilized"] is False  # outside exploration/ -> not counted
-    assert result["reviewers_utilizing_exploration"] == 4
-
-
-def test_exploration_utilization_counts_bash_mediated_reads() -> None:
-
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "Bash",
-                                "arguments": {"command": "cat .daydream/exploration/summary.md"},
-                            },
-                        ],
-                    },
-                ],
-            }
-        ],
-    }
-
-    result = analyze_exploration_utilization(trajectories)
-
-    entry = result["by_agent"][0]
-    assert entry["exploration_reads"] == 1
-    assert entry["utilized"] is True
-    assert result["reviewers_utilizing_exploration"] == 1
-
-
-def test_grounding_rate_is_undefined_with_zero_findings(tmp_path: Path) -> None:
-    """A review that produced NO findings has an undefined grounding rate.
-
-    Reporting 1.0 here would hand a review that found nothing a perfect
-    grounding score, which flows into the manifest and becomes a top RL
-    reward. ``None`` is the only honest value for 0/0. Unchanged by the
-    line-tightening in issue #1106.
-    """
-    trajectories = {
-        "main": None,
-        "forked": [_read_traj("deep-python.json", "/repo/api.py")],
-    }
-
-    result = analyze_grounding(trajectories, [], tmp_path / ".daydream")
-
-    assert result["total_findings"] == 0
-    assert result["grounded_count"] == 0
-    assert result["ungrounded_count"] == 0
-    assert result["grounding_rate"] is None
-
-
-
-
-CODEX_READ_COMMAND = (
-    "sed -n '1,240p' .daydream/exploration/summary.md && "
-    "sed -n '1,280p' .daydream/diff.patch; "
-    "rg -n -C 3 'cache_write_tokens|total_cache_write_tokens' "
-    "core/osprey-cli docs README.md 2>/dev/null && "
-    "cat some/file.rb; nl -ba pkg/services/cleanup.go"
-)
-
-
-def test_files_read_extracts_codex_shell_paths() -> None:
-    calls = [{"function_name": "shell", "arguments": {"command": CODEX_READ_COMMAND}}]
-
-    paths = _files_read(calls)
-
-    assert ".daydream/exploration/summary.md" in paths
-    assert ".daydream/diff.patch" in paths
-    assert "core/osprey-cli" in paths
-    assert "docs" in paths
-    assert "README.md" in paths
-    assert "some/file.rb" in paths
-    assert "pkg/services/cleanup.go" in paths
-    assert "1,240p" not in paths
-    assert "1,280p" not in paths
-    assert "cache_write_tokens|total_cache_write_tokens" not in paths
-    assert "2>/dev/null" not in paths
-
-
-def test_files_read_extracts_pi_read_and_bash_paths() -> None:
-    calls = [
-        {
-            "function_name": "read",
-            "arguments": {"path": "/repo/pkg/services/cleanup.go"},
-        },
-        {
-            "function_name": "bash",
-            "arguments": {"command": "cat README.md && nl -ba core/osprey-cli"},
-        },
-    ]
-
-    paths = _files_read(calls)
-
-    assert "/repo/pkg/services/cleanup.go" in paths
-    assert "README.md" in paths
-    assert "core/osprey-cli" in paths
-
-
-def test_files_read_counts_claude_bash_shell_reads() -> None:
-    calls = [
-        {
-            "function_name": "Bash",
-            "arguments": {"command": "sed -n '1,60p' daydream/config.py"},
-        }
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == {"daydream/config.py"}
-    assert "1,60p" not in paths
-
-
-def _shell_reads(command: str) -> set[str]:
-    """Extract read paths from a single codex ``shell`` call."""
-    return _files_read([{"function_name": "shell", "arguments": {"command": command}}])
-
-
-def test_files_read_skips_separated_redirect_target() -> None:
-    paths = _shell_reads("cat source.txt > target.py")
-
-    assert "source.txt" in paths
-    assert "target.py" not in paths
-
-
-def test_files_read_skips_redirect_and_pattern_for_rg() -> None:
-    paths = _shell_reads("rg -n 'pat' a.py b.py 2>/dev/null")
-
-    assert "a.py" in paths
-    assert "b.py" in paths
-    assert "/dev/null" not in paths
-    assert "pat" not in paths
-
-
-def test_files_read_preserves_quoted_paths_with_spaces() -> None:
-    assert "my file.py" in _shell_reads("cat 'my file.py'")
-    assert "my file.py" in _shell_reads('cat "my file.py"')
-
-
-def test_files_read_skips_rg_option_values() -> None:
-    paths = _shell_reads("rg -C 3 --glob '*.py' 'needle' src/app.py")
-
-    assert paths == {"src/app.py"}
-    assert "3" not in paths
-    assert "*.py" not in paths
-    assert "needle" not in paths
-
-
-def test_files_read_extracts_claude_inspection_verbs() -> None:
-    calls = [{"function_name": "Bash", "arguments": {"command": (
-        "grep -n 'def validate' daydream/config.py && "
-        "head -n 20 tests/test_config.py; "
-        "tail -n 5 README.md; "
-        "wc -l daydream/timeutil.py; "
-        "awk '{print $1}' docs/guide.md"
-    )}}]
-
-    paths = _files_read(calls)
-
-    assert "daydream/config.py" in paths
-    assert "tests/test_config.py" in paths
-    assert "README.md" in paths
-    assert "daydream/timeutil.py" in paths
-    assert "docs/guide.md" in paths
-    assert "def validate" not in paths    # grep pattern is not a path
-    assert "20" not in paths              # head -n value is not a path
-    assert "5" not in paths               # tail -n value is not a path
-    assert "{print $1}" not in paths      # awk program is not a path
-    assert "1" not in paths               # wc -l flag not a path
-
-
-def test_files_read_bash_import_only_grep_does_not_credit() -> None:
-    # The import-only carve-out spans the shared seam: a Bash/shell ``grep``
-    # whose pattern references only module imports credits no read path,
-    # matching the Grep-tool branch (issue #739).
-    assert _shell_reads("grep -n '^from|^import' daydream/config.py") == set()
-    assert _shell_reads("grep 'import ' a.py b.py") == set()
-    # A content grep still credits its file operands.
-    assert _shell_reads("grep -n 'def validate' daydream/config.py") == {"daydream/config.py"}
-
-
-def test_files_read_claude_read_and_grep_unchanged() -> None:
-    calls = [
-        {"function_name": "Read", "arguments": {"file_path": "/repo/api.py"}},
-        {"function_name": "Grep", "arguments": {"path": "src/"}},
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == {"/repo/api.py", "src/"}
-
-
-def test_files_read_grep_import_only_pattern_does_not_credit() -> None:
-    calls = [
-        {
-            "function_name": "Grep",
-            "arguments": {"pattern": "^from|^import", "path": "daydream/config.py"},
-        }
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == set()
-
-
-def test_files_read_grep_content_pattern_credits_path() -> None:
-    calls = [
-        {
-            "function_name": "Grep",
-            "arguments": {"pattern": "def validate", "path": "daydream/config.py"},
-        }
-    ]
-
-    paths = _files_read(calls)
-
-    assert paths == {"daydream/config.py"}
-
-
-def test_files_read_grep_pattern_flag_keeps_file_operand() -> None:
-    # -e/-f/--regexp/--file are pattern-supplying options: the following token
-    # is the pattern, so the trailing file operand must still be credited as a
-    # read path (issue #739). Before the fix these dropped the operand entirely.
-    assert _shell_reads("grep -e 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --regexp 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --regexp='def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep -f /tmp/patterns.txt daydream/config.py") == {"daydream/config.py"}
-
-
-def test_files_read_grep_context_options_do_not_eat_operand() -> None:
-    # --before-context/--after-context/--max-count take a value; their numeric
-    # value must not be misread as the pattern (issue #739).
-    assert _shell_reads("grep --before-context 3 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --after-context 5 'def validate' daydream/config.py") == {"daydream/config.py"}
-    assert _shell_reads("grep --max-count 2 'def validate' daydream/config.py") == {"daydream/config.py"}
-
-
-def test_files_read_resolves_literal_loop_bindings() -> None:
-    # Issue #1397: the two archived reviewer patterns credit the literal word
-    # list -- never the unexpanded ``$task_file``/``$f`` spelling.
-    assert _shell_reads(
-        'for task_file in .gitignore openapi.yaml; do '
-        'echo "--- $task_file"; nl -ba "$task_file"; done'
-    ) == {".gitignore", "openapi.yaml"}
-    assert _shell_reads(
-        "for f in ios/App/App.entitlements ios/App/App.xcodeproj/project.pbxproj; "
-        'do nl -ba "$f"; done'
-    ) == {"ios/App/App.entitlements", "ios/App/App.xcodeproj/project.pbxproj"}
-    # Braced form and one literal prefix (Should Have): identical resolution.
-    assert _shell_reads('for f in a.py b.py; do nl -ba "${f}"; done') == {"a.py", "b.py"}
-    assert _shell_reads('for f in a.py b.py; do cat "src/$f"; done') == {"src/a.py", "src/b.py"}
-    # Sequential top-level loops resolve independently, each to its own list.
-    assert _shell_reads(
-        'for f in a.py b.py; do nl -ba "$f"; done; for g in c.py; do cat "$g"; done'
-    ) == {"a.py", "b.py", "c.py"}
-
-
-def test_files_read_sequential_loops_reusing_a_variable_resolve_independently() -> None:
-    # Issue #1397 Should Have: sequential loops resolve each to its OWN literal
-    # list -- including two loops that reuse the same variable name.
-    assert _shell_reads(
-        'for f in a.py b.py; do nl -ba "$f"; done; for f in c.py; do nl -ba "$f"; done'
-    ) == {"a.py", "b.py", "c.py"}
-
-
-def test_files_read_loop_credit_is_scoped_to_the_enclosing_loop_body() -> None:
-    # Issue #1397 requirement 6 (whole-loop-or-nothing): a read operand resolves
-    # only through the loop body that encloses it. A later loop's word list
-    # never attributes credit to a read it did not perform, and an ambiguous
-    # loop's read is not rescued by an unrelated literal loop.
-    assert _shell_reads(
-        'for f in a.py; do nl -ba "$f"; done; for f in b.py; do :; done'
-    ) == {"a.py"}
-    assert _shell_reads(
-        'for f in $(git ls-files); do cat "$f"; done; for f in readme.md; do :; done'
-    ) == set()
-
-
-def test_files_read_loop_binding_is_whole_loop_or_nothing() -> None:
-    # Issue #1397 AC2 / requirement 6: every ambiguous shape credits nothing
-    # for that call, so the affected files stay uncovered and reach the sweep.
-    for command in (
-        'for f in $(git ls-files); do nl -ba "$f"; done',            # command substitution
-        'for f in `ls`; do nl -ba "$f"; done',                       # backticks
-        'for f in src/*.py; do nl -ba "$f"; done',                   # glob
-        'for f in "$@"; do nl -ba "$f"; done',                       # "$@"
-        'for f in $FILES; do nl -ba "$f"; done',                     # variable list
-        'for f in {a,b}.py; do nl -ba "$f"; done',                   # brace expansion
-        'for f in ~/a.py; do nl -ba "$f"; done',                     # tilde
-        'for f in a.py b.py; do [ -f "$f" ] && nl -ba "$f"; done',   # && guard
-        'for f in a.py b.py; do break; nl -ba "$f"; done',            # skipped read
-        'for f in a.py b.py; do continue; nl -ba "$f"; done',         # skipped read
-        'for f in a.py b.py; do exit 0; nl -ba "$f"; done',           # skipped read
-        'for f in a.py b.py; do return 0; nl -ba "$f"; done',         # skipped read
-        'for f in a.py b.py; do if [ -f "$f" ]; then nl -ba "$f"; fi; done',
-        'for d in x y; do for f in a.py; do nl -ba "$f"; done; done',  # nested
-        'while read f; do nl -ba "$f"; done',                        # while
-        'for f in a.py b.py; do nl -ba "$g"; done',                  # unbound operand
-        'for f in a.py b.py; do nl -ba "src/$f/extra"; done',        # suffix after var
-    ):
-        assert _shell_reads(command) == set(), command
-
-
-def test_analyze_coverage_credits_a_completed_loop_read(tmp_path: Path) -> None:
-    # The same resolution is visible to eval coverage analysis (shared seam).
-    daydream_dir = tmp_path / ".daydream"
-    daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(
-        "diff --git a/.gitignore b/.gitignore\n"
-        "diff --git a/openapi.yaml b/openapi.yaml\n"
-    )
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-generic.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "shell",
-                                "arguments": {
-                                    "command": 'for task_file in .gitignore openapi.yaml; '
-                                    'do nl -ba "$task_file"; done'
-                                },
-                            }
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-
-    result = analyze_coverage(trajectories, daydream_dir)
-
-    assert result["uncovered_files"] == []
-    assert result["files_read_by_reviewers"] == 2
-
-
-# Only a quote opened and never closed makes shlex raise; the two other
-# former candidates had balanced/escaped quotes and tokenize cleanly.
-
-
-def test_tokenize_command_never_raises_on_unbalanced_quotes() -> None:
-    # must not raise
-    tokens = _tokenize_command("rg -l '\"unclosed")
-    assert isinstance(tokens, list)
-
-
-def test_tokenize_command_whitespace_fallback_keeps_recoverable_paths() -> None:
-    # the unclosed quote makes shlex raise mid-token; the whitespace-split
-    # fallback still surfaces the ``a.py`` operand preceding it
-    paths = _shell_reads("rg -n 'pat' a.py '\"unclosed")
-    assert "a.py" in paths
-
-
-def test_analyze_coverage_counts_codex_and_pi_reads(tmp_path: Path) -> None:
-    daydream_dir = tmp_path / ".daydream"
-    daydream_dir.mkdir()
-    (daydream_dir / "diff.patch").write_text(
-        "diff --git a/pkg/services/cleanup.go b/pkg/services/cleanup.go\n"
-        "diff --git a/core/osprey-cli b/core/osprey-cli\n"
-    )
-    trajectories = {
-        "main": {
-            "_source_file": "trajectory.json",
-            "steps": [
-                {
-                    "step_id": "m0",
-                    "extra": {"daydream_phase": "deep"},
-                    "tool_calls": [
-                        {
-                            "function_name": "shell",
-                            "arguments": {"command": "sed -n '1,240p' .daydream/diff.patch"},
-                        }
-                    ],
-                }
-            ],
-        },
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "read",
-                                "arguments": {"path": "/repo/pkg/services/cleanup.go"},
-                            },
-                            {
-                                "function_name": "bash",
-                                "arguments": {"command": "cat core/osprey-cli"},
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-
-    result = analyze_coverage(trajectories, daydream_dir)
-
-    assert result["coverage_ratio"] == 1.0
-    assert result["files_read_by_reviewers"] == 2
-    assert result["uncovered_files"] == []
-
-
-def test_analyze_grounding_counts_codex_and_pi_reads(tmp_path: Path) -> None:
-    trajectories = {
-        "main": None,
-        "forked": [
-            {
-                "_source_file": "deep-python.json",
-                "steps": [
-                    {
-                        "step_id": "s0",
-                        "tool_calls": [
-                            {
-                                "function_name": "shell",
-                                "arguments": {"command": "cat /repo/api.py"},
-                            },
-                            {
-                                "function_name": "read",
-                                "arguments": {"path": "/repo/api.py"},
-                            },
-                        ],
-                    }
-                ],
-            }
-        ],
-    }
-    findings = [
-        {
-            "id": "py-1",
-            "_stack": "python",
-            "file": "api.py",
-            "rationale": "Read api.py; flag the missing validation.",
-            "confidence": "HIGH",
-        }
-    ]
-
-    # No hunk artifacts under this .daydream -> hunk_source "none", so the
-    # predicate is the file-only one and the read extraction is what is measured.
-    result = analyze_grounding(trajectories, findings, tmp_path / ".daydream")
-
-    entry = result["grounded"][0]
-    assert entry["file_was_read"] is True
-    assert entry["location_tier"] == "unchecked"
-    assert result["hunk_source"] == "none"
-    assert result["grounded_count"] == 1
-    assert result["ungrounded_count"] == 0
-    assert result["grounding_rate"] == 1.0
-
-
 
 
 def _quality_workspace(tmp_path: Path, files: dict[str, str], name: str = "workspace") -> Path:
@@ -1365,23 +389,13 @@ def _quality_workspace(tmp_path: Path, files: dict[str, str], name: str = "works
     return ws
 
 
-def _quality(
-    tmp_path: Path,
-    files: dict[str, str],
-    *,
-    name: str = "workspace",
-    **kwargs: Any,
-) -> dict[str, Any]:
+def _quality(tmp_path: Path, files: dict[str, str], *, name: str = "workspace", **kwargs: Any,) -> dict[str, Any]:
     """Build a workspace with ``files`` and analyze its ``.daydream`` quality."""
     return analyze_quality(_quality_workspace(tmp_path, files, name) / ".daydream", **kwargs)
 
 
 def _big_function(max_x: int) -> str:
-    """A single-function if/elif chain reaching ``max_x``.
-
-    ``big`` has ``max_x + 1`` cyclomatic complexity (1 + the ``if`` + every
-    ``elif``) and ``2 * max_x + 2`` sloc lines.
-    """
+    """Build an if/elif chain with max_x+1 complexity and 2*max_x+2 SLOC."""
     lines = ["def big(x):", "    if x == 1:", "        return 1"]
     for i in range(2, max_x + 1):
         lines.append(f"    elif x == {i}:")
@@ -1393,13 +407,9 @@ def _big_function(max_x: int) -> str:
 def _mass(cc: int, sloc: int) -> float:
     return cc * math.sqrt(sloc)
 
-
 def test_quality_erosion_computes_cc_mass_share(tmp_path: Path) -> None:
     """Pooled erosion is the high-CC mass share, hand-computed from the file."""
-    result = _quality(
-        tmp_path,
-        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
-    )
+    result = _quality(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
 
     small_mass = _mass(1, 2)
     big_mass = _mass(12, 24)
@@ -1410,76 +420,57 @@ def test_quality_erosion_computes_cc_mass_share(tmp_path: Path) -> None:
     assert entry["functions"] == 2
     assert entry["high_cc_functions"] == 1
 
-
 def test_quality_erosion_zero_when_no_high_cc(tmp_path: Path) -> None:
-    result = _quality(
-        tmp_path,
-        {"app.py": "def one(x):\n    return x + 1\n\ndef two(x, y):\n    return x + y\n"},
-    )
+    result = _quality(tmp_path, {"app.py": "def one(x):\n    return x + 1\n\ndef two(x, y):\n    return x + y\n"},)
 
     assert result["erosion"] == 0.0
     assert result["per_file"]["app.py"]["erosion"] == 0.0
     assert result["per_file"]["app.py"]["high_cc_functions"] == 0
 
-
-@pytest.mark.parametrize(
-    ("source", "expected"),
+@pytest.mark.parametrize(("source", "expected"),
     [
         pytest.param("def f(items):\n    return [x for x in items]\n", 1 / 2, id="identity-comprehension"),
         pytest.param(
             "def process(items):\n    for x in items:\n        if len(items) == 0:\n"
             "            return None\n        print(x)\n",
-            2 / 5,
-            id="empty-list-guard",
+            2 / 5, id="empty-list-guard",
         ),
         pytest.param(
             "def compute(x):\n    intermediate = x + 1\n    return intermediate * 2\n",
-            round(1 / 3, 4),
-            id="single-use-variable",
+            round(1 / 3, 4), id="single-use-variable",
         ),
         pytest.param(
             "def inner(x, y):\n    return x + y\n\ndef outer(x, y):\n    return inner(x, y)\n",
-            2 / 4,
-            id="trivial-wrapper",
+            2 / 4, id="trivial-wrapper",
         ),
         pytest.param(
             "def f(a, b, c):\n    if a:\n        if b:\n            if c:\n"
             "                return 1\n    return 0\n",
-            round(2 / 6, 4),
-            id="nested-ladder",
+            round(2 / 6, 4), id="nested-ladder",
         ),
         pytest.param(
             "def a():\n    if x > 1:\n        return 1\n    return 0\n\n"
             "def b():\n    if x > 1:\n        return 1\n    return 0\n",
-            6 / 8,
-            id="clone-block",
+            6 / 8, id="clone-block",
         ),
-        pytest.param(
-            "def f(items):\n    return [x for x in items if x > 0]\n",
-            0.0,
-            id="filtered-comprehension",
-        ),
+        pytest.param("def f(items):\n    return [x for x in items if x > 0]\n", 0.0, id="filtered-comprehension",),
         pytest.param(
             "def f(a, b):\n    return [x for x in a for y in b]\n",
-            0.0,
-            id="multi-generator-comprehension",
+            0.0, id="multi-generator-comprehension",
         ),
         pytest.param(
             "def f(items):\n    while should_continue(items):\n"
             "        if not items:\n            break\n",
-            0.0,
-            id="predicate-guard",
+            0.0, id="predicate-guard",
         ),
         pytest.param(
             "def f(items):\n    while items:\n        if not items:\n            break\n",
-            2 / 4,
-            id="bare-collection-guard",
+            2 / 4, id="bare-collection-guard",
         ),
         pytest.param(
             "def f(items):\n    while len(items) > 0:\n        if not items:\n"
             "            break\n",
-            2 / 4,
-            id="len-comparison-guard",
+            2 / 4, id="len-comparison-guard",
         ),
     ],
 )
@@ -1489,13 +480,11 @@ def test_quality_verbosity_detects_redundancy(tmp_path: Path, source: str, expec
         assert entry["verbosity"] > 0
     assert entry["verbosity"] == pytest.approx(expected)
 
-
 def test_quality_per_file_keyed_by_relative_path(tmp_path: Path) -> None:
     result = _quality(tmp_path, {"pkg/mod.py": "def f(x):\n    return x\n"})
 
     assert "pkg/mod.py" in result["per_file"]
     assert result["per_file"]["pkg/mod.py"]["functions"] == 1
-
 
 def test_quality_returns_none_when_no_python_files(tmp_path: Path) -> None:
     result = _quality(tmp_path, {"README.md": "# nothing here\n"})
@@ -1504,16 +493,10 @@ def test_quality_returns_none_when_no_python_files(tmp_path: Path) -> None:
     assert result["verbosity"] is None
     assert result["scoped_files"] == 0
     assert result["per_file"] == {}
-    assert result["calibration"] == {
-        "human_verbosity": 0.19,
-        "human_erosion": 0.34,
-        "paper": "arXiv:2603.24755",
-    }
-
+    assert result["calibration"] == {"human_verbosity": 0.19, "human_erosion": 0.34, "paper": "arXiv:2603.24755"}
 
 def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path) -> None:
-    result = _quality(
-        tmp_path,
+    result = _quality(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
             ".daydream/deep/fixture.py": "def g(x):\n    return x\n",
@@ -1525,47 +508,22 @@ def test_quality_excludes_vendored_and_internal_dirs(tmp_path: Path) -> None:
     assert result["scoped_files"] == 1
     assert list(result["per_file"]) == ["app.py"]
 
-
 def test_quality_monotone_across_eroding_fix(tmp_path: Path) -> None:
-    """An eroding fix to an already-large function raises erosion (verbosity holds)."""
-    clean = _quality(
-        tmp_path,
-        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
-        name="clean",
-    )
-    eroded = _quality(
-        tmp_path,
-        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(13)},
-        name="eroded",
-    )
+    clean = _quality(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)}, name="clean",)
+    eroded = _quality(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(13)}, name="eroded",)
 
     assert eroded["erosion"] > clean["erosion"]
     assert eroded["verbosity"] >= clean["verbosity"]
 
-
-def test_analyze_session_includes_quality_for_post_fix_workspace(
-    tmp_path: Path,
-) -> None:
-    """Real-path: analyze_session computes quality on the live workspace tree."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
-    )
+def test_analyze_session_includes_quality_for_post_fix_workspace(tmp_path: Path,) -> None:
+    ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
     daydream_dir = ws / ".daydream"
-    seed_run_trajectory(
-        daydream_dir, "quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",
-    )
+    seed_run_trajectory(daydream_dir, "quality-real", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
 
     result = analyze_session(daydream_dir, session_id="quality-real")
 
     quality = result["quality"]
-    assert set(quality) == {
-        "erosion",
-        "verbosity",
-        "per_file",
-        "calibration",
-        "scoped_files",
-    }
+    assert set(quality) == {"erosion", "verbosity", "per_file", "calibration", "scoped_files"}
     assert quality["scoped_files"] == 1
     assert quality["calibration"]["human_erosion"] == 0.34
     assert quality["calibration"]["human_verbosity"] == 0.19
@@ -1575,85 +533,43 @@ def test_analyze_session_includes_quality_for_post_fix_workspace(
     expected = round(_mass(12, 24) / (_mass(1, 2) + _mass(12, 24)), 4)
     assert quality["erosion"] == pytest.approx(expected)
 
-
-def test_analyze_session_reads_quality_from_explicit_code_workspace(
-    tmp_path: Path,
-) -> None:
+def test_analyze_session_reads_quality_from_explicit_code_workspace(tmp_path: Path,) -> None:
     """Frozen artifact inputs and post-fix source quality use distinct roots."""
     daydream_dir = tmp_path / "frozen" / ".daydream"
-    seed_run_trajectory(
-        daydream_dir, "quality-split", schema_version="ATIF-v1.6", model_name="test",
-    )
-    code_workspace = _quality_workspace(
-        tmp_path,
+    seed_run_trajectory(daydream_dir, "quality-split", schema_version="ATIF-v1.6", model_name="test",)
+    code_workspace = _quality_workspace(tmp_path,
         {"app.py": "def changed(x):\n    return x + 1\n"},
         name="operational",
     )
     public_source = tmp_path / "public-source"
     provenance = _artifact_provenance(
-        public_source=public_source,
-        private_base=tmp_path / "private",
-        workspace_key="workspace",
+        public_source=public_source, private_base=tmp_path / "private", workspace_key="workspace",
         session_id="quality-split",
     )
 
     result = analyze_session(
-        daydream_dir,
-        session_id="quality-split",
-        artifact_provenance=provenance,
-        code_workspace=code_workspace,
+        daydream_dir, session_id="quality-split", artifact_provenance=provenance, code_workspace=code_workspace,
     )
 
     assert result["quality"]["scoped_files"] == 1
     assert list(result["quality"]["per_file"]) == ["app.py"]
     assert result["daydream_dir"] == str(public_source / ".daydream")
 
-
-
-
-def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(
-    tmp_path: Path,
-) -> None:
-    """Blank rows inside a flagged span must not count toward the ratio.
-
-    A trivial wrapper's span covers the whole function, blank lines included;
-    previously ``verbosity`` divided those rows by non-blank LOC and could
-    exceed 1.0, corrupting the per-file and workspace aggregates.
-    """
-    result = _quality(
-        tmp_path,
-        {
-            "app.py": (
-                "def outer(x, y):\n"
-                "\n"
-                "\n"
-                "    return inner(x, y)\n"
-            )
-        },
-    )
+def test_quality_verbosity_stays_within_zero_one_when_spans_include_blank_lines(tmp_path: Path,) -> None:
+    result = _quality(tmp_path, {"app.py": ("def outer(x, y):\n" "\n" "\n" "    return inner(x, y)\n")},)
 
     entry = result["per_file"]["app.py"]
     assert 0.0 <= entry["verbosity"] <= 1.0
     assert entry["verbosity"] == pytest.approx(1.0)
 
-
 def test_quality_erosion_ignores_wildcard_match_case(tmp_path: Path) -> None:
     """``case _:`` matches any value and adds no decision path."""
-    result = _quality(
-        tmp_path,
-        {
-            "app.py": (
-                "def f(x):\n"
-                "    match x:\n"
-                "        case _:\n"
-                "            return 0\n"
-            )
-        },
+    result = _quality(tmp_path,
+        {"app.py": ("def f(x):\n" "    match x:\n" "        case _:\n" "            return 0\n")},
     )
 
     assert result["per_file"]["app.py"]["high_cc_functions"] == 0
     assert result["erosion"] == 0.0
-
 
 def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> None:
     """Each real ``case <value>:`` adds a decision path; 11 cross the threshold."""
@@ -1667,9 +583,7 @@ def test_quality_erosion_counts_real_match_cases_toward_cc(tmp_path: Path) -> No
     assert entry["high_cc_functions"] == 1
     assert entry["erosion"] == 1.0
 
-
-@pytest.mark.parametrize(
-    ("source", "verbosity"),
+@pytest.mark.parametrize(("source", "verbosity"),
     [
         ("def f(x):\n    return g(x, 42)\n", 0.0),  # literal argument
         ("def f(x):\n    return g(x=x)\n", 0.0),  # keyword argument
@@ -1683,42 +597,24 @@ def test_quality_verbosity_wrapper_cases(tmp_path: Path, source: str, verbosity:
     assert result["per_file"]["app.py"]["verbosity"] == verbosity
 
 
-
-
 _TEN_COMPREHENSION_FILTERS = " ".join(f"if x != {i}" for i in range(10))
 
-
 def test_quality_verbosity_flags_clones_across_files(tmp_path: Path) -> None:
-    """An exact block copied from ``a.py`` into ``b.py`` flags BOTH files.
-
-    Per-file clone detection alone never sees the duplicate — each per-file
-    invocation observes a single occurrence. The cross-file pass must index
-    blocks across scoped files and attribute them back.
-    """
     block = "    if x > 1:\n        return 1\n    return 0\n"
-    result = _quality(
-        tmp_path,
-        {"a.py": "def a():\n" + block, "b.py": "def b():\n" + block},
-    )
+    result = _quality(tmp_path, {"a.py": "def a():\n" + block, "b.py": "def b():\n" + block},)
 
     assert result["per_file"]["a.py"]["verbosity"] > 0
     assert result["per_file"]["b.py"]["verbosity"] > 0
     assert result["verbosity"] > 0
 
-
-def test_quality_candidate_scope_indexes_valid_peers_for_clones(
-    tmp_path: Path,
-) -> None:
-    """Candidate mode indexes valid peer text for cross-file clone attribution."""
+def test_quality_candidate_scope_indexes_valid_peers_for_clones(tmp_path: Path,) -> None:
     block = "    if x > 1:\n        return 1\n    return 0\n"
-    result = _quality(
-        tmp_path,
+    result = _quality(tmp_path,
         {
             "app.py": "def a():\n" + block,
             "peer.py": "def b():\n" + block,  # clone source, NOT a candidate
             "other.py": "def c():\n    return 3\n",  # neither candidate nor peer source
-        },
-        candidate_paths={"app.py"},
+        }, candidate_paths={"app.py"},
     )
 
     assert result["scoped_files"] == 1
@@ -1726,30 +622,18 @@ def test_quality_candidate_scope_indexes_valid_peers_for_clones(
     assert result["per_file"]["app.py"]["verbosity"] > 0  # clone from peer.py indexed
     assert result["erosion"] is not None
 
-
-def test_quality_candidate_none_preserves_whole_workspace_result(
-    tmp_path: Path,
-) -> None:
-    """An explicit ``candidate_paths=None`` preserves whole-workspace analysis."""
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},
-    )
+def test_quality_candidate_none_preserves_whole_workspace_result(tmp_path: Path,) -> None:
+    ws = _quality_workspace(tmp_path, {"app.py": "def a():\n    return 1\n", "b.py": "def b(y):\n    return y * 2\n"},)
     default = analyze_quality(ws / ".daydream")
     explicit_none = analyze_quality(ws / ".daydream", candidate_paths=None)
     assert explicit_none == default
 
-
-def test_quality_candidate_empty_set_returns_empty_without_enumeration(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_quality_candidate_empty_set_returns_empty_without_enumeration(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """An explicitly empty candidate set reports zero files without walking the workspace."""
-
     def _boom(_workspace: Path) -> None:
         raise AssertionError("workspace must not be enumerated for an empty candidate set")
 
-    monkeypatch.setattr(analyzer_mod, "_scoped_python_files", _boom)
+    monkeypatch.setattr(quality_mod, "_scoped_python_files", _boom)
     result = _quality(tmp_path, {"app.py": "def a():\n    return 1\n"}, candidate_paths=set())
 
     assert result["scoped_files"] == 0
@@ -1757,25 +641,18 @@ def test_quality_candidate_empty_set_returns_empty_without_enumeration(
     assert result["erosion"] is None
     assert result["verbosity"] is None
 
-
 def test_quality_candidate_ineligible_path_not_reported(tmp_path: Path) -> None:
-    """A candidate that fails the generated-file eligibility rule is not reported."""
-    result = _quality(
-        tmp_path,
+    result = _quality(tmp_path,
         {
             "app.py": "def a():\n    return 1\n",
             "schema_generated.py": "def x():\n    return 1\n",  # *_generated.py glob excludes it
-        },
-        candidate_paths={"schema_generated.py", "app.py"},
+        }, candidate_paths={"schema_generated.py", "app.py"},
     )
     assert result["scoped_files"] == 1
     assert set(result["per_file"]) == {"app.py"}
 
-
 def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path) -> None:
-    """A block present in only one file flags neither file."""
-    result = _quality(
-        tmp_path,
+    result = _quality(tmp_path,
         {
             "a.py": "def a():\n    if x > 1:\n        return 1\n    return 0\n",
             "b.py": "def b(y):\n    return y * 2\n",
@@ -1785,15 +662,9 @@ def test_quality_verbosity_cross_file_clone_needs_two_files(tmp_path: Path) -> N
     assert result["per_file"]["a.py"]["verbosity"] == 0.0
     assert result["per_file"]["b.py"]["verbosity"] == 0.0
 
-
-def test_quality_verbosity_within_file_clones_still_count_across_pass(
-    tmp_path: Path,
-) -> None:
-    """Within-file duplicates keep counting now that the cross-file pass exists."""
-    result = _quality(
-        tmp_path,
-        {
-            "app.py": (
+def test_quality_verbosity_within_file_clones_still_count_across_pass(tmp_path: Path,) -> None:
+    result = _quality(tmp_path,
+        {"app.py": (
                 "def a():\n"
                 "    if x > 1:\n"
                 "        return 1\n"
@@ -1809,51 +680,29 @@ def test_quality_verbosity_within_file_clones_still_count_across_pass(
 
     assert result["per_file"]["app.py"]["verbosity"] == pytest.approx(6 / 8)
 
-
-@pytest.mark.parametrize(
-    ("comprehension", "label"),
-    [
-        (f"[x for x in xs {_TEN_COMPREHENSION_FILTERS}]", "list"),
+@pytest.mark.parametrize(("comprehension", "label"),
+    [(f"[x for x in xs {_TEN_COMPREHENSION_FILTERS}]", "list"),
         (f"{{x for x in xs {_TEN_COMPREHENSION_FILTERS}}}", "set"),
         (f"{{x: x for x in xs {_TEN_COMPREHENSION_FILTERS}}}", "dict"),
         (f"(x for x in xs {_TEN_COMPREHENSION_FILTERS})", "generator"),
     ],
 )
-def test_quality_erosion_comprehension_types_cc_parity(
-    tmp_path: Path, comprehension: str, label: str
-) -> None:
-    """List/set/dict/generator comprehensions count generators + filters identically.
-
-    A comprehension's generators and filters are real branch paths: a function
-    whose only decision points live inside one must cross the CC>10 erosion
-    threshold, which previously they were invisible to.
-    """
+def test_quality_erosion_comprehension_types_cc_parity(tmp_path: Path, comprehension: str, label: str) -> None:
+    """Comprehension generators and filters must all contribute to the CC>10 threshold."""
     result = _quality(tmp_path, {"app.py": f"def f(xs):\n    return {comprehension}\n"})
 
     entry = result["per_file"]["app.py"]
     assert entry["high_cc_functions"] == 1, label
     assert entry["erosion"] == 1.0
 
-
-def test_quality_verbosity_unfiltered_generator_expression_is_identity(
-    tmp_path: Path,
-) -> None:
-    """``(x for x in items)`` is an identity comprehension, exactly like a list one."""
+def test_quality_verbosity_unfiltered_generator_expression_is_identity(tmp_path: Path,) -> None:
     result = _quality(tmp_path, {"app.py": "def f(items):\n    return (x for x in items)\n"})
 
     assert result["per_file"]["app.py"]["verbosity"] > 0
 
-
 def test_quality_excludes_generated_and_vendored_files(tmp_path: Path) -> None:
-    """Generated and vendored Python is out of metric scope (Finding #8).
-
-    Path-based generated files (``*_generated.py``, ``*.pb.py``,
-    ``migrations/*.py``), the generated-file header marker, and vendored
-    trees (``vendor``/``third_party``) must not reach ``per_file``,
-    ``scoped_files``, or the aggregate denominators.
-    """
-    result = _quality(
-        tmp_path,
+    """Generated paths/headers and vendored trees must be absent from files and denominators."""
+    result = _quality(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
             "api_generated.py": "def g(x):\n    return x\n",
@@ -1868,141 +717,68 @@ def test_quality_excludes_generated_and_vendored_files(tmp_path: Path) -> None:
     assert list(result["per_file"]) == ["app.py"]
     assert result["scoped_files"] == 1
 
-
 def test_quality_syntax_error_file_excluded_from_aggregates(tmp_path: Path) -> None:
     """A malformed file stays in scoped_files but not per_file or the ratios."""
-    result = _quality(
-        tmp_path,
-        {
-            "good.py": "def f(x):\n    return x\n",
-            "broken.py": "def broken(:\n    return 1\n",
-        },
-    )
+    result = _quality(tmp_path, {"good.py": "def f(x):\n    return x\n", "broken.py": "def broken(:\n    return 1\n"},)
 
     assert result["scoped_files"] == 2
     assert list(result["per_file"]) == ["good.py"]
     assert result["verbosity"] == 0.0
 
-
-
-
-def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(
-    tmp_path: Path,
-) -> None:
-    """A malformed file's lines must never flag matching blocks in valid files.
-
-    ``analyze_quality`` indexes the cross-file clone pass over successfully
-    parsed files only. A broken file holding a block that also appears in a
-    valid file would otherwise be a second occurrence and flag the valid
-    file, shifting its verbosity (Finding #1).
-    """
+def test_quality_unparseable_file_does_not_contaminate_cross_file_clones(tmp_path: Path,) -> None:
     block = "    if x > 1:\n        return 1\n    return 0\n"
     clean = _quality(tmp_path, {"app.py": "def a():\n" + block}, name="clean")
-    dirty = _quality(
-        tmp_path,
-        {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block},
-        name="dirty",
-    )
+    dirty = _quality(tmp_path, {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block}, name="dirty",)
 
     assert dirty["scoped_files"] == 2
     assert list(dirty["per_file"]) == ["app.py"]
     assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
     assert clean["verbosity"] == dirty["verbosity"]
 
-
-def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones(
-    tmp_path: Path,
-) -> None:
-    """Finding #1 holds in candidate mode: a malformed peer never flags a valid candidate.
-
-    Candidate mode indexes scoped peers as clone sources, but a peer that fails to
-    parse must be excluded from the cross-file clone index so its garbage lines
-    cannot inflate a valid candidate's verbosity (regression #457 round 2).
-    """
+def test_quality_candidate_malformed_peer_does_not_contaminate_cross_file_clones(tmp_path: Path,) -> None:
     block = "    if x > 1:\n        return 1\n    return 0\n"
     clean = _quality(tmp_path, {"app.py": "def a():\n" + block}, name="clean", candidate_paths={"app.py"})
-    dirty = _quality(
-        tmp_path,
+    dirty = _quality(tmp_path,
         {"app.py": "def a():\n" + block, "broken.py": "def broken(:\n" + block},
-        name="dirty",
-        candidate_paths={"app.py"},
+        name="dirty", candidate_paths={"app.py"},
     )
 
     assert set(dirty["per_file"]) == {"app.py"}
     assert clean["per_file"]["app.py"]["verbosity"] == dirty["per_file"]["app.py"]["verbosity"]
     assert clean["verbosity"] == dirty["verbosity"]
 
-
 def test_quality_per_file_erosion_none_without_functions(tmp_path: Path) -> None:
-    """A module with no functions has no mass, so its erosion ratio is None.
-
-    Zero is a meaningful value (no high-CC mass), so undefined must be None;
-    the workspace aggregate pools mass across files and stays numeric.
-    """
-    result = _quality(
-        tmp_path,
-        {
-            "m.py": "import os\nX = 1\n",
-            "app.py": "def f(x):\n    return x\n",
-        },
-    )
+    """No function mass means undefined erosion, distinct from zero high-complexity mass."""
+    result = _quality(tmp_path, {"m.py": "import os\nX = 1\n", "app.py": "def f(x):\n    return x\n"},)
 
     assert result["per_file"]["m.py"]["erosion"] is None
     assert result["per_file"]["m.py"]["functions"] == 0
     assert result["per_file"]["app.py"]["erosion"] == 0.0
     assert result["erosion"] == 0.0
 
-
 def test_quality_per_file_verbosity_none_on_blank_only_file(tmp_path: Path) -> None:
-    """A file with no non-blank lines has an undefined verbosity ratio.
-
-    ``None`` signals the undefined denominator; the workspace aggregate keeps
-    pooling the zero lines harmlessly and stays ``None`` for verbosity too.
-    """
+    """A zero nonblank denominator remains undefined in file and workspace verbosity."""
     result = _quality(tmp_path, {"blank.py": "\n\n\n"})
 
     assert result["per_file"]["blank.py"]["verbosity"] is None
     assert result["per_file"]["blank.py"]["sloc"] == 0
     assert result["verbosity"] is None
 
-
-@pytest.mark.parametrize(
-    ("mutation", "label"),
-    [
-        ("        item = items.pop()\n", "pop"),
-        ("        items.clear()\n", "clear"),
-    ],
+@pytest.mark.parametrize(("mutation", "label"),
+    [("        item = items.pop()\n", "pop"), ("        items.clear()\n", "clear")],
 )
-def test_quality_verbosity_guard_after_mutation_not_flagged(
-    tmp_path: Path, mutation: str, label: str
-) -> None:
-    """A post-mutation empty check is a necessary termination guard.
-
-    ``while items:`` proves nonemptiness only at the header; once the body
-    mutates the collection, ``if not items:`` is meaningful and must not be
-    counted as redundant slop (Finding #3).
-    """
-    result = _quality(
-        tmp_path,
+def test_quality_verbosity_guard_after_mutation_not_flagged(tmp_path: Path, mutation: str, label: str) -> None:
+    """Mutation invalidates the loop-header nonempty proof, so its termination guard is needed."""
+    result = _quality(tmp_path,
         {"app.py": "def f(items):\n    while items:\n" + mutation + "        if not items:\n            break\n"},
     )
 
     assert result["per_file"]["app.py"]["verbosity"] == 0.0, label
 
-
-def test_quality_verbosity_guard_without_prior_mutation_still_flagged(
-    tmp_path: Path,
-) -> None:
-    """A non-mutating statement between header and guard keeps it redundant.
-
-    ``while items: x = f(); if not items: break`` — nothing touches ``items``,
-    so the header's nonemptiness proof still holds at the guard, which stays
-    flagged (Finding #3).
-    """
-    result = _quality(
-        tmp_path,
-        {
-            "app.py": (
+def test_quality_verbosity_guard_without_prior_mutation_still_flagged(tmp_path: Path,) -> None:
+    """An intervening non-mutating statement leaves the loop-header nonempty proof valid."""
+    result = _quality(tmp_path,
+        {"app.py": (
                 "def f(items):\n"
                 "    while items:\n"
                 "        x = f()\n"
@@ -2014,51 +790,23 @@ def test_quality_verbosity_guard_without_prior_mutation_still_flagged(
 
     assert result["per_file"]["app.py"]["verbosity"] > 0
 
-
-@pytest.mark.parametrize(
-    ("wrapper_body", "label"),
+@pytest.mark.parametrize(("wrapper_body", "label"),
     [
         ('    """Pass through."""\n    return inner(x, y)\n', "documented"),
         ("    return inner(x, y)\n", "undocumented"),
     ],
 )
-def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(
-    tmp_path: Path,
-    wrapper_body: str,
-    label: str,
+def test_quality_verbosity_wrapper_docstring_does_not_hide_wrapper(tmp_path: Path, wrapper_body: str, label: str,
 ) -> None:
-    """A leading docstring is not an executable statement for wrapper detection.
-
-    ``_trivial_wrapper`` must count only the real body statement, so a
-    documented pass-through wrapper is flagged exactly like an undocumented
-    one (Finding #4).
-    """
-    result = _quality(
-        tmp_path,
-        {
-            "app.py": (
-                "def inner(x, y):\n"
-                "    return x + y\n"
-                "\n"
-                "def outer(x, y):\n"
-                + wrapper_body
-            )
-        },
+    result = _quality(tmp_path,
+        {"app.py": ("def inner(x, y):\n" "    return x + y\n" "\n" "def outer(x, y):\n" + wrapper_body)},
     )
 
     assert result["per_file"]["app.py"]["verbosity"] > 0, label
 
-
 def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
-    """A vendored dir whose basename is not vendor/third_party is still excluded.
-
-    ``daydream/atif/`` is explicitly vendored from Harbor (see
-    daydream/atif/NOTICE) but its basename ``atif`` is not in the obvious
-    vendored set — it must not reach ``per_file`` or the aggregates
-    (Finding #5).
-    """
-    result = _quality(
-        tmp_path,
+    """The explicit atif vendor exclusion must work without a conventional vendor basename."""
+    result = _quality(tmp_path,
         {
             "app.py": "def f(x):\n    return x\n",
             "daydream/atif/models.py": "def g(x):\n    return x\n",
@@ -2071,14 +819,11 @@ def test_quality_excludes_explicitly_vendored_subtree(tmp_path: Path) -> None:
     assert result["erosion"] == 0.0
 
 
-# Shipped-set findings metrics (issue #741): analyze_findings counts the
-# authoritative merged-items.json set, falling back to the merged review
-# regex count, then the pre-merge per-stack total.
+# Count authoritative merged items, falling back to review text, then pre-merge stack totals.
 
 def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
     """Write deep/\"merged-items.json\" = {\"items\": [high+med schema-valid items]}."""
-    items = [
-        _item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
+    items = [_item(i, file="a.py", line=i + 1, description=f"high-{i}", confidence="HIGH", severity="high")
         for i in range(high)
     ]
     items += [_item(high + i, file="b.py", line=i + 1, description=f"med-{i}") for i in range(med)]
@@ -2086,21 +831,10 @@ def seed_shipped_items(deep: Path, *, high: int, med: int) -> None:
 
 
 def seed_stack_records(deep: Path, stack_name: str, *, n: int) -> None:
-    """Write ``deep/stack-{stack_name}-records.json`` with *n* HIGH records.
+    """Seed HIGH records with host UIDs using 1-based birth ordinals.
 
-    Each record also carries the host-minted ``uid`` a real per-stack record is
-    stamped with at birth (issue #1111), so the fixture matches the production
-    artifact shape. Ordinals are 1-based, matching ``stamp_record_uids``, while
-    the reviewer-style ``id`` stays 0-based -- the two are deliberately not the
-    same numbering, which is part of why ``id`` cannot serve as an identity.
-
-    Args:
-        deep: The ``.daydream/deep`` directory to write into.
-        stack_name: Stack whose records file is written.
-        n: How many records to seed.
-    """
-    records: list[dict[str, Any]] = [
-        {"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
+    Reviewer ids deliberately remain 0-based: display ids are not record identity."""
+    records: list[dict[str, Any]] = [{"id": i, "confidence": "HIGH", "uid": mint_record_uid(stack_name, i + 1)}
         for i in range(n)
     ]
     (deep / f"stack-{stack_name}-records.json").write_text(json.dumps(records))
@@ -2111,7 +845,6 @@ def seed_review_output(deep: Path, *, count: int) -> None:
     lines = [f"{i}. [HIGH] finding {i}" for i in range(1, count + 1)]
     (deep / "review-output.md").write_text("\n".join(lines) + "\n")
 
-
 def test_shipped_count_wins_over_per_stack_records(tmp_path: Path) -> None:
     dd, deep = _deep_dirs(tmp_path)
     seed_shipped_items(deep, high=4, med=4)     # merged-items.json: 8 items (4 HIGH, 4 MEDIUM)
@@ -2120,36 +853,25 @@ def test_shipped_count_wins_over_per_stack_records(tmp_path: Path) -> None:
     assert out["total"] == 8
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
-
 def test_shipped_count_includes_wonder_lens_items(tmp_path: Path) -> None:
-    # Issue #741: wonder-lens merged items are shipped findings and MUST count
-    # toward total_findings (they were dropped by the pre-fix renderer, inflating
-    # cost_per_finding ~2x). The analyzer counts every merged-items.json item.
+    # Wonder findings belong to the shipped denominator too; excluding them inflates cost per finding.
     dd, deep = _deep_dirs(tmp_path)
-    # 4 per-stack + 4 wonder = 8 shipped items.
     seed_shipped_items(deep, high=4, med=0)
     shipped = json.loads((deep / "merged-items.json").read_text())["items"]
-    shipped += [
-        _item(4 + i, file="w.py", line=i + 1, description=f"wonder-{i}", lens="wonder") for i in range(4)
-    ]
+    shipped += [_item(4 + i, file="w.py", line=i + 1, description=f"wonder-{i}", lens="wonder") for i in range(4)]
     seed_merged_items(deep, shipped)
     out = analyze_findings(dd)
     assert out["total"] == 8                     # wonder items are counted (issue #741)
     assert out["by_confidence"] == {"HIGH": 4, "MEDIUM": 4}
 
-
 def test_shipped_count_wrong_shape_merged_items_propagates(tmp_path: Path) -> None:
-    # ``_shipped_counts`` documents present-but-corrupt merged-items.json as a
-    # data-integrity error. A well-formed file with the wrong shape must surface
-    # that error too, not silently yield a bogus count behind the fallback.
+    # Present but malformed merged items are integrity failures, never fallback evidence.
     dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
-    # ``items`` present but a non-list, and a top-level list, are both wrong
-    # shapes, as is a missing ``items`` key -- the writer always emits it.
+    # A non-list items field, missing items key, or top-level list is an invalid writer shape.
     (deep / "merged-items.json").write_text(json.dumps({"items": {"a": 1}}))
     with pytest.raises(ValueError):
         analyze_findings(dd)
-
 
 def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
     dd, deep = _deep_dirs(tmp_path)
@@ -2157,27 +879,19 @@ def test_shipped_count_missing_items_key_propagates(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         analyze_findings(dd)
 
-
-def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(
-    tmp_path: Path,
-) -> None:
-    # A *syntax*-invalid merged-items.json surfaces, not the fallback.
+def test_shipped_count_corrupt_merged_items_propagates_json_decode_error(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
     seed_stack_records(deep, "python", n=4)
     (deep / "merged-items.json").write_text("{not json")
     with pytest.raises(json.JSONDecodeError):
         analyze_findings(dd)
 
-
-def test_shipped_count_falls_back_to_regex_when_merged_items_absent(
-    tmp_path: Path,
-) -> None:
+def test_shipped_count_falls_back_to_regex_when_merged_items_absent(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
     seed_review_output(deep, count=8)           # review-output.md: 8 numbered [ items
     seed_stack_records(deep, "python", n=4)
     out = analyze_findings(dd)
     assert out["total"] == 8                    # from merged_finding_count regex, not per-stack
-
 
 def test_shipped_count_never_zero_without_artifacts(tmp_path: Path) -> None:
     dd, deep = _deep_dirs(tmp_path)
@@ -2185,31 +899,21 @@ def test_shipped_count_never_zero_without_artifacts(tmp_path: Path) -> None:
     out = analyze_findings(dd)
     assert out["total"] == 4                    # pre-merge fallback, never 0
 
-
-def test_per_lens_attribution_reads_alternatives_and_stack_buckets(
-    tmp_path: Path,
-) -> None:
+def test_per_lens_attribution_reads_alternatives_and_stack_buckets(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
     (deep / "alternatives.json").write_text(json.dumps([{"id": 1}, {"id": 2}]))
     seed_stack_records(deep, "python", n=3)
     seed_stack_records(deep, "uncovered", n=1)
     seed_stack_records(deep, "structure", n=2)
     out = analyze_findings(dd)
-    assert out["per_lens"] == {
-        "wonder": 2,
-        "per-stack": 3,
-        "uncovered": 1,
-        "structure": 2,
-    }
-
+    assert all(stack["name"] != "uncovered" for stack in out["stacks"])
+    assert out["per_lens"] == {"wonder": 2, "per-stack": 3, "structure": 2}
 
 def test_per_lens_malformed_alternatives_does_not_crash(tmp_path: Path) -> None:
-    # A malformed optional alternatives file must not take down analysis.
     dd, deep = _deep_dirs(tmp_path)
     (deep / "alternatives.json").write_text("{not json")
     out = analyze_findings(dd)
     assert out["per_lens"]["wonder"] == 0
-
 
 def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None:
     dd, deep = _deep_dirs(tmp_path)
@@ -2220,13 +924,8 @@ def test_per_lens_wonder_only_run_reports_nonzero_wonder(tmp_path: Path) -> None
 
 
 def seed_run_trajectory(
-    dd: Path,
-    session_id: str,
-    *,
-    total_cost_usd: float | None = None,
-    schema_version: str = "ATIF-v1.7",
-    model_name: str | None = None,
-    steps: list[dict[str, Any]] | None = None,
+    dd: Path, session_id: str, *, total_cost_usd: float | None = None, schema_version: str = "ATIF-v1.7",
+    model_name: str | None = None, steps: list[dict[str, Any]] | None = None,
 ) -> None:
     """Write dd/\"runs\"/<session_id>/\"trajectory.json\" with the requested fields."""
     run_dir = dd / "runs" / session_id
@@ -2234,17 +933,12 @@ def seed_run_trajectory(
     agent: dict[str, Any] = {"name": "test"}
     if model_name is not None:
         agent["model_name"] = model_name
-    document: dict[str, Any] = {
-        "schema_version": schema_version,
-        "session_id": session_id,
-        "agent": agent,
-        "steps": [] if steps is None else steps,
-        "extra": {},
+    document: dict[str, Any] = {"schema_version": schema_version, "session_id": session_id, "agent": agent,
+        "steps": [] if steps is None else steps, "extra": {},
     }
     if total_cost_usd is not None:
         document["final_metrics"] = {"total_cost_usd": total_cost_usd}
     (run_dir / "trajectory.json").write_text(json.dumps(document))
-
 
 def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     sid = "a80b9373-56d6-4062-9ab5-4c75e475ab67"
@@ -2260,28 +954,19 @@ def test_analyze_session_shipped_metrics_match_a80b9373(tmp_path: Path) -> None:
     assert res["findings"]["per_lens"]["wonder"] == 6
     assert res["derived"]["cost_per_finding_usd"] == pytest.approx(18.2056 / 8, rel=1e-4)
 
-
-
-
-def test_analyze_quality_refuses_known_bad_tree_sitter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """#1087: on a known-bad tree-sitter install the analyzer refuses native
     analysis by raising the typed guard error — the orchestrator's fail-open
     wrapper converts that into (None, reason); it must not silently skip.
     """
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    # The factory is lru_cached; clear it so the guard inside the cached body
-    # runs against the monkeypatched (bad) install (see impl plan, assumption).
+    # Clear the parser cache so the bad-version guard sees the patched installation.
     _quality_python_parser.cache_clear()
     with pytest.raises(safety.TreeSitterBadVersionError):
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
 
-
-def test_analyze_quality_unchanged_on_good_install(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_analyze_quality_unchanged_on_good_install(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """#1087 (M5): the guard is a no-op on valid installs — behavior identical
     to pre-regression, including the parser cache being consulted.
     """
@@ -2293,9 +978,7 @@ def test_analyze_quality_unchanged_on_good_install(
     assert entry["functions"] == 1
     assert entry["sloc"] > 0
 
-
-def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """#1087: a known-bad install degrades only the quality section of
     analyze_session -- the rest of the evaluation (and evaluation.json)
@@ -2303,14 +986,9 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     """
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    ws = _quality_workspace(
-        tmp_path,
-        {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},
-    )
+    ws = _quality_workspace(tmp_path, {"app.py": "def small(x):\n    return x * 2\n\n" + _big_function(11)},)
     daydream_dir = ws / ".daydream"
-    seed_run_trajectory(
-        daydream_dir, "quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",
-    )
+    seed_run_trajectory(daydream_dir, "quality-bad", schema_version="ATIF-v1.6", model_name="claude-sonnet-4-5",)
 
     result = analyze_session(daydream_dir, session_id="quality-bad")
 
@@ -2319,28 +997,18 @@ def test_analyze_session_degrades_quality_on_known_bad_tree_sitter(
     assert quality["error"]
     assert quality["per_file"] == {}
     assert quality["scoped_files"] == 0
-    # Rest of the evaluation is intact -- the run is archived, not dropped.
     assert result["session_id"] == "quality-bad"
     assert result["trajectory_count"] == 1
 
 
-
-# Pattern B: real temp artifact dirs. These seed helpers write the REAL
-# production artifacts (`.daydream/diff.patch`, `.daydream/hunk-index.json`,
-# `.daydream/deep/merged-items.json`, `.daydream/deep/dedup-candidates.json`)
-# so the axes are exercised over the same bytes a live run leaves behind.
+# Seed the exact production artifact shapes for location and duplication analysis.
 
 WORKED_A = "New helper duplicates the existing loader"
 WORKED_B = "Config reading is implemented twice in this module"
 
 
 def seed_diff_patch(dd: Path, file: str = "svc/loader.py", *, start: int = 85, count: int = 8) -> None:
-    """Write ``.daydream/diff.patch`` with a single hunk on *file*.
-
-    ``parse_hunks`` derives the new-side range from the ``@@`` header, so the
-    hunk's inclusive range is ``[start, start + count - 1]`` -- the issue's
-    worked example ``(85, 92)`` at the defaults.
-    """
+    """Write one hunk with inclusive new-side range [start, start+count-1]."""
     dd.mkdir(parents=True, exist_ok=True)
     (dd / "diff.patch").write_text(
         f"diff --git a/{file} b/{file}\n"
@@ -2355,23 +1023,12 @@ def seed_diff_patch(dd: Path, file: str = "svc/loader.py", *, start: int = 85, c
 def seed_hunk_index(dd: Path, ranges: dict[str, list[tuple[int, int]]]) -> None:
     """Write ``.daydream/hunk-index.json`` in the persisted production shape."""
     dd.mkdir(parents=True, exist_ok=True)
-    (dd / "hunk-index.json").write_text(
-        json.dumps(
-            {
-                path: {
-                    "hunks": [
-                        {
-                            "old_start": start,
-                            "old_end": end,
-                            "new_start": start,
-                            "new_end": end,
-                            "added": 1,
+    (dd / "hunk-index.json").write_text(json.dumps({path: {"hunks": [{
+                            "old_start": start, "old_end": end, "new_start": start, "new_end": end, "added": 1,
                             "removed": 1,
                         }
                         for start, end in file_ranges
-                    ],
-                    "added_total": len(file_ranges),
-                    "removed_total": len(file_ranges),
+                    ], "added_total": len(file_ranges), "removed_total": len(file_ranges),
                 }
                 for path, file_ranges in ranges.items()
             }
@@ -2385,63 +1042,32 @@ def seed_merged_items(deep: Path, items: list[dict[str, Any]]) -> None:
     (deep / "merged-items.json").write_text(json.dumps({"items": items}))
 
 
-def seed_dedup_candidates(
-    deep: Path,
-    *,
-    record_alt_pairs: list[dict[str, Any]] | None = None,
+def seed_dedup_candidates(deep: Path, *, record_alt_pairs: list[dict[str, Any]] | None = None,
     record_duplicate_pairs: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Write ``deep/dedup-candidates.json`` in the production shape.
-
-    Shape mirrors the writer (see ``tests/test_deep_merge_recovery.py``):
-    ``{"record_alt_pairs": [], "record_duplicate_pairs": []}``. These are the
-    PRE-MERGE candidate pairs handed to the merge agent -- inputs, not escapes.
-    """
+    """Write production-shaped pre-merge candidate pairs, which are inputs rather than escapes."""
     deep.mkdir(parents=True, exist_ok=True)
-    (deep / "dedup-candidates.json").write_text(
-        json.dumps(
-            {
-                "record_alt_pairs": record_alt_pairs or [],
-                "record_duplicate_pairs": record_duplicate_pairs or [],
-            }
+    (deep / "dedup-candidates.json").write_text(json.dumps(
+            {"record_alt_pairs": record_alt_pairs or [], "record_duplicate_pairs": record_duplicate_pairs or []}
         )
     )
 
 
 def _provenance(*uids: str) -> dict[str, Any]:
-    """Keyword payload carrying an explicit ``source_uids`` claim (issue #1111).
+    """Provide a typed source_uids keyword payload for unpacking into _item.
 
-    Returns ``dict[str, Any]`` rather than an inline literal so ``**``-unpacking
-    into :func:`_item` type-checks. The key is a module constant, not a literal,
-    so mypy cannot tell which parameter it targets and matches it against every
-    keyword-only one -- a ``list[str]`` value then fails against ``file: str``.
-
-    Call with no arguments for the "merge agent declined to attribute this item"
-    case, which is a real answer and distinct from omitting the key entirely.
-    """
+    No arguments means explicit attribution refusal, distinct from an absent key."""
     return {RECORD_SOURCE_UIDS_KEY: list(uids)}
 
 
 def _item(
-    item_id: int,
-    *,
-    file: str = "svc/loader.py",
-    line: Any = 88,
-    description: str = WORKED_A,
-    lens: str = "per-stack",
+    item_id: int, *, file: str = "svc/loader.py", line: Any = 88, description: str = WORKED_A, lens: str = "per-stack",
     **extra: Any,
 ) -> dict[str, Any]:
     """A shipped ``merged-items.json`` item in the canonical shape."""
     item: dict[str, Any] = {
-        "id": item_id,
-        "file": file,
-        "line": line,
-        "lens": lens,
-        "severity": "medium",
-        "confidence": "MEDIUM",
-        "description": description,
-        "rationale": f"see {file}",
-        "evidence": f"{file}:{line}",
+        "id": item_id, "file": file, "line": line, "lens": lens, "severity": "medium", "confidence": "MEDIUM",
+        "description": description, "rationale": f"see {file}", "evidence": f"{file}:{line}",
     }
     item.update(extra)
     return item
@@ -2453,35 +1079,15 @@ def _worked_example_dirs(tmp_path: Path) -> tuple[Path, Path]:
     seed_diff_patch(dd)  # svc/loader.py, single hunk (85, 92)
     return dd, deep
 
+def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(tmp_path: Path,) -> None:
+    """Distinguish a correct line-88 finding from its line-4 structural restatement.
 
-def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
-    tmp_path: Path,
-) -> None:
-    """THE acceptance criterion of issue #1106.
-
-    The issue's worked example ships one defect twice over a diff whose only
-    hunk is ``svc/loader.py`` ``(85, 92)``: a correct finding at line 88 and a
-    structural restatement anchored at line 4, 81 lines outside the hunk.
-    Before this change both metrics reported the run as perfect
-    (``grounding_rate: 1.0``, ``coverage_ratio: 1.0``) -- indistinguishable
-    from a run that shipped only the correct finding.
-
-    Now the location axis separates them, and the duplication axis surfaces the
-    same-file pair even though its 0.1538 similarity is far under the 0.5 bar.
-    """
+    The sole hunk is lines 85–92; location must expose the 81-line miss, and duplication
+    must expose the pair even though similarity 0.1538 is below the 0.5 threshold."""
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(1, line=88, description=WORKED_A),
-            _item(
-                2,
-                line=4,
-                description=WORKED_B,
-                lens="structural",
-                location_distrust=True,
-                location_cited_line=4,
-            ),
+    seed_merged_items(deep,
+        [_item(1, line=88, description=WORKED_A),
+            _item(2, line=4, description=WORKED_B, lens="structural", location_distrust=True, location_cited_line=4,),
         ],
     )
 
@@ -2489,9 +1095,7 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
     assert location["hunk_source"] == "diff.patch"
     assert location["shipped_items"] == 2
     assert location["scored_items"] == 2
-    assert location["tiers"] == {
-        "in_hunk": 1,
-        "within_tolerance": 0,
+    assert location["tiers"] == {"in_hunk": 1, "within_tolerance": 0,
         "beyond_tolerance": 1,   # the mis-anchored twin
         "file_absent": 0,
     }
@@ -2511,12 +1115,9 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
     assert (pair["a_id"], pair["b_id"]) == ("1", "2")
     assert (pair["a_lens"], pair["b_lens"]) == ("per-stack", "structural")
     assert pair["same_file"] is True
-    # Both items here are merge-agent-authored and neither was attributed, so
-    # neither side has pre-merge provenance (issue #1111). The empty list is the
-    # expected value, not an error, and the axis still reports the pair.
+    # Unattributed merge-authored items keep empty provenance; the duplicate pair still counts.
     assert (pair["a_source_uids"], pair["b_source_uids"]) == ([], [])
 
-    # The clean run -- one correct finding only -- now scores strictly better.
     clean_dd, clean_deep = _worked_example_dirs(tmp_path / "clean")
     seed_merged_items(clean_deep, [_item(1, line=88, description=WORKED_A)])
     clean_location = analyze_location(clean_dd)
@@ -2528,28 +1129,16 @@ def test_issue_1106_worked_example_is_distinguishable_from_the_clean_run(
     assert clean_duplication["max_similarity"] is None
     assert clean_location["in_hunk_rate"] > location["in_hunk_rate"]
 
-
-@pytest.mark.parametrize(
-    ("file", "line", "expected_tier", "expected_distance"),
-    [
-        pytest.param("svc/loader.py", 88, "in_hunk", 0, id="in_hunk"),
+@pytest.mark.parametrize(("file", "line", "expected_tier", "expected_distance"),
+    [pytest.param("svc/loader.py", 88, "in_hunk", 0, id="in_hunk"),
         pytest.param("svc/loader.py", 94, "within_tolerance", 2, id="within_tolerance"),
         pytest.param("svc/loader.py", 4, "beyond_tolerance", 81, id="beyond_tolerance"),
         pytest.param("other/untouched.py", 88, "file_absent", None, id="file_absent"),
     ],
 )
 def test_location_tiers_are_each_reachable(
-    tmp_path: Path,
-    file: str,
-    line: int,
-    expected_tier: str,
-    expected_distance: int | None,
+    tmp_path: Path, file: str, line: int, expected_tier: str, expected_distance: int | None,
 ) -> None:
-    """Every tier is reachable over the real ``(85, 92)`` hunk.
-
-    ``within_tolerance`` uses distance 2, inside the shared ``HUNK_TOLERANCE``
-    of 3; ``beyond_tolerance`` uses the worked example's 81.
-    """
     dd, deep = _worked_example_dirs(tmp_path)
     seed_merged_items(deep, [_item(1, file=file, line=line)])
 
@@ -2561,18 +1150,9 @@ def test_location_tiers_are_each_reachable(
     assert location["items"][0]["tier"] == expected_tier
     assert location["items"][0]["distance"] == expected_distance
 
-
 def test_location_scores_the_cited_line_not_the_snapped_line(tmp_path: Path) -> None:
-    """``location_cited_line`` wins over the post-snap ``line``.
-
-    The validator SNAPS an in-tolerance citation to the hunk boundary before
-    ``merged-items.json`` is written, so reading ``line`` alone would report
-    ``in_hunk`` for a citation that was actually two lines out -- and
-    ``within_tolerance`` would be structurally almost always zero.
-    """
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
+    seed_merged_items(deep,
         [_item(1, line=92, location_cited_line=94)],  # snapped to 92, cited 94
     )
 
@@ -2585,23 +1165,11 @@ def test_location_scores_the_cited_line_not_the_snapped_line(tmp_path: Path) -> 
     row = location["items"][0]
     assert (row["line"], row["cited_line"], row["distance"]) == (92, 94, 2)
 
-
-def test_location_structural_whole_file_anchor_does_not_pollute_tiers(
-    tmp_path: Path,
-) -> None:
-    """A structural ``line: 0`` item is a whole-file citation, not a line citation.
-
-    Mirrors the validator's own carve-out exactly: it is counted in
-    ``whole_file_anchors`` and excluded from ``scored_items``/``tiers``, so it
-    is never scored ``file_absent``/``beyond_tolerance`` and cannot drag
-    ``in_hunk_rate`` down.
-    """
+def test_location_structural_whole_file_anchor_does_not_pollute_tiers(tmp_path: Path,) -> None:
+    """Structural line 0 counts as a whole-file anchor and never lowers scored-line rates."""
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(1, line=88),
-            _item(2, line=0, lens="structural", description=WORKED_B),
+    seed_merged_items(deep,
+        [_item(1, line=88), _item(2, line=0, lens="structural", description=WORKED_B),
             _item(3, line="not-an-int", description="unscorable citation"),
             _item(4, line=True, description="bool is not a line"),
         ],
@@ -2613,21 +1181,11 @@ def test_location_structural_whole_file_anchor_does_not_pollute_tiers(
     assert location["whole_file_anchors"] == 1
     assert location["unscorable_items"] == 2      # the string and the bool
     assert location["scored_items"] == 1
-    assert location["tiers"] == {
-        "in_hunk": 1,
-        "within_tolerance": 0,
-        "beyond_tolerance": 0,
-        "file_absent": 0,
-    }
+    assert location["tiers"] == {"in_hunk": 1, "within_tolerance": 0, "beyond_tolerance": 0, "file_absent": 0}
     assert location["in_hunk_rate"] == 1.0        # the exemptions cost nothing
 
-
 def test_location_prefers_persisted_hunk_index_over_the_diff(tmp_path: Path) -> None:
-    """The persisted index is the run-time authority the validator itself read.
-
-    Seeded with a range the diff does NOT contain, so the assertion can only
-    pass if the index -- not ``diff.patch`` -- supplied the ranges.
-    """
+    """Use ranges absent from the diff to prove the persisted index remains authoritative."""
     dd, deep = _worked_example_dirs(tmp_path)
     seed_hunk_index(dd, {"svc/loader.py": [(200, 210)]})
     seed_merged_items(deep, [_item(1, line=205)])
@@ -2636,7 +1194,6 @@ def test_location_prefers_persisted_hunk_index_over_the_diff(tmp_path: Path) -> 
 
     assert location["hunk_source"] == "hunk-index.json"
     assert location["tiers"]["in_hunk"] == 1
-
 
 def test_location_hunk_source_falls_back_to_diff_patch(tmp_path: Path) -> None:
     """Archived runs carry only ``diff.patch``; the axis still scores them."""
@@ -2649,7 +1206,6 @@ def test_location_hunk_source_falls_back_to_diff_patch(tmp_path: Path) -> None:
     assert location["hunk_source"] == "diff.patch"
     assert location["in_hunk_rate"] == 1.0
 
-
 def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
     """With neither artifact, "not measured" must be distinguishable from "clean"."""
     dd, deep = _deep_dirs(tmp_path)
@@ -2660,31 +1216,16 @@ def test_location_hunk_source_none_reports_not_measured(tmp_path: Path) -> None:
     assert location["hunk_source"] == "none"
     assert location["shipped_items"] == 1
     assert location["scored_items"] == 0
-    assert location["tiers"] == {
-        "in_hunk": 0,
-        "within_tolerance": 0,
-        "beyond_tolerance": 0,
-        "file_absent": 0,
-    }
+    assert location["tiers"] == {"in_hunk": 0, "within_tolerance": 0, "beyond_tolerance": 0, "file_absent": 0}
     assert location["tier_rates"] == {}
     assert location["in_hunk_rate"] is None       # undefined, not perfect
     assert location["items"] == []
 
+def test_location_and_duplication_are_zeroed_when_merged_items_absent(tmp_path: Path,) -> None:
+    """An existing deep directory does not prove merge produced a shipped set.
 
-def test_location_and_duplication_are_zeroed_when_merged_items_absent(
-    tmp_path: Path,
-) -> None:
-    """An absent shipped set is not an error, but duplication's headline count
-    stays undefined rather than becoming an imputed zero.
-
-    ``deep/`` exists (created by an earlier phase, e.g. coverage) but
-    ``merged-items.json`` itself was never written, i.e. merge never produced
-    a shipped set. Location naturally scores nothing (there is nothing to
-    score), and duplication's ``near_duplicate_pairs`` is ``None`` for the
-    same reason: an imputed ``0`` here would be indistinguishable from a
-    genuinely empty, merge-completed shipped set. ``deep/``'s mere existence
-    is not evidence merge ran -- only ``merged-items.json`` is.
-    """
+    Absent merged-items keeps duplicate counts undefined; zero means merge completed
+    with a genuinely empty set."""
     dd, _deep = _worked_example_dirs(tmp_path)
 
     location = analyze_location(dd)
@@ -2701,21 +1242,7 @@ def test_location_and_duplication_are_zeroed_when_merged_items_absent(
     assert duplication["mean_similarity"] is None
     assert duplication["pairs"] == []
 
-
-def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(
-    tmp_path: Path,
-) -> None:
-    """No ``deep/`` directory at all is another way merge never produced a
-    shipped set.
-
-    Same outcome as
-    ``test_location_and_duplication_are_zeroed_when_merged_items_absent``
-    (what's actually checked is ``merged-items.json``, not ``deep/``'s
-    existence) via a different setup: here ``deep/`` itself was never
-    created, so the manifest-archived headline count must be ``None``, not an
-    imputed zero (the same "undefined, never 0.0" contract as
-    ``location_in_hunk_rate``).
-    """
+def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(tmp_path: Path,) -> None:
     dd = tmp_path / ".daydream"
     dd.mkdir(parents=True)
 
@@ -2728,23 +1255,12 @@ def test_duplication_near_duplicate_pairs_is_none_when_deep_never_ran(
     assert duplication["mean_similarity"] is None
     assert duplication["pairs"] == []
 
+def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(tmp_path: Path,) -> None:
+    """Place the only duplicate pair beyond the 200-item quadratic-comparison cap.
 
-def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(
-    tmp_path: Path,
-) -> None:
-    """Pairwise comparison is O(n^2); a pathological shipped set must not turn
-    a single eval pass into an unbounded time/memory sink (issue #1106 R2).
-
-    202 items: the first 200 fill the input cap with mutually distinct
-    descriptions, and the last two -- both beyond the cap -- are an
-    exact-duplicate pair. An uncapped scan would report that pair as the
-    escape; with the cap applied it is never compared, so
-    ``near_duplicate_pairs`` is 0 even though a genuine duplicate sits in the
-    tail. ``shipped_items`` still reports the true, uncapped total.
-    """
+    It must remain uncounted while shipped_items still reports all 202 entries."""
     dd, deep = _worked_example_dirs(tmp_path)
-    # ``uuid4().hex`` descriptions share no common words/bigram structure, so
-    # none of the first 200 items accidentally clear the 0.5 similarity bar.
+    # Random hex descriptions avoid accidentally crossing the 0.5 similarity threshold.
     items = [_item(i, description=uuid.uuid4().hex) for i in range(200)]
     items.append(_item(200, description="the exact same duplicate description text"))
     items.append(_item(201, description="the exact same duplicate description text"))
@@ -2755,11 +1271,8 @@ def test_shipped_duplication_input_is_capped_to_bound_the_on2_scan(
     assert duplication["shipped_items"] == 202
     assert duplication["near_duplicate_pairs"] == 0   # the tail pair is beyond the cap
 
-
-@pytest.mark.parametrize(
-    ("payload", "expected_error"),
-    [
-        pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
+@pytest.mark.parametrize(("payload", "expected_error"),
+    [pytest.param("{not json", json.JSONDecodeError, id="syntax-invalid"),
         pytest.param('{"items": {"a": 1}}', ValueError, id="wrong-shape"),
     ],
 )
@@ -2768,8 +1281,7 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
 ) -> None:
     """The shared loader's raise-on-corrupt contract holds for the new axes too.
 
-    A bogus shipped set is never silently counted -- and never silently scored.
-    """
+    A bogus shipped set is never silently counted -- and never silently scored."""
     dd, deep = _worked_example_dirs(tmp_path)
     (deep / "merged-items.json").write_text(payload)
 
@@ -2778,16 +1290,10 @@ def test_location_and_duplication_propagate_corrupt_merged_items(
     with pytest.raises(expected_error):
         analyze_shipped_duplication(dd)
 
-
-def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(
-    tmp_path: Path,
-) -> None:
-    """A >= 0.5 pair that survived merge is an ESCAPE and is counted."""
+def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(tmp_path: Path,) -> None:
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(1, line=88, description="The loader does not validate its config path"),
+    seed_merged_items(deep,
+        [_item(1, line=88, description="The loader does not validate its config path"),
             _item(2, line=90, description="The loader fails to validate the config path"),
         ],
     )
@@ -2803,33 +1309,12 @@ def test_shipped_duplication_counts_a_genuine_near_duplicate_pair(
     assert duplication["mean_similarity"] == duplication["max_similarity"]
     assert duplication["pairs"][0]["similarity"] == duplication["max_similarity"]
 
-
 def test_shipped_duplication_pairs_carry_the_item_source_uids(tmp_path: Path) -> None:
-    """A shipped duplicate is traceable to the records that produced it.
-
-    Merged items reach ``merged-items.json`` by two routes. The merge agent
-    re-emits items from scratch and attributes them via ``source_uids``; items
-    that bypass it -- the single-stack path and the host-appended structural
-    items -- keep the ``uid`` they were born with and report it as a
-    one-element list. Both routes appear here in one shipped set, so the row
-    names real records on both sides without the reader having to know which
-    route each item took.
-    """
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(
-                1,
-                line=88,
-                description="The loader does not validate its config path",
-                lens="structural",
+    seed_merged_items(deep,
+        [_item(1, line=88, description="The loader does not validate its config path", lens="structural",
                 uid=mint_record_uid("structure", 3),
-            ),
-            _item(
-                2,
-                line=90,
-                description="The loader fails to validate the config path",
+            ), _item(2, line=90, description="The loader fails to validate the config path",
                 **_provenance(mint_record_uid("python", 4)),
             ),
         ],
@@ -2842,43 +1327,19 @@ def test_shipped_duplication_pairs_carry_the_item_source_uids(tmp_path: Path) ->
     assert (pair["a_id"], pair["b_id"]) == ("1", "2")
     assert pair["a_source_uids"] == ["structure:3"]
     assert pair["b_source_uids"] == ["python:4"]
-    # The lens columns still describe the right item after the pair is mapped
-    # back through the synthetic index ``sources`` channel.
+    # Remapping through the synthetic sources index must preserve each item's lens.
     assert (pair["a_lens"], pair["b_lens"]) == ("structural", "per-stack")
-    # The provenance columns are reporting-only: the numeric definitions are
-    # untouched.
+    # Provenance is reporting-only; numeric metrics remain unchanged.
     assert duplication["near_duplicate_pairs"] == 1
     assert duplication["same_file_pairs"] == 1
 
-
-def test_shipped_duplication_reports_every_consolidated_source_uid_in_order(
-    tmp_path: Path,
-) -> None:
-    """A merge-agent item that consolidates two records names both, in order.
-
-    This is why the column is a list rather than a scalar: one shipped finding
-    can be the synthesis of several per-stack records, and collapsing that to a
-    single handle would drop half the trail. Order is the merge agent's own
-    attribution order, preserved so the leading uid stays the one it credited
-    first.
-    """
+def test_shipped_duplication_reports_every_consolidated_source_uid_in_order(tmp_path: Path,) -> None:
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(
-                1,
-                line=88,
-                description="The loader does not validate its config path",
-                lens="cross-stack",
+    seed_merged_items(deep,
+        [_item(1, line=88, description="The loader does not validate its config path", lens="cross-stack",
                 **_provenance("python:1", "react:2"),
             ),
-            _item(
-                2,
-                line=90,
-                description="The loader fails to validate the config path",
-                **_provenance("python:7"),
-            ),
+            _item(2, line=90, description="The loader fails to validate the config path", **_provenance("python:7"),),
         ],
     )
 
@@ -2888,32 +1349,12 @@ def test_shipped_duplication_reports_every_consolidated_source_uid_in_order(
     assert pair["a_source_uids"] == ["python:1", "react:2"]
     assert pair["b_source_uids"] == ["python:7"]
 
-
-def test_shipped_duplication_reports_empty_provenance_rather_than_fabricating_one(
-    tmp_path: Path,
-) -> None:
-    """An unattributed item reports ``[]`` -- a real answer, not a placeholder.
-
-    ``source_uids: []`` is the merge agent declining to attribute an item. The
-    axis must say so rather than substituting the item's ``id``, its lens, or
-    any other handle that would read as a record uid without being one.
-    """
+def test_shipped_duplication_reports_empty_provenance_rather_than_fabricating_one(tmp_path: Path,) -> None:
+    """Explicit [] attribution must not be replaced with a display id, lens, or invented UID."""
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(
-                1,
-                line=88,
-                description="The loader does not validate its config path",
-                **_provenance(),
-            ),
-            _item(
-                2,
-                line=90,
-                description="The loader fails to validate the config path",
-                **_provenance(),
-            ),
+    seed_merged_items(deep,
+        [_item(1, line=88, description="The loader does not validate its config path", **_provenance(),),
+            _item(2, line=90, description="The loader fails to validate the config path", **_provenance(),),
         ],
     )
 
@@ -2922,38 +1363,19 @@ def test_shipped_duplication_reports_empty_provenance_rather_than_fabricating_on
     pair = duplication["pairs"][0]
     assert pair["a_source_uids"] == []
     assert pair["b_source_uids"] == []
-    # The pair is still reported: an unattributed duplicate is still a
-    # duplicate, and dropping it would blank out the axis on a real run.
+    # Missing provenance cannot hide an otherwise known duplicate.
     assert duplication["near_duplicate_pairs"] == 1
 
-
-def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(
-    tmp_path: Path,
-) -> None:
-    """An item carrying only ``uid`` reports ``[uid]``.
-
-    This is both the host-appended shape (structural items and the single-stack
-    bypass never see the merge agent) and the legacy shape (artifacts written
-    before ``source_uids`` existed). Neither should read as unattributed just
-    because the newer key is missing.
-    """
+def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(tmp_path: Path,) -> None:
     dd, deep = _worked_example_dirs(tmp_path)
-    legacy_items = [
-        _item(
-            1,
-            line=88,
-            description="The loader does not validate its config path",
-            uid=mint_record_uid("python", 2),
+    legacy_items = [_item(
+            1, line=88, description="The loader does not validate its config path", uid=mint_record_uid("python", 2),
         ),
         _item(
-            2,
-            line=90,
-            description="The loader fails to validate the config path",
-            uid=mint_record_uid("structure", 5),
+            2, line=90, description="The loader fails to validate the config path", uid=mint_record_uid("structure", 5),
         ),
     ]
-    # Guard the premise: the fallback is only under test if the newer key really
-    # is absent from the fixture.
+    # Require the newer key to be absent so the legacy fallback is actually exercised.
     assert all(RECORD_SOURCE_UIDS_KEY not in item for item in legacy_items)
     seed_merged_items(deep, legacy_items)
 
@@ -2963,26 +1385,12 @@ def test_shipped_duplication_falls_back_to_the_birth_uid_without_source_uids(
     assert pair["a_source_uids"] == ["python:2"]
     assert pair["b_source_uids"] == ["structure:5"]
 
-
 def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:
-    """The distribution -- not a threshold count -- is what reveals a mis-set bar.
-
-    A threshold-only metric would report zero for the worked example forever.
-    The sub-threshold pair must still be visible via ``same_file_pairs`` and
-    ``max_similarity``, and the pair rows are ordered by similarity desc.
-    """
+    """Keep subthreshold pairs and descending similarity visible so threshold mistakes are diagnosable."""
     dd, deep = _worked_example_dirs(tmp_path)
-    seed_merged_items(
-        deep,
-        [
-            _item(1, line=88, description=WORKED_A),
-            _item(2, line=4, description=WORKED_B, lens="structural"),
-            _item(
-                3,
-                file="other/untouched.py",
-                line=1,
-                description="A wholly unrelated concern",
-            ),
+    seed_merged_items(deep,
+        [_item(1, line=88, description=WORKED_A), _item(2, line=4, description=WORKED_B, lens="structural"),
+            _item(3, file="other/untouched.py", line=1, description="A wholly unrelated concern",),
         ],
     )
 
@@ -2996,20 +1404,9 @@ def test_shipped_duplication_reveals_a_misset_threshold(tmp_path: Path) -> None:
     assert similarities == sorted(similarities, reverse=True)
     assert similarities[0] == duplication["max_similarity"]
 
-
-def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(
-    tmp_path: Path,
-) -> None:
-    """The pre-merge counter is renamed to say it counts INPUTS, not escapes.
-
-    ``record_duplicates`` read as an escape count; the escapes now live in the
-    separate ``shipped_duplication`` axis. The old key is gone (it had no
-    readers anywhere in ``daydream/`` or ``rl/``).
-    """
+def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
-    seed_dedup_candidates(
-        deep,
-        record_alt_pairs=[{"similarity": 0.75}, {"similarity": 0.55}],
+    seed_dedup_candidates(deep, record_alt_pairs=[{"similarity": 0.75}, {"similarity": 0.55}],
         record_duplicate_pairs=[{"similarity": 0.9}],
     )
 
@@ -3021,190 +1418,23 @@ def test_record_duplicate_candidates_is_the_input_counter_under_findings_dedup(
     assert dedup["avg_overlap_similarity"] == 0.65
 
 
-
-
 def _grounding_finding(**extra: Any) -> dict[str, Any]:
     """A pre-merge per-stack record tagged for the ``deep-python`` reader."""
     finding: dict[str, Any] = {
-        "id": "py-1",
-        "_stack": "python",
-        "file": "svc/loader.py",
-        "line": 88,
-        "confidence": "HIGH",
+        "id": "py-1", "_stack": "python", "file": "svc/loader.py", "line": 88, "confidence": "HIGH",
         "rationale": "svc/loader.py needs a guard",
     }
     finding.update(extra)
     return finding
 
-
-def _loader_trajectories() -> dict[str, Any]:
-    return {
-        "main": None,
-        "forked": [_read_traj("deep-python.json", "/repo/svc/loader.py")],
-    }
-
-
-def test_grounding_requires_the_cited_line_not_just_the_cited_file(
-    tmp_path: Path,
-) -> None:
-    """The reward-bearing change: a read file with a bad anchor is NOT grounded.
-
-    Both findings cite a file the reviewer read, so the old file-only predicate
-    scored both ``grounded`` -- ``grounding_rate: 1.0``. Only the in-hunk one
-    is grounded now, and the components are reported separately so the
-    composite change is observable.
-    """
-    dd, _deep = _worked_example_dirs(tmp_path)
-    findings = [
-        _grounding_finding(id="py-1", line=88),
-        _grounding_finding(id="py-2", line=4),
-    ]
-
-    result = analyze_grounding(_loader_trajectories(), findings, dd)
-
-    assert result["hunk_source"] == "diff.patch"
-    assert result["total_findings"] == 2
-    assert result["grounded_count"] == 1
-    assert result["grounding_rate"] == 0.5
-    # Components: the file half is still perfect; only the line half moved.
-    assert result["file_grounded_count"] == 2
-    assert result["file_grounding_rate"] == 1.0
-    assert result["line_grounded_count"] == 1
-    assert result["line_grounding_rate"] == 0.5
-    assert result["tiers"]["in_hunk"] == 1
-    assert result["tiers"]["beyond_tolerance"] == 1
-    assert [entry["id"] for entry in result["ungrounded"]] == ["py-2"]
-    assert result["ungrounded"][0]["location_tier"] == "beyond_tolerance"
-    assert result["ungrounded"][0]["line_grounded"] is False
-    assert result["ungrounded"][0]["file_was_read"] is True
-    assert result["grounded"][0]["location_tier"] == "in_hunk"
-    assert result["grounded"][0]["line_grounded"] is True
-
-
-def test_grounding_accepts_a_within_tolerance_line(tmp_path: Path) -> None:
-    """``within_tolerance`` is grounded -- the validator snaps it, not demotes it."""
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    result = analyze_grounding(
-        _loader_trajectories(), [_grounding_finding(line=94)], dd
-    )
-
-    assert result["tiers"]["within_tolerance"] == 1
-    assert result["grounding_rate"] == 1.0
-
-
-def test_grounding_treats_a_non_string_rationale_as_empty(tmp_path: Path) -> None:
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    result = analyze_grounding(
-        _loader_trajectories(), [_grounding_finding(rationale=None)], dd
-    )
-
-    assert result["total_findings"] == 1
-    assert result["grounding_rate"] == 1.0
-
-
-@pytest.mark.parametrize(
-    ("finding", "expected_tier"),
-    [
-        pytest.param({"line": 0, "lens": "structural"}, "whole_file", id="structural-lens-line-0"),
-        pytest.param(
-            {"line": 0, "_stack": "structure"},
-            "whole_file",
-            id="structure-stack-line-0",
-        ),
-        pytest.param({"line": None}, "no_line", id="missing-line"),
-        pytest.param({"line": "top of file"}, "no_line", id="non-int-line"),
-        pytest.param({"line": True}, "no_line", id="bool-line"),
-    ],
-)
-def test_grounding_exemptions_are_counted_not_swallowed(
-    tmp_path: Path, finding: dict[str, Any], expected_tier: str
-) -> None:
-    """Each exemption keeps the finding grounded AND shows up in ``tiers``.
-
-    Structural records loaded from ``stack-structure-records.json`` carry no
-    ``lens`` key -- ``analyze_findings`` tags them ``_stack == "structure"`` --
-    so both spellings must be recognised.
-    """
-    dd, _deep = _worked_example_dirs(tmp_path)
-    record = _grounding_finding(**finding)
-    if record.get("_stack") == "structure":
-        # The structure reader is the ``deep-structure`` trajectory.
-        trajectories = {
-            "main": None,
-            "forked": [_read_traj("deep-structure.json", "/repo/svc/loader.py")],
-        }
-    else:
-        trajectories = _loader_trajectories()
-
-    result = analyze_grounding(trajectories, [record], dd)
-
-    assert result["tiers"][expected_tier] == 1
-    assert result["line_grounded_count"] == 1
-    assert result["grounding_rate"] == 1.0
-    assert result["grounded"][0]["location_tier"] == expected_tier
-
-
-def test_grounding_is_not_penalized_when_hunks_are_unreadable(tmp_path: Path) -> None:
-    """No hunk artifact -> fall back to the file-only predicate, tier "unchecked".
-
-    A run is never penalized for an artifact the analyzer could not read, and
-    the rate must equal the old file-only rate exactly.
-    """
-    dd = tmp_path / ".daydream"
-    dd.mkdir(parents=True)
-    findings = [
-        _grounding_finding(id="py-1", line=88),
-        _grounding_finding(id="py-2", line=4),        # would be beyond_tolerance
-        _grounding_finding(id="py-3", file="ghost.py", line=1),  # file never read
-    ]
-
-    result = analyze_grounding(_loader_trajectories(), findings, dd)
-
-    assert result["hunk_source"] == "none"
-    assert result["tiers"]["unchecked"] == 3
-    assert result["line_grounded_count"] == 3
-    # Identical to the pre-#1106 file-only outcome: 2 of 3 files were read.
-    assert result["file_grounded_count"] == 2
-    assert result["grounded_count"] == 2
-    assert result["grounding_rate"] == 0.6667
-    assert result["file_grounding_rate"] == result["grounding_rate"]
-
-
-def test_grounding_scores_the_cited_line_when_the_record_was_relocated(
-    tmp_path: Path,
-) -> None:
-    """``location_cited_line`` is honoured here too, for the same reason."""
-    dd, _deep = _worked_example_dirs(tmp_path)
-
-    result = analyze_grounding(
-        _loader_trajectories(),
-        [_grounding_finding(line=92, location_cited_line=4)],
-        dd,
-    )
-
-    assert result["tiers"]["beyond_tolerance"] == 1
-    assert result["grounding_rate"] == 0.0
-
-
-def test_analyze_session_reports_location_and_shipped_duplication(
-    tmp_path: Path,
-) -> None:
-    """The two new axes reach ``analyze_session``'s result under their own keys."""
+def test_analyze_session_reports_location_and_shipped_duplication(tmp_path: Path,) -> None:
     dd, deep = _deep_dirs(tmp_path)
     seed_diff_patch(dd)
     seed_hunk_index(dd, {"svc/loader.py": [(85, 92)]})
     seed_merged_items(
-        deep,
-        [
-            _item(1, line=88, description=WORKED_A),
-            _item(2, line=4, description=WORKED_B, lens="structural"),
-        ],
+        deep, [_item(1, line=88, description=WORKED_A), _item(2, line=4, description=WORKED_B, lens="structural")],
     )
-    seed_run_trajectory(
-        dd, "loc-session", schema_version="ATIF-v1.7", model_name="claude-sonnet-4-5",
-    )
+    seed_run_trajectory(dd, "loc-session", schema_version="ATIF-v1.7", model_name="claude-sonnet-4-5",)
 
     result = analyze_session(dd, session_id="loc-session")
 
@@ -3213,18 +1443,10 @@ def test_analyze_session_reports_location_and_shipped_duplication(
     assert result["location"]["tiers"]["beyond_tolerance"] == 1
     assert result["findings"]["shipped_duplication"]["same_file_pairs"] == 1
     assert result["findings"]["shipped_duplication"]["near_duplicate_pairs"] == 0
-    assert result["grounding"]["hunk_source"] == "hunk-index.json"
 
-
-
-
-@pytest.mark.parametrize(
-    ("filename", "label"),
-    [
-        ("trajectory.json", "main"),
-        ("deep-python.json", "deep-python"),
-        ("trajectory-20260101T000000-abc123.json", "main"),
-        ("deadbeef.deep-python.json", "deep-python"),
+@pytest.mark.parametrize(("filename", "label"),
+    [("trajectory.json", "main"), ("deep-python.json", "deep-python"),
+        ("trajectory-20260101T000000-abc123.json", "main"), ("deadbeef.deep-python.json", "deep-python"),
     ],
 )
 def test_agent_label_keeps_its_legacy_filename_tolerance(filename: str, label: str) -> None:

@@ -1,11 +1,7 @@
-"""Pure resolution truth table for the orthogonal interaction gate.
+"""Truth table for forced answers versus permission to prompt.
 
-``resolve_gate`` collapses two orthogonal axes — *assume* (a forced
-yes/no answer, e.g. ``--yes``) and *interactivity* (may we block on
-stdin?) — into a single decision: ``True``/``False`` to use directly, or
-``None`` to fall back to an interactive prompt. This is a fast pure unit
-test that *supplements* the real-path fix-gate test in
-``deep_orchestrator/test_fix_gate_cleanup_and_precision.py`` (it never replaces it).
+resolve_gate returns True/False directly or None for interactive fallback.
+Real fix-gate behavior is covered in deep_orchestrator/test_fix_gate_cleanup_and_precision.py.
 """
 
 from __future__ import annotations
@@ -15,8 +11,7 @@ import pytest
 from daydream.agent import resolve_gate
 
 
-@pytest.mark.parametrize(
-    "assume,interactive,expected",
+@pytest.mark.parametrize("assume,interactive,expected",
     [
         (None, True, None),  # interactive, no assumption -> prompt
         (None, False, False),  # unattended, no assumption -> safe default (decline)
@@ -28,7 +23,6 @@ from daydream.agent import resolve_gate
 )
 def test_resolve_gate(assume: str | None, interactive: bool, expected: bool | None) -> None:
     assert resolve_gate(assume=assume, interactive=interactive, safe_default=False) is expected
-
 
 def test_resolve_gate_safe_default_true_when_unattended() -> None:
     # A gate whose unattended safe default is "yes" (e.g. auto-commit) returns

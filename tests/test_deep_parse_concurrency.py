@@ -1,11 +1,6 @@
-"""Deep per-stack/shared-name integration tests.
+"""Per-stack reviewers emit records directly, with stable shard names and merge order.
 
-Issue #745 (AC4) removed the ``parse-<stack>`` stage: per-stack reviewers emit
-``PER_STACK_RECORD_SCHEMA`` records directly. The record artifacts and their
-deterministic ordering remain the merge's input, so the shard-naming /
-deterministic-sort contract that still owns this file is preserved here. The
-parse-specific concurrency / failure / truncation tests that were once separate
-are now covered by the shard-ordering and merge-input tests below.
+The former parse stage is gone; these integration cases protect record ordering.
 """
 from __future__ import annotations
 
@@ -14,14 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.harness.stub_backend import install_stub_backend
 
 
 async def test_shard_names_flow_through_parse_and_sort_deterministically(
-    shard_many_python_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
 ) -> None:
     """Issue #731 (P2): synthetic ``#`` shard names ride artifact paths and the
     sorted parse/merge ordering deterministically."""

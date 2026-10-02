@@ -1,21 +1,9 @@
-"""#1220: the run-document layout literals live in the owner, plus a frozen allowlist.
+"""Keep run-document paths in their owner or the live, reasoned allowlist.
 
-The scan is AST-based (a plain text grep cannot tell a path composition from a
-docstring, a data key, or prose) and is modelled on
-``tests/test_atomic_write_consolidation.py``: declared scope roots, a frozenset of
-reasoned allowances, and a liveness assertion so no allowance can rot into a
-blanket exemption.
-
-A literal counts only when it is *path-shaped*:
-
-* a string that carries ``trajectory.json`` / ``trajectories`` / ``runs`` as a path
-  segment (bare, or embedded in a longer path such as ``runs/*/trajectory.json``), and
-* for the bare names, only in a path context — a ``/`` composition, a comparison
-  against a document name, or an argument to ``Path``/``glob``/``rglob``/
-  ``joinpath``/``with_name``/``with_suffix``/``relative_to``.
-
-Docstrings are skipped: the layout is restated in prose in several modules and
-requirement 6 is about path composition, not message wording.
+The AST guard recognizes trajectory.json/trajectories/runs path segments.
+Bare names count only in path composition, name comparison, or Path/glob/
+joinpath/with_name/with_suffix/relative_to calls. Docstrings and ordinary data
+keys are excluded; the liveness assertion prevents stale blanket exemptions.
 """
 
 from __future__ import annotations
@@ -26,7 +14,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCOPE_ROOTS = ("daydream", "rl")
-_OWNER = "daydream/trajectory.py"
+_OWNER = "daydream/trajectory/layout.py"
 
 #: Directories that are not first-party source. ``.venv``/``venv``/``site-packages``
 #: keep the scan from walking an installed dependency tree (the ``rl`` project's own
@@ -35,30 +23,17 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 
 #: The in-scope callers. Each must import the layout surface (requirement 10).
 _IN_SCOPE_CONSUMERS = frozenset({
-    "daydream/archive/__init__.py",
-    "daydream/archive/hydrate.py",
-    "daydream/archive/license_enrich.py",
-    "daydream/archive/sanitize.py",
-    "daydream/eval/analyzer.py",
-    "daydream/artifact_visibility.py",
-    "daydream/phases.py",
-    "daydream/training/adjudication/materialize.py",
-    "daydream/training/adjudication/cli.py",
-    "daydream/runner.py",
+    "daydream/archive/__init__.py", "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
+    "daydream/archive/sanitize.py", "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
+    "daydream/phases/handoff.py", "daydream/training/adjudication/materialize.py",
+    "daydream/training/adjudication/import_local.py",
+    "daydream/run_artifacts.py",
 })
 
 #: Symbols that count as "consuming the layout surface".
 _LAYOUT_SYMBOLS = frozenset({
-    "RUNS_DIRNAME",
-    "RUN_DOCUMENT_NAME",
-    "SIBLINGS_DIRNAME",
-    "PARTIAL_SUFFIX",
-    "run_directory",
-    "run_document_path",
-    "siblings_directory",
-    "sibling_document_path",
-    "partial_document_path",
-    "default_trajectory_path",
+    "RUNS_DIRNAME", "RUN_DOCUMENT_NAME", "SIBLINGS_DIRNAME", "PARTIAL_SUFFIX", "run_directory", "run_document_path",
+    "siblings_directory", "sibling_document_path", "partial_document_path", "default_trajectory_path",
 })
 
 #: (file, literal kind) allowances. Every entry names why that file legitimately
@@ -78,15 +53,7 @@ _PERMITTED = {
     "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
 }
 
-_PATH_CALLS = frozenset({
-    "Path",
-    "glob",
-    "rglob",
-    "joinpath",
-    "with_name",
-    "with_suffix",
-    "relative_to",
-})
+_PATH_CALLS = frozenset({"Path", "glob", "rglob", "joinpath", "with_name", "with_suffix", "relative_to"})
 _BARE_NAMES = frozenset({"trajectory.json", "trajectories", "runs"})
 #: A segment is a path segment when it is preceded by a separator (so
 #: `.../trajectory.json after finalization` still counts) or anchored at the
@@ -167,23 +134,19 @@ def _layout_literals(module: str, path: Path) -> list[tuple[str, int]]:
         found.append(("+".join(sorted(kinds)), node.lineno))
     return found
 
-
 def test_no_layout_literal_outside_the_owner_and_its_allowlist() -> None:
-    offenders = {
-        module: [hit for hit in _layout_literals(module, path) if not _permitted(module, hit[0])]
+    offenders = {module: [hit for hit in _layout_literals(module, path) if not _permitted(module, hit[0])]
         for module, path in _production_modules()
         if module != _OWNER
     }
     offenders = {module: hits for module, hits in offenders.items() if hits}
-    assert not offenders, (
-        "run-document layout literals outside "
+    assert not offenders, ("run-document layout literals outside "
         f"{_OWNER} (use daydream.trajectory's layout surface): {offenders}"
     )
 
 
 def _permitted(module: str, kinds: str) -> bool:
     return set(kinds.split("+")) <= _PERMITTED.get(module, frozenset())
-
 
 def test_every_allowlisted_file_still_carries_its_permitted_literal() -> None:
     """An allowance that no longer matches anything fails, so it cannot rot."""
@@ -194,7 +157,6 @@ def test_every_allowlisted_file_still_carries_its_permitted_literal() -> None:
             carried.update(kinds.split("+"))
         stale.extend(f"{module}:{kind}" for kind in sorted(permitted - carried))
     assert not stale, f"allowlist entries no longer match anything: {stale}"
-
 
 def test_in_scope_consumers_import_the_layout_surface() -> None:
     missing: list[str] = []

@@ -3,14 +3,16 @@ from __future__ import annotations
 
 import json
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import anyio
 import pytest
 
-from daydream import runner as _runner
+from daydream import git_ops, runner as _runner
 from daydream.config import REVIEW_OUTPUT_FILE
+from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
 from daydream.deep.artifacts import (
     arbiter_input_path,
@@ -22,12 +24,17 @@ from daydream.deep.artifacts import (
 )
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import build_merge_prompt
-from daydream.runner import RunConfig, _resolve_backend
+from daydream.findings import build_findings_artifact, load_findings_artifact, write_findings_artifact
+from daydream.pr_review import PRInfo, parsed_issues_from_items
+from daydream.review_budget import review_warnings
+from daydream.run_config import RunConfig
+from daydream.runner import _resolve_backend
+from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
 from tests.deep_orchestrator.support import (
     _install_accept_gate_pipeline,
     _install_post_recorder,
 )
-from tests.harness.review_profile import default_strategy as _default_strategy
+from tests.harness.review_profile import default_strategy as _default_strategy, independent_alternatives_profile
 from tests.test_deep_orchestrator import (
     _TWIN_DESCRIPTION,
     Mute,
@@ -35,20 +42,147 @@ from tests.test_deep_orchestrator import (
     _install_model_capturing_stubs,
     _install_stub_backend,
     _prime_merge_resume,
+    _profile_with_pipeline,
     _record,
     _run_deep,
     _silence,
     _twin_parse_by_stack,
     _write_plugin_registry,
 )
-from tests.test_finite_delegation_parse import _mark_delegated_artifacts
+
+
+async def test_cold_empty_builtin_merge_uses_no_provider_and_writes_canonical_report(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """The real runner must synthesize a clean cold review without merge calls."""
+    backend = EmptyReviewBackend(multi_stack_target)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+    trajectory = tmp_path / "empty-trajectory.json"
+
+    assert await _runner.run(empty_review_config(multi_stack_target, trajectory)) == 0
+
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
+    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+    deep = multi_stack_target / ".daydream" / "deep"
+    payload = json.loads((deep / "merged-items.json").read_text())
+    assert payload == {"items": [], "held": []}
+    assert merged_report_path(deep).is_file()
+    assert (multi_stack_target / REVIEW_OUTPUT_FILE).read_text() == merged_report_path(deep).read_text()
+    assert not (deep / "merge-failed.txt").exists()
+    assert not (deep / "per-stack-failures.json").exists()
+    events = json.loads(trajectory.read_text())["extra"]["phase_events"]
+    for phase, stage in (("merge", "cross-stack-agent"), ("deep", "supervise")):
+        lifecycle = [event for event in events if event["phase"] == phase
+                     and event.get("metadata", {}).get("stage") == stage]
+        assert [event["event"] for event in lifecycle] == ["phase_start", "phase_end"]
+        assert lifecycle[-1]["status"] == "succeeded"
+
+
+async def test_cold_structural_only_merge_preserves_identity_and_supervises_findings(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    structural = _record(description="Structural boundary erosion", file="api.py", line=1,
+                         severity="medium", confidence="MEDIUM", rationale="boundary coupling", evidence="api.py:1")
+    backend = EmptyReviewBackend(multi_stack_target, forbid_supervise=False,
+                                 review_by_stack={"structure": [structural]})
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+
+    assert await _runner.run(empty_review_config(multi_stack_target, tmp_path / "trajectory.json")) == 0
+
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
+    assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
+    deep = multi_stack_target / ".daydream" / "deep"
+    records = json.loads(per_stack_records_path(deep, "structure").read_text())["issues"]
+    items = json.loads(merged_items_path(deep).read_text())["items"]
+    assert len(items) == 1
+    assert items[0]["description"] == structural["description"]
+    assert items[0]["lens"] == "structural"
+    assert items[0]["source_uids"] == [records[0]["uid"]]
+    assert items[0]["file"] == structural["file"]
+    assert items[0]["line"] == structural["line"]
+    assert structural["description"] in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+
+
+@pytest.mark.parametrize("budget_stop", [False, True], ids=["provider-failure", "incomplete-coverage"])
+async def test_cold_empty_merge_preserves_failed_stack_diagnostics(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    capsys: pytest.CaptureFixture[str], budget_stop: bool,
+) -> None:
+    backend = EmptyReviewBackend(multi_stack_target, fail_stack=None if budget_stop else "python",
+                                 incomplete_stack="python" if budget_stop else None)
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+
+    policy = DaydreamFileConfig(supervisor="llm", tool_supervisor="rules", tool_bash_deny=["blocked-review-tool"])
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", file_config=policy)
+    assert await _runner.run(config) == 0
+
+    assert not any("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls)
+    assert not any("supervisor adjudication" in call["prompt"].lower() for call in backend.calls)
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert json.loads(merged_items_path(deep).read_text()) == {"items": [], "held": []}
+    failures = json.loads((deep / "per-stack-failures.json").read_text())
+    assert "python" in failures
+    assert "python" in capsys.readouterr().out
+    assert "Review incomplete" in (multi_stack_target / REVIEW_OUTPUT_FILE).read_text()
+    assert "python" in merged_report_path(deep).read_text()
+    # Exercise the same canonical loader and strict handoff schema as publication,
+    # with local Git objects providing the PR diff rather than another model call.
+    head = git_ops.head_sha(multi_stack_target)
+    base = git_ops.resolve_diff_merge_base(multi_stack_target, "main", head)
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature",
+                owner="test", repo="fixture", url="https://github.com/test/fixture/pull/7")
+    items = json.loads(merged_items_path(deep).read_text())["items"]
+    warnings = review_warnings(deep)
+    artifact = build_findings_artifact(multi_stack_target, pr, parsed_issues_from_items(items),
+                                      run_info=None, review_warnings=warnings)
+    output = tmp_path / "findings.json"
+    write_findings_artifact(output, artifact)
+    loaded = load_findings_artifact(output, expected_repo="test/fixture", expected_pr_number=7, expected_head_sha=head)
+    assert loaded.findings == []
+    assert loaded.review_warnings == warnings
+    assert any("python" in warning for warning in loaded.review_warnings)
+    if budget_stop:
+        assert failures["python"].startswith("budget exhausted:")
+    else:
+        assert "review provider unavailable" in failures["python"]
+
+
+@pytest.mark.parametrize("input_kind", ["language", "alternatives", "custom"])
+async def test_cold_merge_with_model_owned_inputs_or_custom_strategy_dispatches(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, input_kind: str,
+) -> None:
+    backend = EmptyReviewBackend(multi_stack_target, forbid_merge=False, forbid_supervise=False)
+    config_overrides: dict[str, Any] = {}
+    if input_kind == "language":
+        backend.review_by_stack = {"python": [_record(description="Language defect", file="api.py", severity="medium",
+                                                      confidence="MEDIUM", rationale="stub", evidence="api.py:1")]}
+        backend.merge_echo_records = True
+    elif input_kind == "alternatives":
+        backend.alternatives = [{"id": 1, "title": "Alternative design", "description": "Missing reusable boundary",
+                                 "recommendation": "Extract boundary", "severity": "low", "files": ["api.py"]}]
+        config_overrides["review_profile"] = independent_alternatives_profile()
+    else:
+        resolved = _profile_with_pipeline()
+        strategies = dict(resolved.profile.strategies)
+        strategies["merge"] = replace(strategies["merge"], content=strategies["merge"].content + "\nCustom synthesis.")
+        config_overrides["review_profile"] = replace(resolved, profile=replace(resolved.profile, strategies=strategies))
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
+
+    config = empty_review_config(multi_stack_target, tmp_path / "trajectory.json", **config_overrides)
+    assert await _runner.run(config) == 0
+
+    assert sum("cross-stack merge agent" in call["prompt"].lower() for call in backend.calls) == 1
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert merged_items_path(deep).is_file()
+    if input_kind == "language":
+        assert json.loads(merged_items_path(deep).read_text())["items"][0]["description"] == "Language defect"
+        assert sum("supervisor adjudication" in call["prompt"].lower() for call in backend.calls) == 1
+    if input_kind == "alternatives":
+        assert json.loads((deep / "alternatives.json").read_text()) == backend.alternatives
 
 
 def _install_merge_captures(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    captured_merge: dict[str, Any],
-    captured_record_dedup: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch, *, captured_merge: dict[str, Any], captured_record_dedup: dict[str, Any],
     captured_dedup_records: dict[str, Any] | None = None,
 ) -> None:
     """Wrap the merge/dedup builders to capture their arguments."""
@@ -72,18 +206,11 @@ def _install_merge_captures(
 
     monkeypatch.setattr("daydream.deep.prompts.build_merge_prompt", _capture_merge)
     monkeypatch.setattr("daydream.deep.merge_steps.build_dedup_candidates", _capture_dedup)
-    monkeypatch.setattr(
-        "daydream.deep.merge_steps.build_record_dedup_candidates",
-        _capture_record_dedup,
-    )
-
+    monkeypatch.setattr("daydream.deep.merge_steps.build_record_dedup_candidates", _capture_record_dedup,)
 
 def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Detected React files retain their own stack without the plugin registry."""
 
 
     _silence(monkeypatch)
@@ -113,7 +240,6 @@ def test_run_deep_routes_detected_react_to_react_stack_without_plugin(
     assert "python" in stacks
     assert "react" in stacks
 
-
 def test_diff_changed_files_rename_single_entry() -> None:
     """Rename diff contributes only the destination path, not both sides."""
     rename_diff = (
@@ -128,7 +254,6 @@ def test_diff_changed_files_rename_single_entry() -> None:
         "+const x = 1;\n"
     )
     assert _diff_changed_files(rename_diff) == ["foo.ts"]
-
 
 def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     """Non-rename diff shapes emit exactly one path each."""
@@ -157,15 +282,10 @@ def test_diff_changed_files_handles_modify_add_delete_binary() -> None:
     )
     assert _diff_changed_files(mixed) == ["keep.py", "new.py", "old.py", "logo.png"]
 
-
-async def test_merge_prompt_lists_records_in_sorted_order(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_merge_prompt_lists_records_in_sorted_order(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The merge prompt lists per-stack records in stable order."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
@@ -190,23 +310,16 @@ async def test_merge_prompt_lists_records_in_sorted_order(
     assert record_paths, "no record paths found in merge prompt"
     assert record_paths == sorted(record_paths), f"records not in sorted order: {record_paths}"
 
-
 def test_merge_prompt_emits_related_files_instruction() -> None:
 
 
-    prompt = build_merge_prompt(
-        strategy=_default_strategy("merge"),
-        per_stack_records_paths=[Path("a-records.json")],
-        intent_path=Path("intent.md"),
-        alternatives_path=Path("alt.md"),
-        dedup_candidates_path=Path("dedup.json"),
+    prompt = build_merge_prompt(strategy=_default_strategy("merge"), per_stack_records_paths=[Path("a-records.json")],
+        intent_path=Path("intent.md"), alternatives_path=Path("alt.md"), dedup_candidates_path=Path("dedup.json"),
     )
     assert "related_files" in prompt
 
-
 async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A per-stack agent failure must: 1) persist to per-stack-failures.json under .daydream/deep/, 2) appear in
     the merge prompt under an 'Uncovered stacks' block, so the merge agent can call it out instead of silently
@@ -218,15 +331,8 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     # keeps the stub's normal behavior.
     original_execute = stub.execute
 
-    def _maybe_fail(
-        cwd: Any,
-        prompt: str,
-        output_schema: Any = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: Any = None,
-        read_only: Any = False,
-        persist_session: Any = True,
+    def _maybe_fail(cwd: Any, prompt: str, output_schema: Any = None, continuation: Any = None, agents: Any = None,
+        max_turns: Any = None, read_only: Any = False, persist_session: Any = True,
     ) -> Any:
         pl = prompt.lower()
         if "you are reviewing the react stack" in pl:
@@ -239,18 +345,11 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
 
             return _fail()
         return original_execute(
-            cwd,
-            prompt,
-            output_schema,
-            continuation,
-            agents,
-            max_turns=max_turns,
-            read_only=read_only,
+            cwd, prompt, output_schema, continuation, agents, max_turns=max_turns, read_only=read_only,
             persist_session=persist_session,
         )
 
     stub.execute = _maybe_fail  # type: ignore[method-assign]
-
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
@@ -267,40 +366,27 @@ async def test_failed_per_stack_surfaces_to_merge_prompt_and_persists(
     assert "react" in prompt
     assert "simulated react failure" in prompt
 
-
-async def test_resume_merge_errors_on_missing_stack_records(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_resume_merge_errors_on_missing_stack_records(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """--start-at merge must fail loudly when a detected stack has no records."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-
     # Records for python only; react and generic are missing.
     _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")])
-
     exit_code = await _run_deep(multi_stack_target, start_at="merge")
     assert exit_code == 1
-
     # Merge agent must NOT have run -- the orchestrator bailed before it.
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert merge_calls == []
 
-
 async def test_resume_merge_allows_missing_records_for_failed_stacks(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stack listed in per-stack-failures.json is allowed to be missing."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
     # No records for the generic bucket, but it's listed as a prior failure.
-    deep = _prime_merge_resume(
-        multi_stack_target,
-        python=[_record(description="py issue")],
-        react=[_record(description="tsx issue", file="App.tsx")],
-        structure=[_record(description="structural issue")],
+    deep = _prime_merge_resume(multi_stack_target, python=[_record(description="py issue")],
+        react=[_record(description="tsx issue", file="App.tsx")], structure=[_record(description="structural issue")],
     )
     (deep / "per-stack-failures.json").write_text(json.dumps({"generic": "simulated generic failure"}))
 
@@ -310,19 +396,13 @@ async def test_resume_merge_allows_missing_records_for_failed_stacks(
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
     assert len(merge_calls) == 1
 
-
 async def test_orchestrator_partitions_structural_records_from_merge(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Structural records are partitioned out of the dedup pre-filter pool."""
     captured_merge: dict[str, Any] = {}
     captured_dedup_records: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
-    _install_merge_captures(
-        monkeypatch,
-        captured_merge=captured_merge,
-        captured_dedup_records=captured_dedup_records,
+    _install_merge_captures(monkeypatch, captured_merge=captured_merge, captured_dedup_records=captured_dedup_records,
         captured_record_dedup=captured_record_dedup,
     )
 
@@ -331,9 +411,7 @@ async def test_orchestrator_partitions_structural_records_from_merge(
 
     # The structural record carries a sentinel id so we can verify it never lands
     # in the dedup input lists.
-    _prime_merge_resume(
-        multi_stack_target,
-        python=[_record(id="py-1", description="py issue")],
+    _prime_merge_resume(multi_stack_target, python=[_record(id="py-1", description="py issue")],
         react=[_record(id="react-1", description="tsx issue", file="App.tsx")],
         generic=[_record(id="generic-1", description="docs issue", file="README.md")],
         structure=[_record(id="structure-1", description="1000-line file budget violated")],
@@ -362,19 +440,12 @@ async def test_orchestrator_partitions_structural_records_from_merge(
     # And the sources list must stay parallel to the filtered records list.
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
-
 async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fresh-run path (no start_at) applies the same structural partition."""
     captured_merge: dict[str, Any] = {}
     captured_record_dedup: dict[str, Any] = {}
-    _install_merge_captures(
-        monkeypatch,
-        captured_merge=captured_merge,
-        captured_record_dedup=captured_record_dedup,
-    )
+    _install_merge_captures(monkeypatch, captured_merge=captured_merge, captured_record_dedup=captured_record_dedup,)
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -393,12 +464,9 @@ async def test_orchestrator_partitions_structural_records_from_merge_fresh_run(
     assert "structure" not in captured_record_dedup["sources"]
     assert len(captured_record_dedup["sources"]) == len(captured_record_dedup["records"])
 
-
 @pytest.mark.parametrize("structural_line", [1, 0], ids=["same-line", "whole-file"])
 async def test_structural_language_twin_is_arbitrated_and_reported_once(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    structural_line: int,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, structural_line: int,
 ) -> None:
     """Same-line and whole-file structural twins collapse to one high-severity finding."""
     _silence(monkeypatch)
@@ -421,43 +489,24 @@ async def test_structural_language_twin_is_arbitrated_and_reported_once(
     assert twins[0]["severity"] == "high"
     assert {item["file"] for item in items} == {"api.py", "App.tsx", "README.md"}
 
-
 async def test_precision_mode_suppression_never_sees_structural_records(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Structural records rejoin adjudication for the arbiter only (issue #1103)."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_echo_records = True
     stub.suppression_keep = False
-    stub.parse_by_stack = {
-        "python": {
-            "severity": "low",
-            "confidence": "MEDIUM",
-            "file": "api.py",
-            "line": 1,
+    stub.parse_by_stack = {"python": {"severity": "low", "confidence": "MEDIUM", "file": "api.py", "line": 1,
             "description": "Borderline python nit the suppression pass rejects",
         },
-        "structure": {
-            "severity": "low",
-            "confidence": "MEDIUM",
-            "file": "api.py",
-            "line": 1,
+        "structure": {"severity": "low", "confidence": "MEDIUM", "file": "api.py", "line": 1,
             "description": "Low-severity structural erosion in this module",
         },
-        "react": {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "App.tsx",
-            "line": 1,
+        "react": {"severity": "medium", "confidence": "MEDIUM", "file": "App.tsx", "line": 1,
             "description": "Unrelated React concern",
         },
-        "generic": {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "README.md",
-            "line": 1,
+        "generic": {"severity": "medium", "confidence": "MEDIUM", "file": "README.md", "line": 1,
             "description": "Unrelated docs concern",
         },
     }
@@ -471,36 +520,28 @@ async def test_precision_mode_suppression_never_sees_structural_records(
     # The equally borderline STRUCTURAL finding is not -- it was never eligible.
     assert any("Low-severity structural erosion" in d for d in descriptions), descriptions
 
-
-async def test_precision_suppression_excludes_delegated_structure_on_resume(
+async def test_precision_suppression_preserves_structural_records_on_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_echo_records = True
     stub.suppression_keep = False
-    deep = _prime_merge_resume(
-        multi_stack_target,
+    deep = _prime_merge_resume(multi_stack_target,
         python=[_record(description="Local borderline finding", severity="low", confidence="MEDIUM")],
         react=[], generic=[],
-        structure=[_record(description="Delegated boundary mismatch", severity="low", confidence="MEDIUM",
+        structure=[_record(description="Structural boundary mismatch", severity="low", confidence="MEDIUM",
                            evidence="api.py:1")],
     )
-    _mark_delegated_artifacts(deep, {
-        "python": ["api.py"], "react": ["App.tsx"], "generic": ["README.md"],
-    })
     assert await _run_deep(multi_stack_target, start_at="merge", precision_mode=True) == 0
     items = json.loads((deep / "merged-items.json").read_text())["items"]
     assert not any(item["description"] == "Local borderline finding" for item in items)
-    structural = [item for item in items if item["description"] == "Delegated boundary mismatch"]
+    structural = [item for item in items if item["description"] == "Structural boundary mismatch"]
     assert len(structural) == 1
     assert structural[0]["lens"] == "structural"
     assert structural[0]["source_uids"] == ["structure:1"]
 
-
-async def test_distinct_structural_finding_survives_the_fold(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_distinct_structural_finding_survives_the_fold(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The fold is a duplicate check, not a structural-lens filter."""
     _silence(monkeypatch)
@@ -509,9 +550,7 @@ async def test_distinct_structural_finding_survives_the_fold(
     overrides = _twin_parse_by_stack(structural_line=1)
     overrides["structure"]["description"] = "Module layering inverted: api.py now imports the CLI"
     stub.parse_by_stack = overrides
-
     assert await _run_deep(multi_stack_target) == 0
-
     dd = deep_dir(multi_stack_target, allow_standalone=True)
     items = json.loads(merged_items_path(dd).read_text())["items"]
     api_items = sorted(i["description"] for i in items if i["file"] == "api.py")
@@ -519,9 +558,7 @@ async def test_distinct_structural_finding_survives_the_fold(
     assert any(i["lens"] == "structural" for i in items)
     assert "## Structural Review" in merged_report_path(dd).read_text()
 
-
 async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """--start-at fix must not call post_review_to_pr_from_report."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
 
@@ -534,19 +571,9 @@ async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: p
     (multi_stack_target / REVIEW_OUTPUT_FILE).write_text(
         "# Review\n\n## Issues\n\n1. [api.py:1] primed issue\n   rationale\n"
     )
-    (deep / "merged-items.json").write_text(
-        json.dumps(
-            {
-                "items": [
-                    {
-                        "id": 1,
-                        "lens": "per-stack",
-                        "file": "api.py",
-                        "line": 1,
-                        "severity": "medium",
-                        "description": "primed issue",
-                        "confidence": "MEDIUM",
-                        "rationale": "rationale",
+    (deep / "merged-items.json").write_text(json.dumps({"items": [{
+                        "id": 1, "lens": "per-stack", "file": "api.py", "line": 1, "severity": "medium",
+                        "description": "primed issue", "confidence": "MEDIUM", "rationale": "rationale",
                     }
                 ]
             }
@@ -559,33 +586,17 @@ async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: p
         f"post_review_to_pr_from_report should be skipped on --start-at fix, got {len(post_calls)} call(s)"
     )
 
-
 async def test_resolve_backend_called_with_each_phase_in_deep_flow(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """The deep orchestrator resolves a backend for each required phase."""
     seen_phases: list[str] = []
     original = _runner._resolve_backend
 
-    def spy(
-        config: Any,
-        phase: Any,
-        cache: Any = None,
-        *,
-        cwd: Any = None,
-        audit_workspace: Any = None,
+    def spy(config: Any, phase: Any, cache: Any = None, *, cwd: Any = None, audit_workspace: Any = None,
         effort_override: Any = None,
     ) -> Any:
         seen_phases.append(phase)
-        return original(
-            config,
-            phase,
-            cache,
-            cwd=cwd,
-            audit_workspace=audit_workspace,
-            effort_override=effort_override,
+        return original(config, phase, cache, cwd=cwd, audit_workspace=audit_workspace, effort_override=effort_override,
         )
 
     # run_deep imports _resolve_backend from daydream.runner, so patching it there
@@ -608,7 +619,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     async def _stub_fix(backend: Any, work: Any, item: Any, idx: Any, total: Any, **kwargs: Any) -> None:  # noqa: ARG001
         return None
 
-    monkeypatch.setattr("daydream.phases.phase_fix", _stub_fix)
+    monkeypatch.setattr("daydream.phases.fix.phase_fix", _stub_fix)
 
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
@@ -620,7 +631,6 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     missing = expected_phases - captured
     assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
     assert "wonder" not in captured  # The default design lens shares per_stack_review.
-
 
 def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC3: the ``intent`` phase resolves to ``claude-sonnet-5`` by default."""
@@ -646,10 +656,7 @@ def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch
         f"RunConfig(model=...) override should win for intent, got {backend_override.model!r}"
     )
 
-
-async def test_intent_phase_runs_on_sonnet_through_runner_run(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_intent_phase_runs_on_sonnet_through_runner_run(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#171 real-path: the intent phase Sonnet downgrade must be observable through the runner.run production
     entrypoint, not only at the unit seam."""
@@ -669,16 +676,11 @@ async def test_intent_phase_runs_on_sonnet_through_runner_run(
         f"intent phase should run on claude-sonnet-5 (mid tier), got {sorted(intent_models)!r}"
     )
 
-
 async def test_verifier_runs_after_merge_before_fix(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
 ) -> None:
-    """Recommendation verifier runs as a sub-step of the fix gate."""
     # phase_fix stays REAL so verdict propagation is observable.
     stub = _install_accept_gate_pipeline(monkeypatch, multi_stack_target, mute_side_effects)
-
     exit_code = await _run_deep(multi_stack_target)
     assert exit_code == 0
 
@@ -709,11 +711,6 @@ async def test_verifier_runs_after_merge_before_fix(
 
     payload = json.loads(expected_path.read_text())
     assert payload["verdicts"] == [
-        {
-            "issue_id": 1,
-            "verdict": "consistent",
-            "evidence": "stub",
-            "unverified_assumptions": [],
-        }
+        {"issue_id": 1, "verdict": "consistent", "evidence": "stub", "unverified_assumptions": []}
     ]
     assert payload["selection"]["decisions"]

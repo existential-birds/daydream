@@ -16,10 +16,10 @@ from daydream import remote_ci
 from daydream.atif import Step, validate as atif_validate
 from daydream.backends import (
     AgentEvent,
-    ResultEvent,
     TextEvent,
 )
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.trajectory import (
     DaydreamPhase,
     PhaseEvent,
@@ -36,148 +36,65 @@ from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
-from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory
 from tests.test_deep_orchestrator import _install_stub_backend, _merge_item, _pin_findings_pr, _silence
 
 
 def _snapshot_document(path: Path, payload: dict[str, Any]) -> TrajectoryDocumentSnapshot:
     return TrajectoryDocumentSnapshot(
-        trajectory_id=str(payload["trajectory_id"]),
-        path=path,
-        json_bytes=json.dumps(payload, sort_keys=True).encode(),
+        trajectory_id=str(payload["trajectory_id"]), path=path, json_bytes=json.dumps(payload, sort_keys=True).encode(),
     )
-
 
 def test_overlap_coverage_and_recursive_invocation_identity(tmp_path: Path) -> None:
     """Identified intervals are unioned and wrappers never double-count calls."""
     session = "timing-session"
-    root = {
-        "session_id": session,
-        "trajectory_id": session,
-        "steps": [],
-        "extra": {
-            "run_started_at": "2026-01-01T00:00:00Z",
-            "run_ended_at": "2026-01-01T00:00:10Z",
-            "phase_events": [
-                {
-                    "phase": "deep",
-                    "event": "phase_start",
-                    "timestamp": "2026-01-01T00:00:01Z",
-                    "session_id": session,
+    root = {"session_id": session, "trajectory_id": session, "steps": [],
+        "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:10Z",
+            "phase_events": [{
+                    "phase": "deep", "event": "phase_start", "timestamp": "2026-01-01T00:00:01Z", "session_id": session,
                     "scope_id": "deep-1",
-                },
-                {
-                    "phase": "deep",
-                    "event": "phase_end",
-                    "timestamp": "2026-01-01T00:00:05Z",
-                    "session_id": session,
-                    "scope_id": "deep-1",
-                    "status": "succeeded",
-                },
-                {
-                    "phase": "deep",
-                    "event": "phase_start",
-                    "timestamp": "2026-01-01T00:00:03Z",
-                    "session_id": session,
+                }, {"phase": "deep", "event": "phase_end", "timestamp": "2026-01-01T00:00:05Z", "session_id": session,
+                    "scope_id": "deep-1", "status": "succeeded",
+                }, {"phase": "deep", "event": "phase_start", "timestamp": "2026-01-01T00:00:03Z", "session_id": session,
                     "scope_id": "deep-2",
+                }, {"phase": "deep", "event": "phase_end", "timestamp": "2026-01-01T00:00:07Z", "session_id": session,
+                    "scope_id": "deep-2", "status": "partial",
+                }, {"phase": "diagram", "event": "phase_start", "timestamp": "2026-01-01T00:00:06Z",
+                    "session_id": session, "scope_id": "diagram-1",
+                }, {"phase": "diagram", "event": "phase_end", "timestamp": "2026-01-01T00:00:09Z",
+                    "session_id": session, "scope_id": "diagram-1", "status": "succeeded",
                 },
-                {
-                    "phase": "deep",
-                    "event": "phase_end",
-                    "timestamp": "2026-01-01T00:00:07Z",
-                    "session_id": session,
-                    "scope_id": "deep-2",
-                    "status": "partial",
-                },
-                {
-                    "phase": "diagram",
-                    "event": "phase_start",
-                    "timestamp": "2026-01-01T00:00:06Z",
-                    "session_id": session,
-                    "scope_id": "diagram-1",
-                },
-                {
-                    "phase": "diagram",
-                    "event": "phase_end",
-                    "timestamp": "2026-01-01T00:00:09Z",
-                    "session_id": session,
-                    "scope_id": "diagram-1",
-                    "status": "succeeded",
-                },
-            ],
-            "subtrajectories": [
-                {
-                    "trajectory_id": "child",
-                    "phase": "deep",
-                    "invocations": [
-                        {
-                            "trajectory_id": "child",
-                            "invocation_id": "child-call",
-                            "phase": "deep",
-                            "started_at": "2026-01-01T00:00:04Z",
-                            "ended_at": "2026-01-01T00:00:06Z",
-                        },
-                        {
-                            "trajectory_id": "child",
-                            "invocation_id": "uncovered-call",
-                            "phase": "fix",
-                            "started_at": "2026-01-01T00:00:07Z",
-                            "ended_at": "2026-01-01T00:00:08Z",
+            ], "subtrajectories": [{"trajectory_id": "child", "phase": "deep",
+                    "invocations": [{"trajectory_id": "child", "invocation_id": "child-call", "phase": "deep",
+                            "started_at": "2026-01-01T00:00:04Z", "ended_at": "2026-01-01T00:00:06Z",
+                        }, {"trajectory_id": "child", "invocation_id": "uncovered-call", "phase": "fix",
+                            "started_at": "2026-01-01T00:00:07Z", "ended_at": "2026-01-01T00:00:08Z",
                         },
                     ],
                 },
             ],
         },
     }
-    nested = {
-        "session_id": session,
-        "trajectory_id": "nested",
-        "steps": [],
-        "extra": {
-            "run_started_at": "2026-01-01T00:00:06Z",
-            "run_ended_at": "2026-01-01T00:00:09Z",
-            "subtrajectories": [
-                {
-                    "trajectory_id": "nested",
-                    "invocation_id": "nested-call",
-                    "phase": "diagram",
-                    "started_at": "2026-01-01T00:00:06Z",
-                    "ended_at": "2026-01-01T00:00:09Z",
+    nested = {"session_id": session, "trajectory_id": "nested", "steps": [],
+        "extra": {"run_started_at": "2026-01-01T00:00:06Z", "run_ended_at": "2026-01-01T00:00:09Z",
+            "subtrajectories": [{"trajectory_id": "nested", "invocation_id": "nested-call", "phase": "diagram",
+                    "started_at": "2026-01-01T00:00:06Z", "ended_at": "2026-01-01T00:00:09Z",
                 }
             ],
         },
     }
-    child = {
-        "session_id": session,
-        "trajectory_id": "child",
-        "steps": [],
-        "extra": {
-            "run_started_at": "2026-01-01T00:00:03Z",
-            "run_ended_at": "2026-01-01T00:00:08Z",
-            "subtrajectories": [
-                {
-                    "trajectory_id": "child",
-                    "invocation_id": "child-call",
-                    "phase": "deep",
-                    "started_at": "2026-01-01T00:00:04Z",
-                    "ended_at": "2026-01-01T00:00:06Z",
-                },
-                {
-                    "trajectory_id": "child",
-                    "invocation_id": "uncovered-call",
-                    "phase": "fix",
-                    "started_at": "2026-01-01T00:00:07Z",
-                    "ended_at": "2026-01-01T00:00:08Z",
+    child = {"session_id": session, "trajectory_id": "child", "steps": [],
+        "extra": {"run_started_at": "2026-01-01T00:00:03Z", "run_ended_at": "2026-01-01T00:00:08Z",
+            "subtrajectories": [{"trajectory_id": "child", "invocation_id": "child-call", "phase": "deep",
+                    "started_at": "2026-01-01T00:00:04Z", "ended_at": "2026-01-01T00:00:06Z",
+                }, {"trajectory_id": "child", "invocation_id": "uncovered-call", "phase": "fix",
+                    "started_at": "2026-01-01T00:00:07Z", "ended_at": "2026-01-01T00:00:08Z",
                 },
             ],
         },
     }
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-01-01T00:00:10Z",
-        root_trajectory_id=session,
-        documents=(
-            _snapshot_document(tmp_path / "trajectory.json", root),
+    snapshot = RunWriteSnapshot(status="complete", cutoff_at="2026-01-01T00:00:10Z", root_trajectory_id=session,
+        documents=(_snapshot_document(tmp_path / "trajectory.json", root),
             _snapshot_document(tmp_path / "trajectories" / "child.json", child),
             _snapshot_document(tmp_path / "trajectories" / "nested.json", nested),
         ),
@@ -188,51 +105,27 @@ def test_overlap_coverage_and_recursive_invocation_identity(tmp_path: Path) -> N
     assert summary is not None
     assert summary.wall_clock_seconds == 10.0
     assert summary.phase_timings == {
-        "deep": {"wall_clock_seconds": 6.0, "occurrences": 2},
-        "diagram": {"wall_clock_seconds": 3.0, "occurrences": 1},
+        "deep": {"wall_clock_seconds": 6.0, "occurrences": 2}, "diagram": {"wall_clock_seconds": 3.0, "occurrences": 1},
     }
     assert summary.attributed_wall_clock_seconds == 8.0
     assert summary.unattributed_wall_clock_seconds == 2.0
     assert summary.coverage_ratio == 0.8
-    assert summary.agent_completeness == {
-        "total": 3,
-        "attributed": 2,
-        "unattributed": 1,
-    }
-
+    assert summary.agent_completeness == {"total": 3, "attributed": 2, "unattributed": 1}
 
 def test_malformed_identified_interval_is_diagnosed_not_coerced(tmp_path: Path) -> None:
     session = "bad-timing"
-    payload = {
-        "session_id": session,
-        "trajectory_id": session,
-        "steps": [],
-        "extra": {
-            "run_started_at": "2026-01-01T00:00:00Z",
-            "run_ended_at": "2026-01-01T00:00:02Z",
-            "phase_events": [
-                {
-                    "phase": "review",
-                    "event": "phase_start",
-                    "timestamp": "not-a-time",
-                    "session_id": session,
+    payload = {"session_id": session, "trajectory_id": session, "steps": [],
+        "extra": {"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:02Z",
+            "phase_events": [{
+                    "phase": "review", "event": "phase_start", "timestamp": "not-a-time", "session_id": session,
                     "scope_id": "scope",
-                },
-                {
-                    "phase": "review",
-                    "event": "phase_end",
-                    "timestamp": "2026-01-01T00:00:01Z",
-                    "session_id": session,
-                    "scope_id": "scope",
-                    "status": "succeeded",
+                }, {"phase": "review", "event": "phase_end", "timestamp": "2026-01-01T00:00:01Z", "session_id": session,
+                    "scope_id": "scope", "status": "succeeded",
                 },
             ],
         },
     }
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at="2026-01-01T00:00:02Z",
-        root_trajectory_id=session,
+    snapshot = RunWriteSnapshot(status="complete", cutoff_at="2026-01-01T00:00:02Z", root_trajectory_id=session,
         documents=(_snapshot_document(tmp_path / "trajectory.json", payload),),
     )
 
@@ -245,33 +138,19 @@ def test_malformed_identified_interval_is_diagnosed_not_coerced(tmp_path: Path) 
 
 # --- PhaseEvent.to_dict ----------------------------------------------------
 
-
 def test_phase_event_to_dict_basic() -> None:
     """PhaseEvent serializes phase value, event, and timestamp."""
-    ev = PhaseEvent(
-        phase=DaydreamPhase.REVIEW,
-        event="phase_start",
-        timestamp="2026-01-01T00:00:00Z",
-    )
+    ev = PhaseEvent(phase=DaydreamPhase.REVIEW, event="phase_start", timestamp="2026-01-01T00:00:00Z",)
     d = ev.to_dict()
-    assert d == {
-        "phase": "review",
-        "event": "phase_start",
-        "timestamp": "2026-01-01T00:00:00Z",
-    }
-
+    assert d == {"phase": "review", "event": "phase_start", "timestamp": "2026-01-01T00:00:00Z"}
 
 def test_phase_event_to_dict_includes_metadata() -> None:
     """Metadata appears when non-empty."""
     ev = PhaseEvent(
-        phase=DaydreamPhase.DEEP,
-        event="phase_start",
-        timestamp="2026-01-01T00:00:00Z",
-        metadata={"stage": "review"},
+        phase=DaydreamPhase.DEEP, event="phase_start", timestamp="2026-01-01T00:00:00Z", metadata={"stage": "review"},
     )
     d = ev.to_dict()
     assert d["metadata"] == {"stage": "review"}
-
 
 async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
     """Supervisor decisions and tool vetoes are recorded as phase events."""
@@ -282,46 +161,24 @@ async def test_emit_supervisor_and_tool_veto_events(tmp_path: Path) -> None:
 
     assert rec._phase_events[0].event == "supervisor_verdict"
     assert rec._phase_events[0].phase is DaydreamPhase.DEEP
-    assert rec._phase_events[0].metadata == {
-        "finding_id": 7,
-        "action": "drop",
-        "reason": "duplicate",
-    }
+    assert rec._phase_events[0].metadata == {"finding_id": 7, "action": "drop", "reason": "duplicate"}
     assert rec._phase_events[1].event == "tool_veto"
     assert rec._phase_events[1].phase is DaydreamPhase.FIX
-    assert rec._phase_events[1].metadata == {
-        "tool_name": "Write",
-        "reason": "protected path",
-    }
+    assert rec._phase_events[1].metadata == {"tool_name": "Write", "reason": "protected path"}
 
-
-async def test_emit_command_validation_summary_is_structured_and_redacted(
-    tmp_path: Path,
-) -> None:
+async def test_emit_command_validation_summary_is_structured_and_redacted(tmp_path: Path,) -> None:
     rec = make_recorder(tmp_path)
 
-    rec.emit_command_validation_summary(
-        total_candidates=33,
-        accepted=4,
-        rejected=29,
+    rec.emit_command_validation_summary(total_candidates=33, accepted=4, rejected=29,
         reasons={"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
     )
 
     event = rec._phase_events[0]
     assert event.event == "command_validation"
     assert event.phase is DaydreamPhase.RECON
-    assert event.metadata == {
-        "counts": {
-            "total_candidates": 33,
-            "accepted": 4,
-            "rejected": 29,
-        },
-        "reasons": {
-            "RECON_EVIDENCE_MISMATCH": 28,
-            "RECON_MALFORMED_COMMAND": 1,
-        },
+    assert event.metadata == {"counts": {"total_candidates": 33, "accepted": 4, "rejected": 29},
+        "reasons": {"RECON_EVIDENCE_MISMATCH": 28, "RECON_MALFORMED_COMMAND": 1},
     }
-
 
 async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> None:
     """Phase events appear in Trajectory.extra["phase_events"] when present."""
@@ -331,8 +188,7 @@ async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> N
             pass
         # Need at least one step so _write doesn't skip.
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="x"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "x")
     traj = read_trajectory(rec.path)
     assert atif_validate(traj, validate_images=False) is True
     events = traj["extra"]["phase_events"]
@@ -340,20 +196,17 @@ async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> N
     assert events[0]["phase"] == "review"
     assert events[0]["event"] == "phase_start"
 
-
 async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
     """When no phase events emitted, extra has no phase_events key."""
     rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="x"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "x")
     traj = read_trajectory(rec.path)
     assert "phase_events" not in traj["extra"]
 
 
 # --- phase_scope -----------------------------------------------------------
-
 
 async def test_phase_scope_emits_events_when_recorder_active(tmp_path: Path) -> None:
     """phase_scope emits start/end when a recorder is active via ContextVar."""
@@ -365,13 +218,11 @@ async def test_phase_scope_emits_events_when_recorder_active(tmp_path: Path) -> 
         assert len(rec._phase_events) == 2
         assert rec._phase_events[1].event == "phase_end"
 
-
 async def test_phase_scope_noop_without_recorder() -> None:
     """phase_scope is a no-op when no recorder is active (no crash)."""
     assert get_current_recorder() is None
     async with phase_scope(DaydreamPhase.REVIEW):
         pass  # must not raise
-
 
 async def test_phase_scope_emits_end_even_on_exception(tmp_path: Path) -> None:
     """phase_end fires even when the body raises (finally clause)."""
@@ -382,7 +233,6 @@ async def test_phase_scope_emits_end_even_on_exception(tmp_path: Path) -> None:
                 raise RuntimeError("boom")
         assert len(rec._phase_events) == 2
         assert rec._phase_events[1].event == "phase_end"
-
 
 async def test_phase_scope_id_pairs_concurrent_same_phase(tmp_path: Path) -> None:
     """Overlapping equal-valued phases close by identity, not phase-name LIFO."""
@@ -406,16 +256,10 @@ async def test_phase_scope_id_pairs_concurrent_same_phase(tmp_path: Path) -> Non
             await anyio.sleep(0)
             release["first"].set()
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="seed"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "seed")
 
     events = [event for event in read_trajectory(rec.path)["extra"]["phase_events"] if event["phase"] == "deep"]
-    assert [event["event"] for event in events] == [
-        "phase_start",
-        "phase_start",
-        "phase_end",
-        "phase_end",
-    ]
+    assert [event["event"] for event in events] == ["phase_start", "phase_start", "phase_end", "phase_end"]
     starts = {event["metadata"]["stage"]: event for event in events[:2]}
     ends = {event["metadata"]["stage"]: event for event in events[2:]}
     assert set(starts) == set(ends) == {"first", "second"}
@@ -425,26 +269,21 @@ async def test_phase_scope_id_pairs_concurrent_same_phase(tmp_path: Path) -> Non
     assert all(event["session_id"] == rec.session_id for event in events)
     assert all(event["status"] == "succeeded" for event in ends.values())
 
-
-async def test_phase_scope_id_rejects_second_or_post_close_decision(
-    tmp_path: Path,
-) -> None:
+async def test_phase_scope_id_rejects_second_or_post_close_decision(tmp_path: Path,) -> None:
     """A phase handle accepts exactly one caller terminal decision."""
     assert hasattr(trajectory_module, "LifecycleStatus")
     rec = make_recorder(tmp_path)
     async with rec:
         async with phase_scope(DaydreamPhase.REVIEW) as handle:
             handle.finish(
-                trajectory_module.LifecycleStatus.PARTIAL,
-                trajectory_module.LifecycleReasonCode.SOME_CHILDREN_FAILED,
+                trajectory_module.LifecycleStatus.PARTIAL, trajectory_module.LifecycleReasonCode.SOME_CHILDREN_FAILED,
             )
             with pytest.raises(RuntimeError, match="terminal decision"):
                 handle.finish(trajectory_module.LifecycleStatus.FAILED)
         with pytest.raises(RuntimeError, match="closed"):
             handle.finish(trajectory_module.LifecycleStatus.FAILED)
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="seed"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "seed")
 
     terminal = read_trajectory(rec.path)["extra"]["phase_events"][1]
     assert terminal["status"] == "partial"
@@ -453,7 +292,6 @@ async def test_phase_scope_id_rejects_second_or_post_close_decision(
 
 # --- Per-Invocation subtrajectory timestamps -------------------------------
 
-
 async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
     """An Invocation scope registers started_at/ended_at timestamps."""
     rec = make_recorder(tmp_path)
@@ -461,8 +299,7 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             assert inv.started_at != ""
             assert inv.ended_at == ""  # not set until exit
-            inv.observe(TextEvent(text="hi"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "hi")
         assert inv.ended_at != ""
     traj = read_trajectory(rec.path)
     subs = traj["extra"]["subtrajectories"]
@@ -472,14 +309,8 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
     assert subs[0]["ended_at"]
     assert subs[0]["step_ids"] == [1]
 
-
 async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None:
-    """ended_at is stamped after finish() flushes the still-open final step.
-
-    A lone TextEvent leaves the step open, so finish() materializes it during
-    __aexit__ with a fresh timestamp. ended_at must be stamped after that flush,
-    otherwise it predates its own last step and underreports timing (#203).
-    """
+    """Stamp ended_at after finish materializes the last still-open text step."""
     rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -490,50 +321,40 @@ async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None
     assert step_ts, "expected the open step to be flushed by finish()"
     assert sub["ended_at"] >= max(step_ts), f"ended_at {sub['ended_at']!r} predates final step {max(step_ts)!r}"
 
-
 async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
     """Zero invocations → extra has no subtrajectories key, even with steps present."""
     rec = make_recorder(tmp_path)
     async with rec:
-        # Seed a step so _write does not take its empty-steps early return,
-        # but open NO invocation — so _register_subtrajectory never fires.
+        # Avoid empty-write skipping while deliberately recording no invocation.
         rec._extend_steps([Step(step_id=1, source="user", message="seed")])
     assert rec.path.exists()
     data = read_trajectory(rec.path)
     assert "subtrajectories" not in data["extra"]
 
-
-async def test_subtrajectory_step_ids_track_multiple_invocations(
-    tmp_path: Path,
-) -> None:
+async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path,) -> None:
     """Multiple invocations produce multiple subtrajectory entries with sequential step_ids."""
     rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="a"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "a")
         async with rec.invocation(phase=DaydreamPhase.PARSE) as inv:
-            inv.observe(TextEvent(text="b"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "b")
     traj = read_trajectory(rec.path)
     subs = traj["extra"]["subtrajectories"]
     assert len(subs) == 2
     assert subs[0]["step_ids"] == [1]
     assert subs[1]["step_ids"] == [2]
 
-
 async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> None:
     """Fork siblings register subtrajectory entries on the parent (issue #212)."""
 
     rec = make_recorder(tmp_path)
     async with rec:
-        # Seed a parent step so _write does not take its empty-steps early
-        # return; in a real run the parent always has prior-phase steps.
+        # Retain the parent's document while exercising child timing.
         rec._extend_steps([Step(step_id=1, source="user", message="seed")])
         async with maybe_fork(rec, "fix-src-foo-py") as child:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                inv.observe(TextEvent(text="fixing foo"))
-                inv.observe(ResultEvent(structured_output=None, continuation=None))
+                observe_text_and_result(inv, "fixing foo")
     traj = read_trajectory(rec.path)
     subs = traj["extra"].get("subtrajectories", [])
     assert len(subs) == 1, f"expected 1 fork subtrajectory, got {len(subs)}: {subs}"
@@ -560,9 +381,7 @@ class _OverlappingReviewBackend(StubBackend):
         self.entered = {"wonder": anyio.Event(), "review": anyio.Event()}
         self.finished: set[str] = set()
 
-    async def execute(
-        self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
         lowered = prompt.lower()
         role = None
         if "would you have done this differently" in lowered or "evaluate the implementation" in lowered:
@@ -586,8 +405,7 @@ def _seconds(value: str) -> float:
 
 def _phase_union_seconds(events: list[dict[str, Any]]) -> float:
     starts = {event["scope_id"]: event for event in events if event["event"] == "phase_start"}
-    intervals = sorted(
-        (_seconds(starts[event["scope_id"]]["timestamp"]), _seconds(event["timestamp"]))
+    intervals = sorted((_seconds(starts[event["scope_id"]]["timestamp"]), _seconds(event["timestamp"]))
         for event in events if event["event"] == "phase_end"
     )
     union: list[tuple[float, float]] = []
@@ -598,7 +416,6 @@ def _phase_union_seconds(events: list[dict[str, Any]]) -> float:
             union.append((start, end))
     return sum(end - start for start, end in union)
 
-
 async def test_complete_overlapping_deep_run_timing_completeness(
     tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -607,15 +424,12 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     target = dr.build_both_signals_repo(tmp_path)
     backend = _OverlappingReviewBackend(target)
     backend.diagram_specs = {
-        "sequence": [dr.sequence_spec()],
-        "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
+        "sequence": [dr.sequence_spec()], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
     }
-    backend.diagram_emit_reads = True
     backend.per_stack_emit_reads = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
 
-    assert await run(RunConfig(
-        target=str(target), cleanup=False, non_interactive=True,
+    assert await run(RunConfig(target=str(target), cleanup=False, non_interactive=True,
         review_profile=independent_exploration_profile(independent_alternatives_profile()),
     )) == 0
     assert backend.finished == {"wonder", "review"}
@@ -625,10 +439,7 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     root = json.loads(roots[0].read_bytes())
     assert atif_validate(root, validate_images=False)
     events = root["extra"]["phase_events"]
-    expected_metadata = {
-        "merge": {"stage": "cross-stack-agent"},
-        "diagram": {"stage": "diagram"},
-    }
+    expected_metadata = {"merge": {"stage": "cross-stack-agent"}, "diagram": {"stage": "diagram"}}
     for phase, metadata in expected_metadata.items():
         pair = [event for event in events if event["phase"] == phase]
         assert [event["event"] for event in pair] == ["phase_start", "phase_end"]
@@ -643,18 +454,11 @@ async def test_complete_overlapping_deep_run_timing_completeness(
 
     documents = {root["trajectory_id"]: root}
     dispatches = [step for step in root["steps"] if "dispatch_id" in step.get("extra", {})]
-    assert {
-        step["extra"]["daydream_phase"]: [
-            result["content"] for result in step["observation"]["results"]
-        ]
+    assert {step["extra"]["daydream_phase"]: [result["content"] for result in step["observation"]["results"]]
         for step in dispatches
-    } == {
-        "exploration": ["Dispatched to explore-dependency_tracer"],
+    } == {"exploration": ["Dispatched to explore-dependency_tracer"],
         "deep": ["Dispatched to deep-python", "Dispatched to deep-structure"],
-        "diagram": [
-            "Dispatched to diagram-sequence",
-            "Dispatched to diagram-flowchart",
-        ],
+        "diagram": ["Dispatched to diagram-sequence", "Dispatched to diagram-flowchart"],
     }
     for step in dispatches:
         extra = step["extra"]
@@ -698,25 +502,16 @@ async def test_complete_overlapping_deep_run_timing_completeness(
     # Concurrent wonder/review intervals overlap, so summing their widths is not wall time.
     overlapping = [event for event in events if event["phase"] in {"alternatives", "deep"}]
     starts = {event["scope_id"]: event for event in overlapping if event["event"] == "phase_start"}
-    summed = sum(
-        _seconds(event["timestamp"]) - _seconds(starts[event["scope_id"]]["timestamp"])
+    summed = sum(_seconds(event["timestamp"]) - _seconds(starts[event["scope_id"]]["timestamp"])
         for event in overlapping if event["event"] == "phase_end"
     )
     assert _phase_union_seconds(overlapping) < summed
-    assert not any(
-        call["prompt"].lower().startswith(("fix this issue", "fix these"))
-        for call in backend.calls
-    )
+    assert not any(call["prompt"].lower().startswith(("fix this issue", "fix these")) for call in backend.calls)
     assert not (target / ".daydream-fix-applied").exists()
     assert not list(target.glob(".fixed-*"))
 
-
 async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    archive_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Any,
+    multi_stack_target: Path, tmp_path: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any,
     no_ci_remote: NoCIRemote,
 ) -> None:
     """A failed batch plus serial fallback stays one exact FIX child document."""
@@ -728,47 +523,27 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     backend.fail_batched_fix_file = "api.py"
     backend.fix_edit_line = "\n"
 
-    # Preserve the work watchdog in addition to the separately bounded remote-CI
-    # wait. The outer bound must scale with the no-CI harness discovery window:
-    # the run cannot conclude CI verification inside a fixed 30s when the
-    # harness margins widen (same precedent as test_deep_orchestrator.py's
-    # budget test).
+    # Allow discovery/operation time beyond the independently bounded CI wait.
     with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
-        exit_code = await run(
-            make_config(
-                target,
-                archive=True,
-                assume="yes",
-                cleanup=False,
-                output_mode="loop",
-                run_eval=True,
-                review_profile=independent_exploration_profile(),
-                pr_number=no_ci_remote.pr_number,
+        exit_code = await run(make_config(
+                target, archive=True, assume="yes", cleanup=False, output_mode="loop", run_eval=True,
+                review_profile=independent_exploration_profile(), pr_number=no_ci_remote.pr_number,
                 pr_repo=no_ci_remote.base_repository,
             )
         )
 
     assert exit_code == 0
-    assert git(origin, "rev-parse", "refs/heads/feature") == git(
-        target, "rev-parse", "HEAD"
-    )
-    fix_calls = [
-        call
-        for call in backend.calls
-        if call["prompt"].lower().startswith(("fix this issue", "fix these"))
-    ]
-    api_batch = [
-        call
+    assert git(origin, "rev-parse", "refs/heads/feature") == git(target, "rev-parse", "HEAD")
+    fix_calls = [call for call in backend.calls if call["prompt"].lower().startswith(("fix this issue", "fix these"))]
+    api_batch = [call
         for call in fix_calls
         if call["prompt"].startswith("Fix these 3 issues in ")
         and "api.py:" in call["prompt"].splitlines()[0]
     ]
-    api_serial = [
-        call
+    api_serial = [call
         for call in fix_calls
         if call["prompt"].startswith("Fix this issue:")
-        and any(
-            line.startswith("File: ") and Path(line.removeprefix("File: ")).name == "api.py"
+        and any(line.startswith("File: ") and Path(line.removeprefix("File: ")).name == "api.py"
             for line in call["prompt"].splitlines()
         )
     ]
@@ -778,8 +553,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     roots = list((target / ".daydream" / "runs").glob("*/trajectory.json"))
     assert len(roots) == 1
     root = json.loads(roots[0].read_bytes())
-    fix_dispatches = [
-        step
+    fix_dispatches = [step
         for step in root["steps"]
         if step.get("extra", {}).get("daydream_phase") == "fix"
         and "dispatch_id" in step.get("extra", {})
@@ -790,21 +564,17 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     assert dispatch["extra"]["planned_count"] == 2
     assert dispatch["extra"]["attempted_count"] == 2
     assert dispatch["extra"]["completed_count"] == 2
-    assert [
-        result["content"] for result in dispatch["observation"]["results"]
+    assert [result["content"] for result in dispatch["observation"]["results"]
     ] == ["Dispatched to fix-api.py", "Dispatched to fix-App.tsx"]
     api_result = dispatch["observation"]["results"][0]
     assert len(api_result["subagent_trajectory_ref"]) == 1
     api_ref = api_result["subagent_trajectory_ref"][0]
     assert Path(api_ref["trajectory_path"]).name.startswith("fix-api-py--")
-    api_child = json.loads(
-        (target / ".daydream" / api_ref["trajectory_path"]).read_bytes()
-    )
+    api_child = json.loads((target / ".daydream" / api_ref["trajectory_path"]).read_bytes())
     assert api_child["trajectory_id"] == api_ref["trajectory_id"]
     assert api_child["session_id"] == root["session_id"]
 
-    api_summaries = [
-        summary
+    api_summaries = [summary
         for summary in root["extra"]["subtrajectories"]
         if summary.get("dispatch_id") == dispatch["extra"]["dispatch_id"]
         and summary.get("descriptor") == "fix-api.py"
@@ -818,34 +588,22 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     api_invocations = api_summary["invocations"]
     assert len(api_invocations) == 4
     assert all(invocation["phase"] == "fix" for invocation in api_invocations)
-    assert all(
-        invocation["trajectory_id"] == api_child["trajectory_id"]
-        for invocation in api_invocations
-    )
-    assert len(
-        {
-            (invocation["trajectory_id"], invocation["invocation_id"])
-            for invocation in api_invocations
-        }
-    ) == 4
-    assert all(
-        api_child["extra"]["run_started_at"]
+    assert all(invocation["trajectory_id"] == api_child["trajectory_id"] for invocation in api_invocations)
+    assert len({(invocation["trajectory_id"], invocation["invocation_id"]) for invocation in api_invocations}) == 4
+    assert all(api_child["extra"]["run_started_at"]
         <= invocation["started_at"]
         <= invocation["ended_at"]
         <= api_child["extra"]["run_ended_at"]
         for invocation in api_invocations
     )
 
-    fix_events = [
-        event for event in root["extra"]["phase_events"] if event["phase"] == "fix"
-    ]
+    fix_events = [event for event in root["extra"]["phase_events"] if event["phase"] == "fix"]
     assert [event["event"] for event in fix_events] == ["phase_start", "phase_end"]
     assert fix_events[0]["scope_id"] == fix_events[1]["scope_id"]
     assert fix_events[1]["status"] == "succeeded"
     assert dispatch["extra"]["dispatch_started_at"] <= api_child["extra"]["run_started_at"]
     assert api_child["extra"]["run_ended_at"] <= dispatch["extra"]["dispatch_completed_at"]
-    assert all(
-        fix_events[0]["timestamp"]
+    assert all(fix_events[0]["timestamp"]
         <= invocation["started_at"]
         <= invocation["ended_at"]
         <= fix_events[1]["timestamp"]
@@ -866,12 +624,9 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
             child = json.loads((target / ".daydream" / sibling_path).read_bytes())
             if child["trajectory_id"] not in documents:
                 documents[child["trajectory_id"]] = child
-                document_descriptors[child["trajectory_id"]] = Path(
-                    sibling_path
-                ).name.split("--", 1)[0]
+                document_descriptors[child["trajectory_id"]] = Path(sibling_path).name.split("--", 1)[0]
                 pending.append(child)
-    invocation_keys = {
-        (document_id, invocation["invocation_id"])
+    invocation_keys = {(document_id, invocation["invocation_id"])
         for document_id, document in documents.items()
         for invocation in document["extra"].get("subtrajectories", [])
         if "invocation_id" in invocation
@@ -886,40 +641,20 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
                 continue
             key = (document_descriptors[document_id], invocation["phase"])
             qualified_counts[key] = qualified_counts.get(key, 0) + 1
-    assert qualified_counts == {
-        ("root", "intent"): 1,
-        ("root", "merge"): 1,
-        ("root", "test"): 1,
-        ("root", "verify"): 2,
-        ("deep-generic", "deep"): 1,
-        ("deep-python", "deep"): 1,
-        ("deep-react", "deep"): 1,
-        ("deep-structure", "deep"): 1,
-        ("explore-dependency-tracer", "exploration"): 1,
-        ("fix-api-py", "fix"): 4,
+    assert qualified_counts == {("root", "intent"): 1, ("root", "merge"): 1, ("root", "test"): 1, ("root", "verify"): 2,
+        ("deep-generic", "deep"): 1, ("deep-python", "deep"): 1, ("deep-react", "deep"): 1,
+        ("deep-structure", "deep"): 1, ("explore-dependency-tracer", "exploration"): 1, ("fix-api-py", "fix"): 4,
         ("fix-app-tsx", "fix"): 1,
     }
 
-    verify_invocations = [
-        invocation
+    verify_invocations = [invocation
         for invocation in root["extra"]["subtrajectories"]
         if invocation.get("phase") == "verify" and "invocation_id" in invocation
     ]
-    verify_events = [
-        event
-        for event in root["extra"]["phase_events"]
-        if event["phase"] == "verify"
-    ]
+    verify_events = [event for event in root["extra"]["phase_events"] if event["phase"] == "verify"]
     assert len(verify_invocations) == 2
-    assert [event["event"] for event in verify_events] == [
-        "phase_start",
-        "phase_end",
-        "phase_start",
-        "phase_end",
-    ]
-    for start, end, invocation in zip(
-        verify_events[::2], verify_events[1::2], verify_invocations, strict=True
-    ):
+    assert [event["event"] for event in verify_events] == ["phase_start", "phase_end", "phase_start", "phase_end"]
+    for start, end, invocation in zip(verify_events[::2], verify_events[1::2], verify_invocations, strict=True):
         assert start["scope_id"] == end["scope_id"]
         assert end["status"] == "succeeded"
         assert start["timestamp"] <= invocation["started_at"]
@@ -928,11 +663,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     archive = archive_dir / "runs" / root["session_id"]
     manifest = json.loads((archive / "manifest.json").read_bytes())
     evaluation = json.loads((archive / "evaluation.json").read_bytes())
-    completeness = {
-        "total": len(invocation_keys),
-        "attributed": len(invocation_keys),
-        "unattributed": 0,
-    }
+    completeness = {"total": len(invocation_keys), "attributed": len(invocation_keys), "unattributed": 0}
     assert manifest["metrics"]["timing_coverage"]["agent_completeness"] == completeness
     assert evaluation["timing"]["agent_completeness"] == completeness
 
@@ -959,25 +690,15 @@ def _read_phase_timings(tmp_path: Path) -> Any:
     manifest = json.loads(manifest_files[0].read_text())
     return manifest["metrics"]["phase_timings"]
 
-
 async def test_shallow_run_emits_phase_events_and_subtrajectories(
-    feature_branch_repo: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    silence_console: Any,
+    feature_branch_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, silence_console: Any,
     mute_side_effects: Any,
 ) -> None:
     """Shallow single-pass run writes trajectory and manifest timing data."""
 
-    issue = {
-        "id": 1,
-        "description": "Add type hints",
-        "file": "main.py",
-        "line": 1,
-    }
+    issue = {"id": 1, "description": "Add type hints", "file": "main.py", "line": 1}
 
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
+    monkeypatch.setattr("daydream.runner.create_backend",
         lambda name, model=None, **kwargs: PhaseDispatchBackend(parse_results=[[issue]]),
     )
 
@@ -989,17 +710,11 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     silence_console("daydream.deep.diagram_steps")
     silence_console("daydream.deep.fix_steps")
 
-    data = await _run_with_config(
-        tmp_path,
-        feature_branch_repo,
-        stack="python",
-        shallow=True,
-        non_interactive=True,
+    data = await _run_with_config(tmp_path, feature_branch_repo, stack="python", shallow=True, non_interactive=True,
         assume="yes",  # accept the fix gate so the fix/test cycle runs
     )
 
-    # Phase events: the deep-shallow spine's review and the fix's test must
-    # appear (the parse-<stack> stage was removed with issue #745).
+    # The shallow review and fix test phases must both appear.
     events = data["extra"].get("phase_events", [])
     event_phases = [e["phase"] for e in events]
     assert "test" in event_phases, f"test phase event missing; got {event_phases!r}"
@@ -1012,22 +727,10 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
     # Manifest: phase_timings appears in the metrics block.
     assert _read_phase_timings(tmp_path) is not None
 
-
 async def test_deep_run_emits_phase_events_and_manifest_timings(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Any,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
-    """Real-path: deep run writes trajectory with DEEP review phase_events + phase_timings.
-
-    Drives ``runner.run`` → ``_run_loop_deep`` → ``run_deep`` (the production
-    default deep pipeline) with the stub backend from ``test_deep_orchestrator``.
-    The orchestrator wraps the per-stack review fan-out in
-    ``phase_scope(DaydreamPhase.DEEP, stage="review")``, so
-    the trajectory's ``extra["phase_events"]`` must carry the deep review
-    boundary. Asserts the on-disk trajectory JSON + manifest.
-    """
+    """A real deep run records review boundaries in trajectory JSON and manifest timings."""
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -1035,9 +738,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     mute_side_effects()
 
 
-    data = await _run_with_config(
-        tmp_path,
-        multi_stack_target,
+    data = await _run_with_config(tmp_path, multi_stack_target,
         non_interactive=True,  # decline the apply-fixes gate
     )
 
@@ -1060,17 +761,12 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None
     assert "deep" in phase_timings, f"deep missing from manifest phase_timings: {phase_timings!r}"
-    # Declined gate still records the phases reached before fix/test/verify. The
-    # parse-<stack> stage was removed (issue #745), so it is not expected here.
+    # A declined gate retains earlier phase timing.
     assert "intent" in phase_timings
     assert "alternatives" not in phase_timings  # Folded into the structural review.
 
-
 async def test_deep_run_accept_gate_wraps_fix_test_verify(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Any,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
     """Accepted deep fix gate records fix/test/verify timing events."""
 
@@ -1080,9 +776,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
     mute_side_effects()
 
 
-    data = await _run_with_config(
-        tmp_path,
-        multi_stack_target,
+    data = await _run_with_config(tmp_path, multi_stack_target,
         assume="yes",  # accept the apply-fixes gate -> verify/fix/test run
     )
 
@@ -1099,37 +793,20 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
         assert phase in phase_timings, f"{phase} missing from deep phase_timings: {phase_timings!r}"
     assert "alternatives" not in phase_timings
 
-
 async def test_parallel_fix_registers_subtrajectories(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Any,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
-    """Real-path: parallel fix phase registers per-file subtrajectory entries.
-
-    Drives ``runner.run`` through the deep pipeline with the stub backend,
-    producing >=2 file findings that exercise ``phase_fix_parallel`` and the
-    ``recorder.fork()`` path. Asserts multiple ``fix`` entries appear in
-    ``extra["subtrajectories"]``.
-    """
+    """A real multi-file fix run records multiple forked fix trajectories."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     # Override merge items to produce 2 findings on distinct files.
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high"),
-        _merge_item(2, "App.tsx", "medium"),
-    ]
+    stub.merge_items = [_merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "medium")]
 
     mute_side_effects()
 
 
-    data = await _run_with_config(
-        tmp_path,
-        multi_stack_target,
-        assume="yes",
-    )
+    data = await _run_with_config(tmp_path, multi_stack_target, assume="yes",)
 
     subs = data["extra"].get("subtrajectories", [])
     fix_subs = [s for s in subs if s["phase"] == "fix"]
@@ -1141,20 +818,10 @@ async def test_parallel_fix_registers_subtrajectories(
         assert sub["sibling_trajectory_ref"], f"fix subtrajectory missing sibling_trajectory_ref: {sub}"
         assert "step_ids" not in sub, f"step_ids should be replaced by sibling_trajectory_ref: {sub}"
 
-
 async def test_review_flow_emits_phase_events_and_manifest_timings(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Any,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
-    """Review-only mode records review-spine timings and stops before fix/test.
-
-    ``--review`` (a mode of the single deep flow, #330) runs the review spine —
-    intent and per-stack review — and stops at ``findings-out``, so
-    the fix cycle's fix/test/verify must never run (and must not appear in the
-    recorded phase events or manifest timings).
-    """
+    """Review-only runs record review timing and stop before fix/test/verify events."""
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -1164,11 +831,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
 
     findings_out = tmp_path / "findings.json"
     data = await _run_with_config(
-        tmp_path,
-        multi_stack_target,
-        output_mode="review",
-        pr_number=7,
-        findings_out=str(findings_out),
+        tmp_path, multi_stack_target, output_mode="review", pr_number=7, findings_out=str(findings_out),
         non_interactive=True,
     )
     assert findings_out.is_file(), "review mode must emit the findings artifact"
@@ -1185,8 +848,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
             f"review mode ran the fix cycle phase {phase!r}; got: {sorted(event_phases)!r}"
         )
 
-    # Manifest: phase_timings must be non-null (was null before the fix) and
-    # carry the wrapped review phases.
+    # The manifest retains the wrapped review phases.
     phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None, "review flow phase_timings must not be null"
     for phase in ("intent", "deep"):

@@ -31,7 +31,6 @@ def _canonical_strict_iso(dates: str) -> str:
     """
     return dates.replace("Z", "+00:00")
 
-
 def test_seed_family_produces_pinned_shas(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     init_repo(repo)
@@ -46,7 +45,6 @@ def test_seed_family_produces_pinned_shas(tmp_path: Path) -> None:
     assert git(repo, "log", "-1", "--format=%an <%ae> %cn <%ce>") == _SEED_IDENTITY
     assert git(repo, "log", "-1", "--format=%at %ct") == _SEED_EPOCHS
     assert _canonical_strict_iso(git(repo, "log", "-1", "--format=%aI %cI")) == _SEED_DATES
-
 
 def test_write_and_stage_stages_binary_content(tmp_path: Path) -> None:
     repo = tmp_path / "repo"

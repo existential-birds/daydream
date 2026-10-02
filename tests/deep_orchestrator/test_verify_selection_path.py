@@ -1,10 +1,4 @@
-"""Real-path verify-selection config tests (issue #735).
-
-``runner.run`` is the production entrypoint; only the external backend is
-stubbed (``_install_accept_gate_pipeline``). The assertions read the persisted
-``recommendation-verdicts.json`` artifact, so they observe the wiring from the
-``RunConfig`` knob through ``_step_verify`` to the phase's ``selection`` block.
-"""
+"""Real runner tests of config-to-verifier wiring via persisted selection decisions."""
 
 from __future__ import annotations
 
@@ -15,7 +9,8 @@ from typing import Any
 import pytest
 
 from daydream.deep.artifacts import verdicts_path
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import _install_accept_gate_pipeline
 from tests.test_deep_orchestrator import Mute, _run_deep
 
@@ -38,14 +33,8 @@ def _is_verifier_prompt(prompt: str) -> bool:
 
 async def _run_deep_with(target: Path, **overrides: Any) -> int:
     """Run the deep pipeline through ``runner.run`` with explicit RunConfig overrides."""
-    config = RunConfig(
-        target=str(target),
-        start_at="review",
-        cleanup=False,
-        **overrides,
-    )
+    config = RunConfig(target=str(target), start_at="review", cleanup=False, **overrides,)
     return await run(config)
-
 
 async def test_start_at_fix_resume_reuses_unchanged_verdicts_and_reverifies_changed_ones(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
@@ -62,7 +51,6 @@ async def test_start_at_fix_resume_reuses_unchanged_verdicts_and_reverifies_chan
     assert len([c for c in stub.calls if _is_verifier_prompt(c["prompt"])]) == len(verifier_calls_first)
     assert any(d["verdict_reused"] for d in second["selection"]["decisions"])
 
-
 async def test_verify_all_reproduces_the_conservative_item_set(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute
 ) -> None:
@@ -73,7 +61,6 @@ async def test_verify_all_reproduces_the_conservative_item_set(
     payload = json.loads(verdicts_path(multi_stack_target / ".daydream" / "deep").read_text())
     assert payload["selection"]["mode"] == "verify_all"
     assert payload["selection"]["skipped"] == 0
-    assert all(
-        d["reason_code"] in {"verify_all", "exempt:structural", "exempt:wonder"}
+    assert all(d["reason_code"] in {"verify_all", "exempt:structural", "exempt:wonder"}
         for d in payload["selection"]["decisions"]
     )

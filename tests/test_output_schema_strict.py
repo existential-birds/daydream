@@ -1,29 +1,8 @@
-"""Codex/OpenAI strict structured-output conformance for every output schema.
+"""Codex strict-schema conformance for public *_SCHEMA roots and generated variants.
 
-The Codex backend forwards each ``output_schema`` to the ``codex`` CLI, which
-hands it to OpenAI's Responses API in strict mode. That validator rejects any
-schema whose object nodes do not (a) list *every* property key in ``required``
-and (b) set ``additionalProperties: false``. The Claude SDK is lenient and
-accepts partial-``required`` schemas, so a non-conforming schema passes the
-Claude path silently and only fails on the real Codex path with::
-
-    invalid_request_error / invalid_json_schema:
-    'required' is required ... including every key in properties. Missing 'source'.
-
-This is exactly how ``MERGED_ITEMS_SCHEMA`` (vestigial ``source`` not in
-``required``) and ``RECOMMENDATION_VERDICTS_SCHEMA`` (missing
-``additionalProperties``) shipped broken-for-Codex while green on Claude.
-
-This test collects the static and generated schemas passed at the
-``output_schema=`` call sites and asserts each conforms recursively.
-
-Collection is by introspection, never a hand-maintained list: every public
-module-level ``*_SCHEMA`` dict in the modules below is checked. Those modules
-keep their sub-schemas module-private, so the public names are the roots handed
-to a backend. A newly added output schema is therefore covered automatically and
-a deleted one simply stops being collected. A public constant that never reaches
-a backend is covered too — over-coverage is the safe direction, because a
-sub-schema of a strict root must be strict anyway.
+Unlike Claude's lenient SDK, Codex requires all object properties in required
+and additionalProperties=false. Introspection covers new public roots automatically;
+private sub-schemas are checked recursively, including unused public roots.
 """
 
 from __future__ import annotations
@@ -33,53 +12,29 @@ from typing import Any
 import pytest
 
 import daydream.deep.diagram_schema as diagram_schema
-import daydream.improve.orchestrator as improve_orchestrator
 import daydream.improve.prompts as improve_prompts
+import daydream.improve.recon as improve_recon
 import daydream.phases as phases
 import daydream.prompts.exploration_subagents as exploration_subagents
+from daydream.improve.audit import _schema_with_provenance
 
 # Modules whose public ``*_SCHEMA`` constants are all backend output schemas.
-_SCHEMA_MODULES = [
-    phases,
-    exploration_subagents,
-    improve_prompts,
-    improve_orchestrator,
-    diagram_schema,
-]
+_SCHEMA_MODULES = [phases, exploration_subagents, improve_prompts, improve_recon, diagram_schema]
 
 # OpenAI Structured Outputs accepts only this documented JSON Schema subset.
 # Keep this positive list beside the cross-provider schema inventory so every
 # runtime schema is checked against the same provider boundary.
 _SUPPORTED_SCHEMA_KEYWORDS = {
-    "$defs",
-    "$ref",
-    "additionalProperties",
-    "anyOf",
-    "description",
-    "enum",
-    "exclusiveMaximum",
-    "exclusiveMinimum",
-    "format",
-    "items",
-    "maximum",
-    "maxItems",
-    "maxLength",
-    "minimum",
-    "minItems",
-    "minLength",
-    "multipleOf",
-    "pattern",
-    "properties",
-    "required",
-    "type",
+    "$defs", "$ref", "additionalProperties", "anyOf", "description", "enum", "exclusiveMaximum", "exclusiveMinimum",
+    "format", "items", "maximum", "maxItems", "maxLength", "minimum", "minItems", "minLength", "multipleOf", "pattern",
+    "properties", "required", "type",
 }
 
 
 def _takes_provenance(schema: dict[str, Any]) -> bool:
     """True for the improve schemas ``_schema_with_provenance`` extends."""
     properties = schema.get("properties", {})
-    return any(
-        isinstance(properties.get(key), dict)
+    return any(isinstance(properties.get(key), dict)
         and isinstance(properties[key].get("items"), dict)
         for key in ("findings", "verdicts")
     )
@@ -100,11 +55,7 @@ def _collect_output_schemas() -> list[tuple[str, dict[str, Any]]]:
                 found.append((f"{module.__name__}.{name}", value))
     # Branch-focus audits and vets send a provenance-extended variant, so the
     # transformed shape is checked alongside the base it was derived from.
-    found.extend(
-        (
-            f"_schema_with_provenance({name})",
-            improve_orchestrator._schema_with_provenance(schema),
-        )
+    found.extend((f"_schema_with_provenance({name})", _schema_with_provenance(schema),)
         for name, schema in list(found)
         if name.startswith("daydream.improve.") and _takes_provenance(schema)
     )
@@ -113,15 +64,7 @@ def _collect_output_schemas() -> list[tuple[str, dict[str, Any]]]:
 
 def _strict_violations(node: Any, path: str) -> list[str]:
     """Recursively collect OpenAI strict-mode violations under ``node``."""
-    supported_types = {
-        "string",
-        "number",
-        "boolean",
-        "integer",
-        "object",
-        "array",
-        "null",
-    }
+    supported_types = {"string", "number", "boolean", "integer", "object", "array", "null"}
     errors: list[str] = []
     if not isinstance(node, dict):
         return [f"{path}: schema node is not an object"]
@@ -131,11 +74,8 @@ def _strict_violations(node: Any, path: str) -> list[str]:
     if unsupported:
         errors.append(f"{path}: unsupported keywords: {sorted(unsupported)}")
     declared_type = node.get("type")
-    declared_types = (
-        [declared_type] if isinstance(declared_type, str) else declared_type
-    )
-    if declared_types is not None and (
-        not isinstance(declared_types, list)
+    declared_types = ([declared_type] if isinstance(declared_type, str) else declared_type)
+    if declared_types is not None and (not isinstance(declared_types, list)
         or not declared_types
         or any(item not in supported_types for item in declared_types)
     ):
@@ -166,11 +106,9 @@ def _strict_violations(node: Any, path: str) -> list[str]:
 
 _SCHEMAS = _collect_output_schemas()
 
-
 def test_output_schemas_were_discovered() -> None:
     """Guard the guard: discovery must not silently match zero schemas."""
     assert _SCHEMAS, "No *_SCHEMA constants discovered — schema collection is broken"
-
 
 @pytest.mark.parametrize("name,schema", _SCHEMAS, ids=[n for n, _ in _SCHEMAS])
 def test_output_schema_is_codex_strict_compliant(name: str, schema: dict[str, Any]) -> None:

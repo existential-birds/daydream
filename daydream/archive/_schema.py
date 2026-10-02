@@ -1,10 +1,4 @@
-"""SQLite schema definitions and migration helpers for the daydream archive index.
-
-Centralises all DDL constants (CREATE TABLE, CREATE INDEX, UPSERT) and the
-idempotent migration helpers that bring a live database up to the current
-schema version. Imported exclusively by ``daydream.archive.index``; callers
-outside that module should not depend on anything in this file directly.
-"""
+"""Archive index DDL and idempotent migrations, owned by daydream.archive.index."""
 
 from __future__ import annotations
 
@@ -23,12 +17,7 @@ centralised here so all callers stay in sync if the precedence rule ever changes
 """
 
 class Column(NamedTuple):
-    """One table column: its SQL name, DDL body text, and run-migration flags.
-
-    ``additive``/``upserted`` default to ``False`` so most non-``runs`` tables
-    declare only a name and definition; ``label_observations`` sets ``additive``
-    on the columns its own ALTER-ADD migration runs.
-    """
+    """SQL column declaration with additive-migration and run-upsert membership flags."""
 
     name: str
     definition: str
@@ -37,19 +26,11 @@ class Column(NamedTuple):
 
 
 class RunColumn(Column):
-    """One column of the ``runs`` table.
+    """A runs column in canonical fresh-database order.
 
-    ``RUNS_COLUMNS`` is the *only* declaration of the runs column set — the
-    ``CREATE TABLE`` text (``_CREATE_TABLE``), the ``ALTER TABLE ADD COLUMN``
-    entries ``_migrate_schema`` applies, and the run-upsert statement
-    (``_UPSERT_SQL``) are all generated from it. Its order is the canonical
-    fresh-database column order; upgraded databases are migrated *by name*
-    (see ``_alter_add_missing``), so their resulting column order is not a
-    contract, and every runs read is ``SELECT *`` materialised by column name.
-
-    ``additive`` marks a column that appended databases migrate onto;
-    ``upserted`` marks a column the run upsert writes (the label-observation
-    paths own the rest and maintain them separately).
+    The declaration generates CREATE, additive migration, and UPSERT SQL.
+    Upgraded column order is unconstrained: migrations and reads use names.
+    Label-observation writers own columns excluded from run upserts.
     """
 
 
@@ -88,8 +69,6 @@ RUNS_COLUMNS: tuple[RunColumn, ...] = (
     RunColumn("pr_repo", "TEXT", False, True),
     RunColumn("total_cost_usd", "REAL", False, True),
     RunColumn("total_findings", "INTEGER", False, True),
-    RunColumn("grounding_rate", "REAL", False, True),
-    RunColumn("coverage_ratio", "REAL", False, True),
     RunColumn("cost_per_finding_usd", "REAL", False, True),
     RunColumn("wall_clock_seconds", "REAL", False, True),
     RunColumn("erosion", "REAL", True, True),
@@ -120,12 +99,7 @@ def _create_table_sql(
     table: str = "runs",
     table_constraints: Sequence[str] = (),
 ) -> str:
-    """Render a CREATE TABLE statement from *columns* and *table_constraints*.
-
-    Every line carries a trailing comma except the last, matching the canonical
-    fresh-database ``runs`` DDL byte-for-byte. The definition text is emitted
-    verbatim. ``table_constraints`` are appended after the columns.
-    """
+    """Render verbatim column definitions followed by table constraints."""
     lines = [f"    {col.name} {col.definition}" for col in columns]
     lines += [f"    {constraint}" for constraint in table_constraints]
     return f"\nCREATE TABLE IF NOT EXISTS {table} (\n" + ",\n".join(lines) + "\n)\n"
@@ -136,12 +110,7 @@ _UPSERT_LINE_WIDTH = 92
 
 
 def _wrap_tokens(tokens: tuple[str, ...]) -> str:
-    """Greedily wrap *tokens* into 4-space-indented comma-separated lines.
-
-    The single formatting rule shared by both halves of the run upsert: fill a
-    line until the next token would push it past ``_UPSERT_LINE_WIDTH``, then
-    break *before* that token. Every line ends with a comma except the last.
-    """
+    """Wrap comma-separated tokens at _UPSERT_LINE_WIDTH using four-space indentation."""
     lines: list[str] = []
     current = "    "
     for token in tokens:
@@ -157,13 +126,7 @@ def _wrap_tokens(tokens: tuple[str, ...]) -> str:
 
 
 def _upsert_sql(columns: Iterable[RunColumn]) -> str:
-    """Render the run upsert statement from *columns*.
-
-    Only the columns declared ``upserted`` participate, in declaration order;
-    the column block and the ``:name`` parameter block are wrapped by the same
-    ``_wrap_tokens`` rule so their token sequences stay aligned. No trailing
-    comma on either block's last token.
-    """
+    """Generate matching column and parameter lists for declared upsert columns."""
     participating = tuple(col.name for col in columns if col.upserted)
     parameters = tuple(f":{name}" for name in participating)
     return (
@@ -248,13 +211,7 @@ def _alter_add_missing(
     table: str,
     migrations: list[tuple[str, str]],
 ) -> None:
-    """ALTER TABLE *table* to add any columns in *migrations* that are absent.
-
-    Each entry in *migrations* is a ``(column_name, column_type)`` pair.
-    Missing columns are added idempotently; a ``duplicate column name`` error
-    (raised by a race between concurrent openers) is silently swallowed, which
-    preserves the warn-and-continue semantics of the callers it replaces.
-    """
+    """Add missing columns; tolerate concurrent openers racing to add the same column."""
     existing = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}  # noqa: S608 - table is a module-local constant at every call site
     for col, col_type in migrations:
         if col not in existing:
@@ -266,13 +223,9 @@ def _alter_add_missing(
 
 
 def _migration_entries(columns: Iterable[Column]) -> list[tuple[str, str]]:
-    """Render the ``(name, type)`` ALTER-ADD entries for the additive *columns*.
+    """Select additive columns for ALTER ADD in declaration order.
 
-    Non-additive entries are omitted: they are present in every legacy shape by
-    construction (``archived_at``, ``run_flow`` and ``archive_path`` are
-    ``NOT NULL`` without defaults and cannot be added to a populated table). The
-    emitted order follows the declaration; ``_alter_add_missing`` filters by
-    live ``PRAGMA table_info``, so order is not a contract.
+    Required legacy columns without defaults cannot be added to populated tables.
     """
     return [(col.name, col.definition) for col in columns if col.additive]
 
@@ -283,16 +236,10 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
 
 
 def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
-    """Drop and recreate ``label_observations`` if it predates the bitemporal/posterior columns.
+    """Recreate observations missing structural valid_at or has_posterior columns.
 
-    The bitemporal/reward/posterior columns are part of the table's primary
-    structure, so rather than `ALTER TABLE ADD COLUMN` (which cannot retrofit
-    them cleanly for the spec's clean-recreate guarantee), a stale table is
-    dropped and rebuilt. A table missing either ``valid_at`` (pre-bitemporal) or
-    ``has_posterior`` (pre-reward-posterior-corrections) is considered stale. Dev
-    label rows are discarded (spec-sanctioned — repopulate via ``harvest``). The
-    ``runs`` table is never touched. Idempotent: after a recreate both columns
-    exist, so subsequent calls are a no-op.
+    This intentionally discards obsolete development observations for re-harvest;
+    the runs table is untouched. Later migrations preserve observation rows.
     """
     existing = {row[1] for row in conn.execute("PRAGMA table_info(label_observations)").fetchall()}
     if existing and ("valid_at" not in existing or "has_posterior" not in existing):
@@ -306,14 +253,7 @@ def _recreate_label_observations_if_stale(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_label_observations_schema(conn: sqlite3.Connection) -> None:
-    """Additively ALTER-ADD columns missing from a live ``label_observations`` table.
-
-    Unlike ``_recreate_label_observations_if_stale`` (which drop-recreates for
-    structural bitemporal/posterior columns), this is non-destructive: the
-    ``source`` precedence marker is additive, so pre-existing rows are preserved
-    and default to ``'auto'``. Delegates to ``_alter_add_missing`` (the shared
-    helper that also backs ``_migrate_schema`` for the runs table).
-    """
+    """Add missing observation columns without deleting rows; legacy source defaults to auto."""
     _alter_add_missing(
         conn,
         "label_observations",

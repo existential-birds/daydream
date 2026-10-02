@@ -1,13 +1,6 @@
-"""Discover monorepo service roots and answer which service owns a path.
+"""Shared service discovery and path ownership for Improve audits and diagrams.
 
-The single service-discovery implementation, shared by the improve flow's
-monorepo audits (``--scope``, partition grouping) and grounded-diagram
-eligibility (the cross-service rule, issue #1113). Lives at package root so
-neither flow subpackage depends on the other. This module also
-owns the service-root containment rule (``owning_services``): the question
-"which service, if any, owns this repository-relative path?" is answered here
-and nowhere else.
-"""
+Lives outside either flow to keep their dependencies independent."""
 
 from __future__ import annotations
 
@@ -115,23 +108,11 @@ def enumerate_services(
     *,
     service_roots: list[str] | None = None,
 ) -> list[Service]:
-    """Return deterministic service roots declared by config or inferred from layout.
+    """Return declared service roots, or infer them from repository layout.
 
-    Args:
-        repo_root: Repository root to discover under.
-        file_config: Parsed file config; its ``improve_service_roots`` is the
-            default declared-roots source.
-        service_roots: Caller-supplied declared roots that *replace*
-            ``file_config.improve_service_roots`` when non-empty (issue #1113:
-            the diagram flow passes ``[tool.daydream.diagram] service_roots`` so
-            a repo can scope diagram participants differently from improve
-            audits). ``None`` or ``[]`` falls back to the improve list, then to
-            layout inference — an empty explicit list is "nothing declared", not
-            "no services".
-
-    Declared roots short-circuit inference entirely: when a repo names its
-    services, layout heuristics must not add unnamed ones.
-    """
+    A nonempty service_roots replaces the Improve config list. None or [] falls
+    back to that list, then inference; empty never means "no services". Declared
+    roots suppress inference completely, so no unnamed services are added."""
     repo_root = repo_root.resolve()
     declared = service_roots if service_roots else file_config.improve_service_roots
     if declared:

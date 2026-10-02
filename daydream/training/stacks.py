@@ -1,33 +1,9 @@
-"""Frozen-corpus projection loaders for the training pipeline.
+"""Load complete frozen projections and recheck their consumption gates.
 
-:func:`load_v2_projection` loads a ``build_frozen_corpus`` projection
-directory into a :class:`V2Projection` and refuses anything that is not a
-complete, gate-clean projection:
-
-- per-split record loading over the frozen ``train``/``validation``/
-  ``holdout`` manifests (:func:`load_dataset_v2`), refusing any record not
-  stamped ``schema_version == "2"``. Every record must also carry its repo
-  identity and immutable license decision under ``lineage`` (structurally
-  required — an absent field is itself the failure, never a bypass);
-- the ``_SUCCESS`` completeness marker (written last by the projector,
-  mirroring the bundle's own gate) is required: a partial projection left
-  by a mid-write failure is refused, never consumed;
-- the C5/C8 license gates re-run fail-closed over every loaded record: an
-  excluded repo is refused unconditionally, and a copyleft-class record is
-  refused unless its exact slug was passed via ``allow_copyleft``;
-- per-split record access derived from each record's ``lineage.split``;
-- the projection's ``lineage.json`` (salt, rates, provenance pins);
-- per-file sha256 digests and a deterministic directory-level digest over
-  the sorted ``(relpath, sha256(file_bytes))`` pairs — a pure function of
-  the directory bytes, so the same projection always yields the same digest;
-- a **split-drift gate**: the split is recomputed from every record's id via
-  :func:`daydream.training.corpus_projection.splits.assign_split` under the lineage's
-  pinned salt/rates, and any disagreement with the record's recorded
-  ``lineage.split`` refuses the whole load (``ValueError`` naming the
-  offending record id) — never a silent accept.
-
-The lists themselves are owned exclusively by :mod:`daydream.training.exclusion`;
-this module re-implements no parsing.
+Require v2 records, repository/license identity, and _SUCCESS. C5 exclusions
+always refuse consumption; C8 requires exact repository opt-ins. Full projection
+loading also verifies pinned split assignments and computes a deterministic
+file-tree digest. Exclusion-list parsing remains owned by training.exclusion.
 """
 
 from __future__ import annotations
@@ -58,18 +34,10 @@ __all__ = [
 
 @dataclass(frozen=True)
 class V2Projection:
-    """A loaded projection directory.
+    """Validated records in train/validation/holdout file order, grouped by split.
 
-    Attributes:
-        records: All v2 records, in split-file order (train, validation,
-            holdout), exactly as :func:`load_dataset_v2` returns them.
-        by_split: Records grouped by their recorded ``lineage.split``; all
-            three keys are always present.
-        lineage: The parsed ``lineage.json`` dict.
-        digest: Deterministic directory-level digest: sha256 over the sorted
-            ``(relpath, sha256(file_bytes))`` pairs of every file in the
-            projection directory. A pure function of the directory bytes.
-    """
+    lineage contains the pinned assignment parameters; digest covers sorted
+    (relative path, file hash) pairs for every projection file."""
 
     records: list[dict[str, object]]
     by_split: dict[str, list[dict[str, object]]] = field(default_factory=dict)
@@ -165,48 +133,13 @@ def load_dataset_v2(
     *,
     allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> list[dict[str, object]]:
-    """Load a projected projection directory (the frozen train/validation/
-    holdout JSONL manifests from ``build_frozen_corpus``), enforcing repo
-    identity, the license-decision stamp, and C5/C8 fail-closed.
+    """Load split manifests in train/validation/holdout order after completeness checks.
 
-    ``holdout.jsonl``. A ``_SUCCESS`` completeness marker (written last by
-    the projector, mirroring the bundle's own gate) is required: a partial
-    projection left by a mid-write failure is refused, never consumed.
-
-    Structural gate: every record must carry ``lineage.repo_slug`` (a
-    non-empty string) and ``lineage.license_decision`` (a dict with
-    ``status`` in ``{"admitted", "rejected"}`` and a non-empty ``repo_slug``).
-    The field's absence is itself the failure — a stripped record can never
-    slip through as "not applicable".
-
-    Consumption gate (defense in depth over the recorded decisions): the
-    C5/C8 lists are re-evaluated over every loaded record. A record whose
-    ``repo_slug`` is on the exclusion list is refused unconditionally — no
-    keyword can suppress C5. A copyleft-class record (on the copyleft list,
-    or carrying a ``c8_copyleft_unopted`` decision reason) is refused unless
-    its exact slug was passed via ``allow_copyleft``.
-
-    Args:
-        path: The projection output directory containing ``train.jsonl``,
-            ``validation.jsonl`` and ``holdout.jsonl``.
-        allow_copyleft: ``owner/repo`` slugs the caller has explicitly opted
-            in. Empty by default, so copyleft repos are always refused unless
-            explicitly admitted. Never overrides the C5 exclusion list.
-
-    Returns:
-        The full list of v2 training-record dicts, in split-file order.
-
-    Raises:
-        ValueError: When the projection lacks its ``_SUCCESS`` marker, when
-            any record's ``schema_version`` is not ``"2"``, when a record is
-            missing its repo identity or license decision (the offending
-            record id and field are named), or when any record's repo is on
-            the exclusion list (C5) or is copyleft without being in
-            ``allow_copyleft`` (C8). All offending slugs are named; no
-            records are returned.
-        json.JSONDecodeError: When a line is not valid JSON — never a silent
-            skip.
-    """
+    Every record must have schema_version="2", a nonempty lineage.repo_slug,
+    and a resolved license decision with its own repository identity. Re-run
+    C5/C8 checks: exclusions always win; copyleft requires the exact slug in
+    allow_copyleft. Gate failures raise ValueError naming offending records or
+    repositories; malformed JSON propagates unchanged. No partial list returns."""
     projection_dir = Path(path)
     if not (projection_dir / "_SUCCESS").is_file():
         raise ValueError(
@@ -318,26 +251,10 @@ def load_v2_projection(
     *,
     allow_copyleft: frozenset[str] | set[str] = frozenset(),
 ) -> V2Projection:
-    """Load a projection directory into a :class:`V2Projection`.
+    """Load gate-clean records, verify pinned splits, and digest the directory.
 
-    Reuses :func:`load_dataset_v2` for the existing
-    fail-closed gates (missing ``_SUCCESS``, non-``"2"`` ``schema_version``,
-    repo identity, license decisions, C5/C8), then parses ``lineage.json``,
-    recomputes every record's split from its id, and refuses any drift.
-
-    Args:
-        path: The projection output directory written by
-            ``build_frozen_corpus``.
-        allow_copyleft: Passed through to the underlying v2 loader.
-
-    Returns:
-        The :class:`V2Projection` for the directory.
-
-    Raises:
-        ValueError: On any existing-gate failure, on a missing split file
-            or a missing/malformed ``lineage.json``, or on split drift (the
-            offending record ids and both splits are named).
-    """
+    Missing split files become ValueError. Missing/invalid lineage and every
+    recomputed split mismatch refuse the entire load before grouping."""
     projection_dir = Path(path)
     try:
         records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
@@ -351,13 +268,8 @@ def load_v2_projection(
 
     by_split: dict[str, list[dict[str, object]]] = {name: [] for name in SPLIT_FILENAMES}
     for record in records:
-        lineage_obj = record.get("lineage")
-        split = lineage_obj.get("split") if isinstance(lineage_obj, dict) else None
-        if split not in by_split:
-            raise ValueError(
-                f"projection {projection_dir}: record "
-                f"{record.get('record_id')!r} carries unknown split {split!r}"
-            )
+        # Identity and split consistency were validated before grouping.
+        split = cast(dict[str, object], record["lineage"])["split"]
         by_split[cast(str, split)].append(record)
 
     return V2Projection(

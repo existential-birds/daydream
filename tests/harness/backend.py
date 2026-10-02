@@ -1,23 +1,9 @@
-"""Shared scripted fake ``Backend`` for tests that mock the agent seam.
+"""Recording Backend fake for orchestration tests.
 
-``ScriptedBackend`` yields pre-built events and records its calls so tests can
-exercise orchestration through the production seams.
-
-``ScriptedBackend`` is the *scripted* fake: it yields a pre-built turn script,
-records what it was called with, can key responses by the call's
-``output_schema`` (a constructor seam) so a parallel fan-out whose completion
-order is not fixed still gets the right turn, and can hand a call to a
-per-call ``responder`` that returns a turn, streams its own async iterator, or
-declines (``None``) so the schema/script selection decides. Prompt-heuristic
-routing for the shallow review-fix-test loop stays
-``tests.harness.phase_backend.PhaseDispatchBackend``'s job.
-
-A *script* is a list of turns, one per ``execute`` call. A turn is a sequence of
-items, each either an ``AgentEvent`` to yield or a ``BaseException`` to raise at
-that point in the stream (so "yield partial text, then fail" is expressible).
-Once the script is exhausted the final turn repeats, which is what the
-``if call_count == 1: ... else: ...`` fakes were all encoding by hand.
-"""
+Each execute consumes one scripted turn; the final turn repeats. Turns contain
+events and exceptions, allowing partial output before failure. Schema matching
+and responders support fan-out independent of completion order. Prompt-based
+review/fix routing belongs to PhaseDispatchBackend."""
 
 from __future__ import annotations
 
@@ -42,64 +28,20 @@ _DEFAULT_TURN: Turn = (ResultEvent(structured_output=None, continuation=None),)
 
 
 class ScriptedBackend:
-    """Recording fake ``Backend`` driven by a per-call turn script.
+    """Record execute arguments in calls and expose ordered prompt, continuation,
+    turn-limit, schema and read-only projections. Count cancellation separately."""
 
-    Attributes:
-        model: Model name reported to the recorder and the ``Model:`` UI line.
-        calls: One ``dict`` per ``execute`` call, capturing every argument
-            (``cwd``, ``prompt``, ``output_schema``, ``continuation``,
-            ``agents``, ``max_turns``, ``read_only``, ``persist_session``).
-        prompts: Prompts in call order.
-        continuations: ``continuation`` arguments in call order — the observable
-            that fresh-context tests assert on.
-        max_turns: ``max_turns`` arguments in call order.
-        schemas: ``output_schema`` arguments in call order.
-        call_count: Total ``execute`` invocations.
-        cancel_calls: Total ``cancel`` invocations.
-    """
-
-    def __init__(
-        self,
-        script: Sequence[Turn] | None = None,
-        *,
-        events: Turn | None = None,
+    def __init__(self, script: Sequence[Turn] | None = None, *, events: Turn | None = None,
         responses_by_schema: Sequence[tuple[dict[str, Any] | None, Turn]] | None = None,
-        responder: Responder | None = None,
-        model: str | None = "test-model",
-        fanout_concurrency: int = 4,
-        **attrs: Any,
+        responder: Responder | None = None, model: str | None = "test-model", fanout_concurrency: int = 4, **attrs: Any,
     ) -> None:
-        """Configure the fake.
+        """Choose either per-call script turns or an events turn repeated on every call.
 
-        Args:
-            script: One turn per ``execute`` call; the last turn repeats once
-                exhausted. Defaults to a single bare ``ResultEvent`` turn.
-            events: Shorthand for a one-turn script (``script=[events]``) — the
-                every-call-yields-the-same-stream mode. Mutually exclusive with
-                ``script``.
-            responses_by_schema: Ordered pairs, each a ``(output_schema, turn)``
-                whose first pair comparing ``==`` to a call's ``output_schema``
-                supplies that call's turn. A ``None`` key is the fallback for
-                any unmatched call. With no match (and no fallback) the normal
-                per-call script selection applies. Matching never hashes the
-                schema, so the real dict schemas work as keys.
-            responder: Optional per-call hook, called with the same eight
-                ``execute`` arguments. Returns a ``Turn`` (yielded, so an
-                exception inside it raises mid-stream), an async iterator
-                (streamed and closed with the consumer), or ``None`` to fall
-                through to ``responses_by_schema`` and then the script. An
-                awaitable result is awaited first (a rendezvous before the
-                turn).
-            model: Value of the ``model`` attribute.
-            fanout_concurrency: The optional ``Backend`` scheduling hint.
-            **attrs: Extra instance attributes, for the optional protocol
-                extensions a given test needs the backend to advertise
-                (``retry_attempts``, ``reasoning_effort``,
-                ``concise_fix_prompts``, ...).
-
-        Raises:
-            ValueError: If both ``script`` and ``events`` are given.
-        """
+        Selection order: responder, first equal non-None schema, None-schema fallback,
+        then script. Schemas compare by equality without hashing. A responder receives
+        all eight execute arguments and may return a turn, async iterator, None, or an
+        awaitable of those. Async iterators close with their consumer. With no script,
+        emit a bare ResultEvent. Extra attrs advertise optional Backend capabilities."""
         if script is not None and events is not None:
             raise ValueError("pass either script= or events=, not both")
         if events is not None:
@@ -120,12 +62,10 @@ class ScriptedBackend:
 
     @property
     def call_count(self) -> int:
-        """Total ``execute`` invocations."""
         return len(self.calls)
 
     @property
     def prompts(self) -> list[str]:
-        """Prompts in call order."""
         return [call["prompt"] for call in self.calls]
 
     @property
@@ -135,47 +75,28 @@ class ScriptedBackend:
 
     @property
     def continuations(self) -> list[Any]:
-        """``continuation`` arguments in call order."""
         return [call["continuation"] for call in self.calls]
 
     @property
     def max_turns(self) -> list[int | None]:
-        """``max_turns`` arguments in call order."""
         return [call["max_turns"] for call in self.calls]
 
     @property
     def schemas(self) -> list[dict[str, Any] | None]:
-        """``output_schema`` arguments in call order."""
         return [call["output_schema"] for call in self.calls]
 
     @property
     def read_only_calls(self) -> list[bool]:
-        """``read_only`` arguments in call order (the fix-gate write-guard observable)."""
         return [call["read_only"] for call in self.calls]
 
     # --- Backend surface -----------------------------------------------------
 
     async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        output_schema: dict[str, Any] | None = None,
-        continuation: Any = None,
-        agents: Any = None,
-        max_turns: int | None = None,
-        read_only: bool = False,
-        persist_session: bool = True,
+        self, cwd: Path, prompt: str, output_schema: dict[str, Any] | None = None, continuation: Any = None,
+        agents: Any = None, max_turns: int | None = None, read_only: bool = False, persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": output_schema,
-                "continuation": continuation,
-                "agents": agents,
-                "max_turns": max_turns,
-                "read_only": read_only,
-                "persist_session": persist_session,
+        self.calls.append({"cwd": cwd, "prompt": prompt, "output_schema": output_schema, "continuation": continuation,
+                "agents": agents, "max_turns": max_turns, "read_only": read_only, "persist_session": persist_session,
             }
         )
         index = min(len(self.calls) - 1, len(self._script) - 1)
@@ -207,23 +128,15 @@ class ScriptedBackend:
 
     @staticmethod
     async def _raise_or_yield(turn: Iterable[AgentEvent | BaseException]) -> AsyncIterator[AgentEvent]:
-        """Surface a scripted exception item as a raise, every other item as a yield.
-
-        Both the schema/script-selected branch and the responder branch funnel
-        through here, so the two cannot drift in how a mid-stream exception item
-        (the "yield partial output, then fail" shape) reaches the consumer.
-        """
+        """Raise scripted exceptions at their exact position in either selected or
+        responder-provided turns."""
         for item in turn:
             if isinstance(item, BaseException):
                 raise item
             yield item
 
     def _turn_for_schema(self, output_schema: dict[str, Any] | None) -> Turn | None:
-        """The turn for ``output_schema``, or ``None`` to fall through to the script.
-
-        The first pair comparing ``==`` wins; a ``None``-keyed pair is the
-        fallback for any unmatched schema.
-        """
+        """Select the first equal schema, then the None-key fallback; otherwise use the script."""
         for schema, turn in self._responses_by_schema:
             if schema is not None and schema == output_schema:
                 return turn

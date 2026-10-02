@@ -8,40 +8,31 @@ import pytest
 
 import daydream.extensions as ext
 from daydream.benchmark.cli import _build_benchmark_parser
-from daydream.cli import _parse_args
+from daydream.commands.review import _parse_args
 from daydream.extensions import Registry
 from daydream.extensions.builtins import register_builtins
 
 ROOT = Path(__file__).resolve().parents[1]
-
 
 def test_readme_run_examples_parse() -> None:
     readme = (ROOT / "README.md").read_text()
     # the "common commands" code fence — the required run examples
     section = readme.split("Use the common commands for the common tasks:", 1)[1]
     fence = section.split("```bash\n", 1)[1].split("\n```", 1)[0]
-    lines = [
-        line.strip()
-        for line in fence.splitlines()
-        if line.strip().startswith("daydream")
-    ]
+    lines = [line.strip() for line in fence.splitlines() if line.strip().startswith("daydream")]
     assert lines, "the common-commands fence documents no daydream command"
     # each documented run example must be accepted by the production parser
     for line in lines:
         tokens = line.split()[1:]  # drop the leading 'daydream' verb
         if "#" in tokens:  # drop any inline comment
             tokens = tokens[: tokens.index("#")]
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(
-            io.StringIO()
-        ):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             _parse_args(tokens)  # parses without SystemExit
-
 
 def test_benchmark_objective_aggregate_parse() -> None:
     p = _build_benchmark_parser()                    # production parser
     p.parse_args(["objective", "./ws", "--run-id", "run-abc123", "--json", "-"])
     p.parse_args(["aggregate", "./suite.json", "--json", "-"])
-
 
 def test_extensions_doc_claims_only_exposed() -> None:
     doc = (ROOT / "docs" / "extensions.md").read_text()
@@ -59,7 +50,6 @@ def test_extensions_doc_claims_only_exposed() -> None:
         if row.strip().startswith("| `"):
             name = row.split("`")[1]
             assert name in reg.prompt_names(), f"doc claims unexposed prompt {name!r}"
-
 
 def test_help_exposes_native_surface(capsys: pytest.CaptureFixture[str]) -> None:
     for flag in ("--help", "--help-all"):
@@ -93,7 +83,6 @@ def test_replay_manifest_pins_fixture_and_identity() -> None:
     assert identity["normalized_input_tokens"] == 86936
     assert identity["reported_cost_usd"] == 0.00402781
     assert "https://github.com/earendil-works/pi-coding-agent.git" in manifest["public_repo_allowlist"]
-
 
 def test_readback_matrix_subset_is_machine_readable() -> None:
     matrix = json.loads((ROOT / "tests/fixtures/observability_contract/readback-matrix.json").read_text())

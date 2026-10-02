@@ -14,13 +14,12 @@ from daydream import runner
 from daydream.backends.codex import CodexBackend
 from daydream.observability.config import ObservabilityConfig
 from daydream.pricing import compute_cost_from_totals, load_user_prices, resolve_prices
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.otlp import attributes, otlp_collector
 
 
-@pytest.mark.asyncio
 async def test_runner_resumed_codex_usage_is_per_exec_not_prior_session_delta(
     ext_dir: ExtDir,
     feature_branch_repo: Path,
@@ -60,9 +59,8 @@ def register(r):
     backend = CodexBackend(model="gpt-5.3-codex")
     install_backend(backend)
     trajectory_path = feature_branch_repo / ".daydream/resume-trajectory.json"
-    # Observed in one native thread across two exec processes: the resumed
-    # process totals 28,674 + 28,849 input and 104 + 60 output, without adding
-    # the first process's 44,472 input / 167 output to its usage counters.
+    # Resumed execution reports per-execution totals; its first usage must not include the previous
+    # execution.
     native_totals = [
         {"input_tokens": 44472, "output_tokens": 167, "cached_input_tokens": 22016},
         {"input_tokens": 57523, "output_tokens": 164, "cached_input_tokens": 50560},
@@ -71,9 +69,7 @@ def register(r):
         FakeCliProcess([
             json.dumps({"type": "thread.started", "thread_id": "native-thread"}),
             json.dumps({"type": "turn.started"}),
-            json.dumps({"type": "item.completed", "item": {
-                "type": "agent_message", "id": "reply", "text": "Done",
-            }}),
+            json.dumps({"type": "item.completed", "item": { "type": "agent_message", "id": "reply", "text": "Done", }}),
             json.dumps({"type": "turn.completed", "usage": usage}),
         ])
         for usage in native_totals

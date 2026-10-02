@@ -1,16 +1,7 @@
-"""Strict, versioned, immutable review-profile model (issue #885).
+"""Strict, versioned review policy resolved once per run and identified by content digest.
 
-One strict, versioned, immutable review-profile value — resolved once per run
-and recorded by canonical digest — so a future optimizer can mutate it,
-benchmark it, and attribute results to the exact policy it tested.
-
-The model is deliberately separate from the lenient ``config_file.py``
-loader: an invalid profile fails the run naming its source, it never
-degrades to a default (R3).
-
-Default strategy content (R7) is copied verbatim from named production
-symbols with ``copied:`` provenance — never newly-written prose. Every stage
-has a real nonempty copy already.
+Invalid profiles fail with their source named; they never fall back to lower-
+precedence policy. Packaged strategies retain provenance for their original text.
 """
 
 from __future__ import annotations
@@ -28,11 +19,7 @@ from daydream.improve.prompts import AUDIT_PLAYBOOK_SECTIONS
 
 
 class ProfileError(Exception):
-    """A strict review-profile parse/validation failure.
-
-    Carries the offending field (``kind``) and the profile source
-    (``source``); every failure message names both (R3).
-    """
+    """Invalid profile field (kind) and source, both included in the error message."""
 
     def __init__(self, kind: str, source: str):
         self.kind = kind
@@ -40,22 +27,13 @@ class ProfileError(Exception):
         super().__init__(f"invalid review profile: {kind} (source: {source})")
 
 
-# Host-owned severity/confidence vocabularies (R5): severity derives from the
-# canonical vocabulary in daydream/severity.py (CANONICAL_LEVELS -- the only
-# declaration of the lowercase low|medium|high scale); confidence is the
-# uppercase HIGH|MEDIUM|LOW schema enum -- SUPERVISE_SCHEMA,
-# SUPPRESSION_SCHEMA, and the arbiter/suppression/merge prompts in
-# deep/prompts.py).
+# Severity is lowercase; confidence follows the uppercase finding schema.
 _SEVERITY_LEVELS: frozenset[str] = frozenset(severity.CANONICAL_LEVELS)
 _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
 
 
-# Host-owned invariant keys (R5): a benchmark repository can never configure its
-# own evaluator. The profile can only tune the enumerated strategy components and
-# bounded pipeline fields; everything here stays host-owned: backends/models/
-# effort, trust/egress/privacy, Harbor judge/verifier/matching/gold/scoring,
-# skill names, finding/output schemas, evidence/location rules, and executable
-# behavior (callbacks, commands, filesystem paths). Rejected wherever they appear.
+# Profiles tune strategy and bounded pipeline fields, never the host evaluator,
+# executable behavior, schemas, credentials, or trust/privacy policy.
 HOST_OWNED_KEYS: frozenset[str] = frozenset(
     {
         "backend",
@@ -86,26 +64,9 @@ HOST_OWNED_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# Host safety/cost caps (mirror config.py:386-388). After parsing a profile,
-# lower profile values are CLAMPED UP to the host floor (and capped at
-# the host ceiling) BEFORE the digest is computed, so digest reflects the
-# clamped semantic value. The caps themselves are production defaults: safety
-# floors, not tunable budget knobs.
-HOST_CAPS: dict[str, tuple[int | None, int | None]] = {
-    # (floor, ceiling) — ceiling None = no ceiling.
-    "uncovered_sweep_max_files": (1, 10),
-    "uncovered_sweep_min_hunk_lines": (5, None),
-}
-
-
 @dataclass(frozen=True)
 class Strategy:
-    """One stage's profile-owned strategy component.
-
-    ``content`` is the strategy text (replaceable by the profile / clone).
-    ``source`` records provenance: ``copied: <module>.<symbol>`` or
-    ``authored: #886 <strategy name>`` (R7).
-    """
+    """Stage strategy text and its copied/authored provenance."""
 
     content: str
     source: str
@@ -113,7 +74,7 @@ class Strategy:
 
 @dataclass(frozen=True)
 class Arbitration:
-    """Bounded pipeline section: arbitration (R2)."""
+    """Bounded arbitration settings."""
 
     enabled: bool = True
     min_severity: str = "high"
@@ -122,11 +83,7 @@ class Arbitration:
 
 @dataclass(frozen=True)
 class Suppression:
-    """Bounded pipeline section: precision-mode suppression (R2).
-
-    Mirrors the production opt-in default: the suppression pass is OFF by
-    default (issue #232 precision mode; ``deep.settings._resolve_opt_in``).
-    """
+    """Precision suppression settings; disabled unless explicitly enabled."""
 
     enabled: bool = False
     severity_classes: tuple[str, ...] = ("low",)
@@ -135,18 +92,9 @@ class Suppression:
 
 @dataclass(frozen=True)
 class Pipeline:
-    """The bounded pipeline section (R2).
-
-    Defaults mirror ``config.py:386-388`` (uncovered sweep),
-    ``config.DEFAULT_DEEP_SHARD_*`` family, and the deep pipeline's product
-    defaults (structural meta-stack always on; arbitration on
-    high-severity/contested; suppression opt-in off).
-    """
+    """Bounded pipeline policy with production defaults."""
 
     structural_enabled: bool = True
-    uncovered_sweep_enabled: bool = True
-    uncovered_sweep_max_files: int = 10
-    uncovered_sweep_min_hunk_lines: int = 5
     arbitration: Arbitration = field(default_factory=Arbitration)
     suppression: Suppression = field(default_factory=Suppression)
     review_wall_budget_s: int = 2700
@@ -154,12 +102,7 @@ class Pipeline:
 
 @dataclass(frozen=True)
 class ReviewProfile:
-    """The single per-run review-profile value.
-
-    ``schema_version``: int; ``name``: human-readable; ``strategies``: one
-    named ``Strategy`` per registered stage; ``pipeline``: the bounded
-    pipeline section.
-    """
+    """Versioned per-run strategies and pipeline policy."""
 
     schema_version: int = 1
     name: str = ""
@@ -167,12 +110,7 @@ class ReviewProfile:
     pipeline: Pipeline = field(default_factory=Pipeline)
 
     def to_canonical_dict(self) -> dict[str, object]:
-        """Plain-dict projection of the fully-defaulted semantic value (R4).
-
-        Excludes provenance (``Strategy.source``), raw source text, and any
-        order/whitespace/comment artifacts so semantically-identical policies
-        project identically.
-        """
+        """Project defaulted semantics, excluding strategy provenance and source formatting."""
         return {
             "schema_version": self.schema_version,
             "name": self.name,
@@ -184,27 +122,15 @@ class ReviewProfile:
 
     @property
     def digest(self) -> str:
-        """Canonical SHA-256 over sorted-key JSON of the defaulted semantic value (R4).
-
-        Deterministic: independent of key order, whitespace, comments, and
-        source path. Any semantic change to a strategy or pipeline value
-        changes the digest.
-        """
+        """SHA-256 of sorted-key canonical JSON; provenance and formatting do not affect it."""
         canonical = json.dumps(
             self.to_canonical_dict(), sort_keys=True, separators=(",", ":")
         )
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-# Host-owned continuation anchors (R1 inline splicing). The default ``intent``
-# and ``alternatives`` strategies each close their diff-reading head with one
-# of these markers; ``build_intent_prompt`` / ``build_alternative_review_prompt``
-# partition the rendered strategy on the marker to drop that reading head and
-# splice in the host's inlined-diff framing while preserving the shared judgment
-# tail. A profile that overrides either strategy retains that inline splicing by
-# keeping the marker in its content. Defining them here, beside the default
-# prose they bisect, keeps the host's split and the default content one source
-# of truth.
+# Inline-diff prompts replace the strategy head and retain the judgment tail.
+# Custom strategies preserve these markers to support the same splice.
 INTENT_STRATEGY_JUDGMENT_MARKER = "That diff is the complete review target"
 ALTERNATIVES_STRATEGY_JUDGMENT_MARKER = "Report only concrete problems you can substantiate "
 
@@ -217,11 +143,7 @@ FOLDED_ALTERNATIVES_INSTRUCTION = (
 
 
 def build_default_profile() -> ReviewProfile:
-    """Return the packaged default profile (R7).
-
-    Every registered stage gets nonempty, real strategy content copied
-    verbatim from its named production symbol, with ``copied:`` provenance.
-    """
+    """Build packaged strategies with nonempty production text and copied/authored provenance."""
 
     def _exploration(source_symbol: str, text: str) -> Strategy:
         return Strategy(content=text, source=f"copied: {source_symbol}")
@@ -383,17 +305,6 @@ def build_default_profile() -> ReviewProfile:
             ),
             source="copied: daydream.deep.prompts.build_generic_fallback_prompt",
         ),
-        "uncovered_review": Strategy(
-            content=(
-                "You are the uncovered file sweep reviewer for the deep-review "
-                "pipeline (issue #309).\n"
-                "The changed file {file} was NOT read by any per-stack reviewer, "
-                "so you are the second pass that covers it. Review ONLY this "
-                "file's hunks below -- correctness, error handling, test quality, "
-                "and maintainability. Do NOT review other files."
-            ),
-            source="copied: daydream.deep.coverage.build_uncovered_sweep_prompt",
-        ),
         "arbitration": Strategy(
             content=(
                 "You are the arbiter. The cheaper per-stack reviewers flagged the "
@@ -520,9 +431,6 @@ _ENVELOPE_BY_STAGE: dict[str, str] = {
     "discovery.generic_fallback": (
         "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION"
     ),
-    "uncovered_review": (
-        "daydream.deep.prompts.CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION"
-    ),
     "arbitration": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
     "suppression": "daydream.deep.prompts.TRUST_MODEL_INSTRUCTION",
     "merge": "daydream.improve.prompts.FINDING_FORMAT",
@@ -537,37 +445,19 @@ _ENVELOPE_BY_STAGE: dict[str, str] = {
 
 
 def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
-    """Strictly parse TOML into a fully-defaulted ``ReviewProfile`` (R3/R4).
+    """Parse TOML strictly; omitted fields receive defaults before digesting.
 
-    Fail-closed: an unknown key, an unsupported ``schema_version``, an
-    invalid enum, a negative limit, or an inconsistent combination raises
-    ``ProfileError`` naming the offending field and the source. A failed
-    parse NEVER falls through to a default or lower-precedence profile.
-    Omitted pipeline fields are filled from ``Pipeline()`` defaults so
-    omitted-vs-explicit defaults hash identically (R4).
-
-    Args:
-        toml_text: Profile TOML source text.
-        source: Human-readable source description for error messages.
-
-    Raises:
-        ProfileError: On any invalid profile, naming the offending field
-            and the profile source.
+    Invalid keys, types, enums, limits or combinations raise ProfileError with the
+    source. Failure never falls through to a lower-precedence profile.
     """
     try:
         data = tomllib.loads(toml_text)
     except tomllib.TOMLDecodeError as exc:
         raise ProfileError(f"TOML parse failure: {exc}", source) from exc
 
-    if not isinstance(data, dict):
-        raise ProfileError("top level must be a table", source)
-
     _TOP_LEVEL_KEYS = frozenset({"schema_version", "name", "strategies", "pipeline"})
 
-    # Host-owned keys are disjoint from the allowed top-level set, so check
-    # them FIRST: otherwise an unoverridable host key would be swallowed by the
-    # generic unknown-key branch and never surface the dedicated "host-owned"
-    # rejection.
+    # Report host-owned keys before generic unknown keys.
     host_owned = set(data) & HOST_OWNED_KEYS
     if host_owned:
         raise ProfileError(
@@ -634,9 +524,6 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
         {
             "review_wall_budget_s",
             "structural_enabled",
-            "uncovered_sweep_enabled",
-            "uncovered_sweep_max_files",
-            "uncovered_sweep_min_hunk_lines",
             "arbitration_enabled",
             "arbitration_min_severity",
             "arbitration_contested_location",
@@ -664,29 +551,11 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
             raise ProfileError(f"pipeline.{key} must not be negative", source)
         return value
 
-    def _clamped_int(key: str, fallback: int) -> int:
-        """Read a host-capped int, clamping into the host cap range (R5).
-
-        Host caps are the floor: a profile supplying LOWER than the host cap
-        is clamped up, never the reverse. The ceiling keeps a profile from
-        raising a host cap. Clamping happens here (before digest) so the
-        digest reflects the clamped semantic value.
-        """
-        value = _int(key, fallback)
-        floor, ceiling = HOST_CAPS[key]
-        if floor is not None:
-            value = max(value, floor)
-        if ceiling is not None:
-            value = min(value, ceiling)
-        return value
-
     def _severity_classes(
         key: str, fallback: tuple[str, ...], allowed: frozenset[str]
     ) -> tuple[str, ...]:
         value = data.get(key, fallback)
-        if not isinstance(value, (list, tuple)):
-            raise ProfileError(f"pipeline.{key} must be an array of strings", source)
-        if not all(isinstance(item, str) for item in value):
+        if not isinstance(value, (list, tuple)) or not all(isinstance(item, str) for item in value):
             raise ProfileError(f"pipeline.{key} must be an array of strings", source)
         bad = [item for item in value if item not in allowed]
         if bad:
@@ -733,15 +602,6 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
     return Pipeline(
         review_wall_budget_s=_int("review_wall_budget_s", defaults.review_wall_budget_s),
         structural_enabled=_bool("structural_enabled", defaults.structural_enabled),
-        uncovered_sweep_enabled=_bool(
-            "uncovered_sweep_enabled", defaults.uncovered_sweep_enabled
-        ),
-        uncovered_sweep_max_files=_clamped_int(
-            "uncovered_sweep_max_files", defaults.uncovered_sweep_max_files
-        ),
-        uncovered_sweep_min_hunk_lines=_clamped_int(
-            "uncovered_sweep_min_hunk_lines", defaults.uncovered_sweep_min_hunk_lines
-        ),
         arbitration=arbitration,
         suppression=suppression,
     )
@@ -749,13 +609,7 @@ def _parse_pipeline(data: object, *, source: str) -> Pipeline:
 
 @dataclass(frozen=True)
 class ResolvedProfile:
-    """A resolved review profile with its source provenance (R9).
-
-    ``source_kind`` is one of ``"explicit"``, ``"env"``, ``"repo"``, or
-    ``"default"``; ``source_path`` is the path the profile came from (``None``
-    for the packaged default); ``digest`` is the canonical digest of the
-    resolved profile value.
-    """
+    """Profile with source kind (explicit/env/repo/default) and optional source path."""
 
     profile: ReviewProfile
     source_kind: str
@@ -772,11 +626,7 @@ class ResolvedProfile:
 
 
 def resolve_pipeline(profile: ResolvedProfile | None) -> Pipeline:
-    """Return the resolved profile's bounded pipeline, else the packaged default's.
-
-    ``None`` (profile unresolved) falls back to the packaged default so
-    pipeline-driven call sites never branch on resolution state.
-    """
+    """Return the resolved pipeline or packaged defaults when unresolved."""
     if profile is not None:
         return profile.profile.pipeline
     return build_default_profile().pipeline
@@ -792,15 +642,15 @@ def _read_and_parse(path: Path, source: str) -> ReviewProfile:
     return parse_profile(text, source=source)
 
 
-def _guard_repo_path(path: Path, repo_root: Path | None) -> Path:
-    """Resolve a repo-committed profile path beneath ``repo_root`` (R9).
+def _resolved_file(path: str | Path, source_kind: str) -> ResolvedProfile:
+    return ResolvedProfile(_read_and_parse(Path(path), str(path)), source_kind, Path(path))
 
-    The path-escape guard applies to REPOSITORY-committed paths: the value
-    comes from the (untrusted) benchmarked repository's own config, so relative,
-    absolute, and ``~``-expanded paths must ALL resolve beneath the repo root.
-    ``Path.resolve()`` + a containment check reject ``..``, absolute,
-    ``expanduser``, and symlink escapes to stop a benchmarked repository from
-    pointing its own evaluator at an arbitrary filesystem path.
+
+def _guard_repo_path(path: Path, repo_root: Path | None) -> Path:
+    """Confine repository-configured paths beneath repo_root (default cwd).
+
+    Resolve user expansion, absolute paths and symlinks before containment checks:
+    untrusted repository config must not select an evaluator outside its checkout.
     """
     if repo_root is None:
         # No repo root supplied — resolve relative to the current dir (cwd is
@@ -825,41 +675,24 @@ def resolve_profile(
     env: Mapping[str, str] | None = None,
     repo_root: Path | None = None,
 ) -> ResolvedProfile:
-    """Resolve the single per-run review profile from the four normal sources (R9).
+    """Resolve CLI path, normal environment, repository config, then packaged default.
 
-    Precedence (highest wins; an invalid higher source raises and never falls
-    through to a lower source):
-    1. ``explicit_path`` — an explicit CLI/``RunConfig`` path.
-    2. ``DAYDREAM_REVIEW_PROFILE`` env — a private user path.
-    3. ``file_config.review_profile`` — a repo-committed path.
-    4. Packaged default.
+    An invalid higher-precedence source raises; only repository paths are confined.
     """
     if explicit_path is not None:
-        profile = _read_and_parse(Path(explicit_path), str(explicit_path))
-        return ResolvedProfile(
-            profile=profile,
-            source_kind="explicit",
-            source_path=Path(explicit_path),
-        )
+        return _resolved_file(explicit_path, "explicit")
 
     if env is None:
         env = os.environ
     env_value = env.get("DAYDREAM_REVIEW_PROFILE")
     if env_value:
-        raw = str(env_value)
-        profile = _read_and_parse(Path(raw), raw)
-        return ResolvedProfile(
-            profile=profile, source_kind="env", source_path=Path(raw)
-        )
+        return _resolved_file(str(env_value), "env")
 
     if file_config is not None:
         repo_path = getattr(file_config, "review_profile", None)
         if repo_path is not None:
             guarded = _guard_repo_path(Path(repo_path), repo_root)
-            profile = _read_and_parse(guarded, str(guarded))
-            return ResolvedProfile(
-                profile=profile, source_kind="repo", source_path=guarded
-            )
+            return _resolved_file(guarded, "repo")
 
     return ResolvedProfile(
         profile=build_default_profile(), source_kind="default"
@@ -867,14 +700,7 @@ def resolve_profile(
 
 
 def resolve_from_runconfig(cfg: object) -> ResolvedProfile:
-    """Resolve the profile from a ``RunConfig`` (R1: once at composition root).
-
-    The ``RunConfig`` carries the caller-derived ``review_profile_path``, the
-    file config, and the target repo; this is the single seam the runner calls
-    exactly once per run. The target is threaded as ``repo_root`` so a
-    repo-committed RELATIVE ``file_config.review_profile`` path resolves beneath
-    the target repo rather than the invoking cwd (R9).
-    """
+    """Resolve once using caller policy and the target as the repository path root."""
     file_config = getattr(cfg, "file_config", None)
     explicit = getattr(cfg, "review_profile_path", None)
     explicit_str = str(explicit) if explicit is not None else None
@@ -891,42 +717,15 @@ def resolve_harbor_profile(
     candidate_env: str = "DAYDREAM_REVIEW_PROFILE_CANDIDATE",
     env: Mapping[str, str] | None = None,
 ) -> ResolvedProfile:
-    """Resolve the Harbor run's review profile (R10: explicit-only mode).
+    """Accept only the control-plane candidate environment variable or packaged default.
 
-    A DISTINCT resolver mode from :func:`resolve_profile`: a benchmarked
-    repository can never configure its own evaluator, so this accepts ONLY the
-    control-plane-supplied candidate (a dedicated
-    ``DAYDREAM_REVIEW_PROFILE_CANDIDATE`` env var) or the packaged default. It
-    must NOT read ``DAYDREAM_REVIEW_PROFILE`` (the normal-run env), the
-    operator's normal defaults, or any ``file_config``/target-repo profile.
-
-    When no candidate var is set -> the packaged default with
-    ``source_kind="default"``. When set -> the candidate is parsed + validated
-    fail-closed (naming its source); any failure raises ``ProfileError`` and
-    the run aborts — never a fallback to a lower-precedence source.
-
-    Args:
-        file_config: Accepted for signature symmetry with
-            :func:`resolve_profile`; deliberately UNREAD — a benchmarked
-            repository can never point its own evaluation (the first Harbor
-            test asserts exactly this).
-        candidate_env: Env var name carrying the control-plane candidate path.
-        env: Environment mapping; ``None`` reads ``os.environ`` (the trusted
-            control-plane env in the Harbor agent container).
-
-    Returns:
-        The resolved ``ResolvedProfile``.
-
-    Raises:
-        ProfileError: On an invalid candidate, naming the candidate source.
+    Ignore normal-run environment, operator defaults and file_config: a benchmarked
+    repository cannot configure its evaluator. Invalid candidates fail closed.
+    None for env reads os.environ; candidate_env names the trusted override.
     """
     if env is None:
         env = os.environ
     candidate = env.get(candidate_env)
     if candidate:
-        raw = str(candidate)
-        profile = _read_and_parse(Path(raw), raw)
-        return ResolvedProfile(
-            profile=profile, source_kind="candidate", source_path=Path(raw)
-        )
+        return _resolved_file(str(candidate), "candidate")
     return ResolvedProfile(profile=build_default_profile(), source_kind="default")

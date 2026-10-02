@@ -54,12 +54,7 @@ def derive_pre_identity_curation_id(
     index_schema_version: str,
     admission_policy_version: str,
 ) -> str:
-    """Content-addressed curation id: same inputs -> same curated/ prefix.
-
-    sha256 over the canonical tab-joined string with a single trailing
-    newline, hex-truncated to 16 chars, prefixed ``cur-`` (same canonical-
-    string hashing discipline as sanitize._derivative_digest).
-    """
+    """Hash the historical tab-joined inputs plus trailing newline into cur- plus 16 hex digits."""
     canonical = f"cur-v1\t{source_commit}\t{sanitizer_version}\t{index_schema_version}\t{admission_policy_version}\n"
     return "cur-" + hashlib.sha256(canonical.encode()).hexdigest()[:16]
 
@@ -73,14 +68,10 @@ def derive_curation_id(
     decisions_digest: str = "",
     distribution_digest: str = "",
 ) -> str:
-    """Curation identity v2 (issue #1094): binds the license-policy inputs.
+    """Bind source identity, policy, opt-ins, exclusions, decisions, and distribution.
 
-    Same canonical-string hashing discipline as ``derive_pre_identity_curation_id`` (the
-    historical derivation, kept untouched for historical prefixes), extended with the six bound
-    fields: policy digest/version, exact-slug copyleft opt-ins (sorted
-    casefolded so set iteration order never leaks into identity), exclusions
-    digest, resolved per-repo decisions digest, and license distribution
-    digest. Returns ``cur-`` + 16 hex chars (20 chars total).
+    Extend the historical canonical tab-joined hash; sort casefolded opt-ins so
+    set order cannot affect the cur- plus 16-hex identity.
     """
     opt_ins = ",".join(sorted(s.casefold() for s in allow_copyleft))
     canonical = (
@@ -110,12 +101,7 @@ EXCLUSION_CODES = (
 
 
 def fixture_exclusion_codes(bundle_dir: Path) -> list[str]:
-    """Detect pytest/tmp-style fixture provenance from manifest content.
-
-    Reads only ``manifest.json`` inside ``bundle_dir``; JSON parse errors
-    propagate (the orchestrator maps them to a ``bundle_unreadable``
-    quarantine code). Returns stable codes from ``EXCLUSION_CODES``.
-    """
+    """Classify fixture provenance from manifest.json; parse errors propagate for quarantine."""
     manifest = json.loads((bundle_dir / "manifest.json").read_text())
     text = json.dumps(manifest)
     codes: list[str] = []
@@ -132,12 +118,9 @@ def legacy_pipeline_status(
     pipeline_status: str | None,
     deep_artifacts: dict[str, object] | None,
 ) -> str | tuple[str, str]:
-    """Revalidate a legacy ``pipeline_status`` field; never silently success.
+    """Revalidate missing/unknown pipeline status using deep-artifact evidence.
 
-    Non-``unknown`` values pass through unchanged. ``unknown``/missing values
-    are revalidated when the bundle carries deep-artifact evidence; without
-    evidence the bundle is excluded with the stable code
-    ``pipeline_status_evidence_absent`` (spec M9).
+    Known values pass through; absent evidence yields pipeline_status_evidence_absent.
     """
     if pipeline_status and pipeline_status != "unknown":
         return pipeline_status

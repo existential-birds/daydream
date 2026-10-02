@@ -1,15 +1,6 @@
-"""Read-only resolution of exact completed Harbor benchmark runs (issue #888).
-
-A future optimizer can consume an attributable, machine-readable Harbor
-objective for any exact completed run. This module is the read-only surface:
-it resolves a ledgered run by explicit ``run_id``, validates it reached a
-terminal ``complete`` state, parses its per-task reward artifacts in strict
-fail-closed fashion, and binds its count-derived micro-metrics.
-
-Everything here is strictly read-only and immutable. State is modelled with
-frozen dataclasses; ``_load_ledger`` and ``_validate_job_dir`` are reused from
-``run`` so the reader never re-implements ledger parsing, validation, or job
-dir containment — it only filters on ``state`` and reads the reward rows.
+"""Read-only, attributable objectives for exact completed Harbor runs. Reuse
+ledger/containment validation, strictly parse task rewards, and pool count-derived
+metrics. Frozen results never modify run state.
 """
 from __future__ import annotations
 
@@ -24,25 +15,15 @@ from daydream.benchmark.harbor import calibrate, run as run_mod, verifier_core
 
 
 class ObjectiveError(Exception):
-    """The single typed error for objective resolution.
-
-    Raised when a run is absent from the ledger, is not in a terminal
-    ``complete`` state, the ledger fails to parse/validate, or any per-task
-    reward artifact is malformed. The message always names the offending
-    artifact path and run id.
+    """A missing/incomplete run or malformed ledger, identity, or reward artifact, labeled
+    by run and path.
     """
 
 
 @dataclass(frozen=True)
 class Objective:
-    """Count-derived micro-metrics for a single completed run.
-
-    TP/FP/FN are pooled (never per-task averaged) along with the clean/task/
-    infra counts by feeding the flattened per-task reward rows through
-    ``verifier_core.aggregate_metrics`` — the same authoritative scorer the
-    generated corpus uses. ``comparison_eligible`` is ``False`` whenever any
-    trial failed to produce a legitimate scored row and must not participate
-    in comparison.
+    """Count-derived micro-metrics pooled through verifier_core.aggregate_metrics. Any
+    unscored trial makes the result ineligible for comparison.
     """
 
     tp: int
@@ -91,62 +72,56 @@ class Objective:
     cost: float | None = None
 
     def _as_metric_dict(self) -> dict[str, float | int]:
-        """Project this objective in the exact shape ``aggregate_metrics`` returns.
-
-        The count-derived fields were bound by feeding the run's flattened rows
-        through ``verifier_core.aggregate_metrics`` exactly once, so this maps
-        them back into the authoritative scorer's key/shaper set for byte-for-
-        value comparison against the generated ``metric.py`` aggregation.
+        """Project into the canonical aggregate_metrics output shape for exact scorer
+        comparison.
         """
-        return {
-            "micro_precision": self.precision,
-            "micro_recall": self.recall,
-            "micro_f1": self.f1,
-            "mean_task_score": self.mean_task_score,
-            "clean_accuracy": self.clean_accuracy,
-            "task_count": self.task_count,
-            "scored_task_count": self.scored_task_count,
-            "infra_error_task_count": self.infra_error_task_count,
-            "clean_task_count": self.clean_task_count,
-            "total_tp": self.tp,
-            "total_fp": self.fp,
-            "total_fn": self.fn,
-            "location_pairs_scored": self.location_pairs_scored,
-            "severity_pairs_scored": self.severity_pairs_scored,
-            "location_exact_rate": self.location_exact_rate,
-            "location_near_rate": self.location_near_rate,
-            "location_file_rate": self.location_file_rate,
-            "location_miss_rate": self.location_miss_rate,
-            "location_credit": self.location_credit,
-            "location_exact": self.location_exact,
-            "location_near": self.location_near,
-            "location_file": self.location_file,
-            "location_miss": self.location_miss,
-            "total_location_exact": self.total_location_exact,
-            "total_location_near": self.total_location_near,
-            "total_location_file": self.total_location_file,
-            "total_location_miss": self.total_location_miss,
-            "severity_exact": self.severity_exact,
-            "severity_within_1": self.severity_within_1,
-            "total_severity_exact": self.total_severity_exact,
-            "total_severity_within_1": self.total_severity_within_1,
-            "severity_exact_rate": self.severity_exact_rate,
-            "severity_within_1_rate": self.severity_within_1_rate,
-            "severity_mean_distance": self.severity_mean_distance,
-            "severity_credit": self.severity_credit,
-        }
+        return {key: getattr(self, field) for field, (key, _) in _METRIC_FIELDS.items()}
+
+
+# The scorer names differ only for headline rates/counts; casts preserve the public types.
+_METRIC_FIELDS: dict[str, tuple[str, type[int] | type[float]]] = {
+    "precision": ("micro_precision", float),
+    "recall": ("micro_recall", float),
+    "f1": ("micro_f1", float),
+    "mean_task_score": ("mean_task_score", float),
+    "clean_accuracy": ("clean_accuracy", float),
+    "task_count": ("task_count", int),
+    "scored_task_count": ("scored_task_count", int),
+    "infra_error_task_count": ("infra_error_task_count", int),
+    "clean_task_count": ("clean_task_count", int),
+    "tp": ("total_tp", int),
+    "fp": ("total_fp", int),
+    "fn": ("total_fn", int),
+    "location_pairs_scored": ("location_pairs_scored", int),
+    "severity_pairs_scored": ("severity_pairs_scored", int),
+    "location_exact_rate": ("location_exact_rate", float),
+    "location_near_rate": ("location_near_rate", float),
+    "location_file_rate": ("location_file_rate", float),
+    "location_miss_rate": ("location_miss_rate", float),
+    "location_credit": ("location_credit", float),
+    "location_exact": ("location_exact", int),
+    "location_near": ("location_near", int),
+    "location_file": ("location_file", int),
+    "location_miss": ("location_miss", int),
+    "total_location_exact": ("total_location_exact", int),
+    "total_location_near": ("total_location_near", int),
+    "total_location_file": ("total_location_file", int),
+    "total_location_miss": ("total_location_miss", int),
+    "severity_exact": ("severity_exact", int),
+    "severity_within_1": ("severity_within_1", int),
+    "total_severity_exact": ("total_severity_exact", int),
+    "total_severity_within_1": ("total_severity_within_1", int),
+    "severity_exact_rate": ("severity_exact_rate", float),
+    "severity_within_1_rate": ("severity_within_1_rate", float),
+    "severity_mean_distance": ("severity_mean_distance", float),
+    "severity_credit": ("severity_credit", float),
+}
 
 
 @dataclass(frozen=True)
 class CompatibilityIdentity:
-    """Frozen, attributable compatibility identity of one exact completed run.
-
-    Every field is bound from an authoritative source only (the ledger entry,
-    the compiled ``benchmark.lock.json`` ``daydream`` block, the trusted
-    control-plane env, ``verifier_core``/``calibrate`` constants, and the
-    compiled ``harbor-job.yaml`` attempts) — never from inference or coercion.
-    ``reviewer_effort`` is the ledger-recorder effort (read-only) or ``None``
-    when absent; it is never fabricated.
+    """Compatibility fields bound from recorded ledger, lock, runtime, and scorer sources.
+    Missing reviewer effort remains None; attribution is never inferred.
     """
 
     objective_schema_version: int
@@ -183,29 +158,17 @@ class SuiteEntry:
 
 
 def identity_to_dict(identity: CompatibilityIdentity) -> dict[str, object]:
-    """Canonical compatibility/identity projection.
-
-    Single source of truth for the identity mapping reused by
-    ``objective_to_json``, the suite aggregate identity, and the CLI's
-    ``_suite_objective_to_json`` (issue #888 anti-slop): the frozen
-    ``CompatibilityIdentity`` dataclass is itself the schema, so adding or
-    renaming a field cannot silently desynchronize the projections.
-    Repository/benchmark ids are deliberately not part of the identity.
+    """Project the identity dataclass consistently; repository and benchmark ids are
+    intentionally excluded.
     """
     return asdict(identity)
 
 
 @dataclass(frozen=True)
 class SuiteObjective:
-    """A pooled, compatible suite of exact completions.
-
-    ``objective`` holds the count-derived micro-metrics pooled across every
-    entry's flattened per-task rows (never per-repository averages).
-    ``experiment_id`` is a stable SHA-256 derived from the canonicalized
-    manifest plus the shared compatibility identity. ``identity`` is the
-    (single, verified-shared) ``CompatibilityIdentity``; ``profile_digest`` is
-    always present (spec must-have). ``diagnostics`` is empty for pooled suites;
-    invalid entries raise ``ObjectiveError`` before a suite can be returned.
+    """Pooled metrics for a fully compatible suite of exact completions. Experiment
+    identity hashes the canonical manifest and shared compatibility identity. Invalid
+    entries raise before a result exists; diagnostics is empty.
     """
 
     objective: Objective
@@ -233,16 +196,9 @@ class CompletedRun:
 def read_completed_run(
     workspace: Path, run_id: str, *, env: dict[str, Any] | None = None
 ) -> CompletedRun:
-    """Resolve a ledgered run by explicit ``run_id``.
-
-    Loads the ledger through ``run_mod._load_ledger`` and admits only a run
-    whose ``state == "complete"``, binds its full compatibility identity from
-    authoritative sources, then parses its per-task reward rows in strict
-    fail-closed fashion and binds the count-derived ``Objective``.
-    Missing runs, running/cleanup-pending/cleaned runs, any ledger parse/
-    validation failure, any identity disagreement, and any malformed reward
-    artifact all fail closed with an ``ObjectiveError`` naming the run id and
-    the offending artifact.
+    """Resolve one explicit completed run with authoritative identity and strict task
+    rewards. Missing/noncomplete runs, malformed artifacts, and identity disagreements
+    raise ObjectiveError naming the run and offending artifact.
     """
     env = env or {}
     try:
@@ -291,17 +247,9 @@ _OBJECTIVE_SCHEMA_VERSION = 1
 
 
 def objective_to_json(run: CompletedRun) -> dict[str, object]:
-    """Project a completed run into opaque, privacy-safe machine-readable JSON.
-
-    Produces only the opaque ``run_id``, ``mode``, ``schema_version``, the
-    ``identity`` dict, and the ``objective`` dict (counts + ``comparison_eligible``
-    + the reported location/severity axes + optional ``tokens``/``cost``). No
-    repository slug, PR number, source path,
-    gold/candidate text, judge reasoning, or source code is ever emitted; only
-    opaque benchmark/run ids and counts pass through (spec privacy must-have).
-
-    The ledger entry's ``job_dir`` is deliberately dropped before projection so
-    the workspace filesystem path never leaks into the output.
+    """Emit only opaque run identity and metrics, dropping filesystem and evidence content.
+    No repository slug, PR number, source path, text, reasoning, or source code is
+    included; the ledger job_dir is deliberately omitted.
     """
     identity = run.identity
     identity_json = None
@@ -361,20 +309,10 @@ def _suite_experiment_id(
 def aggregate_suite(
     manifest: dict[str, Any], *, env: dict[str, Any] | None = None
 ) -> SuiteObjective:
-    """Validate and pool a suite manifest into one compatible ``SuiteObjective``.
-
-    Validates the manifest, resolves every entry via ``read_completed_run``, and
-    requires the full compatibility identity to match across every entry
-    (non-optional): any differing compatibility field — profile digest, wheel/
-    runtime digest, reviewer/judge identity, verifier template, threshold, or
-    attempts — raises ``ObjectiveError`` naming the field. Any entry that is
-    incomplete, malformed, comparison-ineligible, or a duplicated pair fails the
-    entire command fail-closed — never a silently-subsetted pool.
-
-    The pooled objective feeds the flattened per-task rows across all entries
-    through ``verifier_core.aggregate_metrics`` exactly once; TP/FP/FN pool to
-    micro precision/recall/F1 and the task/clean/infra counts sum across entries.
-    Per-repository precision/recall/F1 are never averaged.
+    """Validate every exact completion and require identical compatibility across the
+    suite. Reject incomplete, malformed, duplicated, or comparison-ineligible entries;
+    never return a subset. Pool flattened task rows once through aggregate_metrics, so
+    precision/recall/F1 derive from counts rather than repository averages.
     """
     env = env or {}
     entries = validate_suite_manifest(manifest)
@@ -438,14 +376,8 @@ _SUITE_SCHEMA_VERSION = 1
 
 
 def validate_suite_manifest(manifest: dict[str, Any]) -> list[SuiteEntry]:
-    """Validate a suite manifest and return its entries in manifest order.
-
-    Rejects a manifest whose ``schema_version`` is not 1, a missing/non-list
-    ``entries``, a non-dict entry, or an entry missing ``workspace``/``run_id``
-    --- every failure raises ``ObjectiveError``. Any duplicated
-    ``(workspace, run_id)`` pair is also rejected, naming the offending entry
-    and its index. Bad entries are never skipped nor coerced to a default;
-    the error always carries the entry index and offending field.
+    """Require schema 1 and well-formed, unique workspace/run pairs; preserve order and
+    identify bad entries.
     """
     if not isinstance(manifest, dict):
         raise ObjectiveError("suite manifest must be a mapping object")
@@ -487,14 +419,9 @@ def validate_suite_manifest(manifest: dict[str, Any]) -> list[SuiteEntry]:
 def _bind_identity(
     workspace: Path, entry: dict[str, Any], run_id: str, env: dict[str, Any]
 ) -> CompatibilityIdentity:
-    """Bind the full compatibility identity from authoritative sources.
-
-    The ledger's ``compiled_lock_sha256`` must equal the hash of the on-disk
-    compiled lock (oracle/default-run gate contract); disagreement is corruption
-    and raises ``ObjectiveError`` naming the offending field. Every other
-    fallible read (lock parse, missing/malformed ``daydream`` wheel block,
-    compiled job config) propagates via ``ObjectiveError`` naming the artifact
-    path — no plausible placeholder is ever defaulted.
+    """Bind identity only from authoritative artifacts, requiring the ledger exact lock
+    digest. Unreadable, missing, malformed, or mismatched provenance raises
+    ObjectiveError.
     """
     ledger_digest = entry.get("compiled_lock_sha256")
     try:
@@ -578,19 +505,9 @@ _SCORED_COUNT_KEYS = ("tp", "fp", "fn")
 def _parse_task_rows(
     job_dir: Path, run_id: str
 ) -> tuple[list[dict[str, object] | None], int]:
-    """Read the run's per-task reward rows in strict fail-closed fashion.
-
-    Walks the job dir exactly as ``run_mod._parse_job_results`` does (sorted
-    trial subdirectories with ``<trial>/verifier/``): a scored task has a
-    ``reward.json`` (parsed as a strict reward dict); a trial with only
-    ``reward-details.json`` is an unscored infra failure and becomes a ``None``
-    row (never a numeric zero).
-
-    A task with ``clean_task == 1`` and zero findings/candidates is a
-    legitimate clean task — it stays a scored row, never an infra failure. Any
-    malformed ``reward.json`` (bad JSON, non-object, a non-integer count, any
-    non-finite/negative value) raises ``ObjectiveError`` naming the artifact
-    and run id.
+    """Read sorted trials: strict reward.json means scored; details-only means an infra
+    failure. Unscored rows become None, never numeric zero. A valid empty clean task
+    remains scored. Malformed reward artifacts fail the whole read.
     """
     if not job_dir.is_dir():
         return [], 0
@@ -615,13 +532,8 @@ def _parse_task_rows(
 
 
 def _parse_reward_strict(reward_path: Path, run_id: str) -> dict[str, object]:
-    """Parse one ``reward.json`` into a strict reward dict.
-
-    Fails closed on any malformed artifact: non-object JSON, a non-integer
-    ``tp``/``fp``/``fn``/``verifier_error``, a negative or non-finite count, or
-    a non-numeric ``reward``. The error message always names the artifact path
-    and run id. Never ``unwrap_or`` a plausible default or coerce a malformed
-    numeric to zero.
+    """Reject non-object rewards, invalid/nonfinite/negative counts, and
+    nonnumeric/nonfinite reward values.
     """
     try:
         data: dict[str, object] = json.loads(reward_path.read_text(encoding="utf-8"))
@@ -684,14 +596,8 @@ def _build_objective(
     rows: list[dict[str, object] | None], infra_errors: int,
     job_dir: Path, run_id: str,
 ) -> Objective:
-    """Populate the count-derived ``Objective`` from the parsed rows.
-
-    TP/FP/FN, precision/recall/f1 and the clean/task/scored/infra counts come
-    from feeding the rows (infra rows included) through
-    ``verifier_core.aggregate_metrics`` — the same authoritative pool the
-    generated corpus metrics use. The verifier-error count is derived from the
-    rows' ``verifier_error`` flags. ``comparison_eligible`` is ``False``
-    whenever any trial failed to produce a legitimate scored row.
+    """Pool canonical scorer metrics and verifier-error counts; any unscored trial blocks
+    comparison.
     """
     try:
         agg = verifier_core.aggregate_metrics(rows)
@@ -714,49 +620,18 @@ def _build_objective(
         _row_int(row, "gold_count") for row in rows if row is not None
     )
     clean_task_count = int(agg["clean_task_count"])
+    metric_values: dict[str, Any] = {
+        field: convert(agg[key]) for field, (key, convert) in _METRIC_FIELDS.items()
+    }
     return Objective(
-        tp=int(agg["total_tp"]),
-        fp=int(agg["total_fp"]),
-        fn=int(agg["total_fn"]),
-        precision=float(agg["micro_precision"]),
-        recall=float(agg["micro_recall"]),
-        f1=float(agg["micro_f1"]),
-        clean_task_count=clean_task_count,
+        **metric_values,
         clean_pass_count=int(round(agg["clean_accuracy"] * clean_task_count)),
-        clean_accuracy=float(agg["clean_accuracy"]),
-        task_count=int(agg["task_count"]),
-        scored_task_count=int(agg["scored_task_count"]),
         candidate_count=candidate_count,
         gold_count=gold_count,
-        infra_error_task_count=int(agg["infra_error_task_count"]),
         verifier_error_task_count=verifier_errors,
         malformed_task_count=malformed,
         failed_task_count=failed,
         comparison_eligible=bool(agg["scored_task_count"]) and not (
             infra_errors + verifier_errors + malformed + failed
         ),
-        mean_task_score=float(agg["mean_task_score"]),
-        location_pairs_scored=int(agg["location_pairs_scored"]),
-        severity_pairs_scored=int(agg["severity_pairs_scored"]),
-        location_exact_rate=float(agg["location_exact_rate"]),
-        location_near_rate=float(agg["location_near_rate"]),
-        location_file_rate=float(agg["location_file_rate"]),
-        location_miss_rate=float(agg["location_miss_rate"]),
-        location_credit=float(agg["location_credit"]),
-        location_exact=int(agg["location_exact"]),
-        location_near=int(agg["location_near"]),
-        location_file=int(agg["location_file"]),
-        location_miss=int(agg["location_miss"]),
-        total_location_exact=int(agg["total_location_exact"]),
-        total_location_near=int(agg["total_location_near"]),
-        total_location_file=int(agg["total_location_file"]),
-        total_location_miss=int(agg["total_location_miss"]),
-        severity_exact=int(agg["severity_exact"]),
-        severity_within_1=int(agg["severity_within_1"]),
-        total_severity_exact=int(agg["total_severity_exact"]),
-        total_severity_within_1=int(agg["total_severity_within_1"]),
-        severity_exact_rate=float(agg["severity_exact_rate"]),
-        severity_within_1_rate=float(agg["severity_within_1_rate"]),
-        severity_mean_distance=float(agg["severity_mean_distance"]),
-        severity_credit=float(agg["severity_credit"]),
     )

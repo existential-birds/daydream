@@ -1,9 +1,5 @@
-"""Pure review scoring core for the Daydream Harbor verifier.
-
-Stdlib-only (dataclasses, hashlib, json, re) so this module can be
-deployed byte-for-byte into a judge-free Harbor verifier image. This file is
-the canonical scorer (issue #1004): the build copies it directly into each
-case. No daydream source and no third-party imports of any kind.
+"""Canonical stdlib-only review scorer, copied byte-for-byte into compiled Harbor tasks.
+Keep it independent of Daydream and third-party imports.
 """
 
 from __future__ import annotations
@@ -99,13 +95,8 @@ def _validate_lines(start_line: object, end_line: object) -> tuple[int, int]:
 def _validate_location(
     path: object, start_line: object, end_line: object
 ) -> tuple[str | None, int | None, int | None]:
-    """Validate the exact-one-of location triple shared by gold/candidate findings.
-
-    Either all three components are ``None`` (a locationless review finding that
-    names a defect without a file or line), or all three are present and fully
-    validated via :func:`_validate_path` / :func:`_validate_lines`. A partially
-    populated location (exactly one or two of the three ``None``) is rejected
-    with a :class:`VerifierError` naming the partial-population rule.
+    """Require all three location fields absent or all present and valid; partial locations
+    raise VerifierError.
     """
     if path is None and start_line is None and end_line is None:
         return (None, None, None)
@@ -157,11 +148,8 @@ class CandidateFinding(_FindingContent):
 
 
 def validate_exact_keys(raw: object, allowed: set[str], context: str) -> None:
-    """Enforce an exact key set over a dict, naming only keys and context.
-
-    Raises :class:`VerifierError` when *raw* is not a dict, when any allowed
-    key is missing, or when any key present is not in *allowed* -- with a
-    leak-free message naming only the keys and *context*, never values.
+    """Require exactly the allowed keys; errors name context/keys without disclosing
+    values.
     """
     if not isinstance(raw, dict):
         raise VerifierError(f"{context} must be a JSON object")
@@ -174,12 +162,8 @@ def validate_exact_keys(raw: object, allowed: set[str], context: str) -> None:
 
 
 def parse_finding_content(raw: object) -> dict[str, object]:
-    """Validate and return the exact six content fields of a finding.
-
-    This is the public, stdlib-only parsing contract shared by host artifact
-    builders and the verifier source copied into compiled Harbor tasks. The
-    nullable ``severity`` field is still required as a key. Raises
-    :class:`VerifierError` when the shape, content, or location is invalid.
+    """Validate the six canonical content fields, including a required nullable severity
+    key. Shared by host builders and the copied verifier.
     """
     validate_exact_keys(raw, _FINDING_CONTENT_KEYS, "finding content")
     assert isinstance(raw, dict)  # established by validate_exact_keys
@@ -252,11 +236,8 @@ def assign_candidate_id(
     finding: CandidateFinding | dict[str, object],
     seen: dict[tuple[object, ...], int],
 ) -> str:
-    """Derive a finding's id, advancing the ordinal for identical content.
-
-    ``seen`` groups findings by their canonical six-field tuple so duplicate
-    content gets consecutive ordinals, matching the verifier's own per-content
-    ordinal. Mutates ``seen``.
+    """Derive an id and advance the per-identical-content ordinal in seen, matching
+    verifier ordering.
     """
     canonical = _canonical_tuple(finding)
     ordinal = seen.get(canonical, 0)
@@ -314,14 +295,9 @@ def validate_candidate_artifact(raw: dict[str, object]) -> list[CandidateFinding
 def validate_gold_set(
     raw: list[dict[str, object]], *, case_id: str | None = None
 ) -> list[GoldFinding]:
-    """Validate a gold set: 50-finding cap, per-member fields, canonical unique ids.
-
-    ``case_id`` is the schema-scoped case id the gold finding ids were derived
-    with (``sha256(case_id, title, body, severity, path, start_line, end_line)``);
-    a non-empty gold set requires it unless ``case_id`` is ``None`` (legacy
-    back-scoring of tasks compiled before the case-scoped digest), in which case
-    the finding ids are validated against the prior content-only digest. An
-    empty gold set (pure-clean case) needs no case_id.
+    """Enforce the 50-finding cap, content validation, and canonical unique ids. Nonempty
+    gold uses case-scoped identity; case_id=None retains legacy content-only scoring.
+    Empty gold needs no case id.
     """
     if len(raw) > MAX_GOLD_FINDINGS:
         raise VerifierError("gold set exceeds 50 findings")
@@ -389,12 +365,9 @@ def maximum_matching(
     gold_ids: list[str],
     candidate_ids: list[str],
 ) -> set[tuple[str, str]]:
-    """Maximum-cardinality one-to-one matching over retained verdict edges.
-
-    Edges are ordered deterministically (descending confidence, then gold ID,
-    then candidate ID); golds are visited in sorted-id order and candidates in
-    the fixed adjacency order, so the result is stable run-to-run. Never
-    iterates a set/dict for an ordering decision.
+    """Compute maximum-cardinality one-to-one matches deterministically. Order edges by
+    descending confidence then gold/candidate id; visit golds by sorted id and never use
+    set iteration for ordering.
     """
     ordered = sorted(verdicts, key=lambda v: (-v.confidence, v.gold_id, v.candidate_id))
     adjacency: dict[str, list[str]] = {}
@@ -436,12 +409,8 @@ def maximum_matching(
 
 @dataclass(frozen=True)
 class Reward:
-    """The 24-field §10 per-task reward output.
-
-    The 12 headline fields are unchanged; the 12 location/severity axis
-    fields (issue #971) are reported-only, computed over matched tp pairs.
-    Axis fields default to zero/absent (0/1 presence flags, no imputed
-    values) when the task has no pairs scoring that axis.
+    """Per-task reward with reported-only location/severity axes over matched pairs.
+    Missing signals use zero counts/presence flags without imputing values.
     """
 
     reward: float = 0.0
@@ -480,13 +449,8 @@ LOCATION_TOLERANCE: Final = 3
 # not the reviewer's actual localization accuracy.
 
 def _range_distance(line: int, start: int, end: int) -> int:
-    """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
-
-    ``0`` when ``line`` lies inside the range, else the distance to the nearer
-    boundary (``start`` when ``line`` is below it, ``end`` when above).
-
-    Private stdlib duplicate of the shared primitive in ``daydream/hunk_index.py``
-    (the source of truth).
+    """Measure distance to an inclusive hunk, zero inside. This stdlib copy mirrors
+    daydream.hunk_index for standalone verifier deployment.
     """
     if start <= line <= end:
         return 0
@@ -513,18 +477,10 @@ def location_tier(
     c_end: int,
     tolerance: int,
 ) -> str:
-    """Classify one matched pair's location agreement into exactly one tier.
-
-    Tiers: ``"exact"`` (same path, distance 0), ``"near"`` (same path,
-    distance ``<= tolerance``), ``"file"`` (same path, distance beyond
-    tolerance), ``"miss"`` (different path). Distance is the candidate
-    range's distance to the inclusive gold range ``[g_start, g_end]``: each
-    endpoint is checked as a point in the gold range and the nearer of the
-    two wins — 0 when either endpoint lies inside the gold range, else the
-    closer endpoint's distance to the nearer boundary. A candidate range
-    fully containing the gold range has both endpoints outside it, so it
-    scores a non-zero distance despite complete overlap (multi-line ranges
-    are rare; candidate.py normally sets ``start_line == end_line``).
+    """Classify same-path distance as exact (0), near (within tolerance), or file;
+    different paths miss. Distance uses the nearer candidate endpoint against the
+    inclusive gold range. A candidate enclosing the whole gold range therefore can have
+    nonzero distance.
     """
     if g_path != c_path:
         return "miss"
@@ -539,13 +495,8 @@ def location_tier(
 
 
 def severity_distance(g_sev: str | None, c_sev: str | None) -> int | None:
-    """Return ``abs(rank(gold) - rank(candidate))`` for the severity axis.
-
-    ``None`` when either side is ``None`` (axis absent -- never imputed,
-    mirroring the missing-signal doctrine in ``daydream/training/reward.py``).
-    Unknown severity strings cannot occur (validated by ``_validate_severity``
-    upstream); an unexpected value raises :class:`VerifierError` rather than
-    being coerced.
+    """Return rank distance, or None when either signal is absent. Unexpected severity
+    strings raise instead of coercing.
     """
     if g_sev is None or c_sev is None:
         return None
@@ -587,11 +538,8 @@ def _score_axes(
     candidates: list[CandidateFinding],
     matches: set[tuple[str, str]],
 ) -> Reward:
-    """Compute reported location/severity axes over matched tp pairs.
-
-    A pair contributes to an axis only when both sides carry that signal
-    (axis-absent doctrine: never imputed, never raised on absence). Unknown
-    severity values raise :class:`VerifierError` via the shared helpers.
+    """Score reported axes only when both matched findings carry that signal; invalid
+    severity still raises.
     """
     gold_by_id = {_finding_id(g): g for g in gold}
     cand_by_id = {c.candidate_id: c for c in candidates}
@@ -751,27 +699,11 @@ def reward_details(
 
 
 def aggregate_metrics(rows: list[dict[str, object] | None]) -> dict[str, float | int]:
-    """Aggregate per-task reward JSONL rows into pooled corpus micro metrics.
-
-    TP/FP/FN are pooled across tasks (never averaged per task). A ``None`` row
-    or a row with ``verifier_error == 1`` is an unscored infrastructure
-    failure: it increments ``infra_error_task_count`` and contributes nothing
-    (no reward, no tp/fp/fn, no clean counts, no axis contributions). Scored
-    rows (``verifier_error == 0``) pool into ``scored_task_count``/
-    ``total_tp/fp/fn`` and the mean, which is over scored rows only (zero
-    scored rows -> 1.0). Zero denominators evaluate to 1.0 throughout for the
-    headline rates.
-
-    The reported location/severity axes pool over scored pairs only (axis-
-    presence doctrine): per-row pairs come from the ``location_*`` tier fields
-    and the ``severity_pairs`` count, read via ``row.get(k, 0)`` so pre-axis
-    rows (older reward schemas) are genuine zero-pair rows and never raise.
-    Tier rates and the location/severity rates/means use the pooled pair
-    counts as denominators, with each task's reported axis mean weighted by
-    its pair count so unequal tasks pool to the exact per-pair mean. They
-    evaluate to 0.0 when no pairs were scored — deliberately not the 1.0
-    clean-slate convention, because an absent axis is missing signal, not a
-    perfect one.
+    """Pool task counts into micro metrics; do not average per-task rates.
+    None/verifier-error rows contribute only infra counts. Means use scored rows; empty
+    headline denominators yield 1.0. Location/severity axes pool present pairs,
+    weighting means by pair counts. Legacy rows contribute zero pairs, and absent axes
+    yield 0.0 rather than a perfect score.
     """
     infra_errors = 0
     clean_correct = 0
@@ -858,16 +790,8 @@ def _axis_aggregates(
     sev_credit_sum: float,
     severity_pairs: int,
 ) -> dict[str, float | int]:
-    """Pool the reported location/severity axes over scored pairs.
-
-    Location tier counts pool per pair and the tier rates use the pooled pair
-    count as the denominator (0.0 with zero pairs). ``location_credit`` pools
-    per pair: each task's reported per-pair mean is weighted by its location
-    pair count (the sum of its tier counts) before dividing by the pooled
-    pair count, pooling to the exact per-pair mean. Severity pools per pair:
-    the totals and rates divide by the pooled ``severity_pairs`` count, and
-    the distance/credit means weight each task's per-pair mean by its pair
-    count, pooling to the exact per-pair mean.
+    """Pool location/severity tier counts and weight each reported mean by its pair count.
+    Rates divide by pooled pairs; zero pairs yield zero rates.
     """
     n_loc = location_pairs
     n_sev = severity_pairs

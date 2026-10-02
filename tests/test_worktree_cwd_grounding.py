@@ -1,10 +1,7 @@
-"""Real-path test for cwd grounding in a linked git worktree (issue #221).
+"""Ground pre_scan in a linked worktree whose sibling has different same-path content.
 
-Drives the real ``pre_scan`` exploration pipeline against an actual linked git
-worktree whose sibling main worktree contains different content at the same
-relative paths. Only the backend is mocked. Asserts that the specialist prompts
-carry cwd-absolute paths under the LINKED worktree (never the main worktree) and
-the cwd-grounding instruction — the deterministic contract the fix locks.
+Only the backend is doubled. Specialist prompts must name the linked worktree's
+absolute paths and include the cwd-grounding instruction.
 """
 
 from __future__ import annotations
@@ -35,36 +32,16 @@ def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[
 
     diff_text = subprocess.run(  # noqa: S603 - args are not user-controlled
         ["git", "diff", "main...HEAD"],  # noqa: S607 - git is a trusted command
-        cwd=linked,
-        capture_output=True,
-        text=True,
-        check=True,
+        cwd=linked, capture_output=True, text=True, check=True,
     ).stdout
     # 4 changed files => parallel tier => all three specialists run.
     assert "services/taste/parser.go" in diff_text
 
-    backend = ScriptedBackend(
-        responses_by_schema=[
-            (
-                PATTERN_SCANNER_SCHEMA,
-                [
-                    ResultEvent(
-                        structured_output={"conventions": [], "guidelines": []}, continuation=None
-                    )
-                ],
-            ),
-            (
-                DEPENDENCY_TRACER_SCHEMA,
-                [
-                    ResultEvent(
-                        structured_output={"affected_files": [], "dependencies": []}, continuation=None
-                    )
-                ],
-            ),
-            (
-                TEST_MAPPER_SCHEMA,
-                [ResultEvent(structured_output={"affected_files": []}, continuation=None)],
-            ),
+    backend = ScriptedBackend(responses_by_schema=[(PATTERN_SCANNER_SCHEMA,
+                [ResultEvent(structured_output={"conventions": [], "guidelines": []}, continuation=None)],
+            ), (DEPENDENCY_TRACER_SCHEMA,
+                [ResultEvent(structured_output={"affected_files": [], "dependencies": []}, continuation=None)],
+            ), (TEST_MAPPER_SCHEMA, [ResultEvent(structured_output={"affected_files": []}, continuation=None)],),
         ]
     )
 

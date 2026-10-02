@@ -2,16 +2,10 @@
 
 from __future__ import annotations
 
-import inspect
-import json
 import logging
-import math
-import os
-import random
 import re
 from collections.abc import Callable
 from contextlib import nullcontext
-from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any
@@ -25,24 +19,20 @@ if TYPE_CHECKING:
     from rich.text import Text
 
 from daydream import clock
+from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint, _RetryTelemetry
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_session_active, assert_model_cwd_clean
 from daydream.backends import (
     AgentEventStream,
     Backend,
     ContinuationToken,
-    CostEvent,
-    DiagnosticEvent,
-    MetricsEvent,
     ResultEvent,
     TextEvent,
-    ThinkingEvent,
-    ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
 )
 from daydream.backends.codex import supervisor_shell_command
-from daydream.config import BUDGET_CLEANUP_GRACE_S, DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-from daydream.diagnostics import sanitize_verbose_message
+from daydream.config import BUDGET_CLEANUP_GRACE_S
+from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
 from daydream.json_utils import extract_json
 from daydream.observability.spans import agent_scope, attempt_scope
@@ -53,9 +43,6 @@ from daydream.retry_policy import (
     FailureClass,
     RetryRecoveryBudget,
     classify_failure,
-    decode_retry_recovery_allowance,
-    parse_message_retry_hint,
-    undeclared_retry_allowance_message,
 )
 from daydream.review_budget import ReviewLimits, review_deadline, review_limits_for_scope
 from daydream.review_evidence import FinalizationContext, ReviewEvidence
@@ -66,323 +53,11 @@ from daydream.run_context import (
     resolve_gate as resolve_gate,
     resolve_run_context,
 )
-from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_structured_text, redact_text, redact_value
-from daydream.ui import (
-    NEON_THEME,
-    AgentTextRenderer,
-    LiveToolPanelRegistry,
-    format_callback_progress,
-    format_callback_text,
-    print_cost,
-    print_error,
-    print_thinking,
-    print_warning,
-)
-from daydream.ui.tools import _BASH_COMMAND_MAX_CHARS, _PRIMARY_TOOL_ARG, _redacted_bash_command
+from daydream.trajectory import DaydreamPhase, get_current_recorder, redact_text
+from daydream.ui import NEON_THEME, print_error
+from daydream.ui.agent_stream import AgentDisplay
 
 _logger = logging.getLogger(__name__)
-
-
-def _sample_retry_delay(cap: float) -> float:
-    """Sample a bounded full-jitter backoff delay uniformly from ``[0, cap]``.
-
-    The only consumer of ``random`` in the retry path; tests pin this seam. The
-    sampler is never seeded. Callers clamp the result to ``cap`` again so a
-    hostile sample cannot overshoot.
-    """
-    if cap <= 0:
-        return 0.0
-    return random.uniform(0.0, cap)
-
-
-def _retry_delay_from_env(name: str, default: float) -> float:
-    """Read one non-negative finite delay knob from the environment, else *default*."""
-    try:
-        value = float(os.environ.get(name, str(default)))
-    except ValueError:
-        return default
-    return value if math.isfinite(value) and value >= 0 else default
-
-
-@dataclass(frozen=True)
-class _ResolvedRetrySettings:
-    """One invocation's fully-resolved retry ladder settings."""
-
-    max_attempts: int
-    base_delay_s: float
-    max_delay_s: float
-    allowance_s: float
-
-
-def _resolve_retry_settings(
-    backend: Backend, retry_recovery_allowance_s: float | None
-) -> _ResolvedRetrySettings:
-    """Resolve one invocation's retry ladder settings before any dispatch.
-
-    The whole input -> settings mapping lives here rather than inline in
-    :func:`_run_agent`: the attempt/delay tiers, the cumulative-allowance
-    precedence ladder and the contradiction checks. It is a pure callable of the
-    backend, the explicit argument and the ambient environment, so it is unit
-    testable without driving the retry loop.
-
-    Precedence for the cumulative allowance, highest first: the backend's
-    ``RetryPolicy.retry_recovery_allowance_s``, then a backend
-    ``retry_recovery_allowance_s`` attribute, then the explicit argument (only the
-    fix phase threads a config-file value), then
-    ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S``, then
-    ``DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. The ambient env var is consulted only
-    when the backend declares no ``RetryPolicy`` at all -- a declared policy
-    declares its retry settings completely (pinned by
-    ``test_run_agent_uses_backend_retry_policy_without_reading_ambient_environment``);
-    the embedded construction path materialises that env var into the policy it
-    builds instead. A single invalid value degrades to the default, observably.
-
-    Raises:
-        ValueError: ``base_delay > max_delay``, or a declared non-zero allowance
-            alongside ``max_attempts == 0`` (retries disabled). Both are refused
-            before any dispatch rather than coerced into a plausible bound.
-    """
-    retry_policy = getattr(backend, "retry_policy", None)
-    if retry_policy is not None:
-        max_attempts = retry_policy.attempts
-        base_delay = retry_policy.base_delay_s
-        max_delay = retry_policy.max_delay_s
-    else:
-        try:
-            default_attempts = int(os.environ.get("DAYDREAM_PI_RETRY_ATTEMPTS", "20"))
-        except ValueError:
-            default_attempts = 20
-        if default_attempts < 0:
-            default_attempts = 20
-        max_attempts = getattr(backend, "retry_attempts", default_attempts)
-        base_delay = getattr(
-            backend,
-            "retry_base_delay_s",
-            _retry_delay_from_env("DAYDREAM_PI_RETRY_BASE_DELAY_S", 2.0),
-        )
-        max_delay = getattr(
-            backend,
-            "retry_max_delay_s",
-            _retry_delay_from_env("DAYDREAM_PI_RETRY_MAX_DELAY_S", 120.0),
-        )
-    if max_attempts < 0:
-        raise ValueError("retry attempts must be >= 0")
-    if not math.isfinite(base_delay):
-        raise ValueError("retry base delay must be finite")
-    if base_delay < 0:
-        raise ValueError("retry base delay must be >= 0")
-    if not math.isfinite(max_delay):
-        raise ValueError("retry max delay must be finite")
-    if max_delay < 0:
-        raise ValueError("retry max delay must be >= 0")
-
-    allowance_source: tuple[str, Any] | None = None
-    if retry_policy is not None:
-        policy_allowance = getattr(retry_policy, "retry_recovery_allowance_s", None)
-        if policy_allowance is not None:
-            allowance_source = (
-                "RetryPolicy.retry_recovery_allowance_s",
-                policy_allowance,
-            )
-    if allowance_source is None:
-        backend_allowance = getattr(backend, "retry_recovery_allowance_s", None)
-        if backend_allowance is not None:
-            allowance_source = ("retry_recovery_allowance_s", backend_allowance)
-    if allowance_source is None and retry_recovery_allowance_s is not None:
-        allowance_source = ("retry_recovery_allowance_s", retry_recovery_allowance_s)
-    if allowance_source is None and retry_policy is None:
-        env_allowance = os.environ.get("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S")
-        if env_allowance is not None:
-            allowance_source = (
-                "DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S",
-                env_allowance,
-            )
-    resolved_allowance = DEFAULT_RETRY_RECOVERY_ALLOWANCE_S
-    declared_allowance = False
-    if allowance_source is not None:
-        parsed_allowance = _coerce_retry_recovery_allowance(
-            allowance_source[1], allowance_source[0]
-        )
-        if parsed_allowance is not None:
-            resolved_allowance = parsed_allowance
-            declared_allowance = True
-
-    # Two declared values can each be valid and still contradict one another.
-    # Refuse the combination here, before any dispatch, with a message naming both
-    # keys -- never coerce it into a plausible bound. The allowance check fires
-    # only for a *declared* non-zero value: the default 300s must not turn
-    # ``retry_attempts = 0`` (a legitimate "no retries" declaration) into an error.
-    if base_delay > max_delay:
-        raise ValueError(
-            f"retry_base_delay_s ({base_delay}) must not exceed "
-            f"retry_max_delay_s ({max_delay})"
-        )
-    if declared_allowance and resolved_allowance > 0 and max_attempts == 0:
-        raise ValueError(
-            "retry_recovery_allowance_s "
-            f"({resolved_allowance}) cannot be non-zero while retries are "
-            "disabled (max_attempts == 0); set retry_recovery_allowance_s = 0 "
-            "to disable retry recovery explicitly"
-        )
-    return _ResolvedRetrySettings(
-        max_attempts=max_attempts,
-        base_delay_s=base_delay,
-        max_delay_s=max_delay,
-        allowance_s=resolved_allowance,
-    )
-
-
-def _plan_retry_delay(
-    *,
-    attempt: int,
-    base_delay_s: float,
-    max_delay_s: float,
-    allowance_remaining_s: float | None,
-    deadline_remaining_s: float | None,
-    hint: float | None,
-) -> tuple[float, str | None]:
-    """Decide the next backoff delay, or the ladder stop that replaces it.
-
-    Returns ``(delay_s, stop_reason)``. ``stop_reason`` is
-    ``"retry_hint_exceeds_budget"`` when a server hint cannot fit inside the
-    remaining allowance/deadline -- the caller stops the ladder exactly as it does
-    on exhaustion -- and the delay is meaningless in that case. Otherwise the
-    delay is the hint, or a full-jitter sample whose cap is the smaller of the
-    exponential growth, the configured maximum, the remaining allowance and the
-    time the deadline has left, so a retry storm cannot overshoot either ceiling
-    by up to one backoff interval.
-    """
-    bounds = [
-        bound
-        for bound in (
-            allowance_remaining_s,
-            # ``max(..., 0.0)`` twice: a spent deadline is a spent bound, never a
-            # negative one that would invert the comparison below.
-            deadline_remaining_s,
-        )
-        if bound is not None
-    ]
-    cap = min(base_delay_s * (2 ** attempt), max_delay_s)
-    if bounds:
-        cap = min(cap, min(bounds))
-    cap = max(cap, 0.0)
-    if hint is not None and bounds and hint > min(bounds):
-        return 0.0, "retry_hint_exceeds_budget"
-    return min(hint if hint is not None else _sample_retry_delay(cap), cap), None
-
-
-@dataclass
-class _RetryTelemetry:
-    """Per-invocation retry counters, shared by the loop and its stop emitter.
-
-    One mutable object instead of the eight locals the stop emitter used to close
-    over, so the accounting it reports is locally checkable. Every field is
-    **retry-scoped**: ``retry_attempts`` counts only dispatched retry attempts and
-    ``retry_backend_s`` only time spent inside them, while ``backend_s`` keeps the
-    full dispatched-attempt total for the deadline-stop record and ``backoff_s``
-    is retry backoff sleep. The initial, useful-work attempt is therefore never
-    charged to the retry totals -- a zero-retry ladder stop reports zero retry
-    attempts and zero retry backend time instead of claiming the failed attempt
-    as retry overhead.
-    """
-
-    attempts_dispatched: int = 0
-    retry_attempts: int = 0
-    backend_s: float = 0.0
-    retry_backend_s: float = 0.0
-    backoff_s: float = 0.0
-    attempt_started_at: float | None = None
-    attempt_is_retry: bool = False
-
-    def start_attempt(self, now: float, *, retry: bool) -> None:
-        """Record one dispatched attempt; *retry* marks it as retry overhead."""
-        self.attempts_dispatched += 1
-        self.attempt_is_retry = retry
-        if retry:
-            self.retry_attempts += 1
-        self.attempt_started_at = now
-
-    def charge_attempt(self, now: float, *, cleanup_elapsed_s: float = 0.0) -> float:
-        """Close the in-flight attempt and return its charged backend seconds.
-
-        Returns ``0.0`` when no attempt is in flight. ``cleanup_elapsed_s`` is
-        excluded because post-stop cleanup (the bounded backend aclose) is not
-        dispatched-attempt time.
-        """
-        if self.attempt_started_at is None:
-            return 0.0
-        delta = now - self.attempt_started_at - cleanup_elapsed_s
-        self.backend_s += delta
-        if self.attempt_is_retry:
-            self.retry_backend_s += delta
-        self.attempt_started_at = None
-        return delta
-
-    def pending_s(self, now: float) -> float:
-        """The in-flight attempt's elapsed time, or ``0.0`` when none is running."""
-        if self.attempt_started_at is None:
-            return 0.0
-        return max(now - self.attempt_started_at, 0.0)
-
-    def pending_retry_s(self, now: float) -> float:
-        """The in-flight attempt's elapsed time when it is a retry, else ``0.0``."""
-        return self.pending_s(now) if self.attempt_is_retry else 0.0
-
-    @property
-    def spent_retry_overhead(self) -> bool:
-        """Whether the ladder spent anything on recovery: a dispatch or a sleep.
-
-        A ladder that slept through a backoff and then found its deadline gone
-        spent real retry overhead even though it never dispatched the retry, so
-        the deadline that ended it must still be reported as a ladder ending.
-        """
-        return self.retry_attempts > 0 or self.backoff_s > 0.0
-
-
-def _coerce_retry_recovery_allowance(raw: Any, source: str) -> float | None:
-    """Validate one declared retry-recovery allowance, warning on an invalid value.
-
-    Thin logging wrapper over :func:`decode_retry_recovery_allowance`, which owns
-    the decode rule for every allowance source. ``raw`` may be a number or a
-    numeric string (the env shape). A bool, a non-number, a non-finite value, or
-    a negative value is refused as an effective bound and degrades to the
-    documented default, observably, rather than becoming a bound. ``0`` is valid
-    and disables retry recovery.
-    """
-    value = decode_retry_recovery_allowance(raw)
-    if value is None:
-        _logger.warning(
-            "daydream: %s; using default %s",
-            undeclared_retry_allowance_message(source, raw),
-            DEFAULT_RETRY_RECOVERY_ALLOWANCE_S,
-        )
-    return value
-
-
-def _retry_hint(exc: BaseException) -> float | None:
-    """Extract a finite, non-negative server retry hint from *exc*, else ``None``.
-
-    The ``retry_after`` attribute wins; when it is absent the failure message is
-    parsed for a ``retry[- ]after[: ]N`` token. A present-but-malformed
-    attribute (a string, ``nan``, ``inf``, a negative) is ignored rather than
-    coerced, degrading to jitter; ``0`` is a valid hint. Never raises.
-    """
-    attribute = getattr(exc, "retry_after", None)
-    if attribute is None:
-        # ``str(exc)`` is guarded exactly like the classifier's: a retryable
-        # exception with a broken ``__str__`` must not raise a secondary error
-        # that masks the real backend failure.
-        try:
-            message = str(exc)
-        except Exception:  # noqa: BLE001 - a broken __str__ must not break retrying
-            return None
-        return parse_message_retry_hint(message)
-    if isinstance(attribute, bool) or not isinstance(attribute, (int, float)):
-        return None
-    value = float(attribute)
-    if not math.isfinite(value) or value < 0:
-        return None
-    return value
 
 
 class _ToolSupervisorFailure(Exception):
@@ -394,11 +69,7 @@ class _ToolSupervisorFailure(Exception):
 
     def __init__(self, original: Exception) -> None:
         self.original = original
-        try:
-            text = str(original)
-        except Exception:  # noqa: BLE001 - a broken __str__ must not abort construction
-            text = ""
-        super().__init__(text)
+        super().__init__(exception_text(original) or "")
 
     @property
     def subtype(self) -> str:
@@ -407,15 +78,10 @@ class _ToolSupervisorFailure(Exception):
 
 
 class _RedactedSupervisorError(RuntimeError):
-    """Scrubbed stand-in for a supervisor exception that cannot be rebuilt clean.
+    """Fallback preserving exception type name and a scrubbed message.
 
-    A tool supervisor is arbitrary extension code and may raise an exception
-    whose ``str()`` is not derived from ``args`` (e.g. ``OSError`` built from
-    errno/strerror, or a type overriding ``__str__``/``__repr__``); such a value
-    cannot be scrubbed in place. This stand-in carries the original type name
-    (for recognizable diagnostics) and a message already run through
-    ``redact_text``, so ``str(exc)`` re-printed by outer handlers never re-
-    surfaces the raw credential.
+    Use when rebuilding cannot remove secrets from custom str/repr or OSError
+    fields; outer handlers may print this exception without another redaction pass.
     """
 
     def __init__(self, original_type_name: str, message: str) -> None:
@@ -425,16 +91,10 @@ class _RedactedSupervisorError(RuntimeError):
 
 
 def _scrubbed_supervisor_error(original: BaseException) -> BaseException:
-    """Return a re-propagatable copy of ``original`` whose ``str()`` is scrubbed.
+    """Rebuild from scrubbed args, falling back if construction fails or str stays unsafe.
 
-    Reconstruct the same exception type from its args (each string run through
-    ``redact_text``) where possible -- this handles RuntimeError-derived types
-    and OSError alike, since a fresh instance rebuilds errno/strerror from the
-    scrubbed args. Where reconstruction is impossible or the resulting str()
-    still carries a redactable value (a type overriding ``__str__``/``__repr__``),
-    fall back to ``_RedactedSupervisorError``. Either way the re-raised
-    exception's ``str()`` is clean and ``retryable`` (a discriminator consumers
-    like improve-run retry checks read via ``getattr``) is preserved.
+    Preserve retryable for outer retry consumers; custom str/repr and OSError fields
+    must never leak the original credential.
     """
     scrubbed_args = tuple(
         redact_text(a) if isinstance(a, str) else a for a in original.args
@@ -443,20 +103,13 @@ def _scrubbed_supervisor_error(original: BaseException) -> BaseException:
         clone = type(original)(*scrubbed_args)
     except (AttributeError, TypeError):
         clone = None
-    # str() is the one operation that can raise on a hostile value; convert it
-    # inside the fail-closed try so a broken __str__ falls through to the
-    # stand-in instead of escaping the scrubber (sanitize_verbose_message's
-    # contract in diagnostics.py).
-    try:
-        clone_text = str(clone) if clone is not None else None
-    except Exception:  # noqa: BLE001 - fail closed to the stand-in on a broken __str__
-        clone_text = None
+    clone_text = exception_text(clone) if clone is not None else None
     if clone is not None and clone_text is not None and redact_text(clone_text) == clone_text:
         setattr(clone, "retryable", getattr(original, "retryable", False))
         return clone
     try:
-        message = redact_text(str(original))
-    except Exception:  # noqa: BLE001 - fail closed to a type-name-only stand-in
+        message = redact_text(exception_text(original) or "")
+    except Exception:  # noqa: BLE001 - fail closed if redaction itself fails
         message = ""
     stand_in = _RedactedSupervisorError(type(original).__name__, message)
     stand_in.retryable = getattr(original, "retryable", False)
@@ -493,12 +146,7 @@ class _EventStreamScope:
 
 
 class _LogRedactingConsole(Console):
-    """Console that redacts string payloads while ``--verbose`` mode is active.
-
-    phases.py, runner.py, and the other importers bind to this module-level
-    console, so their Rich output would otherwise bypass the run_agent-event
-    emitter and leak raw secrets via the UI path in ``--verbose`` mode.
-    """
+    """Redact string console payloads in verbose mode, including UI calls outside agent-event emission."""
 
     def print(self, *objects: Any, **kwargs: Any) -> None:
         context = current_run_context()
@@ -574,13 +222,7 @@ def detect_test_success(output: str) -> bool:
 
 
 def is_environmental_failure(test_output: str) -> bool:
-    """Detect whether a test failure stems from missing infrastructure, not the code.
-
-    Conservative, case-insensitive match on infra signatures (database/cache not
-    reachable). Used to short-circuit the heal loop: re-running an agent fix turn
-    cannot bring up a Postgres/Redis container, so an environmental failure must
-    abort rather than burn turns on a non-code problem.
-    """
+    """Recognize infrastructure failures case-insensitively to stop futile code-heal turns."""
     if not test_output:
         return False
 
@@ -597,71 +239,16 @@ def is_environmental_failure(test_output: str) -> bool:
     return any(signature in output_lower for signature in infra_signatures)
 
 
-def _summarize_input(input_data: dict[str, Any], name: str) -> str:
-    """One-line summary of tool input for log output."""
-    if not input_data:
-        return ""
-    # The COMPLETE selected string is redacted before any [:_BASH_COMMAND_MAX_CHARS]
-    # slice — redact-after-slice would truncate a credential into an unmatchable fragment.
-    # Key the shared primary table by tool name the way ui.tools._primary_tool_value
-    # does instead of hard-applying the Bash-only (command, description) preference:
-    # TaskCreate/Agent inputs also carry "description", and letting the Bash pair
-    # shadow it would replace their short subject with the long field.
-    for key in _PRIMARY_TOOL_ARG.get(name, ()):
-        value = input_data.get(key)
-        if isinstance(value, str) and value:
-            # S1 parity with the live render surfaces (ui.tools): the stored
-            # input keeps the replayable cd-prefixed payload, but the --verbose
-            # surface shows the cd-stripped display variant. Codex-only
-            # ('shell'): Claude/Pi Bash commands never pass through the Codex
-            # wrapper, so their operator-authored cd prefix must render.
-            if key == "command":
-                return _redacted_bash_command(name, value)
-            return redact_structured_text(value)[:_BASH_COMMAND_MAX_CHARS]
-    if "path" in input_data:
-        complete = f"{input_data['path']}" + (
-            f" -> {input_data.get('new_path', '')}" if "new_path" in input_data else ""
-        )
-        return redact_structured_text(complete)
-    # Generic: first value that's a string
-    for v in input_data.values():
-        if isinstance(v, str):
-            return redact_structured_text(v)[:_BASH_COMMAND_MAX_CHARS]
-    return redact_structured_text(str(input_data))[:_BASH_COMMAND_MAX_CHARS]
-
-
-def _summarize_output(output: str) -> str:
-    """One-line summary of tool output for log output."""
-    if not output:
-        return "(empty)"
-    # Redact the COMPLETE output before strip/first-line/[:200] — a credential
-    # straddling the summary boundary must be caught before the slice.
-    redacted = redact_structured_text(output)
-    # Take first non-empty line or first 200 chars
-    first_line = redacted.strip().split("\n")[0]
-    return first_line[:200]
-
-
 def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
     """Return whether ``value`` validates against ``schema`` (shape + required)."""
     return not any(Draft202012Validator(schema).iter_errors(value))
 
 
 def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
-    """Return whether ``value`` is usable by a salvage-tolerant consumer.
+    """Accept full schema validity or a shape downstream consumers can salvage.
 
-    Full validation is the baseline, but the structured-output gate must not
-    be all-or-nothing: it guards the backend-supplied primary result and the
-    extraction fallback alike, and the per-stack parse, the recommendation
-    verifier, and the cross-stack merge all normalize partial agent output
-    (dropping invalid records rather than losing the whole payload, or
-    accepting a bare item array), so a dict whose required top-level fields
-    are present — with array-typed fields holding actual lists — is still
-    returned for them to salvage, and so is a bare JSON array, which
-    ``phase_cross_stack_merge`` normalizes to its item list (a bare array can
-    never validate against the object-typed ``MERGED_ITEMS_SCHEMA``). Nested
-    item validity is deliberately not checked here: that is the consumers'
-    salvage domain.
+    Bare arrays support merge normalization. Objects must contain required keys,
+    with lists in required array slots; nested records are validated downstream.
     """
     if _validates_schema(value, schema):
         return True
@@ -681,15 +268,6 @@ def _salvageable(value: Any, schema: dict[str, Any]) -> bool:
             if not isinstance(value[key], list):
                 return False
     return True
-
-
-def _print_log(value: str) -> None:
-    """The safe ``--verbose`` emitter for run_agent events: redact, then print.
-
-    Phase/UI output flows through the module-level ``console``, which redacts
-    string payloads in log mode via the same fail-closed boundary.
-    """
-    print(redact_structured_text(value), flush=True)
 
 
 async def run_agent(
@@ -856,98 +434,22 @@ async def _run_agent(
     finalization: bool = False,
     tools_disabled: bool = False,
 ) -> tuple[str | Any, ContinuationToken | None, str | None]:
-    """Run agent with the given prompt and return output plus continuation token.
+    """Execute attempts under one deadline, retry allowance, and tool budget.
 
-    Streams verbose output to stdout as it's received. When progress_callback
-    is provided, runs in quiet mode and routes status updates through the
-    callback instead of printing to the console.
+    Recorder observation precedes presentation and supervision. Backend failures
+    may retry; supervisor failures never do. Each attempt owns and closes its
+    stream. A deadline/tool/veto stop returns partial output and its reason, with
+    bounded cleanup; a pre-dispatch or pre-backoff stop discards failed partials.
 
-    All keyword arguments after ``prompt`` are keyword-only (the ``*``
-    separator was added in Phase 2). Existing call sites pass them by name,
-    so this is non-breaking — but the new ``phase`` argument is REQUIRED
-    with no default (D-05). Calls that omit it raise ``TypeError`` from the
-    Python interpreter at call time.
-
-    Args:
-        backend: The Backend to execute against.
-        cwd: Working directory for the agent.
-        prompt: The prompt to send to the agent.
-        phase: Required DaydreamPhase label for ATIF Step.extra (MAP-08, D-05).
-            Must be a literal DaydreamPhase enum member. Required keyword-only
-            with no default — Python raises TypeError if omitted.
-        output_schema: Optional JSON schema for structured output.
-        progress_callback: Optional callback for status updates (quiet mode).
-        continuation: Optional continuation token for multi-turn.
-        agents: Optional mapping of specialist name -> AgentDefinition.
-        max_turns: Optional cap on the number of model turns.
-        read_only: When True, enforcement delegates to the backend: Claude
-            rejects mutating tools via its PreToolUse guard, and Codex
-            combines its read-only sandbox with a disposable standalone Git
-            checkout whenever *cwd* is a worktree root, so a read-only commit
-            can only update the disposable clone's refs and index. Callers
-            select this flag explicitly per call site; the diagnostic
-            subagents (setup-investigator, recommendation-verifier), the
-            failure summarizer, and the exploration and repository
-            reconnaissance specialists (pre_scan, repo_scan, improve recon)
-            pass True, while mutating phases keep the False default.
-        persist_session: When False, request an ephemeral backend invocation.
-            The default preserves existing continuation behavior.
-        wall_budget_s: Opt-in invocation-wide wall-clock budget. It is
-            converted to one absolute effective deadline before the retry
-            loop and enforced across every attempt (pre-dispatch, pre-backoff,
-            and mid-stream). When spent, the invocation's event iterator is
-            closed, the ATIF turn is marked aborted, and the partial output is
-            returned — no exception reaches the caller. ``None`` (the default)
-            disables the budget. See ``deadline`` for a caller-owned bound.
-        deadline: Optional caller-owned absolute deadline on the process-local
-            :func:`daydream.clock.monotonic` timeline. It is never persisted.
-            The effective deadline is ``min(deadline, now + wall_budget_s)``
-            over whichever inputs are present, derived once for the whole
-            invocation so retries and backoff cannot restart the clock.
-        tool_call_budget: Opt-in ceiling on ToolStartEvents in this turn. When
-            exceeded the loop breaks with the same abort/partial-return path.
-            ``None`` (the default) means no tool-call ceiling.
-        retry_recovery_allowance_s: Cumulative retry-overhead allowance for this
-            invocation, in seconds. It bounds the whole retry ladder: once the
-            first retryable failure activates it, every backoff sleep and every
-            retry attempt is charged against it, and a spent allowance re-raises
-            the current failure without dispatching again. It composes with the
-            single effective deadline by clamping (never re-basing) and never
-            interrupts an attempt that is already running. Resolution precedence:
-            the backend's ``RetryPolicy.retry_recovery_allowance_s``, then a
-            backend ``retry_recovery_allowance_s`` attribute, then this argument,
-            then ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S``, then
-            ``DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. An invalid single value
-            degrades to the default with a warning; a contradiction
-            (``base_delay > max_delay`` or a non-zero declared allowance with
-            retries disabled) raises ``ValueError`` before any dispatch. ``0``
-            disables retry recovery.
-        validate_structured_output: When True (default), structured output —
-            the backend-supplied primary result and the extraction fallback alike
-            — is returned only when its shape is usable by downstream consumers
-            (see ``_salvageable``). Set False for call sites that re-validate
-            or salvage wholesale downstream — the improve recon and plan
-            author, whose downstream validators (``validate_recon_commands`` /
-            ``assemble_plan``) are the fail-closed enforcement point.
-
-    Returns:
-        Tuple of (output, continuation_token, budget_reason). Output is text
-        or structured data. ``budget_reason`` is ``None`` on a normal
-        completion, or a string such as ``"wall_budget_exceeded"`` /
-        ``"tool_call_budget_exceeded"`` / ``"tool_vetoed:Write"`` when the
-        turn was cut short.
-
-    Raises:
-        TypeError: If the keyword-only ``phase`` argument is not provided
-            (raised by the Python interpreter at call time).
+    Structured primary and extracted results share the salvage gate. Callers that
+    validate downstream may opt out; bounded review finalization is handled by
+    the public run_agent wrapper.
     """
     output_parts: list[str] = []
     structured_result: Any = None
     result_continuation: ContinuationToken | None = None
     aborted_reason: str | None = None
-    use_callback = progress_callback is not None
     tool_supervisor = get_registry().tool_supervisor_if_registered()
-    policy = run_context.policy
 
     with run_context.backend_registration(backend):
         try:
@@ -961,30 +463,15 @@ async def _run_agent(
             max_delay = settings.max_delay_s
             resolved_allowance = settings.allowance_s
 
-            # Derive ONE absolute effective deadline for the whole invocation,
-            # before the retry loop: retries, attempt restarts and backoff all
-            # spend this same deadline instead of restarting it. ``limit_expired``
-            # names which input produced it (caller deadline wins a tie).
+            # One absolute bound covers attempts and backoff; caller deadline wins ties.
             invocation_start = clock.monotonic()
-            if deadline is not None and wall_budget_s is not None:
+            effective_deadline = deadline
+            limit_expired = "caller_deadline" if deadline is not None else None
+            if wall_budget_s is not None:
                 wall_deadline = invocation_start + wall_budget_s
-                if deadline <= wall_deadline:
-                    effective_deadline = deadline
-                    limit_expired = "caller_deadline"
-                else:
+                if deadline is None or not deadline <= wall_deadline:
                     effective_deadline = wall_deadline
                     limit_expired = "invocation_wall_budget"
-            elif deadline is not None:
-                effective_deadline = deadline
-                limit_expired = "caller_deadline"
-            elif wall_budget_s is not None:
-                effective_deadline = invocation_start + wall_budget_s
-                limit_expired = "invocation_wall_budget"
-            else:
-                effective_deadline = None
-                limit_expired = None
-            # Resolve the cumulative retry-recovery allowance once, after the
-            # single effective deadline so activation can clamp to what remains.
             recovery = RetryRecoveryBudget(resolved_allowance)
             # Telemetry counters for the single invocation: only dispatched
             # attempts and time actually spent inside them are charged. The
@@ -1005,15 +492,10 @@ async def _run_agent(
             def _emit_ladder_stop(
                 stop_reason: str, limit_expired: str = "retry_ladder"
             ) -> None:
-                """Record one retry-ladder stop before its failure is raised.
+                """Record retry overhead and its terminal reason without affecting the raised failure.
 
-                Best-effort and recorder-optional, so telemetry can never change
-                the raised failure. Only durations and reason/state codes are
-                written -- never a monotonic value or the deadline. The counters
-                are retry-scoped: the dispatched retry attempts (plus the in-flight
-                one when it is a retry) and the backend time and backoff sleep they
-                consumed, so every field of the record measures retry overhead and
-                the initial useful-work attempt is never folded in.
+                Counts include dispatched/in-flight retries and backoff, excluding initial useful
+                work. Persist only durations and codes, never monotonic timestamps or deadlines.
                 """
                 if recorder is None:
                     return
@@ -1062,12 +544,7 @@ async def _run_agent(
                 if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                     aborted_reason = "wall_budget_exceeded"
                     partials_discarded_by_deadline = True
-                    # A ladder that already spent retry overhead (a dispatched
-                    # retry or a backoff sleep) and now meets the spent deadline is
-                    # a retry-ladder ending, not a plain deadline: record that stop
-                    # so the manifest's retry summary carries the retry overhead
-                    # the ladder produced, instead of leaving a reason-less
-                    # deadline stop behind.
+                    # When retries or backoff spent time, preserve that overhead in a ladder-stop record.
                     if telemetry.spent_retry_overhead:
                         _emit_ladder_stop(
                             "retry_deadline_exhausted",
@@ -1080,26 +557,9 @@ async def _run_agent(
                 # charged to the recovery budget; the attempt that produces the
                 # first retryable failure is not (activation happens after it).
                 telemetry.start_attempt(clock.monotonic(), retry=recovery.active)
-                # Track tool names by id for log mode output
-                tool_names: dict[str, str] = {}
-                callback_text_parts: list[str] = []
-
-                async def _flush_callback_text() -> None:
-                    """Render one line for a consecutive run of streamed text deltas."""
-                    if progress_callback is None or not callback_text_parts:
-                        return
-                    text = "".join(callback_text_parts)
-                    callback_text_parts.clear()
-                    last_line = text.strip().split("\n")[-1]
-                    if last_line:
-                        result = progress_callback(format_callback_text(last_line))
-                        if inspect.isawaitable(result):
-                            await result
-
-                # Created per attempt so a failed retry's UI panels and task-label
-                # mappings cannot be flushed or reused by a later successful attempt.
-                tool_registry = LiveToolPanelRegistry(console, policy.quiet)
-                agent_renderer = AgentTextRenderer(console)
+                display = AgentDisplay(
+                    console, run_context.policy, progress_callback, structured=output_schema is not None,
+                )
 
                 try:
                     if artifact_session_active():
@@ -1172,50 +632,13 @@ async def _run_agent(
                                 # ignores RequestEvent (the one armless member).
                                 if inv is not None:
                                     inv.observe(event)
-                                if use_callback and not isinstance(
-                                    event, (TextEvent, DiagnosticEvent)
-                                ):
-                                    await _flush_callback_text()
-
                                 if isinstance(event, TextEvent):
                                     output_parts.append(event.text)
-
-                                    if policy.log_mode:
-                                        _print_log(event.text)
-                                    elif use_callback and progress_callback is not None:
-                                        callback_text_parts.append(event.text)
-                                    elif output_schema is None:
-                                        # Structured-output text is the JSON payload, redundant with
-                                        # the returned structured result — don't echo it to the terminal.
-                                        agent_renderer.append(event.text)
-
-                                elif isinstance(event, ThinkingEvent):
-                                    if policy.log_mode:
-                                        _print_log(f"[thinking] {event.text}")
-                                    elif not use_callback:
-                                        if agent_renderer.has_content:
-                                            agent_renderer.finish()
-                                        print_thinking(console, event.text)
-
-                                elif isinstance(event, ToolStartEvent):
-                                    if policy.log_mode:
-                                        tool_names[event.id] = event.name
-                                        _print_log(f"[tool:{event.name}] {_summarize_input(event.input, event.name)}")
-                                    elif progress_callback is not None:
-                                        # Record the originating call so a backgrounded launch's result
-                                        # can later resolve a Task-family label for the progress line.
-                                        tool_registry.note_call(event.id, event.name, event.input)
-                                        label = tool_registry.resolve_call_label(event.name, event.input)
-                                        result = progress_callback(
-                                            format_callback_progress(event.name, event.input, label)
-                                        )
-                                        if inspect.isawaitable(result):
-                                            await result
-                                    else:
-                                        if agent_renderer.has_content:
-                                            agent_renderer.finish()
-                                        tool_registry.create(event.id, event.name, event.input)
-
+                                elif isinstance(event, ResultEvent):
+                                    structured_result = event.structured_output
+                                    result_continuation = event.continuation
+                                await display.observe(event)
+                                if isinstance(event, ToolStartEvent):
                                     if tool_supervisor is not None:
                                         try:
                                             # Use the strip-only entry point for start-anchored deny patterns.
@@ -1241,76 +664,7 @@ async def _run_agent(
                                         budget_reason = "tool_call_budget_exceeded"
                                         break
 
-                                elif isinstance(event, ToolResultEvent):
-                                    if policy.log_mode:
-                                        tool_name = tool_names.get(event.id, "unknown")
-                                        prefix = (
-                                            f"[tool:{tool_name} ERROR]" if event.is_error
-                                            else f"[tool:{tool_name} result]"
-                                        )
-                                        _print_log(f"{prefix} {_summarize_output(event.output)}")
-                                    else:
-                                        # Populate the task_id→label map in both modes, so a later
-                                        # TaskOutput/TaskStop resolves its originating label.
-                                        tool_registry.observe_result(event.id, event.output)
-                                        if not use_callback:
-                                            panel = tool_registry.get(event.id)
-                                            if panel:
-                                                panel.set_result(event.output, event.is_error)
-                                                tool_registry.remove(event.id)
-
-                                elif isinstance(event, MetricsEvent):
-                                    if policy.log_mode:
-                                        _print_log(
-                                            f"[metrics] prompt={event.prompt_tokens} "
-                                            f"completion={event.completion_tokens}",
-                                        )
-
-                                elif isinstance(event, CostEvent):
-                                    if policy.log_mode:
-                                        cost_str = f"${event.cost_usd:.4f}" if event.cost_usd is not None else "unknown"
-                                        _print_log(f"[cost] {cost_str}")
-                                    elif event.cost_usd and not use_callback:
-                                        if agent_renderer.has_content:
-                                            agent_renderer.finish()
-                                        console.print()
-                                        print_cost(console, event.cost_usd)
-
-                                elif isinstance(event, ResultEvent):
-                                    # Capture the structured result unconditionally: the log-mode
-                                    # print is an additive side effect, never a substitute for
-                                    # capture (otherwise --verbose silently drops every structured
-                                    # result — exploration conventions, review findings, etc.).
-                                    structured_result = event.structured_output
-                                    if event.structured_output is not None:
-                                        if policy.log_mode:
-                                            redacted = redact_value(event.structured_output)
-                                            _print_log(
-                                                f"[result] {json.dumps(redacted)[:500]}",
-                                            )
-                                        elif not use_callback:
-                                            issues = (
-                                                structured_result.get("issues", [])
-                                                if isinstance(structured_result, dict)
-                                                else []
-                                            )
-                                            if issues:
-                                                formatted = []
-                                                for i in issues:
-                                                    if "file" in i and "line" in i:
-                                                        desc = i.get("description", "")
-                                                        issue_id = i.get("id", "?")
-                                                        formatted.append(
-                                                            f"[{issue_id}] {i['file']}:{i['line']} - {desc}"
-                                                        )
-                                                    else:
-                                                        label = i.get("title", i.get("description", ""))
-                                                        formatted.append(f"[{i.get('id', '?')}] {label}")
-                                                agent_renderer.append("\n".join(formatted))
-                                    result_continuation = event.continuation
-
-                            if use_callback:
-                                await _flush_callback_text()
+                            await display.flush()
 
                         # Abort handling: a spent deadline cut the loop, the wall
                         # backstop cancelled it, a quantitative tool ceiling fired, or
@@ -1347,20 +701,8 @@ async def _run_agent(
                                     "continuing with the captured partial result",
                                     BUDGET_CLEANUP_GRACE_S,
                                 )
-                            if policy.log_mode:
-                                _print_log(f"[aborted] {budget_reason}")
-                            elif use_callback and progress_callback is not None:
-                                result = progress_callback(format_callback_text(f"[budget] aborted: {budget_reason}"))
-                                if inspect.isawaitable(result):
-                                    await result
-                            elif not use_callback:
-                                print_warning(console, f"Turn aborted: {budget_reason}")
-
-                        if not use_callback and not policy.log_mode:
-                            if agent_renderer.has_content:
-                                agent_renderer.finish()
-                            tool_registry.finish_all()
-                            console.print()
+                            await display.aborted(budget_reason)
+                        display.finish()
 
                     # A completed, un-aborted attempt closes the run circuit;
                     # budget aborts share this break but are not a success.
@@ -1371,8 +713,7 @@ async def _run_agent(
                 except _ToolSupervisorFailure:
                     raise
                 except Exception as exc:
-                    if use_callback:
-                        await _flush_callback_text()
+                    await display.flush()
                     # Classify once per failure, before the per-failure cap: a
                     # permanent condition (bad credentials, an unknown model, a
                     # schema rejection) wins even when the message also carries
@@ -1388,13 +729,8 @@ async def _run_agent(
                         # effective deadline leaves so the two bounds compose by
                         # clamping, never by re-basing.
                         recovery.activate(clock.monotonic(), effective_deadline)
-                        # Spending the deadline ends the ladder before the next
-                        # backoff sleep: no attempt, no sleep, no raise. The
-                        # failed attempt's partials are discarded so they cannot
-                        # leak into the invocation return, and the stop is
-                        # recorded as a ladder stop when the ladder already spent
-                        # retry overhead -- a reason-less deadline stop would erase
-                        # the retry summary the manifest is supposed to carry.
+                        # A spent deadline permits no further sleep or dispatch. Discard failed partials
+                        # and record any retry overhead already spent.
                         if effective_deadline is not None and clock.monotonic() >= effective_deadline:
                             output_parts = []
                             structured_result = None
@@ -1414,12 +750,8 @@ async def _run_agent(
                         if recovery.remaining() <= 0.0:
                             _emit_ladder_stop("retry_recovery_allowance_exhausted")
                             raise
-                        # The run-scoped circuit decides whether the ladder
-                        # may dispatch again and counts the failure when it
-                        # does. First attempts never consult it, so stale open
-                        # state cannot block a healthy call; a suppressed ladder
-                        # raises the current failure with its retryable
-                        # attribute intact.
+                        # The circuit gates retries only; stale open state cannot block a first attempt.
+                        # Denial propagates the current failure with its retryable attribute intact.
                         circuit_now = clock.monotonic()
                         admission = run_context.outage_circuit.admit_retry(circuit_now)
                         opened_here = (
@@ -1457,17 +789,10 @@ async def _run_agent(
                             f"Backend error ({type(exc).__name__}), retrying "
                             f"attempt {attempt + 2}/{exception_max_retries + 1} after {delay:.1f}s..."
                         )
-                        if policy.log_mode:
-                            _print_log(f"[retry] {retry_msg}")
-                        elif use_callback and progress_callback is not None:
-                            result = progress_callback(format_callback_text(f"[retry] {retry_msg}"))
-                            if inspect.isawaitable(result):
-                                await result
-                        elif not use_callback:
-                            print_warning(console, retry_msg)
+                        await display.retry(retry_msg)
                         # The event-stream scope has already closed only this failed
                         # invocation. Backend-wide cancel() is reserved for shutdown.
-                        tool_registry.discard_all()
+                        display.tools.discard_all()
                         # Charge the failed attempt's backend time up to the
                         # backoff point: the sleep that follows is retry backoff
                         # (counted in backoff_s) and must not also land in
@@ -1481,12 +806,8 @@ async def _run_agent(
                         recovery.charge(delay)
                         await anyio.sleep(delay)
                         telemetry.backoff_s += delay
-                        # Re-check the circuit at the pre-dispatch decision point:
-                        # a sibling that failed while this backoff was sleeping may
-                        # have opened it, so a closed admission is not a licence to
-                        # dispatch. A half-open probe was already granted a moment
-                        # ago and must not be re-consumed, and the invocation that
-                        # itself tripped the breaker keeps its one in-flight retry.
+                        # Recheck after backoff because a sibling may have opened the circuit.
+                        # Do not consume a granted half-open probe twice; the tripper retains its retry.
                         if (
                             not opened_here
                             and admission.state == CIRCUIT_CLOSED
@@ -1513,14 +834,8 @@ async def _run_agent(
                         if telemetry.attempt_is_retry:
                             recovery.charge(charged)
 
-            # One honest stop record when a time budget ended the invocation --
-            # best-effort and recorder-optional, so a recorder failure never
-            # changes the returned (output, continuation, reason) tuple. This
-            # branch serves the deadline that interrupted an in-flight attempt
-            # (whose partials survive) and the deadline that ended the ladder
-            # before a dispatch (whose partials were reset); those are the only
-            # two shapes left here, because a deadline that ended a ladder which
-            # had already dispatched a retry records its own ladder stop above.
+            # Emit at most one stop record. In-flight deadline stops retain partials;
+            # pre-dispatch stops discard them. Recorder failure cannot change the return value.
             if (
                 aborted_reason == "wall_budget_exceeded"
                 and not stop_recorded
@@ -1547,35 +862,17 @@ async def _run_agent(
 
         except _ToolSupervisorFailure as exc:
             original = exc.original
-            # Materialize str(original) inside a fail-closed try: a supervisor
-            # exception with a broken __str__ must not escape this handler
-            # (mirrors the generic branch below and sanitize_verbose_message).
-            try:
-                detail = str(original)
-            except Exception:  # noqa: BLE001 - a broken __str__ must not convert the failure
-                detail = ""
+            detail = exception_text(original) or ""
             diagnostic = (
                 f"{type(original).__name__}: {detail}" if detail else type(original).__name__
             )
             print_error(console, "Extension Failure", sanitize_verbose_message(diagnostic))
-            # The exception itself still propagates to outer handlers that re-print
-            # str(exc) without redaction (e.g. the CLI's "Fatal Error" panel on
-            # `daydream <target>`, improve-run retry checks). Rewriting .args in
-            # place is not enough: a supervisor can raise OSError (whose str() is
-            # built from errno/strerror) or a type overriding __str__/__repr__, for
-            # which the raw credential would survive. Rebuild a scrubbed exception
-            # here, failing closed instead of silently passing the raw value onward.
+            # Outer handlers may print str(exc) without redaction. Rebuild instead of only
+            # changing args: custom str/repr and OSError fields can retain credentials.
             raise _scrubbed_supervisor_error(original) from original
         except Exception as exc:
             category = getattr(exc, "category", None)
-            try:
-                msg = str(exc).strip()
-            except Exception:  # noqa: BLE001 - a broken __str__ must not convert the failure
-                # A hostile ``__str__`` must neither abort this handler nor
-                # convert the failure into a new exception bearing the hostile
-                # text: the original exception propagates below and the CLI's
-                # generic handler fails closed on it (mirrors classify_failure).
-                msg = ""
+            msg = (exception_text(exc) or "").strip()
             diagnostic = f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
             if isinstance(category, str):
                 diagnostic += f" [{category}]"
@@ -1598,12 +895,7 @@ async def _run_agent(
             raise
 
     def _usable(value: Any) -> bool:
-        """Whether ``value`` passes the structured-output gate.
-
-        One predicate shared by the primary-result and extraction-fallback
-        return paths: either this call site opted out of validation, or the
-        value is salvageable (see ``_salvageable``).
-        """
+        """Accept explicit validation opt-out or a downstream-salvageable value."""
         return not validate_structured_output or (
             output_schema is not None and _salvageable(value, output_schema)
         )

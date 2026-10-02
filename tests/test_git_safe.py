@@ -4,8 +4,7 @@ import pytest
 from daydream.archive.git_safe import classify_remote_url, normalize_remote_url
 
 
-@pytest.mark.parametrize(
-    ("raw", "slug", "url_out"),
+@pytest.mark.parametrize(("raw", "slug", "url_out"),
     [
         # M2: user:pass@ userinfo
         ("https://user:ghp_abc123@github.com/o/r.git", "o/r", "https://github.com/o/r"),
@@ -33,11 +32,9 @@ def test_normalize_strips_credentials_and_keeps_identity(raw: str, slug: str, ur
     assert "@" not in (url or "")
     assert "token=" not in (url or "")
 
-
 def test_normalize_unparseable_returns_none_identity() -> None:
     identity, _ = normalize_remote_url("not a url at all")
     assert identity is None
-
 
 def test_classify_reports_category() -> None:
     # S2: triage categories
@@ -45,7 +42,6 @@ def test_classify_reports_category() -> None:
     assert classify_remote_url("https://tok@github.com/o/r") == ["userinfo"]
     assert classify_remote_url("https://github.com/o/r?token=x") == ["query"]
     assert classify_remote_url("https://github.com/o/r") == []
-
 
 def test_normalize_rejects_non_github_host_identity() -> None:
     identity, _ = normalize_remote_url("https://evil.example.com/o/r")

@@ -1,35 +1,13 @@
-"""Host-side, pure inputs for the recommendation-verifier selection decision.
+"""Pure recommendation-verifier selection and prior-verdict reuse.
 
-Two responsibilities live here, both deterministic, total, and free of I/O,
-randomness, and time:
+Selection returns one decision per canonical item, in order, including exempt
+structural and wonder findings. Missing or unreadable evidence selects an item;
+only a confirmed, unrevised, strongly evidenced routine finding may be skipped.
+Configuration can widen selection; unknown risk categories raise.
 
-* :func:`changed_text_at` is the reader. It answers "what text did the diff add
-  at (or around) the line this finding cites?" from the run's own ``diff.patch``
-  text, via the shared :func:`daydream.hunk_index.parse_hunks` parser, and
-  returns the newline-joined text of the ``+`` content lines in the hunk
-  covering ``line`` for ``file``. A cited line that is not itself an added line
-  yields the empty string, as does a missing file, a malformed or empty diff,
-  or a non-positive line number -- the classifier reads ``""`` as "no
-  changed-line signal", never as a skip signal (Pattern B, fail-open). The
-  reader is deliberately range-free: a cited line the hunk index snapped is
-  already reflected in ``item["line"]`` before this runs, so reading ranges
-  would double-apply the snap.
-* :func:`select_items` is the predicate. It classifies every canonical merged
-  item into select/skip from four persisted inputs -- the item's own text, the
-  changed lines it cites, the host-stamped adjudication provenance ledger, and
-  (on resume) the prior verify artifact -- with the first matching branch in a
-  fixed order winning. It returns exactly one :class:`SelectionDecision` per
-  input item, in input order, including exempt items, so the decisions
-  reconcile 1:1 with the canonical item list (MH10). Structural and wonder-lens
-  items are marked exempt rather than silently omitted; ``verify_all``
-  reproduces today's "verify every non-exempt item" behaviour and configuration
-  can only widen selection (MH13).
-
-Failure direction is uniform: every unreadable or absent input selects, never
-skips. The only exception is :class:`UnknownRiskCategoryError`, which is a
-configuration error surfaced to the operator, not a data error. The predicate
-never raises for a malformed item, a missing ledger, a missing diff, or a
-missing hunk index.
+Changed-text evidence comes from added lines in the cited hunk, without
+reapplying location snapping. Reuse requires the same rule version, durable item
+identity, verifier-relevant digest, and a resolved prior verdict.
 """
 
 from __future__ import annotations
@@ -82,20 +60,10 @@ _UNRESOLVED_VERDICTS: frozenset[str] = frozenset({"contradicts", "uncertain"})
 
 
 def changed_text_at(diff_text: str, file: str, line: object) -> str:
-    """Return the added text of the hunk a cited ``file``/``line`` falls in.
+    """Return all added text in the cited line's hunk, or "" without a signal.
 
-    Reads the shared parser's in-memory ``added_text`` view: when ``line`` is
-    one of the added (``+``) lines of ``file``, returns the newline-joined text
-    of every added line in that same hunk (a hunk's added text is the unit the
-    classifier reads); otherwise returns ``""``.
-
-    Args:
-        diff_text: Unified-diff text, as written to ``diff.patch``.
-        file: Repo-relative path to look up.
-        line: New-side line number the finding cites.
-
-    Returns:
-        The added lines' text, or ``""`` when there is no changed-line signal.
+    The citation itself must be an added line. Missing files, malformed or empty
+    diffs, and non-positive/non-integer lines yield no signal, never a skip.
     """
     if not isinstance(line, int) or isinstance(line, bool) or line <= 0:
         return ""
@@ -118,13 +86,7 @@ def changed_text_at(diff_text: str, file: str, line: object) -> str:
 
 @dataclass(frozen=True)
 class SelectionConfig:
-    """Resolved verify-selection policy.
-
-    ``verify_all`` is the conservative toggle: ``True`` reproduces today's
-    "verify every non-exempt item" behaviour. ``extra_categories`` names
-    additive risk categories and is always validated against the declared
-    vocabulary by :meth:`categories`; it can never remove a built-in category.
-    """
+    """Resolved policy: verify_all selects every non-exempt item; extras only add risk categories."""
 
     verify_all: bool = True
     extra_categories: tuple[str, ...] = ()
@@ -165,14 +127,7 @@ class SelectionDecision:
 def resolve_selection_config(
     *, verify_all: bool | None, extra_categories: Iterable[str] | None
 ) -> SelectionConfig:
-    """Resolve the config-file knobs into a frozen :class:`SelectionConfig`.
-
-    An absent ``verify_all`` degrades to ``True`` here, the fail-safe for a
-    direct caller that has not resolved the run-level ``DEFAULT_VERIFY_ALL``; a
-    non-bool is treated as absent. Every extra category is validated here so an
-    unrecognised name fails loudly (:class:`UnknownRiskCategoryError`) before
-    any backend call rather than silently widening or narrowing selection.
-    """
+    """Default absent verify_all to True and reject unknown categories before dispatch."""
     categories = tuple(extra_categories or ())
     resolve_mandatory_categories(categories)
     return SelectionConfig(
@@ -185,28 +140,12 @@ def plan_reuse(
     prior_payload: Mapping[str, Any] | None,
     decisions: Sequence[SelectionDecision],
 ) -> tuple[dict[str, dict[str, Any]], list[SelectionDecision]]:
-    """Split *decisions* into reusable prior verdicts and items to re-verify.
+    """Reuse resolved verdicts with matching rule version, item UID, and content digest.
 
-    A verdict is reused only when every one of these holds (SH3/MH14):
-
-    * the prior artifact's ``rule_version`` equals
-      :data:`SELECTION_RULE_VERSION` -- a semantics move invalidates all reuse;
-    * the decision is selected (an exempt/skipped item has no verdict to reuse);
-    * the prior artifact carries a decision for the same ``item_uid`` whose
-      ``content_digest`` equals this decision's -- durable identity plus
-      verifier-relevant content, never the positional ``id``;
-    * a verdict was recorded for that item, keyed by its canonical ``issue_id``.
-
-    MH9 is re-checked here rather than trusted from the prior artifact: a prior
-    ``contradicts`` or ``uncertain`` verdict always lands in ``to_verify``,
-    whatever the digest says. Any absent, unreadable, or malformed prior
-    payload is a total miss -- every decision re-verifies, never a partial
-    reuse and never a raise (Pattern B).
-
-    Returns ``(reused, to_verify)`` where ``reused`` maps ``item_uid`` to the
-    prior verdict body re-keyed to the current decision's ``item_id`` (the
-    matched verdict's own ``issue_id`` is stale whenever a resume renumbers
-    merged ids) and ``to_verify`` preserves input order.
+    Only selected decisions with a matching prior verdict qualify. Contradicts and
+    uncertain verdicts always re-verify. Missing or malformed input produces misses.
+    Return reused verdicts keyed by UID and remapped to current item IDs, plus the
+    remaining decisions in input order.
     """
     if not isinstance(prior_payload, Mapping):
         return {}, list(decisions)
@@ -263,11 +202,9 @@ def plan_reuse(
 
 
 def item_content_digest(item: Mapping[str, Any]) -> str:
-    """Return a sha256 over the verifier-relevant components of *item*.
+    """Hash verifier-relevant fields, excluding positional IDs and attached verdicts.
 
-    Only :data:`_DIGEST_FIELDS` participate, so renumbering ``id`` or attaching
-    a verdict cannot invalidate a reuse while a text change can (MH14). Missing
-    fields are digested as ``None`` so absence is a stable value, not an error.
+    Missing fields hash as None; renumbering alone does not invalidate reuse.
     """
     payload = {field: item.get(field) for field in _DIGEST_FIELDS}
     return hashlib.sha256(canonical_json(payload).encode("utf-8")).hexdigest()
@@ -354,12 +291,7 @@ def _decide(
 
 
 def _attributed_uids(item: Mapping[str, Any]) -> list[str]:
-    """Return the record uids whose provenance adjudicates *item*.
-
-    The merge agent's ``source_uids`` lead; an item that never went through the
-    merge agent falls back to its own ``item_uid``. An item with neither has no
-    usable attribution and is unadjudicated (MH7).
-    """
+    """Use source_uids, falling back to item_uid; neither means unadjudicated."""
     data = dict(item)
     attributed = item_source_uids(data)
     if attributed:
@@ -371,12 +303,10 @@ def _attributed_uids(item: Mapping[str, Any]) -> list[str]:
 def _item_provenance(
     uids: Sequence[str], ledger: Mapping[str, RecordProvenance] | None
 ) -> tuple[dict[str, Any], list[RecordProvenance], str | None]:
-    """Return ``(evidence, present, unadjudicated_reason)`` for one item.
+    """Return ledger evidence, parsed records, and the first unadjudicated reason.
 
-    ``evidence`` is the JSON-safe per-uid ledger body; ``present`` the parsed
-    records, for the revision test; ``unadjudicated_reason`` is ``None`` only
-    when every attributed uid is present and confirmed. Any missing, untargeted,
-    unbound, or unkept record selects the item (the fail direction).
+    Every attributed UID must be present, targeted, bound, and kept to clear the
+    check. Missing evidence selects the item.
     """
     evidence: dict[str, Any] = {}
     present: list[RecordProvenance] = []
@@ -419,11 +349,7 @@ def _risk_category(
 
 
 def _weak_evidence_reason(data: Mapping[str, Any]) -> str | None:
-    """Return the weak-evidence reason code for *data*, or ``None``.
-
-    Exactly three conditions, checked in order; severity is never consulted
-    (MH5).
-    """
+    """Check confidence, concrete evidence, then location trust; severity is irrelevant."""
     if str(data.get("confidence", "")).upper() != "HIGH":
         return "weak_evidence:confidence"
     evidence = str(data.get("evidence", "")).strip()
@@ -441,12 +367,10 @@ def _prior_verdict(data: Mapping[str, Any]) -> str:
 
 
 def _placeholder_evidence() -> frozenset[str]:
-    """The placeholder-evidence vocabulary, shared with the approval gate.
-
-    Imported lazily: ``daydream.phases`` imports this module, so a top-level
-    import would be a cycle.
-    """
-    from daydream.phases import _PLACEHOLDER_EVIDENCE
+    """Read the approval gate's vocabulary lazily to avoid the phase import cycle."""
+    from daydream.phases.findings import (
+        _PLACEHOLDER_EVIDENCE,
+    )
 
     return _PLACEHOLDER_EVIDENCE
 

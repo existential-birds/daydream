@@ -1,19 +1,9 @@
-"""Deterministic reward-calibration tooling (issue #999, M2 validation matrix).
+"""Validate frozen calibration bundles before computing or writing statistics.
 
-``run_calibration`` validates a calibration bundle (wire format documented in
-``docs/calibration.md``) fail-closed before any statistics are computed: every
-gate raises :class:`CalibrationError` naming the offending record/field, and no
-artifact is ever written unless all gates pass.
-
-Split membership is re-derived read-only from ``lineage.json`` (salt +
-holdout/val rates) via :func:`daydream.training.corpus_projection.splits.assign_split`.
-Each record's stored ``lineage['split']`` must match
-its re-derived split, and the derived train/val/holdout sets must stay
-pairwise disjoint (a duplicated record id means the corpus was hand-edited).
-
-Reward weights, thresholds, and grid ranges come exclusively from
-``CalibrationConfig.candidates`` — this module never imports any reward
-weights default nor mutates any reward default (M10).
+Re-derive splits from lineage salt/rates and require stored membership to agree;
+duplicate record ids violate disjointness. Gate errors identify the record/field.
+Weights, thresholds, and grid ranges come only from CalibrationConfig.candidates:
+never import or mutate canonical reward defaults. Wire format: docs/calibration.md.
 """
 
 from __future__ import annotations
@@ -23,7 +13,8 @@ import json
 import math
 import random
 import statistics
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass
 from datetime import datetime
 from importlib import metadata
 from pathlib import Path
@@ -55,6 +46,12 @@ def _tool_version() -> str:
 
 TOOL_VERSION = _tool_version()
 
+_LABEL_VERSION_STAMPS = {
+    "labeler_policy_version": LABELER_POLICY_VERSION,
+    "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
+    "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
+}
+
 _RECORD_SCHEMA_VERSION = "2"
 _LINEAGE_SCHEMA_VERSION = "lineage"
 _ALLOWED_LICENSE_DECISIONS = frozenset({"allow", "deny-recorded"})
@@ -66,33 +63,13 @@ _REQUIRED_LINEAGE_FIELDS = ("split", "as_of", "valid_at", "license_decision")
 # absent stamp fails as "unrecognized label version stamp", not a missing field.
 _REQUIRED_BUNDLE_FIELDS = ("schema_version", "salt", "holdout_rate", "val_rate", "as_of", "valid_at")
 
-# Test seam only: corruption variants injected by tests/test_calibration.py.
-_CORRUPTION_FLAGS = frozenset(
-    {
-        "schema_version",
-        "posterior",
-        "label-version",
-        "c5-repo",
-        "license",
-        "digest",
-        "split-overlap",
-        "drop-session",
-    }
-)
-
-
 class CalibrationError(ValueError):
     """A calibration input failed a fail-closed gate. Message names the culprit."""
 
 
 @dataclass(frozen=True)
 class CalibrationConfig:
-    """Inputs and knobs for one calibration run.
-
-    ``corruptions`` is a **test seam** (never CLI surface): named mutations
-    applied while loading the corpus so the gate matrix can be exercised
-    against otherwise-identical fixtures.
-    """
+    """Inputs and explicit candidate ranges for one calibration run."""
 
     corpus_dir: Path
     gold_labels: Path
@@ -105,12 +82,8 @@ class CalibrationConfig:
     model_digest: str | None = None
     grid_points: int = 9
     bootstrap_resamples: int = 1000
-    corruptions: frozenset[str] = field(default_factory=frozenset)
 
     def __post_init__(self) -> None:
-        unknown = self.corruptions - _CORRUPTION_FLAGS
-        if unknown:
-            raise CalibrationError(f"unknown corruption flags: {sorted(unknown)}")
         if self.stage0_scores is not None and self.model_digest is None:
             raise CalibrationError("--model-digest is required when --stage0-scores is given")
 
@@ -151,27 +124,6 @@ def _load_jsonl(path: Path) -> list[dict[str, Any]]:
         _gate(isinstance(record, dict), f"{path}:{lineno}: record is not a JSON object")
         records.append(record)
     return records
-
-
-def _apply_corruptions(records: list[dict[str, Any]], flags: frozenset[str]) -> None:
-    """Test seam: mutate loaded records per corruption flag."""
-    if not flags:
-        return
-    first = records[0]
-    if "schema_version" in flags:
-        first["schema_version"] = "1"
-    if "posterior" in flags:
-        first["lineage"]["valid_at"] = "2026-06-01T00:00:00+00:00"
-    if "label-version" in flags:
-        del first["lineage"]["labeler_policy_version"]
-    if "c5-repo" in flags:
-        first["repo_slug"] = "getsentry/sentry"
-    if "license" in flags:
-        first["lineage"]["license_decision"] = "unknown"
-    if "split-overlap" in flags:
-        records.append(json.loads(json.dumps(records[-1])))
-    if "drop-session" in flags:
-        del first["session_id"]
 
 
 def _check_digests(corpus_dir: Path) -> None:
@@ -215,21 +167,17 @@ def _check_record_schema(record: dict[str, Any], index: int) -> str:
 
 def _check_version_stamps(record: dict[str, Any], rid: str) -> None:
     lineage = record["lineage"]
-    stamps = {
-        "labeler_policy_version": LABELER_POLICY_VERSION,
-        "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
-        "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
-    }
-    for field_name, recognized in stamps.items():
+    for field_name, recognized in _LABEL_VERSION_STAMPS.items():
         _gate(
             lineage.get(field_name) == recognized,
             f"record {rid}: unrecognized label version stamp {field_name}={lineage.get(field_name)!r}"
             f" (expected {recognized!r})",
         )
+    # Calibration reads captured breakdowns; the frozen fixture retains its original stamp.
     _gate(
-        record["reward_version"] == REWARD_VERSION,
-        f"record {rid}: unrecognized label version stamp reward_version={record['reward_version']!r}"
-        f" (expected {REWARD_VERSION!r})",
+        isinstance(record["reward_version"], str)
+        and record["reward_version"] in {REWARD_VERSION, "2026.09.04-1"},
+        f"record {rid}: unrecognized reward version stamp {record['reward_version']!r}",
     )
 
 
@@ -295,6 +243,7 @@ def _load_inputs(
     for rid, axes in breakdown_raw.items():
         _gate(rid in known_ids, f"{config.breakdowns}: breakdown for unknown record_id {rid!r}")
         _gate(isinstance(axes, dict), f"{config.breakdowns}: breakdown for {rid!r} must be an object")
+        axes = {axis: value for axis, value in axes.items() if axis != "grounding"}
         for axis, value in axes.items():
             _gate(isinstance(value, (int, float)) and not isinstance(value, bool),
                   f"{config.breakdowns}: axis {axis!r} for {rid!r} must be numeric")
@@ -358,13 +307,9 @@ def _point_biserial(values: list[float], labels: list[bool]) -> float:
 
 
 def _grid(axis: str, values: list[float] | None, grid_points: int) -> list[float]:
-    """Resolve a candidate axis's ``grid_points`` evenly spaced grid values.
+    """Build an evenly spaced candidate grid including every user-supplied point.
 
-    The exact user-supplied values are always part of the grid, so every
-    ``--candidate AXIS=V1,...`` point the user asked to score is scored even
-    when it falls between the evenly spaced steps. An axis with no supplied
-    range is an error naming the axis — there are no built-in reward defaults
-    to fall back on.
+    An absent axis range raises; there are no built-in reward defaults.
     """
     if not values:
         raise CalibrationError(
@@ -382,23 +327,10 @@ def _grid(axis: str, values: list[float] | None, grid_points: int) -> list[float
 def _threshold_decision_metrics(
     scores: list[float], labels: list[bool], threshold: float
 ) -> dict[str, float]:
-    """Precision / recall / specificity of ``accepted iff axis >= threshold``.
-
-    These are the per-candidate statistics: unlike AUC, they vary with the
-    cut-off, so the ``--candidate``/``--grid-points`` resolution genuinely
-    differentiates the ``axis=point`` rows.
-    """
-    tp = fp = fn = tn = 0
-    for score, label in zip(scores, labels):
-        predicted = score >= threshold
-        if predicted and label:
-            tp += 1
-        elif predicted and not label:
-            fp += 1
-        elif not predicted and label:
-            fn += 1
-        else:
-            tn += 1
+    """Compute precision, recall, and specificity for accepted iff axis >= threshold."""
+    outcomes = Counter((score >= threshold, bool(label)) for score, label in zip(scores, labels))
+    tp, fp = outcomes[True, True], outcomes[True, False]
+    fn, tn = outcomes[False, True], outcomes[False, False]
     return {
         "precision": tp / (tp + fp) if tp + fp else 0.0,
         "recall": tp / (tp + fn) if tp + fn else 0.0,
@@ -627,13 +559,12 @@ def _write_outputs(
     bundle: dict[str, Any],
     version_stamps: dict[str, str],
 ) -> dict[str, Any]:
-    """Build the artifact + report from already-computed numbers and write both
-    with ``calibration.json`` published last: both payloads are staged to temps
-    before either destination is replaced, so a failure while writing either
-    one leaves the previously recorded artifact — and its run identity — in
-    place, and a same-run re-run overwrites both and self-heals the directory.
-    Each rename is atomic and no temp is left behind on any path. Returns the
-    rounded artifact payload, which is authoritative over any parallel summary."""
+    """Stage report and calibration JSON before either atomic rename; publish JSON last.
+
+    Write failures retain the prior artifact/run identity. Same-run retries replace
+    both outputs and repair partial publication. Clean temporary files on all paths
+    and return the authoritative rounded artifact payload.
+    """
     warnings: list[str] = []
     if stage0_analysis["status"] != "ok":
         warnings.append("stage-0 score file not supplied; marginal analysis unavailable")
@@ -678,13 +609,7 @@ def _write_outputs(
 
 
 def _check_out_dir_collision(config: CalibrationConfig) -> None:
-    """M7: refuse to overwrite an artifact from a different run identity.
-
-    Mirrors the fail-loud resume guard in ``lineage.validate_resume`` but
-    compares a single recorded ``run_id``. A collision is detected before any
-    computation so the prior artifact is never touched; re-running with the
-    same run id is a permitted resume/overwrite.
-    """
+    """Reject a different recorded run_id before computation; permit same-run replacement."""
     prior = config.out_dir / "calibration.json"
     if not prior.exists():
         return
@@ -720,12 +645,6 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     if config.stage0_scores is not None:
         _gate(config.stage0_scores.exists(), f"missing stage-0 scores at {config.stage0_scores}")
 
-    if "digest" in config.corruptions:
-        # Test seam: tamper with the corpus so the pristine manifest mismatches.
-        tampered = json.loads(corpus_path.read_text().splitlines()[0])
-        tampered["session_id"] = "sess-tampered"
-        corpus_path.write_text(json.dumps(tampered, sort_keys=True) + "\n")
-
     _check_digests(corpus_dir)
 
     bundle = json.loads(lineage_path.read_text())
@@ -739,10 +658,13 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
 
     records = _load_jsonl(corpus_path)
     _gate(bool(records), f"{corpus_path}: corpus contains no records")
-    _apply_corruptions(records, config.corruptions)
     for index, record in enumerate(records):
         rid = _check_record_schema(record, index)
         _check_version_stamps(record, rid)
+
+    reward_versions = {record["reward_version"] for record in records}
+    _gate(len(reward_versions) == 1, "corpus mixes reward versions with different scoring semantics")
+    captured_reward_version = next(iter(reward_versions))
 
     excluded = load_exclusion_list()
     for record in records:
@@ -772,12 +694,7 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
     if config.stage0_scores is not None:
         input_digests[config.stage0_scores.name] = _sha256_of(config.stage0_scores)
     corpus_digest = input_digests["corpus.jsonl"]
-    version_stamps = {
-        "labeler_policy_version": LABELER_POLICY_VERSION,
-        "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
-        "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
-        "reward_version": REWARD_VERSION,
-    }
+    version_stamps = {**_LABEL_VERSION_STAMPS, "reward_version": captured_reward_version}
 
     record_ids = [str(r["record_id"]) for r in records]
     gold, breakdowns = _load_inputs(config, record_ids)

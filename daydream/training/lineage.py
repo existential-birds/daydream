@@ -1,15 +1,7 @@
-"""Run identity, LOCKED_FIELDS resume guard, and per-stage lineage digests.
+"""Locked run identity and deterministic per-stage record-lineage digests.
 
-Implements M16 (per-stage split/lineage digests) and M18 (resume guard) from
-issue #91. A resumed training run must abort loudly — never warn — when any
-locked run-identity field differs from the run being resumed, because a silent
-drift in e.g. the learning rate or corpus digest would make the resulting
-adapter's lineage unauditable and the comparison across stages meaningless.
-
-Digests follow the content-addressing style of
-:func:`daydream.training.corpus._trajectory_set_hash`: canonical JSON of the
-record lineage fields, sha256-hex. Digests are deterministic functions of
-content, never of ordering.
+Resume must fail on identity drift to preserve auditable adapter lineage.
+Digests hash canonical JSON content, independent of record ordering.
 """
 
 from __future__ import annotations
@@ -122,13 +114,7 @@ def _content_hash(payload: Any) -> str:
 
 
 def _lineage_digest(records: list[dict[str, Any]]) -> str:
-    """Digest over the record lineage fields each record carries through (M16).
-
-    Only fields actually present on a record contribute, so the digest changes
-    whenever a carried-through lineage field (evidence tier, split, reward
-    version, …) differs — the fields are validated upstream and carried
-    through, never re-derived here.
-    """
+    """Hash present carried-through lineage fields; never re-derive validated evidence."""
     payloads = sorted(
         json.dumps({f: r.get(f) for f in _RECORD_LINEAGE_FIELDS if f in r}, sort_keys=True, default=str)
         for r in records

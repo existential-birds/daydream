@@ -17,7 +17,6 @@ async def test_two_text_turns_produce_two_steps(tmp_path: Path) -> None:
     agent_steps = [s for s in recorder.steps if s.source == "agent"]
     assert [s.message for s in agent_steps] == ["Turn one body.", "Turn two body."]
 
-
 async def test_reasoning_is_isolated_per_turn(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path, agent_model_name="test-model")
     async with recorder:
@@ -31,7 +30,6 @@ async def test_reasoning_is_isolated_per_turn(tmp_path: Path) -> None:
     agent = [s for s in recorder.steps if s.source == "agent"]
     assert [s.reasoning_content for s in agent] == ["thought-1", "thought-2"]
     assert [s.message for s in agent] == ["say-1", "say-2"]
-
 
 async def test_tool_call_spans_turn_boundary_stays_with_its_turn(tmp_path: Path) -> None:
     recorder = make_recorder(tmp_path, agent_model_name="test-model")

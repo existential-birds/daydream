@@ -1,19 +1,7 @@
-"""Ledger-backed cleanup of a Harbor benchmark workspace (issue #782).
-
-A sibling of :mod:`daydream.benchmark.harbor.run` that removes exactly what the
-workspace recorded it created: the disposable ``cache/`` clone + build stage
-(``--cache``), contained ``agent/trajectory.json`` files in ledgered job dirs
-(``--trajectories``), and the ledgered job dirs + their recorded Docker images
-(``--jobs``) — all driven by ``runtime/harbor.json``, never guessed. Curated
-source/gold (``benchmark.yaml``, ``imports/``, ``cases/``, ``snapshots/``) is
-preserved unless the single explicit ``--all --yes`` total-deletion path is
-taken — and then only after every derived stage has completed, so a
-derived-stage failure never destroys the unrecoverable curated content. Every
-filesystem target is containment-/symlink-escape-checked via the
-existing ``storage._resolve_target`` / ``run._validate_job_dir`` primitives and
-fails closed (``RunError``/``WorkspaceCorrupt``). Docker removal runs through an
-injectable ``docker_rm`` seam (the real production default shells ``docker
-rmi``; CI stays hermetic).
+"""Remove only ledger-owned Harbor outputs with containment checks. Cache cleanup preserves
+its scaffold; trajectory cleanup removes contained trajectory files; job cleanup uses
+recorded directories and image references. Curated content survives unless explicit
+--all --yes deletion is requested, and even then all derived cleanup must succeed first.
 """
 
 from __future__ import annotations
@@ -46,13 +34,7 @@ _CURATED_DIRS = ("imports", "cases", "snapshots")
 
 
 def _default_docker_rm(refs: list[str]) -> dict[str, Any]:
-    """Default Docker image-removal seam: shell ``docker rmi`` (real path).
-
-    A non-zero returncode whose stderr names the image as already missing
-    (``No such image``) is surfaced as ``absent`` so ``_clean_jobs`` counts an
-    already-absent image instead of a failed removal. Hermetic tests inject a
-    stub; CI never exercises this default.
-    """
+    """Remove a recorded Docker image; treat an already-missing image as absent."""
     completed = subprocess.run(
         ["docker", "rmi", *refs],
         stderr=subprocess.PIPE,
@@ -117,12 +99,8 @@ def _delete_path(path: Path) -> None:
 
 
 def _clean_cache(root: Path, report: CleanReport) -> None:
-    """Remove the disposable clone + build stage under ``cache/``.
-
-    Each target is resolved through ``storage._resolve_target`` (forcing
-    containment and rejecting symlink escapes/``..``/outside-root as
-    ``WorkspaceCorrupt``). A target already absent is a no-op. The ``cache/``
-    scaffold dir itself is never removed.
+    """Remove contained disposable cache targets, retaining the scaffold; absent targets
+    are a no-op.
     """
     for rel in _CACHE_TARGETS:
         resolved = _resolve_target(root, rel)
@@ -135,13 +113,7 @@ def _clean_cache(root: Path, report: CleanReport) -> None:
 
 
 def _clean_trajectories(root: Path, report: CleanReport) -> None:
-    """Delete contained ``agent/trajectory.json`` files in ledgered job dirs.
-
-    Ledger-driven: every job dir is validated under ``<ws>/harbor/jobs/``
-    (``RunError`` on escape) and every glob hit is containment-resolved
-    (``WorkspaceCorrupt`` on a symlinked trajectory escaping the workspace).
-    The job dir and its non-trajectory content are left intact.
-    """
+    """Delete only contained trajectory files from validated ledger job directories."""
     doc = _load_ledger(root)
     for entry in doc["runs"]:
         job_abs = _validate_job_dir(root, entry["job_dir"])
@@ -167,17 +139,9 @@ def _image_refs(env: dict[str, Any]) -> list[str]:
 def _clean_jobs(
     root: Path, report: CleanReport, *, docker_rm: Callable[[list[str]], dict[str, Any]] | None = None,
 ) -> None:
-    """Remove ledgered job dirs + their recorded Docker images.
-
-    For each non-``cleaned`` run, every environment whose ``removed`` flag is
-    not already true is removed via the injectable ``docker_rm`` seam using only
-    the exact recorded ``image_id``/``image_tags`` refs. A failed removal leaves
-    the run's job dir and prior state intact (partial-failure rule); an
-    already-absent image (the seam reports ``absent``) is persisted as removed
-    without failing the run. A run transitions to ``cleaned`` only when its job
-    dir is gone/absent *and* all of its environments are removed — a run whose
-    job dir never materialized has no images, so it is cleanable with no
-    recorded environments. One locked load-mutate-write pass.
+    """Remove recorded images and job directories in one locked ledger update. Failures
+    preserve the job and prior run state. Already-absent images count as removed; mark
+    cleaned only after all images and the job are gone.
     """
     docker_rm = docker_rm or _default_docker_rm
     with WorkspaceLock(root):

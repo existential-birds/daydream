@@ -63,16 +63,11 @@ DEFAULT_TASKSET_ID = "daydream-review"
 #: is this rollout contract, and ``intrinsic_reward_version`` is the offline
 #: scorer it was evaluated against. Archives scored before this boundary was
 #: introduced carry only the intrinsic version and need no migration tag.
-ROLLOUT_REWARD_VERSION = "2026.08.15-1"
+ROLLOUT_REWARD_VERSION = "2026.10.01-1"
 
 
 class _OutcomeScorer:
-    """Adapter exposing the trained outcome model under rubric's protocol.
-
-    ``rubric.score_review`` requires ``model.score_comment(text) -> float``;
-    the frozen ``OutcomeModel`` scores through the module-level
-    :func:`daydream.training.reward_model.score_comment`, so this wraps it.
-    """
+    """Adapt the frozen outcome model to the rubric scoring protocol."""
 
     def __init__(self, model: OutcomeModel) -> None:
         self._model = model
@@ -85,14 +80,10 @@ _outcome_model_cache: dict[Path, _OutcomeScorer] = {}
 
 
 def _load_outcome_model(path: Path) -> _OutcomeScorer:
-    """Load (and cache) the frozen Stage-0 outcome model checkpoint at *path*.
+    """Cache a Stage-0 checkpoint already bound to the passed gate report.
 
-    The load path has already bound this checkpoint to the passed gate report
-    (M4, ``require_outcome_model_bound``); this re-read is fail-closed anyway, so
-    a file that vanished or corrupted between load and scoring is a refusal with
-    the reason named, never a raw ``FileNotFoundError``/``ValueError`` inside the
-    reward path.
-    """
+    A missing or corrupt checkpoint still refuses scoring; never fall back to
+    intrinsic-only scoring after validation."""
     cached = _outcome_model_cache.get(path)
     if cached is not None:
         return cached
@@ -115,47 +106,24 @@ def _load_outcome_model(path: Path) -> _OutcomeScorer:
 
 
 def stage0_composite_terms(outcome_model_path: Path, run_dir: Path) -> dict[str, Any] | None:
-    """Compose the validated Stage-0 rubric over an archived run's merged findings (M13).
+    """Score merged finding descriptions with the validated Stage-0 rubric.
 
-    Reads the same ``deep/merged-items.json`` the intrinsic scoring path reads
-    (never a second source of truth), scores the finding descriptions under
-    ``rubric.score_review`` with the frozen outcome model, and returns the
-    full breakdown dict (``terms`` / ``composite`` / ``reward_version``).
-
-    Returns ``None`` when no outcome model is configured — scoring stays
-    intrinsic-only. A run with zero merged findings also composes nothing: the
-    intrinsic path already floors it at 0.0, and rubric terms over an empty
-    finding set are undefined rather than imputable.
-
-    Rollout-time limitations, stamped into the returned provenance rather than
-    hidden: there is no live false-positive judge, so ``fp_count`` is 0 (the
-    FP-penalty term is telemetry-neutral here), and ``grounded`` is derived
-    from the manifest's ``grounding_rate``.
-    """
+    No model or no described findings yields None. There is no live FP judge,
+    so fp_count remains zero; the returned breakdown records the rubric terms."""
     if outcome_model_path == Path(""):
         return None
-    merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
-    items = merged.get("items") if isinstance(merged, dict) else None
-    checked = [item for item in (items or []) if isinstance(item, dict) and item.get("description")]
-    if not checked:
-        return None
     findings: list[dict[str, Any]] = [
-        {
-            "text": str(item["description"]),
-            "verdict": None,
-            "tools": [],
-        }
-        for item in checked
+        {"text": str(item["description"]), "verdict": None, "tools": []}
+        for item in _merged_items(run_dir)
+        if isinstance(item, dict) and item.get("description")
     ]
-    total = len(findings)
-    grounding_rate = _manifest_row(run_dir).get("grounding_rate")
-    grounded = int(round(float(grounding_rate) * total)) if grounding_rate is not None else 0
+    if not findings:
+        return None
     result = _score_rubric_review(
         _load_outcome_model(outcome_model_path),
         findings=findings,
         fp_count=0,
-        total_findings=total,
-        grounded=max(0, min(grounded, total)),
+        total_findings=len(findings),
         breakdown=True,
     )
     assert isinstance(result, RubricV2Breakdown)
@@ -179,43 +147,23 @@ def _read_json(path: Path, *, default: Any) -> Any:
         return default
 
 
-def _manifest_row(run_dir: Path) -> dict[str, Any]:
-    """Flatten ``manifest.json`` into the flat row shape the scorer expects.
 
-    ``assemble_scoring_inputs(run_dir, row)`` reads ``row["grounding_rate"]``
-    (``daydream/training/harvest.py:223``). In the archive that value is nested
-    under ``metrics`` (``daydream/archive/manifest.py:213``); it only becomes a
-    top-level column when the run is indexed into SQLite
-    (``daydream/archive/_schema.py:128``). Reading the manifest verbatim would
-    silently null the grounding axis on every rollout.
-    """
-    manifest = _read_json(run_dir / "manifest.json", default={})
-    if not isinstance(manifest, dict):
-        return {}
-    metrics = manifest.get("metrics") or {}
-    return {**manifest, **metrics}
+def _merged_items(run_dir: Path | None) -> list[Any]:
+    """Read the shared finding list without filtering shape-metric inputs."""
+    if run_dir is None:
+        return []
+    merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
+    return (merged.get("items") or []) if isinstance(merged, dict) else []
 
 
-#: Extra pathspecs the oracle probes treat as part of the oracle itself.
-#: ``git ls-files --exclude-standard`` honors ignore rules, so a rollout that
-#: edits the tracked ``.gitignore`` (or drops a new untracked one) can mask a
-#: tampered untracked oracle file from the probes — the ignore files are
-#: therefore probed too. ``sitecustomize.py`` is imported from the repository
-#: root by every ``python`` invocation ``test_command`` runs (cwd is on
-#: ``sys.path``), so an untracked one that ``sys.exit(0)``s makes a suite that
-#: never ran look green.
+
+
+#: Ignore-rule files and Python's root startup hook are part of the oracle.
+#: A new sitecustomize.py can exit before tests run; ignore rules can hide files.
 ORACLE_IGNORE_PATHSPECS = ["sitecustomize.py", ":(glob)**/.gitignore"]
 
-#: Pathspecs excluding the suite's own bytecode artifacts from the untracked
-#: probe. That probe deliberately runs ``git ls-files --others`` WITHOUT
-#: ``--exclude-standard`` (see ``_protected_test_paths_unchanged``), so it lists
-#: every untracked file under a protected path — including the ``__pycache__/``
-#: and ``*.py[cod]`` files a green suite itself drops while importing the test
-#: modules. Without this explicit exclusion a genuinely fixed tree would trip
-#: the probe on its own legitimate test runs and be withheld a green
-#: non-regression reading. The
-#: benign exclusions are baked into the probe rather than delegated to the
-#: repo's ignore rules, whose decisions this gate deliberately no longer trusts.
+#: The suite's own bytecode is benign. Explicit exclusions keep agent-controlled
+#: ignore rules out of the decision when listing all untracked protected files.
 ORACLE_BENIGN_PATHSPECS = [":(exclude,glob)**/__pycache__/**", ":(exclude,glob)**/*.py[cod]"]
 
 
@@ -224,42 +172,17 @@ async def _probe(
     argv: list[str],
     changed: Callable[[vf.ProgramResult], bool],
 ) -> bool:
-    """Run one oracle probe; return True iff the oracle is unchanged.
-
-    Every probe shares the same fail-closed run -> check shape: run one command
-    against the mutable tree and let the ``changed`` predicate decide — anything
-    it flags, including an unusual exit code, reads as an oracle change, never
-    as a pass. The predicate is the single place each probe's semantics live, so
-    the probe list in :func:`_protected_test_paths_unchanged` reads as a table
-    of ``(argv, changed-verdict)`` pairs.
-    """
+    """Return whether one oracle probe passes its fail-closed predicate."""
     return not changed(await runtime.run(argv, {}))
 
 
 async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
-    """Whether the rollout actually changed the code under review.
+    """Detect tracked product changes, excluding .daydream artifacts.
 
-    Answered from the TRACKED tree — modified files, or a ``HEAD`` that has moved
-    past the snapshot the image baked — and never from
-    ``.daydream/recommended.patch``. That file is not a fix signal:
-    ``capture_recommended_patch`` appends a creation hunk for every untracked
-    non-ignored file (``daydream/git_ops.py:842-846``), and daydream writes its
-    own ``.daydream/`` directory inside the repository under review. On any
-    repository that does not gitignore that directory — which is every repository
-    except our own fixture — the patch is non-empty after a rollout that changed
-    nothing, and the still-green baseline would hand out a free green
-    non-regression reading.
-
-    Deliberately biased toward false negatives: a fix consisting ONLY of new,
-    never-committed files reads as "no fix" (``suite_non_regression`` 0.0). That
-    direction costs a gradient; the other direction corrupts one.
-
-    A clean tree at a moved HEAD counts as a fix only when the *committed
-    contents differ* from the snapshot. HEAD advancing on its own — e.g. an
-    `--allow-empty` commit that leaves the tree byte-identical — is not a fix
-    and scores ``suite_non_regression`` 0.0. Either way the decision is read from the
-    tracked tree, never from daydream's own ``.daydream/`` directory.
-    """
+    A dirty tracked tree or a committed tree differing from the baked snapshot
+    counts. An empty commit does not. New uncommitted files deliberately do not
+    count, and Git errors read as no fix. recommended.patch is not evidence:
+    it can include Daydream artifacts even when the product tree is unchanged."""
     dirty = await runtime.run(
         [
             "git",
@@ -275,20 +198,8 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
     )
     if dirty.exit_code == 0 and dirty.stdout.strip():
         return True
-    # The deep flow commits and pushes once the suite is green, so a clean tree
-    # at a moved HEAD is the successful-fix case, not the untouched one. But
-    # "moved" is not enough — an empty commit advances HEAD while leaving the
-    # committed tree identical to the baked snapshot, so compare the committed
-    # contents, not the ref. `git diff --no-ext-diff --no-textconv --quiet` exits
-    # 1 when the trees differ (a fix) and 0 when they are identical (no fix);
-    # any other exit (e.g. 128 for an unresolvable baked SHA) is treated as
-    # no-fix, preserving the deliberate false-negative bias. The hardening flags
-    # are defense-in-depth here, not a present-forgery fix: on the pinned git
-    # (2.43.0) `--quiet` never invokes diff.external or textconv, so no exit
-    # code can be forged through them; they bind a future git that changes
-    # `--quiet` semantics. Both checks exclude `.daydream/` — the agent may
-    # commit daydream's own artifacts into the tree, but they are never a fix
-    # signal.
+    # A clean tree can contain a committed fix. Compare contents, not ref movement:
+    # an empty commit and every Git exit code except 1 still mean no fix.
     diff = await runtime.run(
         candidate_quiet_diff_cmd(repo, head_sha, [DAYDREAM_EXCLUDE], include_head=True),
         {},
@@ -301,69 +212,23 @@ async def _fixes_applied(runtime: vf.Runtime, repo: str, head_sha: str) -> bool:
 async def _protected_test_paths_unchanged(
     runtime: vf.Runtime, repo: str, head_sha: str, protected_test_paths: list[str]
 ) -> bool:
-    """Whether the declared test-oracle paths still match the baked head.
+    """Verify the test oracle against the green baked snapshot before running it.
 
-    The oracle is the repository's own mutable test infrastructure — test
-    sources, runner config, package config — so a rollout could otherwise earn
-    an honest green non-regression reading by rewriting it into a trivial suite;
-    the demoted ``suite_non_regression`` metric must never record a gutted
-    suite as honest telemetry. The baked head SHA is the trustworthy baseline:
-    the image build proved the suite green at exactly that commit before any
-    agent touched the tree.
+    Every probe fails closed, including Git errors. The declared paths also
+    cover .gitignore files and root sitecustomize.py (a Python startup hook).
 
-    Fail-closed by design, with every ambiguity reading as "changed". The probe
-    pathspecs are the declared paths plus ``ORACLE_IGNORE_PATHSPECS``: the repo's
-    own ignore files and the interpreter-startup hook. The five probes share one
-    run -> fail-closed-check shape, expressed as a table of ``(argv, changed)``
-    pairs over :func:`_probe`.
+    - Diff the working tree against head_sha without HEAD, so committed, staged
+      and unstaged tampering all count. Disable external diff and textconv as
+      defense in depth even on Git versions where --quiet already ignores them.
+    - Reject skip-worktree/assume-unchanged flags: they hide worktree tampering
+      by making Git read the index instead.
+    - List every untracked protected file without --exclude-standard. Ignore
+      rules are agent-controlled; only explicit bytecode exclusions are trusted.
+      core.excludesFile= also disables repository-local and global ignore files.
+    - Separately catch ignored .gitignore files, including self-ignoring rules.
+    - Require .git/info/exclude to remain comments-only.
 
-    - ``git diff --no-ext-diff --no-textconv --quiet <head_sha> -- <paths>``
-      compares the baked head against
-      the WORKING TREE (no ``HEAD`` argument — that form would miss uncommitted
-      tampering, the exact attack). The hardening flags are defense-in-depth:
-      on the pinned git (2.43.0) ``--quiet`` never invokes diff.external or
-      textconv, so they bind a future git that changes ``--quiet`` semantics,
-      not a present exit-code-forgery vector. Exit 0 means no tracked difference
-      (committed, staged, unstaged, deleted, or renamed); any other exit — a
-      tracked diff (1) or a Git error such as 128 for an unresolvable baked SHA —
-      means the oracle changed. A tracked ``.gitignore`` edit is itself a
-      tracked difference here: without it, the edit could mask a new untracked
-      oracle file from the untracked probe.
-    - ``git ls-files -v`` rejects any protected or ignore file carrying the
-      ``skip-worktree``/``assume-unchanged`` flag (tag ``S`` or a lowercase
-      letter): git then reads the INDEX instead of the worktree, so the diff
-      probe above would stay clean against a tampered tracked file with the
-      flag set.
-    - ``git -c core.excludesFile= ls-files --others -- <paths>`` lists EVERY
-      untracked file under a protected path — e.g. a new ``pytest.ini`` or
-      ``conftest.py``, an untracked root ``sitecustomize.py`` (imported at
-      startup by every ``python`` ``test_command`` runs, so one that
-      ``sys.exit(0)``s makes a suite that never ran look green), or a new
-      untracked ``.gitignore`` (the ignore-rule attack). It deliberately does
-      NOT pass ``--exclude-standard``: a protected path the baked tree's own
-      ignore rules already cover would otherwise ship inert protection, and a
-      freshly planted ignore rule could hide the file. Listing everything makes
-      the baked tree's ignore decisions irrelevant to the probe; the suite's
-      own runtime byproducts (``__pycache__/`` and ``*.py[cod]``) are excluded
-      explicitly via ``ORACLE_BENIGN_PATHSPECS`` instead.
-    - The ``core.excludesFile=`` override above also neutralizes the two ignore
-      sources ``--exclude-standard`` would otherwise honor with no probe here to
-      vouch for them: the repo-local ``core.excludesFile`` set in ``.git/config``
-      and the global excludes file (default ``$HOME/.config/git/ignore``). Both
-      are agent-writable, so without this a rollout could mask an untracked
-      oracle file behind either and pass every probe. An empty value loads
-      neither — the default-path fallback only applies when the key is unset —
-      so the same override rides on the ``--ignored`` probe below.
-    - ``git -c core.excludesFile= ls-files --others --ignored ... --
-      ':(glob)**/.gitignore'`` catches a ``.gitignore`` that ignores itself
-      (e.g. a bare ``*``), which hides from the listing above.
-    - ``cat .git/info/exclude`` verifies the rollout-controlled per-repo ignore
-      file. A fresh clone's file is comments-only; any real rule means the
-      oracle changed.
-
-    There is deliberately no case that defaults to pass on an error — an
-    unverifiable oracle never records an honest non-regression value.
-    """
+    A gutted or unverifiable oracle must never report honest non-regression."""
     oracle_pathspecs = [*protected_test_paths, *ORACLE_IGNORE_PATHSPECS]
 
     def diff_changed(result: vf.ProgramResult) -> bool:
@@ -447,12 +312,10 @@ def _claimed_test_verdict(run_dir: Path | None) -> bool | None:
 
 
 async def _verifier_identity_available(runtime: vf.Runtime) -> bool:
-    """Whether the sandbox carries the distinct read-only verifier identity.
+    """Check for the container's setpriv and distinct non-root verifier user.
 
-    The container image provides ``setpriv`` and a non-root ``verifier`` user;
-    the local subprocess smoke path has neither, so it keeps the pre-identity
-    re-run shape against the staged repo.
-    """
+    The local subprocess smoke path has no such identity and runs in its staged
+    repository instead."""
     result = await runtime.run(
         ["sh", "-c", "command -v setpriv >/dev/null 2>&1 && id verifier >/dev/null 2>&1"], {}
     )
@@ -460,19 +323,10 @@ async def _verifier_identity_available(runtime: vf.Runtime) -> bool:
 
 
 async def _prepare_verify_checkout(runtime: vf.Runtime, repo: str, head_sha: str) -> str | None:
-    """Build a separate root-owned read-only checkout with only the candidate diff applied.
+    """Apply the candidate diff to a root-owned, read-only baked-head checkout.
 
-    The manifest ``test_command`` must never run against the agent-mutable tree.
-    This clones the current tree, detaches at the baked head, applies the
-    candidate product diff (the rollout's own current tracked diff against
-    ``head_sha``), and makes the result root-owned and read-only — the reward
-    re-runs the suite there under the distinct non-root verifier identity.
-
-    Returns:
-        The checkout path, or ``None`` when construction failed. A checkout the
-        verifier cannot trust is an explicit zero, never a fallback to the
-        mutable tree.
-    """
+    Return None on construction failure. The container must never fall back to
+    running the suite in the agent-mutable repository."""
     verify_dir = f"{repo}-verify"
     # Single derivation site: the candidate diff is derived by the same helper
     # the seal binds (rundir.candidate_diff_cmd), spliced into the atomic sh -c
@@ -556,14 +410,10 @@ class DaydreamReviewTaskConfig(vf.TaskConfig):
 
 
 class DaydreamReviewState(vf.State):
-    """Mutable per-rollout scoring state, living on the trace.
+    """Per-rollout state holding the single staged snapshot shared by all signals.
 
-    Production traces carry one automatically — the rollout resolves the task's
-    ``StateT`` through the MRO (``verifiers/v1/rollout.py:112-116``) — and the
-    overridden :meth:`DaydreamReviewTask.score` holds the single host-side
-    snapshot of the archived run dir here, so every reward/metric reads the
-    same copy instead of re-fetching one.
-    """
+    Verifiers constructs this through the task's StateT; manual traces must
+    supply it explicitly."""
 
     run_dir: Path | None = None
     seal_ok: bool | None = None
@@ -574,12 +424,7 @@ class DaydreamReviewState(vf.State):
 
 
 def _review_state(trace: vf.Trace) -> DaydreamReviewState:
-    """The trace's scoring state, or a loud error for a base ``State``.
-
-    A test helper or consumer that scores without a ``DaydreamReviewState``
-    (e.g. by constructing a bare ``vf.Trace``) would otherwise silently
-    dereference a missing ``run_dir``. Fail loudly instead.
-    """
+    """Require the typed scoring state; bare vf.State cannot hold a staged run."""
     state = trace.state
     if not isinstance(state, DaydreamReviewState):
         raise TypeError(
@@ -589,72 +434,31 @@ def _review_state(trace: vf.Trace) -> DaydreamReviewState:
 
 
 class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, DaydreamReviewTaskConfig]):
-    """One reward axis: daydream's own intrinsic composite; the suite is telemetry.
+    """Score the archived run with the offline intrinsic scorer or validated rubric.
 
-    ``intrinsic_composite`` replays the archived run through
-    :func:`daydream.training.reward.score_trajectory` — the exact scorer the
-    offline training pipeline uses, imported rather than reimplemented, so an
-    online reward and an offline label can never disagree about the same run.
+    The supervisor seals artifacts after the agent's write window. score()
+    verifies one staged copy plus the current candidate diff before signals run;
+    a failed seal zeros reward and non-regression telemetry.
 
-    ``suite_non_regression`` is the ground truth the intrinsic composite cannot
-    supply: the repository's own suite, re-run inside the sandbox against a
-    separate root-owned read-only checkout with only the candidate product diff
-    applied (never the agent-mutable tree).
-    daydream's own test verdict is a regex over agent prose
-    (``daydream/agent.py:252-300``), so it is recorded as a claim and compared
-    against the re-run — never trusted as reward. The suite result is a metric,
-    never a reward: a green suite proves the tree did not regress, not that the
-    reported defect was repaired, so it earns no training signal of its own.
+    The suite is a metric, never a reward: a green suite proves non-regression,
+    not defect repair. Its protected oracle must match the baked head, and the
+    container runs it in a distinct root-owned read-only checkout. The agent's
+    prose-derived test verdict is only a claim to compare against that result.
 
-    ``intrinsic_composite`` consumes only sealed artifacts: the supervisor seals
-    the archived run dir (with the candidate diff) after the agent's write
-    window, and :meth:`DaydreamReviewTask.score` verifies that seal against the
-    single staged host copy before any value is trusted. A tampered archive
-    zeroes the only remaining reward and never records honest non-regression
-    telemetry.
+    Correctness requires verifier verdicts from the accepted fix gate. Missing
+    verdicts earn no correctness credit; zero findings have no composite and
+    score zero. Watch n_findings for a policy learning to say nothing. A clean
+    review has no positive floor under this reward contract.
 
-    Important: ``verifier_verdicts`` exist only when the fix gate was accepted
-    (``deep/recommendation-verdicts.json`` is written at
-    ``daydream/deep/orchestrator.py:1213-1229``). A review-only rollout therefore
-    scores on grounding and format alone. That is the designed behaviour, and
-    ``trace.info["reward_breakdown"]["axes_present"]`` records it per rollout.
-
-    The Stage-0 preference rubric (``daydream.training.rubric``) composes into
-    the reward only through the validated path: when the taskset config carries
-    ``outcome_model_path``, the load path has already re-checked the Stage-0
-    gate report (M4), and ``intrinsic_composite`` returns the rubric composite
-    (which carries the intrinsic composite as one weighted term). Without an
-    outcome model, scoring stays intrinsic-only. Either way, golden-comment
-    agreement is exposed only as the non-summed ``golden_overlap`` metric —
-    golden overlap is telemetry, never a composite substitute (M6).
-
-    A rollout that reports ZERO findings scores ``intrinsic_composite`` 0.0, not
-    1.0. ``analyze_grounding`` returns ``grounding_rate = None`` over an empty
-    finding set (undefined, not perfect), so no credit axis is present and
-    ``score_trajectory`` returns ``composite = None``, mapped to 0.0 below. This
-    was a live defect — a codex rollout with 27 captured turns and 0 findings
-    scored 1.0 — fixed at the write chokepoint in ``daydream/eval/analyzer.py``
-    so the offline corpus and this reward agree. Archived runs scored before that
-    fix keep their 1.0 and were not migrated.
-
-    A correct "nothing wrong here" therefore scores the same as a broken run.
-    Any positive floor for a genuinely clean review is reward design and belongs
-    to the #91 Stage-0 rubric, not here. Keep watching ``n_findings`` alongside
-    the reward regardless: reward climbing while ``n_findings`` falls is still
-    the signal that the policy is learning to say nothing.
-    """
+    With a gate-bound outcome model, the Stage-0 rubric replaces the intrinsic
+    composite (which remains one rubric term). Golden-comment overlap stays
+    telemetry in both modes."""
 
     async def score(self, trace: vf.Trace, runtime: vf.Runtime | None = None) -> None:
-        """Score *trace*, staging the archived run dir into the state exactly once.
+        """Stage and verify the archive once, then share it across scoring signals.
 
-        The single run-dir fetch happens here, at the entrypoint; the consumers
-        read the staged snapshot off ``state.run_dir`` and never re-enter the
-        runtime. The supervisor-produced ``seal.json`` rides in the fetch, so the
-        staged copy is verified against the seal before any reward trusts it; a
-        tampered archive zeroes the only remaining reward. With no runtime the
-        base class simply skips the runtime-dependent signals, and there is
-        nothing to stage.
-        """
+        Without a runtime, defer to the base class's offline replay behavior without
+        accessing typed scoring state."""
         if runtime is None:
             await super().score(trace, None)
             return
@@ -708,20 +512,14 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         if run_dir is None:
             trace.info["reward_breakdown"] = {"error": "no archived run dir"}
             return 0.0
-        breakdown = score_trajectory(assemble_scoring_inputs(run_dir, _manifest_row(run_dir)))
+        breakdown = score_trajectory(assemble_scoring_inputs(run_dir))
 
         # M13: when a validated Stage-0 outcome model is configured, the reward
         # becomes the rubric composite (which itself carries the intrinsic
         # composite as a term — no double counting); otherwise intrinsic-only.
         stage0 = stage0_composite_terms(self.config.outcome_model_path, run_dir)
 
-        reward_breakdown: dict[str, Any] = {
-            "correctness_per_finding": breakdown.correctness_per_finding,
-            "grounding": breakdown.grounding,
-            "format_valid": breakdown.format_valid,
-            "length_penalty": breakdown.length_penalty,
-            "composite": breakdown.composite,
-            "axes_present": breakdown.axes_present,
+        reward_breakdown = breakdown.to_dict() | {
             "reward_version": ROLLOUT_REWARD_VERSION,
             "intrinsic_reward_version": breakdown.reward_version,
         }
@@ -739,27 +537,11 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
 
     @vf.metric
     async def suite_non_regression(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
-        """Re-run the repository's pinned suite against the fixed tree; telemetry, never a reward.
+        """Report whether a real fix preserves the baked green suite; never a reward.
 
-        Deterministic because the image build proved the same command green at
-        the same commit before any agent touched it (D6). A rollout that applied
-        no fix is not evidence either way, so it records ``suite_non_regression``
-        0.0 rather than a free 1.0 for leaving the tree alone.
-
-        The declared ``protected_test_paths`` oracle must still match the baked
-        head before ``test_command`` is trusted: any oracle change — a tracked
-        difference, an untracked file under a protected path or a root
-        ``sitecustomize.py``, a ``skip-worktree``/``assume-unchanged`` flag, an
-        ignore-rule change (``.gitignore`` files or ``.git/info/exclude``), or a
-        Git error — records a literal ``0.0`` without running the repository's
-        mutable ``test_command``, so a gutted suite is never recorded as an
-        honest non-regression value.
-
-        The suite result is deliberately NOT a reward: a rollout that starts
-        from an already-green commit and makes only an unrelated or test-only
-        edit earns no suite-derived credit. The value stays in ``trace.metrics``
-        for analysis.
-        """
+        No fix, a failed seal, a changed oracle, or a Git error yields zero without
+        running the mutable test command. Compare any archived prose claim only
+        when the suite actually runs; otherwise record a no-fix claim separately."""
         repo = _repo_path(trace)
         if _review_state(trace).seal_ok is False:
             # The archived run cannot be trusted: the oracle is unverifiable, so
@@ -777,12 +559,7 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
             return {"suite_non_regression": 0.0}
 
         trace.record_metric("fixes_applied", 1.0)
-        # Security boundary: the test oracle must match the baked head before the
-        # repository's own mutable test_command is trusted. A changed oracle
-        # (committed/staged/unstaged/deleted/renamed, an untracked protected
-        # file or root sitecustomize.py, a skip-worktree/assume-unchanged flag,
-        # an ignore-rule change, or a Git error) records a literal zero WITHOUT
-        # running test_command.
+        # Do not execute an agent-modified oracle, even if its suite would pass.
         unchanged = await _protected_test_paths_unchanged(
             runtime, repo, self.data.head_sha, self.data.protected_test_paths
         )
@@ -793,12 +570,8 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         result = await self._run_test_command(runtime, repo)
         passed = result.exit_code == 0
 
-        # Reward-hack tripwire: daydream's own prose-derived verdict versus what
-        # the suite actually does. Recorded here (inside this metric handler,
-        # which performs the re-run) rather than as a separate @vf.metric,
-        # because metrics run BEFORE rewards (verifiers task.py:299-306), so a
-        # standalone metric could not see this re-run without paying for a
-        # second one.
+        # Compare the claim here: metrics precede rewards, so a separate handler
+        # could only obtain this result by rerunning the suite.
         claimed = _claimed_test_verdict(_review_state(trace).run_dir)
         if claimed is not None:
             trace.record_metric("test_claim_mismatch", float(claimed != passed))
@@ -806,16 +579,10 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
         return {"suite_non_regression": float(passed)}
 
     async def _run_test_command(self, runtime: vf.Runtime, repo: str) -> vf.ProgramResult:
-        """Run the manifest ``test_command`` against a trustworthy tree.
+        """Run the suite under the verifier identity in a read-only candidate checkout.
 
-        In the container the re-run executes against a separate root-owned
-        read-only checkout with only the candidate product diff applied, under a
-        distinct non-root verifier identity (``setpriv``) — never against the
-        agent-mutable ``/work/repo``. A checkout the verifier cannot trust is an
-        explicit non-zero result, never a fallback to the mutable tree. On the
-        local subprocess smoke path (no ``setpriv``/``verifier`` identity) the
-        re-run keeps the pre-identity shape against the staged repo.
-        """
+        Failed construction returns nonzero, never a mutable-tree fallback. Only
+        the local smoke runtime, lacking the verifier identity, uses its staged repo."""
         if not await _verifier_identity_available(runtime):
             return await runtime.run(
                 ["sh", "-c", f"cd {shlex.quote(repo)} && {self.data.test_command}"], {}
@@ -829,18 +596,12 @@ class DaydreamReviewTask(vf.Task[DaydreamReviewData, DaydreamReviewState, Daydre
 
     @vf.metric
     async def review_shape(self, trace: vf.Trace, runtime: vf.Runtime) -> dict[str, float]:
-        """Observability only — never summed into the reward.
+        """Record finding counts and golden-file overlap as telemetry only.
 
-        ``golden_overlap`` is an explicitly crude localisation proxy: the share of
-        the bot's golden comments whose file appears among daydream's merged
-        findings. It exists to inform #91's rubric design, not to grade a rollout.
-        """
+        Overlap is the share of golden comments whose file appears among findings;
+        it is a crude localization measure, never a reward."""
         run_dir = _review_state(trace).run_dir
-        items: list[dict[str, Any]] = []
-        if run_dir is not None:
-            merged = _read_json(run_dir / "deep" / "merged-items.json", default={})
-            if isinstance(merged, dict):
-                items = merged.get("items") or []
+        items = _merged_items(run_dir)
 
         found_files = {item.get("file") for item in items if isinstance(item, dict)}
         golden_paths = [c.path for c in self.data.golden_comments if c.path]
@@ -893,12 +654,7 @@ class DaydreamReviewConfig(vf.TasksetConfig):
 
 
 class _ManifestPR(BaseModel):
-    """One PR snapshot a manifest entry ships as a task.
-
-    ``base_sha``/``head_sha`` pin the image build and the scoring baseline
-    (one image == one PR snapshot); ``golden_comments`` feed only the
-    non-summed ``golden_overlap`` telemetry.
-    """
+    """Pin one PR snapshot; golden comments supply overlap telemetry only."""
 
     model_config = ConfigDict(extra="forbid")
     pr_number: int
@@ -920,17 +676,10 @@ class _ManifestEntry(BaseModel):
     @field_validator("protected_test_paths")
     @classmethod
     def _require_literal_paths(cls, paths: list[str]) -> list[str]:
-        """Reject entries git would re-interpret instead of matching byte-for-byte.
+        """Require literal repository-relative paths; reject rather than normalize.
 
-        The manifest promises LITERAL repository-relative paths, but the scoring
-        gate passes each entry to git as a bare pathspec (``_protected_test_paths_unchanged``),
-        where ``*``, ``?`` and ``[`` are glob metacharacters and a leading ``:``
-        is pathspec magic. Git normalizes exact ``.``/``..`` components, which
-        can redirect a declared path to an unintended location that matches
-        nothing. Absolute paths instead make the oracle probe fail closed.
-        Reject both non-canonical forms at load time to preserve the manifest's
-        literal repository-relative path contract; do not normalize entries.
-        """
+        Git interprets a leading colon as magic, *?[ as glob characters, and . / ..
+        components as traversal. Absolute paths also violate the manifest contract."""
         for path in paths:
             if (
                 not path

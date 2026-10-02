@@ -93,13 +93,7 @@ def render_segments(source: str, segments: list[tuple[int, int, str, Style]], ba
 
 
 def _detect_shell_syntax(content: str) -> bool:
-    """Detect if content looks like shell script or command output.
-
-    Checks for common shell indicators such as:
-    - Lines starting with $ or # (shell prompts)
-    - Shebang lines (#!/bin/bash, etc.)
-    - Multiple lines with common shell command patterns
-    """
+    """Recognize a shebang, repeated shell prompts/commands, or one of each."""
     if _SHEBANG_PATTERN.search(content):
         return True
 
@@ -115,31 +109,17 @@ def _detect_shell_syntax(content: str) -> bool:
 
 
 def _colorize_git_line(line: str) -> Text | None:
-    """Check if a line matches git output patterns and return styled Text.
-
-    Returns:
-        Rich Text with git-specific styling, or None if not git output.
-
-    """
-    # File headers (+++/---) - cyan bold
-    if _GIT_FILE_HEADER_PATTERN.match(line):
-        return Text(line, style=STYLE_BOLD_CYAN)
-
-    # Diff headers (@@, diff --git, index) - purple
-    if _GIT_DIFF_HEADER_PATTERN.match(line):
-        return Text(line, style=STYLE_PURPLE)
-
-    # Added lines (+, A ) - green
-    if _GIT_ADDED_PATTERN.match(line):
-        return Text(line, style=STYLE_GREEN)
-
-    # Deleted lines (-, D ) - red
-    if _GIT_DELETED_PATTERN.match(line):
-        return Text(line, style=STYLE_RED)
-
-    # Modified lines (M ) - yellow
-    if _GIT_MODIFIED_PATTERN.match(line):
-        return Text(line, style=STYLE_YELLOW)
+    """Apply the first matching Git-line style, or return None."""
+    styles = (
+        (_GIT_FILE_HEADER_PATTERN, STYLE_BOLD_CYAN),
+        (_GIT_DIFF_HEADER_PATTERN, STYLE_PURPLE),
+        (_GIT_ADDED_PATTERN, STYLE_GREEN),
+        (_GIT_DELETED_PATTERN, STYLE_RED),
+        (_GIT_MODIFIED_PATTERN, STYLE_YELLOW),
+    )
+    for pattern, style in styles:
+        if pattern.match(line):
+            return Text(line, style=style)
 
     return None
 

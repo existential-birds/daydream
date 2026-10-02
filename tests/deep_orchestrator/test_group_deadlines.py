@@ -28,21 +28,13 @@ from tests.test_deep_orchestrator import (
     _silence,
 )
 
-_STRUCTURAL_FINDING = {
-    "severity": "medium",
-    "confidence": "MEDIUM",
-    "file": "web.ts",
-    "line": 1,
+_STRUCTURAL_FINDING = {"severity": "medium", "confidence": "MEDIUM", "file": "web.ts", "line": 1,
     "description": "Structural maintainability concern",
 }
 
 
 def _install_grouped_stub(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-    *,
-    clock_value: float = 10_000.0,
-    per_event_s: float = 200.0,
+    monkeypatch: pytest.MonkeyPatch, target: Path, *, clock_value: float = 10_000.0, per_event_s: float = 200.0,
     group_wall_s: float = 600.0,
 ) -> StubBackend:
     """Install the stub backend with a FakeClock-driven group deadline.
@@ -59,12 +51,7 @@ def _install_grouped_stub(
     return stub
 
 
-async def _run_fix_loop(
-    target: Path,
-    tmp_path: Path,
-    make_config: MakeConfig,
-    **config_kwargs: Any,
-) -> Path:
+async def _run_fix_loop(target: Path, tmp_path: Path, make_config: MakeConfig, **config_kwargs: Any,) -> Path:
     """Run the fix loop under a wall-clock guard, asserting a real exit code."""
     traj = tmp_path / "trajectory.json"
     with anyio.fail_after(30):
@@ -74,12 +61,8 @@ async def _run_fix_loop(
     assert isinstance(exit_code, int)
     return traj
 
-
 async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """(15a) retry backoff + backend time for one invocation cannot exceed the budget."""
@@ -97,12 +80,8 @@ async def test_run_retry_ladder_is_bounded_by_the_group_deadline(
     recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
     assert recorded["App.tsx"].startswith("file_group_budget_exceeded: group_wall_budget_exceeded")
 
-
 async def test_run_cuts_a_single_item_group_at_the_group_deadline(  # (15b)
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """(15b) A one-call group is cut at the GROUP deadline, and the turn is not progress."""
@@ -113,7 +92,6 @@ async def test_run_cuts_a_single_item_group_at_the_group_deadline(  # (15b)
     mute_side_effects()
 
     traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
-
     singles = _single_fix_calls_for(stub, "App.tsx")
     assert len(singles) == 1  # exactly one call, no fallback loop
     recorded = json.loads((multi_stack_target / ".daydream/deep/fix-failures.json").read_text())
@@ -124,12 +102,8 @@ async def test_run_cuts_a_single_item_group_at_the_group_deadline(  # (15b)
     assert meta["items_processed"] == 0 and meta["items_skipped"] == 1
     assert meta["elapsed_s"] >= 600.0
 
-
 async def test_run_cuts_a_batched_group_at_the_group_deadline(  # (15c/15f)
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """(15c/15f) remaining < scaled call budget: the batch dies at the group deadline, zero fallback."""
@@ -151,12 +125,8 @@ async def test_run_cuts_a_batched_group_at_the_group_deadline(  # (15c/15f)
     stop_reasons = _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason")
     assert "wall_budget_exceeded" in stop_reasons  # the real budget path, not a stub raise
 
-
 async def test_run_serial_fallback_runs_under_the_same_group_deadline(  # (15d)
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """A batched failure (not a deadline) falls back per-finding, cut at the SAME deadline."""
@@ -167,7 +137,6 @@ async def test_run_serial_fallback_runs_under_the_same_group_deadline(  # (15d)
     mute_side_effects()
 
     traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
-
     api_singles = _single_fix_calls_for(stub, "api.py")
     group_size = _batched_group_size(stub, "api.py")
     assert 0 < len(api_singles) < group_size  # cut mid-group, not all N
@@ -182,12 +151,8 @@ async def test_run_serial_fallback_runs_under_the_same_group_deadline(  # (15d)
     assert meta["items_skipped"] == group_size - meta["items_processed"]
     assert meta["elapsed_s"] >= 600.0
 
-
 async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """One group's deadline stop leaves the sibling group's work intact."""
@@ -218,7 +183,6 @@ async def test_run_expired_group_does_not_cancel_a_healthy_sibling(  # (15e)
     assert {e["metadata"]["file"] for e in events} == {"api.py"}
     assert all(e["metadata"]["reason"] == "group_wall_budget_exceeded" for e in events)
 
-
 async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig, mute_side_effects: Mute,
@@ -227,9 +191,7 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
 
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "0")
-    (multi_stack_target / ".daydream.toml").write_text(
-        "retry_recovery_allowance_s = 25\n", encoding="utf-8"
-    )
+    (multi_stack_target / ".daydream.toml").write_text("retry_recovery_allowance_s = 25\n", encoding="utf-8")
     stub = _install_grouped_stub(monkeypatch, multi_stack_target, clock_value=100_000.0, per_event_s=20.0)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     # Keep api.py a SINGLE-item group: the structural meta-stack's finding would
@@ -245,8 +207,7 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     mute_side_effects()
 
     traj = await _run_fix_loop(
-        multi_stack_target, tmp_path, make_config,
-        file_config=load_file_config(multi_stack_target),
+        multi_stack_target, tmp_path, make_config, file_config=load_file_config(multi_stack_target),
     )
 
     stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
@@ -262,7 +223,6 @@ async def test_the_configured_allowance_bounds_a_group_s_retry_ladder(
     # attempt count.
     assert max(e["metadata"]["attempts"] for e in stops) <= 4
     assert stub.completed_fix_files.count("api.py") == 0     # the group never applied a fix
-
 
 async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_completed_work(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
@@ -292,7 +252,6 @@ async def test_an_outage_circuit_bounds_the_group_fan_out_and_restarts_no_comple
     mute_side_effects()
 
     traj = await _run_fix_loop(multi_stack_target, tmp_path, make_config)
-
     stops = _scan_phase_events(multi_stack_target / ".daydream", traj, "agent_budget_stop")
     # One coordinated ladder, not one per sibling: total dispatches stay at the
     # circuit threshold plus the single probe.

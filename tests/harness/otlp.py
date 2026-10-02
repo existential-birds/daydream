@@ -6,7 +6,7 @@ import gzip
 import threading
 import time
 import zlib
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from concurrent import futures
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -15,24 +15,31 @@ from typing import Any
 
 import grpc
 from google.protobuf.json_format import MessageToDict
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import ExportTraceServiceRequest
-from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
-    TraceServiceServicer,
-    add_TraceServiceServicer_to_server,
+from opentelemetry.proto.collector.trace.v1.trace_service_pb2 import (
+    ExportTraceServiceRequest,
+    ExportTraceServiceResponse,
 )
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.trace.export import SimpleSpanProcessor, SpanExporter
+
+
+@contextmanager
+def exporting_provider(*exporters: SpanExporter, **options: Any) -> Iterator[TracerProvider]:
+    """Own synchronous span processors and always shut down their provider."""
+    provider = TracerProvider(shutdown_on_exit=False, **options)
+    try:
+        for exporter in exporters:
+            provider.add_span_processor(SimpleSpanProcessor(exporter))
+        yield provider
+    finally:
+        provider.shutdown()
 
 
 class ScriptedResponse:
     """One scripted HTTP response; the default body is the empty protobuf ack."""
 
-    def __init__(
-        self,
-        *,
-        status: int = 200,
-        headers: Mapping[str, str] | None = None,
-        body: bytes = b"",
-        reason: str | None = None,
-        delay_s: float = 0.0,
+    def __init__(self, *, status: int = 200, headers: Mapping[str, str] | None = None, body: bytes = b"",
+        reason: str | None = None, delay_s: float = 0.0,
     ) -> None:
         # Default to the canonical protobuf ack content type; an explicitly empty
         # headers mapping sends no Content-Type at all (the LangSmith ack shape).
@@ -55,15 +62,14 @@ class TraceCollector:
     @property
     def spans(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [
-                span
+            return [span
                 for request in self.requests
                 for resource in request["body"].get("resourceSpans", [])
                 for scope in resource.get("scopeSpans", [])
                 for span in scope.get("spans", [])
             ]
 
-    def capture(self, path: str, headers: dict[str, str], body: bytes) -> None:
+    def capture(self, path: str, headers: Mapping[str, str | bytes], body: bytes) -> None:
         encoding = headers.get("content-encoding")
         if encoding == "gzip":
             body = gzip.decompress(body)
@@ -97,11 +103,7 @@ class _QuietHTTPHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def otlp_collector(
-    *,
-    status: int = 200,
-    response_headers: Mapping[str, str] | None = None,
-    reason: str | None = None,
+def otlp_collector(*, status: int = 200, response_headers: Mapping[str, str] | None = None, reason: str | None = None,
 ) -> Iterator[TraceCollector]:
     """Receive real protobuf exports; close all listener resources on exit."""
     collector = TraceCollector(status=status)
@@ -122,10 +124,7 @@ def otlp_collector(
 
 
 @contextmanager
-def scripted_otlp_collector(
-    responses: list[ScriptedResponse],
-    *,
-    capture_content_type: list[str | None] | None = None,
+def scripted_otlp_collector(responses: list[ScriptedResponse], *, capture_content_type: list[str | None] | None = None,
 ) -> Iterator[TraceCollector]:
     """Collector serving scripted responses in order; extra requests get the last one.
 
@@ -248,43 +247,43 @@ def _value(value: dict[str, Any]) -> Any:
     return next(iter(value.values()), None)
 
 
-class _GrpcServicer(TraceServiceServicer):
-    """Receive real protobuf ``Export`` calls and record request headers."""
+GrpcReceiver = Callable[[ExportTraceServiceRequest, grpc.ServicerContext], ExportTraceServiceResponse]
 
-    def __init__(self, collector: "TraceCollector", reject: bool) -> None:
-        self._collector = collector
-        self._reject = reject
 
-    def Export(self, request: Any, context: Any) -> Any:
-        metadata = {key.lower(): value for key, value in context.invocation_metadata()}
-        self._collector.capture("/grpc", metadata, request.SerializeToString())
-        if self._reject:
-            context.abort(grpc.StatusCode.UNAVAILABLE, "scripted collector outage")
-        return ExportTraceServiceRequest()
+@contextmanager
+def grpc_trace_server(receive: GrpcReceiver, *, workers: int = 1) -> Iterator[int]:
+    """Serve a real loopback Export RPC; close its server and thread pool together."""
+    with futures.ThreadPoolExecutor(max_workers=workers) as pool:
+        server = grpc.server(pool)
+        server.add_generic_rpc_handlers((grpc.method_handlers_generic_handler(
+            "opentelemetry.proto.collector.trace.v1.TraceService",
+            {"Export": grpc.unary_unary_rpc_method_handler(
+                receive, request_deserializer=ExportTraceServiceRequest.FromString,
+                response_serializer=ExportTraceServiceResponse.SerializeToString,
+            )},
+        ),))
+        port = server.add_insecure_port("127.0.0.1:0")
+        if port == 0:  # pragma: no cover - loopback bind failure is fatal
+            raise RuntimeError("gRPC loopback server failed to bind")
+        server.start()
+        try:
+            yield port
+        finally:
+            server.stop(grace=0).wait(timeout=5)
 
 
 @contextmanager
 def otlp_grpc_collector(*, reject: bool = False) -> Iterator[TraceCollector]:
-    """Receive real gRPC OTLP exports on a loopback port (P18 Task 5).
-
-    Serves the real ``opentelemetry.proto.collector.trace.v1`` TraceService
-    over an insecure loopback channel so the generic gRPC destination is
-    driven through its actual transport. Every call's metadata is recorded
-    so tests can assert the exact wire headers that reached the child;
-    ``reject=True`` answers UNAVAILABLE after capture so outage fail-open
-    behavior can be observed end to end.
-    """
-
+    """Capture real gRPC requests/headers; optionally answer UNAVAILABLE after capture."""
     collector = TraceCollector()
-    server = grpc.server(futures.ThreadPoolExecutor(max_workers=2))
-    add_TraceServiceServicer_to_server(_GrpcServicer(collector, reject), server)  # type: ignore[no-untyped-call]  # generated grpc stub is untyped
-    port = server.add_insecure_port("127.0.0.1:0")
-    if port == 0:  # pragma: no cover - loopback bind failure is fatal
-        raise RuntimeError("gRPC loopback server failed to bind")
-    server.start()
-    collector.base_url = f"127.0.0.1:{port}"
-    try:
-        yield collector
-    finally:
-        server.stop(grace=None).wait(timeout=5)
 
+    def receive(request: ExportTraceServiceRequest, context: grpc.ServicerContext) -> ExportTraceServiceResponse:
+        metadata = {key.lower(): value for key, value in context.invocation_metadata()}
+        collector.capture("/grpc", metadata, request.SerializeToString())
+        if reject:
+            context.abort(grpc.StatusCode.UNAVAILABLE, "scripted collector outage")
+        return ExportTraceServiceResponse()
+
+    with grpc_trace_server(receive, workers=2) as port:
+        collector.base_url = f"127.0.0.1:{port}"
+        yield collector

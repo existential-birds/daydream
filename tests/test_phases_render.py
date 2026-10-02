@@ -28,7 +28,7 @@ from tests.harness.backend import ScriptedBackend
 
 def _rec(monkeypatch: Any) -> Console:
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=100, height=25)
-    monkeypatch.setattr("daydream.phases.console", rec)
+    monkeypatch.setattr("daydream.agent.console", rec)
     return rec
 
 
@@ -146,8 +146,8 @@ def _per_stack_backend(fail_for: set[str]) -> ScriptedBackend:
         if any(f"stack-{name}-review.md" in prompt for name in fail_for):
             return [RuntimeError("agent boom")]
         # Issue #745: per-stack reviewers must emit PER_STACK_RECORD_SCHEMA
-        # structured output (issues + verdicts) to be recorded as a success.
-        return [ResultEvent(structured_output={"issues": [], "verdicts": []}, continuation=None)]
+        # structured findings output to be recorded as a success.
+        return [ResultEvent(structured_output={"issues": []}, continuation=None)]
 
     return ScriptedBackend(responder=respond, model="mock-model")
 

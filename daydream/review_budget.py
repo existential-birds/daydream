@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from daydream import clock
+from daydream.redaction import redact_text
 
 
 @dataclass(frozen=True)
@@ -119,16 +120,19 @@ def clear_review_budget_stop(deep_dir: Path, phase: str) -> None:
 
 def review_warnings(deep_dir: Path) -> tuple[str, ...]:
     """Collect incomplete phases and stacks for reports and posting."""
-    from daydream.deep.artifacts import _load_failures, per_stack_failures_path
+    from daydream.deep.artifacts import (
+        MERGE_FAILURE_KEY,
+        _load_failures,
+        per_stack_failures_path,
+    )
 
     path = review_budget_path(deep_dir)
     stops = json.loads(path.read_text()) if path.exists() else {}
     warnings = [f"{phase}: {reason}" for phase, reason in sorted(stops.items())]
     warnings.extend(
-        f"{stack}: {reason}"
+        f"{stack}: {redact_text(reason)}"
         for stack, reason in sorted(_load_failures(per_stack_failures_path(deep_dir)).items())
-        if isinstance(reason, str)
-        and reason.startswith(("budget exhausted:", "evidence incomplete:"))
+        if isinstance(reason, str) and stack != MERGE_FAILURE_KEY
     )
     return tuple(warnings)
 

@@ -1,60 +1,13 @@
-"""SQLite index for cross-project querying of archived daydream runs.
+"""SQLite archive index with immutable, bitemporal label observations.
 
-Manages a SQLite database at ``~/.daydream/archive/index.db`` that indexes
-all archived runs by their manifest metadata. The schema is created
-idempotently on every connection open, so the database is self-bootstrapping.
+Connections bootstrap the schema. Label projections prefer human observations,
+then recency; appends refresh the run cache from that winner.
 
-Exports:
-    SCHEMA_VERSION: Current schema version integer.
-    upsert_run: Insert or replace a run from a Manifest.
-    update_labels: Update outcome labels for a session (supports prefix matching).
-    query_runs: Query runs with optional WHERE clause.
-    append_label_observation: Append a row to the immutable bitemporal
-        label_observations history (``observed_at`` transaction time,
-        ``valid_at`` valid time, reward columns, plus ``reviewer_logins`` and
-        the ``has_posterior`` population discriminator) and refresh the
-        denormalized runs cache (including the ``has_posterior`` mirror).
-    latest_label_observation: Return the highest-precedence (human-first, then
-        recency) label_observations row for a session, optionally constrained by
-        an ``as_of`` cutoff timestamp.
-    reviewer_set_penalty_prior: Pooled mean false-positive penalty over prior
-        runs sharing a reviewer (strict ``valid_at`` cutoff), for the posterior
-        outcome prior (C4).
-    label_observation_history: Return the full label_observations history for
-        a session in chronological order.
-    canonical_utc_iso: Convert an ISO-8601 timestamp to the canonical UTC
-        spelling this index stores and compares (``+00:00`` suffix).
-    normalize_as_of: Validate and canonicalize a user-supplied ``as_of`` pin
-        (strict: UTC-only input) for lexical comparison against ``observed_at``.
-
-Timestamp canonicalization contract
------------------------------------
-
-The bitemporal columns are TEXT and every cutoff (``observed_at <= as_of``,
-``valid_at < before_valid_at``) is a lexical string comparison, which matches
-chronological order only when both sides share one spelling. The canonical
-spelling is ``datetime.isoformat()`` in UTC — ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``
-(fractional seconds absent or exactly six digits, never a ``Z`` suffix).
-
-- ``observed_at`` has a single writer (:func:`append_label_observation` stamps
-  ``datetime.now(timezone.utc).isoformat()``), so the stored column is uniformly
-  canonical and ``observed_at <= as_of`` / ``ORDER BY observed_at`` are safe once
-  ``as_of`` is canonical (enforced at its entry boundary via
-  :func:`normalize_as_of`).
-- ``valid_at`` historically mixed spellings: caller-supplied values (GitHub
-  merge timestamps, harvest fallbacks) arrived ``Z``-suffixed while the
-  ``None``→``observed_at`` collapse stored ``+00:00``. All rows are now
-  canonicalized at write time (:func:`canonical_utc_iso` in
-  :func:`append_label_observation`), so the column converges on the canonical
-  spelling and the lexical ``valid_at < before_valid_at`` cutoff compares
-  chronologically. Rows written by pre-convergence versions may still carry a
-  ``Z`` suffix; they are deliberately NOT rewritten or deleted (destructive
-  bootstrap migrations are off the table). A stray legacy row sorts after any
-  ``+00:00`` string sharing its second prefix, so the reviewer-prior cutoff
-  can only over-exclude it (a smaller pool, never posterior leakage); the
-  corpus leakage guard parses datetimes and is spelling-immune. A re-harvest
-  appends canonical generations that supersede legacy rows in every winner
-  projection.
+Time cutoffs compare TEXT lexically, so writers and cutoff boundaries use UTC
+``datetime.isoformat()``: ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``. Legacy ``Z``
+rows remain untouched. At an equal second they sort after canonical rows, which
+can shrink the reviewer-prior pool but cannot leak future outcomes. Re-harvest
+appends canonical generations; the corpus leakage guard parses timestamps.
 """
 
 from __future__ import annotations
@@ -86,8 +39,7 @@ from daydream.archive.manifest import Manifest
 from daydream.training.labeler_versions import STALE_LEGACY
 from daydream.training.reward import FP_PENALTY_MAP
 
-# The 16 non-identity columns, in the canonical declaration order: exactly the
-# values ``row_body`` supplies after the ``(session_id, observed_at)`` prefix.
+# Observation body order follows the schema after session_id and observed_at.
 _LABEL_OBSERVATION_ROW_BODY_NAMES = LABEL_OBSERVATION_NAMES[2:]
 _INSERT_LABEL_OBSERVATION_SQL = (
     f"INSERT INTO label_observations ({', '.join(LABEL_OBSERVATION_NAMES)}) "
@@ -118,20 +70,7 @@ __all__ = [
 
 
 def canonical_utc_iso(ts: str) -> str:
-    """Return *ts* in the canonical UTC spelling stored by this index.
-
-    Parses any valid ISO-8601 timestamp (``Z`` or numeric offset, any
-    sub-second precision) and re-emits ``datetime.isoformat()`` in UTC:
-    ``YYYY-MM-DDTHH:MM:SS[.ffffff]+00:00``. Aware non-UTC offsets are
-    *converted* to UTC — a data timestamp in a foreign zone is an unambiguous
-    instant, so conversion is always chronologically correct. Idempotent for
-    already-canonical input.
-
-    Raises:
-        ValueError: When *ts* is not parseable ISO-8601, or is naive (no
-            offset) — a naive timestamp names no single instant, so it cannot
-            be canonicalized.
-    """
+    """Convert an aware ISO-8601 timestamp to canonical UTC; reject malformed or naive input."""
     dt = datetime.fromisoformat(ts)
     if dt.tzinfo is None or dt.utcoffset() is None:
         raise ValueError(f"naive timestamp {ts!r}: an explicit UTC offset is required")
@@ -139,24 +78,11 @@ def canonical_utc_iso(ts: str) -> str:
 
 
 def normalize_as_of(value: str) -> str:
-    """Validate and canonicalize a user-supplied ``as_of`` pin.
+    """Canonicalize a reproducibility pin at its entry boundary.
 
-    The single entry-boundary normalizer for ``as_of``: call it once where the
-    pin enters the system (each projection's config boundary); downstream
-    consumers — the
-    ``observed_at <= as_of`` SQL cutoffs here and the valid-time leakage guard
-    in ``daydream.training.corpus`` — receive the canonical spelling and never
-    re-normalize.
-
-    Stricter than :func:`canonical_utc_iso`: a non-UTC offset is *rejected*,
-    not converted. An operator writing ``+05:00`` on a reproducibility pin is
-    almost certainly thinking in local time; silently shifting the pin five
-    hours invites irreproducible corpora, so the input must already be UTC
-    (``Z`` or ``+00:00``, any sub-second precision).
-
-    Raises:
-        ValueError: When *value* is not parseable ISO-8601, is naive, or
-            carries a non-UTC offset.
+    Accept only aware UTC input (``Z`` or zero offset); reject other offsets
+    instead of silently shifting an operator's pin. Downstream lexical cutoffs
+    assume this canonical spelling.
     """
     try:
         dt = datetime.fromisoformat(value)
@@ -178,14 +104,7 @@ def readonly_connection(archive_dir: Path) -> sqlite3.Connection:
 
 
 def _get_connection(archive_dir: Path) -> sqlite3.Connection:
-    """Open the index database, creating schema if needed.
-
-    Enables WAL mode for concurrent read access and sets a busy timeout
-    to handle contention from parallel daydream runs.
-
-    Returns:
-        An open sqlite3.Connection with row_factory set to sqlite3.Row.
-    """
+    """Open a row-based connection, bootstrap the schema, and enable WAL with a busy timeout."""
     archive_dir.mkdir(parents=True, exist_ok=True)
     db_path = archive_dir / "index.db"
     conn = sqlite3.connect(str(db_path))
@@ -218,122 +137,49 @@ def _connection(archive_dir: Path, *, readonly: bool = False) -> Iterator[sqlite
 
 
 def _project_daydream(daydream: Any) -> dict[str, Any]:
-    """Project the ``manifest.daydream`` provenance onto per-column values.
-
-    Collapses the guarded-ternary projection ladder into one place so the five
-    ``daydream_*`` projections stay in sync with the ``RUNS_COLUMNS``
-    declaration. ``None`` (no executable provenance captured) projects every
-    field to ``None``; ``daydream_dirty`` is stored as an int only when it is a
-    real bool so a sentinel (non-bool) dirty state persists as ``NULL``.
-    """
-    if daydream is None:
-        return {
-            "daydream_version": None,
-            "daydream_install_source": None,
-            "daydream_commit": None,
-            "daydream_dirty": None,
-            "daydream_container_digest": None,
-        }
-    dirty = daydream.dirty
-    return {
-        "daydream_version": daydream.version,
-        "daydream_install_source": daydream.install_source,
-        "daydream_commit": daydream.commit,
-        "daydream_dirty": int(dirty) if isinstance(dirty, bool) else None,
-        "daydream_container_digest": daydream.container_digest,
+    """Project executable provenance; absent provenance and non-bool dirty states become NULL."""
+    values = {
+        f"daydream_{name}": getattr(daydream, name) if daydream is not None else None
+        for name in ("version", "install_source", "commit", "dirty", "container_digest")
     }
+    dirty = values["daydream_dirty"]
+    values["daydream_dirty"] = int(dirty) if isinstance(dirty, bool) else None
+    return values
 
 
 def _run_upsert_values(manifest: Manifest) -> dict[str, Any]:
-    """Project *manifest* onto the run upsert's per-column values.
-
-    The name-keyed value expressions are the one piece of the upsert that stays
-    explicit code: :func:`upsert_run` projects the declaration's ``upserted``
-    column set through this mapping, so a hand-written parameter name can never
-    reach SQLite. ``None`` identity is preserved (a missing source stores
-    ``NULL``); the two booleans are stored as ints; JSON columns are serialised
-    here.
-    """
-    daydream = manifest.daydream
-    # Defense-in-depth: never persist a credential-bearing remote URL, even if
-    # upstream capture bypassed the normalizer. None identity stores None.
-    if manifest.remote_url is None:
-        # No remote URL to normalize; keep the manifest's slug as-is.
-        normalized_slug, normalized_url = manifest.repo_slug, None
-    else:
-        normalized_slug, normalized_url = normalize_remote_url(manifest.remote_url)
-    return {
-        "session_id": manifest.session_id,
-        "archived_at": manifest.archived_at,
-        "status": manifest.status,
-        "archive_status": manifest.archive_status,
-        "pipeline_status": manifest.pipeline_status,
-        "phase_states": json.dumps(manifest.phase_states) if manifest.phase_states is not None else None,
-        **_project_daydream(daydream),
-        "run_flow": manifest.run_flow,
-        "skill": manifest.skill,
-        "model": manifest.model,
-        "backend": manifest.backend,
-        "review_backend": manifest.review_backend,
-        "fix_backend": manifest.fix_backend,
-        "test_backend": manifest.test_backend,
-        "per_stack_review_backend": manifest.per_stack_review_backend,
-        "per_stack_review_model": manifest.per_stack_review_model,
+    """Project declared upsert columns, normalizing credentials, JSON, booleans, and provenance."""
+    # Normalize again at persistence even if capture bypassed URL sanitization.
+    normalized_slug, normalized_url = (
+        (manifest.repo_slug, None)
+        if manifest.remote_url is None
+        else normalize_remote_url(manifest.remote_url)
+    )
+    overrides = {
+        **_project_daydream(manifest.daydream),
         "review_only": int(manifest.review_only),
         "deep": int(manifest.deep),
         "remote_url": normalized_url,
         "repo_slug": normalized_slug,
-        "source_path": manifest.source_path,
-        "branch": manifest.branch,
-        "base_branch": manifest.base_branch,
-        "head_sha": manifest.head_sha,
-        "base_sha": manifest.base_sha,
         "changed_files": json.dumps(manifest.changed_files),
-        "pr_number": manifest.pr_number,
-        "pr_repo": manifest.pr_repo,
-        "total_cost_usd": manifest.total_cost_usd,
-        "total_findings": manifest.total_findings,
-        "grounding_rate": manifest.grounding_rate,
-        "coverage_ratio": manifest.coverage_ratio,
-        "cost_per_finding_usd": manifest.cost_per_finding_usd,
-        "wall_clock_seconds": manifest.wall_clock_seconds,
-        "erosion": manifest.erosion,
-        "verbosity": manifest.verbosity,
-        "location_in_hunk_rate": manifest.location_in_hunk_rate,
-        "shipped_duplicate_pairs": manifest.shipped_duplicate_pairs,
+        "phase_states": json.dumps(manifest.phase_states) if manifest.phase_states is not None else None,
         "fix_quality_gate": json.dumps(manifest.fix_quality_gate)
         if manifest.fix_quality_gate is not None
         else None,
-        "recommended_patch_capture": manifest.recommended_patch_capture,
-        "total_prompt_tokens": manifest.total_prompt_tokens,
-        "total_completion_tokens": manifest.total_completion_tokens,
-        "total_cached_tokens": manifest.total_cached_tokens,
-        "outcome_labels": manifest.outcome_labels,
-        "labeled_at": manifest.labeled_at,
-        "composite_reward": manifest.composite_reward,
-        "archive_path": manifest.archive_path,
         "schema_version": SCHEMA_VERSION,
-        "profile_schema_version": manifest.profile_schema_version,
-        "profile_name": manifest.profile_name,
-        "profile_source_kind": manifest.profile_source_kind,
-        "profile_digest": manifest.profile_digest,
+    }
+    return {
+        col.name: overrides[col.name] if col.name in overrides else getattr(manifest, col.name)
+        for col in RUNS_COLUMNS
+        if col.upserted
     }
 
 
 def upsert_run(archive_dir: Path, manifest: Manifest) -> None:
-    """Insert or replace a run entry from a Manifest.
-
-    Bool fields (review_only, deep) are normalized to integers (0/1)
-    for SQLite storage. The bound parameter set is projected from the
-    ``upserted`` subset of the ``RUNS_COLUMNS`` declaration, so the statement,
-    its placeholders and its parameters cannot drift apart.
-    """
+    """Insert or replace a manifest using the schema declaration for columns and parameters."""
     values = _run_upsert_values(manifest)
     with _connection(archive_dir) as conn:
-        conn.execute(
-            _UPSERT_SQL,
-            {col.name: values[col.name] for col in RUNS_COLUMNS if col.upserted},
-        )
+        conn.execute(_UPSERT_SQL, values)
         conn.commit()
 
 
@@ -359,117 +205,32 @@ def append_label_observation(
     legacy: str = "auto",
     observed_at: str | None = None,
 ) -> bool:
-    """Append a row to the immutable ``label_observations`` history.
+    """Append an immutable observation and refresh the run cache in one transaction.
 
-    Writes a single ``(session_id, observed_at)`` row capturing the current
-    label decision plus the bitemporal valid time and reward breakdown, and in
-    the same transaction refreshes the denormalized
-    ``runs.outcome_labels`` / ``runs.labeled_at`` / ``runs.rubric_json`` /
-    ``runs.composite_reward`` / ``runs.has_posterior`` cache.
+    The session must exist. Timestamps must be aware ISO-8601; supplied
+    ``observed_at`` preserves source transaction time, otherwise use now.
+    ``valid_at`` is canonicalized and defaults to the observation time.
 
-    The cache is recomputed from the *winning* observation under the
-    precedence projection (human-first, then most recent) — **not** necessarily
-    the row just inserted. A newer automated append therefore cannot dethrone an
-    existing human label in the denormalized cache.
+    Automated rows dedupe against the latest auto row on
+    ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
+    has_posterior, reward_version)``. Missing digests remain distinct from
+    present values. Human rows bypass evidence dedupe. An identical row at the
+    same primary key is a no-op; distinct rows sharing a timestamp advance by
+    a microsecond. Return whether a row was inserted.
 
-    Args:
-        archive_dir: Path to the archive root.
-        session_id: Full session UUID — must already exist in ``runs``.
-        labels: List of label strings; serialised as a JSON array.
-        pr_state: One of ``open``/``merged``/``closed``/``reverted`` or
-            ``None`` when not applicable (e.g. local-branch runs).
-        labeler_version: Free-form version tag of the labeler that produced
-            this observation (e.g. ``2026.05.22`` for an automated rubric, or
-            ``human`` for a maintainer override).
-        evidence_sha: Optional commit SHA / artifact hash that grounds the
-            decision; ``None`` when no concrete evidence applies.
-        rubric_json: Optional JSON-serialised rubric (``Rubric.to_dict()``).
-        valid_at: ISO 8601 valid time — when the outcome the annotation
-            describes became true (e.g. a PR merge timestamp). Canonicalized
-            via :func:`canonical_utc_iso` before storage so the column
-            converges on one spelling regardless of the caller's (GitHub emits
-            ``Z``; the collapse path emits ``+00:00``). ``None`` for
-            non-PR/local runs, in which case it collapses to ``observed_at``
-            so an ``as_of``-pinned corpus never spuriously drops the run (Q2).
-        reward_version: Version tag of the reward reducer that produced
-            ``reward_json`` (``RewardBreakdown.reward_version``); ``None`` when
-            no reward was scored.
-        reward_json: Full ``RewardBreakdown.to_dict()`` serialised as JSON so a
-            corpus re-projection has every axis; ``None`` when unscored.
-        composite_reward: The cached composite reward scalar. Persisted on the
-            ``label_observations`` row (so each annotation generation is
-            self-describing) and mirrored onto ``runs.composite_reward`` for
-            SQL thresholding; ``None`` when uncomputable.
-        reviewer_logins: Human GitHub accounts whose review/reply outcomes
-            seeded the posterior axis. Serialised as a JSON array on the
-            ``label_observations`` row; ``None`` (stored as SQL ``NULL``) for
-            non-PR/local runs with no reviewer set.
-        has_posterior: Population discriminator. ``True`` when the row carries a
-            ``PosteriorBreakdown`` (a mapped PR-outcome label was scored).
-            Coerced to ``int`` and written to ``label_observations.has_posterior``
-            and mirrored onto ``runs.has_posterior`` so SQL consumers can split
-            labeled/unlabeled populations without parsing ``reward_json``.
-        reply_classifier_version: Version of the reply classifier that produced
-            the per-finding dispositions (version axis, M13); persisted on the
-            row so each annotation generation is self-describing.
-        reply_evidence_digest: Stable digest over the combined reply evidence
-            (versioned dedup input, M14); persisted and compared in the auto
-            dedup key so an edited reply appends a new generation.
-        labeler_policy_version: Versioned policy axis (M13); persisted on the
-            row and part of the auto dedup key so a policy bump appends a new
-            generation. ``None`` (the default, keeping pre-policy callers
-            unchanged) mirrors ``labeler_version`` into the policy column; the
-            ``STALE_LEGACY`` sentinel — the inventory marker for legacy-schema
-            source rows with no policy axis — is stored as SQL ``NULL`` with
-            the ``legacy`` marker stamped, the representation the corpus gold
-            gate (``labeler_policy_version IS NOT NULL``) already treats as
-            non-gold.
-        legacy: Legacy marker for the row — ``"auto"`` (the default) or
-            ``"legacy"`` (a row whose policy axis predates
-            ``label_observations`` versioning; never gold-eligible). Mirrors
-            the schema's legacy stamping so imported legacy rows persist the
-            same representation a migrated in-place row has.
-        source: Provenance of this observation — ``"auto"`` (automated rubric
-            labeler; the default that keeps existing harvest callers
-            unchanged) or ``"human"`` (operator override). Human-sourced rows
-            take precedence over automated ones in every projection regardless
-            of timing, which is why the cache is written from the winning row
-            rather than the inserted one.
+    The cache always reflects the human-first, then newest winner, so later
+    automation cannot replace a human override. ``has_posterior`` identifies
+    rows with a scored PR outcome; reviewer logins identify the human accounts
+    that supplied it. Missing reviewers/reward data remain NULL.
 
-    Returns:
-        ``True`` when a new observation row was inserted; ``False`` when the
-        append was a deduped no-op. Dedup is **auto-only**: an automated
-        (``source="auto"``) append matching the latest existing *auto*
-        observation for the session on the versioned evidence tuple
-        ``(evidence_sha, labeler_policy_version, reply_evidence_digest,
-        labels, has_posterior, reward_version)`` is
-        skipped without inserting and without touching the cache. A
-        policy-version bump, a reward-version bump, or an edited-reply digest
-        change on otherwise-identical evidence appends
-        a fresh generation. A ``None`` digest is not coerced to ``""`` — ``None``
-        never equals a present digest, so digest-less legacy callers dedupe on
-        the remaining tuple exactly as before (deliberate default). Human
-        (``source != "auto"``) appends are never deduped by the evidence
-        tuple; only a byte-identical row already occupying the same
-        ``(session_id, observed_at)`` primary key is a no-op re-import (so a
-        re-merged source never grows microsecond-shifted duplicates).
-
-        An explicit ``observed_at`` (aware ISO-8601) is preserved bitemporally
-        as the row's observation time instead of the wall clock; ``None``
-        keeps the existing now() behavior.
-
-    Raises:
-        ValueError: When ``session_id`` is not present in the ``runs`` table,
-            when ``valid_at`` is not a parseable aware ISO-8601 timestamp, or
-            when ``observed_at`` is set and is not a parseable aware ISO-8601
-            timestamp.
+    An omitted policy version inherits ``labeler_version``. ``STALE_LEGACY``
+    becomes NULL policy plus ``legacy='legacy'``, which excludes gold admission.
+    Malformed timestamps and unknown sessions raise ValueError.
     """
     if valid_at is not None:
         valid_at = canonical_utc_iso(valid_at)
     if observed_at is not None:
-        # Bitemporal preservation: an explicit data timestamp (e.g. imported
-        # from a surviving local archive) is stored in place of the wall clock.
-        # Fails closed on non-ISO-8601 or naive input before any write.
+        # Validate imported transaction time before any write.
         try:
             parsed = datetime.fromisoformat(observed_at)
         except ValueError:
@@ -483,14 +244,7 @@ def append_label_observation(
         observed_dt = parsed.astimezone(timezone.utc)
     else:
         observed_dt = datetime.now(timezone.utc)
-    # Policy axis resolution: versioned callers (the import merge) pass the
-    # source's labeler_policy_version verbatim; callers that predate the axis
-    # leave it None and the free-form labeler_version mirrors into the policy
-    # column (inherited behavior). The STALE_LEGACY sentinel — the inventory-
-    # time marker for a legacy-schema row with no policy axis — is stored as
-    # the canonical legacy representation: NULL policy + legacy='legacy', so
-    # the corpus gold gate (which rejects rows by labeler_policy_version IS
-    # NULL) can never admit a row the importer's version gate excluded.
+    # Legacy policy stays NULL so the gold gate cannot admit unknown provenance.
     if labeler_policy_version == STALE_LEGACY:
         labeler_policy_version = None
         legacy = "legacy"
@@ -507,18 +261,8 @@ def append_label_observation(
         if cursor.fetchone() is None:
             msg = f"Unknown session {session_id!r}"
             raise ValueError(msg)
-        # Idempotency: an automated re-score with identical evidence is a no-op.
-        # Compare against the latest *auto* row specifically so a human override
-        # appended in between cannot mask a genuine automated re-score.
-        #
-        # The dedup key is the versioned evidence tuple (M14):
-        # ``(evidence_sha, labeler_policy_version, reply_evidence_digest, labels,
-        # has_posterior, reward_version)``. A policy-version bump, a
-        # reward-version bump, or an edited-reply digest change therefore
-        # appends a new generation rather than deduping. A
-        # ``None`` digest is deliberately NOT coerced to ``""``: ``None`` never
-        # equals a present digest, so digest-less legacy callers dedupe on the
-        # remaining tuple exactly as before.
+        # Compare with the latest auto row; intervening human overrides cannot mask a
+        # re-score.
         if source == "auto":
             latest_auto = conn.execute(
                 "SELECT evidence_sha, labeler_policy_version, reply_evidence_digest, labels, has_posterior, "
@@ -569,12 +313,8 @@ def append_label_observation(
                 )
                 break
             except sqlite3.IntegrityError:
-                # Primary-key collision on (session_id, observed_at): a
-                # byte-identical row already occupying this exact stamp is a
-                # no-op re-import — the microsecond bump must never fabricate
-                # a duplicate generation for it (idempotent re-merge of a
-                # surviving source, human or auto). A genuinely distinct
-                # generation at the same stamp keeps the pre-existing bump.
+                # Identical re-imports retain their timestamp; only distinct generations
+                # advance it.
                 existing = conn.execute(
                     _SELECT_LABEL_OBSERVATION_ROW_SQL,
                     (session_id, observed_at),
@@ -582,10 +322,8 @@ def append_label_observation(
                 if existing is not None and tuple(existing) == row_body:
                     return False
                 observed_dt += timedelta(microseconds=1)
-        # Recompute the winning observation (human-first, then recency) so the
-        # denormalized runs cache mirrors the precedence projection — not
-        # necessarily the row just inserted (a newer auto must not dethrone a
-        # human label).
+        # Refresh from the human-first winner, which may differ from the newly inserted
+        # row.
         winner = conn.execute(
             f"SELECT labels, observed_at, rubric_json, composite_reward, has_posterior "
             f"FROM label_observations WHERE session_id = ? "
@@ -615,17 +353,9 @@ def latest_label_observation(
     *,
     as_of: str | None = None,
 ) -> dict[str, Any] | None:
-    """Return the highest-precedence (human-first, then most recent) label observation for ``session_id``.
+    """Return the human-first, then newest observation within the optional cutoff.
 
-    Human-sourced observations win over automated ones regardless of timing;
-    ties broken by recency. When ``as_of`` is provided, the result is the
-    highest-precedence observation whose ``observed_at <= as_of`` — enabling
-    reproducible corpus pinning.
-
-    Args:
-        as_of: Optional ISO 8601 cutoff timestamp in the canonical UTC
-            spelling (see :func:`normalize_as_of` — the entry boundary
-            normalizes once; this lexical cutoff assumes canonical input).
+    ``as_of`` must already have the canonical UTC spelling from ``normalize_as_of``.
     """
     cutoff = "AND observed_at <= ? " if as_of is not None else ""
     params: tuple[Any, ...] = (session_id,) if as_of is None else (session_id, as_of)
@@ -648,48 +378,20 @@ def reviewer_set_penalty_prior(
     repo_slug: str | None = None,
     readonly: bool = False,
 ) -> tuple[float | None, int]:
-    """Return the pooled mean penalty over prior runs sharing a reviewer (C4).
+    """Return (mean penalty, count) over prior sessions sharing a reviewer.
 
-    Pools ``label_observations`` rows whose ``reviewer_logins`` JSON intersects
-    *logins*, restricted to ``session_id != exclude_session`` and
-    ``valid_at < before_valid_at`` (strict). When *repo_slug* is provided the
-    pool is further restricted to rows whose parent ``runs.repo_slug`` matches —
-    preventing cross-repo reviewer history from inflating or deflating the prior
-    (C4 per-repo scoping). One outcome is taken per session (latest
-    ``observed_at``); its first label is mapped to a false-positive penalty via
-    ``FP_PENALTY_MAP`` (``accepted→0.0``, ``contested→0.5``,
-    ``rejected→1.0``). The raw pooled mean and count are returned — the ``>=10``
-    sufficiency threshold and the ``0.5`` default fallback are the caller's
-    responsibility.
-
-    Rows with malformed ``reviewer_logins`` / ``labels`` JSON are skipped with a
-    :func:`warnings.warn` so a single
-    bad row never crashes the aggregate.
-
-    Args:
-        logins: The current run's reviewer set. Empty → no pool.
-        before_valid_at: ISO 8601 strict upper bound on ``valid_at``.
-            Canonicalized via :func:`canonical_utc_iso` so the lexical ``<``
-            against the (uniformly canonical) stored column compares
-            chronologically regardless of the caller's spelling.
-        exclude_session: Session id to exclude (the current run).
-        repo_slug: When provided, restrict the pool to observations whose
-            parent run shares this ``repo_slug`` (joined via ``runs``).
-            ``None`` disables per-repo filtering (backward-compatible).
-
-    Returns:
-        ``(mean_penalty, count)`` over the pooled sessions, or ``(None, 0)``
-        when *logins* is empty or the pool is empty.
+    Exclude the current session and require ``valid_at < before_valid_at``
+    (canonicalized here). An optional repo slug confines the pool to that repo.
+    Use the latest observation per session and map its first label through
+    ``FP_PENALTY_MAP``. Malformed reviewer/label JSON warns and skips the row.
+    An empty pool returns ``(None, 0)``; callers own sufficiency and fallback.
     """
     if not logins:
         return None, 0
-    # Canonicalize the bound so the lexical < against the canonical stored
-    # column stays chronological regardless of the caller's spelling.
+    # Canonical spelling makes the SQL time cutoff chronological.
     before_valid_at = canonical_utc_iso(before_valid_at)
 
-    # Build an IN-list so SQLite's json_each() filters reviewer intersection
-    # inside the query, avoiding a full-table fetch followed by Python-side
-    # isdisjoint() for every archived row.
+    # Filter reviewer intersection in SQLite to avoid loading the full archive.
     placeholders = ",".join("?" * len(logins))
 
     p = "lo." if repo_slug is not None else ""
@@ -755,11 +457,7 @@ def reviewer_set_penalty_prior(
 
 
 def label_observation_history(archive_dir: Path, session_id: str) -> list[dict[str, Any]]:
-    """Return the full label history for ``session_id`` in chronological order.
-
-    Returns:
-        List of row dicts ordered by ``observed_at`` ascending.
-    """
+    """Return session label rows ordered by ``observed_at`` ascending."""
     with _connection(archive_dir) as conn:
         cursor = conn.execute(
             "SELECT * FROM label_observations WHERE session_id = ? ORDER BY observed_at ASC",
@@ -769,21 +467,10 @@ def label_observation_history(archive_dir: Path, session_id: str) -> list[dict[s
 
 
 def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool:
-    """Update outcome labels for a session, supporting prefix matching.
+    """Append a human override for an exact or uniquely prefixed session id.
 
-    Thin wrapper around :func:`append_label_observation` that records a
-    **human-sourced** observation (``source="human"``, ``labeler_version="human"``).
-    Human labels win over automated ones in every precedence projection and are
-    never deduped, so this is the authoritative override surface backing
-    ``daydream label``. The session_id can be a prefix (e.g. first 8 chars of
-    the UUID). If the prefix matches exactly one row, that row is updated. If it
-    matches multiple rows, a ValueError is raised asking for a longer prefix.
-
-    Returns:
-        True if a row was updated, False if no matching session was found.
-
-    Raises:
-        ValueError: If the prefix matches more than one session.
+    Return False if absent; raise ValueError for an ambiguous prefix. Human
+    observations retain precedence over automation and bypass evidence dedupe.
     """
     with _connection(archive_dir) as conn:
         cursor = conn.execute(
@@ -814,17 +501,9 @@ def update_labels(archive_dir: Path, session_id: str, labels: list[str]) -> bool
 
 
 def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo: str) -> None:
-    """Backfill the PR linkage columns on a run row.
+    """Backfill only PR linkage, leaving observations and caches untouched.
 
-    Used by harvest to durably record a PR resolved for an orphan run (a run
-    launched before its PR existed, so ``pr_number`` was frozen as ``None``).
-    Persisting the linkage keeps subsequent harvest passes from re-querying
-    GitHub for the same row and makes the resolution auditable.
-
-    This is a pure linkage backfill: it touches only the ``pr_number`` and
-    ``pr_repo`` columns on the ``runs`` table and never writes to
-    ``label_observations`` or any cache column. A zero-row match (no such
-    ``session_id``) is a silent no-op; the caller guarantees the row exists.
+    This retains a PR discovered after the run was frozen. Unknown sessions are a no-op.
     """
     with _connection(archive_dir) as conn:
         conn.execute(
@@ -835,13 +514,7 @@ def set_run_pr_link(archive_dir: Path, session_id: str, pr_number: int, pr_repo:
 
 
 def query_runs(archive_dir: Path, where: str = "", params: tuple[Any, ...] = ()) -> list[dict[str, Any]]:
-    """Query the runs index with an optional WHERE clause.
-
-    Args:
-        where: Optional SQL WHERE clause (without the ``WHERE`` keyword).
-            Example: ``"repo_slug = ? AND status = ?"``.
-        params: Parameter tuple to bind to the WHERE clause placeholders.
-    """
+    """Query runs using an optional SQL WHERE expression and its bound parameters."""
     with _connection(archive_dir) as conn:
         sql = "SELECT * FROM runs"
         if where:

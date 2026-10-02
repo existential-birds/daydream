@@ -30,9 +30,7 @@ from tests.fixtures.training.build_hub_snapshot import (
 )
 
 
-def test_full_annotation_pipeline_survives_vm_loss(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_full_annotation_pipeline_survives_vm_loss(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     hubs = build_publication_hubs()
     source = hubs.source
@@ -54,12 +52,10 @@ def test_full_annotation_pipeline_survives_vm_loss(
 
     # 2. semantic preview -> sessions.jsonl + preview manifest (snapshot id),
     #    read directly off the hydrated staging archive (no sessions.jsonl there)
-    pin = {
-        "curation_id": curation_id, "sanitized_hub_commit": hubs.source_revision,
+    pin = {"curation_id": curation_id, "sanitized_hub_commit": hubs.source_revision,
         "source_hub_commit": hubs.source_revision,
         "archive_index_digest": hashlib.sha256((stage / "index.db").read_bytes()).hexdigest(),
-        "evidence_observed_at": "2026-01-01T00:00:00+00:00",
-        "as_of": "2026-02-01T00:00:00+00:00",
+        "evidence_observed_at": "2026-01-01T00:00:00+00:00", "as_of": "2026-02-01T00:00:00+00:00",
         "labeler_version": "1055-human-r1", "rubric_version": "984-adjudicate-r1",
         "classifier_version": "980-classifier-r1",
     }
@@ -72,10 +68,8 @@ def test_full_annotation_pipeline_survives_vm_loss(
     #    the unresolved item remains — the automatic decisive findings are
     #    already adjudicated), label it, then publish the durable state.
     state = tmp_path / "state"
-    assert handle_adjudicate([
-        "build", "--index-root", str(mat), "--state-dir", str(state)]) == 0
-    assert handle_adjudicate([
-        "label", "--state-dir", str(state), "--batch", "1",
+    assert handle_adjudicate(["build", "--index-root", str(mat), "--state-dir", str(state)]) == 0
+    assert handle_adjudicate(["label", "--state-dir", str(state), "--batch", "1",
         "--disposition", "accepted", "--rationale", "clear maintainer approval",
         "--labeler", "alice"]) == 0
     run_preview(mat, state / "preview-ledger.json")
@@ -91,8 +85,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
 
     # 5. canonical harvest: drift-checked, appends label_observations exactly
     #    once per session into the hydrated stage's SQLite index
-    harvest = run_canonical_harvest(
-        index_root=stage, materialize_dir=mat, archive_dir=stage,
+    harvest = run_canonical_harvest(index_root=stage, materialize_dir=mat, archive_dir=stage,
         observations_path=fresh / "observations.jsonl")
     assert harvest["appended_sessions"] == 3
     assert harvest["human_adjudicated"] == 1
@@ -102,16 +95,13 @@ def test_full_annotation_pipeline_survives_vm_loss(
 
     # 6-7. final bundle: CLI only — build + dry-run + publish (the resumed
     # state dir is the observations source the coverage report's gate reads).
-    assert handle_adjudicate([
-        "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
+    assert handle_adjudicate(["publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
         "--archive-dir", str(stage), "--curation-bundle-dir", str(stage / "curated" / curation_id),
         "--state-dir", str(fresh),
         "--hub-repo", annotations.repo_id, "--dry-run"]) == 0
     assert handle_adjudicate([
-        "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat),
-        "--archive-dir", str(stage),
-        "--curation-bundle-dir", str(stage / "curated" / curation_id),
-        "--state-dir", str(fresh),
+        "publish-final", "--index-root", str(stage), "--materialize-dir", str(mat), "--archive-dir", str(stage),
+        "--curation-bundle-dir", str(stage / "curated" / curation_id), "--state-dir", str(fresh),
         "--hub-repo", annotations.repo_id]) == 0
     success_commit = annotations.commit_order[-1]
     assert len(success_commit["contains"]) == 1
@@ -121,8 +111,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
 
     # 7. A supported pinned download independently verifies the published tree.
     clean = tmp_path / "clean-download"
-    assert handle_adjudicate([
-        "download-final", "--hub-repo", annotations.repo_id,
+    assert handle_adjudicate(["download-final", "--hub-repo", annotations.repo_id,
         "--curation-id", curation_id, "--snapshot-id", success["final_snapshot_id"],
         "--revision", success_commit["sha"], "--destination", str(clean),
     ]) == 0
@@ -140,8 +129,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
         out_dir=tmp_path / "corpus-out", bundle_dir=stage / "curated" / curation_id,
         annotation_bundle_dir=clean, license_policy_path=policy_path))
     assert (tmp_path / "corpus-out" / "_SUCCESS").is_file()
-    records = [json.loads(line) for line in
-               (tmp_path / "corpus-out" / "corpus.jsonl").read_text().splitlines() if line]
+    records = [json.loads(line) for line in (tmp_path / "corpus-out" / "corpus.jsonl").read_text().splitlines() if line]
     assert summary["total"] == 3
     assert sorted(r["tier"] for r in records) == ["gold", "gold", "gold"]
     assert {r["session_id"] for r in records} == {"sess-a", "sess-b", "sess-c"}
@@ -150,8 +138,7 @@ def test_full_annotation_pipeline_survives_vm_loss(
     # annotation rows are build_canonical_record output with the profile
     # nested under "profile", not flat profile_* keys.
     for record in records:
-        assert record["profile"] == {
-            "profile_schema_version": 2, "profile_name": "pr_review",
+        assert record["profile"] == {"profile_schema_version": 2, "profile_name": "pr_review",
             "profile_source_kind": "builtin", "profile_digest": "d" * 64,
         }
         assert record["stack"] == "python"

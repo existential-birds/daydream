@@ -11,3 +11,8 @@ def parse_iso_timestamp(value: str) -> datetime:
 def now_iso_utc() -> str:
     """Return the current UTC time as a second-precision ISO-8601 ``Z`` string."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def now_iso() -> str:
+    """Return current UTC time with microsecond precision and a trailing Z."""
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds").removesuffix("+00:00") + "Z"

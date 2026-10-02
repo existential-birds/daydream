@@ -1,38 +1,10 @@
-"""Per-profile latency/recall comparison and lens-to-shipped attribution (issue #732).
+"""Compare latency, recall, and shipped-lens contributions over a fixed corpus.
 
-The MH13 report is a *comparison*, not a scoreboard: it reads a small, fixed,
-hand-built corpus (:mod:`tests.fixtures.latency_profiles`) and states what each
-latency profile cost and found on exactly those inputs. It makes no statistical
-claim beyond the corpus, and the command it documents
-(``uv run python -m daydream.eval.latency_report --corpus .../manifest.json``)
-is the sole consumer of the corpus.
-
-Two attribution rules are deliberately kept apart from
-``analyze_findings.per_lens``, which stays *raw pre-merge* attribution:
-
-* ``shipped_by_lens`` counts the ``lens`` field the merge schema *requires* on
-  every shipped item (A7), so a wonder-routing change is evaluated against what
-  wonder actually contributed to the posted review.
-* ``citations`` counts the corroborating ``(Sources: ...)`` prose separately and
-  reports its coverage rate; a shipped item with no parseable citation is still
-  attributed by ``lens`` and is never silently folded into another lens.
-
-Every percentage is reported over the runs that exist. A profile with no runs
-reports zeroed metrics rather than extrapolating from another profile.
-
-A case may additionally declare ``sample_group`` (``cold`` or ``warm``); the
-report then emits a ``review_runtime`` block that keeps a cold fix and a warm
-reuse loop apart, using the same nearest-rank percentiles (MH14). A case with no
-``sample_group`` reports as ``ungrouped`` and is otherwise rendered as before.
-
-A manifest may also declare ``selection_cases``; the report then emits a
-``verify_selection`` block comparing today's conservative verifier against the
-optimised selective mode over exactly those cases. The block's ``proposed`` arm
-carries a *projected* latency derived from the selected-item ratio, never a
-second measured arm, so the single-arm corpus is labelled rather than passed off
-as a paired measurement. The report still makes no statistical claim beyond the
-corpus: it states the observed subset and its coverage.
-"""
+Report only observed runs, with zeroed missing profiles and no population-level
+claims. Shipped attribution uses required lens fields; citation coverage is a
+separate measure from raw pre-merge attribution. Cold/warm/ungrouped samples use
+nearest-rank percentiles. Optional verifier-selection reports label item-ratio
+latency projections separately from the archived measured arm."""
 
 from __future__ import annotations
 
@@ -67,39 +39,16 @@ _PHASE_TIMING_KEYS: dict[str, tuple[str, ...]] = {
     "arbiter": ("deep", "arbiter"),
     "verify": ("verify",),
 }
-"""Report phase -> the ``timing.phase_timings`` keys that measure it, in order.
+# Arbiter work is recorded under DEEP, which also includes other deep brackets.
+# Keep the old arbiter timing key as a fallback for historical hand-built corpora.
+# Verify timings belong only to the selection comparison.
 
-``compute_timing_summary`` keys ``phase_timings`` by the ``DaydreamPhase``
-value only, and every arbiter call runs inside ``phase_scope(DaydreamPhase.DEEP,
-stage="arbiter")`` -- there is no ``ARBITER`` phase member, so real runs carry
-the arbiter wall-clock under ``deep``, never ``arbiter``. The ``deep`` bucket
-aggregates all deep-phase brackets (arbiter, suppression, supervision, review,
-uncovered sweep), so the report's ``arbiter`` latency is that shared aggregate.
-The legacy ``arbiter`` key is kept only as a fallback for hand-authored corpora
-that predate the pipeline keying, so the committed fixtures still report their
-arbiter bucket instead of silently collapsing to an empty sample.
-
-The ``verify`` entry reads the archived recommendation-verifier wall-clock for
-the ``verify_selection`` comparison; it is not part of the per-profile block.
-"""
 
 _PROFILE_PHASE_TIMING_KEYS: tuple[str, ...] = ("wonder", "arbiter")
-"""The phases the per-profile ``phase_latency_seconds`` block reports.
-
-Kept apart from :data:`_PHASE_TIMING_KEYS` so adding a verify timing for the
-selection block leaves the existing per-profile output byte-identical.
-"""
 
 
 def attribute_shipped_lens(items: Iterable[Any]) -> dict[str, Any]:
-    """Attribute shipped items to their ``lens`` and report citation coverage.
-
-    ``by_lens`` counts the schema-required ``lens`` field; an unknown or missing
-    lens counts under no lens key and is reported as ``unattributed`` -- it is
-    never silently folded into ``per-stack``. ``citations_present`` counts items
-    whose ``rationale`` carries a parseable ``(Sources: ...)`` citation, and
-    ``citation_coverage`` is that fraction over every item considered.
-    """
+    """Count shipped lens attribution and independent citation coverage; retain unknown lenses as unattributed."""
     by_lens = dict.fromkeys(_LENSES, 0)
     citations_present = 0
     unattributed = 0
@@ -126,16 +75,16 @@ def attribute_shipped_lens(items: Iterable[Any]) -> dict[str, Any]:
 
 
 def _percentile(samples: Sequence[float], quantile: float) -> float:
-    """Nearest-rank percentile (no interpolation) over a sample list.
-
-    The rank is ``ceil(q * n)`` in 1-based terms, so the result is always an
-    observed sample: deterministic and independent of interpolation choices.
-    """
+    """Return a rounded nearest-rank observed sample, or zero for an empty series."""
     if not samples:
         return 0.0
     ordered = sorted(samples)
     index = max(0, min(len(ordered) - 1, math.ceil(quantile * len(ordered)) - 1))
     return round(float(ordered[index]), 4)
+
+
+def _percentiles(samples: Sequence[float]) -> dict[str, float]:
+    return {"p50": _percentile(samples, 0.5), "p90": _percentile(samples, 0.9)}
 
 
 def _resolve_corpus_dir(manifest: Mapping[str, Any], corpus_dir: Path | None) -> Path:
@@ -191,8 +140,8 @@ def _phase_timings(evaluation: Mapping[str, Any]) -> dict[str, float | None]:
         for key in keys:
             bucket = phase_timings.get(key)
             seconds = bucket.get("wall_clock_seconds") if isinstance(bucket, Mapping) else None
-            if isinstance(seconds, (int, float)) and not isinstance(seconds, bool):
-                result[phase] = float(seconds)
+            if (parsed := _seconds(seconds)) is not None:
+                result[phase] = parsed
                 break
     return result
 
@@ -218,15 +167,9 @@ def _seconds_text(value: float) -> str:
 def _case_sample_series(
     case: Mapping[str, Any], root: Path
 ) -> tuple[dict[str, list[float]], list[dict[str, str]]]:
-    """Named elapsed-second series for one corpus case, plus any skipped files.
+    """Load named elapsed-time series from inline profiles or archived evaluations.
 
-    A case may declare ``profiles`` as an inline mapping of series name to the
-    seconds observed for that series, or as the list of latency profiles whose
-    ``evaluation.json`` run directories hold the measurements. Inline samples are
-    the unit-test path; run directories are the committed-corpus path. A run file
-    that cannot be read is reported with its path and reason instead of being
-    silently dropped.
-    """
+    Report unreadable run files with their paths/reasons rather than silently dropping them."""
     declared = case.get("profiles")
     series: dict[str, list[float]] = {}
     skipped: list[dict[str, str]] = []
@@ -257,16 +200,10 @@ def _case_sample_series(
 def _runtime_report(
     manifest: Mapping[str, Any], cases: Sequence[Mapping[str, Any]], root: Path
 ) -> dict[str, Any]:
-    """Group the corpus's measured samples by ``sample_group`` (MH14).
+    """Group measured samples by declared sample_group, defaulting to ungrouped.
 
-    A case without ``sample_group`` is ungrouped; a group is only reported when
-    at least one of its cases carried samples. Percentiles reuse the module's
-    nearest-rank helper, so the cold/warm report and the per-profile report agree
-    by construction. The header names the corpus, the observed sample size per
-    group, and the stated target, so the report stands without the docs.
-    """
+    Omit empty groups; report observed case counts and shared nearest-rank percentiles."""
     groups: dict[str, dict[str, Any]] = {}
-    order: list[str] = []
     skipped: list[dict[str, str]] = []
     for case in cases:
         group = case.get("sample_group")
@@ -277,7 +214,6 @@ def _runtime_report(
             continue
         if group_name not in groups:
             groups[group_name] = {"n": 0, "profiles": {}}
-            order.append(group_name)
         bucket = groups[group_name]
         bucket["n"] += 1
         for name, values in series.items():
@@ -286,10 +222,9 @@ def _runtime_report(
     corpus = manifest.get("corpus", "latency-profiles")
     rendered: dict[str, Any] = {}
     lines = [f"Review runtime corpus: {corpus}", _RUNTIME_TARGET]
-    for group_name in order:
-        bucket = groups[group_name]
+    for group_name, bucket in groups.items():
         profiles = {
-            name: {"p50": _percentile(values, 0.5), "p90": _percentile(values, 0.9)}
+            name: _percentiles(values)
             for name, values in bucket["profiles"].items()
         }
         rendered[group_name] = {"n": bucket["n"], "profiles": profiles}
@@ -312,13 +247,7 @@ def _runtime_report(
 
 
 def _contested_outcomes(routing: Mapping[str, Any], items: Sequence[Any]) -> tuple[int, int]:
-    """Kept/dropped counts for groups the routing record names as contested.
-
-    A group's ``reason`` names its forcing signal; a group whose reason contains
-    ``contested`` carries contested targets. A contested target uid counts as
-    ``kept`` when a shipped item names it in ``source_uids`` and as ``dropped``
-    when none does. "Contested" is read from the record, never re-derived.
-    """
+    """Count routed contested UIDs as kept only when a shipped source_uids list names them."""
     arbiter = routing.get("arbiter")
     groups = arbiter.get("groups") if isinstance(arbiter, Mapping) else None
     if not isinstance(groups, list):
@@ -461,10 +390,7 @@ def _selection_mode_report(
         "high_severity_recall": recall,
         "contradictory_fixes": counts["contradictory_fixes"],
         "reverted_and_failed_fixes": counts["reverted_and_failed_fixes"],
-        "latency_seconds": {
-            "p50": _percentile(samples, 0.5),
-            "p90": _percentile(samples, 0.9),
-        },
+        "latency_seconds": _percentiles(samples),
     }
     report["latency_seconds_projected"] = projected
     if projected:
@@ -473,16 +399,10 @@ def _selection_mode_report(
 
 
 def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str, Any]:
-    """Build the MH16 ``verify_selection`` comparison over the declared cases.
+    """Compare conservative and selective verification over the same archived cases.
 
-    Two modes run the same predicate over the same archived cases: ``current``
-    is today's conservative ``verify_all`` behaviour, ``proposed`` the selective
-    mode. ``current`` reports the archived measured verify latency; ``proposed``
-    scales those same measured samples by the selected-item ratio and labels the
-    result projected, because the corpus holds one arm only. ``flip_allowed`` is
-    gated on the contradiction counter and the recall anchor alone -- latency is
-    reported, never gated.
-    """
+    Current latency is measured; proposed latency is projected by selected-item ratio.
+    Only contradictions and recall gate flip_allowed, never projected latency."""
     current = _empty_mode_counts()
     proposed = _empty_mode_counts()
     case_names: list[str] = []
@@ -569,12 +489,7 @@ def _selection_block(cases: Sequence[Mapping[str, Any]], root: Path) -> dict[str
 def build_report(
     manifest: Mapping[str, Any], *, corpus_dir: Path | None = None
 ) -> dict[str, Any]:
-    """Aggregate the committed corpus into the per-profile comparison report.
-
-    ``corpus_dir`` overrides the manifest's ``corpus_dir``; this is how
-    :func:`main` resolves run directories relative to the manifest it loaded
-    rather than relative to the repository root.
-    """
+    """Aggregate corpus profiles; an explicit corpus_dir overrides the manifest-relative root."""
     if not isinstance(manifest, Mapping):
         raise ValueError("corpus manifest must be a JSON object")
     root = _resolve_corpus_dir(manifest, corpus_dir)
@@ -650,7 +565,7 @@ def build_report(
     for profile in LATENCY_PROFILES:
         runs = len(decisions[profile])
         phase_latency = {
-            phase: {"p50": _percentile(samples[profile][phase], 0.5), "p90": _percentile(samples[profile][phase], 0.9)}
+            phase: _percentiles(samples[profile][phase])
             for phase in _PROFILE_PHASE_TIMING_KEYS
         }
         recall = (

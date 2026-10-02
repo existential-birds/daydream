@@ -1,15 +1,7 @@
-"""Real git fixture repositories for the grounded-diagram tests (issue #1113).
+"""Real Git repositories and grounded specs shared by both diagram flows.
 
-Six shapes, each built to satisfy (or deliberately miss) one deterministic
-eligibility rule, plus the canonical grounded specs that go with them. Shared by
-``tests/test_deep_diagram_integration.py`` (the review paths) and
-``tests/test_diagram_only_integration.py`` (the ``--diagram-only`` flow), which
-need identical repositories to make their assertions comparable.
-
-Every path, line number and symbol in the specs below is real: the grounding
-pass reads the head tree, so a spec that drifts from the fixture stops being a
-"grounded spec" fixture and silently becomes an omission fixture.
-"""
+Cited paths, lines and symbols must match the head tree: fixture drift would
+turn a grounded case into an omission case."""
 
 from __future__ import annotations
 
@@ -54,12 +46,8 @@ def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path
     (repo / "pkg_b").mkdir(parents=True)
     (repo / "pkg_a" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "pkg_b" / "__init__.py").write_text("", encoding="utf-8")
-    (repo / "pkg_a" / "core.py").write_text(
-        "def handle(payload):\n    return payload\n", encoding="utf-8"
-    )
-    (repo / "pkg_a" / "util.py").write_text(
-        "def normalize(text):\n    return text\n", encoding="utf-8"
-    )
+    (repo / "pkg_a" / "core.py").write_text("def handle(payload):\n    return payload\n", encoding="utf-8")
+    (repo / "pkg_a" / "util.py").write_text("def normalize(text):\n    return text\n", encoding="utf-8")
     (repo / "pkg_b" / "client.py").write_text(
         "from pkg_a.core import handle\n\n\ndef call_handle(payload):\n"
         "    return handle(payload)\n",
@@ -67,20 +55,14 @@ def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path
     )
     _branch_off_main(repo)
     (repo / "pkg_a" / "core.py").write_text(CORE_PY, encoding="utf-8")
-    (repo / "pkg_a" / "util.py").write_text(
-        "def normalize(text):\n    return text.strip()\n", encoding="utf-8"
-    )
+    (repo / "pkg_a" / "util.py").write_text("def normalize(text):\n    return text.strip()\n", encoding="utf-8")
     (repo / "pkg_b" / "client.py").write_text(client_body, encoding="utf-8")
     return _finish(repo)
 
 
 def build_cross_module_repo(root: Path) -> Path:
-    """Two packages, three changed code files, one cross-module import edge.
-
-    Satisfies the sequence diagram's cross-module rule (>= 3 code files, >= 2
-    modules, >= 1 import edge crossing modules) and deliberately misses the
-    flowchart rule: no changed function gains a single branch point.
-    """
+    """Sequence-eligible: three changed files, two modules and one crossing import.
+    No changed function gains a branch point, so flowcharts stay ineligible."""
     return _build_cross_module_variant(root, "cross_module", CLIENT_PY)
 
 
@@ -99,38 +81,18 @@ def _large_client_body(marker: str, lines: int) -> str:
     """``pkg_b/client.py``: imports ``handle`` from ``pkg_a.core`` (the edge)."""
     body = [f"# pkg_b/client.py {marker} line {i:03d}" for i in range(lines - 2)]
     return (
-        "\n".join(
-            [
-                "from pkg_a.core import handle",
-                *body,
-                "def call_handle(payload):",
-                "    return handle(payload)",
-            ]
-        )
+        "\n".join(["from pkg_a.core import handle", *body, "def call_handle(payload):", "    return handle(payload)"])
         + "\n"
     )
 
 
-def build_large_cross_module_repo(
-    root: Path, *, modules: int = 220, lines: int = 110
-) -> Path:
-    """A cross-module fixture far beyond the advisory-input budget.
+def build_large_cross_module_repo(root: Path, *, modules: int = 220, lines: int = 110) -> Path:
+    """Exceed the advisory-input byte budget with a deterministic cross-module diff.
 
-    Same ``init_repo`` / commit / ``checkout -b feature`` sequence as
-    :func:`build_cross_module_repo`, but generated instead of literal: the
-    initial tree has ``modules // 2`` files under ``pkg_a/`` (including
-    ``core.py`` with a ``handle`` function) and the rest under ``pkg_b/``
-    (including ``client.py``, which imports ``handle`` so one cross-module edge
-    exists), each ``lines`` long. The feature commit rewrites every file, so the
-    whole ``modules x lines`` diff is changed and total diff bytes exceed
-    ``SANCTIONED_EXACT_INPUT_FILE_MAX_BYTES``.
-
-    Contents depend only on the generated module name, the version marker and
-    ``lines`` -- never on *root* -- so byte assertions are deterministic. It
-    deliberately does not reproduce the canonical ``build_cross_module_repo``
-    paths' grounding targets: callers assert on status/omission/advisory facts,
-    not on a rendered mermaid.
-    """
+    Split modules between pkg_a and pkg_b, including core.handle and a client
+    import edge, and rewrite every file on the feature branch. Contents depend
+    only on module, version marker and lines, never root. Citations differ from
+    the canonical fixture; use this for budget/status assertions, not rendering."""
     repo = root / "large_cross_module"
     pkg_a_count = modules // 2
     pkg_b_count = modules - pkg_a_count
@@ -139,15 +101,13 @@ def build_large_cross_module_repo(
 
     def _write(marker: str) -> None:
         for name in pkg_a_names:
-            body = (
-                _large_core_body(marker, lines)
+            body = (_large_core_body(marker, lines)
                 if name == "core.py"
                 else _large_module_body(f"pkg_a/{name}", marker, lines)
             )
             (repo / "pkg_a" / name).write_text(body, encoding="utf-8")
         for name in pkg_b_names:
-            body = (
-                _large_client_body(marker, lines)
+            body = (_large_client_body(marker, lines)
                 if name == "client.py"
                 else _large_module_body(f"pkg_b/{name}", marker, lines)
             )
@@ -162,16 +122,11 @@ def build_large_cross_module_repo(
 
 
 def build_branch_heavy_repo(root: Path) -> Path:
-    """One module, one changed function gaining four branch points.
-
-    Satisfies the flowchart rule and misses the sequence rules (one code file,
-    one module, no service, no import edge).
-    """
+    """Four new branch points satisfy flowchart eligibility. One code file and
+    module without service/import edges keep sequence diagrams ineligible."""
     repo = root / "branch_heavy"
     (repo / "app").mkdir(parents=True)
-    (repo / "app" / "pipeline.py").write_text(
-        "def run(payload):\n    return payload\n", encoding="utf-8"
-    )
+    (repo / "app" / "pipeline.py").write_text("def run(payload):\n    return payload\n", encoding="utf-8")
     (repo / "README.md").write_text("# app\n", encoding="utf-8")
     _branch_off_main(repo)
     (repo / "app" / "pipeline.py").write_text(PIPELINE_PY, encoding="utf-8")
@@ -179,38 +134,23 @@ def build_branch_heavy_repo(root: Path) -> Path:
 
 
 def build_both_signals_repo(root: Path) -> Path:
-    """Cross-module AND branch-heavy: both kinds are eligible in one run.
+    """Combine cross-module imports and PIPELINE_PY for both diagram kinds.
 
-    Same three files and the same import edge as the cross-module fixture, with
-    the branch-heavy ``run`` function (:data:`PIPELINE_PY`) added to
-    ``pkg_b/client.py`` so a single run exercises the two-kind fan-out. Offset
-    by ``CLIENT_PY`` plus the two-newline join, ``run`` starts on line 11 with
-    branch statements on lines 12, 14, 16 and 17; ``fast_path`` is defined on
-    line 22.
-    """
+    After the CLIENT_PY prefix and two newlines, run starts at line 11, its branch
+    points are 12/14/16/17, and fast_path starts at line 22."""
     return _build_cross_module_variant(root, "both_signals", CLIENT_PY + "\n\n" + PIPELINE_PY)
 
 
 def build_cross_service_repo(root: Path) -> Path:
-    """Monorepo with two manifest-bearing service roots, one changed file each.
-
-    No import edge between them, so only the cross-service rule can fire --
-    which is the point: HTTP and queue boundaries are invisible to the import
-    graph.
-    """
+    """Two changed services with manifests but no import edge: only the
+    cross-service rule can detect this boundary."""
     repo = root / "cross_service"
     for service in ("alpha", "beta"):
         service_root = repo / "services" / service
         service_root.mkdir(parents=True)
-        (service_root / "pyproject.toml").write_text(
-            f'[project]\nname = "{service}"\n', encoding="utf-8"
-        )
-        (service_root / "api.py").write_text(
-            f'def endpoint():\n    return "{service}"\n', encoding="utf-8"
-        )
-    (repo / "pyproject.toml").write_text(
-        '[project]\nname = "cross-service"\n', encoding="utf-8"
-    )
+        (service_root / "pyproject.toml").write_text(f'[project]\nname = "{service}"\n', encoding="utf-8")
+        (service_root / "api.py").write_text(f'def endpoint():\n    return "{service}"\n', encoding="utf-8")
+    (repo / "pyproject.toml").write_text('[project]\nname = "cross-service"\n', encoding="utf-8")
     _branch_off_main(repo)
     for service in ("alpha", "beta"):
         (repo / "services" / service / "api.py").write_text(
@@ -220,11 +160,7 @@ def build_cross_service_repo(root: Path) -> Path:
 
 
 def build_flat_repo(root: Path) -> Path:
-    """Two files, one module, zero branch points: no kind is eligible.
-
-    The below-threshold fixture -- the diagram step must record its signals and
-    make no backend call at all.
-    """
+    """Two files in one module with no branches: record signals without calling a backend."""
     repo = root / "flat"
     (repo / "app").mkdir(parents=True)
     (repo / "app" / "one.py").write_text("VALUE = 1\n", encoding="utf-8")
@@ -290,108 +226,49 @@ def _participant(name: str, files: list[str], *, service: str | None = None) -> 
     return {"name": name, "kind": "internal", "files": files, "service": service}
 
 
-def _message(
-    frm: str,
-    to: str,
-    label: str,
-    kind: str,
-    *,
-    file: str,
-    line: int,
-    symbol: str,
-) -> dict[str, Any]:
-    return {
-        "from": frm,
-        "to": to,
-        "label": label,
-        "kind": kind,
-        "changed": True,
+def _message(frm: str, to: str, label: str, kind: str, *, file: str, line: int, symbol: str,) -> dict[str, Any]:
+    return {"from": frm, "to": to, "label": label, "kind": kind, "changed": True,
         "evidence": {"file": file, "line": line, "symbol": symbol},
     }
 
 
 def sequence_spec() -> dict[str, Any]:
-    """A fully grounded sequence spec for the cross-module fixture.
-
-    Five messages across three participants: two calls out of
-    ``pkg_b/client.py``, their adjacent replies, and one self-call inside
-    ``pkg_a/core.py``. Each reply cites its enclosing function's return line
-    and immediately follows the reversed call, as required by the sequence
-    grounding contract. Five (not the floor's three) so a test that withholds
-    the reads for ``pkg_b/client.py`` still leaves a renderable diagram behind,
-    making a PARTIAL prune observable.
-    """
-    return {
-        "participants": [
-            _participant("Client", ["pkg_b/client.py"]),
-            _participant("Core", ["pkg_a/core.py"]),
+    """Five messages across three participants, with each reply citing its
+    function return and immediately following the reversed call. Five messages
+    leave a renderable partial diagram when client.py reads are withheld."""
+    return {"participants": [_participant("Client", ["pkg_b/client.py"]), _participant("Core", ["pkg_a/core.py"]),
             _participant("Util", ["pkg_a/util.py"]),
         ],
-        "messages": [
+        "messages": [_message(
+                "Client", "Util", "Normalize payload", "call", file="pkg_b/client.py", line=6, symbol="normalize",
+            ), _message("Util", "Client", "Stripped text", "reply", file="pkg_a/util.py", line=2, symbol="normalize",),
             _message(
-                "Client", "Util", "Normalize payload", "call",
-                file="pkg_b/client.py", line=6, symbol="normalize",
-            ),
-            _message(
-                "Util", "Client", "Stripped text", "reply",
-                file="pkg_a/util.py", line=2, symbol="normalize",
-            ),
-            _message(
-                "Client", "Core", "Handle cleaned payload", "call",
-                file="pkg_b/client.py", line=7, symbol="handle",
-            ),
-            _message(
-                "Core", "Client", "Cleaned payload", "reply",
-                file="pkg_a/core.py", line=3, symbol="handle",
-            ),
-            _message(
-                "Core", "Core", "Normalize inside handler", "self",
+                "Client", "Core", "Handle cleaned payload", "call", file="pkg_b/client.py", line=7, symbol="handle",
+            ), _message("Core", "Client", "Cleaned payload", "reply", file="pkg_a/core.py", line=3, symbol="handle",),
+            _message("Core", "Core", "Normalize inside handler", "self",
                 file="pkg_a/core.py", line=2, symbol="normalize_payload",
             ),
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }
 
 
 def flowchart_spec(*, root_file: str = "app/pipeline.py", offset: int = 0) -> dict[str, Any]:
-    """A fully grounded flowchart spec for the branch-heavy fixture.
-
-    Seven nodes rooted at ``run``: start, two decisions, one subroutine call to
-    ``fast_path``, one process, and two terminal returns.
-
-    Args:
-        root_file: The file holding ``run``.
-        offset: Line offset to add to every citation, so the both-signals
-            fixture (where ``run`` starts on line 11 rather than line 1) reuses
-            the same shape.
-    """
+    """Seven nodes rooted at run, with decisions, fast_path and terminal returns.
+    Apply offset to all root_file citations so the combined fixture reuses the shape."""
 
     def _node(node_id: str, kind: str, label: str, line: int, symbol: str | None) -> dict[str, Any]:
-        return {
-            "id": node_id,
-            "kind": kind,
-            "label": label,
+        return {"id": node_id, "kind": kind, "label": label,
             "evidence": {"file": root_file, "line": line + offset, "symbol": symbol},
         }
 
-    return {
-        "root": {"file": root_file, "name": "run", "line": 1 + offset},
-        "nodes": [
-            _node("start", "start", "run", 1, "run"),
-            _node("d1", "decision", "payload is None?", 2, None),
-            _node("e1", "end", "Return empty", 3, None),
-            _node("d2", "decision", "fast mode?", 4, None),
-            _node("s1", "subroutine", "fast_path", 5, "fast_path"),
-            _node("p1", "process", "Scan items", 6, None),
+    return {"root": {"file": root_file, "name": "run", "line": 1 + offset},
+        "nodes": [_node("start", "start", "run", 1, "run"), _node("d1", "decision", "payload is None?", 2, None),
+            _node("e1", "end", "Return empty", 3, None), _node("d2", "decision", "fast mode?", 4, None),
+            _node("s1", "subroutine", "fast_path", 5, "fast_path"), _node("p1", "process", "Scan items", 6, None),
             _node("e2", "end", "Return none", 9, None),
-        ],
-        "edges": [
-            {"from": "start", "to": "d1", "label": None},
-            {"from": "d1", "to": "e1", "label": "yes"},
-            {"from": "d1", "to": "d2", "label": "no"},
-            {"from": "d2", "to": "s1", "label": "yes"},
-            {"from": "d2", "to": "p1", "label": "no"},
-            {"from": "s1", "to": "e2", "label": None},
+        ], "edges": [{"from": "start", "to": "d1", "label": None}, {"from": "d1", "to": "e1", "label": "yes"},
+            {"from": "d1", "to": "d2", "label": "no"}, {"from": "d2", "to": "s1", "label": "yes"},
+            {"from": "d2", "to": "p1", "label": "no"}, {"from": "s1", "to": "e2", "label": None},
             {"from": "p1", "to": "e2", "label": None},
         ],
     }
@@ -399,24 +276,16 @@ def flowchart_spec(*, root_file: str = "app/pipeline.py", offset: int = 0) -> di
 
 def cross_service_sequence_spec() -> dict[str, Any]:
     """A three-message sequence spec for the cross-service fixture."""
-    return {
-        "participants": [
-            _participant("Alpha", ["services/alpha/api.py"], service="alpha"),
+    return {"participants": [_participant("Alpha", ["services/alpha/api.py"], service="alpha"),
             _participant("Beta", ["services/beta/api.py"], service="beta"),
-        ],
-        "messages": [
-            _message(
-                "Alpha", "Alpha", "Call alpha endpoint", "call",
+        ], "messages": [_message("Alpha", "Alpha", "Call alpha endpoint", "call",
                 file="services/alpha/api.py", line=1, symbol="endpoint",
             ),
             _message(
-                "Alpha", "Alpha", "Return alpha body", "reply",
-                file="services/alpha/api.py", line=2, symbol="endpoint",
+                "Alpha", "Alpha", "Return alpha body", "reply", file="services/alpha/api.py", line=2, symbol="endpoint",
             ),
             _message(
-                "Beta", "Beta", "Serve beta endpoint", "self",
-                file="services/beta/api.py", line=1, symbol="endpoint",
+                "Beta", "Beta", "Serve beta endpoint", "self", file="services/beta/api.py", line=1, symbol="endpoint",
             ),
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }

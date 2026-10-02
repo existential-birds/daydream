@@ -81,15 +81,9 @@ def load_license_policy(path: str | Path) -> tuple[LicensePolicy, str]:
 
 
 def normalize_repo_slug(raw: str) -> str:
-    """Normalize a producer-authored repo slug to canonical ``owner/repo``.
+    """Canonicalize producer URLs, .git suffixes, and whitespace to owner/repo.
 
-    Manifest ``repo_slug`` fields are producer-authored data; the C5 exclusion
-    and C8 copyleft lists are canonical ``owner/repo``. A stamped clone URL
-    ('https://github.com/owner/repo'), a '.git'-suffixed slug, or padded
-    whitespace must reduce to the canonical spelling so the fail-closed gates
-    cannot be bypassed by spelling. Returns ``''`` when the input does not
-    reduce to an ``owner/repo`` shape (never a false C5/C8 match, and treated
-    as missing identity by the caller).
+    Return an empty string for invalid shapes so spelling cannot bypass C5/C8 gates.
     """
     slug = raw.strip()
     if "://" in slug:
@@ -117,21 +111,10 @@ def resolve_repo_decision(
     policy: LicensePolicy,
     allow_copyleft: frozenset[str] | set[str],
 ) -> RepoDecision:
-    """Resolve the immutable license decision for one repo. Pure function of
-    its inputs (determinism constraint) — the only I/O is the C5 exclusion
-    list, which is static repo data.
+    """Resolve a deterministic license decision under canonical owner/repo identity.
 
-    The decision identity is the canonical ``owner/repo`` spelling of the
-    producer-authored slug (see :func:`normalize_repo_slug`), so a manifest
-    that stamps the clone URL, a '.git' suffix, or padded whitespace cannot
-    bypass C5/C8 by spelling, and the stamped identity is never a raw URL.
-
-    Precedence:
-    1. C5 exclusion list -> ``c5_excluded_repo`` unconditionally (no override).
-    2. Missing/blank/non-canonical repo slug -> ``repo_identity_missing``.
-    3. Missing/unknown evidence -> ``license_evidence_missing``.
-    4. SPDX rejected and slug not opted in -> ``c8_copyleft_unopted``.
-    5. Otherwise admitted.
+    Precedence: C5 exclusion (no override), missing identity, missing/unknown
+    evidence, unopted rejected SPDX, admission. The static C5 list is the only I/O.
     """
     evidence_ref = str(evidence.get("source", "")) if isinstance(evidence, dict) else ""
 

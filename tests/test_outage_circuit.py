@@ -1,9 +1,6 @@
-"""Unit tests for the run-scoped outage circuit state machine.
+"""Drive the pure outage state machine with explicit clock values.
 
-The circuit is pure and caller-clocked: every observation takes an explicit
-``now``, so these tests drive it with raw floats and never touch a real clock.
-The real-path coordination test lives in ``tests/test_agent_budget.py``.
-"""
+Real-path coordination lives in test_agent_budget.py."""
 
 from __future__ import annotations
 
@@ -12,12 +9,10 @@ from daydream.outage_circuit import OutageCircuit
 
 def test_the_circuit_opens_at_the_threshold_and_admits_exactly_one_probe() -> None:
     circuit = OutageCircuit(failure_threshold=3, probe_interval_s=30.0)
-
     for instant in (0.0, 1.0, 2.0):
         assert circuit.admit_retry(instant).allowed is True  # closed: ladders run
         # Only the third consecutive failure crosses the threshold and opens.
         assert circuit.record_failure(instant) is (instant == 2.0)
-
     assert circuit.state() == "open"
     assert circuit.admit_retry(5.0).allowed is False  # open, before the interval
     assert circuit.admit_retry(32.0).allowed is True  # half-open: one probe
@@ -28,7 +23,6 @@ def test_the_circuit_opens_at_the_threshold_and_admits_exactly_one_probe() -> No
     assert circuit.admit_retry(64.0).allowed is True  # next interval, next probe
     circuit.record_success()
     assert circuit.state() == "closed"
-
 
 def test_state_is_a_pure_read_that_never_transitions() -> None:
     circuit = OutageCircuit(failure_threshold=1, probe_interval_s=30.0)
@@ -42,7 +36,6 @@ def test_state_is_a_pure_read_that_never_transitions() -> None:
     assert circuit.admit_retry(1_000.0).allowed is True
     assert circuit.state() == "half_open"
     assert circuit.admit_retry(1_000.0).allowed is False
-
 
 def test_a_success_resets_the_consecutive_failure_count() -> None:
     circuit = OutageCircuit(failure_threshold=3, probe_interval_s=30.0)

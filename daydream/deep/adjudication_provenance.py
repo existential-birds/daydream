@@ -1,21 +1,8 @@
-"""Host-stamped adjudication provenance (issue #735).
+"""Host-stamped ledger of record targeting, bound verdicts, survival, and revisions.
 
-One artifact, one writer, one meaning. ``adjudication-provenance.json`` records
-what each adjudication pass (the scoped arbiter and, when precision mode is on,
-the suppression pass) did to each canonical per-stack record: whether the record
-was targeted at all, whether a verdict actually bound to it, whether it survived
-the pass, and which revisable fields the verdict materially rewrote. It is
-written by the same code path that applies the verdicts and read by the
-verify-selection predicate.
-
-Only the adjudication seam writes this ledger -- no other step may. The write
-path is deliberately fail-loud: :func:`record_provenance` lets ``OSError``
-propagate, because a run that cannot persist provenance must not silently
-proceed as though the ledger were written. The read path is deliberately
-fail-open (the ``load_hunk_index`` pattern): a missing, unreadable, non-dict,
-wrong-format, or partially malformed ledger degrades to ``{}`` with no
-exception, because every consumer prefers "no provenance" (which selects, never
-skips) to a crashed run.
+Only the verdict-application seam writes adjudication-provenance.json. Write
+errors propagate. Unusable reads yield no provenance so selection re-verifies;
+malformed records are dropped individually.
 """
 
 from __future__ import annotations
@@ -72,12 +59,7 @@ class RecordProvenance:
     def from_dict(
         cls, data: Mapping[str, Any], *, uid: str | None = None
     ) -> RecordProvenance | None:
-        """Parse one record body, or ``None`` when it is malformed.
-
-        Unknown extra keys are ignored, so a ledger written by a newer version
-        still loads its known fields. ``uid`` may come from the enclosing
-        ``records`` key when the body omits it.
-        """
+        """Parse known fields, ignoring extras; the enclosing key can supply a missing UID."""
         resolved_uid = data.get("uid", uid)
         if not isinstance(resolved_uid, str) or not resolved_uid:
             return None
@@ -140,13 +122,10 @@ def record_provenance(
     pass_name: str,
     outcomes: Iterable[RecordProvenance],
 ) -> Path:
-    """Merge ``outcomes`` into the ledger and return the written path.
+    """Atomically merge outcomes by UID and write records in sorted UID order.
 
-    The ledger is a single document keyed by uid. A uid already present unions
-    its ``passes`` (first-seen order, ``pass_name`` appended), ORs
-    ``verdict_bound``, ANDs ``kept``, and unions ``revised_fields`` in
-    declaration order. The whole document is written atomically (temp file +
-    ``os.replace``) with records in sorted uid order.
+    Preserve first-seen pass order, OR verdict_bound, AND kept, and union revisions
+    in declaration order. Write errors propagate.
     """
     merged = dict(load_provenance(deep_dir))
     for outcome in outcomes:
@@ -159,12 +138,7 @@ def record_provenance(
 
 
 def load_provenance(deep_dir: Path) -> dict[str, RecordProvenance]:
-    """Return the provenance ledger keyed by uid, or ``{}`` when unusable.
-
-    Missing, unreadable, malformed, wrong-format, non-object, and
-    partially-malformed ledgers all degrade to an empty mapping or drop only the
-    malformed record. Never raises and never returns a partially-typed value.
-    """
+    """Read the typed ledger or {}; discard malformed records individually."""
     raw = read_json_object(adjudication_provenance_path(deep_dir))
     if raw.get("format") != PROVENANCE_FORMAT:
         return {}

@@ -1,15 +1,8 @@
-"""Injectable subprocess/JSONL transport for the CLI backends (codex, pi, osprey).
+"""Shared subprocess lifecycle for Codex, Pi, and Osprey.
 
-One owner for spawn, stdin policy, idle-timeout line reads, stderr handling,
-exit-code surfacing, and shielded teardown, built on the primitives in
-:mod:`daydream.backends._subprocess`. The module also owns the shared
-reap / exit-check / teardown sequence and the exit-diagnostic message builder
-(:func:`reap`, :func:`raise_for_exit`, :func:`teardown`,
-:func:`process_exit_message`), so each CLI adapter contributes only its own
-wording and parameters. Backends keep all protocol mapping: the transport
-yields raw decoded lines and surfaces only the exit code, so each backend
-owns its error wording. The shared PROCESS_EXIT builder reports the number
-of lines actually printed.
+Own spawning, stdin, idle reads, stderr drains, exit handling, and shielded
+teardown. Adapters own protocol interpretation and error wording; this layer
+yields decoded lines and exit codes without protocol fallbacks.
 """
 
 from __future__ import annotations
@@ -39,13 +32,10 @@ class StdinMode(enum.Enum):
 
 
 class StderrPolicy(enum.Enum):
-    """Where the child's stderr goes.
+    """Merge stderr into JSONL, or drain it separately through a bounded sink.
 
-    ``MERGE_INTO_STDOUT`` folds stderr into the JSONL stream (codex, pi).
-    ``DRAIN_TASK`` keeps stderr a separate pipe drained by a background task
-    (osprey), whose lines are handed to ``stderr_sink``; the backend awaits
-    :meth:`drain_finished` after ``wait()``/``terminate()`` so the drain task
-    can never outlive the transport.
+    DRAIN_TASK callers await drain_finished after wait/terminate so it cannot
+    outlive the transport.
     """
 
     MERGE_INTO_STDOUT = enum.auto()
@@ -64,11 +54,9 @@ class TransportExitError(Exception):
 
 
 class CliTransport:
-    """Spawn a CLI subprocess and stream its stdout as decoded JSONL lines.
+    """Spawn and stream decoded stdout; propagate stall, oversized-line, and spawn errors.
 
-    Transport-internal errors propagate as raised: :class:`StreamStalledError`
-    on stream silence, :class:`ValueError` on oversized lines, ``OSError`` from
-    spawn — the caller maps each to its own backend error type. No fallbacks.
+    Each backend maps transport failures into its own error contract.
     """
 
     def __init__(
@@ -169,14 +157,11 @@ class CliTransport:
     async def lines(
         self, timeout_for_line: Callable[[], float | None]
     ) -> AsyncIterator[str]:
-        """Yield decoded, stripped stdout lines under per-line idle windows.
+        """Yield decoded, stripped lines under per-line idle windows.
 
-        The callable is invoked per line, so a dual-window policy (response vs
-        tool-active) can switch mid-stream. Silence within the window raises
-        :class:`StreamStalledError` via the shared primitive; an oversized line
-        raises ``ValueError`` unchanged. Lines decode with the configured
-        ``decode_errors`` (strict by default), keeping each backend's
-        historical decode contract.
+        Re-evaluate the timeout for each line to support response/tool-active windows.
+        Propagate StreamStalledError and oversized-line ValueError; decoding is strict
+        unless the adapter requests replacement.
         """
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
@@ -192,12 +177,7 @@ class CliTransport:
             yield raw.decode(errors=self._decode_errors).strip()
 
     async def wait(self) -> int:
-        """Await the child and return its exit code.
-
-        Raises:
-            TransportExitError: On a non-zero exit; ``.returncode`` carries
-                the code.
-        """
+        """Wait for exit; raise TransportExitError carrying any nonzero returncode."""
         if self._proc is None:
             raise RuntimeError("transport not started; call start() first")
         returncode = await self._proc.wait()
@@ -206,14 +186,7 @@ class CliTransport:
         return returncode
 
     async def drain_finished(self) -> None:
-        """Await the stderr drain task (a no-op under MERGE_INTO_STDOUT).
-
-        Shielded so a drain awaited in a backend's teardown ``finally`` still
-        completes when the caller's scope is already cancelled — the same
-        shield the cancel-sweep relies on. Drain-task exceptions are folded
-        into the gathered result so teardown cannot mask the caller's original
-        backend error.
-        """
+        """Shield and join the stderr task without masking the caller's primary error."""
         if self._drain_task is not None:
             task, self._drain_task = self._drain_task, None
             with anyio.CancelScope(shield=True):
@@ -226,14 +199,7 @@ class CliTransport:
 
     @classmethod
     async def cancel_all(cls, transports: list[CliTransport]) -> None:
-        """Cancel every tracked transport, mirroring
-        :func:`daydream.backends._subprocess.cancel_processes`.
-
-        Delegates the per-transport work to :meth:`terminate_process` via
-        :func:`cancel_processes` over the tracked live processes, so the reap is
-        shielded from the caller's cancellation and idempotent on double-call —
-        the same contract the backends' ``cancel()`` delegation relies on.
-        """
+        """Shield and join teardown and stderr drains for every tracked live process."""
         await cancel_processes([
             proc for t in transports for proc in t.processes if proc.returncode is None
         ])
@@ -252,13 +218,9 @@ PROCESS_EXIT_EXCERPT_MAX_LINES = 10
 
 
 async def reap(transport: CliTransport) -> int | None:
-    """Await *transport*'s child and return its exit code, however it exited.
+    """Return the actual exit code, suppressing TransportExitError.
 
-    :meth:`CliTransport.wait` raises :class:`TransportExitError` on a non-zero
-    exit; this suppresses that signal and returns the code so the caller can
-    run its own exit check after any between-the-two steps (codex yields its
-    final diagnostics, pi its terminal events). No fallback value is
-    substituted: the returned code is exactly ``transport.returncode``.
+    Adapters may emit diagnostics/terminal events before checking the code.
     """
     try:
         await transport.wait()
@@ -275,12 +237,7 @@ def raise_for_exit(
     build_message: Callable[[int], str],
     retryable: bool | None = None,
 ) -> None:
-    """Raise ``error_type`` for a non-zero *returncode*, else return.
-
-    The adapter owns the error class and the wording; this owns the shared
-    guard. ``retryable`` is forwarded only when the adapter passes it (pi does;
-    codex/osprey construct their error with exactly today's kwargs).
-    """
+    """Raise the adapter's error for nonzero exits, forwarding retryable only when supplied."""
     if returncode is None or returncode == 0:
         return
     kwargs: dict[str, object] = {"category": category}
@@ -290,15 +247,9 @@ def raise_for_exit(
 
 
 async def teardown(transport: CliTransport, transports: list[CliTransport]) -> None:
-    """Signal, drain and drop *transport* from the caller-owned *transports*.
+    """Shielded, idempotent terminate/drain/remove for a tracked transport.
 
-    Idempotent: the reap (:meth:`CliTransport.terminate`) and the stderr drain
-    (:meth:`CliTransport.drain_finished`) are each shielded and safe to repeat.
-    A second call re-drains nothing; :meth:`terminate_process` still issues its
-    group SIGTERM before checking ``returncode``, but the process is already
-    reaped, so the extra signal is harmless and the wait is a no-op. Osprey
-    calls this early as well as in its ``finally``; the ``finally`` call is a
-    no-op.
+    Osprey invokes this before its finally block as well as during cleanup.
     """
     await transport.terminate()
     await transport.drain_finished()
@@ -307,13 +258,9 @@ async def teardown(transport: CliTransport, transports: list[CliTransport]) -> N
 
 
 def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> str:
-    """Build the codex/pi PROCESS_EXIT message, parameterized by *display*.
+    """Render Codex/Pi exit diagnostics with the last ten lines or a no-output fallback.
 
-    Always leads with ``<display> CLI exited with return code <n>.`` and then
-    either the last :data:`PROCESS_EXIT_EXCERPT_MAX_LINES` captured lines (the
-    header reports the number of lines actually printed) or the display's
-    no-output fallback sentence. Osprey builds its structurally different
-    message itself.
+    The header counts printed lines; Osprey owns its different message shape.
     """
     if lines:
         shown = lines[-PROCESS_EXIT_EXCERPT_MAX_LINES:]
@@ -327,11 +274,9 @@ def process_exit_message(*, display: str, returncode: int, lines: list[str]) -> 
 
 
 def write_temp_json_schema(schema: dict[str, Any], *, prefix: str) -> str:
-    """Serialize *schema* to a ``delete=False`` temp ``.json`` file for a CLI to reopen.
+    """Write a schema file for the CLI; the caller unlinks it after child exit.
 
-    Returns the path; the caller owns it and unlinks it after the child exits.
-    Because ``delete=False`` leaves the file behind on any failure, this removes
-    it itself when serialization does not complete.
+    Remove the temporary file here if serialization fails.
     """
     handle = tempfile.NamedTemporaryFile(
         mode="w", encoding="utf-8", suffix=".json", prefix=prefix, delete=False

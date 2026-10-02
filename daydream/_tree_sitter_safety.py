@@ -1,11 +1,7 @@
-"""Shared tree-sitter version safety guard (#1087).
+"""Guard parser construction against tree-sitter 0.26.0's native Point-getter crash.
 
-Tree-sitter 0.26.0 ships a native Point-getter regression (py-tree-sitter#472)
-that can SIGSEGV the whole process during coordinate access.  Every native
-analysis entry point consults this module before constructing a parser: a
-known-bad installed version raises :class:`TreeSitterBadVersionError`, which
-callers' existing fail-open wrappers convert into an explicit, auditable
-"gate unavailable" outcome instead of a process crash.
+Every native entry checks before constructing a parser. Existing fail-open
+wrappers turn TreeSitterBadVersionError into an auditable unavailable gate.
 """
 
 from __future__ import annotations
@@ -24,12 +20,9 @@ class TreeSitterBadVersionError(RuntimeError):
 
 
 def installed_tree_sitter_version() -> str | None:
-    """Return the installed tree-sitter version, or ``None`` if not installed.
+    """Read installed metadata; return None only for PackageNotFoundError.
 
-    Uses ``importlib.metadata`` (the Task 0 spike confirmed it reports
-    correctly on both 0.25.2 and 0.26.0).  ``tree_sitter.__version__`` is
-    deliberately not read: it is absent on 0.25.2, so the package attribute
-    is not a valid detector.  Only ``PackageNotFoundError`` is swallowed.
+    tree_sitter.__version__ is absent on 0.25.2, so it cannot identify safe installs.
     """
     try:
         return importlib.metadata.version("tree-sitter")
@@ -38,11 +31,7 @@ def installed_tree_sitter_version() -> str | None:
 
 
 def tree_sitter_unavailable_reason() -> str | None:
-    """Return a human-readable reason when the installed version is bad.
-
-    Reports ``None`` when the guard would pass -- a missing or unknown-good
-    install is the existing degrade path, not a known-bad one.
-    """
+    """Describe a known-bad install; missing or unknown versions return None."""
     try:
         version = installed_tree_sitter_version()
     except Exception:
@@ -61,12 +50,7 @@ def tree_sitter_unavailable_reason() -> str | None:
 
 
 def assert_tree_sitter_safe() -> None:
-    """Raise :class:`TreeSitterBadVersionError` on a known-bad install.
-
-    Returns normally when the installed version is not in the known-bad set
-    (including an unresolvable/not-installed version) -- the guard never
-    treats an unknown version as bad.
-    """
+    """Raise TreeSitterBadVersionError only for an explicitly known-bad version."""
     reason = tree_sitter_unavailable_reason()
     if reason is not None:
         # The reason already names the offending version, so there is no need

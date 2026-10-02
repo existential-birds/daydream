@@ -70,7 +70,7 @@ cli.py -> runner.py -> deep/orchestrator.py -> flows/engine.py (deep FlowSteps)
               |        -> improve/orchestrator.py -> flows/engine.py (improve FlowSteps)
               |        -> flows/engine.py (custom extension flows)
               \-> ui/ (terminal output)
-deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
+deep FlowSteps -> phases/ -> agent.py -> Backend.execute()
 ```
 
 - `runner.run()` is the async entry: builds the per-run extension `Registry` onto a `ContextVar`, then
@@ -85,13 +85,16 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 
 | File | Responsibility |
 |------|----------------|
-| `cli.py` | Args, signals, process lifecycle, subcommand dispatch |
-| `runner.py` | Flow preambles (workspace, diff, recorder), backend resolution, registry, dispatch |
+| `cli.py`, `commands/` | Process lifecycle and verb dispatch; each command family owns its parser and execution |
+| `runner.py` | Workspace lifecycle, registry, and flow dispatch |
+| `run_config.py`, `run_artifacts.py` | Run settings and backend precedence; recorder, manifest, and archive lifecycle |
 | `run_snapshot.py` | Immutable manifest identity and archive aggregate; runner captures policy before recorder entry |
 | `flows/` | `FlowContext` + `run_flow()` engine: ordering, `enabled` gates, `Stop`/`BreakLoop`, loop groups |
 | `extensions/` | `Registry` (phases+flows, prompts, stack rules), `daydream_ext` loader |
 | `deep/orchestrator.py` | Public deep/diagram entry points, flow assembly, mode gates, diff/stack preamble, and success-only cleanup dispatch |
-| `deep/{review,merge,diagram,fix}_steps.py` | Stage implementations: review fan-out; adjudication and publication; grounded diagrams; authorized fix transactions, test, commit, and CI |
+| `deep/{review,adjudication,merge,diagram,fix}_steps.py` | Review fan-out, record verdicts and arbiter work, publication, grounded diagrams, and authorized fix sequencing |
+| `deep/fix_state.py`, `deep/quality_gate.py`, `deep/remote_ci_steps.py` | Fix baselines/capture/confinement, quality checks, and remote CI gates |
+| `deep/review_reuse.py` | Reusable-unit identity and shared restore/store bookkeeping |
 | `deep/state.py` | Checked `DeepState` view over the same extension-visible `FlowContext.data` mapping; validates when consumed and writes through |
 | `deep/diff.py` | Shared changed-file parsing and full-diff reads, also consumed by scope enforcement and Improve |
 | `deep/{detection,dedup,artifacts}.py` | `detect_stacks()` router, artifact paths, dedup pre-filter |
@@ -99,29 +102,36 @@ deep FlowSteps -> phases.py -> agent.py -> Backend.execute()
 | `deep/latency.py` | Pure latency-profile vocabulary, risk summary, monotone `route_for`, and the `wonder_decision`/`arbiter_plan` predicates |
 | `deep/routing_record.py` | The single writer/reader of `.daydream/deep/latency-routing.json`; write-merged top-level keys, evidence only |
 | `deep/arbiter.py` | Scoped Opus pass over high-severity/contested findings |
-| `deep/diagram_{types,trigger,schema,grounding,render}.py` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
+| `deep/diagram_{types,trigger,schema,render}.py`, `deep/diagram_grounding/` | Grounded diagrams: shared dataclasses, eligibility rules, strict spec schemas, deterministic evidence checking (the sole authority on what may be drawn), pure mermaid emitters |
 | `services.py` | The single service-discovery implementation (declared `service_roots` or layout inference), shared by improve and diagram eligibility |
-| `improve/` | Read-only recon, category audits, vetting, prioritization, plan artifacts |
-| `phases.py` | Stateless async `phase_*()` steps and prompt builders |
-| `agent.py` | Backend wrapper, events to UI, global state, budget enforcement |
-| `trajectory.py` | ATIF v1.7 recorder, redaction, ContextVar propagation |
-| `artifact_visibility.py` | Source-owned private artifact sessions: live artifact routing, output publication, conflict handling, and recovery; `artifact_dir_for` / `review_output_path_for` route through the active session |
+| `improve/orchestrator.py`, `recon.py`, `audit.py` | Flow registration, repository survey/verified commands, and bounded audit/vetting execution |
+| `improve/audit_scope.py`, `planning.py` | Partitions, coverage, finding identity, and incremental plan selection |
+| `improve/plans.py`, `plan_index.py`, `reanchor.py` | Plan reservation/landing, durable identity/recovery, and re-anchor worktree lifecycle |
+| `improve/assemble.py`, `plan_contract.py`, `plan_normalization.py` | Author-content expansion, schema/path/command validation, and safe projection/repair |
+| `improve/issue_publication.py`, `reporting.py`, `plan_diagnostics.py` | Validated-plan publication, summaries, and safe diagnostics |
+| `phases/` | Review, findings, fixing, testing, and publication operations; `inputs.py` and `schemas.py` own shared preparation/contracts |
+| `agent.py`, `agent_retry.py`, `ui/agent_stream.py` | Backend lifecycle and budgets, retry decisions, and per-attempt event presentation |
+| `trajectory/` | `recorder.py` owns persistence, `scopes.py` owns fork/invocation lifetimes, `invocation.py` handles backend events, and `lifecycle.py` tracks phase/dispatch metadata; timing, layout, and billing stay independent |
+| `redaction.py` | Shared credential redaction for backend events, logging, archives, and trajectory text |
+| `artifact_visibility.py`, `artifacts/` | Session routing over owned filesystem, ledger, transfer, publication, and recovery modules; conflicts preserve competing bytes |
 | `observability/` | Operator trace settings, exporter factories, per-run OTel lifecycle, backend-event hydration and export privacy |
 | `backends/` | `Backend` protocol, Claude/Codex/Pi/Osprey, `AgentEvent` union, `create_backend()` |
 | `ui/` | Rich output (Dracula): `console`, `panels`, `messages`, `tools`, `agent_text`, `summary`, `theme`, `colorize` |
 | `config.py`, `config_file.py` | Per-phase model/effort defaults, budgets; `[tool.daydream]` / `.daydream.toml` parser |
 | `workspace.py` | `WorkContext`: in-place vs ephemeral detached worktree; private operational worktrees under `~/.daydream/workspaces/` are separate from the runtime artifact root |
-| `git_ops.py` | **Single point of contact for every `git`/`gh` shell-out** |
-| `exploration*.py`, `tree_sitter_index.py` | Pre-scan: tree-sitter import resolution, convention detection |
+| `git_ops/` | **Single Git/GitHub subprocess boundary**: process policy, authentication, queries, mutations, state, and snapshots |
+| `exploration*.py`, `tree_sitter_index/` | Pre-scan conventions; safe parser/query runtime, import impact, and statement classification |
+| `remote_ci/` | Captured CI evidence, rule parsing, evaluation, GitHub reads, polling, and artifact writes |
 | `supervision.py` | Runtime findings + tool supervision (extension veto seam) |
 | `reconcile.py` | Cross-run dedup vs prior bot PR comments (GitHub is the store) |
+| `pr_review.py`, `reviews/` | Posting orchestration over finding/placement models, host-owned comment identity, captured rendering, and immutable diagram validation |
 | `pr_comment_renderer.py` | Pure renderer: trajectory in, markdown out (no I/O) |
-| `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/latency_report.py` renders the per-profile report |
+| `training/` vs `eval/` | Corpus pipeline (harvest, reward, projection, JSONL) vs deterministic trajectory analysis; `eval/quality.py` owns source-quality analysis and `eval/latency_report.py` renders the per-profile report |
 | `training/harvest.py`, `training/harvest_types.py` | Explicit per-run evidence services and validated immutable inputs; `collect_annotation` shares acquisition with read-only semantic preview, and `build_annotation(row, evidence)` reduces completed evidence without I/O |
 | `training/calibration.py` | Fail-closed projection validation, deterministic calibration statistics, `calibration-artifact` emission (`corpus calibrate-reward`) |
 | `prompts/` | Authorial intent, exploration subagents, CWD grounding |
 
-Self-describing modules are not listed: `pr_review.py`, `findings.py`, `pricing.py`, `github_app.py`,
+Self-describing modules are not listed: `findings.py`, `pricing.py`, `github_app.py`,
 `bot_identity.py`, `bot_setup.py`, `summarize.py`, `archive/`, `benchmark/`.
 
 **Latency-profile naming.** The concept is `latency_profile` (config key `latency_profile`, CLI
@@ -132,8 +142,8 @@ it is not a synonym for "sharding disabled" or "read-only". Sharding-off is call
 ### Backend protocol
 
 `Backend` (in `backends/__init__.py`) is `model` + `execute()` + `cancel()`.
-`execute()` yields the 10-member `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`,
-`Diagnostic`, `Cost`, `Metrics`, `TurnEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
+`execute()` yields the `AgentEvent` union (`Request`, `Text`, `Thinking`, `ToolStart`, `ToolResult`,
+`Diagnostic`, `Cost`, `Metrics`, `TurnEnd`, `GenerationStart`, `GenerationEnd`, `Result`). `Request` exposes the effective Daydream-sent request after adapter
 transformations. Adding a backend means producing that stream correctly — phases and the
 recorder are backend-agnostic. `Diagnostic` is recorder-only parser/transport evidence: the recorder
 normalizes and redacts it into JSON-safe `Step.extra.backend_diagnostics`, while observability exports
@@ -148,8 +158,9 @@ unpublished public-only candidate that requires exact-run private corroboration 
 Observability is activated only by operator CLI/environment settings. The target's file config never
 selects destinations or credentials. A run owns its OTel provider and OpenLLMetry 0.62.3 processors;
 never install a global provider or call `Traceloop.init()`. Span ownership is run → executed flow step →
-logical agent → backend attempt → tool. Only attempts carry billed usage. Native turn boundaries
-differ by backend, so do not infer per-provider-call usage from `TurnEndEvent`. Preserve available
+logical agent → backend attempt → tool/generation. Frozen billing ownership assigns usage to either
+the structural attempt or its sealed generation children. Native turn boundaries differ by backend,
+so do not infer per-provider-call usage from `TurnEndEvent`. Preserve available
 terminal metrics before raising a backend error. Exporters register through
 `Registry.register_trace_exporter`; registration/validation must not construct exporters.
 Full contract and operator recipes: `docs/observability.md` and `docs/extensions.md`.
@@ -210,7 +221,7 @@ exploration pre-scan (cached across runs)
     -> intent analysis (Sonnet)
     -> alternative review (wonder) ∥ per-stack reviews (parallel, Sonnet;
        structural review for cross-cutting concerns)
-    -> per-stack parse (parallel)
+    -> load per-stack structured records
     -> arbiter review (Opus, scoped to high-severity/contested findings)
     -> cross-stack merge (dedup; resumes the arbiter's session)
     -> diagrams (conditional, grounded; sequence and/or flowchart)
@@ -230,11 +241,11 @@ exploration pre-scan (cached across runs)
   Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack
   has no merge agent, so that pointer is the only path wonder findings take into the report. This boundary
   is why the extension API is v4.
-- The N parse calls run concurrently but are consumed in **stack-name order**, keeping merge input ordering
+- Reviewers return structured records, loaded in **stack-name order** to keep merge input ordering
   and global issue numbering reproducible.
 - **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
-  (`stack:ordinal`, `deep/records.py`) at birth — both birth sites, the per-stack reviewers and the uncovered
-  sweep — and backfilled by the same deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
+  (`stack:ordinal`, `deep/records.py`) at birth by the per-stack reviewers and backfilled by the same
+  deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
   The reviewer's `id` restarts at 1 per stack and is *not* unique; `normalize_items` mints the human-facing
   `id` only at the final merge write. Dedup, arbitration, suppression and the structural fold all run before
   that, so they key on `uid`. A content key (`compute_fingerprint`, `descriptions_match`) answers
@@ -259,9 +270,6 @@ exploration pre-scan (cached across runs)
   unchanged. Recovery finalization uses completed investigation evidence and never recaptures raw diff.
   Other backends' intent, wonder and per-stack prompts keep their bounded 12 KiB inline policy and
   transport-specific isolation. Small diffs can still collapse the fan-out.
-- Uncovered sweeps use the durable hunk index for eligibility. Pi reviewers receive the admitted diff
-  reference and source checkout; other backends retain bounded per-file context and their access mode. Structured output is persisted by the host. Only completed source
-  reads and validated findings establish review coverage; assignment or successful output alone does not.
 - Pi sends normal logical prompts plus schema through private temporary `@file` attachments. Dynamic
   review system instructions use Pi's system-prompt file support. Files survive until child teardown
   and are removed on success, failure, cancellation or generator close; tools-disabled calls retain stdin.
@@ -269,15 +277,15 @@ exploration pre-scan (cached across runs)
   prompt forces a re-read of the per-stack record files, rewritten after arbitration.
 - **Diagrams (`diagram` step, after merge/supervision).** The LLM **never writes mermaid**: it emits a
   strict JSON spec whose every element carries `file:line` (+`symbol`) evidence, and
-  `deep/diagram_grounding.py` is the sole authority on what may be drawn — path confinement, existence,
-  line range, symbol-on-line (±3 snap), tree-sitter node kind, definition lookup, and a completed read
-  receipt in that kind's own fork trajectory. Then **one** repair turn with the reason codes, prune
+  `deep/diagram_grounding/` is the sole authority on what may be drawn — path confinement, existence,
+  line range, symbol-on-line (±3 snap), tree-sitter node kind, and definition lookup. Then **one** repair
+  turn with the reason codes, prune
   (dependents go with their element), the render caps, and finally the omission floors — caps run **before**
   the floor so a cap-induced drop cannot leave a thin diagram rendered, and `spec_final` is rebuilt
   key-by-key so it re-validates against the `additionalProperties: false` spec schema in the privileged
-  poster. The step always writes `.daydream/deep/diagram.json` (eligibility signals + per-element verdicts —
-  the audit trail for "why did this PR get no diagram?", zero agent calls when nothing is eligible) and
-  `diagram.md`. Eligibility re-runs `detect_stacks()` itself rather than reading `ctx.data["stacks"]`, which
+  poster. The step writes `.daydream/deep/diagram.json` (eligibility, final specs, omission reasons;
+  zero agent calls when nothing is eligible) and `diagram.md`. Eligibility re-runs `detect_stacks()` itself
+  rather than reading `ctx.data["stacks"]`, which
   is post-tiny-diff-collapse and would read a two-language diff as non-code. Per-kind failure is **fail-open
   in every review mode** (warn, record `status="failed"`, review continues) and **exit 1** under
   `--diagram-only`, after the artifact is written. The author prompt follows the turn's **resolved
@@ -310,7 +318,7 @@ Full contract: `docs/extensions.md`.
   unshielded on cancellation, so a budget/fan-out cancel mid-stream corrupts anyio's cancel-scope stack.
 - **ATIF** vendored from Harbor v0.17.1-9 under `daydream/atif/` (Apache-2.0), pinned to v1.7 emission.
   Re-vendor wholesale on Harbor updates; no local patches. **No `harbor` runtime dep** — ATIF models live in
-  `daydream/trajectory.py` only. **Module-bloat ban**: no ATIF construction in `phases.py` or `ui/`.
+  `daydream/trajectory/` only. **Module-bloat ban**: no ATIF construction in `phases/` or `ui/`.
 - Deps live in `pyproject.toml`; keep `uv.lock` in sync via `uv lock` or `make check` fails at step one.
 - **`make check`** = root `uv lock --check` + install + ruff over `daydream tests` + vulture dead-code scan over `daydream tests` and the RL package + mypy over `daydream tests` + pytest + actionlint (Docker) + coverage-report existence check + naming-convention check; `scripts/hooks/pre-push` verifies signatures then delegates to it. `rl-check` is **not** part of it, mirroring `ci.yml`, whose `check` job carries no RL gate either — the RL project has its own job (own runner, own `uv sync`, Python 3.12) and one of its e2e tests drives the real `claude` CLI that runner never installs, so as a `check` dependency it failed the pre-push gate on changes that never touch `rl/`. Run `make rl-check` when you change `rl/daydream_review`.
 - Ruff: 120 cols, `E F I W`, py312. `daydream/atif/**` is lint-exempt (vendored, mechanical edits only).

@@ -1,13 +1,6 @@
-"""The deterministic throwaway repository the tests and the fixture image share.
-
-Its history is byte-for-byte reproducible — fixed author and committer identity,
-fixed timestamps, fixed tree contents, no signing — so its commit SHAs are
-constants. ``images/manifest.toml`` pins exactly those SHAs in its PR snapshots:
-one repository, one set of SHAs, everywhere.
-
-Lives in the package rather than in ``conftest.py`` because three callers need
-it: the test suite, ``images/build_images.py`` (the ``fixture://`` clone-URL
-sentinel), and anyone staging the local smoke rollout by hand.
+"""Deterministic three-commit repository shared by tests, fixture images, and local smoke runs. Fixed
+identities, timestamps, tree contents, and disabled signing preserve the SHAs pinned by
+images/manifest.toml. The image builder selects it through the fixture:// clone-URL sentinel.
 
     python -m daydream_review.fixture /tmp/daydream-rl-smoke/repo
 """
@@ -41,12 +34,8 @@ _IDENTITY = {
     "GIT_COMMITTER_DATE": "2026-01-01T00:00:00+00:00",
 }
 
-# Every real repository ignores its build artifacts, and so must this one:
-# `capture_recommended_patch` appends a creation hunk for each untracked,
-# NON-ignored file (daydream/git_ops.py:842 -> list_untracked, which passes
-# --exclude-standard). Without this file, stray .pyc bytecode written during the
-# review would land in recommended.patch and make an empty fix look like a real
-# one — the exact signal suite_non_regression gates on.
+# Ignore bytecode so capture_recommended_patch does not turn stray non-ignored .pyc files into
+# creation hunks and make an empty fix satisfy suite_non_regression.
 _GITIGNORE = """__pycache__/
 *.py[cod]
 .daydream/
@@ -157,17 +146,9 @@ def _commit(repo: Path, files: dict[str, str], message: str) -> str:
 
 
 def build_fixture_repo(dest: Path, *, red: bool = False) -> FixtureRepo:
-    """Build the deterministic three-commit fixture repository at *dest*.
-
-    Args:
-        dest: New or empty directory to create the repository in; created if
-            absent. An occupied destination (an existing file or a non-empty
-            directory) is rejected before any mutation.
-        red: Plant a failing assertion in the final commit's test file, to prove
-            the image build's green-baseline gate actually fails.
-
-    Returns:
-        The built repository and its commit SHAs.
+    """Build the three-commit fixture and return its repository/SHAs. Create dest if absent; reject
+    files or nonempty directories before mutation. red adds a failing assertion to the final test
+    commit to exercise the image baseline gate.
     """
     if dest.exists() and (not dest.is_dir() or any(dest.iterdir())):
         raise ValueError(f"fixture destination must be a new or empty directory: {dest}")

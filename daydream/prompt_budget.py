@@ -84,20 +84,10 @@ class PreparedSanctionedInputs:
         return "\n".join(blocks)
 
     def render_prompt(self, prompt: str) -> str:
-        """Append the inputs, hiding private pathnames from inline transports.
+        """Append sanctioned inputs once, scrubbing inline private paths before comparison.
 
-        Builders suppress the pointers they own, but one still names artifacts
-        it did not sanction (a sibling under the same private root), so the
-        inputs' common parent is scrubbed too.
-
-        Idempotent: a caller may render the prompt it shapes and then let the
-        agent layer re-apply this renderer on its way to the backend. An
-        already-appended section is returned unchanged rather than duplicated;
-        the scrub still runs first, so a path that survived an earlier render
-        is still hidden. The appended section is scrubbed too, because captured
-        content can itself embed a private pathname, and scrubbing both sides
-        keeps the idempotence check stable across re-renders.
-        """
+        Scrub both prompt and captured content, including their common parent: builders
+        may mention unsanctioned sibling artifacts under that same private root."""
         rendered = self.render()
         if self.transport is SanctionedInputTransport.INLINE and self.inputs:
             prompt = self._scrub_private_paths(prompt)
@@ -109,11 +99,7 @@ class PreparedSanctionedInputs:
         return f"{prompt}\n\n{rendered}"
 
     def _scrub_private_paths(self, text: str) -> str:
-        """Hide sanctioned-input pathnames from an inline-transport string.
-
-        Replaces each input's path with its label first, then the inputs' shared
-        parent (a sibling the builders did not sanction) with a storage marker.
-        """
+        """Replace input paths with labels, then their common parent with a storage marker."""
         for item in self.inputs:
             text = text.replace(str(item.path), f"sanctioned input '{item.label}'")
         common_parent = os.path.commonpath([str(item.path.parent) for item in self.inputs])
@@ -124,12 +110,10 @@ class PreparedSanctionedInputs:
     def finalization_text(
         self, backend: object, cwd: Path, read_only: bool, *, input_priority: tuple[str, ...] = (),
     ) -> str:
-        """Capture bounded bytes for tool-less output through the same boundary.
+        """Read bounded prefixes for tool-less output, validating the whole input first.
 
-        Exact-path captures ordinarily retain only identity/hash, not text. Read
-        their bounded prefixes while hashing and validating the entire admitted
-        input, then compare the original identity before exposing any bytes.
-        """
+        Exact-path captures retain identity/hash; recheck that identity before exposing
+        any newly captured bytes."""
         self.revalidate(backend, cwd, read_only)
         blocks: list[str] = []
         remaining = 24000
@@ -194,11 +178,7 @@ class PreparedSanctionedInputs:
 
 @dataclass(frozen=True)
 class AdvisoryCandidate:
-    """One declared advisory input that is admitted whole or omitted whole.
-
-    ``size`` is filled by :func:`select_advisory_inputs` from the file it sized;
-    callers declare only a label and a path.
-    """
+    """An advisory input admitted or omitted whole; selection fills its measured size."""
 
     label: str
     path: Path
@@ -249,14 +229,10 @@ def _canonical_cwd(cwd: Path) -> Path:
 
 
 def _unchanged_since_capture(item: PreparedSanctionedInput) -> bool:
-    """Whether *item*'s file still carries the identity the capture attested.
+    """Check captured (dev, ino, size, mtime_ns) without rereading file content.
 
-    The ``(dev, ino, size, mtime_ns)`` tuple is the same identity
-    :func:`_capture_input` validates internally; matching it re-validates file
-    identity without a per-attempt re-read. A missing, unreadable, or replaced
-    file returns ``False`` so the caller performs the full capture and
-    surfaces its original fail-closed errors.
-    """
+    Missing, unreadable, or changed files trigger full capture and its original
+    fail-closed errors."""
     try:
         metadata = item.path.lstat()
     except OSError:
@@ -278,12 +254,9 @@ def _capture_input(
     label: str, path: Path, transport: SanctionedInputTransport, aggregate: int, *,
     text_budget: int | None = None, pointer_only: bool = False,
 ) -> PreparedSanctionedInput:
-    """Capture one no-follow file within the transport's remaining allowance.
+    """Capture one no-follow inode within the remaining transport allowance.
 
-    Reading stops one byte past the allowance, so a refusal never hashes more
-    than the aggregate ceiling admits. ``fstat`` before and after bounds the
-    captured bytes to one immutable revision of one inode.
-    """
+    Read at most allowance + 1 bytes; fstat before/after binds one immutable revision."""
     max_bytes, aggregate_limit, limit_name = (
         (SANCTIONED_DIFF_REFERENCE_MAX_BYTES, False, "durable diff resource limit")
         if pointer_only else _transport_allowance(transport, aggregate)
@@ -351,11 +324,7 @@ def _capture_input(
 
 
 def _sanctioned_transport(backend: object, canonical_cwd: Path, *, read_only: bool) -> SanctionedInputTransport:
-    """Inline the inputs for a backend that cannot read exact host paths.
-
-    "Can this backend read this host path" is not on the ``Backend`` protocol,
-    so it is read off the three concrete backends that declare it.
-    """
+    """Choose inline transport unless a concrete backend declares exact host-path access."""
     strict_audit = getattr(backend, "audit_root_isolation", None) == AUDIT_ROOT_ISOLATION
     if strict_audit:
         audit_root = getattr(backend, "audit_root", None)
@@ -377,12 +346,7 @@ def _sanctioned_transport(backend: object, canonical_cwd: Path, *, read_only: bo
 def sanctioned_transport_for(
     backend: object, cwd: Path, *, read_only: bool
 ) -> SanctionedInputTransport:
-    """Return the sanctioned-input transport a capture from *cwd* would use.
-
-    Public wrapper around the transport decision so phase builders can size
-    advisory inputs (e.g. exploration context) for the INLINE budget *before*
-    capture, mirroring how the diff is excluded when it is inlined.
-    """
+    """Resolve the capture transport early so builders can size advisory inputs."""
     return _sanctioned_transport(backend, cwd, read_only=read_only)
 
 
@@ -402,17 +366,10 @@ def select_advisory_inputs(
     *,
     read_only: bool,
 ) -> AdvisorySelection:
-    """Split advisory inputs whole by the transport's real remaining allowance.
+    """Admit candidates whole, in order, within the resolved transport’s allowance.
 
-    Resolves the transport once with the same resolver and canonical cwd the
-    capture path uses, then walks ``candidates`` in the order given, admitting a
-    whole candidate while its cost fits and omitting it whole otherwise. INLINE
-    costs account for the exact bytes :meth:`PreparedSanctionedInputs.render`
-    emits for that candidate, so an admitted set always renders inside the
-    shared aggregate; EXACT_PATHS reuses the capture path's per-file/aggregate
-    arithmetic. A missing or unreadable candidate is omitted as ``unavailable``;
-    transport-resolution failures propagate untouched (fail closed).
-    """
+    INLINE accounts for exact rendered bytes; EXACT_PATHS uses capture limits.
+    Unavailable candidates are omitted; transport resolution errors propagate."""
     canonical_cwd = _canonical_cwd(cwd)
     transport = _sanctioned_transport(backend, canonical_cwd, read_only=read_only)
     inline = transport is SanctionedInputTransport.INLINE
@@ -498,13 +455,7 @@ def _sanctioned_inline_open_tag(label: str) -> str:
 
 
 def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
-    """Exact UTF-8 byte length of the INLINE render for these captured inputs.
-
-    ``entries`` pairs each ``(label, content_bytes)`` exactly as
-    :meth:`PreparedSanctionedInputs.render` receives them, so callers can size
-    the emitted block — header, tags, newline separators, and content — before
-    capturing anything. ``()`` matches the renderer's empty result: zero bytes.
-    """
+    """Count exact UTF-8 bytes for (label, content_bytes) entries, including all wrappers."""
     if not entries:
         return 0
     sizes = [len(_SANCTIONED_INLINE_HEADER.encode("utf-8"))]
@@ -516,11 +467,7 @@ def inline_section_emitted_bytes(entries: Sequence[tuple[str, int]]) -> int:
 
 
 def inline_context_file(path: Path, budget_bytes: int = 4096) -> str | None:
-    """Inline a whole small shared artifact; fall back to its pointer otherwise.
-
-    These are host-selected context artifacts, never source-read receipts. A
-    bounded read avoids allocating large files before deciding to use a pointer.
-    """
+    """Inline a whole bounded host-context artifact, else use its pointer; never a source receipt."""
     try:
         with path.open("rb") as stream:
             raw = stream.read(budget_bytes + 1)
@@ -532,14 +479,10 @@ def inline_context_file(path: Path, budget_bytes: int = 4096) -> str | None:
 
 
 def truncate_utf8_to_budget(text: str, budget_bytes: int, marker: str = "") -> str:
-    """Byte-exact prefix of ``text`` that, with ``marker``, fits ``budget_bytes``.
+    """Fit text plus marker within a UTF-8 byte budget without splitting characters.
 
-    Returns ``text`` unchanged when it plus ``marker`` already fits. Otherwise
-    slices ``text.encode("utf-8")`` (never ``str`` indices) and decodes the
-    prefix with ``errors="ignore"`` so a split multibyte sequence is dropped
-    rather than replaced, keeping the result ``<= budget_bytes`` UTF-8 bytes.
-    A marker larger than the budget is itself truncated rather than raising.
-    """
+    Keep fitting text unchanged. Oversized markers are also truncated; incomplete
+    multibyte suffixes are dropped rather than replaced."""
     marker_bytes = marker.encode("utf-8")
     encoded = text.encode("utf-8")
     if len(encoded) + len(marker_bytes) <= budget_bytes:

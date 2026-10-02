@@ -1,22 +1,7 @@
-"""Shared Claude-SDK message mocks and patch helper for ``ClaudeBackend`` tests.
-
-``ClaudeBackend.execute`` dispatches on the SDK's message/block types by
-``isinstance``, so any test that drives it must (a) supply stand-in classes and
-(b) monkeypatch the eight names ``daydream.backends.claude`` resolves at
-runtime. That block was re-rolled verbatim in four test modules, which meant an
-SDK shape change had to be chased through four copies.
-
-This module owns one set of stand-ins plus the two helpers every consumer needs:
-
-* :func:`patch_claude_sdk` — patch the eight SDK names in one call.
-* :func:`scripted_client` — build a ``ClaudeSDKClient`` stand-in that replays a
-  canned message sequence and, optionally, records the
-  ``ClaudeAgentOptions`` it was constructed with.
-
-The mocks are intentionally minimal but carry every optional field
-``ClaudeBackend`` reads (``model`` / ``message_id`` / ``usage`` on the
-assistant message; ``usage`` / ``duration_ms`` / ``duration_api_ms`` /
-``stop_reason`` on the result message) so no consumer needs a subclass.
+"""Claude SDK stand-ins must replace the runtime message/block classes because ClaudeBackend dispatches
+with isinstance. patch_claude_sdk installs them; scripted_client replays messages and can capture
+options and prompt. Optional model, message ID, usage, timing, and stop-reason fields match what the
+backend reads.
 """
 
 from __future__ import annotations
@@ -55,8 +40,7 @@ class MockToolResultBlock:
 @dataclass
 class MockAssistantMessage:
     content: list[Any] = field(default_factory=list)
-    # Only read via ``getattr`` by ``ClaudeBackend.execute``; the defaults give a
-    # message with no model, no metrics, and no continuation unless a test opts in.
+    # Defaults omit model, metrics, and continuation until the test supplies them.
     model: str | None = None
     message_id: str = ""
     usage: dict[str, Any] | None = None
@@ -74,8 +58,7 @@ class MockResultMessage:
     is_error: bool = False
     result: str | None = None
     subtype: str = "success"
-    # Real ResultMessage always carries one; default None keeps every existing
-    # scripted message minting no continuation until a test opts in.
+    # Default None suppresses continuation unless the test supplies the real SDK session ID.
     session_id: str | None = None
     usage: dict[str, Any] | None = None
     duration_ms: int | None = None
@@ -83,30 +66,14 @@ class MockResultMessage:
     stop_reason: str | None = None
 
 
-def patch_claude_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-    client_class: type,
-) -> None:
-    """Patch every SDK name ``daydream.backends.claude`` resolves at runtime.
-
-    Args:
-        monkeypatch: The test's monkeypatch fixture.
-        client_class: Stand-in for ``ClaudeSDKClient`` (see
-            :func:`scripted_client`).
-    """
+def patch_claude_sdk(monkeypatch: pytest.MonkeyPatch, client_class: type,) -> None:
+    """Patch the SDK classes resolved by ClaudeBackend, including the supplied client_class."""
     monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_class)
 
-    def _injected_client(
-        *,
-        options: Any,
-        transport: Any,
-        initialize_timeout_s: float,
-    ) -> Any:
+    def _injected_client(*, options: Any, transport: Any, initialize_timeout_s: float,) -> Any:
         return client_class(options=options)
 
-    monkeypatch.setattr(
-        "daydream.backends.claude._RunLocalClaudeSDKClient", _injected_client
-    )
+    monkeypatch.setattr("daydream.backends.claude._RunLocalClaudeSDKClient", _injected_client)
     monkeypatch.setattr("daydream.backends.claude.AssistantMessage", MockAssistantMessage)
     monkeypatch.setattr("daydream.backends.claude.UserMessage", MockUserMessage)
     monkeypatch.setattr("daydream.backends.claude.ResultMessage", MockResultMessage)
@@ -117,16 +84,9 @@ def patch_claude_sdk(
 
 
 def scripted_client(messages: Sequence[Any], *, captured: dict[str, Any] | None = None) -> type:
-    """Build a ``ClaudeSDKClient`` stand-in that replays *messages* verbatim.
-
-    Args:
-        messages: Message objects ``receive_response()`` yields, in order.
-        captured: When given, the constructed ``ClaudeAgentOptions`` is recorded
-            under ``"options"`` and the queried prompt under ``"prompt"`` — the
-            observable for tests that assert on what reached the SDK.
-
-    Returns:
-        A class suitable for :func:`patch_claude_sdk`'s ``client_class``.
+    """Build a client class that yields messages in order. When captured is supplied, record
+    constructed options under "options" and the queried prompt under "prompt". Use the result with
+    patch_claude_sdk.
     """
 
     class _ScriptedClient:

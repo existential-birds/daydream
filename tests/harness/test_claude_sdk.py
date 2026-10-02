@@ -32,20 +32,14 @@ async def _drive(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[A
     backend = ClaudeBackend(model="opus")
     return [event async for event in backend.execute(Path("/tmp"), "go")]
 
-
 @pytest.mark.asyncio
 async def test_patched_blocks_reach_the_backend_as_events(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every mock block type the harness patches maps onto its AgentEvent."""
-    events = await _drive(
-        monkeypatch,
-        [
-            MockAssistantMessage(
-                content=[
-                    MockTextBlock(text="hello"),
-                    MockToolUseBlock(id="t1", name="Read", input={"file_path": "a.py"}),
+    events = await _drive(monkeypatch,
+        [MockAssistantMessage(content=[
+                    MockTextBlock(text="hello"), MockToolUseBlock(id="t1", name="Read", input={"file_path": "a.py"}),
                 ]
-            ),
-            MockUserMessage(content=[MockToolResultBlock(tool_use_id="t1", content="contents")]),
+            ), MockUserMessage(content=[MockToolResultBlock(tool_use_id="t1", content="contents")]),
             MockResultMessage(total_cost_usd=0.02),
         ],
     )

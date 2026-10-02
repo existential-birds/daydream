@@ -1,9 +1,7 @@
-"""The single process-local monotonic clock seam.
+"""Shared process-local monotonic clock for deadlines and budgets.
 
-Every deadline and budget read goes through :func:`monotonic` so a test can
-install a fake clock and advance time instead of sleeping. Consumers must call
-it as ``clock.monotonic()`` (a module attribute), never via a ``from`` import,
-so one monkeypatch reaches every reader.
+Call clock.monotonic() through the module, never a from-import, so one test
+monkeypatch advances every consumer without sleeping.
 """
 
 from __future__ import annotations

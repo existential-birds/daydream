@@ -23,14 +23,11 @@ _TOP_LEVEL = ""
 
 @dataclass(frozen=True)
 class Partition:
-    """One bounded slice of the repository's tracked files.
+    """Bounded tracked-file slice with a unique service/directory name and POSIX root.
 
-    Attributes:
-        name: Unique partition name — a service name, or the directory root.
-        root: Repo-relative POSIX directory; ``"."`` only for the residue partition.
-        source: ``"service:<Service.source>"``, ``"directory"``, or ``"residue"``.
-        service: Owning service name, kept through oversized-service splits.
-        files: Sorted member files. Host-side only — never serialized into a prompt.
+    Root ``"."`` is reserved for residue; source is ``service:<Service.source>``,
+    ``directory``, or ``residue``. Oversized-service splits retain their service.
+    Sorted member files are host-only and never serialized into prompts.
     """
 
     name: str
@@ -61,12 +58,7 @@ class PartitionGroup:
 
 @dataclass(frozen=True)
 class PartitionStackOmission:
-    """One partition pass omitted from a stack-specific audit group.
-
-    Attributes:
-        partition: The partition whose pass was dropped.
-        stack: The stack-specific group the pass was omitted from.
-    """
+    """One partition pass omitted from a stack-specific audit group."""
 
     partition: Partition
     stack: str
@@ -169,11 +161,9 @@ def group_partitions(
     max_files: int = PARTITION_MAX_FILES,
     max_groups: int | None = None,
 ) -> tuple[list[PartitionGroup], list[PartitionStackOmission]]:
-    """Pack partitions into stack-homogeneous groups bounded by ``max_files``.
+    """Pack stack-homogeneous groups bounded by ``max_files``, named ``group-01`` onward.
 
-    Returns:
-        The kept groups (renamed ``group-01``..) and, when ``max_groups`` binds,
-        one ``PartitionStackOmission`` per dropped pass.
+    Return kept groups and one omission per dropped pass when ``max_groups`` binds.
     """
     buckets: dict[str, list[Partition]] = defaultdict(list)
     for partition in partitions:
@@ -244,15 +234,10 @@ def _parent(partition: Partition) -> str:
 
 
 def _pack(partitions: Sequence[Partition], max_files: int) -> list[list[Partition]]:
-    """Bin-pack sibling-first, so one subtree's slices land in one agent's group.
+    """Pack sibling clusters together to avoid repeated subtree context across agents.
 
-    Packing purely by size scatters a split subtree across groups — on a real
-    1892-file monorepo it put one React app's eleven sibling partitions in four
-    different groups, making four agents rebuild the same context. Sibling
-    clusters are placed whole wherever one bin has room; a cluster larger than
-    the bound spills into as few adjacent bins as possible. Within a cluster
-    the order stays first-fit-decreasing, and an oversized partition still gets
-    its own bin.
+    Place whole clusters where they fit; otherwise spill them using first-fit-decreasing,
+    preferring the preceding bin. An oversized partition receives its own bin.
     """
     clusters = defaultdict(list)
     for partition in partitions:

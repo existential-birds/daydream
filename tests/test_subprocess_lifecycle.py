@@ -20,7 +20,7 @@ from tests.harness.processes import (
 )
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 MakeConfig = Callable[..., "RunConfig"]
 
@@ -28,19 +28,13 @@ MakeConfig = Callable[..., "RunConfig"]
 async def _spawn_holder() -> asyncio.subprocess.Process:
     """Spawn a long-running CLI that keeps a `sleep` child holding the pipe."""
     proc = await asyncio.create_subprocess_exec(
-        "python3",
-        "-c",
-        GROUP_HOLDER_CLI,
-        stdin=asyncio.subprocess.PIPE,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.STDOUT,
-        start_new_session=True,
+        "python3", "-c", GROUP_HOLDER_CLI, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT, start_new_session=True,
     )
     stdout = proc.stdout
     assert stdout is not None
     assert await stdout.readline() == b"UP\n"
     return proc
-
 
 async def test_terminate_process_kills_whole_group() -> None:
     """Grandchildren cannot outlive the CLI: the whole group dies on terminate."""
@@ -49,9 +43,7 @@ async def test_terminate_process_kills_whole_group() -> None:
     assert pgid == proc.pid  # session leader => pid is the group id
 
     await terminate_process(proc)
-
     await wait_for_process_group_gone(pgid)
-
 
 async def test_terminate_process_releases_fds() -> None:
     """No fd growth after an aborted run, even with a grandchild holding the pipe."""
@@ -60,22 +52,18 @@ async def test_terminate_process_releases_fds() -> None:
     await terminate_process(proc)
     await wait_for_fd_baseline(base)
 
-
 async def test_terminate_process_is_idempotent() -> None:
     """Calling terminate twice (cancel + finally both fire) is a no-op."""
     proc = await _spawn_holder()
     await terminate_process(proc)
     await terminate_process(proc)  # must not raise
 
-
 async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
     """cancel_processes reaps every tracked process group, not just direct children."""
     base = fd_count()
     procs = [await _spawn_holder() for _ in range(2)]
     pgids = [os.getpgid(p.pid) for p in procs]
-
     await cancel_processes(procs)
-
     for pgid in pgids:
         await wait_for_process_group_gone(pgid)
     await wait_for_fd_baseline(base)
@@ -99,12 +87,8 @@ async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
             raise TimeoutError(f"timed out waiting for the backend CLI marker at {path}")
         await asyncio.sleep(0.01)
 
-
 async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
-    improve_monorepo_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    improve_monorepo_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     silence_console: Callable[..., None],
 ) -> None:
     """Real-path: an aborted ``--improve`` run through ``runner.run`` reaps the
@@ -125,7 +109,8 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     grandchildren) and the fd count returns to the pre-run baseline.
     """
     silence_console("daydream.runner")
-    silence_console("daydream.improve.orchestrator")
+    for module in ("recon", "audit", "planning", "issue_publication", "reporting"):
+        silence_console(f"daydream.improve.{module}")
     silence_console("daydream.agent")
 
     # A fake `codex` CLI that is a genuine subprocess: it forks a `sleep`
@@ -165,11 +150,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     def _factory(*_args: object, **kwargs: object) -> CodexBackend:
         audit_root = kwargs.get("audit_root")
         setattr(backend, "audit_root", audit_root)
-        setattr(
-            backend,
-            "audit_root_isolation",
-            AUDIT_ROOT_ISOLATION if isinstance(audit_root, Path) else None,
-        )
+        setattr(backend, "audit_root_isolation", AUDIT_ROOT_ISOLATION if isinstance(audit_root, Path) else None,)
         return backend
 
     monkeypatch.setattr("daydream.runner.create_backend", _factory)

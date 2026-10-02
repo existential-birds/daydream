@@ -24,8 +24,7 @@ _PERMITTED_OS_REPLACE_FILES = frozenset({
 })
 
 #: The private writers deleted by #1215; none may be redefined.
-_DELETED_PRIVATE_WRITERS = {
-    "daydream/training/adjudication/materialize.py": {"_write_atomic"},
+_DELETED_PRIVATE_WRITERS = {"daydream/training/adjudication/materialize.py": {"_write_atomic"},
     "daydream/training/adjudication/final_bundle.py": {"_write_atomic", "_write_atomic_bytes"},
     "daydream/training/corpus_projection/projector.py": {"_atomic_write"},
     "daydream/training/adjudication/cli.py": {"_write_queue"},
@@ -40,8 +39,7 @@ def _os_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
         if isinstance(node, ast.Import):
             module_aliases.update(alias.asname or alias.name for alias in node.names if alias.name == "os")
         elif isinstance(node, ast.ImportFrom) and node.module == "os":
-            function_aliases.update(
-                alias.asname or alias.name
+            function_aliases.update(alias.asname or alias.name
                 for alias in node.names
                 if alias.name in ("replace", "rename")
             )
@@ -51,13 +49,10 @@ def _os_aliases(tree: ast.AST) -> tuple[set[str], set[str]]:
 def _os_replace_lines(source: str) -> list[int]:
     tree = ast.parse(source)
     module_aliases, function_aliases = _os_aliases(tree)
-    return [
-        node.lineno
+    return [node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
-        and (
-            (
-                isinstance(node.func, ast.Attribute)
+        and ((isinstance(node.func, ast.Attribute)
                 and node.func.attr in ("replace", "rename")
                 and isinstance(node.func.value, ast.Name)
                 and node.func.value.id in module_aliases
@@ -71,8 +66,7 @@ def _single_arg_replace_lines(source: str) -> list[int]:
     """`X.replace(target)` / `X.rename(target)` — a Path rename. A str.replace always carries two args."""
     tree = ast.parse(source)
     module_aliases, _ = _os_aliases(tree)
-    return [
-        node.lineno
+    return [node.lineno
         for node in ast.walk(tree)
         if isinstance(node, ast.Call)
         and isinstance(node.func, ast.Attribute)
@@ -84,12 +78,7 @@ def _single_arg_replace_lines(source: str) -> list[int]:
 
 
 def _scope_files() -> list[Path]:
-    return sorted(
-        path
-        for root in _SCOPE_ROOTS
-        for path in (_REPO_ROOT / root).rglob("*.py")
-    )
-
+    return sorted(path for root in _SCOPE_ROOTS for path in (_REPO_ROOT / root).rglob("*.py"))
 
 def test_no_hand_rolled_temp_rename_writer_remains() -> None:
     offenders: list[str] = []
@@ -101,17 +90,14 @@ def test_no_hand_rolled_temp_rename_writer_remains() -> None:
         offenders += [f"{rel}:{line} Path.replace()/Path.rename()" for line in _single_arg_replace_lines(source)]
     assert offenders == []
 
-
 def test_deleted_private_writer_helpers_stay_deleted() -> None:
     surviving: list[str] = []
     for rel, names in _DELETED_PRIVATE_WRITERS.items():
-        defined = {
-            node.name for node in ast.walk(ast.parse((_REPO_ROOT / rel).read_text(encoding="utf-8")))
+        defined = {node.name for node in ast.walk(ast.parse((_REPO_ROOT / rel).read_text(encoding="utf-8")))
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
         }
         surviving += [f"{rel}::{name}" for name in sorted(names & defined)]
     assert surviving == []
-
 
 def test_scanner_reports_a_reintroduced_hand_rolled_writer() -> None:
     """The guard's own discrimination check: feed it the shape it exists to catch."""

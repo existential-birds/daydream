@@ -1,12 +1,6 @@
-"""Strict, mode-safe filesystem primitives for the private benchmark workspace.
-
-This module owns the on-disk safety layer for ``daydream benchmark``: strict
-YAML/JSON loaders that reject duplicate keys and unsafe tags, mode-``0600``
-atomic writes, mode-``0700`` private directory creation, sha256 checksums,
-and (in later tasks) the workspace lock and transaction journal.
-
-Every parse failure raises :class:`WorkspaceCorrupt` naming the offending file
-— a corrupt file is an error, never silently defaulted.
+"""Private benchmark storage: strict loaders, atomic writes, locking, and recovery. Reject
+duplicate keys, unsafe tags, and malformed documents with WorkspaceCorrupt naming the
+file. Files are 0600 and directories 0700.
 """
 
 from __future__ import annotations
@@ -66,11 +60,9 @@ _UniqueKeyLoader.add_constructor(
 
 
 def load_yaml_strict(path: Path) -> dict[str, Any]:
-    """Load a YAML file as a dict, rejecting duplicates, non-dict roots, and unsafe tags.
+    """Load a mapping or raise ``WorkspaceCorrupt`` for unreadable, invalid, or empty YAML.
 
-    Raises:
-        WorkspaceCorrupt: if the file is not valid YAML, is not a mapping, is
-            empty, or contains duplicate keys / unsafe constructor tags.
+    Duplicate keys, non-mapping roots, and unsafe tags are rejected.
     """
     try:
         data = yaml.load(Path(path).read_bytes(), Loader=_UniqueKeyLoader)
@@ -153,21 +145,10 @@ class _HeldLock:
 
 
 class WorkspaceLock:
-    """An ``fcntl``-backed exclusive lock scoped to a workspace root directory.
-
-    Holds ``LOCK_EX`` (blocking) or ``LOCK_EX | LOCK_NB`` on a sibling
-    ``<root>/.benchmark.lock`` file. The lock is process-reentrant per root:
-    nested acquisitions within the same process share the same open fd and
-    only bump a depth counter, so a command that holds the lock across its own
-    journal writes cannot deadlock against itself. The curation service
-    (``daydream/benchmark/curation.py``) relies on this blocking,
-    process-reentrant semantics for every mutation: each locked mutation runs
-    its whole read -> validate -> mutate -> commit sequence under one
-    acquisition, so concurrent curators serialize instead of losing updates.
-
-    The ``.benchmark.lock`` file itself is left on disk after release (removal
-    races are unsafe), and mutual-exclusion among separate OS processes is
-    provided by the kernel ``fcntl.flock`` byte-range lock.
+    """Exclusive flock on the retained .benchmark.lock file, reentrant per process/root.
+    Nested acquisitions share a descriptor and depth counter. Hold the lock through
+    read, validation, mutation, and commit to serialize curators. The lock file remains
+    after release to avoid removal races.
     """
 
     _held: dict[Path, _HeldLock] = {}
@@ -237,13 +218,9 @@ class _TargetState:
 
 
 class Transaction:
-    """A same-filesystem multi-file mutation journal with startup recovery.
-
-    The context manager *stores* a transaction; it does not auto-*commit*.
-    Callers drive ``stage``/``prepare``/``begin_commit``/``commit`` explicitly
-    so an interrupted operation leaves the exact mid-state
-    ``recover_startup`` is meant to heal. ``__exit__`` is therefore a no-op —
-    partial state is deliberately left for recovery to adjudicate.
+    """Same-filesystem journal with explicit stage/prepare/begin_commit/commit steps.
+    Context exit does not commit or erase partial state; startup recovery requires that
+    evidence to resolve an interrupted operation.
     """
 
     def __init__(self, root: Path, *, op_id: str, kind: str) -> None:
@@ -296,13 +273,8 @@ class Transaction:
     # pipeline
 
     def create_dir(self, target_rel: str | Path) -> None:
-        """Create a ``0700`` directory that this journal atomically owns.
-
-        Directory creation is recorded in the journal so an interrupted
-        transaction (``prepared`` / ``committing``) is rolled back by
-        ``recover_startup`` (only empty directories are removed). This lets
-        ``init_workspace`` build the private scaffold subdirs through the same
-        crash-consistent journal instead of leaving them outside it.
+        """Journal ownership of a new 0700 directory. Recovery removes only empty owned
+        directories after an interrupted transaction.
         """
         rel = _resolve_target(self._root, target_rel)
         ensure_private_dir(self._root / rel)
@@ -352,12 +324,8 @@ class Transaction:
             self._replacement_order = [r for r in self._replacement_order if r != "benchmark.yaml"] + [rel]
 
     def retire(self, target_rel: str | Path, *, expected_sha256: str) -> None:
-        """Stage a digest-matched existing file for atomic deletion.
-
-        The target is backed up inside the same transaction before the journal
-        is prepared. A committing-state recovery restores that backup; a
-        complete transaction verifies that the target is absent. The digest
-        binds retirement to the exact file the caller inspected.
+        """Stage exact-digest file retirement with a backup. Interrupted commits restore
+        it; complete commits verify absence.
         """
         rel = _resolve_target(self._root, target_rel)
         if rel in self._states:
@@ -411,26 +379,17 @@ class Transaction:
         _fsync_file(self._journal_path())
 
     def begin_commit(self) -> None:
-        """Rewrite the journal ``committing``, then apply targets in ordered list.
-
-        Each target's ``applied_count`` is recorded in the journal *before* the
-        target is replaced, so a crash between the replace and the next journal
-        write still lets recovery roll that target back from its backup (the
-        journal already accounts for it). Journaling-after-apply would leave the
-        last-replaced file unrecoverable — a checksum-drifted mixed state the
-        journal's never-drift contract forbids.
+        """Mark committing, then apply targets in order. Persist applied_count before each
+        replacement so recovery includes a target even if the process dies between
+        replacement and the next journal write.
         """
         self._begin_committing()
         self._apply_replacements()
         _fsync_directory(self._root)
 
     def _apply_replacements(self) -> None:
-        """Apply targets in ``replacement_order``, fsyncing each rename.
-
-        Each target's rename is made durable (file + *parent directory* fsync)
-        before the next target is applied, so a crash at any per-target
-        boundary still restores the whole before- or after-state, never a
-        checksum-drifted mix.
+        """Replace in declared order, fsyncing each file and parent before applying the
+        next target.
         """
         for rel in self._replacement_order:
             self._apply_replacement(rel)
@@ -502,13 +461,8 @@ class Transaction:
 
 @lru_cache(maxsize=None)
 def _resolve_cached(root_r: str, target: str) -> str:
-    """Resolve ``target`` against the already-resolved absolute ``root_r``.
-
-    Every non-partial resolution/containment failure fails closed with
-    :class:`WorkspaceCorrupt`, mirroring the sibling strict loaders. The
-    result is memoized on ``(root_r, target)`` so recovery consumers that
-    re-resolve the same validated rels after :func:`_validate_journal` reuse
-    the canonical rel instead of repeating ``Path.resolve()`` syscalls.
+    """Memoize contained canonical paths under a resolved root; failures raise
+    WorkspaceCorrupt.
     """
     p = Path(target)
     candidate = p if p.is_absolute() else Path(root_r) / p
@@ -528,13 +482,8 @@ def _resolve_cached(root_r: str, target: str) -> str:
 
 
 def _resolve_target(root: Path, target: str | Path) -> str:
-    """Resolve ``target`` to a canonical POSIX rel, forcing it beneath ``root``.
-
-    The containment invariant is enforced at the *resolved* path, not the
-    literal string: a ``../x`` relative input, an absolute path, and a path
-    whose parent is a symlink to an outside directory all collapse to
-    "resolves outside root" and are rejected uniformly. Absolute paths that
-    resolve inside the root are accepted (the canonical ``rel`` is returned).
+    """Return a canonical POSIX path relative to root, rejecting resolved escapes. Absolute
+    paths inside root are allowed; parent symlinks cannot escape it.
     """
     try:
         root_r = Path(root).resolve()
@@ -544,13 +493,8 @@ def _resolve_target(root: Path, target: str | Path) -> str:
 
 
 def resolve_authoring_path(root: Path, rel: str | Path) -> Path:
-    """Resolve an authoring path (case/import/bundle) contained in ``root``.
-
-    Stricter than :func:`_resolve_target` (which keeps serving the transaction
-    journal): any *absolute* authoring path is a containment violation, even
-    one resolving inside ``root``. ``..``, symlink-escape, and outside-root
-    inputs are rejected by :func:`_resolve_target` and surface as
-    :class:`WorkspaceCorrupt` naming the path.
+    """Resolve a contained authoring path, rejecting absolute inputs even when they point
+    inside root.
     """
     if Path(rel).is_absolute():
         raise WorkspaceCorrupt(f"{root}: authoring path must be relative: {rel!r}")
@@ -566,21 +510,11 @@ def recover_startup(
     indexed: set[str] | None = None,
     on_disk: set[Path] | None = None,
 ) -> None:
-    """Recover an interrupted journal before reading workspace state.
-
-    Recovery is fail-closed and two-phase. Phase 1 loads and validates the
-    *entire* journal set (via :func:`_validate_journal`) and builds a
-    ``{rel: op_dir}`` claim map, rejecting any cross-transaction target
-    conflict before any filesystem mutation. Phase 2 then dispatches each
-    validated journal: a ``prepared`` journal rolls back (targets were never
-    applied), a ``committing`` journal rolls back in reverse from backups/
-    absent markers, and a ``complete`` journal is verified against after-state
-    digests then cleared. With ``indexed``/``on_disk`` supplied and no journal
-    present, the orphan rule applies: an on-disk import/case/bundle not in
-    ``indexed``, or an indexed file missing from disk, is corruption. When no
-    journal is present, recovery still runs: it removes only positively-
-    identified pre-journal ``stage-*.bin``/``backup-*.bin`` residue and treats
-    any unidentifiable entry under ``transactions/`` as corruption.
+    """Validate every journal and cross-transaction claim before any recovery mutation.
+    Prepared journals roll back; committing journals restore backups in reverse;
+    complete journals verify after-state digests before clearing. With no journal,
+    indexed/on-disk mismatches are corruption. Delete only positively identified
+    pre-journal residue; unknown transaction entries fail closed.
     """
     root = Path(root)
     txn_root = root / "transactions"
@@ -659,13 +593,8 @@ _TRANSACTION_RESIDUE_RE = re.compile(r"^(?:stage|backup)-\d{4}\.bin$")
 
 
 def _is_transaction_residue(op_dir: Path) -> bool:
-    """True iff ``op_dir`` is positively-identified pre-journal residue.
-
-    A residue dir is a real directory (not a symlink) whose *only* contents
-    are regular files matching the exact ``stage-NNNN.bin`` / ``backup-NNNN.bin``
-    staging patterns. A dir containing ``journal.json``, a subdirectory, a
-    foreign file, or any symlink is -- by definition -- not residue, so
-    recovery never guesses and never deletes anything it cannot identify.
+    """Recognize real directories containing only stage-NNNN.bin/backup-NNNN.bin regular
+    files. Journals, symlinks, subdirectories, and foreign files prevent deletion.
     """
     if not op_dir.is_dir() or op_dir.is_symlink():
         return False
@@ -684,13 +613,8 @@ def _is_transaction_residue(op_dir: Path) -> bool:
 
 
 def _empty_transactions(root: Path) -> None:
-    """Clean leftover per-op dirs, keeping the empty ``transactions/`` root.
-
-    Only dirs that pass :func:`_is_transaction_residue` (positive
-    identification) are removed. Symlinks, foreign files, and unknown subdirs
-    are never touched here — ``recover_startup`` already raised on them before
-    this runs — and a failure to remove a positively-identified dir propagates
-    rather than being swallowed.
+    """Remove only positively identified residue directories; retain the root and propagate
+    failures.
     """
     txn_root = root / "transactions"
     if not txn_root.exists():
@@ -701,13 +625,8 @@ def _empty_transactions(root: Path) -> None:
 
 
 def _validate_journal(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
-    """Strictly validate a journal document, failing closed with no mutation.
-
-    Every check here is a hard requirement: a journal that violates any rule
-    is corruption, never something to silently skip or partially trust. The
-    validator performs no filesystem mutation — it only proves the doc is
-    structurally sound and that every path it names resolves within ``root``.
-    Recovery readers then trust the validated ``rel`` strings.
+    """Validate the full journal structure and resolved containment without filesystem
+    mutation.
     """
     state = doc.get("state")
     if state not in ("prepared", "committing", "complete"):

@@ -1,26 +1,8 @@
-"""The pure evidence-reuse decision predicate for the fix/commit gates.
+"""Pure comparison of successful host-test evidence with a gate's typed target.
 
-A successful host test run may stand in for a fresh validation at a later
-decision gate only when the *whole* typed identity of that run still matches
-the gate's target. This module owns that comparison and nothing else: it takes
-already-resolved values, performs no I/O, and makes no model or network call,
-so the same inputs always yield the same :class:`ReuseDecision`.
-
-Check order (each earlier clause wins):
-
-1. no evidence at all -> ``no-evidence`` (a fresh validation is required);
-2. red or incomplete evidence (``identity.reusable`` false: an agent-reported
-   verdict, a timeout, a truncated run) -> ``incomplete-evidence``;
-3. any named absent component (Pattern C: an unreadable config input) ->
-   ``absent-component``, naming the absent input(s);
-4. component-wise comparison in the fixed order ``session_id``, ``argv``,
-   ``cwd_relative``, ``runner``, ``interpreter``, ``config_digest``, tree keys,
-   ``head_sha``, ``branch`` -> ``identity-mismatch``, naming every mismatch.
-
-The tree key is content-only, so a commit can move ``HEAD`` without moving it.
-A bare tree-key match therefore never authorizes reuse: ``head_sha``/``branch``
-must also match, unless the caller has *verified* the post-commit tree with
-``ReuseTarget.post_commit_verified``.
+Check absence, incomplete execution, absent components, then all identity fields
+in declared order. A content-only tree-key match is insufficient: HEAD and branch
+must also match unless the caller verified the post-commit retained tree.
 """
 
 from __future__ import annotations
@@ -59,13 +41,9 @@ _COMPONENT_ORDER: tuple[str, ...] = (
 
 @dataclass(frozen=True)
 class ReuseTarget:
-    """The already-resolved target a reuse decision is compared against.
+    """Resolved target; post_commit_verified attests the committed retained path/state set.
 
-    ``tree_key`` is the retained tree's content key (supplied by the caller,
-    never recomputed here). ``post_commit_verified`` is set only after the
-    strict post-commit verification proved the created commit carries exactly
-    the retained path/state set that was tested; when set, the ``head_sha`` and
-    ``branch`` components are not compared.
+    Only that strict post-commit proof permits ignoring changed HEAD and branch.
     """
 
     session_id: str
@@ -83,12 +61,7 @@ class ReuseTarget:
 
 @dataclass(frozen=True)
 class ReuseDecision:
-    """The pure outcome of one reuse comparison.
-
-    ``mismatched_components`` names every component that failed (or the absent
-    inputs when ``result == "absent-component"``), so the caller can explain a
-    miss without re-deriving it.
-    """
+    """Reuse outcome with every mismatched or absent component named for audit."""
 
     reused: bool
     result: ReuseResult
@@ -157,12 +130,10 @@ def audit_payload(
     identity: TestExecutionIdentity | None,
     target: ReuseTarget,
 ) -> dict[str, Any]:
-    """Build the strict-JSON audit record for one reuse decision.
+    """Record tree keys, HEADs, branch, and mismatch names only.
 
-    Only identity *facts* are recorded — tree keys, HEAD shas, branch, and the
-    mismatched component names — never commands, config digests, secrets, or
-    environment values. ``before_head_sha`` is the evidence's HEAD and
-    ``after_head_sha`` the target's.
+    Never include commands, config digests, secrets, or environment values.
+    before_head_sha belongs to the evidence; after_head_sha belongs to the target.
     """
     return {
         "format_version": EVIDENCE_REUSE_FORMAT,

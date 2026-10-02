@@ -1,18 +1,7 @@
-"""Deterministic, non-destructive upgrade path for legacy authoring cases.
-
-Issue #806 hardened the authoring schemas and made ``finding_id`` case-scoped
-(``sha256(case_id, title, body, severity, path, start_line, end_line)``) via
-:func:`daydream.benchmark.schema.derive_finding_id`, gated on
-``CaseDocument.schema_version == 2`` so pre-change v1 workspaces stay loadable.
-This module deterministically re-derives ``finding_id`` for every v1 case and
-bumps its ``schema_version`` to 2 without touching authored content. It also
-repairs the legacy producer's draft/unreplayable state pairing and snapshot
-provenance: imported snapshots preserve their sole base candidate, while ready
-snapshots gain the merge-base marker only after local Git objects prove their
-requested tip, merge base, and trees.
-
-Invalid data is **never** silently rewritten: a case that fails to load or
-validate is surfaced in ``UpgradeReport.errors`` and left byte-unchanged.
+"""Upgrade legacy cases without changing authored content or invalid input. V1 findings
+gain case-scoped identities and schema version 2. Repair legacy curation pairing and
+snapshot provenance only when local Git objects prove the requested tip, merge base, and
+trees. Invalid cases remain byte-identical and appear in UpgradeReport.errors.
 """
 
 from __future__ import annotations
@@ -154,19 +143,10 @@ def _upgrade_case(raw: dict[str, Any], case_id: str) -> tuple[dict[str, Any], in
 
 
 def migrate_workspace(root: Path, *, dry_run: bool = False) -> UpgradeReport:
-    """Deterministically upgrade every v1 case in the workspace to v2.
-
-    Recomputes case-scoped ``finding_id``, bumps ``schema_version`` to 2, and
-    repairs the legacy producer's draft/unreplayable curation pairing, writing
-    changed cases atomically through ``storage.Transaction``. When *dry_run* is
-    True the report is computed without writing. Every unchanged v2 case is
-    still validated; invalid cases are recorded in ``report.errors`` and left
-    byte-unchanged.
-
-    The migration's writes run under the workspace lock so they serialize
-    against concurrent curators — otherwise a curator mutation and a migration
-    could race on the same case file and lose an update. (The *dry_run* path is
-    read-only and intentionally runs without the lock.)
+    """Upgrade and validate cases, writing changes atomically under the workspace lock.
+    Recompute V1 finding ids and legacy curation/provenance state; validate unchanged V2
+    cases too. Invalid cases remain untouched and reported. Dry runs compute the report
+    without writes or lock acquisition.
     """
     root = Path(root)
     if dry_run:

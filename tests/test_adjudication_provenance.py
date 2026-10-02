@@ -20,28 +20,20 @@ from daydream.deep.adjudication_provenance import (
     load_provenance,
     record_provenance,
 )
+from daydream.deep.adjudication_steps import _apply_adjudication_verdicts
 from daydream.deep.artifacts import adjudication_provenance_path
-from daydream.deep.merge_steps import _apply_adjudication_verdicts
 
 
 def test_a_revision_that_changes_a_revisable_field_is_recorded(tmp_path: Path) -> None:
-    before = {
-        "uid": "python:1",
-        "severity": "high",
-        "confidence": "HIGH",
-        "description": "d",
-        "rationale": "r",
+    before = {"uid": "python:1", "severity": "high", "confidence": "HIGH", "description": "d", "rationale": "r",
         "evidence": "e",
     }
     after = {**before, "severity": "low", "description": "rewritten"}
     assert find_revision_delta(before, after) == ("severity", "description")
     assert find_revision_delta(before, dict(before)) == ()
 
-    record_provenance(
-        tmp_path,
-        pass_name="arbiter",
-        outcomes=[
-            RecordProvenance("python:1", ("arbiter",), True, True, ("severity", "description")),
+    record_provenance(tmp_path, pass_name="arbiter",
+        outcomes=[RecordProvenance("python:1", ("arbiter",), True, True, ("severity", "description")),
             RecordProvenance("python:2", ("arbiter",), False, True, ()),
         ],
     )
@@ -52,46 +44,21 @@ def test_a_revision_that_changes_a_revisable_field_is_recorded(tmp_path: Path) -
     assert recorded["python:2"].targeted is True
     assert json.loads(adjudication_provenance_path(tmp_path).read_text())["format"] == PROVENANCE_FORMAT
 
-
 def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None:
     """A bound keep-verdict confirms; an unbound or missing one does not."""
-    records = [
-        {
-            "uid": "python:1",
-            "severity": "high",
-            "confidence": "HIGH",
-            "description": "a",
-            "rationale": "r",
+    records = [{"uid": "python:1", "severity": "high", "confidence": "HIGH", "description": "a", "rationale": "r",
             "evidence": "e",
-        },
-        {
-            "uid": "python:2",
-            "severity": "high",
-            "confidence": "HIGH",
-            "description": "b",
-            "rationale": "r",
+        }, {"uid": "python:2", "severity": "high", "confidence": "HIGH", "description": "b", "rationale": "r",
             "evidence": "e",
-        },
-        {
-            "uid": "python:3",
-            "severity": "high",
-            "confidence": "HIGH",
-            "description": "c",
-            "rationale": "r",
+        }, {"uid": "python:3", "severity": "high", "confidence": "HIGH", "description": "c", "rationale": "r",
             "evidence": "e",
         },
     ]
-    verdicts: dict[int, dict[str, Any]] = {
-        1: {"arb_id": 1, "keep": True, "severity": "low"},
+    verdicts: dict[int, dict[str, Any]] = {1: {"arb_id": 1, "keep": True, "severity": "low"},
         2: {"arb_id": 99, "keep": True},  # echoed id mismatch -> unconfirmed
     }
     _kept, _sources, outcomes = _apply_adjudication_verdicts(
-        records,
-        ["stack-python-records.json"] * 3,
-        [0, 1, 2],
-        verdicts,
-        pass_name="arbiter",
-        id_field="arb_id",
+        records, ["stack-python-records.json"] * 3, [0, 1, 2], verdicts, pass_name="arbiter", id_field="arb_id",
         fail_closed=False,
     )
 
@@ -102,44 +69,31 @@ def test_apply_adjudication_verdicts_reports_confirmation_and_revision() -> None
     assert by_uid["python:2"].verdict_bound is False and by_uid["python:2"].confirmed is False
     assert by_uid["python:3"].verdict_bound is False  # no verdict returned
 
-
 def test_absent_or_malformed_ledger_loads_as_no_provenance(tmp_path: Path) -> None:
     assert load_provenance(tmp_path) == {}
     adjudication_provenance_path(tmp_path).write_text("{not json")
     assert load_provenance(tmp_path) == {}
 
-
 def test_a_body_missing_kept_parses_as_unkept_not_confirmed() -> None:
     """A missing ``kept`` is an absent input and must not read as confirmation.
 
-    The writer always emits an explicit ``kept``, so a body that omits it is
-    malformed or foreign: defaulting it to True would let a partially readable
-    ledger certify a record as confirmed and silently skip its verification,
-    against the ledger's documented fail-open read path.
-    """
-    parsed = RecordProvenance.from_dict(
-        {"uid": "python:1", "passes": ["arbiter"], "verdict_bound": True}
-    )
+    The writer always emits an explicit ``kept``, so a body that omits it is malformed or foreign: defaulting it
+    to True would let a partially readable ledger certify a record as confirmed and silently skip its
+    verification, against the ledger's documented fail-open read path."""
+    parsed = RecordProvenance.from_dict({"uid": "python:1", "passes": ["arbiter"], "verdict_bound": True})
     assert parsed is not None
     assert parsed.kept is False
     assert parsed.confirmed is False
 
-
 def test_two_passes_accumulate_additively_in_one_ledger(tmp_path: Path) -> None:
     """The additive merge path the real run relies on (arbiter, then suppression).
 
-    The second ``record_provenance`` call must fold into the first record:
-    ``passes`` union in first-seen order, ``verdict_bound`` OR, ``kept`` AND, and
-    ``revised_fields`` union in declaration order.
-    """
+    The second ``record_provenance`` call must fold into the first record: ``passes`` union in first-seen order,
+    ``verdict_bound`` OR, ``kept`` AND, and ``revised_fields`` union in declaration order."""
     record_provenance(
-        tmp_path,
-        pass_name="arbiter",
-        outcomes=[RecordProvenance("python:1", ("arbiter",), True, True, ("severity",))],
+        tmp_path, pass_name="arbiter", outcomes=[RecordProvenance("python:1", ("arbiter",), True, True, ("severity",))],
     )
-    record_provenance(
-        tmp_path,
-        pass_name="suppression",
+    record_provenance(tmp_path, pass_name="suppression",
         outcomes=[RecordProvenance("python:1", ("suppression",), False, False, ("evidence",))],
     )
     merged = load_provenance(tmp_path)["python:1"]
