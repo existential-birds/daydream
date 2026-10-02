@@ -57,7 +57,6 @@ _EXPECTED_ROOTS = frozenset(
         "PER_STACK_RECORD_SCHEMA",
         "SUPERVISE_SCHEMA",
         "SUPPRESSION_SCHEMA",
-        "UNCOVERED_SWEEP_SCHEMA",
     }
 )
 

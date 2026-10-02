@@ -41,12 +41,10 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.backends.codex import CodexBackend
-from daydream.eval.analyzer import analyze_session
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.review_budget import ReviewLimits
 from daydream.runner import RunConfig, run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
-from daydream.trajectory import RunWriteSnapshot, TrajectoryDocumentSnapshot, snapshot_trajectories
 from tests.deep_orchestrator.support import _only_archived_run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.codex_replay import make_mock_process
@@ -158,6 +156,8 @@ async def _run_real_phases_deep(
     stub.fix_edit_line = fix_edit_line
     if untracked_fix is not None:
         stub.fix_new_generated = untracked_fix
+        assert stub.merge_items is not None
+        stub.merge_items[0]["related_files"] = [untracked_fix]
         (multi_stack_target / "notes.txt").write_text("pre-existing\n")
     exit_code = await run(
         _deep_run_config(
@@ -220,9 +220,9 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     assert any("2 passed, 0 failed" in step["message"] for step in test_steps)
 
     metrics = manifest["metrics"]
-    assert metrics["grounding_rate"] is not None
+    assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is not None
-    assert metrics["coverage_ratio"] is not None
+    assert "coverage_ratio" not in metrics
     assert metrics["cost_per_finding_usd"] is not None
     assert (run_dir / "evaluation.json").is_file()
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
@@ -421,91 +421,6 @@ async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     assert "notes.txt" not in committed
     # notes.txt still untracked in the working tree.
     assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
-
-
-async def test_deep_run_with_unbalanced_quote_shell_command_still_archives_evaluation(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-) -> None:
-    """A shell command ``shlex`` cannot tokenize must not lose the archive's
-    evaluation.json (issue #327).
-
-    The offending call contributes no read paths while sibling calls in the
-    same trajectory are still analyzed; the eval completes (archive never
-    blocks) and the run keeps non-null manifest eval metrics.
-    """
-    stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
-    stub.fix_edit_line = "# daydream recommended change\n"
-
-    exit_code = await run(
-        _deep_run_config(multi_stack_target)
-    )
-    assert exit_code == 0
-
-    run_dir = _only_archived_run(archive_dir)
-    session_id = run_dir.name
-
-    # Inject an unbalanced-quote shell command into the SOURCE trajectory (the
-    # tree analyze_session reads) and re-run the production archive eval seam
-    # against it. Drop the stale evaluation.json from the clean run first so
-    # the assertions below observe the eval of the INJECTED trajectory.
-    source_traj = multi_stack_target / ".daydream" / "runs" / session_id / "trajectory.json"
-    traj = json.loads(source_traj.read_text())
-    traj["steps"].append(
-        {
-            "step_id": len(traj["steps"]) + 1,
-            "extra": {"daydream_phase": "deep"},
-            "tool_calls": [
-                {
-                    "function_name": "shell",
-                    "arguments": {"command": "rg -l '\"unclosed"},
-                },
-                {"function_name": "shell", "arguments": {"command": "cat api.py"}},
-            ],
-        }
-    )
-    source_traj.write_text(json.dumps(traj))
-
-    eval_path = run_dir / "evaluation.json"
-    eval_path.unlink(missing_ok=True)
-
-
-    snapshot = RunWriteSnapshot(
-        status="complete",
-        cutoff_at=str((traj.get("extra") or {}).get("run_ended_at", "")),
-        root_trajectory_id=str(traj["trajectory_id"]),
-        documents=(
-            TrajectoryDocumentSnapshot(
-                trajectory_id=str(traj["trajectory_id"]),
-                path=source_traj,
-                json_bytes=json.dumps(traj).encode(),
-            ),
-        ),
-    )
-    # The same evaluation seam the strict archive finalizer drives, over the
-    # injected trajectory bytes.
-    result = analyze_session(
-        multi_stack_target / ".daydream",
-        session_id=session_id,
-        frozen_trajectories=snapshot_trajectories(snapshot),
-    )
-    assert "error" not in result
-    eval_path.write_text(json.dumps(result, indent=2), encoding="utf-8")
-
-    # Coverage degrades gracefully for the offending call only: the clean
-    # sibling call still contributes its read, so api.py stays covered.
-    evaluation = json.loads(eval_path.read_text())
-    assert evaluation["coverage"]["files_read_by_reviewers"] >= 1
-    assert "api.py" not in evaluation["coverage"]["uncovered_files"]
-
-    # The archive as a whole keeps non-null eval metrics.
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    metrics = manifest["metrics"]
-    assert metrics["grounding_rate"] is not None
-    assert metrics["total_findings"] is not None
-    assert metrics["coverage_ratio"] is not None
-    assert metrics["cost_per_finding_usd"] is not None
 
 
 async def test_dump_artifacts_copies_full_bundle_to_target_dir(
@@ -891,9 +806,9 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     run_dir = _only_archived_run(archive_dir)
     manifest = json.loads((run_dir / "manifest.json").read_text())
     metrics = manifest["metrics"]
-    assert metrics["grounding_rate"] is None
+    assert "grounding_rate" not in metrics
     assert metrics["total_findings"] is None
-    assert metrics["coverage_ratio"] is None
+    assert "coverage_ratio" not in metrics
     assert metrics["cost_per_finding_usd"] is None
     assert not (run_dir / "evaluation.json").exists()
 
@@ -938,13 +853,12 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
                                 "evidence": "main.py:1",
                             }
                         ],
-                        "verdicts": [],
                     },
                     continuation=None,
                 ),
             ]
         if "fix this issue" in pl or pl.startswith("fix these"):
-            main_py = repo / "main.py"
+            main_py = Path(cwd) / "main.py"
             main_py.write_text(main_py.read_text() + "# daydream recommended change\n")
             return [TextEvent(text="Fixed."), ResultEvent(structured_output=None, continuation=None)]
         if "post-fix fix-verifier agent" in pl:
@@ -1215,12 +1129,11 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     assert (escape["a_id"], escape["b_id"]) == ("1", "2")
     assert escape["same_file"] is True
 
-    # Grounding records which artifact it checked against.
-    assert evaluation["grounding"]["hunk_source"] == "hunk-index.json"
+    assert "grounding" not in evaluation
 
     # Pre-existing manifest eval metrics are unaffected.
     manifest = json.loads((run_dir / "manifest.json").read_text())
-    assert manifest["metrics"]["grounding_rate"] is not None
+    assert "grounding_rate" not in manifest["metrics"]
     assert manifest["metrics"]["total_findings"] == 3
 
 
@@ -1550,13 +1463,13 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
             yield event
 
 
-async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_source(
+async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     multi_stack_target: Path,
     monkeypatch: pytest.MonkeyPatch,
     archive_dir: Path,
     artifact_runtime_root: Path,
 ) -> None:
-    """Real deep run keeps source credit while rejecting artifact evidence."""
+    """A real run archives routed prompt inputs and preserves parsed findings."""
     silence(monkeypatch)
     force_interactive(monkeypatch)
     backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
@@ -1730,60 +1643,11 @@ async def test_real_deep_archive_rejects_sanctioned_artifact_reads_but_credits_s
         controlled_records.append(matches[0])
     assert len({record["description"] for record in controlled_records}) == 3
 
-    coverage = evaluation["coverage"]
-    assert coverage["coverage_ratio"] == 1.0
-    assert coverage["files_read_by_reviewers"] == coverage["files_in_diff"]
-    assert coverage["artifact_reads_rejected"] == 2
+    assert "coverage" not in evaluation
+    assert "grounding" not in evaluation
+    assert "grounding_rate" not in manifest["metrics"]
+    assert "coverage_ratio" not in manifest["metrics"]
 
-    grounding = evaluation["grounding"]
-    assert grounding["artifact_evidence_rejections"] == 2
-    python_rows = [
-        row
-        for row in grounding["ungrounded"]
-        if row["stack"] == "python" and row["file"] == "api.py"
-    ]
-    generic_rows = [
-        row
-        for row in grounding["ungrounded"]
-        if row["stack"] == "generic" and row["file"] == "README.md"
-    ]
-    react_rows = [
-        row
-        for row in grounding["grounded"]
-        if row["stack"] == "react" and row["file"] == "App.tsx"
-    ]
-    assert len(python_rows) == len(generic_rows) == len(react_rows) == 1
-    python_row = python_rows[0]
-    generic_row = generic_rows[0]
-    react_row = react_rows[0]
-
-    assert python_row["file_was_read"] is True
-    assert python_row["line_grounded"] is True
-    assert python_row["artifact_file_ref"] is None
-    assert python_row["artifact_rationale_refs"] == [str(private_intent)]
-    assert python_row["unread_rationale_refs"] == []
-    assert python_row["grounded"] is False
-
-    assert generic_row["file_was_read"] is True
-    assert generic_row["line_grounded"] is True
-    assert generic_row["artifact_file_ref"] is None
-    assert generic_row["artifact_rationale_refs"] == [
-        ".daydream/deep/intent.md"
-    ]
-    assert generic_row["unread_rationale_refs"] == []
-    assert generic_row["grounded"] is False
-
-    assert react_row["file_was_read"] is True
-    assert react_row["line_grounded"] is True
-    assert react_row["artifact_rationale_refs"] == []
-    assert react_row["unread_rationale_refs"] == []
-    assert react_row["grounded"] is True
-
-    assert manifest["metrics"]["grounding_rate"] is not None
-    assert (
-        manifest["metrics"]["grounding_rate"]
-        == evaluation["grounding"]["grounding_rate"]
-    )
 
 
 

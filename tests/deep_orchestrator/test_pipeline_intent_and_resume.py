@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +39,6 @@ from tests.test_deep_orchestrator import (
     _intent_prompt,
     _merge_item,
     _prime_merge_resume,
-    _profile_with_pipeline,
     _record,
     _recording_prompter,
     _run_deep,
@@ -530,7 +530,6 @@ async def test_preflight_notice(
         stack_lines: Any,
         agent_count: Any,
         exploration_available: Any,
-        sweep_note: Any = None,
     ) -> None:
         captured.append(
             {
@@ -538,7 +537,6 @@ async def test_preflight_notice(
                 "stack_lines": stack_lines,
                 "agent_count": agent_count,
                 "exploration_available": exploration_available,
-                "sweep_note": sweep_note,
             }
         )
 
@@ -566,49 +564,6 @@ async def test_preflight_notice(
         "react: 1 file(s)",
         "generic: 1 file(s)",
     ]
-    # Issue #309 finding 8: the sweep is enabled by default, so the pre-flight
-    # estimate appends an upper-bound note. The fixture changes 3 files, so the
-    # sweep could add up to 2 x min(3, max_files=10) = 6 review+parse agents.
-    assert notice["sweep_note"] == (
-        "(+ up to 6 sweep agents: review + parse per uncovered file, capped by eligible changed files)"
-    )
-
-
-async def test_preflight_notice_sweep_note_disabled_when_sweep_off(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """No sweep additive in the pre-flight estimate when the sweep is disabled."""
-    captured: list[dict[str, Any]] = []
-
-    def _capture(
-        console: Any,
-        *,
-        stages: Any,
-        stack_lines: Any,
-        agent_count: Any,
-        exploration_available: Any,
-        sweep_note: Any = None,
-    ) -> None:
-        captured.append(
-            {
-                "agent_count": agent_count,
-                "sweep_note": sweep_note,
-            }
-        )
-
-    monkeypatch.setattr("daydream.deep.review_steps.print_stage_progress", lambda *a, **kw: None)
-    monkeypatch.setattr("daydream.deep.orchestrator.print_preflight_notice", _capture)
-    monkeypatch.setattr("daydream.run_context._prompt_user", _accept_intent_decline_other)
-    _install_stub_backend(monkeypatch, multi_stack_target)
-
-    exit_code = await _run_deep(
-        multi_stack_target,
-        review_profile=_profile_with_pipeline(uncovered_sweep_enabled=False),
-    )
-    assert exit_code == 0
-    assert len(captured) == 1
-    assert captured[0]["sweep_note"] is None
 
 
 async def test_resume_per_stack_reruns_all(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -690,3 +645,37 @@ async def test_stage_ui_surfacing(multi_stack_target: Path, monkeypatch: pytest.
     stage_numbers = {c[0] for c in progress_calls}
     assert stage_numbers == {1, 2, 3, 4, 5}
     assert all(c[1] == 5 for c in progress_calls)
+
+
+@pytest.mark.parametrize("empty", [False, True])
+async def test_review_and_resume_ignore_obsolete_sweep_outputs(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, empty: bool,
+) -> None:
+    """Current reviewer outputs alone define findings, including on merge resume."""
+    _silence(monkeypatch)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.merge_echo_records = True
+    if empty:
+        monkeypatch.setattr(stub, "_apply_parse_by_stack_override", lambda prompt, issue: [])
+    assert await _run_deep(multi_stack_target) == 0
+    deep = multi_stack_target / ".daydream" / "deep"
+    assert not (deep / "coverage-stats.json").exists()
+    assert not (deep / "coverage-receipts.json").exists()
+    assert not list(deep.glob("uncovered-*-review.md"))
+    assert not (deep / "stack-uncovered-records.json").exists()
+    assert all("uncovered file sweep" not in str(call["prompt"]).lower() for call in stub.calls)
+    original = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert bool(original) is not empty
+    (deep / "stack-uncovered-records.json").write_text(json.dumps([
+        _record(description="stale sweep finding"),
+    ]))
+    (deep / "stack-obsolete-records.json").write_text(json.dumps([
+        _record(description="stale reviewer finding"),
+    ]))
+    (deep / "coverage-stats.json").write_text("not valid JSON")
+    assert await _run_deep(multi_stack_target, start_at="merge") == 0
+    resumed = json.loads((deep / "merged-items.json").read_text())["items"]
+    assert bool(resumed) is not empty
+    assert all("stale" not in item["description"] for item in resumed)
+    report = (multi_stack_target / ".review-output.md").read_text()
+    assert "## Coverage" not in report

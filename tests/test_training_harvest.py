@@ -214,12 +214,11 @@ def _pr_row(run_dir: Path, session_id: str, *, pr_number: int = 7) -> dict[str, 
         "head_sha": "h",
         "base_branch": "main",
         "archive_path": str(run_dir),
-        "grounding_rate": 1.0,
         "changed_files": "[]",
     }
 
 
-def _local_row(run_dir: Path, session_id: str, *, grounding_rate: float | None) -> dict[str, Any]:
+def _local_row(run_dir: Path, session_id: str) -> dict[str, Any]:
     """The PR-less local-branch row shared by the shallow/local annotation tests."""
     return {
         "session_id": session_id,
@@ -228,7 +227,6 @@ def _local_row(run_dir: Path, session_id: str, *, grounding_rate: float | None) 
         "branch": "feat",
         "head_sha": "h",
         "archive_path": str(run_dir),
-        "grounding_rate": grounding_rate,
         "changed_files": "[]",
     }
 
@@ -385,7 +383,7 @@ def test_build_annotation_applies_posterior_penalty_for_rejected_pr(tmp_path: Pa
     row = _pr_row(run_dir, "s_rej", pr_number=9)
 
     # Intrinsic-only baseline: same inputs scored with no posterior.
-    intrinsic_inputs = assemble_scoring_inputs(run_dir, row)
+    intrinsic_inputs = assemble_scoring_inputs(run_dir)
     intrinsic_only_composite = score_trajectory(intrinsic_inputs).composite
 
     _write_findings(run_dir, _FP_A)
@@ -524,7 +522,7 @@ def test_build_annotation_formal_review_author_reply_is_decisive(tmp_path: Path)
 def test_build_annotation_shallow_local_row_null_valid_at_reward_present(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()           # no deep/ → shallow
-    row = _local_row(run_dir, "s2", grounding_rate=None)
+    row = _local_row(run_dir, "s2")
     ann = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh,
                            repo_clone=tmp_path)
     assert ann.valid_at is None                               # collapses to observed_at on write
@@ -550,7 +548,7 @@ def test_build_annotation_rejected_pr_populated_prior_drives_pool(tmp_path: Path
             pr_number=1,
             head_sha="aaa",
             base_branch="main",
-            grounding_rate=1.0,
+
             changed_files=["app.py"],
             archive_path=str(tmp_path),
         ),
@@ -656,7 +654,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
     # maintainer acting in a PR, so the label is kept but has_posterior is False.
 
     run_dir = _seed_deep_bronze(tmp_path)
-    row = _local_row(run_dir, "s_local", grounding_rate=1.0)
+    row = _local_row(run_dir, "s_local")
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(
         row,
@@ -690,21 +688,21 @@ def test_build_annotation_asserts_canonical_version(tmp_path: Path, monkeypatch:
                          gh_api=_fake_gh(merged=False), repo_clone=tmp_path)
 
 
-def test_assemble_reads_verdicts_and_grounding_from_bronze(tmp_path: Path) -> None:
+def test_assemble_reads_verdicts_from_bronze(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     (run_dir / "deep" / "recommendation-verdicts.json").write_text(
         '{"verdicts":[{"issue_id":1,"verdict":"consistent"}]}'
     )
-    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.75})
+    inputs = assemble_scoring_inputs(run_dir)
     assert inputs.verifier_verdicts == [{"issue_id": 1, "verdict": "consistent"}]
-    assert inputs.grounding_rate == 0.75 and inputs.format_valid is True
+    assert inputs.format_valid is True
 
 
 def test_assemble_shallow_run_has_null_verdicts(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
     run_dir.mkdir()
-    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": None})
+    inputs = assemble_scoring_inputs(run_dir)
     assert inputs.verifier_verdicts is None
 
 
@@ -720,7 +718,7 @@ def test_assemble_declined_deep_run_null_verdicts_keeps_format_valid(tmp_path: P
     (run_dir / "deep" / "stack-python-records.json").write_text(
         json.dumps({"records": [{"id": "i1"}]})
     )
-    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 0.5})
+    inputs = assemble_scoring_inputs(run_dir)
     assert inputs.verifier_verdicts is None          # declined ⇒ no verdicts
     assert inputs.format_valid is True                # absence is expected, not malformed
 
@@ -729,32 +727,10 @@ def test_assemble_malformed_verdicts_flags_format_invalid(tmp_path: Path) -> Non
     run_dir = tmp_path / "run"
     (run_dir / "deep").mkdir(parents=True)
     (run_dir / "deep" / "recommendation-verdicts.json").write_text("{not json")
-    inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 1.0})
+    inputs = assemble_scoring_inputs(run_dir)
     assert inputs.format_valid is False
 
 
-def test_score_trajectory_grounding_axis_present_on_default_run(tmp_path: Path) -> None:
-    """AC2: a default-run row (eval-by-default populated grounding_rate) yields a
-    non-absent grounding axis; a --no-eval row (grounding_rate=None) omits it.
-
-    Drives the real harvest → reward path: assemble_scoring_inputs reads the
-    indexed ``grounding_rate`` and score_trajectory flags the axis present.
-    """
-
-    run_dir = tmp_path / "run"
-    run_dir.mkdir()
-
-    # Default run: eval ran by default, so the manifest row carries grounding_rate.
-    default_inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": 1.0})
-    default_breakdown = score_trajectory(default_inputs)
-    assert default_breakdown.axes_present["grounding"] is True
-    assert default_breakdown.grounding == 1.0
-
-    # --no-eval run: no grounding_rate, so the axis is absent.
-    no_eval_inputs = assemble_scoring_inputs(run_dir, {"grounding_rate": None})
-    no_eval_breakdown = score_trajectory(no_eval_inputs)
-    assert no_eval_breakdown.axes_present["grounding"] is False
-    assert no_eval_breakdown.grounding is None
 
 
 def _seed_run_manifest(
@@ -788,7 +764,7 @@ def _seed_run_manifest(
             base_branch=base_branch,
             pr_number=pr_number,
             pr_repo=pr_repo,
-            grounding_rate=1.0,
+
             changed_files=["app.py"],
             archive_path=str(run_dir),
             source_path=str(source_path) if source_path else None,
@@ -2166,7 +2142,7 @@ def test_harvest_evidence_detaches_nested_signals_with_canonical_rubric() -> Non
     )
     expected = rubric.to_dict()
     evidence = HarvestEvidence(
-        scoring_inputs=ScoringInputs(verdicts, 1.0, True, 12),
+        scoring_inputs=ScoringInputs(verdicts, True, 12),
         rubric=rubric,
         reviewer_logins=("reviewer",),
         pooled_prior=0.75,

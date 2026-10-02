@@ -363,6 +363,7 @@ def shard_key_payload(
         "include_alternatives": include_alternatives,
         "exploration_present": exploration_present,
         "docs_only": docs_only,
+        "schema": _phases_schema_digest("PER_STACK_RECORD_SCHEMA"),
     }
     grounding = {
         "exploration": {"digest": exploration_digest(exploration_dir)},
@@ -450,49 +451,6 @@ def _phases_schema_digest(name: str) -> str:
     return _schema_digest(getattr(phases, name))
 
 
-def sweep_key_payload(
-    *,
-    contributing_records: Mapping[str, bytes],
-    uncovered_files: Sequence[str],
-    hunk_index: Mapping[str, Any],
-    bounds: Mapping[str, Any],
-    identity: PhaseIdentity,
-    grounding: Mapping[str, Any],
-) -> dict[str, Any]:
-    """Build the uncovered-sweep payload.
-
-    ``contributing_records`` are the project-stack records the sweep runs
-    beside (structural excluded, matching what it consumes) and are *subject*:
-    a recomputed shard moves the sweep's key (MH8). ``uncovered_files`` is
-    the run's current uncovered set -- derived by
-    ``compute_uncovered_files`` from the durable hunk index, this
-    session's completed reviewer reads and the coverage
-    receipts/records -- and ``hunk_index`` supplies its hunks. Because
-    that set is a hard component, reads the reuse path does not replay
-    (a hit restores a shard's artifacts and returns before any fork,
-    leaving its origin-run reads out of the new session) can move this
-    key on an unchanged diff, miss the entry, and recompute the sweep
-    plus the downstream arbiter/merge units (A8/MH9; issue #733
-    review). Intent and
-    exploration are the loop's own re-derived grounding, so they are recorded
-    and never keyed (MH2/MH16). ``bounds`` is the resolved sweep budget
-    (``min_hunk_lines``/``max_files``), so a changed budget misses.
-    """
-    ordered_uncovered = sorted(set(uncovered_files))
-    components: dict[str, Any] = {
-        "format": REUSE_KEY_FORMAT,
-        "records": _record_digests(contributing_records),
-        "uncovered_set": ordered_uncovered,
-        "hunk_slice": hunk_slice_digest(hunk_index, ordered_uncovered),
-        "schema": _phases_schema_digest("UNCOVERED_SWEEP_SCHEMA"),
-        **_identity_components(identity),
-        "bounds": {
-            "min_hunk_lines": bounds.get("min_hunk_lines"),
-            "max_files": bounds.get("max_files"),
-        },
-    }
-    return _unit_payload("sweep", components, grounding)
-
 
 def arbiter_key_payload(
     *,
@@ -546,8 +504,7 @@ def merge_key_payload(
     """Build the cross-stack merge payload.
 
     ``contributing_records`` is the canonical ``name -> bytes`` map of every
-    per-stack record file the merge reads -- the primary stacks, the uncovered
-    sweep's records, and the structural meta-stack -- and is *subject*: a
+    per-stack record file the merge reads -- the primary stacks and the structural meta-stack -- and is *subject*: a
     recomputed shard moves the merge's key (MH8), so the aggregation unit misses
     and recomputes rather than serving output synthesized from stale records. A
     named file that could not be read maps to ``None``, which makes the whole

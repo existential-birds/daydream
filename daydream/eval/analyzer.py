@@ -1,7 +1,7 @@
 """Quantitative analysis of ATIF v1.7 trajectory data from daydream runs.
 
 Parses trajectory JSON files and deep review artifacts, computes metrics
-across cost, tool usage, file coverage, finding quality, grounding,
+across cost, tool usage, finding quality,
 location accuracy, shipped duplication, and training signal dimensions. Output is a JSON-serializable report for archive
 inspection and downstream training analysis.
 
@@ -16,13 +16,11 @@ from __future__ import annotations
 import json
 import math
 import re
-import shlex
 from collections import Counter
-from dataclasses import dataclass
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
-from typing import Any, Iterator, Literal
+from typing import Any, Iterator
 
 from daydream._tree_sitter_safety import (
     TreeSitterBadVersionError,
@@ -39,7 +37,6 @@ from daydream.trajectory import (
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     compute_timing_summary,
-    redact_text,
     run_document_path,
     siblings_directory,
 )
@@ -159,632 +156,9 @@ def _agent_label(filename: str) -> str:
     return re.sub(r"--[0-9a-f]{64}$", "", label)
 
 
-def _extract_tool_calls(trajectory: dict[str, Any]) -> list[dict[str, Any]]:
-    calls: list[dict[str, Any]] = []
-    for step in trajectory.get("steps", []):
-        for tc in step.get("tool_calls") or []:
-            calls.append({
-                "step_id": step["step_id"],
-                "function_name": tc["function_name"],
-                "arguments": tc.get("arguments", {}),
-                "phase": (step.get("extra") or {}).get("daydream_phase", "unknown"),
-            })
-    return calls
-
-
-def _files_from_diff(diff_path: Path) -> list[str]:
-    if not diff_path.exists():
-        return []
-    text = diff_path.read_text()
-    files: set[str] = set()
-    for m in re.finditer(r"^diff --git a/.+? b/(.+?)$", text, re.MULTILINE):
-        files.add(m.group(1))
-    return sorted(files)
-
-
-_READ_VERBS = ("sed", "nl", "cat", "rg", "grep", "head", "tail", "awk", "wc")
-_IMPORT_ONLY_ALTERNATIVE_RE = re.compile(r"^\^?(?:from\b|import\b)")
 _WRITE_TOOL_ALIASES = frozenset(
     {"write", "edit", "multiedit", "notebookedit", "patch", "apply_patch"}
 )
-
-
-def _semantic_tool_kind(
-    function_name: str,
-) -> Literal["read", "write", "other"]:
-    """Classify a standard-event tool name without changing its raw spelling."""
-    name = function_name.casefold()
-    if name == "read":
-        return "read"
-    if name in _WRITE_TOOL_ALIASES:
-        return "write"
-    return "other"
-
-
-def _is_import_only_pattern(pattern: str) -> bool:
-    """Whether a ``Grep`` pattern references only module imports, no content.
-
-    Returns ``False`` for an empty/absent pattern (an import-only rule must
-    never gate a pathless Grep call). Otherwise ``True`` iff every ``|``-
-    separated alternative, stripped, matches the anchor-or-bare ``from`` /
-    ``import`` predicate — so ``^from|^import`` and ``from |import `` qualify,
-    while any alternative naming content (a ``class ``/``def `` body or a
-    symbol) makes it ``False``.
-    """
-    if not pattern:
-        return False
-    return all(
-        _IMPORT_ONLY_ALTERNATIVE_RE.match(alt.strip())
-        for alt in pattern.split("|")
-    )
-
-
-_SED_RANGE_RE = re.compile(r"^\d+(?:,\d*)?\$?p$")
-_REDIRECT_RE = re.compile(r"^(\d*)([<>]+|&>)(.*)$")
-_SEGMENT_SEPARATORS = frozenset(("&&", ";", "&"))
-
-# Literal-loop resolution (issue #1397). A shell ``for VAR in <words>; do``
-# binding is recognised only when every listed word is a plain literal (no
-# shell metacharacter) and the loop body is straight-line, i.e. it carries no
-# nested/conditional control flow and no flow control (``break``/``continue``/
-# ``return``/``exit``) that could skip a listed read; every ambiguous shape
-# contributes no binding, so no operand is ever credited from it and the
-# affected files stay uncovered and are swept (fail-open).
-_NON_LITERAL_CHARS = frozenset("$`*?[]{}~()|&<>;!\\\"'")
-_BODY_CONTROL_KEYWORDS = frozenset(
-    {
-        "for",
-        "while",
-        "until",
-        "if",
-        "then",
-        "else",
-        "elif",
-        "fi",
-        "case",
-        "esac",
-        "do",
-        "done",
-        "select",
-        "time",
-        "break",
-        "continue",
-        "return",
-        "exit",
-        "{",
-        "}",
-        "|",
-        "||",
-        "&&",
-        "&",
-    }
-)
-_LOOP_VAR_RE = re.compile(r"\$(?:\{(\w+)\}|(\w+))")
-_LOOP_PREFIX_OPERAND_RE = re.compile(r"([^$]*)(\$(?:\{\w+\}|\w+))")
-_RG_LONG_VALUE_OPTS = frozenset(
-    {
-        "context",
-        "context-before",
-        "context-after",
-        "glob",
-        "ignore-file",
-        "engine",
-        "regexp",
-        "file",
-        "type",
-        "type-not",
-        "type-add",
-        "max-columns",
-        "max-count",
-        "max-filesize",
-        "threads",
-        "pre",
-        "pre-glob",
-        "replace",
-        "sort",
-        "sortr",
-    }
-)
-_RG_SHORT_VALUE_OPTS = frozenset("ABCefgMmtTr")
-_GREP_LONG_VALUE_OPTS = frozenset(
-    {
-        "context",
-        "before-context",
-        "after-context",
-        "max-count",
-        "regexp",
-        "file",
-        "include",
-        "exclude",
-    }
-)
-_GREP_SHORT_VALUE_OPTS = frozenset("efABC")
-
-
-def _tokenize_command(command: str) -> list[str]:
-    """Split a shell command into tokens, honoring quotes and separators.
-
-    ``shlex`` preserves quoted operands as single tokens (``'my file.py'``
-    stays intact) while punctuation mode keeps ``&&``/``;``/``&`` as distinct
-    separator tokens even without surrounding whitespace.
-
-    Malformed tool-call data (unbalanced quotes) must never crash the
-    eval/archive pipeline; on ``ValueError`` we fall back to a whitespace
-    split so recoverable path operands still surface, except recoverable
-    operands adjacent to a separator, which the whitespace split glues to
-    the separator and are lost (issue #327).
-    """
-    lexer = shlex.shlex(command, posix=True, punctuation_chars=";&")
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    try:
-        return list(lexer)
-    except ValueError:
-        return command.split()
-
-
-def _option_info(
-    tok: str,
-    long_value_opts: frozenset[str],
-    short_value_opts: frozenset[str],
-) -> tuple[int, bool]:
-    """How many tokens a ``rg``/``grep``-family option occupies, and whether it supplies the pattern.
-
-    ``-C 3`` → (2, False); ``--glob=*.py`` → (1, False) (value attached);
-    ``-n`` → (1, False); ``-e PAT``/``--regexp=PAT`` → (…, True) because an
-    explicit pattern leaves the next positional operand as a path, not a
-    pattern. Combined short flags (``-ni``) skip only their own token; a
-    value-taking short flag with an attached value (``-C3``) also consumes one.
-
-    The value sets are the verb's own — ``_RG_{LONG,SHORT}_VALUE_OPTS`` for
-    ``rg`` and ``_GREP_{LONG,SHORT}_VALUE_OPTS`` for ``grep`` — so each verb
-    consumes exactly the options that take a value in its own table. Which
-    options supply the search pattern is shared across both: ``--regexp`` and
-    ``--file`` long, ``-e`` and ``-f`` short.
-    """
-    if tok.startswith("--"):
-        if "=" in tok:
-            name = tok[2:].split("=", 1)[0]
-            return 1, name in ("regexp", "file")
-        name = tok[2:]
-        return (2 if name in long_value_opts else 1), name in ("regexp", "file")
-    body = tok[1:]
-    if body and body[0] in short_value_opts:
-        return (1 if len(body) > 1 else 2), body[0] in ("e", "f")
-    return 1, False
-
-
-def _read_paths_for_segment(verb: str, operands: list[str]) -> set[str]:
-    """File-path operands of one command segment for a given read verb.
-
-    Redirection operators are consumed together with their targets (separated
-    ``> target`` or attached ``2>/dev/null``) so a redirect target is never
-    recorded as a read. Sed address ranges and flags are filtered, ``rg``
-    skips option values plus the search pattern, and the inspection verbs
-    behave likewise: ``grep`` skips option values and its first positional
-    (the pattern) and credits no operand when that pattern is import-only
-    (issue #739), ``awk`` skips options and its first positional (the
-    program), ``head``/``tail`` skip options and their ``-n``/``-c`` values,
-    and ``wc`` skips options. ``cat`` operands pass through verbatim.
-    """
-    paths: set[str] = set()
-    i = 0
-    n = len(operands)
-    seen_pattern = False
-    seen_program = False
-    after_ddash = False
-    while i < n:
-        tok = operands[i]
-        m = _REDIRECT_RE.match(tok)
-        if m:
-            i += 1 if m.group(3) else 2
-            continue
-        # ``rg`` and ``grep`` share the same shape: ``--`` flips to literal
-        # operand parsing, a leading ``-`` (unless ``-`` itself) is an option
-        # whose consumed tokens + pattern-supplying status come from the verb's
-        # own option table, and the first remaining positional is the pattern.
-        if verb in ("rg", "grep"):
-            long_opts, short_opts = (
-                (_RG_LONG_VALUE_OPTS, _RG_SHORT_VALUE_OPTS)
-                if verb == "rg"
-                else (_GREP_LONG_VALUE_OPTS, _GREP_SHORT_VALUE_OPTS)
-            )
-            if tok == "--":
-                after_ddash = True
-                i += 1
-                continue
-            if not after_ddash and tok.startswith("-") and tok != "-":
-                skip, supplies_pattern = _option_info(tok, long_opts, short_opts)
-                i += skip
-                if supplies_pattern:
-                    seen_pattern = True
-                continue
-            if not seen_pattern:
-                seen_pattern = True
-                if verb == "grep" and _is_import_only_pattern(tok):
-                    # A grep whose pattern is only an import anchor is a
-                    # module-import scan, not a content read (issue #739):
-                    # crediting its operands as read paths would mis-credit
-                    # AC2/AC3 import coverage, exactly like the Grep-tool
-                    # branch's carve-out on the same shared seam.
-                    return paths
-                i += 1
-                continue
-        elif verb in ("head", "tail"):
-            if tok.startswith("-"):
-                body = tok[1:]
-                if body and body[0] in ("n", "c"):
-                    i += 1 if len(body) > 1 else 2
-                else:
-                    i += 1
-                continue
-        elif verb in ("awk", "wc"):
-            if tok.startswith("-"):
-                i += 1
-                continue
-            if verb == "awk" and not seen_program:
-                seen_program = True
-                i += 1
-                continue
-        elif verb in ("sed", "nl", "cat"):
-            if tok.startswith("-"):
-                i += 1
-                continue
-            if verb == "sed" and _SED_RANGE_RE.fullmatch(tok):
-                i += 1
-                continue
-        paths.add(tok)
-        i += 1
-    return paths
-
-
-def _is_literal_word(tok: str) -> bool:
-    """Whether ``tok`` is a plain literal with no shell metacharacter.
-
-    Used for the ``for VAR in <words>`` word list (issue #1397): a word
-    carrying any expansion, glob, quote, separator or redirection character
-    makes the whole loop unrecognised, so no partial credit is ever granted.
-    """
-    if not tok:
-        return False
-    return not any(ch in _NON_LITERAL_CHARS for ch in tok)
-
-
-def _is_straight_line_body(body: list[str]) -> bool:
-    """Whether a loop body is free of nested/conditional control flow.
-
-    A body qualifies only when every listed read is unconditionally reached.
-    Nested ``for``/``if``/``case``, ``while``/``until``, brace groups,
-    pipelines and the ``&&``/``&``/``||`` conditionals make the read
-    conditionally reached, as do command substitution, backticks, and flow
-    control (``break``/``continue``/``return``/``exit``) that can skip a later
-    read altogether; such a loop credits nothing (issue #1397, requirement 6,
-    whole-loop-or-nothing).
-    """
-    for tok in body:
-        if tok in _BODY_CONTROL_KEYWORDS:
-            return False
-        if "$(" in tok or "`" in tok:
-            return False
-    return True
-
-
-def _literal_loop_bindings(
-    tokens: list[str],
-) -> list[tuple[str, tuple[str, ...], int, int]]:
-    """Loop bindings as ``(var, words, body_start, body_end)`` records.
-
-    Each record carries its own ``do``…``done`` token span so that sequential
-    loops resolve independently — including two loops that reuse the same
-    variable name (issue #1397, Should Have) — and a read operand outside every
-    recognised loop credits nothing.
-
-    Only a top-level loop (the ``for`` token at index 0 or immediately after a
-    segment separator) with an all-literal, non-empty word list, a ``do`` and a
-    ``done``, and a straight-line body contributes a binding. Every ambiguous
-    shape credits nothing, per requirement 6: an empty list; a non-literal word
-    (command substitution, backticks, glob, ``$@``/``$*``, variable reference,
-    brace expansion, tilde); a missing ``do``/``done``; a nested ``for``, an
-    ``if``/``case`` body, a ``while``/``until`` loop; or a read reached through
-    ``&&``/``&``/``||``, a pipe, or a brace group. No partial credit is ever
-    granted (issue #1397).
-    """
-    bindings: list[tuple[str, tuple[str, ...], int, int]] = []
-    n = len(tokens)
-    i = 0
-    while i < n:
-        if tokens[i] != "for" or not (i == 0 or tokens[i - 1] in _SEGMENT_SEPARATORS):
-            i += 1
-            continue
-        if i + 2 >= n or not _is_literal_word(tokens[i + 1]) or tokens[i + 2] != "in":
-            i += 1
-            continue
-        var = tokens[i + 1]
-        j = i + 3
-        words: list[str] = []
-        while j < n and tokens[j] not in (";", "do"):
-            words.append(tokens[j])
-            j += 1
-        if j >= n or not words or any(not _is_literal_word(w) for w in words):
-            i += 1
-            continue
-        if tokens[j] == ";":
-            j += 1
-        if j >= n or tokens[j] != "do":
-            i += 1
-            continue
-        body_start = j + 1
-        k = body_start
-        while k < n and tokens[k] != "done":
-            k += 1
-        if k >= n:
-            i += 1
-            continue
-        if not _is_straight_line_body(tokens[body_start:k]):
-            i += 1
-            continue
-        bindings.append((var, tuple(words), body_start, k))
-        i = k + 1
-    return bindings
-
-
-def _enclosing_loop_binding(
-    bindings: list[tuple[str, tuple[str, ...], int, int]], index: int
-) -> tuple[str, tuple[str, ...]] | None:
-    """Binding of the recognised loop whose ``do``…``done`` span holds *index*.
-
-    A read operand credits a loop's words only when the read segment sits inside
-    that loop's own body, so a variable reused by a later loop — or a read
-    outside every loop — never picks up another loop's word list (issue #1397,
-    requirement 6: whole-loop-or-nothing). Nested bodies are rejected up front,
-    and spans never overlap, so at most one span can match.
-    """
-    for var, words, body_start, body_end in bindings:
-        if body_start <= index < body_end:
-            return (var, words)
-    return None
-
-
-def _resolve_loop_operand(
-    operand: str, binding: tuple[str, tuple[str, ...]] | None
-) -> tuple[str, ...] | None:
-    """Resolve a ``$``-bearing operand through one loop's binding, if possible.
-
-    ``$VAR`` and ``${VAR}`` return that loop's words; one literal prefix followed
-    by exactly one reference to the same loop variable (``src/$f``) returns each
-    word with the prefix prepended. A reference to a different variable, a
-    second ``$``, any trailing suffix, or no enclosing loop returns ``None``
-    (issue #1397).
-    """
-    if binding is None:
-        return None
-    var, words = binding
-    m = _LOOP_VAR_RE.fullmatch(operand)
-    if m:
-        return words if (m.group(1) or m.group(2)) == var else None
-    m = _LOOP_PREFIX_OPERAND_RE.fullmatch(operand)
-    if not m:
-        return None
-    var_match = _LOOP_VAR_RE.fullmatch(m.group(2))
-    if not var_match or (var_match.group(1) or var_match.group(2)) != var:
-        return None
-    prefix = m.group(1)
-    return tuple(prefix + w for w in words)
-
-
-def _loop_resolved_paths(
-    verb: str, operands: list[str], binding: tuple[str, tuple[str, ...]] | None
-) -> set[str]:
-    """Resolved literal-loop paths for one read segment inside a loop body.
-
-    Each ``$``-bearing operand is replaced by a unique sentinel literal and
-    ``_read_paths_for_segment`` re-run, so the verb's own position rules
-    (``rg``/``grep`` pattern skipping, ``sed`` address ranges, redirects,
-    option tables) decide which operands are credited. A sentinel the verb
-    credited is resolved through the enclosing loop's binding; an unresolvable
-    one contributes nothing.
-    """
-    resolved: set[str] = set()
-    sentinels: dict[str, str] = {}
-    substituted: list[str] = []
-    for idx, op in enumerate(operands):
-        if "$" in op:
-            sentinel = f"\x00loop{idx}\x00"
-            sentinels[sentinel] = op
-            substituted.append(sentinel)
-        else:
-            substituted.append(op)
-    credited = _read_paths_for_segment(verb, substituted)
-    for sentinel, op in sentinels.items():
-        if sentinel not in credited:
-            continue
-        words = _resolve_loop_operand(op, binding)
-        if words:
-            resolved.update(words)
-    return resolved
-
-
-def _paths_from_command(command: str) -> set[str]:
-    """Extract file-path operands from a codex ``shell`` / pi ``bash`` command.
-
-    Reviewers read files through these verbs: ``sed -n '1,240p'``, ``nl -ba``,
-    ``cat``, ``rg``, ``grep``, ``head``, ``tail``, ``awk``, and ``wc``.
-    Commands may chain segments with ``&&``/``;`` and redirect with
-    ``2>/dev/null``. Tokenization is shell-aware: quoted paths survive,
-    redirection targets are consumed with their operator, and option values
-    plus the ``rg``/``grep`` search pattern and the ``awk`` program are
-    filtered. A read segment inside a recognised literal ``for … in <words>;
-    do … done`` body is resolved to that loop's listed words (issue #1397)
-    while everything else falls through verbatim. Extraction is deliberately permissive — ``_path_matches``
-    matches by ``endswith``, so a stray operand simply never matches a diff
-    file — but options, redirect targets, sed address ranges, and the
-    ``rg``/``grep`` search patterns are filtered.
-    """
-    paths: set[str] = set()
-    tokens = _tokenize_command(command)
-    bindings = _literal_loop_bindings(tokens)
-    i = 0
-    n = len(tokens)
-    while i < n:
-        tok = tokens[i]
-        if tok in _SEGMENT_SEPARATORS:
-            i += 1
-            continue
-        m = _REDIRECT_RE.match(tok)
-        if m:
-            i += 1 if m.group(3) else 2
-            continue
-        verb = tok.split("/")[-1]
-        if verb not in _READ_VERBS:
-            i += 1
-            continue
-        segment_start = i
-        i += 1
-        operands: list[str] = []
-        while i < n and tokens[i] not in _SEGMENT_SEPARATORS:
-            operands.append(tokens[i])
-            i += 1
-        credited = _read_paths_for_segment(verb, operands)
-        dynamic = {op for op in operands if "$" in op}
-        paths.update(credited - dynamic)
-        if dynamic and bindings:
-            binding = _enclosing_loop_binding(bindings, segment_start)
-            if binding is not None:
-                paths.update(_loop_resolved_paths(verb, operands, binding))
-    return paths
-
-
-def _read_paths_for_call(tc: dict[str, Any]) -> list[str]:
-    """All file paths a single tool call reads, across backends.
-
-    ``function_name`` is case-folded so ``Bash`` (Claude) / ``bash`` (pi) /
-    ``shell`` (codex) all route to the shell-command parser, and Claude's
-    ``Read`` / pi's ``read`` collapse into one branch that accepts either the
-    ``file_path`` or ``path`` argument key.
-
-    - claude: ``Read`` → ``arguments.file_path``; ``Grep`` → ``arguments.path``
-      (credited only when the pattern is not import-only)
-    - pi:     lowercase ``read`` → ``arguments.path``
-    - codex/pi: ``shell``/``bash`` → paths embedded in ``arguments.command``
-    """
-    fn = tc["function_name"].casefold()
-    args = tc["arguments"]
-    if _semantic_tool_kind(tc["function_name"]) == "read":
-        p = args.get("file_path") or args.get("path", "")
-        return [p] if p else []
-    if fn == "grep":
-        p = args.get("path", "")
-        if not p:
-            return []
-        pattern = args.get("pattern", "")
-        if pattern and _is_import_only_pattern(pattern):
-            return []
-        return [p]
-    if fn in ("shell", "bash"):
-        return sorted(_paths_from_command(args.get("command", "")))
-    return []
-
-
-def _files_read(tool_calls: list[dict[str, Any]]) -> set[str]:
-    paths: set[str] = set()
-    for tc in tool_calls:
-        paths.update(_read_paths_for_call(tc))
-    return paths
-
-
-_ArtifactPathKind = Literal["repository", "artifact", "exploration_artifact", "rejected"]
-
-
-@dataclass(frozen=True)
-class _ArtifactPathRoots:
-    """Trusted lexical spellings used to classify already-recorded paths."""
-
-    daydream: tuple[tuple[str, ...], ...]
-    review_output: tuple[tuple[str, ...], ...]
-    live: tuple[tuple[str, ...], ...]
-
-
-def _lexical_path(value: str) -> tuple[bool, tuple[str, ...]] | None:
-    """Return an absolute marker plus safe components without touching disk."""
-    if type(value) is not str or not value:
-        return None
-    components = tuple(part for part in value.split("/") if part not in ("", "."))
-    if not components or ".." in components:
-        return None
-    return value.startswith("/"), components
-
-
-def _absolute_spellings(path: Path) -> tuple[tuple[str, ...], ...]:
-    """Raw and canonically redacted component spellings for one absolute path."""
-    spellings: list[tuple[str, ...]] = []
-    for value in (str(path), redact_text(str(path))):
-        lexical = _lexical_path(value)
-        if lexical is not None and lexical[0] and lexical[1] not in spellings:
-            spellings.append(lexical[1])
-    return tuple(spellings)
-
-
-def _artifact_path_roots(
-    daydream_dir: Path | None,
-    artifact_provenance: ArtifactEvidenceProvenance | None,
-) -> _ArtifactPathRoots:
-    """Derive the trusted lexical roots owned by the active artifact session."""
-    daydream_roots: list[tuple[str, ...]] = []
-    if daydream_dir is not None and daydream_dir.is_absolute():
-        daydream_roots.extend(_absolute_spellings(daydream_dir))
-    if artifact_provenance is None:
-        return _ArtifactPathRoots(tuple(daydream_roots), (), ())
-    daydream_roots.extend(_absolute_spellings(artifact_provenance.public_daydream_dir))
-    return _ArtifactPathRoots(
-        tuple(dict.fromkeys(daydream_roots)),
-        _absolute_spellings(artifact_provenance.public_review_output),
-        _absolute_spellings(artifact_provenance.live_root),
-    )
-
-
-def _artifact_path_kind(path: str, *, roots: _ArtifactPathRoots) -> _ArtifactPathKind:
-    """Classify one recorded path by exact lexical component ownership."""
-    lexical = _lexical_path(path)
-    if lexical is None:
-        return "rejected"
-    absolute, components = lexical
-    if not absolute:
-        if components[0] == ".daydream":
-            return "exploration_artifact" if components[1:2] == ("exploration",) else "artifact"
-        return "artifact" if components == (".review-output.md",) else "repository"
-    if components in roots.review_output:
-        return "artifact"
-    # An owned root's whole subtree is artifact evidence; only its own
-    # ``exploration`` directory is the exploration pre-scan.
-    for root, exploration in (
-        *((root, ("exploration",)) for root in roots.daydream),
-        *((root, (".daydream", "exploration")) for root in roots.live),
-    ):
-        if components[: len(root)] == root:
-            relative = components[len(root) :]
-            return "exploration_artifact" if relative[: len(exploration)] == exploration else "artifact"
-    return "repository"
-
-
-def _partition_repository_reads(
-    tool_calls: list[dict[str, Any]],
-    *,
-    roots: _ArtifactPathRoots,
-) -> tuple[set[str], set[str]]:
-    """Partition source reads from artifact-shaped or unsafe evidence paths."""
-    repository: set[str] = set()
-    rejected: set[str] = set()
-    for path in _files_read(tool_calls):
-        if _artifact_path_kind(path, roots=roots) == "repository":
-            repository.add(path)
-        else:
-            rejected.add(path)
-    return repository, rejected
-
-
-def _path_matches(absolute: str, relative: str) -> bool:
-    """Check if an absolute tool-call path corresponds to a relative diff path."""
-    return absolute.endswith(relative) or absolute.endswith("/" + relative)
 
 
 # Analysis functions
@@ -872,33 +246,25 @@ def analyze_costs(trajectories: dict[str, Any]) -> dict[str, Any]:
 
 
 def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
-    """Tool call counts, per-agent breakdown, and redundancy detection."""
+    """Tool call counts and per-agent breakdown."""
     total_counts: Counter[str] = Counter()
     by_agent: dict[str, dict[str, Any]] = {}
-    redundant_reads: list[dict[str, Any]] = []
 
     for traj in _all_trajectories(trajectories):
         label = _agent_label(traj["_source_file"])
-        calls = _extract_tool_calls(traj)
-        counts = Counter(tc["function_name"] for tc in calls)
+        counts = Counter(
+            call["function_name"]
+            for step in traj.get("steps", [])
+            for call in step.get("tool_calls") or []
+        )
         by_agent[label] = dict(counts)
         total_counts.update(counts)
-
-        read_paths = [
-            tc["arguments"].get("file_path")
-            or tc["arguments"].get("path", "")
-            for tc in calls
-            if _semantic_tool_kind(tc["function_name"]) == "read"
-        ]
-        for path, count in Counter(read_paths).items():
-            if count > 1 and path:
-                redundant_reads.append({"agent": label, "file": path, "read_count": count})
 
     total = sum(total_counts.values())
     write_count = sum(
         count
         for function_name, count in total_counts.items()
-        if _semantic_tool_kind(function_name) == "write"
+        if function_name.casefold() in _WRITE_TOOL_ALIASES
     )
 
     return {
@@ -906,91 +272,6 @@ def analyze_tools(trajectories: dict[str, Any]) -> dict[str, Any]:
         "by_type": dict(total_counts.most_common()),
         "by_agent": by_agent,
         "write_ratio": round(write_count / total, 4) if total > 0 else 0,
-        "redundant_reads": redundant_reads,
-    }
-
-
-def _completed_source_packet_files(daydream_dir: Path) -> set[str]:
-    """Credit host source only with the same stack's assigned, final verdict."""
-    # Deep coverage imports this module for legacy artifact normalization.
-    from daydream.deep.artifacts import per_stack_records_path
-    from daydream.deep.coverage import coverage_receipt_path, resolve_per_stack_verdicts
-
-    deep_dir = daydream_dir / "deep"
-    try:
-        receipts = json.loads(coverage_receipt_path(deep_dir).read_text())
-    except (OSError, ValueError):
-        return set()
-    if not isinstance(receipts, dict):
-        return set()
-    covered: set[str] = set()
-    for stack, receipt in receipts.items():
-        if not re.fullmatch(r"[\w-]+(?:#\d+)?", stack) or not isinstance(receipt, dict):
-            continue
-        assigned = receipt.get("assigned_files")
-        packet = receipt.get("source_packet_files")
-        if not isinstance(assigned, list) or not isinstance(packet, list):
-            continue
-        try:
-            records = json.loads(per_stack_records_path(deep_dir, stack).read_text())
-        except (OSError, ValueError):
-            continue
-        if not isinstance(records, dict) or not isinstance(records.get("verdicts"), list):
-            continue
-        verdicts = resolve_per_stack_verdicts(
-            assigned_files=[path for path in assigned if isinstance(path, str)],
-            declared_verdicts=records["verdicts"],
-            completed_read_paths=set(), finding_files=set(),
-            source_packet_paths={path for path in packet if isinstance(path, str)},
-        )
-        covered.update(v["path"] for v in verdicts if v["verdict"] != "not_reviewed")
-    return covered
-
-
-def analyze_coverage(
-    trajectories: dict[str, Any],
-    daydream_dir: Path,
-    *,
-    artifact_provenance: ArtifactEvidenceProvenance | None = None,
-) -> dict[str, Any]:
-    """File review coverage from repository reads and completed source packets.
-
-    ``artifact_reads_rejected`` counts the artifact-shaped or lexically unsafe
-    read paths excluded before suffix matching. ``files_read_by_reviewers``
-    retains its tool-read meaning; ``files_reviewed`` also includes host sources
-    with an assigned, completed final verdict from the receiving stack.
-    """
-    diff_files = _files_from_diff(daydream_dir / "diff.patch")
-
-    review_calls: list[dict[str, Any]] = []
-    for traj in trajectories["forked"]:
-        label = _agent_label(traj["_source_file"])
-        if label.startswith("deep-"):
-            review_calls.extend(_extract_tool_calls(traj))
-
-    if trajectories["main"]:
-        for tc in _extract_tool_calls(trajectories["main"]):
-            if tc["phase"] in ("deep", "alternatives"):
-                review_calls.append(tc)
-
-    review_reads, rejected_reads = _partition_repository_reads(
-        review_calls,
-        roots=_artifact_path_roots(daydream_dir, artifact_provenance),
-    )
-
-    tool_covered = {df for df in diff_files if any(_path_matches(r, df) for r in review_reads)}
-    packet_covered = set(diff_files) & _completed_source_packet_files(daydream_dir)
-    covered = tool_covered | packet_covered
-    uncovered = sorted(set(diff_files) - covered)
-
-    return {
-        "files_in_diff": len(diff_files),
-        "files_read_by_reviewers": len(tool_covered),
-        "files_reviewed": len(covered),
-        "source_packet_reviewed": len(packet_covered),
-        "coverage_ratio": (round(len(covered) / len(diff_files), 4) if diff_files else 1.0),
-        "uncovered_files": uncovered,
-        "artifact_reads_rejected": len(rejected_reads),
     }
 
 
@@ -998,12 +279,12 @@ def _records_issues(records: Any) -> list[Any] | None:
     """Normalize a loaded per-stack records file to its bare issues list.
 
     Issue #742: fresh-run per-stack records files carry the dict shape
-    ``{"issues": [...], "verdicts": [...]}``; legacy and primed fixtures use
+    ``{"issues": [...]}``; legacy and primed fixtures use
     the bare list. Returns the issues list when ``records`` is a bare list or
     a dict whose ``issues`` is a list; ``None`` when it is neither (callers
     keep their own fail-open / warn-and-continue handling for non-list
     shapes). This is the canonical records-shape normalization shared by
-    every per-stack records reader (coverage sweep, merge resume, analyzer,
+    every per-stack records reader (merge resume, analyzer,
     phases, and the test harness); a future shape change lands here only.
     """
     if isinstance(records, dict):
@@ -1014,6 +295,8 @@ def _records_issues(records: Any) -> list[Any] | None:
 
 def _iter_stack_records(deep_dir: Path) -> Iterator[tuple[str, list[Any]]]:
     for f in sorted(deep_dir.glob("stack-*-records.json")):
+        if f.name == "stack-uncovered-records.json":
+            continue
         yield f.stem.replace("stack-", "").replace("-records", ""), _records_issues_or_empty(json.loads(f.read_text()))
 
 
@@ -1028,7 +311,7 @@ def _records_issues_or_empty(records: Any) -> list[Any]:
     return issues
 
 
-_EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "uncovered": 0, "structure": 0}
+_EMPTY_PER_LENS = {"wonder": 0, "per-stack": 0, "structure": 0}
 
 
 def _load_shipped_items(deep_dir: Path) -> list[Any] | None:
@@ -1116,7 +399,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
     rendered from). When that file is absent, the count falls back to the
     ``merged_finding_count`` regex on ``review-output.md``, then to the pre-merge
     per-stack total so archived runs never regress to zero. ``per_lens`` attributes
-    findings across the wonder (``alternatives.json``), per-stack, uncovered, and
+    findings across the wonder (``alternatives.json``), per-stack and
     structure lenses.
     """
     deep_dir = daydream_dir / "deep"
@@ -1137,7 +420,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
     # ``wonder`` reads the bare-list ``alternatives.json`` (the canonical wonder
     # artifact); the ``stack-*-records.json`` walk below buckets each stack into
-    # per-stack / uncovered / structure by name. These lens counts are raw,
+    # per-stack / structure by name. These lens counts are raw,
     # *pre-merge* attribution -- they are not derived from the shipped
     # ``merged-items.json`` set, so they need not sum to, or relate to, the
     # shipped ``total`` reported by ``_shipped_counts``. Reconciling a lens to
@@ -1156,9 +439,7 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
     for stack_name, records in _iter_stack_records(deep_dir):
         stacks.append({"name": stack_name, "finding_count": len(records)})
-        if stack_name == "uncovered":
-            per_lens["uncovered"] += len(records)
-        elif stack_name == "structure":
+        if stack_name == "structure":
             per_lens["structure"] += len(records)
         else:
             per_lens["per-stack"] += len(records)
@@ -1206,9 +487,6 @@ def analyze_findings(daydream_dir: Path) -> dict[str, Any]:
 
 _LOCATION_TIERS = ("in_hunk", "within_tolerance", "beyond_tolerance", "file_absent")
 """The four tiers a scored ``file:line`` citation can land in."""
-
-_GROUNDING_EXEMPT_TIERS = ("whole_file", "no_line", "unchecked")
-"""Grounding-only tiers for citations the line check cannot or must not judge."""
 
 _LOCATION_ITEM_CAP = 200
 """Max per-item rows carried in ``analyze_location``'s ``items`` list.
@@ -1345,7 +623,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
 
     Scores every item in ``deep/merged-items.json`` -- the canonical set the
     posted review is rendered from -- against the run's diff hunks. This is a
-    different population from :func:`analyze_grounding`, which scores the
+    different population from the raw stack findings, which include the
     PRE-MERGE per-stack records; the two are not comparable and are reported
     under separate keys.
 
@@ -1372,7 +650,7 @@ def analyze_location(daydream_dir: Path) -> dict[str, Any]:
     records whether validation could run rather than assuming it did.
 
     ``in_hunk_rate`` is ``None`` (not ``1.0``) over zero scored items: the ratio
-    is undefined, not perfect -- the same reasoning as ``grounding_rate``.
+    is undefined, not perfect -- an empty population supplies no evidence.
 
     An absent ``merged-items.json`` yields ``shipped_items: 0`` with everything
     zeroed/``None`` and does NOT raise; only a present-but-corrupt file raises,
@@ -1492,7 +770,7 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
     real answer, never an error, and no uid is ever fabricated to fill it.
 
     ``max_similarity``/``mean_similarity`` are ``None`` (not ``0.0``) with no
-    comparable pairs: undefined, not perfect -- the ``grounding_rate``
+    comparable pairs: undefined, not perfect -- the empty-population
     precedent. A present-but-empty ``merged-items.json`` yields real zeros;
     a missing file (:func:`_load_shipped_items` returning ``None``) makes
     ``near_duplicate_pairs`` -- archived as ``manifest.shipped_duplicate_pairs``
@@ -1577,197 +855,6 @@ def analyze_shipped_duplication(daydream_dir: Path) -> dict[str, Any]:
             round(sum(similarities) / len(similarities), 4) if similarities else None
         ),
         "pairs": [_pair_row(pair) for pair in top],
-    }
-
-
-def analyze_grounding(
-    trajectories: dict[str, Any],
-    findings: list[dict[str, Any]],
-    daydream_dir: Path,
-    *,
-    artifact_provenance: ArtifactEvidenceProvenance | None = None,
-) -> dict[str, Any]:
-    """Grounding: the cited file was read AND the cited line resolves to a hunk.
-
-    The predicate is ``file_was_read and not unread_refs and line_grounded``,
-    where ``line_grounded`` is ``location_tier in ("in_hunk",
-    "within_tolerance")`` against the run's diff hunks (issue #1106).
-
-    Exemptions -- every one is COUNTED and visible in ``tiers``, never silently
-    swallowed:
-
-    - **Structural whole-file anchor** (line ``0``): a whole-file citation, not
-      a line citation, mirroring the location validator's own carve-out.
-      Detected as ``lens == "structural"`` OR ``_stack == "structure"``.
-      -> ``line_grounded`` True, tier ``"whole_file"``.
-    - **No usable integer line** (missing, non-int, or ``bool``)
-      -> ``line_grounded`` True, tier ``"no_line"``.
-    - **``hunk_source == "none"``**: nothing can be checked, so every finding
-      falls back to the file-only predicate with tier ``"unchecked"``.
-
-    The denominator is the PRE-MERGE per-stack finding list in
-    ``findings_data["findings"]``, NOT the shipped set (scored separately by
-    :func:`analyze_location` and :func:`analyze_shipped_duplication`).
-
-    ``grounding_rate`` is ``None`` over an empty finding set: undefined, not
-    perfect. It feeds the RL/SFT reward (``daydream/training/reward.py``), where
-    scoring absence of evidence as 1.0 made "report nothing" the cheapest path
-    to a maximal composite. ``file_grounding_rate``/``line_grounding_rate``
-    follow the same convention and are reported alongside the composite.
-
-    An artifact-owned primary file or rationale reference forces the finding
-    ungrounded and is kept in redacted ``artifact_*`` fields.
-    """
-    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
-    agent_reads: dict[str, set[str]] = {}
-    for traj in trajectories["forked"]:
-        label = _agent_label(traj["_source_file"])
-        agent_reads[label] = _partition_repository_reads(_extract_tool_calls(traj), roots=roots)[0]
-
-    ranges, hunk_source = _hunk_ranges(daydream_dir)
-
-    grounded: list[dict[str, Any]] = []
-    ungrounded: list[dict[str, Any]] = []
-    tiers = dict.fromkeys((*_LOCATION_TIERS, *_GROUNDING_EXEMPT_TIERS), 0)
-    file_grounded_count = 0
-    line_grounded_count = 0
-    artifact_evidence_rejections = 0
-
-    for finding in findings:
-        stack = finding.get("_stack", "")
-        reads = agent_reads.get(f"deep-{stack}", set())
-
-        cited_file = finding.get("file", "")
-        rationale_value = finding.get("rationale", "")
-        rationale = rationale_value if isinstance(rationale_value, str) else ""
-
-        cited_kind = _artifact_path_kind(cited_file, roots=roots)
-        artifact_file_ref = (
-            redact_text(cited_file) if cited_kind in ("artifact", "exploration_artifact") else None
-        )
-        file_was_read = cited_kind == "repository" and any(_path_matches(r, cited_file) for r in reads)
-
-        rationale_refs = re.findall(
-            r"(?:\[REDACTED_USER\]|[\w/.:-])+\."
-            r"(?:md|json|py|ts|tsx|js|txt|yaml|yml|in|toml|cfg)",
-            rationale,
-        )
-        artifact_rationale_refs: list[str] = []
-        unread_refs: list[str] = []
-        for ref in rationale_refs:
-            ref_kind = _artifact_path_kind(ref, roots=roots)
-            if ref_kind in ("artifact", "exploration_artifact"):
-                artifact_rationale_refs.append(redact_text(ref))
-            elif ref_kind == "rejected" or not any(_path_matches(read, ref) for read in reads):
-                unread_refs.append(ref)
-        artifact_rationale_refs = sorted(set(artifact_rationale_refs))
-        artifact_rejected = bool(artifact_file_ref or artifact_rationale_refs)
-        artifact_evidence_rejections += int(artifact_rejected)
-        file_grounded = file_was_read and not unread_refs and not artifact_rejected
-
-        cited = _cited_line(finding)
-        cited_line = _int_or_none(cited)
-        is_structural = (
-            finding.get("lens") == "structural" or finding.get("_stack") == "structure"
-        )
-        if hunk_source == "none":
-            tier = "unchecked"
-            line_grounded = True
-        elif is_structural and cited == 0:
-            tier = "whole_file"
-            line_grounded = True
-        elif cited_line is None:
-            tier = "no_line"
-            line_grounded = True
-        else:
-            tier, _distance = _location_tier(ranges.get(str(cited_file)), cited_line)
-            line_grounded = tier in ("in_hunk", "within_tolerance")
-
-        tiers[tier] += 1
-        file_grounded_count += int(file_grounded)
-        line_grounded_count += int(line_grounded)
-
-        entry = {
-            "id": finding.get("id"),
-            "stack": stack,
-            "file": artifact_file_ref if artifact_file_ref is not None else cited_file,
-            "confidence": finding.get("confidence", "UNKNOWN"),
-            "file_was_read": file_was_read,
-            "unread_rationale_refs": unread_refs,
-            "artifact_file_ref": artifact_file_ref,
-            "artifact_rationale_refs": artifact_rationale_refs,
-            "location_tier": tier,
-            "line_grounded": line_grounded,
-            "grounded": file_grounded and line_grounded,
-        }
-        (grounded if entry["grounded"] else ungrounded).append(entry)
-
-    total = len(findings)
-    return {
-        "total_findings": total,
-        "grounded_count": len(grounded),
-        "ungrounded_count": len(ungrounded),
-        "grounding_rate": round(len(grounded) / total, 4) if total > 0 else None,
-        "hunk_source": hunk_source,
-        "file_grounded_count": file_grounded_count,
-        "line_grounded_count": line_grounded_count,
-        "file_grounding_rate": (round(file_grounded_count / total, 4) if total > 0 else None),
-        "line_grounding_rate": (round(line_grounded_count / total, 4) if total > 0 else None),
-        "artifact_evidence_rejections": artifact_evidence_rejections,
-        "tiers": tiers,
-        "grounded": grounded,
-        "ungrounded": ungrounded,
-    }
-
-
-def analyze_exploration_utilization(
-    trajectories: dict[str, Any],
-    *,
-    daydream_dir: Path | None = None,
-    artifact_provenance: ArtifactEvidenceProvenance | None = None,
-) -> dict[str, Any]:
-    """Check whether review agents read current-run exploration artifacts.
-
-    Only the relative public ``.daydream/exploration`` path and the exploration
-    directory of a root this run owns count; a directory merely named
-    ``exploration``, another owner's, and parent traversals do not.
-    """
-    roots = _artifact_path_roots(daydream_dir, artifact_provenance)
-    results: list[dict[str, Any]] = []
-
-    for traj in trajectories["forked"]:
-        label = _agent_label(traj["_source_file"])
-        if not label.startswith("deep-"):
-            continue
-
-        calls = _extract_tool_calls(traj)
-        exploration_refs: list[str] = []
-        total_reads = 0
-
-        for tc in calls:
-            read_paths = _read_paths_for_call(tc)
-            if not read_paths:
-                continue
-            total_reads += 1
-            for path in read_paths:
-                if _artifact_path_kind(path, roots=roots) == "exploration_artifact":
-                    exploration_refs.append(path)
-
-        results.append({
-            "agent": label,
-            "total_reads": total_reads,
-            "exploration_reads": len(exploration_refs),
-            "utilized": len(exploration_refs) > 0,
-        })
-
-    utilized = sum(1 for r in results if r["utilized"])
-    total_reviewers = len(results)
-
-    return {
-        "reviewers_utilizing_exploration": utilized,
-        "total_reviewers": total_reviewers,
-        "utilization_rate": (round(utilized / total_reviewers, 4) if total_reviewers > 0 else 0),
-        "by_agent": results,
     }
 
 
@@ -1925,7 +1012,6 @@ def _tool_outcome_flags(steps: list[dict[str, Any]]) -> list[str]:
 
 def analyze_training_signals(
     trajectories: dict[str, Any],
-    grounding: dict[str, Any],
 ) -> dict[str, Any]:
     """Assess forked training trajectories for content and evidence quality."""
     signals: list[dict[str, Any]] = []
@@ -1961,15 +1047,6 @@ def analyze_training_signals(
                         break
 
         noise_flags.extend(_tool_outcome_flags(steps))
-
-        # Extract stack name from agent label (e.g. "deep-python" → "python")
-        agent_stack = label.removeprefix("deep-").removeprefix("explore-")
-        agent_ungrounded = [
-            g for g in grounding.get("ungrounded", [])
-            if g.get("stack", "") == agent_stack
-        ]
-        if agent_ungrounded:
-            noise_flags.append(f"ungrounded_findings:{len(agent_ungrounded)}")
 
         # Keep the documented category order while ensuring repeated evidence
         # never repeats a training-review flag.
@@ -2928,20 +2005,11 @@ def analyze_session(
     costs = analyze_costs(trajectories)
     tools = analyze_tools(trajectories)
     findings_data = analyze_findings(daydream_dir)
-    coverage = analyze_coverage(trajectories, daydream_dir, artifact_provenance=artifact_provenance)
-    grounding = analyze_grounding(
-        trajectories, findings_data["findings"], daydream_dir, artifact_provenance=artifact_provenance
-    )
     location = analyze_location(daydream_dir)
     routing = analyze_routing(daydream_dir)
     shipped_duplication = analyze_shipped_duplication(daydream_dir)
-    exploration = analyze_exploration_utilization(
-        trajectories, daydream_dir=daydream_dir, artifact_provenance=artifact_provenance
-    )
     timing = analyze_timing(trajectories)
-    training = analyze_training_signals(
-        trajectories, grounding,
-    )
+    training = analyze_training_signals(trajectories)
     try:
         quality = analyze_quality(daydream_dir, code_workspace=code_workspace)
     except TreeSitterBadVersionError as exc:
@@ -2977,7 +2045,6 @@ def analyze_session(
         "cost": costs,
         "timing": timing,
         "tools": tools,
-        "coverage": coverage,
         "findings": {
             "total": finding_count,
             "by_confidence": findings_data["by_confidence"],
@@ -2987,11 +2054,9 @@ def analyze_session(
             "merged_review": findings_data.get("merged_review", {}),
             "per_lens": findings_data.get("per_lens", {}),
         },
-        "grounding": grounding,
         "location": location,
         "latency_profile": routing["profile"],
         "routing": routing,
-        "exploration_utilization": exploration,
         "training_signals": training,
         "quality": quality,
         "derived": {

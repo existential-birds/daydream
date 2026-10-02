@@ -294,10 +294,6 @@ def test_rundir_golden_fixture_is_clean(rundir_golden: Path) -> None:
         assert not tcs, f"step {step.get('step_id')} carries tool_calls prompt text"
 
 
-def _manifest_row_like_production(run_dir: Path) -> dict[str, object]:
-    """Flatten ``manifest.json`` exactly as ``taskset._manifest_row`` does."""
-    manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    return {**manifest, **(manifest.get("metrics") or {})}
 
 
 def _stage_repo(
@@ -453,32 +449,25 @@ async def test_intrinsic_composite_parity(
     await task.score(trace, runtime)
 
     expected = score_trajectory(
-        assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
+        assemble_scoring_inputs(rundir_golden)
     ).composite
     assert expected is not None
     assert trace.rewards["intrinsic_composite"] == expected
     assert trace.info["reward_breakdown"]["composite"] == expected
 
 
-async def test_intrinsic_composite_carries_the_grounding_axis(
+async def test_intrinsic_composite_ignores_historical_read_metrics(
     tmp_path: Path, runtime: SubprocessRuntime, rundir_golden: Path, fixture_manifest_path: Path
 ) -> None:
-    """grounding_rate lives under ``metrics`` in the archive; reading the manifest
-    verbatim would null the axis. The expectation comes from evaluation.json, so
-    that regression cannot hide behind a manifest-shaped fixture."""
-    evaluation = json.loads((rundir_golden / "evaluation.json").read_text(encoding="utf-8"))
-    expected_grounding = evaluation["grounding"]["grounding_rate"]
-    assert expected_grounding == 1.0, "fixture drift: the golden run is fully grounded"
-
+    """Old archives remain readable without importing obsolete reward evidence."""
     archive_root, task = _golden_task(tmp_path, fixture_manifest_path, rundir_golden)
     trace = _trace(task, archive_root=archive_root, repo_path=tmp_path / "repo")
 
     await task.score(trace, runtime)
 
     breakdown = trace.info["reward_breakdown"]
-    assert breakdown["axes_present"]["grounding"] is True
-    assert breakdown["grounding"] is not None
-    assert breakdown["grounding"] == expected_grounding
+    assert "grounding" not in breakdown["axes_present"]
+    assert "grounding" not in breakdown
 
 
 async def test_zero_finding_rollout_scores_no_intrinsic_reward(
@@ -486,13 +475,8 @@ async def test_zero_finding_rollout_scores_no_intrinsic_reward(
 ) -> None:
     """Saying nothing must not be the cheapest path to a perfect reward.
 
-    A review that reports ZERO findings has an UNDEFINED grounding rate — the
-    ratio has no denominator — and no verified recommendations, so it has no
-    credit axis at all. Scoring the empty ratio as a vacuous 1.0 handed such a
-    rollout the maximum ``intrinsic_composite``, making silence the degenerate
-    optimum the policy would learn first. With ``grounding_rate`` undefined the
-    whole credit side must be absent, ``composite`` must be ``None``, and the
-    reward the trainer sums must be 0.0.
+    A review with no verifier evidence has no correctness credit. Its composite
+    is absent and the trainer reward is zero.
     """
     archive_root = tmp_path / "archive"
     run_dir = _stage_run(archive_root, rundir_golden)
@@ -504,12 +488,10 @@ async def test_zero_finding_rollout_scores_no_intrinsic_reward(
     (run_dir / "deep" / "recommendation-verdicts.json").unlink()
 
     manifest = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
-    manifest["metrics"]["grounding_rate"] = None
     manifest["metrics"]["total_findings"] = 0
     (run_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     evaluation = json.loads((run_dir / "evaluation.json").read_text(encoding="utf-8"))
-    evaluation["grounding"]["grounding_rate"] = None
     evaluation["findings"]["total"] = 0
     (run_dir / "evaluation.json").write_text(json.dumps(evaluation), encoding="utf-8")
 
@@ -520,7 +502,7 @@ async def test_zero_finding_rollout_scores_no_intrinsic_reward(
 
     breakdown = trace.info["reward_breakdown"]
     assert trace.rewards["intrinsic_composite"] == 0.0
-    assert breakdown["axes_present"]["grounding"] is False
+    assert "grounding" not in breakdown["axes_present"]
     assert breakdown["composite"] is None
     # Not merely "grounding went away": no credit axis survives, so the
     # composite is uncomputable rather than carried by a stale verdict file.
@@ -1170,7 +1152,7 @@ async def test_score_reuses_one_archived_run_snapshot(
     await task.score(trace, runtime)
 
     expected = score_trajectory(
-        assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
+        assemble_scoring_inputs(rundir_golden)
     ).composite
     assert expected is not None
     assert trace.rewards["intrinsic_composite"] == expected
@@ -1311,11 +1293,11 @@ async def test_reward_version_is_pinned(
     """
 
 
-    assert REWARD_VERSION == "2026.09.04-1", (
+    assert REWARD_VERSION == "2026.10.01-1", (
         f"the training pipeline's reward version moved to {REWARD_VERSION!r}. Re-derive the "
         "rollout reward's expected values before trusting any run scored across the boundary."
     )
-    assert ROLLOUT_REWARD_VERSION == "2026.08.15-1", (
+    assert ROLLOUT_REWARD_VERSION == "2026.10.01-1", (
         f"the rollout reward contract version moved to {ROLLOUT_REWARD_VERSION!r}"
     )
 
@@ -1367,7 +1349,7 @@ async def test_untampered_sealed_run_scores_normally(
     assert trace.metrics["seal_verified"] == 1.0
     assert trace.rewards["intrinsic_composite"] == (
         score_trajectory(
-            assemble_scoring_inputs(rundir_golden, _manifest_row_like_production(rundir_golden))
+            assemble_scoring_inputs(rundir_golden)
         ).composite
     )
 

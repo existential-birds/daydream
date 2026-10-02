@@ -263,7 +263,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     shared verdict vocabulary (``accepted`` → ``consistent``, ``rejected`` →
     ``contradicts``, ambiguous/unanswered/missing → ``uncertain``) so the
     replay's winner filter reads a real correctness axis instead of scoring
-    every candidate at a flat 0.0 composite. ``grounding_rate`` stays absent
+    every candidate at a flat 0.0 composite. Missing verifier evidence remains absent
     (unknown, never an invented zero).
 
     Raises:
@@ -305,8 +305,7 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         # Map it onto the shared verdict vocabulary (the labels
         # score_trajectory's verdict_map consumes) so the replay reads a
         # real correctness axis instead of flooring every candidate at a
-        # 0.0 composite. grounding_rate stays absent (unknown, never an
-        # invented zero) and format_valid is True: a frozen v2 record is
+        # 0.0 composite. format_valid is True: a frozen v2 record is
         # admission/shape/drift-validated, so the v1 bronze-parse failure
         # floor cannot apply here.
         disposition = rec.get("outcome_label") or rec.get("disposition")
@@ -333,7 +332,6 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "diff": diff,
                 "findings": rec.get("findings", []),
                 "verifier_verdicts": verifier_verdicts,
-                "grounding_rate": rec.get("grounding_rate", rec.get("grounding_score")),
                 "format_valid": format_valid,
                 "length": length,
             }
@@ -502,7 +500,7 @@ def _reward_weights_snapshot() -> dict[str, float]:
     """
     return {
         name: float(getattr(DEFAULT_WEIGHTS, name))
-        for name in ("w_correctness", "w_grounding", "w_len", "w_fp", "len_tau", "len_scale")
+        for name in ("w_len", "w_fp", "len_tau", "len_scale")
     }
 
 

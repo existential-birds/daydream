@@ -73,8 +73,8 @@ _PHASE_TIMING_KEYS: dict[str, tuple[str, ...]] = {
 value only, and every arbiter call runs inside ``phase_scope(DaydreamPhase.DEEP,
 stage="arbiter")`` -- there is no ``ARBITER`` phase member, so real runs carry
 the arbiter wall-clock under ``deep``, never ``arbiter``. The ``deep`` bucket
-aggregates all deep-phase brackets (arbiter, suppression, supervision, review,
-uncovered sweep), so the report's ``arbiter`` latency is that shared aggregate.
+aggregates all deep-phase brackets (arbiter, suppression, supervision, and review),
+so the report's ``arbiter`` latency is that shared aggregate.
 The legacy ``arbiter`` key is kept only as a fallback for hand-authored corpora
 that predate the pipeline keying, so the committed fixtures still report their
 arbiter bucket instead of silently collapsing to an empty sample.

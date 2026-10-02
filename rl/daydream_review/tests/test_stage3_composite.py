@@ -59,7 +59,7 @@ def rl_train_configs() -> list[dict[str, Any]]:
 
 
 def _stage_run_dir(tmp_path: Path) -> Path:
-    """A minimal archived run dir: merged findings + a manifest with grounding."""
+    """A minimal archived run dir: merged findings and a manifest."""
     run_dir = tmp_path / "run"
     deep = run_dir / "deep"
     deep.mkdir(parents=True)
@@ -85,7 +85,7 @@ def _stage_run_dir(tmp_path: Path) -> Path:
         encoding="utf-8",
     )
     (run_dir / "manifest.json").write_text(
-        json.dumps({"metrics": {"grounding_rate": 1.0}}), encoding="utf-8"
+        json.dumps({"metrics": {}}), encoding="utf-8"
     )
     return run_dir
 
@@ -133,12 +133,12 @@ async def test_env_scores_with_stage0_composite(
     # The scored breakdown carries the rubric terms, not intrinsic-only.
     assert "learned_outcome" in stage0["terms"]
     assert "fp_penalty" in stage0["terms"]
-    assert "localization" in stage0["terms"]
+    assert "localization" not in stage0["terms"]
     assert stage0["composite"] is not None
     assert stage0["reward_version"]  # rubric version stamped for provenance
     # M13: the reward IS the rubric composite (which carries the intrinsic
     # composite as one weighted term), not the intrinsic-only value.
-    assert stage0["terms"]["intrinsic_composite"] is not None
+    assert stage0["terms"]["intrinsic_composite"] is None  # no verifier verdicts in this rollout
     assert trace.rewards["intrinsic_composite"] == stage0["composite"]
 
 

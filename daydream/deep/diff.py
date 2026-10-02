@@ -42,13 +42,12 @@ def _read_full_diff(ctx: FlowContext) -> str:
     Issue #644 — the gather-time bound shrinks the in-memory
     ``ctx.data["diff"]`` to ``INLINE_DIFF_BUDGET_BYTES`` via whole-block
     retention, so consumers that need the COMPLETE diff (the exploration
-    pre-scan, the intent/wonder TTT phases, and the uncovered sweep) must
+    pre-scan and the intent/wonder TTT phases) must
     re-read ``diff_path``, which is always written full at gather. This is
     that single re-read site.
 
     Raises ``OSError`` on a failed read so each caller keeps its own
-    degradation shape (warn-and-fallback for exploration / TTT,
-    propagate-to-the-fail-open-wrapper for the sweep). When the ctx carries no
+    degradation shape (warn-and-fallback for exploration / TTT). When the ctx carries no
     ``diff_path`` (defensive legacy fallback only, never the default), the
     bounded in-memory ``ctx.data["diff"]`` is returned instead of crashing.
     """

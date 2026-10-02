@@ -515,8 +515,9 @@ class _ExtraEditBackend(_StubBackend):
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
         if prompt.lower().startswith(("fix this issue", "fix these")):
-            before = self._extra.read_text() if self._append else ""
-            self._extra.write_text(before + self._text)
+            extra = cwd / self._extra.relative_to(self._target)
+            before = extra.read_text() if self._append else ""
+            extra.write_text(before + self._text)
 
 
 def _read_quality_gate(target: Path) -> dict[str, Any]:

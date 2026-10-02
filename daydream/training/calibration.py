@@ -226,10 +226,11 @@ def _check_version_stamps(record: dict[str, Any], rid: str) -> None:
             f"record {rid}: unrecognized label version stamp {field_name}={lineage.get(field_name)!r}"
             f" (expected {recognized!r})",
         )
+    # Calibration reads captured breakdowns; the frozen fixture retains its original stamp.
     _gate(
-        record["reward_version"] == REWARD_VERSION,
-        f"record {rid}: unrecognized label version stamp reward_version={record['reward_version']!r}"
-        f" (expected {REWARD_VERSION!r})",
+        isinstance(record["reward_version"], str)
+        and record["reward_version"] in {REWARD_VERSION, "2026.09.04-1"},
+        f"record {rid}: unrecognized reward version stamp {record['reward_version']!r}",
     )
 
 
@@ -295,6 +296,7 @@ def _load_inputs(
     for rid, axes in breakdown_raw.items():
         _gate(rid in known_ids, f"{config.breakdowns}: breakdown for unknown record_id {rid!r}")
         _gate(isinstance(axes, dict), f"{config.breakdowns}: breakdown for {rid!r} must be an object")
+        axes = {axis: value for axis, value in axes.items() if axis != "grounding"}
         for axis, value in axes.items():
             _gate(isinstance(value, (int, float)) and not isinstance(value, bool),
                   f"{config.breakdowns}: axis {axis!r} for {rid!r} must be numeric")
@@ -744,6 +746,10 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
         rid = _check_record_schema(record, index)
         _check_version_stamps(record, rid)
 
+    reward_versions = {record["reward_version"] for record in records}
+    _gate(len(reward_versions) == 1, "corpus mixes reward versions with different scoring semantics")
+    captured_reward_version = next(iter(reward_versions))
+
     excluded = load_exclusion_list()
     for record in records:
         rid = str(record["record_id"])
@@ -776,7 +782,7 @@ def run_calibration(config: CalibrationConfig) -> dict[str, Any]:
         "labeler_policy_version": LABELER_POLICY_VERSION,
         "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
         "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
-        "reward_version": REWARD_VERSION,
+        "reward_version": captured_reward_version,
     }
 
     record_ids = [str(r["record_id"]) for r in records]

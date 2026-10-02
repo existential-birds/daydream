@@ -170,7 +170,7 @@ async def test_review_mode_writes_findings_artifact(
         # Issue #742: the deep per-stack parse schema requires a ``verdicts``
         # property (Codex strict-mode output).
         ResultEvent(
-            structured_output={"issues": [issue], "verdicts": []},
+            structured_output={"issues": [issue]},
             continuation=None,
         ),
     ])
@@ -241,19 +241,7 @@ def _diagram_payload() -> dict[str, Any]:
             "sequence": {
                 "status": "rendered",
                 "reason": None,
-                "spec_proposed": {"participants": [], "messages": [], "blocks": []},
                 "spec_final": {"participants": [], "messages": [], "blocks": []},
-                "grounding": {
-                    "elements": [],
-                    "summary": {
-                        "proposed": 0,
-                        "grounded_first_pass": 0,
-                        "repaired": 0,
-                        "pruned": 0,
-                    },
-                    "capped": {},
-                    "root_range": None,
-                },
                 "omit_reasons": [],
             },
             "flowchart": None,

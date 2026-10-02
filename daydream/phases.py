@@ -42,6 +42,7 @@ from daydream.backends import (
     effective_fanout_concurrency,
 )
 from daydream.backends.claude import READ_ONLY_BASH_ALLOWLIST
+from daydream.check_claims import substantiate_check_claims
 from daydream.clipboard import clipboard_available, copy_to_clipboard
 from daydream.config import (
     DEFAULT_GROUP_MAX_SERIAL_ITEMS,
@@ -119,6 +120,7 @@ from daydream.eval.analyzer import _records_issues, _records_issues_or_empty
 from daydream.extensions import Registry, get_registry
 from daydream.file_group_budget import FileGroupBudget
 from daydream.fix_footprint import AuthorizedFixFootprint
+from daydream.fix_isolation import FixIsolationRound
 from daydream.generated_files import (
     GENERATED_FILES_PROMPT_RULE,
     _changed_untracked_generated_files,
@@ -1102,45 +1104,14 @@ FEEDBACK_SCHEMA: dict[str, Any] = strict_object({
     },
 })
 
-# Per-stack parse schema (issue #168). Identical to FEEDBACK_SCHEMA but carries a
-# required ``severity`` so the scoped Opus arbiter can select high-severity /
-# contested findings *before* the merge, plus a per-file ``verdicts`` array
-# (issue #742) so a file marked ``clean`` in the review is distinguishable from
-# one never reviewed (``not_reviewed``). The shared FEEDBACK_SCHEMA stays
-# severity-free (the shallow parse path never needs it);
-# only deep-mode's pre-merge per-stack parse opts into this richer record shape.
-#
-# Derived from FEEDBACK_SCHEMA to avoid silent drift: we deep-copy the base
-# schema and inject the extra ``severity`` field into the items sub-schema and
-# the top-level ``verdicts`` array.
+# Deep reviewers add severity to the shared findings shape so the scoped
+# arbiter can select high-severity or contested findings before merge. The
+# shallow feedback schema remains severity-free.
 PER_STACK_RECORD_SCHEMA: dict[str, Any] = copy.deepcopy(FEEDBACK_SCHEMA)
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["properties"]["severity"] = severity_enum_schema()
 PER_STACK_RECORD_SCHEMA["properties"]["issues"]["items"]["required"] = [
     "id", "description", "file", "line", "severity", "confidence", "rationale", "evidence"
 ]
-# Per-file verdicts (issue #742). ``verdicts`` sits in ``required`` (like
-# every property of every Codex-routed output schema -- the strict-mode
-# validator rejects optional properties, see test_output_schema_strict.py), so
-# the deep per-stack parse model must emit a (possibly empty) verdicts array.
-# The uncovered sweep parses with UNCOVERED_SWEEP_SCHEMA instead (it never
-# teaches the verdicts shape, so it must not ask for that field), and records
-# written before this field existed remain parseable on resume (loading is
-# schema-free).
-PER_STACK_RECORD_SCHEMA["required"] = ["issues", "verdicts"]
-PER_STACK_RECORD_SCHEMA["properties"]["verdicts"] = {
-    "type": "array",
-    "items": strict_object({
-        "path": _REPOSITORY_FILE_PATH_SCHEMA,
-        "lines_read": {"type": "integer"},
-        "verdict": {"type": "string", "enum": ["clean", "has_findings", "not_reviewed"]},
-        "n_findings": {"type": "integer"},
-    }),
-}
-
-UNCOVERED_SWEEP_SCHEMA: dict[str, Any] = copy.deepcopy(PER_STACK_RECORD_SCHEMA)
-UNCOVERED_SWEEP_SCHEMA["required"] = ["issues"]
-UNCOVERED_SWEEP_SCHEMA["properties"].pop("verdicts", None)
-
 ALTERNATIVE_REVIEW_SCHEMA: dict[str, Any] = strict_object({
     "issues": {
         "type": "array",
@@ -1492,6 +1463,8 @@ FIX_VERIFY_VERDICTS_SCHEMA = strict_object({
             # requirement because JSON Schema cannot express it.
             "path": {"type": ["string", "null"]},
             "reason": {"type": "string"},
+            "check_command": {"type": ["string", "null"]},
+            "check_only": {"type": "boolean"},
         }),
     },
 })
@@ -2069,6 +2042,13 @@ async def phase_fix_verify(
         round_number=round_number,
     )
     prompt = append_extended_facts(prompt, _recipe_for_work(work))
+    prompt += (
+        "\nIf regressed relies on a deterministic lint/test/type/build/check failure, "
+        "set check_command to the repository-declared command (or null if unknown). "
+        "The host validates it; do not invent diagnostic failures. "
+        "Set check_only true only when the entire regressed verdict relies solely on that check failure; "
+        "set it false for any semantic or additional defect.\n"
+    )
 
     candidate = await _run_verifier(
         backend, work, prompt, FIX_VERIFY_VERDICTS_SCHEMA, run_context,
@@ -2087,6 +2067,10 @@ async def phase_fix_verify(
             "verdict": verdict,
             "reason": entry.get("reason") or "",
         }
+        if "check_command" in entry:
+            cleaned["check_command"] = entry["check_command"]
+        if "check_only" in entry:
+            cleaned["check_only"] = entry["check_only"]
         path = entry.get("path")
         if verdict in FIX_VERIFY_RETARGETABLE_VERDICTS and isinstance(path, str) and path.strip():
             cleaned["path"] = path.strip()
@@ -2105,7 +2089,7 @@ async def phase_fix_verify(
                 "reason": "no verifier verdict",
             }
         verdicts.append(entry)
-    return verdicts
+    return await substantiate_check_claims(work.repo, verdicts, recipe=_recipe_for_work(work))
 
 
 # Shared scope/precedence/contract guardrails appended to every fix prompt
@@ -2671,24 +2655,38 @@ Make the minimal changes needed to address ALL of the above findings in one cohe
 
 
 @asynccontextmanager
-async def _restore_round_index_after_fanout(
-    repo: Path,
-    index: git_ops.IndexSnapshot,
-) -> AsyncIterator[None]:
-    """Restore one shared index only after the enclosed fixer fan-out closes."""
+async def _isolated_fix_fanout(
+    work: WorkContext,
+    footprint: AuthorizedFixFootprint,
+    *,
+    file_scope_issues: bool,
+    auth: git_ops.GitHubAuth,
+) -> AsyncIterator[FixIsolationRound]:
+    """Join isolated writers, restore direct parent writes, then import fixes."""
+    isolation = FixIsolationRound(work, footprint, capture_discarded_edits=file_scope_issues)
     try:
-        yield
-    except BaseException as fanout_error:
         try:
-            git_ops.restore_index(repo, index)
-        except BaseException as restore_error:
-            raise BaseExceptionGroup(
-                "fix fan-out failed and round index restoration also failed",
-                [fanout_error, restore_error],
-            ) from None
-        raise
-    else:
-        git_ops.restore_index(repo, index)
+            yield isolation
+        except BaseException as fanout_error:
+            try:
+                isolation.restore_parent()
+                isolation.publish()
+            except BaseException as restore_error:
+                raise BaseExceptionGroup(
+                    "fix fan-out failed and parent restoration also failed",
+                    [fanout_error, restore_error],
+                ) from None
+            raise
+        else:
+            isolation.restore_parent()
+            isolation.publish()
+            if file_scope_issues:
+                from daydream.deep.scope_issues import _file_reverted_edit_issue
+
+                for path, patch in isolation.discarded_edits:
+                    _file_reverted_edit_issue(work.repo, path, patch, auth=auth)
+    finally:
+        isolation.close()
 
 
 @bind_resolved_run_context
@@ -2698,6 +2696,8 @@ async def phase_fix_parallel(
     items: list[dict[str, Any]],
     *,
     footprint: AuthorizedFixFootprint | None = None,
+    file_scope_issues: bool = False,
+    auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     round_snapshot: git_ops.WorktreeRollbackSnapshot | None = None,
     limiter_size: int = 10,
     intent_path: Path | None = None,
@@ -2806,10 +2806,14 @@ async def phase_fix_parallel(
                 f"item(s); skipping remaining {skipped}.",
             )
 
-    def _restore_group_or_raise(context: str, paths: frozenset[str]) -> None:
+    def _restore_group_or_raise(
+        context: str, paths: frozenset[str], group_work: WorkContext,
+        group_snapshot: git_ops.WorktreeRollbackSnapshot,
+    ) -> None:
         """Restore the complete group from the round snapshot, or fail the group."""
         try:
-            git_ops.restore_group_worktree_from_snapshot(work.repo, round_snapshot, paths)
+            isolation.audit_group(group_work.repo, group_snapshot)
+            git_ops.restore_group_worktree_from_snapshot(group_work.repo, group_snapshot, paths)
         except Exception as restore_err:  # noqa: BLE001
             raise RuntimeError(
                 f"failed to restore the complete fix group {context}"
@@ -2820,6 +2824,8 @@ async def phase_fix_parallel(
         grp: list[tuple[dict[str, Any], int]],
         budget: FileGroupBudget,
         edit_scope: frozenset[str],
+        group_work: WorkContext,
+        group_snapshot: git_ops.WorktreeRollbackSnapshot,
     ) -> None:
         """Fix a group's findings one at a time, honoring the group budget.
 
@@ -2841,7 +2847,7 @@ async def phase_fix_parallel(
                 await _record_budget_stop(fkey, budget_reason, len(grp), budget)
                 return
             turn_reason = await phase_fix(
-                backend, work, item, item_num, total,
+                backend, group_work, item, item_num, total,
                 edit_scope=edit_scope,
                 read_scope=footprint.run_allowed_paths,
                 console_lock=_console_lock,
@@ -2853,6 +2859,7 @@ async def phase_fix_parallel(
                 retry_recovery_allowance_s=retry_recovery_allowance_s,
             )
             if turn_reason == "wall_budget_exceeded":
+                _restore_group_or_raise("after its turn wall budget cut", edit_scope, group_work, group_snapshot)
                 if group_max_wall_s > DEFAULT_WALL_BUDGET_S and budget.remaining() > 0:
                     # The invocation's own per-turn wall budget
                     # (DEFAULT_WALL_BUDGET_S) cut the turn, not the group
@@ -2872,7 +2879,7 @@ async def phase_fix_parallel(
                     # restore the complete group from the round snapshot so the
                     # half-applied change cannot reach fix-verify/test/commit,
                     # mirroring the batched fallback recovery.
-                    _restore_group_or_raise("after its wall budget cut", edit_scope)
+                    _restore_group_or_raise("after its wall budget cut", edit_scope, group_work, group_snapshot)
                 await _record_budget_stop(fkey, "group_wall_budget_exceeded", len(grp), budget)
                 return
             # Any other turn reason (a ``tool_vetoed:<tool>`` supervisor veto is
@@ -2893,9 +2900,16 @@ async def phase_fix_parallel(
         phase=DaydreamPhase.FIX,
         descriptors=dispatch_descriptors,
     ) as dispatch:
-        async with _restore_round_index_after_fanout(
-            work.repo, round_snapshot.index
-        ), anyio.create_task_group() as tg:
+        async with _isolated_fix_fanout(
+            work, footprint, file_scope_issues=file_scope_issues, auth=auth,
+        ) as isolation, anyio.create_task_group() as tg:
+            # Complete host checkout preparation before starting any backend.
+            # Synchronous cloning must not block a live sibling or consume its
+            # cumulative model-call wall budget.
+            group_workspaces = {
+                file_key: isolation.create_group(footprint.group_paths([item for item, _ in numbered]))
+                for file_key, numbered in groups_numbered
+            }
             for file_key, numbered_items in groups_numbered:
                 # Default-arg capture -- prevents late-binding closure bug (Pitfall 2).
                 async def _task(
@@ -2907,6 +2921,7 @@ async def phase_fix_parallel(
                         async with maybe_fork(
                             recorder, f"fix-{_fkey_slug}", dispatch=dispatch,
                         ):
+                            group_work, group_snapshot = group_workspaces[fkey]
                             budget = FileGroupBudget(
                                 max_wall_seconds=group_max_wall_s,
                                 max_serial_items=group_max_serial_items,
@@ -2920,7 +2935,7 @@ async def phase_fix_parallel(
                                     # Single-item or <no-file> groups: go straight to
                                     # per-finding phase_fix (no batched prompt to build,
                                     # no fallback retry on failure).
-                                    await _fix_group_serially(fkey, grp, budget, edit_scope)
+                                    await _fix_group_serially(fkey, grp, budget, edit_scope, group_work, group_snapshot)
                                 else:
                                     # Design-checkpoint #1: consult the group budget
                                     # BEFORE the batched call too, mirroring the serial
@@ -2933,7 +2948,7 @@ async def phase_fix_parallel(
                                         return
                                     try:
                                         await phase_fix_batched(
-                                            backend, work, grp_items, grp_nums, total,
+                                            backend, group_work, grp_items, grp_nums, total,
                                             edit_scope=edit_scope,
                                             read_scope=footprint.run_allowed_paths,
                                             console_lock=_console_lock,
@@ -2950,8 +2965,14 @@ async def phase_fix_parallel(
                                         # Restore the file to HEAD before falling back so
                                         # per-finding fixes don't re-apply partial edits
                                         # that the batched turn may have already written.
-                                        _restore_group_or_raise("before fallback", edit_scope)
-                                        await _fix_group_serially(fkey, grp, budget, edit_scope)
+                                        _restore_group_or_raise(
+                                            "before fallback", edit_scope, group_work, group_snapshot,
+                                        )
+                                        await _fix_group_serially(
+                                            fkey, grp, budget, edit_scope, group_work, group_snapshot,
+                                        )
+                                if fkey in successful_groups:
+                                    isolation.retain_group(group_work.repo, edit_scope, group_snapshot)
                             except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
                                 # Recovery restores the complete group, so earlier
                                 # serial progress cannot justify a partial status.
@@ -2959,9 +2980,10 @@ async def phase_fix_parallel(
                                 failure: BaseException = e
                                 try:
                                     grp_items = [item for item, _ in grp]
+                                    isolation.audit_group(group_work.repo, group_snapshot)
                                     git_ops.restore_group_worktree_from_snapshot(
-                                        work.repo,
-                                        round_snapshot,
+                                        group_work.repo,
+                                        group_snapshot,
                                         footprint.group_paths(grp_items),
                                     )
                                 except Exception as restore_err:  # noqa: BLE001
@@ -4770,8 +4792,8 @@ def _read_text_or_none(path: Path | None) -> str | None:
 def _frontier_files_for_stack(stack: "StackAssignment") -> list[str]:
     """The recorded cross-shard frontier a shard's review is grounded with.
 
-    Single-sourced and read-only: this is the exact list the coverage receipt
-    records, the prompt's ``Cross-shard interface file(s)`` block names, and the
+    Single-sourced and read-only: this is the exact list the prompt's
+    ``Cross-shard interface file(s)`` block names, and the
     reuse key hashes (MH7). Never recompute a frontier from the import graph
     here -- a fresh graph could name a file no prompt ever carried, letting the
     key miss a change the review actually depended on.
@@ -4792,7 +4814,6 @@ async def phase_per_stack_reviews(
     diff_text: str | None = None,
     intent_authoritative: bool = False,
     include_alternatives: bool = True,
-    write_coverage_receipts: bool = False,
     strategies: dict[str, str] | None = None,
     registry: Registry | None = None,
     artifact_session: ArtifactSession | None = None,
@@ -4800,17 +4821,9 @@ async def phase_per_stack_reviews(
     run_context: RunContext | None = None,
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
-    reuse_pending: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Path], dict[str, str]]:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
-    ``reuse_pending`` is an optional out-channel for the real pipeline: a
-    freshly reviewed stack's store inputs are collected here instead of being
-    committed by the fan-out, because the records file is only final after
-    ``_step_per_stack_parse`` reconciles verdicts against the completed review
-    forks (issue #745). The caller persists the entries once that finalization
-    has happened, so a cached shard restores exactly the bytes a fresh run
-    leaves. Direct callers that omit it keep the immediate-store behavior.
     """
     active_registry = registry if registry is not None else get_registry()
     run_context = resolve_run_context(run_context)
@@ -4843,34 +4856,7 @@ async def phase_per_stack_reviews(
         "intent": intent_path,
         "alternatives": alternatives_path if include_alternatives else None,
     }
-    # Issue #731: when sharding is enabled, write the deterministic coverage
-    # receipts BEFORE the task group spawns (pre-task-group, sequential). Each
-    # stack records what it was assigned, which files were inline-grounded
-    # (all-or-nothing per ``inline_grounded_files``) and its bounded cross-shard
-    # frontier. The structural stack is never inlined (`:3276-3297`) so its
-    # inline evidence is empty. Default False keeps the forensic path
-    # byte-identical (no receipt file written).
     read_only = uses_diff_reference(backend, work.repo, read_only=True)
-    receipts: dict[str, dict[str, list[str]]] = {}
-    if write_coverage_receipts:
-        from daydream.deep.coverage import write_coverage_receipts as _write_coverage_receipts
-        from daydream.deep.prompts import inline_grounded_files as _inline_grounded_files
-
-        for stack in stacks:
-            if read_only or stack.stack_name == STRUCTURE_STACK_NAME:
-                inline_files: list[str] = []
-            else:
-                inline_files = sorted(
-                    _inline_grounded_files(diff_text, stack.files)
-                    if diff_text is not None
-                    else set()
-                )
-            receipts[stack.stack_name] = {
-                "assigned_files": list(stack.files),
-                "inline_files": inline_files,
-                "frontier_files": _frontier_files_for_stack(stack),
-            }
-        _write_coverage_receipts(deep_dir_path, receipts)
 
     hunk_index = load_hunk_index(deep_dir_path.parent)
 
@@ -4885,13 +4871,10 @@ async def phase_per_stack_reviews(
             capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
         )
         prepared[stack.stack_name] = (inline_diff, inputs)
-    delegation_path = deep_dir_path / "structural-delegation.json"
-    delegation_temp = delegation_path.with_suffix(".json.tmp")
     structural_records = per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME)
     structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
-    # A per-stack rerun supersedes any previously committed delegation, including
-    # its compatibility artifacts. Primaries must finish before a new marker exists.
-    for stale_path in (delegation_path, delegation_temp, structural_records, structural_output):
+    # A rerun supersedes structural output from any earlier attempt.
+    for stale_path in (structural_records, structural_output):
         stale_path.unlink(missing_ok=True)
 
     dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
@@ -5020,15 +5003,14 @@ async def phase_per_stack_reviews(
                 task=f"Finalize {stack.stack_name} review",
                 input_priority=("diff", "intent"),
                 assigned_files=tuple(stack.files),
-                output_semantics="Return issues and file verdicts in the required schema. "
-                "Use not_reviewed for unfinished files and an empty issues array "
-                "when no defect is established.",
+                output_semantics="Return issues in the required schema. "
+                "An empty issues array is valid when no defect is established; "
+                "unfinished review work must not be described as clean.",
                 supplied_context=(("diff", inline_diff or ""),
                                   ("intent authority", AUTHORITATIVE_INTENT_BLOCK
                                    if intent_authoritative else "Intent is advisory context.")),
             )
             stack_name = stack.stack_name
-            record_schema = PER_STACK_RECORD_SCHEMA
             structured: Any = None
             budget_reason: str | None = None
             async with limiter:
@@ -5038,9 +5020,7 @@ async def phase_per_stack_reviews(
                     ):
                         # Issue #745 (AC4): the reviewer emits
                         # PER_STACK_RECORD_SCHEMA structured output directly --
-                        # no separate ``parse-<stack>`` fork. The fork is
-                        # finalized on exit so verdict reconciliation below
-                        # can read its completed reads from disk.
+                        # no separate ``parse-<stack>`` fork.
                         structured, _, budget_reason = await run_agent(
                             backend,
                             work.repo,
@@ -5064,7 +5044,7 @@ async def phase_per_stack_reviews(
                     # "Uncovered stacks" instead of silently shipping
                     # a partial review as a complete one.
                     failures[stack_name] = f"budget exhausted: {budget_reason}"
-                    if not _validates_schema(structured, record_schema):
+                    if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
                         return
                 if not isinstance(structured, dict):
                     failures[stack_name] = "no structured output produced"
@@ -5103,17 +5083,9 @@ async def phase_per_stack_reviews(
                 # host owns. Stamping before the write makes the artifact
                 # self-describing when debugging.
                 stamp_record_uids(issues, stack_name)
-                declared_verdicts = structured.get("verdicts")
-                declared = (
-                    declared_verdicts if isinstance(declared_verdicts, list) and not budget_reason else []
-                )
-                # Persist the records file with the DECLARED verdicts for
-                # now; final verdict reconciliation happens in
-                # ``_step_per_stack_parse`` AFTER the fan-out completes and
-                # every review fork is finalized on disk (issue #745).
                 try:
                     per_stack_records_path(deep_dir_path, stack_name).write_text(
-                        json.dumps({"issues": issues, "verdicts": declared,
+                        json.dumps({"issues": issues,
                                     **({"incomplete": True} if budget_reason else {})}, indent=2)
                     )
                     write_review_markdown(output_path, issues)
@@ -5129,50 +5101,24 @@ async def phase_per_stack_reviews(
                     and budget_reason is None
                 ):
                     records_path = per_stack_records_path(deep_dir_path, stack_name)
-                    store_inputs: dict[str, Any] = {
-                        "key": stack_reuse_key,
-                        "unit": f"shard:{stack_name}",
-                        # Paths, not yet-read bytes: the records file is rewritten
-                        # by verdict reconciliation after the fan-out, and the
-                        # entry must capture the reconciled bytes.
-                        "payload_names": {
-                            records_path.name: str(records_path),
-                            output_path.name: str(output_path),
+                    reuse_cache.store(
+                        stack_reuse_key,
+                        unit=f"shard:{stack_name}",
+                        payload={
+                            records_path.name: records_path.read_bytes(),
+                            output_path.name: output_path.read_bytes(),
                         },
-                        "components": stack_payload["components"],
-                        "identity": phase_identity,
-                        "grounding": grounding_digests(stack_payload),
-                        "grounding_status": reuse_grounding_statuses(reuse_cache, stack_payload),
-                    }
-                    if reuse_pending is not None:
-                        # Defer the store until verdicts are final; the parse step
-                        # commits it (issue #733, MH6).
-                        reuse_pending[stack_name] = store_inputs
-                    else:
-                        # Direct callers without a deferral channel keep the
-                        # original immediate store; bytes are read from disk so
-                        # the entry restores exactly what this run wrote (A14).
-                        reuse_cache.store(
-                            stack_reuse_key,
-                            unit=f"shard:{stack_name}",
-                            payload={
-                                name: Path(path).read_bytes()
-                                for name, path in store_inputs["payload_names"].items()
-                            },
-                            components=stack_payload["components"],
-                            identity=phase_identity,
-                            grounding=grounding_digests(stack_payload),
-                            grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
-                        )
+                        components=stack_payload["components"],
+                        identity=phase_identity,
+                        grounding=grounding_digests(stack_payload),
+                        grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
+                    )
 
         async with anyio.create_task_group() as tg:
             for stack in stacks:
                 tg.start_soon(_review_stack, stack)
         if dispatch is not None and failures:
             finish_partial_or_failed(dispatch, results)
-
-    if write_coverage_receipts:
-        _write_coverage_receipts(deep_dir_path, receipts)
 
     if failures:
         lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
@@ -5706,7 +5652,7 @@ def _append_structural_and_write_merged(
             print_warning(console, f"Skipping malformed structural records: {type(exc).__name__}: {exc}")
             structural_records = []
         # Issue #742: fresh-run per-stack records files carry the dict shape
-        # ``{"issues": [...], "verdicts": [...]}``; the structural records are
+        # ``{"issues": [...]}``; the structural records are
         # the issues list either way. Legacy bare-list files pass through.
         structural_records = _records_issues(structural_records)
         if structural_records is None:

@@ -247,7 +247,7 @@ def test_pagination_preserves_tenant_archive_and_cursor_filters():
         from daydream.review_evidence import FinalizationContext
         kwargs["finalization_context"] = FinalizationContext(
             task="Finalize assigned Python review", assigned_files=(filename,),
-            output_semantics="Return issues and truthful file verdicts. Empty issues is valid.",
+            output_semantics="Return validated issues. Empty issues is valid.",
             supplied_context=(("diff", diff), ("confirmed intent", intent), ("repository contract", contract)),
         )
     recorder = TrajectoryRecorder(
@@ -282,9 +282,7 @@ def test_pagination_preserves_tenant_archive_and_cursor_filters():
         "completion_tokens": sum(e.get("completion_tokens", 0) for e in events),
         "budget_stops": int(reason is not None), "schema_valid": valid,
         "valid_empty_result": valid and not issues,
-        "complete_clean_result": valid and not issues and reason is None and any(
-            v["path"] == filename and v["verdict"] == "clean" for v in result["verdicts"]
-        ),
+        "complete_clean_result": valid and not issues and reason is None,
         # Human adjudication of these evidence/location-bearing issues is required;
         # schema validity or a keyword match does not prove defect retention.
         "defect_retention": "requires examination of result evidence against fixture" if issues else "no findings",

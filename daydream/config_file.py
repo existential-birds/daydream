@@ -357,10 +357,8 @@ def _coerce_non_negative_int(raw: Any) -> int | None:
     """Return ``raw`` as a non-negative int, or None otherwise (degrade to default).
 
     Unlike :func:`_coerce_int`, a negative value degrades to ``None`` so the
-    named default applies (issue #309): a negative sweep capacity cap or hunk
-    floor is never a meaningful count. Explicit ``0`` is preserved — ``0`` max
-    files means "sweep nothing" and ``0`` min hunk lines means "no hunk-size
-    floor".
+    named default applies. Explicit ``0`` is preserved for settings that allow
+    a zero bound.
     """
     if isinstance(raw, bool):
         return None

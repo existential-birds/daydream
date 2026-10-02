@@ -30,7 +30,6 @@ class HarvestRow:
     base_sha: str | None = None
     pr_repo: str | None = None
     pr_number: int | None = None
-    grounding_rate: float | None = None
     changed_files: tuple[str, ...] = ()
     findings_fingerprints: tuple[str, ...] | None = None
 
@@ -96,9 +95,6 @@ class HarvestRow:
         number = raw.get("pr_number")
         if number is not None and (type(number) is not int or number <= 0):
             raise invalid("pr_number", "must be a positive integer or null")
-        grounding = raw.get("grounding_rate")
-        if grounding is not None and type(grounding) not in (int, float):
-            raise invalid("grounding_rate", "must be a number or null")
         changed = raw.get("changed_files")
         if changed is None:
             changed = []
@@ -118,7 +114,7 @@ class HarvestRow:
             repo_slug=slug("repo_slug"), branch=text("branch"),
             base_branch=text("base_branch"), head_sha=text("head_sha"),
             base_sha=text("base_sha"), pr_repo=slug("pr_repo"),
-            pr_number=number, grounding_rate=grounding,
+            pr_number=number,
             changed_files=tuple(changed),
             findings_fingerprints=(
                 tuple(str(item) for item in fingerprints) if isinstance(fingerprints, list) else None
@@ -139,7 +135,7 @@ class HarvestRow:
             "branch": self.branch, "base_branch": self.base_branch,
             "head_sha": self.head_sha, "base_sha": self.base_sha,
             "pr_repo": self.pr_repo, "pr_number": self.pr_number,
-            "grounding_rate": self.grounding_rate, "changed_files": list(self.changed_files),
+            "changed_files": list(self.changed_files),
         }
         if self.findings_fingerprints is not None:
             row["findings_fingerprints"] = list(self.findings_fingerprints)

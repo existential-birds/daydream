@@ -210,7 +210,7 @@ exploration pre-scan (cached across runs)
     -> intent analysis (Sonnet)
     -> alternative review (wonder) ∥ per-stack reviews (parallel, Sonnet;
        structural review for cross-cutting concerns)
-    -> per-stack parse (parallel)
+    -> load per-stack structured records
     -> arbiter review (Opus, scoped to high-severity/contested findings)
     -> cross-stack merge (dedup; resumes the arbiter's session)
     -> diagrams (conditional, grounded; sequence and/or flowchart)
@@ -230,11 +230,11 @@ exploration pre-scan (cached across runs)
   Single-stack mode and every `--start-at` resume keep the serial order **and** the pointer — single-stack
   has no merge agent, so that pointer is the only path wonder findings take into the report. This boundary
   is why the extension API is v4.
-- The N parse calls run concurrently but are consumed in **stack-name order**, keeping merge input ordering
+- Reviewers return structured records, loaded in **stack-name order** to keep merge input ordering
   and global issue numbering reproducible.
 - **Record identity is host-assigned, not content-derived.** Every per-stack record is stamped with a `uid`
-  (`stack:ordinal`, `deep/records.py`) at birth — both birth sites, the per-stack reviewers and the uncovered
-  sweep — and backfilled by the same deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
+  (`stack:ordinal`, `deep/records.py`) at birth by the per-stack reviewers and backfilled by the same
+  deterministic rule when loaded, so pre-`uid` artifacts resume cleanly.
   The reviewer's `id` restarts at 1 per stack and is *not* unique; `normalize_items` mints the human-facing
   `id` only at the final merge write. Dedup, arbitration, suppression and the structural fold all run before
   that, so they key on `uid`. A content key (`compute_fingerprint`, `descriptions_match`) answers
@@ -259,9 +259,6 @@ exploration pre-scan (cached across runs)
   unchanged. Recovery finalization uses completed investigation evidence and never recaptures raw diff.
   Other backends' intent, wonder and per-stack prompts keep their bounded 12 KiB inline policy and
   transport-specific isolation. Small diffs can still collapse the fan-out.
-- Uncovered sweeps use the durable hunk index for eligibility. Pi reviewers receive the admitted diff
-  reference and source checkout; other backends retain bounded per-file context and their access mode. Structured output is persisted by the host. Only completed source
-  reads and validated findings establish review coverage; assignment or successful output alone does not.
 - Pi sends normal logical prompts plus schema through private temporary `@file` attachments. Dynamic
   review system instructions use Pi's system-prompt file support. Files survive until child teardown
   and are removed on success, failure, cancellation or generator close; tools-disabled calls retain stdin.
@@ -270,14 +267,14 @@ exploration pre-scan (cached across runs)
 - **Diagrams (`diagram` step, after merge/supervision).** The LLM **never writes mermaid**: it emits a
   strict JSON spec whose every element carries `file:line` (+`symbol`) evidence, and
   `deep/diagram_grounding.py` is the sole authority on what may be drawn — path confinement, existence,
-  line range, symbol-on-line (±3 snap), tree-sitter node kind, definition lookup, and a completed read
-  receipt in that kind's own fork trajectory. Then **one** repair turn with the reason codes, prune
+  line range, symbol-on-line (±3 snap), tree-sitter node kind, and definition lookup. Then **one** repair
+  turn with the reason codes, prune
   (dependents go with their element), the render caps, and finally the omission floors — caps run **before**
   the floor so a cap-induced drop cannot leave a thin diagram rendered, and `spec_final` is rebuilt
   key-by-key so it re-validates against the `additionalProperties: false` spec schema in the privileged
-  poster. The step always writes `.daydream/deep/diagram.json` (eligibility signals + per-element verdicts —
-  the audit trail for "why did this PR get no diagram?", zero agent calls when nothing is eligible) and
-  `diagram.md`. Eligibility re-runs `detect_stacks()` itself rather than reading `ctx.data["stacks"]`, which
+  poster. The step writes `.daydream/deep/diagram.json` (eligibility, final specs, omission reasons;
+  zero agent calls when nothing is eligible) and `diagram.md`. Eligibility re-runs `detect_stacks()` itself
+  rather than reading `ctx.data["stacks"]`, which
   is post-tiny-diff-collapse and would read a two-language diff as non-code. Per-kind failure is **fail-open
   in every review mode** (warn, record `status="failed"`, review continues) and **exit 1** under
   `--diagram-only`, after the artifact is written. The author prompt follows the turn's **resolved

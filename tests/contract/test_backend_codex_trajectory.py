@@ -391,9 +391,7 @@ async def test_issue_1126_failure_status_and_incomplete_marker(tmp_path: Path) -
     assert ok.extra == {"is_error": False, "exit_code": 0, "status": "completed"}
 
     dangling = steps[-1].observation.results[-1]  # type: ignore[union-attr]  # filtered above
-    # The marker records the interruption WITHOUT source_call_id: stamping the
-    # in-flight id would let _completed_read_paths derive the interrupted call
-    # as completed and flip fail-open coverage to fail-closed.
+    # The synthetic interruption marker is distinct from a completed tool result.
     assert dangling.source_call_id is None
     assert dangling.content == "[interrupted: call did not complete before invocation ended]"
     assert dangling.extra == {"is_error": True, "status": "interrupted"}

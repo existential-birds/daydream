@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import inspect
-import json
 import os
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -24,7 +23,6 @@ from daydream.config import (
     DIAGRAM_MODES,
 )
 from daydream.deep.artifacts import diagram_markdown_path, diagram_path, merged_report_path
-from daydream.deep.coverage import _completed_read_paths
 from daydream.deep.detection import detect_stacks
 from daydream.deep.diagram_grounding import RepoSymbols, ground_flowchart, ground_sequence
 from daydream.deep.diagram_render import render_diagram_blocks, render_flowchart_mermaid, render_sequence_mermaid
@@ -152,8 +150,8 @@ def _diagram_settings(ctx: FlowContext) -> DiagramSettings:
 #
 # Two agent turns at most per kind, and no mermaid from either of them: the
 # model proposes a JSON spec whose every element carries file:line evidence,
-# ``ground_*`` verifies each element against the head tree and the turn's own
-# read receipts, one repair turn fixes or removes what failed, survivors are
+# ``ground_*`` verifies each element against the head tree, one repair turn
+# fixes or removes what failed, survivors are
 # pruned/capped, and a pure renderer emits the diagram. What the checker could
 # not confirm is never drawn.
 
@@ -164,7 +162,7 @@ def _diagram_result(
     """A no-spec result for a kind that never produced one.
 
     ``skipped`` (not eligible) and ``failed`` (agent or budget error) share
-    this shape: no spec, no grounding, no mermaid, and a reason the omission
+    this shape: no spec, no mermaid, and a reason the omission
     notice and ``diagram.json`` can both render. ``advisory`` is the kind's
     resolved input-omission diagnostic (or ``None`` when no capture ran), so a
     budget/authoring failure keeps both facts.
@@ -172,9 +170,7 @@ def _diagram_result(
     return {
         "status": status,
         "reason": reason,
-        "spec_proposed": None,
         "spec_final": None,
-        "grounding": None,
         "omit_reasons": [],
         "mermaid": None,
         "advisory": advisory,
@@ -188,35 +184,6 @@ def _failed_kind_result(exc: BaseException, advisory: dict[str, Any] | None = No
         f"{type(exc).__name__}: {exc}",
         advisory=advisory if advisory and advisory["omitted"] else None,
     )
-
-
-def _diagram_read_paths(fork_path: Path | None) -> set[str]:
-    """Completed diagram-phase read paths recorded in one fork's trajectory.
-
-    Fail-CLOSED: a missing, unreadable, or malformed fork file yields the empty
-    set, which makes every citation fail ``FILE_NOT_READ_BY_MODEL``. The
-    alternative -- treating "no receipts" as "all reads happened" -- would turn
-    a recording failure into an unverified diagram.
-
-    The fork file is written by ``_ForkCM.__aexit__`` even when the body
-    raised, but ``_write`` short-circuits on a fork with no steps, so absence
-    is a real and expected case.
-
-    Note that the receipts are the UNION across ``run_agent``'s retry attempts:
-    a failed retryable attempt's invocation is still flushed into the fork, so
-    a file read during an attempt that later errored still counts. That is
-    fail-open in the model's favour and is deliberate -- the read did happen,
-    and the file content it returned is what grounding cares about.
-    """
-    if fork_path is None:
-        return set()
-    try:
-        trajectory = json.loads(fork_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return set()
-    if not isinstance(trajectory, dict):
-        return set()
-    return _completed_read_paths(trajectory, phases={DaydreamPhase.DIAGRAM.value})
 
 
 def _files_by_module(eligibility: Eligibility) -> dict[str, list[str]]:
@@ -470,7 +437,7 @@ async def _diagram_turn(
     continuation: Any = None,
     sanctioned_inputs: PreparedSanctionedInputs | None = None,
     advisory: dict[str, Any] | None = None,
-) -> tuple[Any, Any, str | None, Path | None] | DiagramResult:
+) -> tuple[Any, Any, str | None] | DiagramResult:
     """Run one diagram turn, mapping its failure modes to a kind result.
 
     Shared by the author and repair turns so the two cannot drift. A
@@ -479,11 +446,11 @@ async def _diagram_turn(
     advisory degradation, so ``SanctionedInputUnavailable`` propagates. Every
     other exception fails the kind while keeping both facts -- the reason and
     the advisory omission diagnostic (or ``None`` when every advisory input
-    fit). On success the turn's output, continuation, budget reason, and fork
-    path are returned.
+    fit). On success the turn's output, continuation, and budget reason are
+    returned.
     """
     try:
-        async with maybe_fork(recorder, descriptor, dispatch=dispatch) as fork:
+        async with maybe_fork(recorder, descriptor, dispatch=dispatch):
             output, token, budget_reason = await run_agent(
                 backend,
                 ctx.work.repo,
@@ -502,7 +469,7 @@ async def _diagram_turn(
         raise
     except Exception as exc:  # noqa: BLE001 -- the kind still fails, keep both facts
         return _failed_kind_result(exc, advisory)
-    return output, token, budget_reason, getattr(fork, "path", None)
+    return output, token, budget_reason
 
 
 async def _run_diagram_kind(
@@ -520,9 +487,7 @@ async def _run_diagram_kind(
 
     Each turn runs in its own fork (``diagram-<kind>`` then
     ``diagram-<kind>-repair``) and the forks are strictly sequential: the first
-    must EXIT before grounding runs, because the read receipts that decide
-    ``FILE_NOT_READ_BY_MODEL`` only reach disk on exit, and the repair decision
-    depends on that grounding. Nested forks would also be illegal -- the
+    completes before its spec is validated and a repair is considered. The
     recorder ContextVar is reset LIFO.
 
     Returns:
@@ -532,26 +497,25 @@ async def _run_diagram_kind(
     deep_state = DeepState(ctx.data)
     schema = SEQUENCE_SPEC_SCHEMA if kind == "sequence" else FLOWCHART_SPEC_SCHEMA
 
-    def _ground(spec: dict[str, Any], read_paths: set[str]) -> Any:
+    def _ground(spec: dict[str, Any]) -> Any:
         if kind == "sequence":
-            return ground_sequence(
+            report = ground_sequence(
                 spec,
                 repo_root=ctx.work.repo,
                 hunk_ranges=hunk_ranges,
-                read_paths=read_paths,
                 symbols=symbols,
             )
-        return ground_flowchart(
-            spec,
-            repo_root=ctx.work.repo,
-            hunk_ranges=hunk_ranges,
-            read_paths=read_paths,
-            candidate_roots=eligibility.candidate_roots,
-            symbols=symbols,
-        )
+        else:
+            report = ground_flowchart(
+                spec,
+                repo_root=ctx.work.repo,
+                hunk_ranges=hunk_ranges,
+                candidate_roots=eligibility.candidate_roots,
+                symbols=symbols,
+            )
+        return report
 
     coerce = coerce_sequence_spec if kind == "sequence" else coerce_flowchart_spec
-    read_paths: set[str] = set()
 
     diff_path: Path = deep_state.diff_path
     exploration_dir = deep_state.exploration_dir_or_none
@@ -624,7 +588,7 @@ async def _run_diagram_kind(
         )
         if not isinstance(turn, tuple):
             return turn
-        structured, continuation, budget_reason, fork_path = turn
+        structured, continuation, budget_reason = turn
     except SanctionedInputUnavailable:
         # A capture/revalidation failure is not an authoring outcome: it must
         # reach the caller's failure path unchanged, without being relabelled
@@ -635,7 +599,6 @@ async def _run_diagram_kind(
         # advisory inputs all fit has nothing to report beyond its reason, and
         # ``None`` is the documented "no omission diagnostic" value.
         return _failed_kind_result(exc, advisory)
-    read_paths |= _diagram_read_paths(fork_path)
     if budget_reason:
         # A truncated author turn did not really answer: recording it as an
         # omission would claim the model looked and found nothing to draw.
@@ -644,9 +607,7 @@ async def _run_diagram_kind(
         return _diagram_result("failed", "no structured output produced", advisory=advisory)
 
     spec = coerce(structured)
-    report = _ground(spec, read_paths)
-    grounded_first_pass = int(report.summary["grounded"])
-    repaired = 0
+    report = _ground(spec)
 
     # Exactly one repair turn, and only when the session can be resumed: a
     # fresh session would have to re-derive the whole spec from scratch, which
@@ -676,12 +637,10 @@ async def _run_diagram_kind(
         )
         if not isinstance(turn, tuple):
             return turn
-        repaired_output, _, repair_budget, repair_fork_path = turn
-        read_paths |= _diagram_read_paths(repair_fork_path)
+        repaired_output, _, repair_budget = turn
         if not repair_budget and isinstance(repaired_output, dict):
             spec = coerce(repaired_output)
-            report = _ground(spec, read_paths)
-            repaired = max(int(report.summary["grounded"]) - grounded_first_pass, 0)
+            report = _ground(spec)
 
     omit_reasons = list(report.omit_reasons)
     mermaid: str | None = None
@@ -697,19 +656,7 @@ async def _run_diagram_kind(
     return {
         "status": status,
         "reason": report.rejected,
-        "spec_proposed": spec,
         "spec_final": report.spec_final,
-        "grounding": {
-            "elements": [check.to_dict() for check in report.elements],
-            "summary": {
-                "proposed": int(report.summary["proposed"]),
-                "grounded_first_pass": grounded_first_pass,
-                "repaired": repaired,
-                "pruned": int(report.summary["pruned"]),
-            },
-            "capped": dict(report.capped),
-            "root_range": list(report.root_range) if report.root_range is not None else None,
-        },
         "omit_reasons": omit_reasons,
         "mermaid": mermaid,
         "advisory": advisory,
@@ -869,6 +816,7 @@ async def _run_diagram_step(
     for kind, result in results.items():
         if result is not None and result.get("status") == "failed":
             failures.setdefault(kind, str(result.get("reason") or "unknown failure"))
+
 
     ordered: dict[str, DiagramResult | None] = {kind: results.get(kind) for kind in DIAGRAM_KINDS}
     blocks = render_diagram_blocks(ordered)

@@ -293,13 +293,17 @@ The build stage applies a temporal-leakage guard. It prevents future data from l
 
 ### Scoring
 
-The harvest stage scores each trajectory. The intrinsic reward is a composite:
+The harvest stage scores each trajectory using verifier correctness and a length penalty:
 
-- Correctness, weight 0.6
-- Grounding, weight 0.4
-- A length ramp (a penalty)
+```text
+correctness = mean(consistent: 1.0, uncertain: 0.5, contradicts: 0.0)
+length_penalty = clip((length - 2000) / 8000, 0, 1)
+composite = round(clip(correctness - 0.2 * length_penalty, 0, 1), 4)
+```
 
-The format-valid check dominates. A trajectory that fails the format check receives no reward. Daydream records a posterior-cost axis as a sibling. It is never folded into the intrinsic reward.
+The format-valid check dominates: invalid format yields `0.0`. Missing or empty verifier verdicts leave the composite uncomputable (`None`); missing length contributes no penalty. The current reward version is `2026.10.01-1`. Grounding is no longer a reward axis. Daydream records posterior cost separately from the intrinsic reward; `w_fp = 0.3` remains a training-time combination parameter and is never subtracted here.
+
+RFT winner thresholds support `composite`, `correctness_per_finding` (mean score), and `length_penalty`. Each threshold is a minimum; a length threshold selects at least that much penalty, not a maximum verbosity limit.
 
 ### Upload to a private Hugging Face dataset
 
@@ -366,6 +370,8 @@ Daydream supports four backends. Each implements the same `Backend` protocol and
 | `osprey` | Osprey CLI |
 
 All four remain available to review flows. Repository-wide `improve` is intentionally stricter and currently accepts only Claude, whose SDK hook provides the required snapshot-root tool boundary.
+
+Reviewer tool telemetry does not determine review completeness or diagram validity. Failed or budget-limited reviewers produce partial-result warnings; validated findings survive recovery. Diagram citations are checked directly against repository source.
 
 Select a backend with `--backend`. The selection order, highest first, is:
 
@@ -565,10 +571,6 @@ Supervisor settings are config-file-only:
 
 Configure the LLM supervisor model under `[tool.daydream.phases.supervise]`.
 
-### Uncovered-diff-file sweep
-
-A second-pass reviewer covers diff files that no per-stack reviewer read.
-
 ### Quality gate
 
 The fix-phase anti-degradation quality gate prevents a fix from degrading a file:
@@ -652,7 +654,7 @@ retry_recovery_allowance_s = 120
 
 ### Diagrams
 
-A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived.
+A review can post grounded mermaid diagrams — a sequence diagram, a flowchart, or both — folded into the PR summary comment and into `review-output.md`. The model never writes mermaid. It proposes a structured JSON spec in which every participant, message, node, and edge carries `file:line` evidence (plus a `symbol` where one applies). The host verifies that evidence against the head tree, and a pure renderer draws only what survived. PR comments show the diagrams without evidence tables or audit captions.
 
 Diagram settings are config-file-only:
 
@@ -701,7 +703,7 @@ Which diagram and why:
 
 A forced kind still goes through grounding and may still be omitted. Forcing changes eligibility, never verification.
 
-**How grounding works.** Every cited path must resolve inside the repository, the file must exist at head, the line must be in range, the cited symbol must appear on that line (a ±3-line snap is attempted and recorded), and the file must carry a completed read in the diagram phase's own trajectory — an unread file is never drawn. A sequence message additionally requires its evidence file to belong to the `from` participant and, for an internal target, the callee to be defined in a `to` participant file. A flowchart node must sit inside the chosen root function's tree-sitter range; a `decision` line must be a real branch statement in that file's language, an `end` line a real return/raise/throw/panic/exit, and a `subroutine` symbol must be on the cited call-site line and defined somewhere in the repository. Ungrounded elements are pruned together with whatever depended on them, the author gets exactly one repair turn with the reason codes, the render caps are applied, and a diagram left below its floor (3 messages, 2 participants, and 1 message in a changed hunk; 4 nodes including a start, an end, and a grounded decision) is omitted with a stated reason instead of drawn thin. Every decision — eligibility signals, per-element reason codes, prune and cap counts — is recorded in `.daydream/deep/diagram.json`, and the rendered blocks in `.daydream/deep/diagram.md`.
+**How grounding works.** Generation checks repository paths, source lines, symbols, and definitions directly against the source checkout. Sequence calls must match their participants; flowchart nodes must belong to the chosen function and match their statement kinds. Unsupported elements and their dependents are pruned after one repair turn, then render caps and minimum diagram sizes apply. Diagrams below their minimum size are omitted. `.daydream/deep/diagram.json` stores eligibility, final specs, and omission reasons; `diagram.md` stores the rendered blocks. Posting validates the final specs and immutable head source, then renders safe Mermaid. Per-element audit reports and proposed-spec copies are not persisted.
 
 Flowchart grounding proves that each node is a real statement of the stated kind inside the root function, and that each subroutine call exists at its call site and has a definition. It does **not** prove the arrows. Edge order is checked only for structural validity — a decision's fan-out, and both endpoints being grounded — and no control-flow graph is extracted or compared, so the sequencing of a flowchart is the model's reading of the function rather than a verified execution order. A diagram failure in a review path is fail-open: it warns and the review continues, in both the review run and the `post-findings` poster, which drops a rejected diagram payload and still posts the findings. Under `--diagram-only` the diagram is the deliverable, so a failure exits 1 after the artifact is written.
 

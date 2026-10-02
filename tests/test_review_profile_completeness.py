@@ -21,7 +21,6 @@ STAGE_KEYS: frozenset[str] = frozenset(
         "discovery.per_stack",
         "discovery.structural",
         "discovery.generic_fallback",
-        "uncovered_review",
         "arbitration",
         "suppression",
         "merge",

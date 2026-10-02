@@ -9,7 +9,6 @@ from typing import Any
 import pytest
 
 from daydream import review_profile as rp, severity
-from daydream.deep.coverage import build_uncovered_sweep_prompt
 from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,
     CONFIG_FLOW_TRACE_INSTRUCTION,
@@ -33,7 +32,6 @@ from daydream.deep.prompts import (
     build_supervise_prompt,
     build_suppression_prompt,
     build_verification_prompt,
-    inline_grounded_files,
 )
 from daydream.exploration_runner import count_changed_files
 from daydream.extensions import Registry
@@ -783,20 +781,6 @@ def test_cross_file_instructions_contain_no_banned_words() -> None:
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
 
 
-def test_inline_grounded_files_when_blocks_fit() -> None:
-    """Issue #731: files whose hunks inline are inline-grounded (evidence)."""
-
-    diff = ("diff --git a/a.py b/a.py\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n+'x'\n"
-            "diff --git a/b.py b/b.py\n--- a/b.py\n+++ b/b.py\n@@ -1 +1 @@\n+'y'\n")
-    assert inline_grounded_files(diff, ["a.py", "b.py"]) == {"a.py", "b.py"}
-
-
-def test_inline_grounded_files_empty_when_over_budget_or_absent() -> None:
-    """Issue #731: a file with no resolvable diff block is not grounded."""
-
-    assert inline_grounded_files("", ["ghost.py"]) == set()  # no block -> not grounded
-
-
 def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
     """Issue #731: frontier files surface as cross-shard interface reads."""
 
@@ -812,31 +796,8 @@ def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
     assert "cross-shard" in prompt or "interface file" in prompt
 
 
-def test_verification_protocol_clean_clause_present_in_all_builders(tmp_path: Path) -> None:
-    """Key Decision 1: a clean verdict also requires a same-turn read, in all four builders."""
-    p = _paths(tmp_path)
-    prompts = [
-        build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"),
-                               stack_name="python", files=["api.py"], **p),
-        build_structural_prompt(strategy=_default_strategy("discovery.structural"),
-                                files=["api.py"], **p),
-        build_generic_fallback_prompt(
-            strategy=_default_strategy("discovery.generic_fallback"),
-            files=["config.yaml"],
-            **p,
-        ),
-        build_uncovered_sweep_prompt(
-            strategy=_default_strategy("uncovered_review"),
-            file="api.py", diff_path=tmp_path / "diff.patch", intent_path=p["intent_path"],
-            cwd=p["cwd"], output_path=p["output_path"],
-        ),
-    ]
-    for prompt in prompts:
-        assert "not reviewed" in prompt and "clean" in prompt
-
-
 def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
-    """Key Decision 5: MAY Read is replaced by the sweep's read-first obligation."""
+    """Reviewers read source context before judging changed behavior."""
     p = _paths(tmp_path)
     per_stack = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"), stack_name="python",
@@ -849,21 +810,6 @@ def test_diff_instruction_mandates_read_first(tmp_path: Path) -> None:
     for prompt in (per_stack, fallback):
         assert "you MAY Read the source files directly" not in prompt
         assert "Read the source file FIRST" in prompt
-
-
-def test_stack_scope_instruction_is_mandatory_coverage_list(tmp_path: Path) -> None:
-    """Must-Have 5: assigned files are an inclusion obligation, not an exclusion bound."""
-    p = _paths(tmp_path)
-    out = build_per_stack_prompt(
-        strategy=_default_strategy("discovery.per_stack"), stack_name="python",
-        files=["api.py", "lib/util.py"], **p,
-    )
-    assert "Focus ONLY on these files" not in out
-    assert "Do NOT review files from other stacks" in out  # cross-stack exclusion preserved
-    assert "api.py" in out and "lib/util.py" in out
-    # The instruction demands one verdict line per assigned file (clean / has_findings / not_reviewed).
-    assert "not_reviewed" in out and "has_findings" in out and "clean" in out
-    assert "verdict" in out
 
 
 def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp_path: Path) -> None:
@@ -1163,11 +1109,11 @@ def test_diagram_prompts_open_with_their_role_sentence(tmp_path: Path) -> None:
 
 
 def test_diagram_grounding_instruction_states_the_three_host_guarantees() -> None:
-    """The constant carries Gate-0, the same-turn read rule, and the deterministic drop."""
+    """The contract describes source validation, pruning, and host rendering."""
     text = DIAGRAM_GROUNDING_INSTRUCTION
-    assert "Gate-0 anti-confabulation" in text
-    assert "read freshly in THIS turn" in text
-    assert "must be read in this turn" in text
+    assert "Inspect the source for every element" in text
+    assert "successful structured Read" not in text
+    assert "trajectory" not in text
     assert "verifies every file:line you emit deterministically" in text
     assert "dropped from the rendered diagram" in text
     assert "never write mermaid" in text
@@ -1175,7 +1121,7 @@ def test_diagram_grounding_instruction_states_the_three_host_guarantees() -> Non
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
 def test_diagram_prompts_carry_the_grounding_instruction(builder: str, tmp_path: Path) -> None:
-    """Delivery matrix: every diagram prompt embeds the Gate-0 diagram text."""
+    """Every diagram prompt embeds the source-validation contract."""
     prompts = {
         "sequence": _sequence_prompt(tmp_path),
         "flowchart": _flowchart_prompt(tmp_path),

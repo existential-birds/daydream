@@ -39,7 +39,6 @@ def test_stage_keys_cover_every_model_bearing_stage() -> None:
         "discovery.per_stack",
         "discovery.structural",
         "discovery.generic_fallback",
-        "uncovered_review",
         "arbitration",
         "suppression",
         "merge",
@@ -122,13 +121,6 @@ def test_unsupported_schema_version_fails_closed() -> None:
     assert "schema_version" in str(e.value)
 
 
-def test_negative_limit_fails_closed() -> None:
-    with pytest.raises(rp.ProfileError):
-        _profile("""\
-[pipeline]
-uncovered_sweep_max_files = -5""")
-
-
 def test_invalid_enum_fails_closed() -> None:
     with pytest.raises(rp.ProfileError):
         _profile('''\
@@ -144,30 +136,6 @@ def test_forbidden_host_fields_rejected() -> None:
         with pytest.raises(rp.ProfileError) as e:
             _profile(f'{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
-
-
-def test_host_cap_clamps_lower_profile_value_up() -> None:
-    # Host caps are the floor: a profile supplying LOWER than the host cap is clamped up.
-    p = _profile("""\
-[pipeline]
-uncovered_sweep_min_hunk_lines = 2""")   # below host cap of 5
-    assert p.pipeline.uncovered_sweep_min_hunk_lines == 5   # clamped up, never below
-
-
-def test_uncovered_sweep_max_files_is_tunable() -> None:
-    # The uncovered-sweep cap is a live profile knob, not a silent no-op locked
-    # to the production default: a value inside the host band passes through.
-    p = _profile("""\
-[pipeline]
-uncovered_sweep_max_files = 5""")   # within host band (1, 10)
-    assert p.pipeline.uncovered_sweep_max_files == 5   # tunable, not forced to 10
-
-
-def test_profile_cannot_raise_host_cap() -> None:
-    p = _profile("""\
-[pipeline]
-uncovered_sweep_max_files = 999""")   # above host cap
-    assert p.pipeline.uncovered_sweep_max_files == 10   # capped at host ceiling
 
 
 def test_suppression_severity_classes_default_narrowed() -> None:

@@ -64,9 +64,9 @@ def stack_name_from_records_source(source: str) -> str:
 
     ``source`` reaches this function in either of two shapes, because the
     pipeline has two producers: the loop that loads records off disk tags them
-    with the records *filename* (``stack-python-records.json``), while the
-    uncovered-file sweep appends its records tagged with a bare stack name
-    (``uncovered``). Both must normalize to the same key or a record routes to
+    with the records *filename* (``stack-python-records.json``), while direct
+    callers may use a bare stack name. Both forms must
+    normalize to the same key or a record routes to
     the wrong file — or to none at all.
 
     Args:

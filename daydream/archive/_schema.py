@@ -88,8 +88,6 @@ RUNS_COLUMNS: tuple[RunColumn, ...] = (
     RunColumn("pr_repo", "TEXT", False, True),
     RunColumn("total_cost_usd", "REAL", False, True),
     RunColumn("total_findings", "INTEGER", False, True),
-    RunColumn("grounding_rate", "REAL", False, True),
-    RunColumn("coverage_ratio", "REAL", False, True),
     RunColumn("cost_per_finding_usd", "REAL", False, True),
     RunColumn("wall_clock_seconds", "REAL", False, True),
     RunColumn("erosion", "REAL", True, True),

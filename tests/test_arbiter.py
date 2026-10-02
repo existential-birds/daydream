@@ -307,8 +307,8 @@ def test_select_arbiter_targets_honors_contested_location_knob() -> None:
 
 # Issue #1111: "two or more DISTINCT stacks" needs one canonical spelling per
 # stack. ``source`` has two -- the ``stack-<name>-records.json`` filename used by
-# every path that loads records off disk, and a bare stack name used by the
-# uncovered sweep's in-memory append -- so comparing raw ``source`` strings made
+# every path that loads records off disk, and a bare stack name supplied by
+# standalone callers -- so comparing raw ``source`` strings made
 # one stack count as two and marked uncontested locations contested, routing
 # low/medium findings to the expensive Opus arbiter that the cost split exists to
 # keep away from it. ``_stack_name`` prefers the stack half of the record's
@@ -375,20 +375,4 @@ def test_uid_outranks_the_source_tag() -> None:
         _rec("api.py", 10, "low", uid="react:1"),
     ]
     sources = ["stack-python-records.json", "stack-python-records.json"]
-    assert select_arbiter_targets(records, sources) == [0, 1]
-
-
-def test_uncovered_sweep_record_is_its_own_stack() -> None:
-    """The sweep's bare ``uncovered`` tag names a real, distinct stack.
-
-    The uncovered-file sweep is the pipeline's second record-birth site and tags
-    its records with a bare stack name rather than a records filename. Both
-    spellings normalize to themselves, so a sweep finding colliding with a
-    per-stack finding is a genuine two-stack contest and must be arbitrated.
-    """
-    records = [
-        _rec("api.py", 10, "medium", uid="python:1"),
-        _rec("api.py", 10, "low", uid="uncovered:1"),
-    ]
-    sources = ["stack-python-records.json", "uncovered"]
     assert select_arbiter_targets(records, sources) == [0, 1]

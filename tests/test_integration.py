@@ -1681,7 +1681,7 @@ async def test_run_populates_exploration_context(
         dd.mkdir(parents=True, exist_ok=True)
         for s in stacks:
             per_stack_records_path(dd, s.stack_name).write_text(
-                json.dumps({"issues": [], "verdicts": []})
+                json.dumps({"issues": []})
             )
         return {s.stack_name: None for s in stacks}, {}
 

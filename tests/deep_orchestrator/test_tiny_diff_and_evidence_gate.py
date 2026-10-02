@@ -36,7 +36,6 @@ from tests.test_deep_orchestrator import (
     _run_deep,
     _silence,
 )
-from tests.test_finite_delegation_parse import _mark_delegated_artifacts
 
 
 @pytest.mark.parametrize(
@@ -398,10 +397,8 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
 
 
-@pytest.mark.parametrize("delegated", [False, True])
 async def test_ac_merge_resume_on_tiny_diff(
     tiny_diff_target: Path,
-    delegated: bool,
     monkeypatch: pytest.MonkeyPatch,
     make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -429,9 +426,6 @@ async def test_ac_merge_resume_on_tiny_diff(
         generic=[_record(id="gen-1", description="generic per-stack issue", evidence="api.py:1")],
         structure=[_record(id="structure-1", description="file-size budget violated", evidence="api.py:1")],
     )
-
-    if delegated:
-        _mark_delegated_artifacts(tiny_diff_target / ".daydream/deep", {"generic": ["api.py"]})
 
     rc = await run(make_config(tiny_diff_target, start_at="merge"))
     assert rc == 0

@@ -279,22 +279,21 @@ follow the same convention: pick globally unique step names, and use
 | 2 | `intent` | `intent` |
 | 3 | `per-stack-reviews` | `per_stack_review` |
 | 4 | `per-stack-parse` | `parse` |
-| 5 | `uncovered-sweep` | `parse` |
-| 6 | `arbiter` | `arbiter` |
-| 7 | `cross-stack-merge` | `merge` |
-| 8 | `single-stack-merge` | `single-stack-merge` |
-| 9 | `load-items` | `load-items` |
-| 10 | `supervise` | `supervise` |
-| 11 | `diagram` | `diagram` |
-| 12 | `findings-out` | `findings-out` |
-| 13 | `post-review` | `post-review` |
-| 14 | `fix-gate` | `fix-gate` |
-| 15 | `verify` | `verify` |
-| 16 | `fix` | `fix` |
-| 17 | `fix-verify` | `fix-verify` |
-| 18 | `test` | `test` |
-| 19 | `commit` | `fix` |
-| 20 | `remote-ci` | `remote-ci` |
+| 5 | `arbiter` | `arbiter` |
+| 6 | `cross-stack-merge` | `merge` |
+| 7 | `single-stack-merge` | `single-stack-merge` |
+| 8 | `load-items` | `load-items` |
+| 9 | `supervise` | `supervise` |
+| 10 | `diagram` | `diagram` |
+| 11 | `findings-out` | `findings-out` |
+| 12 | `post-review` | `post-review` |
+| 13 | `fix-gate` | `fix-gate` |
+| 14 | `verify` | `verify` |
+| 15 | `fix` | `fix` |
+| 16 | `fix-verify` | `fix-verify` |
+| 17 | `test` | `test` |
+| 18 | `commit` | `fix` |
+| 19 | `remote-ci` | `remote-ci` |
 
 The steps are gated by the run's mode (`ctx.data["mode"]`), set in the dispatch
 preamble. `review` / `comment` run the review spine and stop after `post-review`;
@@ -326,10 +325,6 @@ publication. Commit messages list only findings verified as resolved.
 multi-stack run the two are siblings in one task group, so wonder has no step of
 its own. Its per-phase config key is still `wonder`
 (`[tool.daydream.phases.wonder]`), resolved inside the step.
-
-`uncovered-sweep` (issue #309) re-reviews diff files no per-stack reviewer read
-with a cheap second-pass agent; it resolves its backend via the `parse` phase
-key (the cheapest tier) and is gated off on `--start-at merge`/`fix` resumes.
 
 `diagram` (issue #1113) decides deterministically which grounded diagram kinds
 apply, runs one read-only author agent per eligible kind (plus at most one

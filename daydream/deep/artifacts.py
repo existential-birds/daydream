@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -24,12 +25,12 @@ MERGE_FAILURE_KEY = "__merge__"
 
 # Stage prerequisites -- single source of truth.
 # Value is a list of file names (relative to deep_dir) that must exist before the
-# given stage can run. Special handling for "merge" (needs at least one glob match)
+# given stage can run. Special handling for "merge" (needs a current reviewer output)
 # and "fix" (checks merged-items.json in deep_dir -- the canonical source of truth).
 _DEEP_STAGE_PREREQS: dict[str, list[str]] = {
     "ttt": [],
     "per-stack": ["intent.md", "alternatives.json"],
-    "merge": ["intent.md", "alternatives.json"],  # + at least one stack-*-records.json
+    "merge": ["intent.md", "alternatives.json"],  # + at least one current reviewer output
     "fix": [],  # special-cased: needs merged-items.json in deep_dir
 }
 
@@ -364,13 +365,16 @@ def diff_key(diff: str) -> str:
 
 
 def check_deep_artifacts(
-    stage: str, deep_dir_path: Path, *, current_diff_sha: str | None = None
+    stage: str, deep_dir_path: Path, *, current_diff_sha: str | None = None,
+    record_paths: Sequence[Path] = (),
 ) -> None:
     """Validate predecessor artifacts exist, and are fresh, for a resume stage.
 
     Args:
         stage: The ``--start-at`` stage being resumed into.
         deep_dir_path: The run's ``.daydream/deep`` directory.
+        record_paths: Legitimate reviewer outputs for the current review assignments.
+            Stale files outside this list cannot satisfy a merge prerequisite.
         current_diff_sha: When given, the artifacts must have been produced from
             this diff. A missing key file (a pre-upgrade artifact directory) or a
             mismatched one refuses the resume: an unverifiable artifact set is
@@ -397,9 +401,9 @@ def check_deep_artifacts(
         if not p.is_file():
             missing.append(p)
 
-    # Merge stage additionally needs at least one stack-*-records.json.
+    # Only current reviewer assignments can satisfy the merge prerequisite.
     if stage == "merge":
-        records = [p for p in deep_dir_path.glob("stack-*-records.json") if p.is_file()]
+        records = [path for path in record_paths if path.is_file()]
         if not records:
             missing.append(deep_dir_path / "stack-*-records.json")
 

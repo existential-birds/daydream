@@ -334,7 +334,6 @@ def print_preflight_notice(
     stack_lines: list[str],
     agent_count: int,
     exploration_available: bool,
-    sweep_note: str | None = None,
 ) -> None:
     """Print the deep-mode pre-flight notice (D-30).
 
@@ -346,12 +345,6 @@ def print_preflight_notice(
         agent_count: Total agent invocation count (D-30 formula).
         exploration_available: True when the exploration infrastructure is
             available and the pre-scan is wired in.
-        sweep_note: Optional additive line for the uncovered-file sweep agent
-            estimate (issue #309 finding 8). Uncovered files are not known at
-            pre-flight time, so the sweep's review + parse invocations are
-            shown as an explicit upper-bound note rather than folded into the
-            count.
-
     """
     console.print("[neon.cyan]▶[/] [neon.fg]Deep-review pipeline pre-flight[/]")
     if exploration_available:
@@ -368,5 +361,3 @@ def print_preflight_notice(
     for line in stack_lines:
         console.print(f"    - {line}")
     console.print(f"[neon.fg]  Total agents: {agent_count}[/]")
-    if sweep_note:
-        console.print(f"  {sweep_note}", style="dim")

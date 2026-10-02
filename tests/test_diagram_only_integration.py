@@ -69,7 +69,6 @@ def diagram_run(
         *,
         diagram: str = "auto",
         specs: dict[str, list[dict[str, Any]]] | None = None,
-        emit_reads: bool = True,
         session_id: str | None = None,
         fail: frozenset[str] = frozenset(),
         inline_transport: bool = False,
@@ -78,7 +77,6 @@ def diagram_run(
 
         stub = install_stub_backend(monkeypatch, target, enable_exploration=inline_transport)
         stub.diagram_specs = specs or {}
-        stub.diagram_emit_reads = emit_reads
         stub.diagram_session_id = session_id
         stub.diagram_fail = fail
         if inline_transport:
@@ -201,7 +199,9 @@ async def test_diagram_only_posts_a_marked_issue_comment(
     )
 
     assert exit_code == 0
-    assert _artifact(target)["results"][kind]["status"] == "rendered"
+    result = _artifact(target)["results"][kind]
+    assert result["status"] == "rendered"
+    assert "grounding" not in result and "spec_proposed" not in result
 
     comments = _issue_comments(fake_gh)
     assert len(comments) == 1
@@ -283,7 +283,7 @@ async def test_omitted_kind_posts_an_omission_notice(
     fake_gh: FakeGh,
     diagram_run: Callable[..., Any],
 ) -> None:
-    """An explicit request that grounds to nothing says so, with counts and codes."""
+    """An explicit request that grounds to nothing explains its omission."""
     target = _diagram_target(tmp_path, fake_gh)
     thin = dr.sequence_spec()
     thin["messages"] = thin["messages"][:2]
@@ -298,7 +298,6 @@ async def test_omitted_kind_posts_an_omission_notice(
     assert SEQUENCE_HEADING not in body
     assert "No sequence diagram was rendered for this pull request." in body
     assert "Grounding floor not met: TOO_FEW_MESSAGES." in body
-    assert "5 elements proposed, 5 grounded on the first pass" in body
     end = _diagram_phase_end(target)
     assert end["status"] == "succeeded"
     assert "reason_code" not in end
@@ -398,19 +397,27 @@ async def test_phase_b_reposts_a_diagram_artifact_without_any_checkout(
     ) == 1
 
 
-async def test_phase_b_rejects_diagram_evidence_missing_from_the_immutable_head(
+@pytest.mark.parametrize("outside_root", [False, True])
+async def test_phase_b_rejects_diagram_evidence_missing_from_or_outside_its_immutable_root(
     tmp_path: Path,
     fake_gh: FakeGh,
     diagram_run: Callable[..., Any],
     monkeypatch: pytest.MonkeyPatch,
+    outside_root: bool,
 ) -> None:
-    """Phase B must not trust a structurally valid, artifact-supplied citation."""
+    """Phase B checks immutable source and root confinement before posting."""
     target, artifact_path, artifact = await _render_flowchart_artifact(diagram_run, tmp_path, fake_gh)
 
     spec_final = artifact["diagrams"]["results"]["flowchart"]["spec_final"]
-    spec_final["root"]["file"] = "untrusted.py"
-    for node in spec_final["nodes"]:
-        node["evidence"]["file"] = "untrusted.py"
+    if outside_root:
+        process = next(node for node in spec_final["nodes"] if node["kind"] == "process")
+        process["evidence"] = {"file": "app/pipeline.py", "line": 13, "symbol": None}
+        # A dirty checkout cannot extend the immutable run function's range.
+        (target / "app" / "pipeline.py").write_text("def run():\n" + "    pass\n" * 20)
+    else:
+        spec_final["root"]["file"] = "untrusted.py"
+        for node in spec_final["nodes"]:
+            node["evidence"]["file"] = "untrusted.py"
     artifact_path.write_text(json.dumps(artifact), encoding="utf-8")
 
     monkeypatch.chdir(target)
@@ -442,7 +449,6 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(
                         "status": "rendered",
                         # ``root`` must be an object with file/name/line.
                         "spec_final": {"root": None, "nodes": [], "edges": []},
-                        "grounding": {"elements": [], "summary": {}, "capped": {}},
                     }
                 },
             },
@@ -457,46 +463,6 @@ def test_phase_b_rejects_an_invalid_diagrams_payload(
     assert fake_gh.calls("POST") == []
 
 
-def test_phase_b_rejects_rendered_source_claims_without_grounding_attestations() -> None:
-
-    payload = {
-        "results": {
-            "flowchart": {
-                "status": "rendered",
-                "spec_final": {
-                    "root": {"file": "does/not/exist.py", "name": "invented", "line": 999999},
-                    "nodes": [
-                        {
-                            "id": "start",
-                            "kind": "start",
-                            "label": "Invented source",
-                            "evidence": {
-                                "file": "does/not/exist.py",
-                                "line": 999999,
-                                "symbol": "invented",
-                            },
-                        }
-                    ],
-                    "edges": [],
-                },
-                "grounding": {
-                    "elements": [],
-                    "summary": {
-                        "proposed": 0,
-                        "grounded_first_pass": 0,
-                        "repaired": 0,
-                        "pruned": 0,
-                    },
-                    "capped": {},
-                    "root_range": [999999, 999999],
-                },
-            }
-        }
-    }
-
-    problem = validate_diagram_payload(payload)
-
-    assert problem == "flowchart grounding attestation does not cover root at final index 0"
 
 
 def test_phase_b_rejects_over_cap_specs_before_rendering() -> None:
@@ -519,17 +485,6 @@ def test_phase_b_rejects_over_cap_specs_before_rendering() -> None:
                     "nodes": nodes,
                     "edges": [],
                 },
-                "grounding": {
-                    "elements": [],
-                    "summary": {
-                        "proposed": 0,
-                        "grounded_first_pass": 0,
-                        "repaired": 0,
-                        "pruned": 0,
-                    },
-                    "capped": {},
-                    "root_range": None,
-                },
             }
         }
     }
@@ -538,6 +493,28 @@ def test_phase_b_rejects_over_cap_specs_before_rendering() -> None:
 
     assert problem is not None
     assert "nodes render cap" in problem
+
+
+@pytest.mark.parametrize(
+    ("kind", "mutate", "problem"),
+    [
+        ("sequence", lambda s: s["participants"].append(s["participants"][0]), "duplicate participant"),
+        ("sequence", lambda s: s["messages"][0].update({"to": "missing"}), "unknown participant"),
+        ("sequence", lambda s: s.update({"blocks": [{"kind": "opt", "branches": [
+            {"condition": "ready", "evidence": {"file": "a.py", "line": 1}, "messages": [999]}
+        ]}]}), "unknown message"),
+        ("flowchart", lambda s: s["nodes"].append(s["nodes"][0]), "duplicate node"),
+        ("flowchart", lambda s: s["edges"][0].update({"to": "missing"}), "unknown endpoint"),
+        ("flowchart", lambda s: s["nodes"][0]["evidence"].update({"file": "other.py"}), "outside its root"),
+    ],
+)
+def test_phase_b_rejects_invalid_spec_references(
+    kind: str, mutate: Callable[[dict[str, Any]], None], problem: str,
+) -> None:
+    spec = dr.sequence_spec() if kind == "sequence" else dr.flowchart_spec()
+    mutate(spec)
+    result = validate_diagram_payload({"results": {kind: {"status": "rendered", "spec_final": spec}}})
+    assert result is not None and problem in result
 
 
 # --- Spec test 14 (diagram-only half): agent error exits 1 ------------------
@@ -648,7 +625,6 @@ def test_actual_cli_diagram_only_timing_success_persists_succeeded_lifecycle(
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
-    stub.diagram_emit_reads = True
 
     exit_code = _cli_main(["--diagram-only", "sequence", str(target)])
 
@@ -692,9 +668,7 @@ async def test_returned_failure_in_diagram_only_mode_exits_one(
         return {
             "status": "failed",
             "reason": "stub: diagram author returned failure",
-            "spec_proposed": None,
             "spec_final": None,
-            "grounding": None,
             "omit_reasons": [],
             "mermaid": None,
         }
@@ -911,7 +885,6 @@ async def test_review_findings_artifact_carries_diagrams_and_phase_b_renders_the
     target = _diagram_target(tmp_path, fake_gh)
     stub = install_stub_backend(monkeypatch, target)
     stub.diagram_specs = {"sequence": [dr.sequence_spec()]}
-    stub.diagram_emit_reads = True
     artifact_path = tmp_path / "review-findings.json"
 
     exit_code = await run(

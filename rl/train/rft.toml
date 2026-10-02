@@ -6,8 +6,13 @@
 # rl.toml; the dataset-SFT shape in sft.toml).
 #
 # The winners filter is always a breakdown-shaped spec supplied to RftConfig
-# (per-axis minimums, e.g. {"composite": 0.6, "grounding": 0.5}) — never a
+# (per-axis minimums, e.g. {"composite": 0.6, "correctness_per_finding": 0.5}) — never a
 # bare scalar (M12).
+# Supported axes: composite, correctness_per_finding (mean), length_penalty.
+# All thresholds are minimums; length_penalty is not a verbosity ceiling.
+# Intrinsic reward: clip(correctness - 0.2 * clip((length - 2000) / 8000, 0, 1),
+# 0, 1), rounded to four places. Invalid format floors it; absent correctness
+# leaves it uncomputable. Grounding and posterior cost do not enter this score.
 
 # Deterministic replay: temperature 0 and an explicit seed. Byte-identical
 # reruns are the acceptance contract (M11) — do not raise temperature here.

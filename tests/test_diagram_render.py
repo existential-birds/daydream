@@ -101,50 +101,13 @@ FLOWCHART_SPEC: dict[str, Any] = {
 }
 
 
-def _check(element: str, ref: str, *, final_index: int | None, defined_at: str | None) -> dict[str, Any]:
-    """One ``ElementCheck.to_dict()`` — the nine fields, nothing else."""
-    return {"element": element, "ref": ref, "grounded": True, "reason": None,
-            "strength": "definition", "snapped_line": None, "in_changed_hunk": True,
-            "defined_at": defined_at, "final_index": final_index}
-
-
-SEQUENCE_GROUNDING: dict[str, Any] = {
-    "elements": [
-        _check("message", "0", final_index=0, defined_at="proxy/handler.py:38"),
-        _check("message", "1", final_index=1, defined_at="proxy/auth.py:22"),
-        _check("message", "2", final_index=2, defined_at=None),
-        _check("message", "3", final_index=3, defined_at="proxy/jwt.py:15"),
-        _check("message", "4", final_index=4, defined_at=None),
-        _check("participant", "Client", final_index=0, defined_at=None),
-    ],
-    "summary": {"proposed": 7, "grounded_first_pass": 4, "repaired": 1, "pruned": 2},
-    "capped": {},
-    "root_range": None,
-}
-
-FLOWCHART_GROUNDING: dict[str, Any] = {
-    "elements": [
-        _check("node", "verify", final_index=4, defined_at="proxy/jwt.py:15"),
-        _check("node", "enter", final_index=0, defined_at=None),
-        _check("edge", "enter->passthrough", final_index=0, defined_at=None),
-    ],
-    "summary": {"proposed": 9, "grounded_first_pass": 8, "repaired": 0, "pruned": 1},
-    "capped": {},
-    "root_range": [22, 71],
-}
-
-
-def _rendered(spec: dict[str, Any], grounding: dict[str, Any], **extra: Any) -> dict[str, Any]:
-    result: dict[str, Any] = {"status": "rendered", "reason": None, "spec_proposed": spec,
-                              "spec_final": spec, "grounding": grounding, "omit_reasons": [],
-                              "mermaid": None}
-    result.update(extra)
-    return result
+def _rendered(spec: dict[str, Any]) -> dict[str, Any]:
+    return {"status": "rendered", "spec_final": spec}
 
 
 def _both_rendered() -> dict[str, dict[str, Any] | None]:
-    return {"sequence": _rendered(SEQUENCE_SPEC, SEQUENCE_GROUNDING),
-            "flowchart": _rendered(FLOWCHART_SPEC, FLOWCHART_GROUNDING)}
+    return {"sequence": _rendered(SEQUENCE_SPEC),
+            "flowchart": _rendered(FLOWCHART_SPEC)}
 
 
 # Byte goldens
@@ -160,54 +123,13 @@ def test_flowchart_mermaid_matches_golden_fixture_byte_for_byte() -> None:
     assert render_flowchart_mermaid(FLOWCHART_SPEC) + "\n" == (FIXTURES / "diagram_flowchart.mmd").read_text()
 
 
-def test_sequence_block_reproduces_the_spec_target_layout() -> None:
-    blocks = render_diagram_blocks({"sequence": _rendered(SEQUENCE_SPEC, SEQUENCE_GROUNDING),
-                                    "flowchart": None})
-    lines = blocks.split("\n")
-    assert lines[0] == "<details><summary><h3>Sequence Diagram</h3></summary>"
-    assert lines[1] == ""
-    assert lines[2] == "```mermaid"
-    mermaid = render_sequence_mermaid(SEQUENCE_SPEC)
-    assert lines[3:3 + len(mermaid.split("\n"))] == mermaid.split("\n")
-    tail = lines[3 + len(mermaid.split("\n")):]
-    assert tail[0] == "```"
-    assert tail[1] == ""
-    assert tail[2] == (
-        "<sub>5 interactions across 3 components, each grounded to a cited call site. "
-        "2 proposed interactions were dropped as ungrounded.</sub>"
+@pytest.mark.parametrize("kind,spec", [("sequence", SEQUENCE_SPEC), ("flowchart", FLOWCHART_SPEC)])
+def test_diagram_block_contains_only_the_rendered_diagram(kind: str, spec: dict[str, Any]) -> None:
+    title = "Sequence Diagram" if kind == "sequence" else "Flowchart"
+    mermaid = render_sequence_mermaid(spec) if kind == "sequence" else render_flowchart_mermaid(spec)
+    assert render_diagram_blocks({kind: _rendered(spec)}) == (
+        f"<details><summary><h3>{title}</h3></summary>\n\n```mermaid\n{mermaid}\n```\n\n</details>"
     )
-    assert tail[3] == ""
-    assert tail[4] == "<details><summary>Evidence</summary>"
-    assert tail[5] == ""
-    assert tail[6] == "| # | Interaction | Call site | Callee defined at |"
-    assert tail[7] == "|---|---|---|---|"
-    assert tail[8] == (
-        "| 1 | Client → External API Proxy: Request with Authorization | "
-        "`proxy/handler.py:41` | `proxy/handler.py:38` |"
-    )
-    # defined_at is None on message 3 -> an empty final cell, never the word None.
-    assert tail[10] == "| 3 | Identity Resolver → External API Proxy: Unverified identity | `proxy/auth.py:68` |  |"
-    assert tail[-2:] == ["</details>", "</details>"]
-    assert not blocks.startswith("\n") and not blocks.endswith("\n")
-
-
-def test_flowchart_block_reproduces_the_spec_target_layout() -> None:
-    blocks = render_diagram_blocks({"sequence": None,
-                                    "flowchart": _rendered(FLOWCHART_SPEC, FLOWCHART_GROUNDING)})
-    assert blocks.startswith("<details><summary><h3>Flowchart</h3></summary>\n\n```mermaid\n")
-    assert (
-        "<sub>Control flow of `resolve_identity` (`proxy/auth.py:22-71`): 8 nodes, "
-        "each grounded to a statement inside that function. "
-        "1 proposed node was dropped as ungrounded.</sub>"
-    ) in blocks
-    assert "| Node | Statement | Location |\n|---|---|---|\n| N1 | start | `proxy/auth.py:22` |" in blocks
-    # subroutine row: symbol + call site + definition site, and an empty Location.
-    assert (
-        "| N5 | subroutine `verify_jwt`, called at `proxy/auth.py:44`, "
-        "defined at `proxy/jwt.py:15` |  |"
-    ) in blocks
-    assert "| N2 | decision | `proxy/auth.py:27` |" in blocks
-    assert blocks.endswith("</details>\n</details>")
 
 
 # Ordering, gating, and the "never read a stored mermaid" rule
@@ -218,18 +140,17 @@ def test_blocks_render_sequence_first_then_flowchart() -> None:
     assert blocks.index("<h3>Sequence Diagram</h3>") < blocks.index("<h3>Flowchart</h3>")
     # Exactly two top-level folds, joined by one blank line.
     assert blocks.count("<details><summary><h3>") == 2
-    assert "</details>\n</details>\n\n<details><summary><h3>Flowchart</h3>" in blocks
+    assert "</details>\n\n<details><summary><h3>Flowchart</h3>" in blocks
 
 
 @pytest.mark.parametrize("results", [
     {},
     {"sequence": None, "flowchart": None},
-    {"sequence": {"status": "omitted", "grounding": {}, "spec_final": None, "omit_reasons": ["NO_END"]}},
-    {"flowchart": {"status": "skipped", "reason": "not eligible", "grounding": None, "spec_final": None}},
-    {"sequence": {"status": "failed", "reason": "backend error", "grounding": None, "spec_final": None}},
+    {"sequence": {"status": "omitted", "spec_final": None, "omit_reasons": ["NO_END"]}},
+    {"flowchart": {"status": "skipped", "reason": "not eligible", "spec_final": None}},
+    {"sequence": {"status": "failed", "reason": "backend error", "spec_final": None}},
     # status says rendered but the artifact is malformed: no block, never a raise.
-    {"sequence": {"status": "rendered", "spec_final": None, "grounding": None}},
-    {"sequence": {"status": "rendered", "spec_final": SEQUENCE_SPEC, "grounding": None}},
+    {"sequence": {"status": "rendered", "spec_final": None}},
 ])
 def test_blocks_are_empty_when_nothing_rendered(results: dict[str, Any]) -> None:
     assert render_diagram_blocks(results) == ""
@@ -255,54 +176,6 @@ def test_rendering_is_deterministic_and_does_not_mutate_the_spec() -> None:
     assert results == before
     assert render_sequence_mermaid(SEQUENCE_SPEC) == render_sequence_mermaid(copy.deepcopy(SEQUENCE_SPEC))
     assert render_flowchart_mermaid(FLOWCHART_SPEC) == render_flowchart_mermaid(copy.deepcopy(FLOWCHART_SPEC))
-
-
-# <sub> line variants
-
-
-def test_sub_line_singular_variants_and_cap_clause() -> None:
-    spec = {"participants": [{"name": "Solo"}],
-            "messages": [{"from": "Solo", "to": "Solo", "label": "tick", "kind": "self",
-                          "evidence": {"file": "a.py", "line": 3, "symbol": "tick"}}],
-            "blocks": []}
-    grounding: dict[str, Any] = {"elements": [], "summary": {"proposed": 3, "grounded_first_pass": 1,
-                                             "repaired": 0, "pruned": 1},
-                 "capped": {"messages": 1}, "root_range": None}
-    blocks = render_diagram_blocks({"sequence": _rendered(spec, grounding)})
-    assert (
-        "<sub>1 interaction across 1 component, each grounded to a cited call site. "
-        "1 proposed interaction was dropped as ungrounded. "
-        "1 further interaction was trimmed to fit the diagram cap.</sub>"
-    ) in blocks
-
-
-def test_flowchart_sub_line_singular_and_missing_root_range() -> None:
-    spec = {"root": {"file": "a.py", "name": "solo", "line": 4},
-            "nodes": [{"id": "s", "kind": "start", "label": "solo",
-                       "evidence": {"file": "a.py", "line": 4, "symbol": "solo"}}],
-            "edges": []}
-    grounding: dict[str, Any] = {"elements": [], "summary": {"proposed": 3, "grounded_first_pass": 1,
-                                             "repaired": 0, "pruned": 1},
-                 "capped": {"nodes": 1, "edges": 0}, "root_range": None}
-    blocks = render_diagram_blocks({"flowchart": _rendered(spec, grounding)})
-    # root_range is None -> the parenthetical carries no range.
-    assert (
-        "<sub>Control flow of `solo` (`a.py:4`): 1 node, "
-        "each grounded to a statement inside that function. "
-        "1 proposed node was dropped as ungrounded. "
-        "1 further node was trimmed to fit the diagram cap.</sub>"
-    ) in blocks
-    # An isolated node still gets a declaration line.
-    assert "flowchart TD\n    N1([solo])\n```" in blocks
-
-
-def test_sub_line_omits_the_optional_clauses_when_nothing_was_dropped() -> None:
-    grounding = dict(SEQUENCE_GROUNDING, summary={"proposed": 5, "grounded_first_pass": 5,
-                                                  "repaired": 0, "pruned": 0}, capped={})
-    blocks = render_diagram_blocks({"sequence": _rendered(SEQUENCE_SPEC, grounding)})
-    assert "<sub>5 interactions across 3 components, each grounded to a cited call site.</sub>" in blocks
-    assert "dropped as ungrounded" not in blocks
-    assert "diagram cap" not in blocks
 
 
 # Render caps: asserted, not enforced
@@ -454,7 +327,7 @@ def test_flowchart_injection_payloads_cannot_close_a_shape_or_add_an_edge() -> N
     assert lines[4].endswith(" N5([#lt;/details#gt;])")
 
 
-def test_injection_payloads_keep_the_html_wrapper_and_table_intact() -> None:
+def test_injection_payloads_cannot_close_the_html_wrapper() -> None:
     spec: dict[str, Any] = {
         "participants": [{"name": "</details>", "kind": "internal", "files": ["a.py"], "service": None}],
         "messages": [{"from": "</details>", "to": "</details>", "label": "a|b</details>",
@@ -462,19 +335,9 @@ def test_injection_payloads_keep_the_html_wrapper_and_table_intact() -> None:
                       "evidence": {"file": "a|b`.py", "line": 7, "symbol": "x"}}],
         "blocks": [],
     }
-    grounding = {"elements": [{**_check("message", "0", final_index=0,
-                                        defined_at="`x`|y.py:1</details>")}],
-                 "summary": {"proposed": 1, "grounded_first_pass": 1, "repaired": 0, "pruned": 0},
-                 "capped": {}, "root_range": None}
-    blocks = render_diagram_blocks({"sequence": _rendered(spec, grounding)})
-    # Exactly the two folds the renderer opened, and no injected close tag.
-    assert blocks.count("<details>") == 2
-    assert blocks.count("</details>") == 2
-    table = [line for line in blocks.split("\n") if line.startswith("| 1 |")]
-    assert len(table) == 1
-    assert table[0].count("|") == 5   # four cells, no cell break-out
-    assert "`ab.py:7`" in table[0]    # markdown cells drop backticks and pipes
-    assert "`xy.py:1/details`" in table[0]
+    blocks = render_diagram_blocks({"sequence": _rendered(spec)})
+    assert blocks.count("<details>") == blocks.count("</details>") == 1
+    assert "#lt;/details#gt;" in blocks
 
 
 # Block structure edge cases
@@ -551,75 +414,35 @@ def test_empty_labels_fall_back_to_a_placeholder() -> None:
     assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[unlabeled]"
 
 
-def test_unknown_node_kind_falls_back_to_the_process_shape_and_word() -> None:
+def test_unknown_node_kind_falls_back_to_the_process_shape() -> None:
     flow: dict[str, Any] = {
         "root": {"file": "a.py", "name": "f", "line": 1},
         "nodes": [{"id": "a", "kind": "mystery", "label": "x", "evidence": {"file": "a.py", "line": 1}}],
         "edges": [],
     }
     assert render_flowchart_mermaid(flow) == "flowchart TD\n    N1[x]"
-    grounding: dict[str, Any] = {"elements": [], "summary": {"proposed": 1, "grounded_first_pass": 1,
-                                             "repaired": 0, "pruned": 0},
-                 "capped": {}, "root_range": None}
-    assert "| N1 | process | `a.py:1` |" in render_diagram_blocks({"flowchart": _rendered(flow, grounding)})
-
-
-def test_subroutine_row_without_a_definition_site_drops_that_clause() -> None:
-    flow: dict[str, Any] = {
-        "root": {"file": "a.py", "name": "f", "line": 1},
-        "nodes": [{"id": "a", "kind": "subroutine", "label": "helper",
-                   "evidence": {"file": "a.py", "line": 9, "symbol": "helper"}},
-                  {"id": "b", "kind": "subroutine", "label": "anon",
-                   "evidence": {"file": "a.py", "line": 10, "symbol": None}}],
-        "edges": [],
-    }
-    grounding = {"elements": [], "summary": {"proposed": 2, "grounded_first_pass": 2,
-                                             "repaired": 0, "pruned": 0},
-                 "capped": {}, "root_range": [1, 20]}
-    blocks = render_diagram_blocks({"flowchart": _rendered(flow, grounding)})
-    assert "| N1 | subroutine `helper`, called at `a.py:9` |  |" in blocks
-    assert "| N2 | subroutine, called at `a.py:10` |  |" in blocks
 
 
 # Omission notice
 
 
-def test_omission_notice_reports_floor_codes_and_counts() -> None:
-    result: dict[str, Any] = {"status": "omitted", "reason": None, "spec_proposed": {}, "spec_final": {},
-              "grounding": {"elements": [],
-                            "summary": {"proposed": 6, "grounded_first_pass": 2,
-                                        "repaired": 1, "pruned": 3},
-                            "capped": {"messages": 2}, "root_range": None},
-              "omit_reasons": ["TOO_FEW_MESSAGES", "NO_CHANGED_INTERACTION"], "mermaid": None}
-    notice = render_omission_notice("sequence", result)
+def test_omission_notice_reports_floor_codes() -> None:
+    notice = render_omission_notice("sequence", {
+        "status": "omitted", "omit_reasons": ["TOO_FEW_MESSAGES", "NO_CHANGED_INTERACTION"],
+    })
     assert notice == (
         "No sequence diagram was rendered for this pull request. "
-        "Grounding floor not met: TOO_FEW_MESSAGES, NO_CHANGED_INTERACTION. "
-        "6 elements proposed, 2 grounded on the first pass, 1 repaired, 3 dropped as ungrounded. "
-        "2 elements were trimmed to fit the diagram cap."
+        "Grounding floor not met: TOO_FEW_MESSAGES, NO_CHANGED_INTERACTION."
     )
-    assert "\n" not in notice
 
 
 def test_omission_notice_covers_skipped_failed_and_rendered() -> None:
     assert render_omission_notice("flowchart", {"status": "rendered"}) == ""
-    assert render_omission_notice("flowchart", {"status": "skipped", "reason": "no candidate root",
-                                                "grounding": None, "omit_reasons": []}) == (
+    assert render_omission_notice("flowchart", {"status": "skipped", "reason": "no candidate root"}) == (
         "No flowchart was rendered for this pull request. Reason: no candidate root."
     )
-    # A failure reason is model/exception text: sanitized into one safe line.
-    assert render_omission_notice("flowchart", {"status": "failed",
-                                                "reason": "backend `boom`\nline two",
-                                                "grounding": None, "omit_reasons": []}) == (
+    assert render_omission_notice("flowchart", {"status": "failed", "reason": "backend `boom`\nline two"}) == (
         "No flowchart was rendered for this pull request. Reason: backend boom line two."
-    )
-    # A singular cap clause, and an unknown kind degrades to a generic phrase.
-    assert render_omission_notice("weird", {"status": "omitted", "grounding": {
-        "summary": {"proposed": 1, "grounded_first_pass": 1, "repaired": 0, "pruned": 0},
-        "capped": {"nodes": 1}}, "omit_reasons": []}) == (
-        "No weird was rendered for this pull request. "
-        "1 element proposed, 1 grounded on the first pass, 0 repaired, 0 dropped as ungrounded. "
-        "1 element was trimmed to fit the diagram cap."
     )
 
 

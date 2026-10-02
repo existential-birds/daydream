@@ -46,12 +46,10 @@ from daydream.improve.command_contract import REPOSITORY_FILE_PATH_SCHEMA
 from daydream.phases import (
     _FIX_GUARDRAILS,
     _PR_BODY_MAX_CHARS,
-    FEEDBACK_SCHEMA,
     FIX_VERIFY_ACTIONABLE_VERDICTS,
     FIX_VERIFY_RETARGETABLE_VERDICTS,
     FIX_VERIFY_VERDICTS,
     FIX_VERIFY_VERDICTS_SCHEMA,
-    PER_STACK_RECORD_SCHEMA,
     TEST_OUTPUT_TAIL_LINES,
     PushAttemptError,
     TestAttemptEvidence,
@@ -348,6 +346,15 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
         return await batched_implementation(*args, **kwargs)
 
     async def _parallel_with_contract(*args: Any, **kwargs: Any) -> Any:
+        # The parallel boundary now owns independent Git checkouts, even when
+        # this unit case mocks individual fix calls. Supply a real baseline
+        # instead of replacing its storage or recovery operations with fakes.
+        repo = args[1].repo
+        if not (repo / ".git").exists():
+            init_repo(repo)
+            (repo / ".phase-fixture").write_text("real Git baseline\n")
+            git(repo, "add", ".phase-fixture")
+            git_commit(repo, "test: parallel phase baseline")
         original_items = args[2]
         items = [dict(item, item_uid=item.get("item_uid") or f"item:{n}")
                  for n, item in enumerate(original_items, start=1)]
@@ -385,9 +392,6 @@ def _supply_test_evidence_contract(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(phases, "phase_fix_batched", _batched_with_contract)
     monkeypatch.setattr(phases, "phase_fix_parallel", _parallel_with_contract)
     monkeypatch.setattr(git_ops, "restore_group_from_snapshot", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        git_ops, "restore_group_worktree_from_snapshot", lambda *args, **kwargs: None
-    )
     monkeypatch.setattr(git_ops, "restore_index", lambda *args, **kwargs: None)
 
 
@@ -655,7 +659,6 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     out = capsys.readouterr().out
     assert "scope creep" not in out
     assert "under-commit" not in out
-
 
 
 @pytest.mark.asyncio
@@ -937,7 +940,6 @@ async def test_do_commit_defensive_snapshot_can_drop_fix_created_new_file(
     assert "app.py" in committed
     # Fix-created new file is untracked at snapshot time and dropped.
     assert "generated.py" not in committed
-
 
 
 def _init_committed_repo(path: Path, branch: str) -> Path:
@@ -1774,9 +1776,6 @@ async def test_phase_fix_batched_includes_verifier_verdicts(
     assert "assumes single-threaded" in prompt
 
 
-
-
-
 @pytest.mark.asyncio
 async def test_phase_fix_parallel_batches_same_file_findings(
     tmp_path: Path,
@@ -1853,9 +1852,6 @@ async def test_phase_fix_parallel_falls_back_to_per_finding_on_batch_failure(
     assert 1 not in fix_calls and 2 not in fix_calls
     # The fallback succeeded, so no failure was collected.
     assert failures == {}
-
-
-
 
 
 @pytest.mark.asyncio
@@ -1935,7 +1931,7 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
         events=(
             TextEvent(text="done"),
             ResultEvent(
-                structured_output={"issues": [], "verdicts": []}, continuation=None
+                structured_output={"issues": []}, continuation=None
             ),
         )
     )
@@ -3140,7 +3136,6 @@ async def test_approved_investigator_backtick_only_command_is_skipped_not_crash(
     # The backtick-only suggestion never produced an executable argv and was
     # never handed to run_test_command; no shlex/empty-argv crash.
     assert calls == []
-
 
 
 @pytest.mark.asyncio
@@ -4745,7 +4740,7 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         intent = _write_sized(deep / "intent.md", "intent", 6_361)
         alternatives = _write_sized(deep / "alternatives.json", "[]", 6_234)
         dedup = _write_sized(deep / "dedup.json", "[]", 60)
-        records = '{"issues": [], "verdicts": []}'
+        records = '{"issues": []}'
         python_records = _write_sized(deep / "python-records.json", records, 7_593)
         generic_records = _write_sized(deep / "generic-records.json", records, 2_180)
         structural = _write_sized(deep / "structural-records.json", "[]", 7_880)
@@ -5192,7 +5187,9 @@ def test_fix_verify_schema_accepts_all_four_verdicts() -> None:
 
 
     for verdict in ("resolved", "unresolved", "wrong_target", "regressed"):
-        entry: dict[str, Any] = {"issue_id": 1, "verdict": verdict, "reason": "r"}
+        entry: dict[str, Any] = {
+            "issue_id": 1, "verdict": verdict, "reason": "r", "check_command": None, "check_only": False,
+        }
         # ``path`` is strict-mode required (see test_output_schema_strict.py)
         # but nullable; wrong_target/regressed carry the corrected file.
         if verdict in ("wrong_target", "regressed"):
@@ -5325,7 +5322,12 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     monkeypatch: pytest.MonkeyPatch,
     make_work: Callable[..., WorkContext],
 ) -> None:
-
+    init_repo(tmp_path)
+    paths = {"a.py", "shared.py", "test_a.py"}
+    for path in paths:
+        (tmp_path / path).write_text("original group content\n")
+    git(tmp_path, "add", *sorted(paths))
+    git_commit(tmp_path, "test: complete group rollback baseline")
     items = [
         {"id": 1, "item_uid": "item:1", "file": "a.py", "related_files": ["shared.py"]},
         {"id": 2, "item_uid": "item:2", "file": "shared.py", "related_files": ["test_a.py"]},
@@ -5337,20 +5339,20 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
         path_states=(),
         untracked={},
     )
-    restored: list[tuple[WorktreeRollbackSnapshot, frozenset[str]]] = []
+    fallback_contents: list[dict[str, str]] = []
 
     async def _fail_batch(*args: Any, **kwargs: Any) -> None:
+        for path in paths:
+            (args[1].repo / path).write_text("partial batched edit\n")
         raise RuntimeError("partial batch")
 
     async def _fix(*args: Any, **kwargs: Any) -> None:
-        return None
-
-    def _restore(repo: Path, supplied: WorktreeRollbackSnapshot, paths: Any) -> None:
-        restored.append((supplied, frozenset(paths)))
+        repo = args[1].repo
+        fallback_contents.append({path: (repo / path).read_text() for path in paths})
+        (repo / args[2]["file"]).write_text("successful fallback fix\n")
 
     monkeypatch.setattr(phases, "phase_fix_batched", _fail_batch)
     monkeypatch.setattr(phases, "phase_fix", _fix)
-    monkeypatch.setattr(git_ops, "restore_group_worktree_from_snapshot", _restore)
 
     failures = await phases.phase_fix_parallel(
         cast(Backend, object()),
@@ -5361,7 +5363,12 @@ async def test_phase_fix_parallel_restores_whole_group_worktree_before_batch_fal
     )
 
     assert failures == {}
-    assert restored == [(snapshot, frozenset({"a.py", "shared.py", "test_a.py"}))]
+    assert fallback_contents[0] == {path: "original group content\n" for path in paths}
+    assert fallback_contents[1]["a.py"] == "successful fallback fix\n"
+    assert fallback_contents[1]["shared.py"] == "original group content\n"
+    assert (tmp_path / "a.py").read_text() == "successful fallback fix\n"
+    assert (tmp_path / "shared.py").read_text() == "successful fallback fix\n"
+    assert (tmp_path / "test_a.py").read_text() == "original group content\n"
 
 
 @pytest.mark.asyncio
@@ -6002,17 +6009,6 @@ def test_inlineable_diff_budget_counts_utf8_bytes_not_characters() -> None:
     assert len(multibyte) < INLINE_DIFF_BUDGET_BYTES
     assert len(multibyte.encode("utf-8")) > INLINE_DIFF_BUDGET_BYTES
     assert _inlineable_diff(multibyte) is None
-
-
-async def test_per_stack_schema_carries_verdicts_and_feedback_schema_untouched() -> None:
-    """Key Decision 2: PER_STACK_RECORD_SCHEMA gains per-file verdicts; FEEDBACK_SCHEMA is not mutated."""
-    props = PER_STACK_RECORD_SCHEMA["properties"]
-    assert "verdicts" in props
-    v_items = props["verdicts"]["items"]["properties"]
-    assert {"path", "lines_read", "verdict"}.issubset(v_items)
-    assert v_items["verdict"]["enum"] == ["clean", "has_findings", "not_reviewed"]
-    assert "verdicts" not in FEEDBACK_SCHEMA["properties"]  # base schema untouched
-    assert "severity" in props["issues"]["items"]["properties"]  # existing field preserved
 
 
 def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path: Path) -> None:

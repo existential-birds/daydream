@@ -110,6 +110,9 @@ async def test_fix_guard_reverts_generated_migration_edit(
         _merge_item(2, "api.py", "high", desc="source fix"),
         _merge_item(3, "migrations/0000_local_draft.sql", "high", desc="local schema fix"),
     ]
+    # Admit the secondary path so this test reaches the generated-file guard,
+    # independently of the earlier per-fixer scope boundary.
+    stub.merge_items[1]["related_files"] = ["migrations/0002_add_x.sql"]
     stub.fix_edit_line = "\n-- FORBIDDEN EDIT\n"
     stub.fix_new_generated = "migrations/0002_add_x.sql"
 
@@ -468,12 +471,20 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects(commit=False)
-    stub = _ExtraEditBackend(target, target / "unrelated.py", "\n# scope creep\n")
+
+    class EscapingBackend(_PromptHookStub):
+        def intercept(self, cwd: Path, prompt: str) -> None:
+            if prompt.lower().startswith(("fix this issue", "fix these")):
+                assert cwd != target
+                (target / "unrelated.py").write_text("# escaped parent write\n")
+            return None
+
+    stub = EscapingBackend(target)
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr(
-        "daydream.git_ops.restore_group_from_snapshot",
+        "daydream.git_ops.restore_group_worktree_from_snapshot",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
     )
 
