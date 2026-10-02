@@ -11,23 +11,16 @@ from daydream.training.corpus_projection.tiers import _NON_DECISIVE_DISPOSITIONS
 from daydream.training.dispositions import NON_DECISIVE_DISPOSITIONS, is_decisive
 
 
-def _session(
-    sid: str, fingerprint: str, disposition: str, digest: str
-) -> dict[str, object]:
-    return {
-        "session_id": sid, "trajectory_id": f"{sid}-traj", "segment_id": f"{sid}-seg",
-        "resolutions": [{
-            "fingerprint": fingerprint, "disposition": disposition,
+def _session(sid: str, fingerprint: str, disposition: str, digest: str) -> dict[str, object]:
+    return {"session_id": sid, "trajectory_id": f"{sid}-traj", "segment_id": f"{sid}-seg",
+        "resolutions": [{"fingerprint": fingerprint, "disposition": disposition,
             "evidence": [{"reply_id": "r1", "body_sha256": "abc"}],
             "evidence_digest": digest, "profile": "pr_review", "stack": "python",
         }],
     }
 
 def _sessions_with_accepted_and_unanswered() -> list[dict[str, object]]:  # existing-shape helper
-    return [
-        _session("s1", "fp-a", "accepted", "d-gold"),
-        _session("s2", "fp-b", "unanswered", "d2"),
-    ]
+    return [_session("s1", "fp-a", "accepted", "d-gold"), _session("s2", "fp-b", "unanswered", "d2")]
 
 
 def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> None:
@@ -40,14 +33,10 @@ def test_build_queue_include_decisive_returns_complete_set(tmp_path: Path) -> No
     # decisive entries carry the same record_id derivation as materialize
     assert {str(i["status"]) for i in complete} <= {"open", "reopened"}
 
-
 def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
     # NOTE: 'accepted' disposition with evidence would be gold — the queue must EXCLUDE it.
-    sessions = [
-        _session("s2", "fp-b", "unanswered", "d2"),
-        _session("s1", "fp-b", "ambiguous", "d1"),
-        _session("s1", "fp-a", "accepted", "d-gold"),
-        _session("s0", "fp-m", "missing", "d3"),
+    sessions = [_session("s2", "fp-b", "unanswered", "d2"), _session("s1", "fp-b", "ambiguous", "d1"),
+        _session("s1", "fp-a", "accepted", "d-gold"), _session("s0", "fp-m", "missing", "d3"),
     ]
     items_a = build_queue(sessions)
     items_b = build_queue(list(reversed(sessions)))
@@ -56,16 +45,10 @@ def test_queue_is_deterministic_and_covers_all_non_decisive_states() -> None:
     assert all(i["disposition"] in {"ambiguous", "unanswered", "missing"} for i in items_a)
     assert all(i["record_id"] != record_id("s1", "s1-traj", "s1-seg", "fp-a") for i in items_a)
 
-
 def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
     record_id_val = record_id("s1", "s1-traj", "s1-seg", "fp-a")
-    prior = {
-        "record_id": record_id_val,
-        "role": "rater",
-        "disposition": "accepted",
-        "evidence_digest": "d" * 64,
-        "labeler": "alice",
-        "observed_at": "2026-08-30T10:00:00+00:00",
+    prior = {"record_id": record_id_val, "role": "rater", "disposition": "accepted", "evidence_digest": "d" * 64,
+        "labeler": "alice", "observed_at": "2026-08-30T10:00:00+00:00",
         "review_required": True,  # e.g. a stored model-suggested label
     }
     # Same digest: judgment stands, item stays open with no prior disposition.
@@ -86,14 +69,10 @@ def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
 
-
 def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-
     session = _session("s1", "fp-a", "ambiguous", "d1")
 
-    def _forge_decisive(
-        s: dict[str, object], **_kw: object
-    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    def _forge_decisive(s: dict[str, object], **_kw: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
         # The real projector routes only task-only dispositions to the
         # adjudication set; forge a decisive entry to prove the queue
         # builder's own fail-closed disposition guard holds.
@@ -104,9 +83,7 @@ def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
 
-
 def test_disposition_sets_are_single_sourced() -> None:
-
     assert queue_set is NON_DECISIVE_DISPOSITIONS
     assert tiers_set is NON_DECISIVE_DISPOSITIONS
     assert is_decisive("accepted") and is_decisive("rejected")

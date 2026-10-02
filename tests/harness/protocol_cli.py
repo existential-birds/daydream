@@ -16,8 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-_CANARIES = (
-    "SOURCE_CANARY", "PRIOR_REASONING_CANARY", "CURRENT_REASONING_CANARY",
+_CANARIES = ("SOURCE_CANARY", "PRIOR_REASONING_CANARY", "CURRENT_REASONING_CANARY",
     "SIBLING_REASONING_CANARY", "RESUME_CACHE_CANARY", "SANCTIONED_INPUT_CANARY",
     "PRIVATE_ROOT_CANARY", "RUNTIME_STATE_CANARY",
 )
@@ -36,13 +35,9 @@ class ProtocolCli:
         return [json.loads(path.read_text(encoding="utf-8")) for path in sorted(self.observations.glob("*.json"))]
 
 
-def install_protocol_cli(
-    root: Path,
-    backend: Literal["codex", "pi", "osprey"],
-    *,
+def install_protocol_cli(root: Path, backend: Literal["codex", "pi", "osprey"], *,
     response_mode: Literal["success", "model_error", "process_error", "block"] = "success",
-    sanctioned_files: tuple[Path, ...] = (),
-    forbidden_paths: tuple[Path, ...] = (),
+    sanctioned_files: tuple[Path, ...] = (), forbidden_paths: tuple[Path, ...] = (),
 ) -> ProtocolCli:
     """Install a real executable; block mode releases through a FIFO write.
 
@@ -59,8 +54,7 @@ def install_protocol_cli(
     if response_mode == "block":
         os.mkfifo(release, mode=0o600)
     executable = bin_dir / backend
-    config = {
-        "root": str(root), "backend": backend, "response_mode": response_mode,
+    config = {"root": str(root), "backend": backend, "response_mode": response_mode,
         "sanctioned_files": [str(path) for path in sanctioned_files],
         "forbidden_paths": [str(path) for path in forbidden_paths],
     }
@@ -75,10 +69,7 @@ def install_protocol_cli(
 def _forbidden_path_hits(argv: list[str], prompt: str) -> dict[str, dict[str, bool]]:
     """Record only booleans: did each forbidden path appear in argv/stdin/env?"""
     joined_argv = "\x00".join(argv)
-    return {
-        path: {
-            "argv": path in joined_argv,
-            "stdin": path in prompt,
+    return {path: {"argv": path in joined_argv, "stdin": path in prompt,
             "env": any(path in value for value in os.environ.values()),
         }
         for path in _FIXTURE_CONFIG.get("forbidden_paths", [])
@@ -121,15 +112,12 @@ def _cwd_observation(cwd: Path) -> dict[str, Any]:
 
 def _observed_argv(backend: str, argv: list[str]) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
     """Admit known fixture flags only; content values become lengths/hashes."""
-    switches = frozenset({
-        "codex": "exec --experimental-json",
-        "pi": "--no-session --no-skills --no-tools",
+    switches = frozenset({"codex": "exec --experimental-json", "pi": "--no-session --no-skills --no-tools",
         "osprey": "agent --events-jsonl --sandbox --read-only --ultracode"
                   " --atif-system-prompt-plaintext --immutable-runtime-surface"
                   " --compress-context=true --compress-context=false",
     }[backend].split())
-    values = frozenset({
-        "codex": "--model --sandbox --cd --output-schema resume",
+    values = frozenset({"codex": "--model --sandbox --cd --output-schema resume",
         "pi": "--mode --model --provider --thinking --tools --session-id",
         "osprey": "--model --toolset --temperature --atif-output --max-turns --turn-timeout"
                   " --stream-idle-timeout-secs --streaming-timeout-secs --empty-completion-threshold"
@@ -187,8 +175,7 @@ def _codex_events(text: str, *, failed: bool) -> None:
 
 
 def _pi_events(text: str, model: str, *, failed: bool) -> None:
-    message = {
-        "role": "assistant", "content": [{"type": "text", "text": text}],
+    message = {"role": "assistant", "content": [{"type": "text", "text": text}],
         "model": model, "provider": "nous", "timestamp": int(time.time() * 1000),
     }
     _emit({"type": "session", "sessionId": "fixture-pi-session"})
@@ -196,8 +183,7 @@ def _pi_events(text: str, model: str, *, failed: bool) -> None:
     _emit({"type": "turn_start"})
     _emit({"type": "message_start", "message": message})
     completed = {
-        **message, "usage": {"input": 10, "output": 5, "cacheRead": 0},
-        "stopReason": "error" if failed else "stop",
+        **message, "usage": {"input": 10, "output": 5, "cacheRead": 0}, "stopReason": "error" if failed else "stop",
     }
     if failed:
         completed["errorMessage"] = "fixture failure"
@@ -208,8 +194,7 @@ def _pi_events(text: str, model: str, *, failed: bool) -> None:
 
 def _osprey_events(text: str, model: str, *, failed: bool, exit_code: int) -> None:
     _emit({"event": "protocol", "version": 2})
-    _emit({
-        "event": "session_start", "session_id": "fixture-osprey-session",
+    _emit({"event": "session_start", "session_id": "fixture-osprey-session",
         "started_at": "2026-09-06T00:00:00Z", "model": model, "provider": "fixture-provider",
     })
     _emit({"event": "turn_start", "turn_id": "turn-1", "timestamp": "2026-09-06T00:00:00Z"})
@@ -217,8 +202,7 @@ def _osprey_events(text: str, model: str, *, failed: bool, exit_code: int) -> No
     _emit({"event": "turn_end", "turn_id": "turn-1", "usage_reported": True,
            "duration_ms": 1, "prompt_tokens": 10, "completion_tokens": 5,
            "cached_tokens": 0, "thinking_tokens": 0, "cost_usd": None, "model": model})
-    _emit({
-        "event": "session_end", "total_turns": 1, "session_wallclock_ms": 1,
+    _emit({"event": "session_end", "total_turns": 1, "session_wallclock_ms": 1,
         "total_cost_usd": None, "total_prompt_tokens": 10, "total_completion_tokens": 5,
         "total_cached_tokens": 0, "total_cache_write_tokens": 0, "total_thinking_tokens": 0,
         "total_oom_kills": 0, "p50_turn_ms": 1, "p99_turn_ms": 1, "avg_turn_cost_usd": None,
@@ -230,8 +214,7 @@ def _osprey_events(text: str, model: str, *, failed: bool, exit_code: int) -> No
 def _git_remote_count(cwd: Path) -> int:
     """Count the remotes of *cwd*; 0 when git is unavailable or it is not a repo."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(cwd), "remote"], capture_output=True, text=True, timeout=10, check=False
+        proc = subprocess.run(["git", "-C", str(cwd), "remote"], capture_output=True, text=True, timeout=10, check=False
         )
     except (OSError, subprocess.SubprocessError):
         return 0
@@ -260,8 +243,7 @@ def _run_cli() -> int:
             if stat.S_ISREG(path.lstat().st_mode):
                 with path.open("rb") as handle:
                     opened[requested] = hashlib.sha256(handle.read(12_289)).hexdigest()
-    observation = {
-        "backend": backend, "response_mode": mode, "pid": os.getpid(),
+    observation = {"backend": backend, "response_mode": mode, "pid": os.getpid(),
         "argv": recorded_argv, "content_arguments": content_arguments,
         "inherited_cwd": str(Path.cwd()), "effective_cwd": str(cwd),
         "stdin_bytes": len(stdin), "stdin_sha256": hashlib.sha256(stdin).hexdigest(),
@@ -270,10 +252,8 @@ def _run_cli() -> int:
         "argv_bytes": sum(len(arg.encode()) + 1 for arg in argv),
         "prompt_bytes": len(prompt.encode()), "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
         "prompt_canaries": {canary: canary in prompt for canary in _CANARIES},
-        "sanctioned_reads": opened, "process_outcome": "entered",
-        "git_remote_count": _git_remote_count(cwd),
-        "forbidden_path_hits": _forbidden_path_hits(args_without_prompt, prompt),
-        **_cwd_observation(cwd),
+        "sanctioned_reads": opened, "process_outcome": "entered", "git_remote_count": _git_remote_count(cwd),
+        "forbidden_path_hits": _forbidden_path_hits(args_without_prompt, prompt), **_cwd_observation(cwd),
     }
     path = root / "observations" / f"{backend}-{os.getpid()}-{time.monotonic_ns()}.json"
     _atomic_observation(path, observation)

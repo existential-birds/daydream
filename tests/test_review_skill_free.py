@@ -17,7 +17,6 @@ def _all_builtin_sources() -> Iterator[Any]:
             continue
         yield p
 
-
 def test_no_skill_tokens_in_builtin_prompt_sources() -> None:
     for p in _all_builtin_sources():
         if not any(name in p.name for name in ("prompts", "phases", "coverage", "detection", "sharding")):
@@ -29,11 +28,7 @@ def test_no_skill_tokens_in_builtin_prompt_sources() -> None:
                     continue
                 m = FORBIDDEN.search(line)
                 assert m is not None
-                raise AssertionError(
-                    f"{p}:{i}: skill token {m.group(0)!r} "
-                    f"in {line.strip()!r}"
-                )
-
+                raise AssertionError(f"{p}:{i}: skill token {m.group(0)!r} " f"in {line.strip()!r}")
 
 def test_builtin_default_profile_has_no_skill_tokens() -> None:
     p = rp.build_default_profile()

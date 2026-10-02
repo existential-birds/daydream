@@ -19,30 +19,18 @@ def test_first_verb_routing() -> None:
     # "feedback" is not a verb anymore (M1): it falls through to the review shim.
     assert _first_verb(["feedback", "42", "--bot", "x"]) == "review"
 
-
 @pytest.mark.parametrize("argv", [["/t"], ["review", "/t"]])
 def test_bare_and_review_verb_parse_identically(argv: list[str]) -> None:
     cfg = _parse_args(argv)
     assert cfg.target == "/t" and cfg.output_mode == "loop"
 
-
 def test_improve_verb_builds_improve_config() -> None:
-    config = _parse_improve_args(
-        ["improve", "/tmp/x", "--effort", "deep", "--focus", "security"]
-    )
-    assert (
-        config.flow_name,
-        config.improve_effort,
-        config.improve_focus,
-    ) == ("improve", "deep", "security")
-
+    config = _parse_improve_args(["improve", "/tmp/x", "--effort", "deep", "--focus", "security"])
+    assert (config.flow_name, config.improve_effort, config.improve_focus,) == ("improve", "deep", "security")
 
 def test_improve_plan_subverb_parses_description() -> None:
-    config = _parse_improve_args(
-        ["improve", "plan", "add rate limiting", "/tmp/x"]
-    )
+    config = _parse_improve_args(["improve", "plan", "add rate limiting", "/tmp/x"])
     assert config.improve_plan_description == "add rate limiting"
-
 
 def test_improve_rejects_unknown_effort(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc_info:

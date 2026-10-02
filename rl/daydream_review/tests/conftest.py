@@ -51,11 +51,7 @@ def base_image() -> str:
     tag = build_images.base_tag()
     present = subprocess.run(["docker", "image", "inspect", tag], capture_output=True, check=False)
     if present.returncode != 0:
-        subprocess.run(
-            ["uv", "run", "python", "images/build_images.py", "--base-only"],
-            cwd=PROJECT_ROOT,
-            check=True,
-        )
+        subprocess.run(["uv", "run", "python", "images/build_images.py", "--base-only"], cwd=PROJECT_ROOT, check=True)
     return tag
 
 
@@ -64,25 +60,16 @@ def fixture_manifest_path() -> Path:
     """The committed images manifest, which carries the fixture repo entry."""
     return PROJECT_ROOT / "images" / "manifest.toml"
 
-
 _OUTCOME_MODEL_STATE: dict[str, Any] = {
-    "weights": {"bug": 1.0, "race": 0.5, "regression": 0.75},
-    "bias": -0.25,
-    "split_digest": "fixture-split-digest",
-    "label_ratio_reported": 0.5,
-    "train_rows": 10,
-    "held_out_rows": 4,
-    "held_out_accuracy": 0.75,
+    "weights": {"bug": 1.0, "race": 0.5, "regression": 0.75}, "bias": -0.25, "split_digest": "fixture-split-digest",
+    "label_ratio_reported": 0.5, "train_rows": 10, "held_out_rows": 4, "held_out_accuracy": 0.75,
     "model_fingerprint": "",
 }
 
-_GATE_EVIDENCE: dict[str, Any] = {
-    "split_digest": _OUTCOME_MODEL_STATE["split_digest"],
+_GATE_EVIDENCE: dict[str, Any] = {"split_digest": _OUTCOME_MODEL_STATE["split_digest"],
     "model_fingerprint": _OUTCOME_MODEL_STATE["model_fingerprint"],
     "thresholds": {"min_separation": 0.1, "min_calibration": 0.5},
-    "held_out_rows": _OUTCOME_MODEL_STATE["held_out_rows"],
-    "separation": 0.2,
-    "calibration": 0.75,
+    "held_out_rows": _OUTCOME_MODEL_STATE["held_out_rows"], "separation": 0.2, "calibration": 0.75,
     "accepted_ratio": 0.5,
 }
 
@@ -109,19 +96,12 @@ def stage0_gate_report(tmp_path: Path) -> Path:
     gateway binding accepts it alongside the ``outcome_model_path`` fixture.
     """
     p = tmp_path / "stage0-gate.json"
-    p.write_text(
-        json.dumps(
-            {
-                "passed": True,
-                "separation": _GATE_EVIDENCE["separation"],
-                "calibration": _GATE_EVIDENCE["calibration"],
-                "accepted_ratio": _GATE_EVIDENCE["accepted_ratio"],
-                "evidence_digest": _evidence_digest(_GATE_EVIDENCE),
-                "thresholds": dict(_GATE_EVIDENCE["thresholds"]),
+    p.write_text(json.dumps({"passed": True, "separation": _GATE_EVIDENCE["separation"],
+                "calibration": _GATE_EVIDENCE["calibration"], "accepted_ratio": _GATE_EVIDENCE["accepted_ratio"],
+                "evidence_digest": _evidence_digest(_GATE_EVIDENCE), "thresholds": dict(_GATE_EVIDENCE["thresholds"]),
                 "held_out_rows": _GATE_EVIDENCE["held_out_rows"],
             }
-        ),
-        encoding="utf-8",
+        ), encoding="utf-8",
     )
     return p
 

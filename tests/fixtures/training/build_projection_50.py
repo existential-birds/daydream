@@ -58,8 +58,7 @@ _GOLD_SESSIONS = 23  # 2 gold findings each -> 46 gold outcome-finding records
 # 46 gold + 2 process-trace + 2 task-only = 50 records.
 
 _SESSION_ORDER = ["sess-a"] + [
-    *(f"sess-gold-{i:02d}" for i in range(_GOLD_SESSIONS - 1)),
-    *(f"sess-amb-{c}" for c in "ab"),
+    *(f"sess-gold-{i:02d}" for i in range(_GOLD_SESSIONS - 1)), *(f"sess-amb-{c}" for c in "ab"),
 ]
 
 
@@ -84,9 +83,7 @@ def _plan_dispositions() -> dict[str, list[str]]:
         fps = _fingerprints(sid, prefixed=index > 0)
         for fp in fps[:2]:
             rid = record_id(sid, f"{sid}:root", "seg-0", fp)
-            split = assign_split(
-                rid, salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE
-            )
+            split = assign_split(rid, salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
             gold_pairs.append((sid, fp, split))
 
     holdout = [pair for pair in gold_pairs if pair[2] == "holdout"]
@@ -110,51 +107,27 @@ def _plan_dispositions() -> dict[str, list[str]]:
 
 
 def _body_for(label: str) -> str:
-    return {
-        "accepted": ACCEPTED_TEXT,
-        "rejected": REJECTED_TEXT,
-        "ambiguous": AMBIGUOUS_TEXT,
-    }[label]
+    return {"accepted": ACCEPTED_TEXT, "rejected": REJECTED_TEXT, "ambiguous": AMBIGUOUS_TEXT}[label]
 
 
-def _add_batch(
-    bundle_dir: Path,
-    manifest: dict[str, Any],
-    session_id: str,
-    dispositions: list[str],
-) -> None:
+def _add_batch(bundle_dir: Path, manifest: dict[str, Any], session_id: str, dispositions: list[str],) -> None:
     """One admitted batch directory: producer-realistic ``manifest.json``
     (``git.head_sha`` plus ``code_context.{base_sha, head_sha}``),
     ``findings.json`` (fingerprint-keyed bodies), and ``diff.patch``, plus
     its curation-manifest row."""
     batch_dir = bundle_dir / "batches" / session_id
     batch_dir.mkdir(parents=True, exist_ok=True)
-    fps = _fingerprints(
-        session_id, prefixed=_SESSION_ORDER.index(session_id) > 0
-    )
+    fps = _fingerprints(session_id, prefixed=_SESSION_ORDER.index(session_id) > 0)
     head_sha = hashlib.sha256(f"{session_id}-head".encode()).hexdigest()[:40]
     base_sha = hashlib.sha256(f"{session_id}-base".encode()).hexdigest()[:40]
-    (batch_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "git": {"head_sha": head_sha},
-                "code_context": {
-                    "base_sha": base_sha,
-                    "head_sha": head_sha,
-                },
-            },
+    (batch_dir / "manifest.json").write_text(json.dumps(
+            {"git": {"head_sha": head_sha}, "code_context": {"base_sha": base_sha, "head_sha": head_sha}},
             sort_keys=True,
         )
         + "\n"
     )
-    (batch_dir / "findings.json").write_text(
-        json.dumps(
-            {
-                "findings": [
-                    {"fingerprint": fp, "body": _body_for(label)}
-                    for fp, label in zip(fps, dispositions)
-                ]
-            },
+    (batch_dir / "findings.json").write_text(json.dumps(
+            {"findings": [{"fingerprint": fp, "body": _body_for(label)} for fp, label in zip(fps, dispositions)]},
             sort_keys=True,
         )
         + "\n"
@@ -164,13 +137,8 @@ def _add_batch(
         f"--- a/{session_id}.py\n+++ b/{session_id}.py\n"
         f"@@ -1 +1 @@\n-pass\n+fixed-{session_id}\n"
     )
-    batch_row = {
-        "session_id": session_id,
-        "content_digest": hashlib.sha256(session_id.encode()).hexdigest(),
-        "status": "admitted",
-        "reason_code": None,
-        "artifact_relpath": f"batches/{session_id}",
-        "artifact_digest": None,
+    batch_row = {"session_id": session_id, "content_digest": hashlib.sha256(session_id.encode()).hexdigest(),
+        "status": "admitted", "reason_code": None, "artifact_relpath": f"batches/{session_id}", "artifact_digest": None,
         "manifest_relpath": f"batches/{session_id}/manifest.json",
         "repo_slug": f"owner/repo-{hashlib.sha256(session_id.encode()).hexdigest()[:6]}",
         "license_evidence": {"spdx_id": "MIT", "source": "manifest"},
@@ -212,15 +180,9 @@ def build_projection_50(tmp_path: Path) -> Path:
         _write_annotations_snapshot(bundle_dir, session_id=sid, dispositions=dispositions[sid])
 
     proj_dir = work / "proj"
-    build_frozen_corpus(
-        BuildFrozenCorpusConfig(
-            out_dir=proj_dir,
-            bundle_dir=bundle_dir,
+    build_frozen_corpus(BuildFrozenCorpusConfig(out_dir=proj_dir, bundle_dir=bundle_dir,
             annotation_bundle_dir=bundle_dir.parent / f"{bundle_dir.name}-annotations",
-            license_policy_path=_policy_file(work),
-            salt=SALT,
-            holdout_rate=HOLDOUT_RATE,
-            val_rate=VAL_RATE,
+            license_policy_path=_policy_file(work), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE,
             emit_process_traces=True,
         )
     )
@@ -241,10 +203,7 @@ def main() -> None:
     import tempfile
 
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--out",
-        type=Path,
-        required=True,
+    parser.add_argument("--out", type=Path, required=True,
         help="Destination projection directory (e.g. tests/fixtures/training/projection-50)",
     )
     args = parser.parse_args()

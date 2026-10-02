@@ -24,7 +24,6 @@ _DIFF = """diff --git a/auth.py b/auth.py
      return user
 """
 
-
 def test_cited_changed_lines_are_the_added_text_of_the_covering_hunk() -> None:
     assert "permissionerror" in changed_text_at(_DIFF, "auth.py", 2).lower()
     assert changed_text_at(_DIFF, "auth.py", 3).strip() == ""  # unchanged line
@@ -33,24 +32,18 @@ def test_cited_changed_lines_are_the_added_text_of_the_covering_hunk() -> None:
 
 
 def _item(item_uid: str, **over: object) -> dict[str, object]:
-    base = {
-        "item_uid": item_uid, "id": 1, "lens": "per-stack", "file": "a.py", "line": 1,
+    base = {"item_uid": item_uid, "id": 1, "lens": "per-stack", "file": "a.py", "line": 1,
         "severity": "low", "confidence": "HIGH", "description": "routine cleanup",
         "rationale": "pure rename", "evidence": "a.py:1 renamed helper",
     }
     return {**base, **over}
 
 
-def _provenance(
-    uid: str, *, verdict_bound: bool = True, revised_fields: tuple[str, ...] = ()
-) -> RecordProvenance:
+def _provenance(uid: str, *, verdict_bound: bool = True, revised_fields: tuple[str, ...] = ()) -> RecordProvenance:
     return RecordProvenance(uid, ("arbiter",), verdict_bound, True, revised_fields)
 
-
-@pytest.mark.parametrize(
-    ("item_over", "prov", "expected_reason"),
-    [
-        ({"lens": "cross-stack"}, _provenance("item:1"), "cross_stack"),
+@pytest.mark.parametrize(("item_over", "prov", "expected_reason"),
+    [({"lens": "cross-stack"}, _provenance("item:1"), "cross_stack"),
         ({"description": "auth token check missing"}, _provenance("item:1"), "risk_category:security"),
         ({"confidence": "MEDIUM"}, _provenance("item:1"), "weak_evidence:confidence"),
         ({"evidence": "n/a"}, _provenance("item:1"), "weak_evidence:placeholder_evidence"),
@@ -63,48 +56,38 @@ def _provenance(
 def test_every_mandatory_select_branch_is_reachable(
     item_over: dict[str, object], prov: RecordProvenance | None, expected_reason: str
 ) -> None:
-    decisions = select_items(
-        [_item("item:1", **item_over)],
-        provenance={} if prov is None else {"item:1": prov},
+    decisions = select_items([_item("item:1", **item_over)], provenance={} if prov is None else {"item:1": prov},
         diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert decisions[0].selected is True
     assert decisions[0].reason_code == expected_reason
-
 
 def test_only_a_strong_adjudicated_routine_item_skips() -> None:
     # The diff is present and readable but never covers the cited file (a.py), so
     # the changed-line signal is absent while the input itself is not: the skip
     # branch may certify routine strength. An *absent* diff is an absent input
     # and selects instead (see the invariant test below).
-    decisions = select_items(
-        [_item("item:1")], provenance={"item:1": _provenance("item:1")},
+    decisions = select_items([_item("item:1")], provenance={"item:1": _provenance("item:1")},
         diff_text=_DIFF, config=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert decisions[0].selected is False
     assert decisions[0].reason_code == "strongly_evidenced_adjudicated_routine"
-
 
 def test_absent_diff_selects_even_a_strong_routine_item() -> None:
     # Uniform failure direction: an unreadable or absent diff.patch is an absent
     # input (``_read_diff_text`` degrades to ""), so mandatory risk categories
     # grounded on changed text cannot be ruled out and the item selects -- never
     # skips, whatever else the item's own evidence says (verify_selection:29-31).
-    decisions = select_items(
-        [_item("item:1")], provenance={"item:1": _provenance("item:1")},
+    decisions = select_items([_item("item:1")], provenance={"item:1": _provenance("item:1")},
         diff_text="", config=SelectionConfig(verify_all=False, extra_categories=()),
     )
     assert decisions[0].selected is True
     assert decisions[0].reason_code == "unreadable_diff"
 
-
 def test_verify_all_selects_every_non_exempt_item_and_config_widens_only() -> None:
     items = [_item("item:1"), _item("item:2", lens="structural")]
     decisions = select_items(
-        items,
-        provenance=None,
-        diff_text="",
-        config=SelectionConfig(verify_all=True, extra_categories=()),
+        items, provenance=None, diff_text="", config=SelectionConfig(verify_all=True, extra_categories=()),
     )
     assert [(d.item_uid, d.selected, d.reason_code) for d in decisions] == [
         ("item:1", True, "verify_all"), ("item:2", False, "exempt:structural"),
@@ -117,21 +100,16 @@ def _decision(item_uid: str, *, digest: str, item_id: int = 1) -> SelectionDecis
         reason="no recorded adjudication", provenance={}, content_digest=digest,
     )
 
-
 def test_reuse_serves_unchanged_selected_items_and_marks_them_reused() -> None:
     decisions = [_decision("item:1", digest="d1"), _decision("item:2", digest="d2")]
-    prior = {
-        "rule_version": SELECTION_RULE_VERSION,
-        "decisions": [
-            {"item_uid": "item:1", "content_digest": "d1", "verdict_reused": False},
+    prior = {"rule_version": SELECTION_RULE_VERSION,
+        "decisions": [{"item_uid": "item:1", "content_digest": "d1", "verdict_reused": False},
             {"item_uid": "item:2", "content_digest": "STALE", "verdict_reused": False},
-        ],
-        "verdicts": [{"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}],
+        ], "verdicts": [{"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}],
     }
     reused, to_verify = plan_reuse(prior, decisions)
     assert reused == {"item:1": {"issue_id": 1, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}}
     assert [d.item_uid for d in to_verify] == ["item:2"]
-
 
 def test_reused_verdict_is_rekeyed_to_the_current_item_id() -> None:
     # A resume that renumbers merged ids keeps the verdict (durable uid plus the
@@ -140,40 +118,30 @@ def test_reused_verdict_is_rekeyed_to_the_current_item_id() -> None:
     # join, so the reused body must be re-keyed or it binds to whichever item now
     # holds the old number (or is silently unmatched).
     decisions = [_decision("item:1", digest="d1", item_id=7)]
-    prior = {
-        "rule_version": SELECTION_RULE_VERSION,
+    prior = {"rule_version": SELECTION_RULE_VERSION,
         "decisions": [{"item_uid": "item:1", "item_id": 2, "content_digest": "d1"}],
-        "verdicts": [
-            {"issue_id": 2, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}
-        ],
+        "verdicts": [{"issue_id": 2, "verdict": "consistent", "evidence": "e", "unverified_assumptions": []}],
     }
     reused, to_verify = plan_reuse(prior, decisions)
     assert reused["item:1"]["issue_id"] == 7
     assert reused["item:1"]["verdict"] == "consistent"
     assert to_verify == []
 
-
 def test_a_moved_rule_version_invalidates_every_prior_decision() -> None:
-    prior = {
-        "rule_version": SELECTION_RULE_VERSION + 1,
-        "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
+    prior = {"rule_version": SELECTION_RULE_VERSION + 1, "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
         "verdicts": [{"issue_id": 1}],
     }
     reused, to_verify = plan_reuse(prior, [_decision("item:1", digest="d1")])
     assert reused == {} and [d.item_uid for d in to_verify] == ["item:1"]
 
-
 def test_unresolved_prior_verdicts_are_reverified_and_absent_prior_is_a_miss() -> None:
-    prior = {
-        "rule_version": SELECTION_RULE_VERSION,
-        "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
+    prior = {"rule_version": SELECTION_RULE_VERSION, "decisions": [{"item_uid": "item:1", "content_digest": "d1"}],
         "verdicts": [{"issue_id": 1, "verdict": "contradicts", "evidence": "e"}],
     }
     reused, to_verify = plan_reuse(prior, [_decision("item:1", digest="d1")])
     assert reused == {} and [d.item_uid for d in to_verify] == ["item:1"]
     assert plan_reuse(None, [_decision("item:1", digest="d1")]) == ({}, [_decision("item:1", digest="d1")])
     assert plan_reuse(cast(Any, []), [_decision("item:1", digest="d1")])[0] == {}
-
 
 def test_unknown_extra_category_fails_loudly_and_digest_is_content_only() -> None:
     with pytest.raises(UnknownRiskCategoryError):

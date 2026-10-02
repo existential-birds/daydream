@@ -60,23 +60,16 @@ REPO_SLUGS = [f"acme/widgets-{i % 3}" for i in range(RECORD_COUNT)]
 
 
 def _record(i: int) -> dict[str, Any]:
-    return {
-        "schema_version": "2",
-        "record_id": f"rec-{i:04d}",
-        "session_id": f"sess-{i:04d}",
-        "repo_slug": REPO_SLUGS[i],
+    return {"schema_version": "2",
+        "record_id": f"rec-{i:04d}", "session_id": f"sess-{i:04d}", "repo_slug": REPO_SLUGS[i],
         "reward_version": REWARD_VERSION,
         "lineage": {
             # Stored split must equal the split run_calibration re-derives from
             # the bundle salt + split rates (0.2/0.2 in _lineage()); the
             # stored-split gate compares them fail-closed.
-            "split": assign_split(f"rec-{i:04d}", holdout_rate=0.2, val_rate=0.2, salt=SALT),
-            "as_of": AS_OF,
-            "valid_at": VALID_AT,
-            "license_decision": "allow",
-            "labeler_policy_version": LABELER_POLICY_VERSION,
-            "reply_classifier_version": REPLY_CLASSIFIER_VERSION,
-            "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
+            "split": assign_split(f"rec-{i:04d}", holdout_rate=0.2, val_rate=0.2, salt=SALT), "as_of": AS_OF,
+            "valid_at": VALID_AT, "license_decision": "allow", "labeler_policy_version": LABELER_POLICY_VERSION,
+            "reply_classifier_version": REPLY_CLASSIFIER_VERSION, "rubric_schema_version": RUBRIC_SCHEMA_VERSION,
         },
     }
 
@@ -93,21 +86,16 @@ def _gold() -> dict[str, dict[str, Any]]:
 def _breakdowns() -> dict[str, dict[str, float]]:
     # Partially separable so bootstrap CIs and correlations are non-degenerate.
     w_fp = [0.55, 0.50, 0.65, 0.58, 0.52, 0.61, 0.48, 0.57, 0.63, 0.51, 0.59, 0.47]
-    return {
-        f"rec-{i:04d}": {
-            "fidelity": round(0.2 + 0.05 * i, 4),
-            "specificity": round(0.8 - 0.04 * i, 4),
-            "correctness": round(0.4 + 0.03 * i, 4),
-            "grounding": round(0.7 - 0.02 * i, 4),
-            "w_fp": w_fp[i],
+    return {f"rec-{i:04d}": {"fidelity": round(0.2 + 0.05 * i, 4),
+            "specificity": round(0.8 - 0.04 * i, 4), "correctness": round(0.4 + 0.03 * i, 4),
+            "grounding": round(0.7 - 0.02 * i, 4), "w_fp": w_fp[i],
         }
         for i in range(RECORD_COUNT)
     }
 
 
 def _stage0_scores(aligned: bool) -> dict[str, dict[str, Any]]:
-    scores = {
-        f"rec-{i:04d}": {"score": round(0.3 + 0.05 * i, 4), "model_digest": STAGE0_MODEL_DIGEST}
+    scores = {f"rec-{i:04d}": {"score": round(0.3 + 0.05 * i, 4), "model_digest": STAGE0_MODEL_DIGEST}
         for i in range(RECORD_COUNT)
     }
     if not aligned:
@@ -117,34 +105,23 @@ def _stage0_scores(aligned: bool) -> dict[str, dict[str, Any]]:
 
 
 def _lineage() -> dict[str, Any]:
-    return {
-        "schema_version": "lineage",
-        "salt": SALT,
-        "holdout_rate": 0.2,
-        "val_rate": 0.2,
-        "as_of": AS_OF,
-        "valid_at": VALID_AT,
-        "content_digests": {},
+    return {"schema_version": "lineage",
+        "salt": SALT, "holdout_rate": 0.2, "val_rate": 0.2, "as_of": AS_OF, "valid_at": VALID_AT, "content_digests": {},
     }
 
 
 def _manifest(records: list[dict[str, Any]]) -> dict[str, Any]:
     gold = _gold()
     excluded_hits = sorted(set(load_exclusion_list()) & {r["repo_slug"] for r in records})
-    c5_claim = (
-        f"contains excluded repo slug(s): {', '.join(excluded_hits)}"
+    c5_claim = (f"contains excluded repo slug(s): {', '.join(excluded_hits)}"
         if excluded_hits
         else "clean corpus repo slugs are synthetic and absent from the exclusion list"
     )
     return {
         "description": "Synthetic projected-corpus bundle for calibrate-reward fixtures (issue #999)",
-        "record_count": RECORD_COUNT,
-        "accepted_count": sum(1 for v in gold.values() if v["accepted"]),
-        "rejected_count": sum(1 for v in gold.values() if not v["accepted"]),
-        "constraints": {
-            "C5_exclusion": c5_claim,
-            "C8_copyleft": "clean corpus repo slugs are absent from the copyleft list",
-            "gpu_free": True,
+        "record_count": RECORD_COUNT, "accepted_count": sum(1 for v in gold.values() if v["accepted"]),
+        "rejected_count": sum(1 for v in gold.values() if not v["accepted"]), "constraints": {"C5_exclusion": c5_claim,
+            "C8_copyleft": "clean corpus repo slugs are absent from the copyleft list", "gpu_free": True,
         },
     }
 
@@ -159,9 +136,7 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _sha256sums(corpus_dir: Path, names: list[str]) -> None:
-    lines = [
-        f"{hashlib.sha256((corpus_dir / name).read_bytes()).hexdigest()}  {name}" for name in names
-    ]
+    lines = [f"{hashlib.sha256((corpus_dir / name).read_bytes()).hexdigest()}  {name}" for name in names]
     (corpus_dir / "SHA256SUMS").write_text("\n".join(lines) + "\n")
 
 
@@ -213,10 +188,8 @@ def build(out: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--out",
-        type=Path,
-        default=Path(__file__).resolve().parent,
+    parser.add_argument("--out",
+        type=Path, default=Path(__file__).resolve().parent,
         help="Output directory (default: the committed fixture directory)",
     )
     build(parser.parse_args().out)

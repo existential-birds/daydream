@@ -29,7 +29,6 @@ CANARY_MAX_BYTES = 700
 CANARY_FANOUT_CAP = 16
 CANARY_FRONTIER_MAX = 8
 
-
 def _diff_change_bytes(diff: str) -> dict[str, int]:
     """Per-file changed-byte sizes, mirroring ``sharding._file_change_bytes``.
 
@@ -45,12 +44,7 @@ def _diff_change_bytes(diff: str) -> dict[str, int]:
             sizes.setdefault(m.group(1), len(block.encode("utf-8")))
     return sizes
 
-
-async def _drive_canary(
-    target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    *,
+async def _drive_canary(target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, *,
     parse_by_stack: dict[str, dict[str, object]] | None = None,
 ) -> tuple[Path, StubBackend]:
     """Run one enabled-sharding deep canary through the real ``runner.run``.
@@ -60,22 +54,15 @@ async def _drive_canary(
     drives a single deep run at the locked sharding bounds, and returns the
     ``.daydream/deep`` output dir against which both tests assert.
     """
-
     stub = install_stub_backend(monkeypatch, target)
     stub.parse_by_stack = parse_by_stack
-    exit_code = await run(
-        make_config(
-            target,
-            deep_shard_enabled=True,
-            deep_shard_max_files=CANARY_MAX_FILES,
-            deep_shard_max_bytes=CANARY_MAX_BYTES,
-            deep_shard_fanout_cap=CANARY_FANOUT_CAP,
+    exit_code = await run(make_config(target, deep_shard_enabled=True, deep_shard_max_files=CANARY_MAX_FILES,
+            deep_shard_max_bytes=CANARY_MAX_BYTES, deep_shard_fanout_cap=CANARY_FANOUT_CAP,
             deep_shard_frontier_max=CANARY_FRONTIER_MAX,
         )
     )
     assert exit_code == 0
     return target / ".daydream" / "deep", stub
-
 
 def test_sibling_frontier_target_shape(sibling_frontier_target: Path) -> None:
     """The canary fixture has 13 changed python files, all importing core.py."""
@@ -88,23 +75,14 @@ def test_sibling_frontier_target_shape(sibling_frontier_target: Path) -> None:
     # Real, tree-sitter-parseable cross-file import edges are physically present.
     assert all("from core import core_helper" in (repo / f"mod{i}.py").read_text() for i in range(12))
 
-
 async def test_deep_canary_sharding_and_sibling_frontier(
-    sibling_frontier_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """Shards retain their byte/file limits, frontier context, and findings."""
-    deep, stub = await _drive_canary(
-        sibling_frontier_target,
-        monkeypatch,
-        make_config,
+    deep, stub = await _drive_canary(sibling_frontier_target, monkeypatch, make_config,
         parse_by_stack={
             "python#2": {
-                "severity": "high",
-                "confidence": "HIGH",
-                "file": "mod3.py",
-                "line": 1,
+                "severity": "high", "confidence": "HIGH", "file": "mod3.py", "line": 1,
                 "description": "finding on mod3",
             }
         },

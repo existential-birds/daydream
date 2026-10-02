@@ -62,9 +62,7 @@ from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otl
 #: payload and in no sibling's. Distinct canaries make accidental cross-task,
 #: fan-out, or destination inheritance observable.
 _CANARIES = {
-    "claude": "canary-claude-opus-main-7f3a",
-    "codex": "canary-codex-golden-91bd",
-    "pi": "canary-pi-replay-53ce",
+    "claude": "canary-claude-opus-main-7f3a", "codex": "canary-codex-golden-91bd", "pi": "canary-pi-replay-53ce",
     "osprey": "canary-osprey-strict-2ab8",
 }
 
@@ -93,12 +91,7 @@ def _flow(ext_dir: ExtDir, body: str = _SINGLE_AGENT_BODY) -> None:
     ext_dir.write_module(source)
 
 
-def _flow_config(
-    make_config: Callable[..., RunConfig],
-    repo: Path,
-    *,
-    backend: str,
-) -> RunConfig:
+def _flow_config(make_config: Callable[..., RunConfig], repo: Path, *, backend: str,) -> RunConfig:
     """RunConfig for the protocol-acceptance flow pinned to *backend*.
 
     The runner resolves the flow's ``ctx.backend_for("review")`` through
@@ -202,32 +195,19 @@ def _pin_first_message_end_receipt(monkeypatch: pytest.MonkeyPatch, pinned_ns: i
 
 def _claude_messages(canary: str) -> list[Any]:
     usage = {"input_tokens": 60, "output_tokens": 12, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 5}
-    return [
-        MockAssistantMessage(
+    return [MockAssistantMessage(
             content=[MockToolUseBlock(id="tool-claude-1", name="Read", input={"path": "src/main.py"})],
-            model="claude-opus-4-5-20250901",
-            usage=usage,
-            message_id="msg-claude-1",
+            model="claude-opus-4-5-20250901", usage=usage, message_id="msg-claude-1",
         ),
         MockUserMessage(
             content=[MockToolResultBlock(tool_use_id="tool-claude-1", content=f"tool result {canary}", is_error=False)]
         ),
-        MockAssistantMessage(
-            content=[MockTextBlock(f"done {canary}")],
-            model="claude-opus-4-5-20250901",
-            usage=usage,
+        MockAssistantMessage(content=[MockTextBlock(f"done {canary}")], model="claude-opus-4-5-20250901", usage=usage,
             message_id="msg-claude-2",
         ),
         MockResultMessage(
-            subtype="success",
-            duration_ms=150,
-            duration_api_ms=120,
-            is_error=False,
-            session_id="native-claude-session",
-            stop_reason="end_turn",
-            total_cost_usd=0.021,
-            usage=usage,
-            result=f"done {canary}",
+            subtype="success", duration_ms=150, duration_api_ms=120, is_error=False, session_id="native-claude-session",
+            stop_reason="end_turn", total_cost_usd=0.021, usage=usage, result=f"done {canary}",
         ),
     ]
 
@@ -245,13 +225,9 @@ class _RecordingClaudeBackend(ClaudeBackend):
                 self._recorded.append(event)
             yield event
 
-
 async def test_claude_real_backend_runner_trace_sdk_options_and_config(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real ClaudeBackend + SDK-shaped client through runner.run onto loopback OTLP.
 
@@ -316,7 +292,6 @@ async def test_claude_real_backend_runner_trace_sdk_options_and_config(
     assert "gen_ai.provider.name" not in billed or billed["gen_ai.provider.name"]
     _assert_leak_free(receiver, canary)
 
-
 async def test_claude_specialist_agents_make_aggregate_multi_model_without_claiming_single(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -332,13 +307,7 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
     requests: list[RequestEvent] = []
     scripted = scripted_client(_claude_messages(canary), captured=captured)
     patch_claude_sdk(monkeypatch, scripted)
-    agents = {
-        "pattern-scanner": AgentDefinition(
-            description="scan patterns",
-            prompt="scan",
-            model="sonnet",
-        )
-    }
+    agents = {"pattern-scanner": AgentDefinition(description="scan patterns", prompt="scan", model="sonnet",)}
     backend = _RecordingClaudeBackend(requests, model="claude-opus-5")
     events = []
     async for event in backend.execute(Path("/tmp"), f"scan {canary}", agents=agents):
@@ -355,12 +324,8 @@ async def test_claude_specialist_agents_make_aggregate_multi_model_without_claim
 
 # Codex: real CodexBackend replaying committed public JSONL + multi-turn fake
 
-
 async def test_codex_real_backend_replays_public_golden_shape_through_runner(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real CodexBackend, public real-capture shape, through runner.run."""
     canary = _CANARIES["codex"]
@@ -368,9 +333,7 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
     # The golden real capture (tests/fixtures/codex_jsonl/real/golden.jsonl) is
     # one turn with a command_execution + agent_message; its text is public
     # sanitized content, so the canary rides in the prompt and answer here.
-    lines = [
-        '{"type":"thread.started","thread_id":"th_golden_public"}',
-        '{"type":"turn.started"}',
+    lines = ['{"type":"thread.started","thread_id":"th_golden_public"}', '{"type":"turn.started"}',
         '{"type":"item.started","item":{"id":"item_0","type":"command_execution",'
         '"command":"/bin/zsh -lc \'sed -n 1p README.md\'","status":"in_progress"}}',
         '{"type":"item.completed","item":{"id":"item_0","type":"command_execution",'
@@ -423,29 +386,20 @@ async def test_codex_real_backend_replays_public_golden_shape_through_runner(
     assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
-
 async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Multi-turn protocol shape the golden does not cover (plan §789)."""
     canary = _CANARIES["codex"]
     _flow(ext_dir)
-    install_fake_cli_process(
-        monkeypatch,
-        "codex",
-        lines=[
-            '{"type":"thread.started","thread_id":"th_two_turns"}',
-            '{"type":"turn.started"}',
+    install_fake_cli_process(monkeypatch, "codex",
+        lines=['{"type":"thread.started","thread_id":"th_two_turns"}', '{"type":"turn.started"}',
             '{"type":"item.started","item":{"id":"item_0","type":"command_execution",'
             '"command":"/bin/zsh -lc \'cat a.txt\'","status":"in_progress"}}',
             '{"type":"item.completed","item":{"id":"item_0","type":"command_execution",'
             '"command":"/bin/zsh -lc \'cat a.txt\'","aggregated_output":"A","exit_code":0,"status":"completed"}}',
             f'{{"type":"item.completed","item":{{"id":"item_1","type":"agent_message","text":"first {canary}"}}}}',
-            '{"type":"turn.completed","usage":{"input_tokens":150,"output_tokens":75}}',
-            '{"type":"turn.started"}',
+            '{"type":"turn.completed","usage":{"input_tokens":150,"output_tokens":75}}', '{"type":"turn.started"}',
             '{"type":"item.started","item":{"id":"item_2","type":"command_execution",'
             '"command":"/bin/zsh -lc \'cat b.txt\'","status":"in_progress"}}',
             '{"type":"item.completed","item":{"id":"item_2","type":"command_execution",'
@@ -471,12 +425,8 @@ async def test_codex_multi_turn_replay_yields_two_tool_spans_and_isolated_turns(
 
 # Pi: real PiBackend with the explicitly labeled long-generation replay
 
-
 async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The 395.332-second replay through runner.run: exact ns, choice, billing.
 
@@ -492,12 +442,8 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     # Inject the per-run canary into the replay's assistant text so the wire
     # payload positively proves this run's content (leak-free check requires
     # the canary present; the rest of the fixture stays frozen placeholder).
-    lines = _replay_lines(
-        "long_generation_replay.jsonl",
-        {
-            "REPLAY_TEXT_ONE": f"replay one {canary}",
-            "REPLAY_TEXT_TWO": f"replay two {canary}",
-        },
+    lines = _replay_lines("long_generation_replay.jsonl",
+        {"REPLAY_TEXT_ONE": f"replay one {canary}", "REPLAY_TEXT_TWO": f"replay two {canary}"},
     )
     spawner = install_fake_cli_process(monkeypatch, "pi", lines=lines)
     # Plan §364/§519+corrections: inject the deterministic host receipt clock
@@ -580,13 +526,9 @@ async def test_pi_replay_exact_native_timing_choice_and_billing_through_runner(
     assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
-
 @pytest.mark.parametrize("vendor", ["otlp", "honeyhive", "langsmith"])
 async def test_pi_metadata_mode_omits_generation_choice_content(
-    vendor: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
+    vendor: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Metadata mode through a real adapter: generation choice content absent.
@@ -600,12 +542,8 @@ async def test_pi_metadata_mode_omits_generation_choice_content(
     """
     canary = _CANARIES["pi"]
     _flow(ext_dir)
-    lines = _replay_lines(
-        "long_generation_replay.jsonl",
-        {
-            "REPLAY_TEXT_ONE": f"replay one {canary}",
-            "REPLAY_TEXT_TWO": f"replay two {canary}",
-        },
+    lines = _replay_lines("long_generation_replay.jsonl",
+        {"REPLAY_TEXT_ONE": f"replay one {canary}", "REPLAY_TEXT_TWO": f"replay two {canary}"},
     )
     install_fake_cli_process(monkeypatch, "pi", lines=lines)
     _pin_first_message_end_receipt(monkeypatch, 1788690709621000000)
@@ -649,20 +587,14 @@ async def test_pi_metadata_mode_omits_generation_choice_content(
     home = os.environ.get("HOME", "/home/operator")
     assert home not in payload
 
-
 async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The committed lifecycle fixture: two generations, one tool, canary linkage."""
     canary = _CANARIES["pi"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch,
-        "pi",
-        lines=_replay_lines("generation_lifecycle.jsonl", {"src/example.py": f"src/{canary}.py"}),
+        monkeypatch, "pi", lines=_replay_lines("generation_lifecycle.jsonl", {"src/example.py": f"src/{canary}.py"}),
     )
     # Deterministic host message_end receipt strictly between the two native
     # starts (gen0 native 1788690314289000000 ns < P < gen1 native
@@ -691,74 +623,35 @@ async def test_pi_generation_lifecycle_fixture_two_generations_around_one_tool(
 
 
 def _osprey_lines(canary: str) -> list[str]:
-    return [
-        json.dumps({"event": "protocol", "version": 2}),
-        json.dumps(
-            {
-                "event": "session_start",
-                "session_id": "native-osprey-session",
-                "started_at": "2026-09-09T12:00:00Z",
-                "model": "osprey-native-model",
-                "provider": "osprey-native-provider",
+    return [json.dumps({"event": "protocol", "version": 2}),
+        json.dumps({
+                "event": "session_start", "session_id": "native-osprey-session", "started_at": "2026-09-09T12:00:00Z",
+                "model": "osprey-native-model", "provider": "osprey-native-provider",
             }
-        ),
-        json.dumps({"event": "turn_start", "turn_id": "t1", "timestamp": "2026-09-09T12:00:01Z"}),
+        ), json.dumps({"event": "turn_start", "turn_id": "t1", "timestamp": "2026-09-09T12:00:01Z"}),
         json.dumps({"event": "thinking_delta", "content": f"osprey thinking {canary}"}),
         json.dumps({"event": "text_delta", "content": f"osprey answer {canary}"}),
-        json.dumps(
-            {
-                "event": "tool_call",
-                "tool_call_id": "call_osp_1",
-                "tool_name": "read",
+        json.dumps({"event": "tool_call", "tool_call_id": "call_osp_1", "tool_name": "read",
                 "arguments": {"path": "src/osp.py"},
             }
-        ),
-        json.dumps(
-            {
-                "event": "tool_result",
-                "tool_call_id": "call_osp_1",
-                "tool_name": "read",
-                "status": "success",
-                "content": "file body",
-                "duration_ms": 41,
+        ), json.dumps({"event": "tool_result", "tool_call_id": "call_osp_1", "tool_name": "read", "status": "success",
+                "content": "file body", "duration_ms": 41,
             }
         ),
-        json.dumps(
-            {
-                "event": "turn_end",
-                "turn_id": "t1",
-                "usage_reported": True,
-                "duration_ms": 90,
-                "prompt_tokens": 30,
-                "completion_tokens": 6,
-                "cached_tokens": 4,
-                "cache_write_tokens": 2,
-                "thinking_tokens": 3,
+        json.dumps({
+                "event": "turn_end", "turn_id": "t1", "usage_reported": True, "duration_ms": 90, "prompt_tokens": 30,
+                "completion_tokens": 6, "cached_tokens": 4, "cache_write_tokens": 2, "thinking_tokens": 3,
                 "cost_usd": "0.007",
             }
-        ),
-        json.dumps(
-            {
-                "event": "session_end",
-                "outcome": "completed",
-                "exit_code": 0,
-                "total_cost_usd": "0.007",
-                "total_prompt_tokens": 30,
-                "total_completion_tokens": 6,
-                "total_cached_tokens": 4,
-                "total_cache_write_tokens": 2,
-                "total_thinking_tokens": 3,
-                "session_wallclock_ms": 120,
+        ), json.dumps({"event": "session_end", "outcome": "completed", "exit_code": 0, "total_cost_usd": "0.007",
+                "total_prompt_tokens": 30, "total_completion_tokens": 6, "total_cached_tokens": 4,
+                "total_cache_write_tokens": 2, "total_thinking_tokens": 3, "session_wallclock_ms": 120,
             }
         ),
     ]
 
-
 async def test_osprey_strict_protocol_fixture_through_runner(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real OspreyBackend via strict fake process: argv, session usage, no gen child."""
     canary = _CANARIES["osprey"]
@@ -796,10 +689,8 @@ async def test_osprey_strict_protocol_fixture_through_runner(
     assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
-
 async def test_osprey_explicit_zero_temperature_reaches_argv_and_config(
-    monkeypatch: pytest.MonkeyPatch,
-    feature_branch_repo: Path,
+    monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path,
 ) -> None:
     """Only explicit temperature=0.0 is admitted; it reaches argv AND typed config."""
     canary = _CANARIES["osprey"]
@@ -818,20 +709,14 @@ async def test_osprey_explicit_zero_temperature_reaches_argv_and_config(
 
 # Schema-valid content on the wire (pinned semconv message schemas)
 
-
 async def test_attempt_input_messages_validate_against_pinned_schema(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """gen_ai.input.messages on the attempt validates against the pinned schema."""
     canary = _CANARIES["pi"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch,
-        "pi",
-        lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
+        monkeypatch, "pi", lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
     )
     with otlp_collector() as receiver:
         _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
@@ -857,22 +742,16 @@ def _vendor_env(monkeypatch: pytest.MonkeyPatch, vendor: str, base: str) -> None
         monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", base + "/v1/traces")
     monkeypatch.setenv("OTEL_EXPORTER_OTLP_TRACES_TIMEOUT", "2")
 
-
 @pytest.mark.parametrize("vendor", ["otlp", "honeyhive", "langsmith"])
 async def test_generic_http_protobuf_reaches_every_destination(
-    vendor: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
+    vendor: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """HTTP/protobuf transport for every destination consumes Task 4A's contract."""
     canary = _CANARIES["pi"]
     _flow(ext_dir)
     install_fake_cli_process(
-        monkeypatch,
-        "pi",
-        lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
+        monkeypatch, "pi", lines=_replay_lines("simple_text.jsonl", {"Hello from Pi": f"pi reply {canary}"}),
     )
     expected_paths = {"otlp": "/v1/traces", "honeyhive": "/opentelemetry/v1/traces", "langsmith": "/otel/v1/traces"}
     with otlp_collector() as receiver:
@@ -892,12 +771,8 @@ async def test_generic_http_protobuf_reaches_every_destination(
     assert _attempt(spans)
     _assert_leak_free(receiver, canary)
 
-
 async def test_generic_grpc_transport_reaches_real_loopback_server(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The generic gRPC destination speaks the real TraceService protocol."""
     canary = _CANARIES["osprey"]
@@ -922,12 +797,8 @@ async def test_generic_grpc_transport_reaches_real_loopback_server(
     assert receiver.requests[0]["path"] == "/grpc"
     _assert_leak_free(receiver, canary)
 
-
 async def test_grpc_outage_fails_open_and_review_completes(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig], monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Transport outage on gRPC: bounded shutdown, run succeeds, warning logged."""
@@ -950,37 +821,22 @@ async def test_grpc_outage_fails_open_and_review_completes(
 
 
 _PI_RETRY_FAILED_LINES = [
-    json.dumps({"type": "session", "sessionId": "pi_ses_retry"}),
-    json.dumps({"type": "agent_start"}),
+    json.dumps({"type": "session", "sessionId": "pi_ses_retry"}), json.dumps({"type": "agent_start"}),
     json.dumps({"type": "turn_start"}),
     json.dumps(
-        {
-            "type": "message_end",
-            "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]},
-        }
-    ),
-    json.dumps(
-        {
-            "type": "turn_end",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "partial"}],
-                "stopReason": "error",
+        {"type": "message_end", "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}]}}
+    ), json.dumps({"type": "turn_end",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "partial"}], "stopReason": "error",
                 "errorMessage": "429 too many requests",
                 "usage": {"input": 500, "output": 20, "cacheRead": 0, "cost": {"total": 0.003}},
             },
         }
-    ),
-    json.dumps({"type": "agent_end", "messages": []}),
+    ), json.dumps({"type": "agent_end", "messages": []}),
 ]
 
-
 async def test_runner_failed_billed_attempt_wears_its_own_bill_real_pi(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Step 3 via a real adapter: the failed billed attempt keeps its bill.
 

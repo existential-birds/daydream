@@ -35,11 +35,7 @@ def _task(fixture_manifest_path: Path) -> DaydreamReviewTask:
     # here exercise launch/sealing, not the gate, so hand them a passed one.
     with passed_gate_report() as gate_path:
         taskset = DaydreamReviewTaskset(
-            DaydreamReviewConfig(
-                id="daydream-review",
-                manifest_path=fixture_manifest_path,
-                gate_report_path=gate_path,
-            )
+            DaydreamReviewConfig(id="daydream-review", manifest_path=fixture_manifest_path, gate_report_path=gate_path)
         )
         return list(taskset.load())[0]
 
@@ -54,8 +50,7 @@ def _trace(task: DaydreamReviewTask, *, turns: int = 1) -> vf.Trace:
     list.
     """
     trace: vf.Trace = vf.Trace(
-        task=vf.TraceTask(type=type(task).__name__, data=task.data),
-        agent=vf.AgentInfo(model=MODEL),
+        task=vf.TraceTask(type=type(task).__name__, data=task.data), agent=vf.AgentInfo(model=MODEL),
     )
     for index in range(turns):
         parent = None if index == 0 else len(trace.nodes) - 1
@@ -96,9 +91,7 @@ class _ArchiveRuntime(_SessionsListingRuntime):
 
 
 @pytest.mark.parametrize("backend", sorted(STRATEGIES))
-async def test_launch_passes_the_selected_backend_to_the_cli(
-    backend: str, fixture_manifest_path: Path
-) -> None:
+async def test_launch_passes_the_selected_backend_to_the_cli(backend: str, fixture_manifest_path: Path) -> None:
     task = _task(fixture_manifest_path)
     trace = _trace(task)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig(backend=backend, fanout_concurrency=3))
@@ -121,10 +114,7 @@ async def test_launch_passes_the_selected_backend_to_the_cli(
     assert trace.info["daydream_backend"] == backend
     assert trace.info["daydream_exit_code"] == 0
 
-
-async def test_launch_carries_extra_args_before_the_target(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_carries_extra_args_before_the_target(fixture_manifest_path: Path) -> None:
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(
         DaydreamReviewHarnessConfig(backend="codex", extra_args=["--reasoning-effort", "high"])
@@ -137,10 +127,7 @@ async def test_launch_carries_extra_args_before_the_target(
     assert argv[argv.index("--reasoning-effort") + 1] == "high"
     assert argv.index("--reasoning-effort") < argv.index("/work/repo")
 
-
-async def test_launch_unsets_ambient_github_credentials(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_unsets_ambient_github_credentials(fixture_manifest_path: Path) -> None:
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = FakeRuntime(exit_code=0)
@@ -149,18 +136,9 @@ async def test_launch_unsets_ambient_github_credentials(
 
     (argv, _), = runtime.programs
     assert argv[:10] == [
-        "env",
-        "-u",
-        "DAYDREAM_APP_ID",
-        "-u",
-        "DAYDREAM_APP_PRIVATE_KEY",
-        "-u",
-        "GH_TOKEN",
-        "-u",
-        "GITHUB_TOKEN",
+        "env", "-u", "DAYDREAM_APP_ID", "-u", "DAYDREAM_APP_PRIVATE_KEY", "-u", "GH_TOKEN", "-u", "GITHUB_TOKEN",
         "daydream",
     ]
-
 
 async def test_launch_clears_operator_observability_env(fixture_manifest_path: Path) -> None:
     """Operator-only destinations (tracing, trajectory upload) never leak into a
@@ -178,17 +156,12 @@ async def test_launch_clears_operator_observability_env(fixture_manifest_path: P
     assert env["DAYDREAM_TRACE_TO"] == ""
     assert env["DAYDREAM_TRAJECTORY_HUB_REPO"] == ""
 
-
-async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(fixture_manifest_path: Path) -> None:
     """Tests still red after the fix pass is an outcome to score, not a crash."""
     task = _task(fixture_manifest_path)
     trace = _trace(task)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
-    runtime = _ArchiveRuntime(
-        exit_code=1,
-        sessions=["session-1"],
+    runtime = _ArchiveRuntime(exit_code=1, sessions=["session-1"],
         files=_archive_with_trajectory("/rollout/archive", final_metrics={"cost_usd": 1.0}),
     )
 
@@ -197,10 +170,7 @@ async def test_launch_stops_the_trace_when_a_completed_run_exits_nonzero(
     assert result.exit_code == 1
     assert trace.stop_condition == "daydream_completed_nonzero"
 
-
-async def test_launch_leaves_a_crash_to_raise(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_leaves_a_crash_to_raise(fixture_manifest_path: Path) -> None:
     """No artifacts means infrastructure failure: let HarnessError fire."""
     task = _task(fixture_manifest_path)
     trace = _trace(task)
@@ -211,28 +181,20 @@ async def test_launch_leaves_a_crash_to_raise(
 
     assert trace.stop_condition is None
 
-
-async def test_launch_does_not_stop_on_a_half_written_archive(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_does_not_stop_on_a_half_written_archive(fixture_manifest_path: Path) -> None:
     """final_metrics is written last; without it the pipeline did not finish."""
     task = _task(fixture_manifest_path)
     trace = _trace(task)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
     runtime = _ArchiveRuntime(
-        exit_code=1,
-        sessions=["session-1"],
-        files=_archive_with_trajectory("/rollout/archive", final_metrics=None),
+        exit_code=1, sessions=["session-1"], files=_archive_with_trajectory("/rollout/archive", final_metrics=None),
     )
 
     await harness.launch(_ctx(), trace, runtime, ENDPOINT, SECRET, {})
 
     assert trace.stop_condition is None
 
-
-async def test_setup_names_the_missing_binaries(
-    fixture_manifest_path: Path
-) -> None:
+async def test_setup_names_the_missing_binaries(fixture_manifest_path: Path) -> None:
     class MissingBinaries(_DockerLikeRuntime):
         """Docker-shaped runtime whose image is missing every required binary."""
 
@@ -248,10 +210,7 @@ async def test_setup_names_the_missing_binaries(
     assert "run-as-agent" in message, "a wrapper-less image must fail setup"
     assert "build_images.py" in message, "the error must say how to fix it"
 
-
-async def test_launch_refuses_a_rollout_that_captured_no_model_calls(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_refuses_a_rollout_that_captured_no_model_calls(fixture_manifest_path: Path) -> None:
     """Capture loss must be loud: a bypassed interception server would otherwise
     produce a normal-looking archive and a positive reward."""
     task = _task(fixture_manifest_path)
@@ -297,9 +256,7 @@ class _OrderingDockerRuntime(_DockerLikeRuntime):
         return await super().run_program(argv, env)
 
 
-async def test_launch_uses_run_as_agent_wrapper_under_docker(
-    fixture_manifest_path: Path
-) -> None:
+async def test_launch_uses_run_as_agent_wrapper_under_docker(fixture_manifest_path: Path) -> None:
     """Container launches drop to the non-root agent identity via run-as-agent.
 
     The image's default user is root and the root-owned run-as-agent wrapper is
@@ -329,10 +286,7 @@ async def test_launch_uses_run_as_agent_wrapper_under_docker(
     assert "daydream" in argv
     assert argv[argv.index("--backend") + 1] == "claude"
 
-
-async def test_docker_launch_preflights_writability_before_run_as_agent(
-    fixture_manifest_path: Path
-) -> None:
+async def test_docker_launch_preflights_writability_before_run_as_agent(fixture_manifest_path: Path) -> None:
     """The docker deep flow's first write succeeds because the image bakes both
     trees agent-owned (repo.Dockerfile's combined chown layer covers /work/repo
     and /srv/mirror.git). The harness therefore performs no recursive chown at
@@ -347,13 +301,10 @@ async def test_docker_launch_preflights_writability_before_run_as_agent(
     await harness.launch(_ctx(), _trace(task), runtime, ENDPOINT, SECRET, {})
 
     for argv in runtime.commands:
-        assert "chown" not in argv, (
-            "a docker rollout must never issue a recursive ownership command; "
+        assert "chown" not in argv, ("a docker rollout must never issue a recursive ownership command; "
             "the image bakes ownership at build time"
         )
-    preflight = next(
-        argv for argv in runtime.commands if f"test -w {harness.config.repo_path}" in " ".join(argv)
-    )
+    preflight = next(argv for argv in runtime.commands if f"test -w {harness.config.repo_path}" in " ".join(argv))
     assert f"test -w {harness.config.repo_path}" in " ".join(preflight)
     assert "test -w /srv/mirror.git" in " ".join(preflight)
     (argv, _), = runtime.programs
@@ -362,13 +313,10 @@ async def test_docker_launch_preflights_writability_before_run_as_agent(
         "the writability preflight must run before the run-as-agent launch"
     )
 
-
 async def test_preflight_quotes_repo_path(fixture_manifest_path: Path) -> None:
     """#705 fold-in: the binary-check preflight passes repo_path as one shell
     argument, never an unquoted interpolation."""
-    harness = DaydreamReviewHarness(
-        DaydreamReviewHarnessConfig(repo_path="/data/repo with spaces & $dollar")
-    )
+    harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig(repo_path="/data/repo with spaces & $dollar"))
     runtime = FakeRuntime(exit_code=0)
 
     await harness.setup(runtime)
@@ -376,23 +324,14 @@ async def test_preflight_quotes_repo_path(fixture_manifest_path: Path) -> None:
     (argv,) = [argv for argv in runtime.commands if argv[:2] == ["sh", "-c"]]
     assert "test -d '/data/repo with spaces & $dollar'" in argv[2]
 
-
-async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
-    fixture_manifest_path: Path
-) -> None:
+async def test_docker_launch_fails_closed_when_trees_not_agent_writable(fixture_manifest_path: Path) -> None:
     """A non-agent-writable repo or mirror is a rebuild signal, never a runtime
     repair: launch raises RuntimeError naming both paths and the rebuild entry
     point, and no run-as-agent launch attempt follows."""
     task = _task(fixture_manifest_path)
     harness = DaydreamReviewHarness(DaydreamReviewHarnessConfig())
-    runtime = _OrderingDockerRuntime(
-        exit_code=1,
-        failed_argv=[
-            "run-as-agent",
-            "sh",
-            "-c",
-            f"test -w {harness.config.repo_path} && test -w /srv/mirror.git",
-        ],
+    runtime = _OrderingDockerRuntime(exit_code=1,
+        failed_argv=["run-as-agent", "sh", "-c", f"test -w {harness.config.repo_path} && test -w /srv/mirror.git"],
     )
 
     with pytest.raises(RuntimeError) as excinfo:
@@ -403,8 +342,6 @@ async def test_docker_launch_fails_closed_when_trees_not_agent_writable(
     assert "/srv/mirror.git" in message
     assert "images/build_images.py" in message
     assert runtime.programs == [], "no launch attempt may follow a failed preflight"
-
-
 
 def test_run_as_agent_wrapper_executes_and_enforces_root_only() -> None:
     """The privilege-drop seam must actually run, not just be argv[0].
@@ -441,9 +378,7 @@ class _ArchivingDockerRuntime(_SessionsListingRuntime, _DockerLikeRuntime):
         self.sessions = ["session-1"]
 
 
-async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(
-    fixture_manifest_path: Path
-) -> None:
+async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(fixture_manifest_path: Path) -> None:
     """The sealed run dir is re-chowned root-owned read-only at seal time.
 
     base.Dockerfile documents that the supervisor re-chowns the sealed run dir
@@ -463,10 +398,7 @@ async def test_seal_re_chowns_the_run_dir_root_owned_under_docker(
     assert "chmod -R a-w" in hardened[-1][2]
     assert any(path.endswith("/seal.json") for path in runtime.writes), "seal.json must be written"
 
-
-async def test_seal_failure_is_fail_closed_and_recorded(
-    fixture_manifest_path: Path
-) -> None:
+async def test_seal_failure_is_fail_closed_and_recorded(fixture_manifest_path: Path) -> None:
     """A seal-production failure is fail-closed, never silently unsealed.
 
     seal_archived_run swallows every exception, but not fail-open: it overwrites

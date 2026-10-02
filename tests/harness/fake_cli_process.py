@@ -176,17 +176,9 @@ class _FakePipeTransport:
 class FakeCliProcess:
     """An ``asyncio.subprocess.Process`` stand-in with modeled exit semantics."""
 
-    def __init__(
-        self,
-        lines: list[str],
-        *,
-        hang: bool = False,
-        exit_code: int = 0,
-        ignore_sigterm: bool = False,
-        stderr_lines: list[str] | None = None,
-        stderr_held_open: bool = False,
-        stdout_reader: asyncio.StreamReader | None = None,
-        stderr_reader: asyncio.StreamReader | None = None,
+    def __init__(self, lines: list[str], *, hang: bool = False, exit_code: int = 0, ignore_sigterm: bool = False,
+        stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
+        stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
     ) -> None:
         if stdout_reader is not None:
             self.stdout: asyncio.StreamReader = stdout_reader
@@ -252,17 +244,9 @@ class FakeCliSpawner:
 
 
 def install_fake_cli_process(
-    monkeypatch: pytest.MonkeyPatch,
-    cli: str,
-    *,
-    lines: list[str],
-    hang: bool = False,
-    exit_code: int = 0,
-    ignore_sigterm: bool = False,
-    stderr_lines: list[str] | None = None,
-    stderr_held_open: bool = False,
-    stdout_reader: asyncio.StreamReader | None = None,
-    stderr_reader: asyncio.StreamReader | None = None,
+    monkeypatch: pytest.MonkeyPatch, cli: str, *, lines: list[str], hang: bool = False, exit_code: int = 0,
+    ignore_sigterm: bool = False, stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
+    stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
 ) -> FakeCliSpawner:
     """Patch ``create_subprocess_exec`` at the transport seam.
 
@@ -282,25 +266,15 @@ def install_fake_cli_process(
     spawner = FakeCliSpawner()
 
     async def fake_exec(*args: Any, **kwargs: Any) -> FakeCliProcess:
-        assert args[0] == cli, (
-            f"spawned CLI argv[0] {args[0]!r} does not match declared cli {cli!r}"
-        )
+        assert args[0] == cli, (f"spawned CLI argv[0] {args[0]!r} does not match declared cli {cli!r}")
         proc = FakeCliProcess(
-            lines,
-            hang=hang,
-            exit_code=exit_code,
-            ignore_sigterm=ignore_sigterm,
-            stderr_lines=stderr_lines,
-            stderr_held_open=stderr_held_open,
-            stdout_reader=stdout_reader,
-            stderr_reader=stderr_reader,
+            lines, hang=hang, exit_code=exit_code, ignore_sigterm=ignore_sigterm, stderr_lines=stderr_lines,
+            stderr_held_open=stderr_held_open, stdout_reader=stdout_reader, stderr_reader=stderr_reader,
         )
         spawner.procs.append(proc)
         spawner.argvs.append(tuple(str(a) for a in args))
         spawner.kwargs.append(kwargs)
         return proc
 
-    monkeypatch.setattr(
-        "daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec
-    )
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", fake_exec)
     return spawner

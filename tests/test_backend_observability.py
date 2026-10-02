@@ -36,13 +36,9 @@ from tests.harness.fake_cli_process import FakeCliProcess
 from tests.harness.trajectory import make_recorder
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failed", [False, True])
-async def test_claude_terminal_metadata_survives_billed_failure(
-    monkeypatch: pytest.MonkeyPatch, failed: bool,
-) -> None:
-    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 20,
-             "cache_creation_input_tokens": 30}
+async def test_claude_terminal_metadata_survives_billed_failure(monkeypatch: pytest.MonkeyPatch, failed: bool) -> None:
+    usage = {"input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 30}
     messages = [
         AssistantMessage(content=[TextBlock("partial")], model="actual-model", usage=usage),
         UserMessage(content=[ToolResultBlock("call", [{"type": "text", "text": "structured tool output"}])]),
@@ -74,8 +70,6 @@ async def test_claude_terminal_metadata_survives_billed_failure(
     tool = next(e for e in events if isinstance(e, ToolResultEvent))
     assert json.loads(tool.output) == [{"type": "text", "text": "structured tool output"}]
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failed", [False, True])
 async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) -> None:
     msg = {"role": "assistant", "model": "actual-model", "provider": "actual-provider",
@@ -88,12 +82,10 @@ async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) 
     schema = {"type": "object", "properties": {"answer": {"type": "string"}}}
     events: list[Any] = []
     delivered_prompts: list[str] = []
-
     async def spawn_child(*args: str, **kwargs: Any) -> Any:
         assert args[-1].startswith("@/")
         delivered_prompts.append(Path(args[-1][1:]).read_text(encoding="utf-8"))
         return proc
-
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn_child) as spawn:
         try:
             async for event in PiBackend("requested-model").execute(Path("/tmp"), "actual prompt", schema,
@@ -123,16 +115,12 @@ async def test_pi_actual_identity_cache_totals_and_failed_billing(failed: bool) 
     assert request.output_schema == schema
     assert request.system_prompt
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("native_identity", "expected_model", "expected_provider"),
     [
         ({}, "requested-model", None),
-        ({"model": "custom-response-model", "provider": "custom-provider"},
-         "custom-response-model", "custom-provider"),
-    ],
-    ids=["provider-unavailable", "native-custom-provider"],
+        ({"model": "custom-response-model", "provider": "custom-provider"}, "custom-response-model", "custom-provider"),
+    ], ids=["provider-unavailable", "native-custom-provider"],
 )
 async def test_codex_usage_scope_and_native_session(
     native_identity: dict[str, str], expected_model: str, expected_provider: str | None,
@@ -156,8 +144,6 @@ async def test_codex_usage_scope_and_native_session(
         assert response.model_name == expected_model
         assert response.provider_name == expected_provider
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("failed", [False, True])
 async def test_osprey_terminal_usage_and_native_tool_metadata(failed: bool) -> None:
     native = [
@@ -205,8 +191,6 @@ async def test_osprey_terminal_usage_and_native_tool_metadata(failed: bool) -> N
     request = next(e for e in events if isinstance(e, RequestEvent))
     assert request.timestamp == "2026-09-05T12:00:00Z"
 
-
-@pytest.mark.asyncio
 async def test_claude_preserves_selected_native_model_usage(monkeypatch: pytest.MonkeyPatch) -> None:
     terminal = ResultMessage(
         subtype="success", duration_ms=10, duration_api_ms=8, is_error=False, num_turns=1,
@@ -230,35 +214,28 @@ async def test_claude_preserves_selected_native_model_usage(monkeypatch: pytest.
     assert result.model_name == "actual-model"
     assert result.provider_name == "bedrock"
 
-
 def test_pi_preserves_mixed_tool_blocks_and_structured_details() -> None:
     result = {"content": [{"type": "text", "text": "caption"},
                           {"type": "image", "data": "public-image", "mimeType": "image/png"}],
               "details": {"count": 1}}
     assert json.loads(_render_tool_result(result)) == result
 
-
-@pytest.mark.asyncio
 async def test_request_event_does_not_fabricate_a_trajectory_step(tmp_path: Path) -> None:
     request = RequestEvent(prompt="effective prompt", output_schema={"type": "object"})
     assert isinstance(request, AgentEvent)
     recorder = make_recorder(
-        tmp_path, path=tmp_path / "trajectory.json",
-        agent_model_name="model", session_id="session",
+        tmp_path, path=tmp_path / "trajectory.json", agent_model_name="model", session_id="session",
     )
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             inv.observe(request)
 
-
 # --- P18 Task 1: cross-backend typed-config contract through real event streams
-
 
 def test_all_four_configs_share_the_common_subset() -> None:
     """Every backend config subclasses the closed common subset."""
     configs = [
-        ClaudeRequestConfig(model_mode="single"),
-        CodexRequestConfig(model_mode="single", sandbox_mode="read-only"),
+        ClaudeRequestConfig(model_mode="single"), CodexRequestConfig(model_mode="single", sandbox_mode="read-only"),
         PiRequestConfig(model_mode="single", no_skills=True),
         OspreyRequestConfig(model_mode="single", approval_mode="deny-untrusted"),
     ]
@@ -272,13 +249,10 @@ def test_all_four_configs_share_the_common_subset() -> None:
     assert isinstance(configs[2], PiRequestConfig)
     assert isinstance(configs[3], OspreyRequestConfig)
 
-
-@pytest.mark.asyncio
 async def test_claude_request_event_through_real_stream_carries_config() -> None:
     """Claude's real-path stream attaches the closed typed config + provenance."""
     terminal = ResultMessage(
-        subtype="success", duration_ms=10, duration_api_ms=8, is_error=False, num_turns=1,
-        session_id="session",
+        subtype="success", duration_ms=10, duration_api_ms=8, is_error=False, num_turns=1, session_id="session",
     )
     monkeypatch_state = pytest.MonkeyPatch()
     try:
@@ -286,7 +260,6 @@ async def test_claude_request_event_through_real_stream_carries_config() -> None
         events = [e async for e in ClaudeBackend("requested-model").execute(Path("/tmp"), "prompt")]
     finally:
         monkeypatch_state.undo()
-
     request = next(e for e in events if isinstance(e, RequestEvent))
     assert isinstance(request.config, ClaudeRequestConfig)
     assert request.model_source == "configured"
@@ -294,19 +267,14 @@ async def test_claude_request_event_through_real_stream_carries_config() -> None
     # Generation lifecycle events are never emitted by an opaque backend.
     assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in events)
 
-
-@pytest.mark.asyncio
 async def test_codex_and_osprey_emit_no_generation_events() -> None:
     """Only Pi is native_generation_interval; the others stay structural."""
     codex_proc = codex_fixture("simple_text.jsonl")
-    with patch(
-        "daydream.backends._transport.asyncio.create_subprocess_exec", return_value=codex_proc,
-    ):
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=codex_proc):
         codex_events = [e async for e in CodexBackend(model="gpt-5.3-codex").execute(Path("/tmp"), "p")]
     assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in codex_events)
     request = next(e for e in codex_events if isinstance(e, RequestEvent))
     assert isinstance(request.config, CodexRequestConfig)
-
     # Osprey: build the full JSONL stream inline (protocol/session_start/…).
     osprey_body = [
         {"event": "protocol", "version": 2},

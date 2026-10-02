@@ -35,10 +35,7 @@ from tests.harness.git_helpers import git as _git
 
 
 def _install_recording_commands(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    names: tuple[str, ...],
-    exit_code: dict[str, int] | None = None,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, names: tuple[str, ...], exit_code: dict[str, int] | None = None,
 ) -> Path:
     """Prepend a fakebin of PATH-shim recorders for ``names`` to PATH.
 
@@ -80,11 +77,7 @@ def _install_recording_commands(
     for name in names:
         shim = fakebin / name
         if name == "git":
-            tail = (
-                "import subprocess\n"
-                f"sys.exit(subprocess.run([{real_git!r}, *sys.argv[1:]])"
-                ".returncode)\n"
-            )
+            tail = ("import subprocess\n" f"sys.exit(subprocess.run([{real_git!r}, *sys.argv[1:]])" ".returncode)\n")
         else:
             status = (exit_code or {}).get(name, 0)
             tail = f"sys.exit({status})\n"
@@ -110,11 +103,7 @@ def _stage_file(worktree: Path, relpath: str, content: str) -> None:
 
 
 def _run_pre_commit(
-    worktree: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    exit_code: dict[str, int] | None = None,
+    worktree: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, exit_code: dict[str, int] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], list[dict[str, Any]]]:
     """Install the real pre-commit hook in *worktree*, run it under recording
     PATH shims, and return ``(completed process, recorded commands)``.
@@ -129,14 +118,8 @@ def _run_pre_commit(
     shutil.copy(repo_root / "scripts" / "hooks" / "pre-commit", hook)
     hook.chmod(0o755)
     log = _install_recording_commands(tmp_path, monkeypatch, ("uv", "git"), exit_code=exit_code)
-    proc = subprocess.run(
-        [str(hook)],
-        cwd=worktree,
-        capture_output=True,
-        text=True,
-    )
+    proc = subprocess.run([str(hook)], cwd=worktree, capture_output=True, text=True,)
     return proc, _read_command_records(log)
-
 
 def test_pre_commit_runs_ruff_only_on_staged_python_files(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
@@ -176,7 +159,6 @@ def test_pre_commit_runs_ruff_only_on_staged_python_files(
     # No other commands may appear.
     assert {r["command"] for r in recs} <= {"uv", "git"}
 
-
 def test_pre_commit_lints_index_content_not_working_tree(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -198,7 +180,6 @@ def test_pre_commit_lints_index_content_not_working_tree(
     # under the SAME path is excluded from the lint feed.
     assert call["stdin"] == "STAGED_VALUE = 1\n"
 
-
 def test_pre_commit_exits_zero_without_staged_python(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -207,7 +188,6 @@ def test_pre_commit_exits_zero_without_staged_python(
     assert proc.returncode == 0, proc.stdout + proc.stderr
     # No ruff invocation when nothing relevant is staged — the speed contract.
     assert not [r for r in recs if r["command"] == "uv"]
-
 
 def test_pre_commit_skips_python_files_outside_lint_scope(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
@@ -230,7 +210,6 @@ def test_pre_commit_skips_python_files_outside_lint_scope(
     assert call["args"] == ["run", "ruff", "check", "--stdin-filename", "daydream/in_scope.py", "-"]
     assert call["stdin"] == "x = 1\n"
 
-
 def test_pre_commit_propagates_ruff_failure(
     tmp_path: Path, linked_worktree: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,39 +222,27 @@ def test_pre_commit_propagates_ruff_failure(
     # Failure output names the gate and how to fix it:
     assert "ruff" in proc.stdout.lower() or "ruff" in proc.stderr.lower()
 
-
-def test_pre_push_scrubs_inherited_git_env_from_the_gate(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_pre_push_scrubs_inherited_git_env_from_the_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The gate subprocess must not inherit the pushing worktree's git env.
 
-    Git exports ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE``/
-    ``GIT_COMMON_DIR``/``GIT_PREFIX`` to hooks, so without the
-    ``git rev-parse --local-env-vars`` scrub every gate subprocess that builds
-    its own throwaway repository would write into the index of the worktree
-    being pushed instead of honoring ``git -C <repo>``. Silent and destructive.
+    Git exports ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_INDEX_FILE``/ ``GIT_COMMON_DIR``/``GIT_PREFIX`` to hooks, so
+    without the ``git rev-parse --local-env-vars`` scrub every gate subprocess that builds its own throwaway
+    repository would write into the index of the worktree being pushed instead of honoring ``git -C <repo>``.
+    Silent and destructive.
 
-    Which target the hook runs is not asserted: that is the Makefile's business.
-    """
+    Which target the hook runs is not asserted: that is the Makefile's business."""
     repo_root = Path(__file__).resolve().parents[1]
     _install_recording_commands(tmp_path, monkeypatch, ("make", "uv", "docker"))
     log = tmp_path / "command-log.jsonl"
 
     clean_env = {k: v for k, v in os.environ.items() if k not in ("MAKEFLAGS", "MFLAGS")}
     inherited_git_env = {
-        "GIT_DIR": "/sentinel/git-dir",
-        "GIT_WORK_TREE": "/sentinel/work-tree",
-        "GIT_INDEX_FILE": "/sentinel/index",
-        "GIT_COMMON_DIR": "/sentinel/common-dir",
-        "GIT_PREFIX": "sentinel-prefix/",
+        "GIT_DIR": "/sentinel/git-dir", "GIT_WORK_TREE": "/sentinel/work-tree", "GIT_INDEX_FILE": "/sentinel/index",
+        "GIT_COMMON_DIR": "/sentinel/common-dir", "GIT_PREFIX": "sentinel-prefix/",
     }
     clean_env.update(inherited_git_env)
     proc = subprocess.run(
-        [str(repo_root / "scripts" / "hooks" / "pre-push")],
-        cwd=repo_root,
-        capture_output=True,
-        text=True,
-        input="",
+        [str(repo_root / "scripts" / "hooks" / "pre-push")], cwd=repo_root, capture_output=True, text=True, input="",
         env=clean_env,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr

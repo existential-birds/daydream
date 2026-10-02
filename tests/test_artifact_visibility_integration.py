@@ -42,14 +42,8 @@ SANCTIONED_INPUT_CANARY = "SANCTIONED_INPUT_CANARY"
 PRIVATE_ROOT_CANARY = "PRIVATE_ROOT_CANARY"
 RUNTIME_STATE_CANARY = "RUNTIME_STATE_CANARY"
 _OBSERVED_CANARIES = (
-    SOURCE_CANARY,
-    PRIOR_REASONING_CANARY,
-    CURRENT_REASONING_CANARY,
-    SIBLING_REASONING_CANARY,
-    RESUME_CACHE_CANARY,
-    SANCTIONED_INPUT_CANARY,
-    PRIVATE_ROOT_CANARY,
-    RUNTIME_STATE_CANARY,
+    SOURCE_CANARY, PRIOR_REASONING_CANARY, CURRENT_REASONING_CANARY, SIBLING_REASONING_CANARY, RESUME_CACHE_CANARY,
+    SANCTIONED_INPUT_CANARY, PRIVATE_ROOT_CANARY, RUNTIME_STATE_CANARY,
 )
 
 MakeConfig = Callable[..., RunConfig]
@@ -60,12 +54,7 @@ BACKEND_SINK: list[Any] = []
 
 
 def _write_probe_extension(
-    ext_dir: Any,
-    sanctioned_path: Path,
-    *,
-    sink_backend: bool = False,
-    read_only: bool = False,
-    oversize: bool = False,
+    ext_dir: Any, sanctioned_path: Path, *, sink_backend: bool = False, read_only: bool = False, oversize: bool = False,
 ) -> None:
     """Register the ``artifact-visibility-probe`` extension flow.
 
@@ -199,11 +188,7 @@ def _scan_resolve(path: Path) -> Path | None:
     return None
 
 
-def _install_claude_boundary(
-    monkeypatch: pytest.MonkeyPatch,
-    sanctioned_path: Path,
-    *,
-    model_error: bool = False,
+def _install_claude_boundary(monkeypatch: pytest.MonkeyPatch, sanctioned_path: Path, *, model_error: bool = False,
 ) -> list[dict[str, Any]]:
     observations: list[dict[str, Any]] = []
 
@@ -227,23 +212,13 @@ def _install_claude_boundary(
                 metadata = sanctioned_path.lstat()
                 assert stat.S_ISREG(metadata.st_mode)
                 sanctioned_reads[str(sanctioned_path)] = hashlib.sha256(sanctioned_path.read_bytes()).hexdigest()
-            observations.append(
-                {
-                    "backend": "claude",
-                    "response_mode": "model_error" if model_error else "success",
-                    "effective_cwd": str(cwd.resolve()),
-                    "prompt_bytes": len(prompt.encode()),
+            observations.append({"backend": "claude", "response_mode": "model_error" if model_error else "success",
+                    "effective_cwd": str(cwd.resolve()), "prompt_bytes": len(prompt.encode()),
                     "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
-                    "prompt_canaries": {
-                        canary: canary in prompt for canary in _OBSERVED_CANARIES
-                    },
-                    "cwd_entries": entries,
-                    "cwd_canaries": cwd_canaries,
-                    "sanctioned_reads": sanctioned_reads,
-                    "model": self.options.model,
-                    "permission_mode": self.options.permission_mode,
-                    "allowed_tools": self.options.allowed_tools,
-                    "setting_sources": self.options.setting_sources,
+                    "prompt_canaries": {canary: canary in prompt for canary in _OBSERVED_CANARIES},
+                    "cwd_entries": entries, "cwd_canaries": cwd_canaries, "sanctioned_reads": sanctioned_reads,
+                    "model": self.options.model, "permission_mode": self.options.permission_mode,
+                    "allowed_tools": self.options.allowed_tools, "setting_sources": self.options.setting_sources,
                     "resume": self.options.resume,
                 }
             )
@@ -253,11 +228,8 @@ def _install_claude_boundary(
             setattr(message, "model", self.options.model)
             yield message
             yield MockResultMessage(
-                total_cost_usd=None,
-                is_error=model_error,
-                result="fixture failure" if model_error else None,
-                subtype="error" if model_error else "success",
-                session_id=f"fixture-claude-session-{len(observations)}",
+                total_cost_usd=None, is_error=model_error, result="fixture failure" if model_error else None,
+                subtype="error" if model_error else "success", session_id=f"fixture-claude-session-{len(observations)}",
             )
 
     patch_claude_sdk(monkeypatch, ObservingClient)
@@ -265,21 +237,13 @@ def _install_claude_boundary(
 
 
 def _configure_cli_backend(
-    backend: str,
-    fixture_root: Path,
-    sanctioned_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-    *,
+    backend: str, fixture_root: Path, sanctioned_path: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *,
     response_mode: Literal["success", "model_error", "process_error", "block"] = "success",
     forbidden_paths: tuple[Path, ...] = (),
 ) -> ProtocolCli:
-    fixture = install_protocol_cli(
-        fixture_root,
+    fixture = install_protocol_cli(fixture_root,
         backend,  # type: ignore[arg-type]
-        response_mode=response_mode,
-        sanctioned_files=(sanctioned_path,),
-        forbidden_paths=forbidden_paths,
+        response_mode=response_mode, sanctioned_files=(sanctioned_path,), forbidden_paths=forbidden_paths,
     )
     monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
     if backend == "osprey":
@@ -294,11 +258,7 @@ def _configure_cli_backend(
     return fixture
 
 
-_HIDDEN_CWD_CANARIES = (
-    PRIOR_REASONING_CANARY,
-    CURRENT_REASONING_CANARY,
-    SIBLING_REASONING_CANARY,
-    RESUME_CACHE_CANARY,
+_HIDDEN_CWD_CANARIES = (PRIOR_REASONING_CANARY, CURRENT_REASONING_CANARY, SIBLING_REASONING_CANARY, RESUME_CACHE_CANARY,
     SANCTIONED_INPUT_CANARY,
 )
 
@@ -328,20 +288,9 @@ def _assert_cwd_isolated(observation: dict[str, Any], *, extra: tuple[str, ...] 
 
 
 def _probe_config(
-    make_config: MakeConfig,
-    repo: Path,
-    *,
-    flow_name: str = "artifact-visibility-probe",
-    **overrides: Any,
+    make_config: MakeConfig, repo: Path, *, flow_name: str = "artifact-visibility-probe", **overrides: Any,
 ) -> RunConfig:
-    return make_config(
-        repo,
-        flow_name=flow_name,
-        model="fixture-model",
-        archive=True,
-        run_eval=True,
-        **overrides,
-    )
+    return make_config(repo, flow_name=flow_name, model="fixture-model", archive=True, run_eval=True, **overrides,)
 
 
 async def _run_probe(config: RunConfig, private_base: Path) -> int:
@@ -365,11 +314,7 @@ def _assert_archived_run(archive_dir: Path, trajectory: Path, *, backend: str, s
 
 
 def _assert_external_observations(
-    observations: list[dict[str, Any]],
-    *,
-    backend: str,
-    repo: Path,
-    sanctioned_path: Path,
+    observations: list[dict[str, Any]], *, backend: str, repo: Path, sanctioned_path: Path,
 ) -> None:
     expected_digest = hashlib.sha256(sanctioned_path.read_bytes()).hexdigest()
     assert len(observations) == 2
@@ -384,13 +329,7 @@ def _assert_external_observations(
 
 
 def _assert_frozen_outputs(
-    repo: Path,
-    archive_dir: Path,
-    explicit_trajectory: Path,
-    dump_dir: Path,
-    *,
-    backend: str,
-    model: str,
+    repo: Path, archive_dir: Path, explicit_trajectory: Path, dump_dir: Path, *, backend: str, model: str,
 ) -> str:
     explicit_bytes = explicit_trajectory.read_bytes()
     explicit = json.loads(explicit_bytes)
@@ -423,22 +362,15 @@ def _assert_frozen_outputs(
     assert {step["model_name"] for step in agent_steps} == {model}
     return session_id
 
-
 @pytest.mark.parametrize("backend", ["claude", "codex", "pi", "osprey"])
 @pytest.mark.asyncio
 async def test_runner_ordinary_adapter_two_turn_visibility(
-    backend: str,
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
-    archive_dir: Path,
+    backend: str, tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
+    make_config: MakeConfig, archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
     private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     _write_probe_extension(ext_dir, sanctioned_path)
-
     model = "fixture-model"
     cli_fixture: ProtocolCli | None = None
     claude_observations: list[dict[str, Any]] = []
@@ -446,24 +378,13 @@ async def test_runner_ordinary_adapter_two_turn_visibility(
         claude_observations = _install_claude_boundary(monkeypatch, sanctioned_path)
     else:
         cli_fixture = _configure_cli_backend(
-            backend,
-            tmp_path / f"{backend} external protocol fixture",
-            sanctioned_path,
-            monkeypatch,
-            tmp_path,
+            backend, tmp_path / f"{backend} external protocol fixture", sanctioned_path, monkeypatch, tmp_path,
         )
-
     explicit_trajectory = tmp_path / f"{backend} explicit trajectory output.json"
     dump_dir = tmp_path / f"{backend} explicit artifact dump"
-    result = await _run_probe(
-        _probe_config(
-            make_config,
-            repo,
-            backend=backend,
-            trajectory_path=explicit_trajectory,
-            dump_artifacts=str(dump_dir),
-        ),
-        private_base,
+    result = await _run_probe(_probe_config(
+            make_config, repo, backend=backend, trajectory_path=explicit_trajectory, dump_artifacts=str(dump_dir),
+        ), private_base,
     )
 
     assert result == 0
@@ -473,29 +394,18 @@ async def test_runner_ordinary_adapter_two_turn_visibility(
 
 
 _MODEL_FAILURES: dict[str, type[Exception]] = {
-    "codex": CodexError,
-    "pi": PiError,
-    "osprey": OspreyTerminalError,
-    "claude": ClaudeAgentError,
+    "codex": CodexError, "pi": PiError, "osprey": OspreyTerminalError, "claude": ClaudeAgentError,
 }
 _MODEL_FAILURE_MESSAGES = {
-    "codex": "fixture failure",
-    "pi": "fixture failure",
-    "osprey": "outcome 'failed': exit_code=0",
+    "codex": "fixture failure", "pi": "fixture failure", "osprey": "outcome 'failed': exit_code=0",
     "claude": "fixture failure",
 }
-
 
 @pytest.mark.parametrize("backend", ["codex", "pi", "osprey", "claude"])
 @pytest.mark.asyncio
 async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
-    backend: str,
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
-    archive_dir: Path,
+    backend: str, tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
+    make_config: MakeConfig, archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
     private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
@@ -508,11 +418,7 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
         claude_observations = _install_claude_boundary(monkeypatch, sanctioned_path, model_error=True)
     else:
         cli_fixture = _configure_cli_backend(
-            backend,
-            tmp_path / f"{backend} model failure protocol fixture",
-            sanctioned_path,
-            monkeypatch,
-            tmp_path,
+            backend, tmp_path / f"{backend} model failure protocol fixture", sanctioned_path, monkeypatch, tmp_path,
             response_mode="model_error",
         )
     if backend == "pi":
@@ -521,8 +427,7 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
     explicit_trajectory = tmp_path / f"{backend} failed trajectory output.json"
     with pytest.raises(_MODEL_FAILURES[backend], match=_MODEL_FAILURE_MESSAGES[backend]) as raised:
         await _run_probe(
-            _probe_config(make_config, repo, backend=backend, trajectory_path=explicit_trajectory),
-            private_base,
+            _probe_config(make_config, repo, backend=backend, trajectory_path=explicit_trajectory), private_base,
         )
 
     assert type(raised.value) is _MODEL_FAILURES[backend]
@@ -547,11 +452,7 @@ async def test_runner_external_adapter_model_failure_preserves_partial_evidence(
     assert (public_run / "trajectory.json").read_bytes() == explicit_trajectory.read_bytes()
 
 
-def _release_fifo_invocations(
-    fixture: ProtocolCli,
-    expected: int,
-    stop: threading.Event,
-    failures: list[BaseException],
+def _release_fifo_invocations(fixture: ProtocolCli, expected: int, stop: threading.Event, failures: list[BaseException],
 ) -> None:
     seen_pids: set[int] = set()
     deadline = time.monotonic() + 15
@@ -581,9 +482,7 @@ async def _run_blocked_codex(*, fixture: ProtocolCli, config: RunConfig, private
     stop = threading.Event()
     failures: list[BaseException] = []
     releaser = threading.Thread(
-        target=_release_fifo_invocations,
-        args=(fixture, 2, stop, failures),
-        name="artifact-visibility-fifo-releaser",
+        target=_release_fifo_invocations, args=(fixture, 2, stop, failures), name="artifact-visibility-fifo-releaser",
         daemon=True,
     )
     releaser.start()
@@ -596,14 +495,9 @@ async def _run_blocked_codex(*, fixture: ProtocolCli, config: RunConfig, private
         assert not releaser.is_alive()
         assert failures == []
 
-
 @pytest.mark.asyncio
 async def test_two_ephemeral_runs_for_one_source_cannot_observe_sibling_runtime(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
@@ -629,19 +523,12 @@ async def test_two_ephemeral_runs_for_one_source_cannot_observe_sibling_runtime(
     private_bases = first_private, second_private
     for index, private_base in enumerate(private_bases, start=1):
         fixture = _configure_cli_backend(
-            "codex",
-            tmp_path / f"blocked codex fixture {index}",
-            sanctioned_path,
-            monkeypatch,
-            tmp_path,
+            "codex", tmp_path / f"blocked codex fixture {index}", sanctioned_path, monkeypatch, tmp_path,
             response_mode="block",
         )
         trajectory = tmp_path / f"ephemeral run {index} trajectory.json"
-        result = await _run_blocked_codex(
-            fixture=fixture,
-            config=_probe_config(
-                make_config, repo, backend="codex", force_worktree=True, trajectory_path=trajectory
-            ),
+        result = await _run_blocked_codex(fixture=fixture,
+            config=_probe_config(make_config, repo, backend="codex", force_worktree=True, trajectory_path=trajectory),
             private_base=private_base,
         )
         assert result == 0
@@ -696,33 +583,23 @@ def _assert_no_forbidden_path_observed(observation: dict[str, Any]) -> None:
     for hits in observation["forbidden_path_hits"].values():
         assert hits == {"argv": False, "stdin": False, "env": False}
 
-
 @pytest.mark.asyncio
 async def test_runner_codex_read_only_uses_clone_and_inline_sanctioned_input(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
     private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
     _write_probe_extension(ext_dir, sanctioned_path, read_only=True)
     fixture = _configure_cli_backend(
-        "codex",
-        tmp_path / "codex read-only protocol fixture",
-        sanctioned_path,
-        monkeypatch,
-        tmp_path,
+        "codex", tmp_path / "codex read-only protocol fixture", sanctioned_path, monkeypatch, tmp_path,
         forbidden_paths=(repo.resolve(), private_base),
     )
 
     source_before = _tracked_source_state(repo)
     explicit_trajectory = tmp_path / "read-only trajectory output.json"
     result = await _run_probe(
-        _probe_config(make_config, repo, backend="codex", trajectory_path=explicit_trajectory),
-        private_base,
+        _probe_config(make_config, repo, backend="codex", trajectory_path=explicit_trajectory), private_base,
     )
     assert result == 0
 
@@ -834,10 +711,7 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
             else:
                 raise AssertionError(f"unexpected improve prompt: {prompt[:160]}")
             return MockResultMessage(
-                total_cost_usd=None,
-                structured_output=structured,
-                is_error=False,
-                subtype="success",
+                total_cost_usd=None, structured_output=structured, is_error=False, subtype="success",
                 session_id=f"fixture-improve-session-{len(observations)}",
             )
 
@@ -845,21 +719,11 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
             self.prompt = prompt
             cwd = Path(self.options.cwd)
             entries, cwd_canaries = _scan_cwd(cwd)
-            observations.append(
-                {
-                    "backend": "claude",
-                    "effective_cwd": str(cwd.resolve()),
-                    "prompt": prompt,
+            observations.append({"backend": "claude", "effective_cwd": str(cwd.resolve()), "prompt": prompt,
                     "prompt_bytes": len(prompt.encode()),
-                    "prompt_canaries": {
-                        canary: canary in prompt for canary in _OBSERVED_CANARIES
-                    },
-                    "cwd_entries": entries,
-                    "cwd_canaries": cwd_canaries,
-                    "sanctioned_reads": {},
-                    "options": {
-                        "cwd": self.options.cwd,
-                        "model": self.options.model,
+                    "prompt_canaries": {canary: canary in prompt for canary in _OBSERVED_CANARIES},
+                    "cwd_entries": entries, "cwd_canaries": cwd_canaries, "sanctioned_reads": {},
+                    "options": {"cwd": self.options.cwd, "model": self.options.model,
                         "permission_mode": self.options.permission_mode,
                         "allowed_tools": list(self.options.allowed_tools or []),
                         "tools": list(getattr(self.options, "tools", None) or []),
@@ -867,17 +731,11 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
                         "strict_mcp_config": self.options.strict_mcp_config,
                         "setting_sources": list(self.options.setting_sources or []),
                         "skills": list(getattr(self.options, "skills", None) or []),
-                        "plugins": list(getattr(self.options, "plugins", None) or []),
-                        "agents": self.options.agents,
-                        "resume": self.options.resume,
-                        "extra_args": dict(self.options.extra_args or {}),
-                        "hook_matchers": [
-                            matcher.matcher
-                            for matcher in (self.options.hooks or {}).get(
-                                "PreToolUse", []
-                            )
-                        ],
-                        "env_values": list((self.options.env or {}).values()),
+                        "plugins": list(getattr(self.options, "plugins", None) or []), "agents": self.options.agents,
+                        "resume": self.options.resume, "extra_args": dict(self.options.extra_args or {}),
+                        "hook_matchers": [matcher.matcher
+                            for matcher in (self.options.hooks or {}).get("PreToolUse", [])
+                        ], "env_values": list((self.options.env or {}).values()),
                     },
                 }
             )
@@ -890,14 +748,9 @@ def _install_improve_strict_boundary(monkeypatch: pytest.MonkeyPatch) -> list[di
     patch_claude_sdk(monkeypatch, ImproveRouterClient)
     return observations
 
-
 @pytest.mark.asyncio
 async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctioned_input(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
@@ -908,8 +761,7 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
     model = "fixture-model"
     explicit_trajectory = tmp_path / "improve trajectory output.json"
-    config = _probe_config(
-        make_config, repo, flow_name="improve", backend="claude", trajectory_path=explicit_trajectory
+    config = _probe_config(make_config, repo, flow_name="improve", backend="claude", trajectory_path=explicit_trajectory
     )
     assert await _run_probe(config, private_base) == 0
     assert observations
@@ -978,10 +830,7 @@ async def test_runner_improve_claude_strict_uses_audit_root_and_inline_sanctione
 
 
 def _write_osprey_sandbox_extension(
-    ext_dir: Any,
-    sanctioned_path: Path,
-    allowed_roots: tuple[Path, ...],
-    osprey_binary: Path,
+    ext_dir: Any, sanctioned_path: Path, allowed_roots: tuple[Path, ...], osprey_binary: Path,
 ) -> None:
     """Extension constructs the real sandboxed OspreyBackend — no factory patch."""
     roots_literal = ", ".join(f"Path({str(root)!r})" for root in allowed_roots)
@@ -1026,43 +875,27 @@ def _write_osprey_sandbox_extension(
         "    )\n"
     )
 
-
 @pytest.mark.asyncio
 async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
     archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
     private_base, sanctioned_dir, sanctioned_path = _seed_world(repo, tmp_path)
     BACKEND_SINK.clear()
     osprey_fixture = install_protocol_cli(
-        tmp_path / "osprey sandbox protocol fixture",
-        "osprey",
-        response_mode="success",
-        sanctioned_files=(sanctioned_path,),
-        forbidden_paths=(repo.resolve(), private_base),
+        tmp_path / "osprey sandbox protocol fixture", "osprey", response_mode="success",
+        sanctioned_files=(sanctioned_path,), forbidden_paths=(repo.resolve(), private_base),
     )
     # Only pre-approved non-runtime roots are handed to the constructor.
     _write_osprey_sandbox_extension(
-        ext_dir,
-        sanctioned_path,
-        allowed_roots=(sanctioned_dir,),
-        osprey_binary=osprey_fixture.executable,
+        ext_dir, sanctioned_path, allowed_roots=(sanctioned_dir,), osprey_binary=osprey_fixture.executable,
     )
 
     explicit_trajectory = tmp_path / "sandbox trajectory output.json"
     dump_dir = tmp_path / "sandbox explicit artifact dump"
-    config = _probe_config(
-        make_config,
-        repo,
-        flow_name="artifact-visibility-osprey-sandbox",
-        backend="osprey",
-        trajectory_path=explicit_trajectory,
-        dump_artifacts=str(dump_dir),
+    config = _probe_config(make_config, repo, flow_name="artifact-visibility-osprey-sandbox", backend="osprey",
+        trajectory_path=explicit_trajectory, dump_artifacts=str(dump_dir),
     )
     assert await _run_probe(config, private_base) == 0
 
@@ -1117,8 +950,7 @@ def _assert_pid_reaped(pid: int) -> None:
     raise AssertionError(f"external process {pid} is still live after cancellation")
 
 
-def _assert_single_partial_snapshot(
-    repo: Path, archive_dir: Path, explicit_trajectory: Path, *, backend: str
+def _assert_single_partial_snapshot(repo: Path, archive_dir: Path, explicit_trajectory: Path, *, backend: str
 ) -> dict[str, Any]:
     """Exactly one honest partial snapshot is frozen across all destinations."""
     explicit_bytes = explicit_trajectory.read_bytes()
@@ -1143,17 +975,11 @@ def _assert_archive_runs_empty(archive_dir: Path) -> None:
     runs = archive_dir / "runs"
     assert not runs.exists() or not list(runs.iterdir())
 
-
 @pytest.mark.parametrize("backend", ["codex", "pi", "osprey"])
 @pytest.mark.asyncio
 async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_once(
-    backend: str,
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
-    archive_dir: Path,
+    backend: str, tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any,
+    make_config: MakeConfig, archive_dir: Path,
 ) -> None:
     repo = tiny_diff_target
     private_base, _, sanctioned_path = _seed_world(repo, tmp_path)
@@ -1161,11 +987,7 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
     _write_probe_extension(ext_dir, sanctioned_path, sink_backend=True)
 
     fixture = _configure_cli_backend(
-        backend,
-        tmp_path / f"{backend} cancel protocol fixture",
-        sanctioned_path,
-        monkeypatch,
-        tmp_path,
+        backend, tmp_path / f"{backend} cancel protocol fixture", sanctioned_path, monkeypatch, tmp_path,
         response_mode="block",
     )
     if backend == "pi":
@@ -1198,14 +1020,9 @@ async def test_runner_external_adapter_cancellation_reaps_process_and_freezes_on
     assert observation[0]["pid"] == pid
     _assert_single_partial_snapshot(repo, archive_dir, explicit_trajectory, backend=backend)
 
-
 @pytest.mark.asyncio
 async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    make_config: MakeConfig,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, make_config: MakeConfig,
     archive_dir: Path,
 ) -> None:
     """Adjudicated Claude cancellation: disconnect completes, then freeze."""
@@ -1215,15 +1032,9 @@ async def test_runner_claude_sdk_cancellation_completes_disconnect_before_freeze
     _write_probe_extension(ext_dir, sanctioned_path, sink_backend=True)
 
     state: dict[str, Any] = {
-        "entered": asyncio.Event(),
-        "disconnect_started_event": asyncio.Event(),
-        "release_disconnect": asyncio.Event(),
-        "queries": [],
-        "post_disconnect_queries": 0,
-        "response_cancelled": False,
-        "disconnect_started": False,
-        "disconnect_complete": False,
-        "shutdown_interrupted": None,
+        "entered": asyncio.Event(), "disconnect_started_event": asyncio.Event(), "release_disconnect": asyncio.Event(),
+        "queries": [], "post_disconnect_queries": 0, "response_cancelled": False, "disconnect_started": False,
+        "disconnect_complete": False, "shutdown_interrupted": None,
     }
 
     class BlockingCancelClient:

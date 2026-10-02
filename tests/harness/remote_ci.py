@@ -16,12 +16,7 @@ from tests.harness.git_helpers import git
 _FULL_SHA_RE = re.compile(r"[0-9a-f]{40}\Z")
 
 
-def _wait_for_pushed_sha(
-    sha_path: Path,
-    stop: threading.Event,
-    *,
-    poll_seconds: float = 0.01,
-) -> str | None:
+def _wait_for_pushed_sha(sha_path: Path, stop: threading.Event, *, poll_seconds: float = 0.01,) -> str | None:
     """Wait until the pre-push hook publishes one complete commit SHA."""
     while True:
         try:
@@ -34,13 +29,7 @@ def _wait_for_pushed_sha(
             return None
 
 
-def write_pre_push_sha_hook(
-    project: Path,
-    *,
-    sha_path: Path,
-    ready_path: Path,
-    marker: Path | None = None,
-) -> None:
+def write_pre_push_sha_hook(project: Path, *, sha_path: Path, ready_path: Path, marker: Path | None = None,) -> None:
     """Install a pre-push hook that publishes the pushed SHA and waits for ``ready_path``.
 
     The hook atomically writes the pushed ``local_sha`` to *sha_path*, then blocks
@@ -79,22 +68,12 @@ class NoCIRemote:
     base_repository = "base-user/project"
     head_repository = "fork-user/project"
 
-    def __init__(
-        self,
-        fake_gh: FakeGh,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
+    def __init__(self, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,) -> None:
         self._fake_gh = fake_gh
         self._tmp_path = tmp_path
-        self._threads: list[
-            tuple[threading.Thread, list[BaseException], threading.Event, list[str]]
-        ] = []
-        monkeypatch.setattr(
-            remote_ci,
-            "DEFAULT_LIMITS",
-            remote_ci.RemoteCILimits(
-                poll_seconds=0.01,
+        self._threads: list[tuple[threading.Thread, list[BaseException], threading.Event, list[str]]] = []
+        monkeypatch.setattr(remote_ci, "DEFAULT_LIMITS",
+            remote_ci.RemoteCILimits(poll_seconds=0.01,
                 # Real Git/gh subprocess startup under parallel CI exhausted
                 # a 5-second window; retain this loaded-host safety margin.
                 # Two concurrent 16-worker pytest runs (e.g. overlapping
@@ -107,9 +86,7 @@ class NoCIRemote:
                 # completion >= discovery is a RemoteCILimits invariant;
                 # the completion window itself is inert here because the
                 # fake gh serves final no-CI evidence during discovery.
-                discovery_seconds=45,
-                completion_seconds=90,
-                request_seconds=10,
+                discovery_seconds=45, completion_seconds=90, request_seconds=10,
             ),
         )
 
@@ -163,15 +140,9 @@ class NoCIRemote:
 
     def _serve_pr(self, *, branch: str, head_sha: str) -> None:
         self._fake_gh.set_response("repo-view", value=self.base_repository)
-        self._fake_gh.serve_pr_view(
-            {
-                "number": self.pr_number,
-                "title": "Fixture PR",
-                "body": "",
-                "state": "OPEN",
-                "headRefName": branch,
-                "baseRefName": "main",
-                "headRefOid": head_sha,
+        self._fake_gh.serve_pr_view({
+                "number": self.pr_number, "title": "Fixture PR", "body": "", "state": "OPEN", "headRefName": branch,
+                "baseRefName": "main", "headRefOid": head_sha,
                 "url": f"https://github.com/{self.base_repository}/pull/{self.pr_number}",
                 "headRepository": {"nameWithOwner": self.head_repository},
                 "headRepositoryOwner": {"login": "fork-user"},
@@ -180,40 +151,24 @@ class NoCIRemote:
 
     def _serve_no_ci(self, *, branch: str, head_sha: str) -> None:
         pull = {
-            "number": self.pr_number,
-            "html_url": f"https://github.com/{self.base_repository}/pull/{self.pr_number}",
-            "state": "open",
-            "base": {"ref": "main", "repo": {"full_name": self.base_repository}},
-            "head": {
-                "ref": branch,
-                "sha": head_sha,
-                "repo": {"full_name": self.head_repository},
-            },
+            "number": self.pr_number, "html_url": f"https://github.com/{self.base_repository}/pull/{self.pr_number}",
+            "state": "open", "base": {"ref": "main", "repo": {"full_name": self.base_repository}},
+            "head": {"ref": branch, "sha": head_sha, "repo": {"full_name": self.head_repository}},
             "merge_commit_sha": None,
         }
+        self._fake_gh.set_response("GET", f"repos/{self.base_repository}/pulls/{self.pr_number}", pull)
+        self._fake_gh.set_response("GET", f"repos/{self.base_repository}/rules/branches/main?per_page=100&page=1", [])
         self._fake_gh.set_response(
-            "GET", f"repos/{self.base_repository}/pulls/{self.pr_number}", pull
-        )
-        self._fake_gh.set_response(
-            "GET", f"repos/{self.base_repository}/rules/branches/main?per_page=100&page=1", []
-        )
-        self._fake_gh.set_response(
-            "GET",
-            f"repos/{self.base_repository}/branches/main/protection/required_status_checks",
+            "GET", f"repos/{self.base_repository}/branches/main/protection/required_status_checks",
             {"strict": False, "contexts": [], "checks": []},
         )
-        self._fake_gh.set_response(
-            "GET",
-            f"repos/{self.base_repository}/actions/workflows?per_page=100&page=1",
+        self._fake_gh.set_response("GET", f"repos/{self.base_repository}/actions/workflows?per_page=100&page=1",
             {"total_count": 0, "workflows": []},
         )
         self._fake_gh.set_response(
-            "GET",
-            f"repos/{self.base_repository}/commits/{head_sha}/check-runs?filter=latest&per_page=100&page=1",
+            "GET", f"repos/{self.base_repository}/commits/{head_sha}/check-runs?filter=latest&per_page=100&page=1",
             {"total_count": 0, "check_runs": []},
         )
         self._fake_gh.set_response(
-            "GET",
-            f"repos/{self.base_repository}/commits/{head_sha}/statuses?per_page=100&page=1",
-            [],
+            "GET", f"repos/{self.base_repository}/commits/{head_sha}/statuses?per_page=100&page=1", [],
         )

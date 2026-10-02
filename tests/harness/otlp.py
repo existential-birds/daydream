@@ -25,14 +25,8 @@ from opentelemetry.proto.collector.trace.v1.trace_service_pb2_grpc import (
 class ScriptedResponse:
     """One scripted HTTP response; the default body is the empty protobuf ack."""
 
-    def __init__(
-        self,
-        *,
-        status: int = 200,
-        headers: Mapping[str, str] | None = None,
-        body: bytes = b"",
-        reason: str | None = None,
-        delay_s: float = 0.0,
+    def __init__(self, *, status: int = 200, headers: Mapping[str, str] | None = None, body: bytes = b"",
+        reason: str | None = None, delay_s: float = 0.0,
     ) -> None:
         # Default to the canonical protobuf ack content type; an explicitly empty
         # headers mapping sends no Content-Type at all (the LangSmith ack shape).
@@ -55,8 +49,7 @@ class TraceCollector:
     @property
     def spans(self) -> list[dict[str, Any]]:
         with self._lock:
-            return [
-                span
+            return [span
                 for request in self.requests
                 for resource in request["body"].get("resourceSpans", [])
                 for scope in resource.get("scopeSpans", [])
@@ -97,11 +90,7 @@ class _QuietHTTPHandler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def otlp_collector(
-    *,
-    status: int = 200,
-    response_headers: Mapping[str, str] | None = None,
-    reason: str | None = None,
+def otlp_collector(*, status: int = 200, response_headers: Mapping[str, str] | None = None, reason: str | None = None,
 ) -> Iterator[TraceCollector]:
     """Receive real protobuf exports; close all listener resources on exit."""
     collector = TraceCollector(status=status)
@@ -122,10 +111,7 @@ def otlp_collector(
 
 
 @contextmanager
-def scripted_otlp_collector(
-    responses: list[ScriptedResponse],
-    *,
-    capture_content_type: list[str | None] | None = None,
+def scripted_otlp_collector(responses: list[ScriptedResponse], *, capture_content_type: list[str | None] | None = None,
 ) -> Iterator[TraceCollector]:
     """Collector serving scripted responses in order; extra requests get the last one.
 

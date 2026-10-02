@@ -56,11 +56,9 @@ def make_mock_process_from_fixture(fixtures_dir: Path, name: str, *, writable_st
     return make_mock_process(lines, writable_stdin=writable_stdin)
 
 
-def bind_replay(
-    fixtures_dir: Path, *, writable_stdin: bool
+def bind_replay(fixtures_dir: Path, *, writable_stdin: bool
 ) -> tuple[Callable[[list[str]], MagicMock], Callable[[str], MagicMock]]:
     """Bind one backend's fixture dir and stdin mode to the replay builders."""
-    return (
-        partial(make_mock_process, writable_stdin=writable_stdin),
+    return (partial(make_mock_process, writable_stdin=writable_stdin),
         partial(make_mock_process_from_fixture, fixtures_dir, writable_stdin=writable_stdin),
     )

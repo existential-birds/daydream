@@ -35,8 +35,7 @@ def prime_rl_workspace() -> Path:
     """Path to a synced prime-rl workspace checkout, or skip."""
     workspace = _usable_workspace()
     if workspace is None:
-        pytest.skip(
-            "prime-rl workspace checkout not available "
+        pytest.skip("prime-rl workspace checkout not available "
             "(set PRIME_RL_WORKSPACE or sync /home/exedev/prime-rl per rl/train/README.md)"
         )
     return workspace

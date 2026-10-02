@@ -54,16 +54,12 @@ from tests.test_deep_orchestrator import _profile_with_pipeline
 
 # --- Expected renderer output (goldens for these fixtures) -------------------
 
-
-async def test_expired_review_deadline_skips_optional_diagram_requests(
-    tmp_path: Path, review_run: Callable[..., Any],
+async def test_expired_review_deadline_skips_optional_diagram_requests(tmp_path: Path, review_run: Callable[..., Any],
 ) -> None:
-
     target = dr.build_cross_module_repo(tmp_path)
     code, backend = await review_run(target, review_profile=_profile_with_pipeline(review_wall_budget_s=0))
     assert code == 0
     assert not backend.calls
-
 
 SEQUENCE_GOLDEN = """sequenceDiagram
     participant P1 as Client
@@ -87,21 +83,13 @@ FLOWCHART_GOLDEN = """flowchart TD
 SEQUENCE_HEADING = "<details><summary><h3>Sequence Diagram</h3></summary>"
 FLOWCHART_HEADING = "<details><summary><h3>Flowchart</h3></summary>"
 
-
 def _legacy_sequence_builder(
-    *,
-    diff_path: Path,
-    inline_diff: str | None,
-    files_by_module: dict[str, list[str]],
-    cwd: Path,
-    exploration_dir: Path | None,
-    schema: dict[str, Any],
+    *, diff_path: Path, inline_diff: str | None, files_by_module: dict[str, list[str]], cwd: Path,
+    exploration_dir: Path | None, schema: dict[str, Any],
 ) -> str:
     return f"legacy: diff={diff_path} cwd={cwd} exploration={exploration_dir}"
 
-
 # --- Harness -----------------------------------------------------------------
-
 
 @dataclass
 class _CapturedPost:
@@ -123,34 +111,20 @@ def captured_post(monkeypatch: pytest.MonkeyPatch, fake_gh: FakeGh) -> _Captured
     renderer, the diagram slot, and every marker are produced by production
     code exactly as they would be on a live PR.
     """
-
     captured = _CapturedPost(fake_gh)
     fake_pr = pr_review.PRInfo(
-        number=123,
-        head_sha="a" * 40,
-        base_sha="b" * 40,
-        base_ref="main",
-        head_ref="feature",
-        owner="acme",
-        repo="widgets",
-        url="https://example/pr/123",
+        number=123, head_sha="a" * 40, base_sha="b" * 40, base_ref="main", head_ref="feature", owner="acme",
+        repo="widgets", url="https://example/pr/123",
     )
-    monkeypatch.setattr(
-        "daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr
-    )
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", lambda _target, **_kwargs: fake_pr)
 
-    fake_gh.set_response(
-        "POST", "repos/acme/widgets/pulls/123/reviews",
+    fake_gh.set_response("POST", "repos/acme/widgets/pulls/123/reviews",
         {"html_url": "https://example/pr/123#review-1"},
     )
     return captured
 
-
 @pytest.fixture
-def review_run(
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., Any],
-    silence_console: Callable[..., None],
+def review_run(monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any], silence_console: Callable[..., None],
     captured_post: _CapturedPost,
 ) -> Callable[..., Any]:
     """Run a full ``--comment`` deep review with a diagram-scripted stub backend.
@@ -159,25 +133,14 @@ def review_run(
     PR post as a run failure (exit 1), so a test that forgot the fixture would
     be asserting on the wrong exit code for the wrong reason.
     """
-    for module in (
-        "daydream.deep.orchestrator",
-        "daydream.deep.review_steps",
-        "daydream.deep.merge_steps",
-        "daydream.deep.diagram_steps",
-        "daydream.phases",
-        "daydream.runner",
-        "daydream.pr_review",
+    for module in ("daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps", "daydream.phases", "daydream.runner", "daydream.pr_review",
     ):
         silence_console(module)
     silence(monkeypatch)
 
-    async def _run(
-        target: Path,
-        *,
-        specs: dict[str, list[dict[str, Any]]] | None = None,
-        session_id: str | None = None,
-        fail: frozenset[str] = frozenset(),
-        **config_overrides: Any,
+    async def _run(target: Path, *, specs: dict[str, list[dict[str, Any]]] | None = None, session_id: str | None = None,
+        fail: frozenset[str] = frozenset(), **config_overrides: Any,
     ) -> tuple[int, StubBackend]:
         stub = install_stub_backend(monkeypatch, target)
         stub.diagram_specs = specs or {}
@@ -188,24 +151,17 @@ def review_run(
 
     return _run
 
-
 def _diagram_lifecycle(target: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     trajectory = _root_trajectory(target)
-    events = [
-        event
-        for event in trajectory["extra"]["phase_events"]
-        if event["phase"] == "diagram"
-    ]
+    events = [event for event in trajectory["extra"]["phase_events"] if event["phase"] == "diagram"]
     starts = [event for event in events if event["event"] == "phase_start"]
     ends = [event for event in events if event["event"] == "phase_end"]
     assert len(starts) == len(ends) == 1
     assert starts[0]["scope_id"] == ends[0]["scope_id"]
     return starts[0], ends[0]
 
-
 def _diagram_dispatch(target: Path) -> dict[str, Any]:
-    steps = [
-        step
+    steps = [step
         for step in _root_trajectory(target)["steps"]
         if step.get("extra", {}).get("daydream_phase") == "diagram"
         and "dispatch_id" in step.get("extra", {})
@@ -213,36 +169,21 @@ def _diagram_dispatch(target: Path) -> dict[str, Any]:
     assert len(steps) == 1
     return cast(dict[str, Any], steps[0])
 
-
 def _diagram_calls(stub: StubBackend, kind: str) -> list[dict[str, Any]]:
     """The stub calls that are diagram turns for ``kind`` (author + repair)."""
-    role = (
-        "You are the sequence-diagram author"
-        if kind == "sequence"
-        else "You are the flowchart author"
-    )
+    role = ("You are the sequence-diagram author" if kind == "sequence" else "You are the flowchart author")
     repair = f"Diagram repair turn ({kind}):"
-    return [
-        call
-        for call in stub.calls
-        if role in call["prompt"] or repair in call["prompt"]
-    ]
-
+    return [call for call in stub.calls if role in call["prompt"] or repair in call["prompt"]]
 
 # --- Spec test 1: sequence auto trigger -------------------------------------
 
-
 async def test_sequence_auto_trigger_renders_grounded_diagram(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """A cross-module diff renders the sequence diagram and skips the flowchart."""
     target = dr.build_cross_module_repo(tmp_path)
 
-    exit_code, stub = await review_run(
-        target, specs={"sequence": [dr.sequence_spec()]}
-    )
+    exit_code, stub = await review_run(target, specs={"sequence": [dr.sequence_spec()]})
 
     assert exit_code == 0
     artifact = _artifact(target)
@@ -265,7 +206,6 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     assert calls[0]["output_schema"] is SEQUENCE_SPEC_SCHEMA
     assert calls[0]["max_turns"] is None
     assert calls[0]["agents"] is None
-
     assert sequence["mermaid"] == SEQUENCE_GOLDEN
 
     body = captured_post.body()
@@ -284,42 +224,26 @@ async def test_sequence_auto_trigger_renders_grounded_diagram(
     # The diagram section sits after the report title and before findings.
     assert report.index("# Review") < report.index("## Diagrams")
     assert report.index("## Diagrams") < report.index("## Issues")
-    deep_report = (target / ".daydream" / "deep" / "review-output.md").read_text(
-        encoding="utf-8"
-    )
+    deep_report = (target / ".daydream" / "deep" / "review-output.md").read_text(encoding="utf-8")
     assert SEQUENCE_HEADING in deep_report
     # diagram.md carries the same rendered blocks.
-    assert SEQUENCE_HEADING in (
-        target / ".daydream" / "deep" / "diagram.md"
-    ).read_text(encoding="utf-8")
-
+    assert SEQUENCE_HEADING in (target / ".daydream" / "deep" / "diagram.md").read_text(encoding="utf-8")
 
 # --- Spec test 2: flowchart auto trigger ------------------------------------
 
-
 async def test_flowchart_auto_trigger_renders_grounded_diagram(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """A branch-heavy single-module diff renders the flowchart and skips sequence."""
     target = dr.build_branch_heavy_repo(tmp_path)
 
-    exit_code, stub = await review_run(
-        target, specs={"flowchart": [dr.flowchart_spec()]}
-    )
+    exit_code, stub = await review_run(target, specs={"flowchart": [dr.flowchart_spec()]})
 
     assert exit_code == 0
     artifact = _artifact(target)
     assert artifact["eligibility"]["flowchart"]["rule"] == "branch-points"
     assert artifact["eligibility"]["candidate_roots"] == [
-        {
-            "file": "app/pipeline.py",
-            "name": "run",
-            "line": 1,
-            "end_line": 9,
-            "branch_points": 4,
-        }
+        {"file": "app/pipeline.py", "name": "run", "line": 1, "end_line": 9, "branch_points": 4,}
     ]
     flowchart = artifact["results"]["flowchart"]
     assert flowchart["status"] == "rendered"
@@ -333,23 +257,17 @@ async def test_flowchart_auto_trigger_renders_grounded_diagram(
     assert SEQUENCE_HEADING not in body
     assert FLOWCHART_GOLDEN in body
 
-
 # --- Spec test 3: both kinds -------------------------------------------------
 
-
 async def test_both_signals_render_sequence_first(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """A diff carrying both signals renders both blocks, sequence first."""
     target = dr.build_both_signals_repo(tmp_path)
 
-    exit_code, stub = await review_run(
-        target,
+    exit_code, stub = await review_run(target,
         specs={
-            "sequence": [dr.sequence_spec()],
-            "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
+            "sequence": [dr.sequence_spec()], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
         },
     )
 
@@ -364,39 +282,21 @@ async def test_both_signals_render_sequence_first(
     body = captured_post.body()
     assert body.index(SEQUENCE_HEADING) < body.index(FLOWCHART_HEADING)
 
-
 # --- Spec test 4: repair then prune -----------------------------------------
 
-_FABRICATED = [
-    {
-        "from": "Client",
-        "to": "Core",
-        "label": "Ghost call",
-        "kind": "call",
-        "changed": True,
+_FABRICATED = [{"from": "Client", "to": "Core", "label": "Ghost call", "kind": "call", "changed": True,
         # Nonexistent file -> FILE_MISSING.
         "evidence": {"file": "pkg_b/ghost.py", "line": 3, "symbol": "handle"},
     },
-    {
-        "from": "Client",
-        "to": "Core",
-        "label": "Unsnappable symbol",
-        "kind": "call",
-        "changed": True,
+    {"from": "Client", "to": "Core", "label": "Unsnappable symbol", "kind": "call", "changed": True,
         # Real file and line, symbol nowhere within the +/-3 snap window.
         "evidence": {"file": "pkg_b/client.py", "line": 5, "symbol": "missing_fn"},
     },
-    {
-        "from": "Client",
-        "to": "Util",
-        "label": "Undefined callee",
-        "kind": "call",
-        "changed": True,
+    {"from": "Client", "to": "Util", "label": "Undefined callee", "kind": "call", "changed": True,
         # ``handle`` IS on line 7 but is not defined in the Util participant.
         "evidence": {"file": "pkg_b/client.py", "line": 7, "symbol": "handle"},
     },
 ]
-
 
 def _fabricated_sequence_turns() -> list[dict[str, Any]]:
     """Turn 1 with three fabricated messages; the repair fixes exactly one."""
@@ -404,26 +304,17 @@ def _fabricated_sequence_turns() -> list[dict[str, Any]]:
     turn_one["messages"].extend(copy.deepcopy(_FABRICATED))
     repair = dr.sequence_spec()
     repair["messages"].extend(copy.deepcopy(_FABRICATED))
-    repair["messages"][5]["evidence"] = {
-        "file": "pkg_b/client.py",
-        "line": 7,
-        "symbol": "handle",
-    }
+    repair["messages"][5]["evidence"] = {"file": "pkg_b/client.py", "line": 7, "symbol": "handle",}
     return [turn_one, repair]
 
-
 async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """Three ungrounded messages: one repaired, two pruned out of the diagram."""
     target = dr.build_cross_module_repo(tmp_path)
 
     exit_code, stub = await review_run(
-        target,
-        specs={"sequence": _fabricated_sequence_turns()},
-        session_id="diagram-session-1",
+        target, specs={"sequence": _fabricated_sequence_turns()}, session_id="diagram-session-1",
     )
 
     assert exit_code == 0
@@ -446,34 +337,16 @@ async def test_fabricated_sequence_evidence_is_repaired_then_pruned(
     assert "Ghost call" in body
     assert "Unsnappable symbol" not in body
     dispatch = _diagram_dispatch(target)
-    assert [
-        result["content"] for result in dispatch["observation"]["results"]
-    ] == [
-        "Dispatched to diagram-sequence",
-        "Dispatched to diagram-sequence-repair",
-    ]
-    assert_dispatch_children(
-        target,
-        dispatch,
-        "diagram",
-        ["diagram-sequence", "diagram-sequence-repair"],
-    )
-
+    assert [result["content"] for result in dispatch["observation"]["results"]
+    ] == ["Dispatched to diagram-sequence", "Dispatched to diagram-sequence-repair",]
+    assert_dispatch_children(target, dispatch, "diagram", ["diagram-sequence", "diagram-sequence-repair"],)
 
 async def test_nonresumable_diagram_prunes_without_losing_grounded_content(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """An unavailable continuation skips repair and preserves verified content."""
     target = dr.build_cross_module_repo(tmp_path)
-
-    exit_code, stub = await review_run(
-        target,
-        specs={"sequence": _fabricated_sequence_turns()},
-        session_id=None,
-    )
-
+    exit_code, stub = await review_run(target, specs={"sequence": _fabricated_sequence_turns()}, session_id=None,)
     assert exit_code == 0
     assert len(_diagram_calls(stub, "sequence")) == 1
     sequence = _artifact(target)["results"]["sequence"]
@@ -483,9 +356,7 @@ async def test_nonresumable_diagram_prunes_without_losing_grounded_content(
     assert SEQUENCE_GOLDEN in body
     assert all(str(item["label"]) not in body for item in _FABRICATED)
 
-
 # --- Spec test 5: flowchart grounding ---------------------------------------
-
 
 def _flowchart_grounding_turns() -> list[dict[str, Any]]:
     """Turn 1 roots outside the candidate list; the repair re-picks and offends."""
@@ -493,79 +364,46 @@ def _flowchart_grounding_turns() -> list[dict[str, Any]]:
     wrong_root["root"] = {"file": "app/pipeline.py", "name": "fast_path", "line": 12}
 
     repair = dr.flowchart_spec()
-    repair["nodes"].extend(
-        [
-            {
-                "id": "bad_out",
-                "kind": "process",
-                "label": "Outside root",
+    repair["nodes"].extend([{"id": "bad_out", "kind": "process", "label": "Outside root",
                 # Line 13 is inside ``fast_path``, not inside ``run``.
                 "evidence": {"file": "app/pipeline.py", "line": 13, "symbol": None},
             },
-            {
-                "id": "bad_dec",
-                "kind": "decision",
-                "label": "Not a branch",
+            {"id": "bad_dec", "kind": "decision", "label": "Not a branch",
                 # Line 3 is a return statement.
                 "evidence": {"file": "app/pipeline.py", "line": 3, "symbol": None},
             },
-            {
-                "id": "bad_sub_call",
-                "kind": "subroutine",
-                "label": "ghost_call",
-                "evidence": {
-                    "file": "app/pipeline.py",
-                    "line": 8,
-                    "symbol": "ghost_call",
-                },
+            {"id": "bad_sub_call", "kind": "subroutine", "label": "ghost_call",
+                "evidence": {"file": "app/pipeline.py", "line": 8, "symbol": "ghost_call",},
             },
-            {
-                "id": "bad_sub_def",
-                "kind": "subroutine",
-                "label": "item",
+            {"id": "bad_sub_def", "kind": "subroutine", "label": "item",
                 # ``item`` IS the token on line 8, but nothing defines it.
                 "evidence": {"file": "app/pipeline.py", "line": 8, "symbol": "item"},
             },
-            {
-                "id": "d3",
-                "kind": "decision",
-                "label": "item truthy?",
+            {"id": "d3", "kind": "decision", "label": "item truthy?",
                 "evidence": {"file": "app/pipeline.py", "line": 7, "symbol": None},
             },
-            {
-                "id": "orphan",
-                "kind": "process",
-                "label": "Unreachable",
+            {"id": "orphan", "kind": "process", "label": "Unreachable",
                 "evidence": {"file": "app/pipeline.py", "line": 9, "symbol": None},
             },
         ]
     )
-    repair["edges"].extend(
-        [
-            {"from": "p1", "to": "d3", "label": None},
+    repair["edges"].extend([{"from": "p1", "to": "d3", "label": None},
             # d3's only labeled outgoing edge -> demoted to a plain process.
-            {"from": "d3", "to": "e2", "label": "yes"},
-            {"from": "p1", "to": "bad_out", "label": None},
-            {"from": "p1", "to": "bad_dec", "label": None},
-            {"from": "p1", "to": "bad_sub_call", "label": None},
+            {"from": "d3", "to": "e2", "label": "yes"}, {"from": "p1", "to": "bad_out", "label": None},
+            {"from": "p1", "to": "bad_dec", "label": None}, {"from": "p1", "to": "bad_sub_call", "label": None},
             {"from": "p1", "to": "bad_sub_def", "label": None},
         ]
     )
     return [wrong_root, repair]
 
-
 async def test_flowchart_grounding_prunes_repairs_and_demotes(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """Every flowchart reason code fires, offenders prune, a thin decision demotes."""
     target = dr.build_branch_heavy_repo(tmp_path)
 
     exit_code, stub = await review_run(
-        target,
-        specs={"flowchart": _flowchart_grounding_turns()},
-        session_id="diagram-session-2",
+        target, specs={"flowchart": _flowchart_grounding_turns()}, session_id="diagram-session-2",
     )
 
     assert exit_code == 0
@@ -592,7 +430,6 @@ async def test_flowchart_grounding_prunes_repairs_and_demotes(
     assert "Unreachable" not in mermaid
     assert FLOWCHART_HEADING in captured_post.body()
 
-
 @pytest.mark.parametrize("shell_reads", [False, True])
 async def test_valid_diagrams_render_without_structured_read_receipts(
     tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
@@ -604,8 +441,7 @@ async def test_valid_diagrams_render_without_structured_read_receipts(
 
         async def execute(self: StubBackend, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> Any:
             if self._diagram_dispatch(prompt.lower()) is not None:
-                yield ToolStartEvent(
-                    id="source-shell", name="Bash",
+                yield ToolStartEvent(id="source-shell", name="Bash",
                     input={"command": "cat pkg_a/core.py pkg_a/util.py pkg_b/client.py"},
                 )
                 yield ToolResultEvent(id="source-shell", output="source content", is_error=False)
@@ -614,13 +450,10 @@ async def test_valid_diagrams_render_without_structured_read_receipts(
 
         monkeypatch.setattr(StubBackend, "execute", execute)
     target = dr.build_both_signals_repo(tmp_path)
-    code, backend = await review_run(
-        target,
+    code, backend = await review_run(target,
         specs={
-            "sequence": [dr.sequence_spec()],
-            "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
-        },
-        session_id="diagram-source-validation",
+            "sequence": [dr.sequence_spec()], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
+        }, session_id="diagram-source-validation",
     )
     assert code == 0
     for result in _artifact(target)["results"].values():
@@ -631,14 +464,10 @@ async def test_valid_diagrams_render_without_structured_read_receipts(
     assert len(_diagram_calls(backend, "sequence")) == 1
     assert len(_diagram_calls(backend, "flowchart")) == 1
 
-
 # --- Spec test 7: omission floors -------------------------------------------
 
-
 async def test_thin_sequence_is_omitted_and_flowchart_unaffected(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """Two surviving messages is below the floor: no block, the other kind is fine."""
     target = dr.build_both_signals_repo(tmp_path)
@@ -646,11 +475,7 @@ async def test_thin_sequence_is_omitted_and_flowchart_unaffected(
     thin["messages"] = thin["messages"][:2]
 
     exit_code, _ = await review_run(
-        target,
-        specs={
-            "sequence": [thin],
-            "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
-        },
+        target, specs={"sequence": [thin], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],},
     )
 
     assert exit_code == 0
@@ -666,11 +491,8 @@ async def test_thin_sequence_is_omitted_and_flowchart_unaffected(
     assert SEQUENCE_HEADING not in report
     assert FLOWCHART_HEADING in report
 
-
 async def test_flowchart_without_a_decision_is_omitted(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """A flowchart whose only decisions fail grounding falls below its floor."""
     target = dr.build_branch_heavy_repo(tmp_path)
@@ -689,14 +511,10 @@ async def test_flowchart_without_a_decision_is_omitted(
     assert all(node["kind"] != "decision" for node in flowchart["spec_final"]["nodes"])
     assert FLOWCHART_HEADING not in captured_post.body()
 
-
 # --- Spec test 8: below threshold -------------------------------------------
 
-
 async def test_below_threshold_records_signals_without_any_agent_call(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """Nothing eligible: both kinds skipped, zero diagram turns, no blocks."""
     target = dr.build_flat_repo(tmp_path)
@@ -713,11 +531,7 @@ async def test_below_threshold_records_signals_without_any_agent_call(
     assert eligibility["modules"] == {"app/one.py": "app", "app/two.py": "app"}
     assert eligibility["cross_module_edges"] == 0
     assert eligibility["candidate_roots"] == []
-    assert eligibility["thresholds"] == {
-        "min_code_files": 3,
-        "min_modules": 2,
-        "min_branch_points": 3,
-    }
+    assert eligibility["thresholds"] == {"min_code_files": 3, "min_modules": 2, "min_branch_points": 3,}
     assert _diagram_calls(stub, "sequence") == []
     assert _diagram_calls(stub, "flowchart") == []
 
@@ -726,52 +540,32 @@ async def test_below_threshold_records_signals_without_any_agent_call(
     assert FLOWCHART_HEADING not in body
     assert "## Diagrams" not in (target / ".review-output.md").read_text(encoding="utf-8")
 
-
 # --- Spec test 9: cross-service trigger -------------------------------------
 
-
 async def test_cross_service_trigger_fires_without_an_import_edge(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """Two manifest-bearing services, no import edge: the cross-service rule fires."""
     target = dr.build_cross_service_repo(tmp_path)
-
-    exit_code, _ = await review_run(
-        target, specs={"sequence": [dr.cross_service_sequence_spec()]}
-    )
-
+    exit_code, _ = await review_run(target, specs={"sequence": [dr.cross_service_sequence_spec()]})
     assert exit_code == 0
     artifact = _artifact(target)
     assert artifact["eligibility"]["sequence"]["rule"] == "cross-service"
     assert artifact["eligibility"]["cross_module_edges"] == 0
-    assert artifact["eligibility"]["services"] == {
-        "services/alpha/api.py": "alpha",
-        "services/beta/api.py": "beta",
-    }
+    assert artifact["eligibility"]["services"] == {"services/alpha/api.py": "alpha", "services/beta/api.py": "beta",}
     assert artifact["results"]["sequence"]["status"] == "rendered"
     assert SEQUENCE_HEADING in captured_post.body()
 
-
 # --- Spec test 10: force flags and config -----------------------------------
 
-
-async def test_diagram_sequence_forces_the_kind_on_a_flat_diff(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
+async def test_diagram_sequence_forces_the_kind_on_a_flat_diff(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     """``--diagram sequence`` forces sequence eligible and leaves flowchart skipped."""
     target = dr.build_flat_repo(tmp_path)
-
     exit_code, stub = await review_run(target, diagram="sequence")
-
     assert exit_code == 0
     artifact = _artifact(target)
     assert artifact["eligibility"]["sequence"] == {
-        "eligible": True,
-        "rule": "forced",
-        "reason": "Forced eligible: diagram mode 'sequence' names this kind.",
+        "eligible": True, "rule": "forced", "reason": "Forced eligible: diagram mode 'sequence' names this kind.",
     }
     assert artifact["results"]["flowchart"]["status"] == "skipped"
     # Forcing changes eligibility, never verification: the empty spec the stub
@@ -779,16 +573,11 @@ async def test_diagram_sequence_forces_the_kind_on_a_flat_diff(
     assert artifact["results"]["sequence"]["status"] == "omitted"
     assert len(_diagram_calls(stub, "sequence")) == 1
 
-
-async def test_diagram_flowchart_forced_offers_every_changed_function(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
+async def test_diagram_flowchart_forced_offers_every_changed_function(tmp_path: Path, review_run: Callable[..., Any],
 ) -> None:
     """With no function meeting the threshold, every changed function is a candidate."""
     target = dr.build_cross_module_repo(tmp_path)
-
     exit_code, stub = await review_run(target, diagram="flowchart")
-
     assert exit_code == 0
     artifact = _artifact(target)
     assert artifact["eligibility"]["flowchart"]["rule"] == "forced"
@@ -798,16 +587,10 @@ async def test_diagram_flowchart_forced_offers_every_changed_function(
     prompt = _diagram_calls(stub, "flowchart")[0]["prompt"]
     assert "call_handle" in prompt
 
-
-async def test_diagram_both_forces_both_kinds(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
+async def test_diagram_both_forces_both_kinds(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     """``--diagram both`` runs an author turn for each kind on a flat diff."""
     target = dr.build_flat_repo(tmp_path)
-
     exit_code, stub = await review_run(target, diagram="both")
-
     assert exit_code == 0
     eligibility = _artifact(target)["eligibility"]
     assert eligibility["sequence"]["rule"] == "forced"
@@ -815,78 +598,47 @@ async def test_diagram_both_forces_both_kinds(
     assert len(_diagram_calls(stub, "sequence")) == 1
     assert len(_diagram_calls(stub, "flowchart")) == 1
 
-
 async def test_diagram_off_suppresses_a_complex_diff(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """``--diagram off`` writes no artifact at all and makes no diagram call."""
     target = dr.build_cross_module_repo(tmp_path)
-
-    exit_code, stub = await review_run(
-        target, specs={"sequence": [dr.sequence_spec()]}, diagram="off"
-    )
-
+    exit_code, stub = await review_run(target, specs={"sequence": [dr.sequence_spec()]}, diagram="off")
     assert exit_code == 0
     assert not (target / ".daydream" / "deep" / "diagram.json").exists()
     assert _diagram_calls(stub, "sequence") == []
     assert SEQUENCE_HEADING not in captured_post.body()
 
-
-async def test_file_config_mode_off_suppresses_diagrams(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
+async def test_file_config_mode_off_suppresses_diagrams(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     """``[tool.daydream.diagram] mode = "off"`` suppresses without a CLI flag."""
-
     target = dr.build_cross_module_repo(tmp_path)
-
     exit_code, stub = await review_run(
-        target,
-        specs={"sequence": [dr.sequence_spec()]},
-        file_config=DaydreamFileConfig(diagram_mode="off"),
+        target, specs={"sequence": [dr.sequence_spec()]}, file_config=DaydreamFileConfig(diagram_mode="off"),
     )
-
     assert exit_code == 0
     assert not (target / ".daydream" / "deep" / "diagram.json").exists()
     assert _diagram_calls(stub, "sequence") == []
 
-
-async def test_cli_diagram_both_overrides_file_config_off(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
+async def test_cli_diagram_both_overrides_file_config_off(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     """The CLI flag outranks the repository file's off switch."""
-
     target = dr.build_cross_module_repo(tmp_path)
-
-    exit_code, _ = await review_run(
-        target,
-        specs={"sequence": [dr.sequence_spec()]},
-        diagram="both",
+    exit_code, _ = await review_run(target, specs={"sequence": [dr.sequence_spec()]}, diagram="both",
         file_config=DaydreamFileConfig(diagram_mode="off"),
     )
-
     assert exit_code == 0
     eligibility = _artifact(target)["eligibility"]
     assert eligibility["force"] == "both"
     assert eligibility["sequence"]["eligible"] is True
     assert eligibility["flowchart"]["eligible"] is True
 
-
-async def test_min_branch_points_threshold_disables_the_flowchart(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
+async def test_min_branch_points_threshold_disables_the_flowchart(tmp_path: Path, review_run: Callable[..., Any],
 ) -> None:
     """A raised ``min_branch_points`` puts the 4-branch fixture below the bar."""
 
     target = dr.build_branch_heavy_repo(tmp_path)
 
     exit_code, stub = await review_run(
-        target,
-        specs={"flowchart": [dr.flowchart_spec()]},
-        file_config=DaydreamFileConfig(diagram_min_branch_points=6),
+        target, specs={"flowchart": [dr.flowchart_spec()]}, file_config=DaydreamFileConfig(diagram_min_branch_points=6),
     )
 
     assert exit_code == 0
@@ -898,14 +650,10 @@ async def test_min_branch_points_threshold_disables_the_flowchart(
     assert artifact["eligibility"]["function_branch_counts"][0]["branch_points"] == 4
     assert _diagram_calls(stub, "flowchart") == []
 
-
 # --- Spec test 11: injection -------------------------------------------------
 
-
 async def test_injection_payloads_cannot_add_mermaid_statements(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """Hostile labels are sanitized: no extra statement, HTML wrapper intact."""
     target = dr.build_cross_module_repo(tmp_path)
@@ -943,25 +691,18 @@ async def test_injection_payloads_cannot_add_mermaid_statements(
     assert body.count("```mermaid") == 1
     assert body.count(SEQUENCE_HEADING) == 1
 
-
 # --- Spec test 14: fail-open in review --------------------------------------
 
-
 async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-    captured_post: _CapturedPost,
+    tmp_path: Path, review_run: Callable[..., Any], captured_post: _CapturedPost,
 ) -> None:
     """One kind's backend error is fail-open: the other renders and the review posts."""
     target = dr.build_both_signals_repo(tmp_path)
 
-    exit_code, _ = await review_run(
-        target,
+    exit_code, _ = await review_run(target,
         specs={
-            "sequence": [dr.sequence_spec()],
-            "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
-        },
-        fail=frozenset({"flowchart"}),
+            "sequence": [dr.sequence_spec()], "flowchart": [dr.flowchart_spec(root_file="pkg_b/client.py", offset=10)],
+        }, fail=frozenset({"flowchart"}),
     )
 
     assert exit_code == 0, "a failed diagram kind must not fail the review"
@@ -980,28 +721,14 @@ async def test_diagram_phase_outcome_and_dispatch_interval_when_one_author_fails
     assert end["reason_code"] == "some_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "partial"
     assert dispatch["extra"]["reason_code"] == "some_children_failed"
-    assert_dispatch_children(
-        target,
-        dispatch,
-        "diagram",
-        ["diagram-sequence", "diagram-flowchart"],
-    )
+    assert_dispatch_children(target, dispatch, "diagram", ["diagram-sequence", "diagram-flowchart"],)
     body = captured_post.body()
     assert SEQUENCE_HEADING in body
     assert FLOWCHART_HEADING not in body
 
-
-async def test_diagram_phase_outcome_all_authors_fail_open(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
+async def test_diagram_phase_outcome_all_authors_fail_open(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     target = dr.build_both_signals_repo(tmp_path)
-
-    exit_code, _ = await review_run(
-        target,
-        fail=frozenset({"sequence", "flowchart"}),
-    )
-
+    exit_code, _ = await review_run(target, fail=frozenset({"sequence", "flowchart"}),)
     assert exit_code == 0
     results = _artifact(target)["results"]
     assert set(results) == {"sequence", "flowchart"}
@@ -1015,22 +742,11 @@ async def test_diagram_phase_outcome_all_authors_fail_open(
     assert end["reason_code"] == "all_children_failed"
     assert dispatch["extra"]["dispatch_status"] == "failed"
     assert dispatch["extra"]["reason_code"] == "all_children_failed"
-    assert_dispatch_children(
-        target,
-        dispatch,
-        "diagram",
-        ["diagram-sequence", "diagram-flowchart"],
-    )
+    assert_dispatch_children(target, dispatch, "diagram", ["diagram-sequence", "diagram-flowchart"],)
 
-
-async def test_no_eligible_diagram_closes_skipped_lifecycle(
-    tmp_path: Path,
-    review_run: Callable[..., Any],
-) -> None:
+async def test_no_eligible_diagram_closes_skipped_lifecycle(tmp_path: Path, review_run: Callable[..., Any],) -> None:
     target = dr.build_flat_repo(tmp_path)
-
     exit_code, _ = await review_run(target)
-
     assert exit_code == 0
     _, end = _diagram_lifecycle(target)
     assert end["status"] == "skipped"
@@ -1038,13 +754,9 @@ async def test_no_eligible_diagram_closes_skipped_lifecycle(
 
 # --- Per-phase config override (spec section 9) ------------------------------
 
-
 async def test_diagram_phase_resolves_its_own_configured_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., Any],
-    silence_console: Callable[..., None],
-    captured_post: _CapturedPost,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., Any],
+    silence_console: Callable[..., None], captured_post: _CapturedPost,
 ) -> None:
     """``[tool.daydream.phases.diagram]`` reaches the author agent with zero glue.
 
@@ -1053,14 +765,8 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     the step's ``config_phase`` really is ``"diagram"``, which this proves at
     the backend boundary rather than by reading the FlowStep.
     """
-
-    for module in (
-        "daydream.deep.orchestrator",
-        "daydream.deep.review_steps",
-        "daydream.deep.merge_steps",
-        "daydream.deep.diagram_steps",
-        "daydream.phases",
-        "daydream.runner",
+    for module in ("daydream.deep.orchestrator", "daydream.deep.review_steps", "daydream.deep.merge_steps",
+        "daydream.deep.diagram_steps", "daydream.phases", "daydream.runner",
     ):
         silence_console(module)
     silence(monkeypatch)
@@ -1076,62 +782,36 @@ async def test_diagram_phase_resolves_its_own_configured_model(
     monkeypatch.setattr("daydream.runner.create_backend", factory)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
 
-    exit_code = await run(
-        make_config(
-            target,
-            output_mode="comment",
-            file_config=DaydreamFileConfig(
-                phases={"diagram": {"model": "diagram-only-model"}}
-            ),
+    exit_code = await run(make_config(target, output_mode="comment",
+            file_config=DaydreamFileConfig(phases={"diagram": {"model": "diagram-only-model"}}),
         )
     )
 
     assert exit_code == 0
-    models = {
-        call["model"]
-        for call in shared
-        if "You are the sequence-diagram author" in call["prompt"]
-    }
+    models = {call["model"] for call in shared if "You are the sequence-diagram author" in call["prompt"]}
     assert models == {"diagram-only-model"}
     # No other phase inherited it.
-    others = {
-        call["model"]
-        for call in shared
-        if "You are the sequence-diagram author" not in call["prompt"]
-    }
+    others = {call["model"] for call in shared if "You are the sequence-diagram author" not in call["prompt"]}
     assert "diagram-only-model" not in others
-
 
 # --- Issue #1123: inline host artifacts for disposable-clone author turns ----
 
-
 async def _empty_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
     return {"participants": []}, None, None
-
 
 def _recording_agent(prompts: list[str]) -> Any:
     async def _fake_run_agent(backend: Any, cwd: Any, prompt: str, **kwargs: Any) -> Any:
         prompts.append(prompt)
         return {"participants": []}, None, None
-
     return _fake_run_agent
 
-
 def _clone_test_eligibility() -> Any:
-
     return Eligibility(
-        code_files=["a.py", "b.py"],
-        modules={"a.py": "m1", "b.py": "m2"},
-        services={},
-        cross_module_edges=1,
-        function_branch_counts=[],
-        candidate_roots=[],
+        code_files=["a.py", "b.py"], modules={"a.py": "m1", "b.py": "m2"}, services={}, cross_module_edges=1,
+        function_branch_counts=[], candidate_roots=[],
         sequence=KindDecision(eligible=True, rule="cross-module", reason="test"),
-        flowchart=KindDecision(eligible=False, rule=None, reason="test"),
-        thresholds=DiagramThresholds(),
-        force="off",
+        flowchart=KindDecision(eligible=False, rule=None, reason="test"), thresholds=DiagramThresholds(), force="off",
     )
-
 
 def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: str | None) -> Any:
 
@@ -1144,32 +824,20 @@ def _clone_test_ctx(tmp_path: Path, exploration_summary: str | None, deps_text: 
     if deps_text is not None:
         (exploration_dir / "dependencies.md").write_text(deps_text, encoding="utf-8")
 
-    work = WorkContext(
-        repo=tmp_path,
-        source=tmp_path,
-        base_branch="main",
-        base_sha="",
-        head_branch=None,
-        head_sha="",
-        is_ephemeral=False,
-        run_id="test",
+    work = WorkContext(repo=tmp_path, source=tmp_path, base_branch="main", base_sha="", head_branch=None, head_sha="",
+        is_ephemeral=False, run_id="test",
     )
-    ctx = FlowContext(
-        config=RunConfig(target=str(tmp_path)), work=work, registry=Registry(), data={}
-    )
+    ctx = FlowContext(config=RunConfig(target=str(tmp_path)), work=work, registry=Registry(), data={})
     ctx.data["diff_path"] = diff_path
     ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
     ctx.data["exploration_dir"] = exploration_dir
     return ctx
-
 
 def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Path) -> None:
     """Issue #1123 acceptance: a disposable-clone backend's diagram author prompt
     carries inline exploration+dependency content, inlines the diff, and names
     NO .daydream/exploration or diff.patch path — the author turn can complete
     without reading any artifact the prompt references."""
-
-
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
@@ -1178,12 +846,9 @@ def test_disposable_clone_backend_diagram_prompt_is_self_sufficient(tmp_path: Pa
     assert ".daydream/exploration" not in prompt
     assert "diff.patch" not in prompt
 
-
 def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
     """A non-disposable backend takes the unchanged pointer path: the on-disk
     diff.patch and exploration directory are named, not inlined."""
-
-
     backend = SimpleNamespace(read_only_disposable_clone=False, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
@@ -1192,12 +857,9 @@ def test_worktree_backend_diagram_prompt_keeps_pointers(tmp_path: Path) -> None:
     assert "dependencies.md lists the deterministic import edges" in prompt
     assert "## Summary" not in prompt
 
-
 def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -> None:
     """Missing exploration files are omitted entirely in clone mode — never
     faked — while the diff is still inlined."""
-
-
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
     ctx = _clone_test_ctx(tmp_path, exploration_summary=None, deps_text=None)
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
@@ -1205,24 +867,19 @@ def test_disposable_clone_backend_omits_unreadable_exploration(tmp_path: Path) -
     assert "a -> b" not in prompt
     assert "diff --git a/a.py b/a.py" in prompt
 
-
 def test_inline_exploration_text_drops_dependencies_when_budget_exhausted(tmp_path: Path) -> None:
     """When the summary consumes the full shared budget, a pending non-empty
     dependencies.md must not be rendered as a marker-only string: that would
     assert 'Deterministic import edges' while carrying only the truncation
     notice. It is omitted entirely."""
-
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
-    (exploration_dir / "summary.md").write_text(
-        "x" * (INLINE_DIFF_BUDGET_BYTES + 1), encoding="utf-8"
-    )
+    (exploration_dir / "summary.md").write_text("x" * (INLINE_DIFF_BUDGET_BYTES + 1), encoding="utf-8")
     (exploration_dir / "dependencies.md").write_text("a -> b", encoding="utf-8")
     summary, dependencies = deep._inline_exploration_text(exploration_dir)
     assert summary is not None
     assert "[exploration summary truncated]" in summary
     assert dependencies is None
-
 
 def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) -> None:
     """Issue #336: the clone-mode inline summary must not name the sibling
@@ -1256,22 +913,17 @@ def test_inline_exploration_text_scrubs_dangling_artifact_names(tmp_path: Path) 
     assert "Pre-scan exploration results for the current review." in summary
     assert "keep me" in summary
 
-
 def test_inline_exploration_text_truncation_is_byte_accurate(tmp_path: Path) -> None:
     """Issue #336: the summary slice is byte-exact (mirroring the diff-block
     truncation), so a multibyte summary cannot exceed INLINE_DIFF_BUDGET_BYTES."""
-
     exploration_dir = tmp_path / "exploration"
     exploration_dir.mkdir()
-    (exploration_dir / "summary.md").write_text(
-        "é" * (INLINE_DIFF_BUDGET_BYTES // 2 + 100), encoding="utf-8"
-    )
+    (exploration_dir / "summary.md").write_text("é" * (INLINE_DIFF_BUDGET_BYTES // 2 + 100), encoding="utf-8")
     summary, _ = deep._inline_exploration_text(exploration_dir)
     assert summary is not None
     assert "[exploration summary truncated]" in summary
     body = summary.split("\n[exploration summary truncated]", 1)[0]
     assert len(body.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
-
 
 def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1281,8 +933,6 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     splatting them in would raise TypeError and degrade the kind to failed.
     The override gets exactly the documented kwarg set and the run proceeds —
     with exploration_dir=None on the clone run, never the dangling host path."""
-
-
     registry = Registry()
     registry.override_prompt("diagram_sequence", _legacy_sequence_builder)
     monkeypatch.setattr(deep, "get_registry", lambda: registry)
@@ -1293,7 +943,6 @@ def test_diagram_author_prompt_legacy_fork_override_gets_documented_kwargs(
     prompt = deep._diagram_author_prompt(ctx, "sequence", _clone_test_eligibility(), backend)
     assert prompt.startswith("legacy:")
     assert "exploration=None" in prompt  # no dangling host path on a clone run
-
 
 @pytest.mark.parametrize("kind", ["sequence", "flowchart"])
 async def test_disposable_clone_authoring_completes_without_artifact_reads(
@@ -1318,33 +967,21 @@ async def test_disposable_clone_authoring_completes_without_artifact_reads(
     monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
     ctx = _clone_test_ctx(tmp_path, exploration_summary="## Summary\n3 files", deps_text="a -> b")
     result = await deep._run_diagram_kind(
-        ctx,
-        kind=kind,
-        eligibility=_clone_test_eligibility(),
-        hunk_ranges={},
-        symbols=RepoSymbols(tmp_path),
-        recorder=None,
-        backend=_Wall(),
+        ctx, kind=kind, eligibility=_clone_test_eligibility(), hunk_ranges={}, symbols=RepoSymbols(tmp_path),
+        recorder=None, backend=_Wall(),
     )
     assert result["status"] != "failed"  # authoring completed
 
-
 # --- Issue #1214: transport-aware advisory-input budgeting -------------------
 
-
 def test_large_cross_module_repo_is_large_enough_for_the_advisory_budget(tmp_path: Path) -> None:
-
     repo = build_large_cross_module_repo(tmp_path)
     diff = git(repo, "diff", "--stat", "main...HEAD")
     assert len(git(repo, "diff", "main...HEAD").splitlines()) > 20_000
-    assert sum(1 for _ in (repo / "pkg_a").rglob("*.py")) + sum(
-        1 for _ in (repo / "pkg_b").rglob("*.py")
-    ) >= 200
+    assert sum(1 for _ in (repo / "pkg_a").rglob("*.py")) + sum(1 for _ in (repo / "pkg_b").rglob("*.py")) >= 200
     assert diff  # non-empty stat output, i.e. the branch really differs from main
 
-
 def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> None:
-
     huge = {f"pkg_{i:03d}": [f"pkg_{i:03d}/mod_{j:02d}.py" for j in range(30)] for i in range(60)}
     first = _files_by_module_block(huge)
     assert first == _files_by_module_block(huge)                       # stable
@@ -1358,12 +995,8 @@ def test_files_by_module_block_is_bounded_stable_and_counts_the_omission() -> No
     assert match is not None                                           # notice carries a numeric count
     assert int(match.group(1)) == total - kept
 
-
 def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> None:
-
-    roots = [
-        {"file": f"pkg/mod_{i:03d}.py", "name": f"handle_{i:03d}", "line": 1,
-         "end_line": 40, "branch_points": 5}
+    roots = [{"file": f"pkg/mod_{i:03d}.py", "name": f"handle_{i:03d}", "line": 1, "end_line": 40, "branch_points": 5}
         for i in range(200)
     ]
     block = _candidate_roots_block(roots, forced=True)
@@ -1374,7 +1007,6 @@ def test_candidate_roots_block_is_bounded_stable_and_counts_the_omission() -> No
     match = re.search(r"\((\d+) more candidate roots omitted", block)
     assert match is not None                                           # notice carries a numeric count
     assert int(match.group(1)) == len(roots) - kept
-
 
 async def test_large_pr_author_prompt_reports_the_capped_projection(
     tmp_path: Path, fake_gh: FakeGh, review_run: Callable[..., Any]
@@ -1404,7 +1036,6 @@ async def test_large_pr_author_prompt_reports_the_capped_projection(
     assert author_prompts, "the sequence author turn must run"
     assert "omitted to fit the prompt budget" in author_prompts[0]
 
-
 async def _session_test_ctx(tmp_path: Path) -> Any:
     """A FlowContext on an ACTIVE artifact session with realistic artifact sizes.
 
@@ -1416,7 +1047,6 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
     the plan). A test that needs teardown should use the ``async with`` form
     instead.
     """
-
     repo = tmp_path / "repo"
     repo.mkdir()
     init_repo(repo)
@@ -1440,74 +1070,53 @@ async def _session_test_ctx(tmp_path: Path) -> Any:
     diff_path = deep_dir / "diff.patch"
     diff_path.write_text("diff --git a/a.py b/a.py\n+line\n", encoding="utf-8")
     (deep_dir / "hunk-index.json").write_text("{}", encoding="utf-8")
-    ctx = FlowContext(
-        config=RunConfig(target=str(repo)), work=work, registry=Registry(),
+    ctx = FlowContext(config=RunConfig(target=str(repo)), work=work, registry=Registry(),
         data={"diff_path": diff_path, "diff": diff_path.read_text(encoding="utf-8"),
               "exploration_dir": exploration, "dd": dd},
         artifacts=session,
     )
     return ctx
 
-
-@pytest.mark.parametrize(
-    "backend_factory",
-    [
-        lambda repo: SimpleNamespace(read_only_disposable_clone=True, model="fake"),
-        lambda repo: SimpleNamespace(audit_root_isolation="claude-pretooluse",
-                                     audit_root=repo.resolve(), model="fake"),
+@pytest.mark.parametrize("backend_factory",
+    [lambda repo: SimpleNamespace(read_only_disposable_clone=True, model="fake"),
+        lambda repo: SimpleNamespace(audit_root_isolation="claude-pretooluse", audit_root=repo.resolve(), model="fake"),
         lambda repo: SimpleNamespace(sandbox=True, model="fake"),
-    ],
-    ids=["clone-like-inline", "strict-audit-inline", "sandbox-inline"],
+    ], ids=["clone-like-inline", "strict-audit-inline", "sandbox-inline"],
 )
 async def test_eligible_diagram_reaches_the_backend_when_advisory_artifacts_overflow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend_factory: Callable[[Path], Any]
 ) -> None:
-
     ctx = await _session_test_ctx(tmp_path)
     prompts: list[str] = []
-
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    result = await deep._run_diagram_kind(
-        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None,
-        backend=backend_factory(ctx.work.repo),
+    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend_factory(ctx.work.repo),
     )
-
     assert prompts, "the author turn must be reached — no preflight abort"
     assert result["status"] != "failed", result.get("reason")
 
-
-async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_exact_paths_run_with_over_limit_diff_reaches_the_backend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-
     ctx = await _session_test_ctx(tmp_path)
     diff_path = ctx.data["diff_path"]
     diff_path.write_text("+" + ("x" * 1_100_000) + "\n", encoding="utf-8")   # > 1 MiB per-file limit
     ctx.data["diff"] = diff_path.read_text(encoding="utf-8")
     prompts: list[str] = []
-
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    result = await deep._run_diagram_kind(
-        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None,
-        backend=SimpleNamespace(model="fake"),
+    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=SimpleNamespace(model="fake"),
     )
-
     assert prompts, "an EXACT_PATHS run must reach the author turn with the diff omitted, not aborted"
     assert [item["label"] for item in result["advisory"]["omitted"]] == ["diff"]
     assert result["advisory"]["transport"] == "exact_paths"
 
-
-async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+async def test_advisory_omission_is_recorded_and_not_a_failed_kind(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
 
     ctx = await _session_test_ctx(tmp_path)
 
     monkeypatch.setattr(deep, "run_agent", _empty_agent)
-    result = await deep._run_diagram_kind(
-        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+    result = await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None,
         backend=SimpleNamespace(read_only_disposable_clone=True, model="fake"),
     )
@@ -1522,14 +1131,10 @@ async def test_advisory_omission_is_recorded_and_not_a_failed_kind(
     assert [item["label"] for item in result["advisory"]["omitted"]] == ["exploration-affected-files"]
     assert result["advisory"]["omitted"][0]["bytes"] == 23_684
 
-
-@pytest.mark.parametrize(
-    "backend",
-    [
-        SimpleNamespace(audit_root_isolation="claude-pretooluse", model="fake"),
+@pytest.mark.parametrize("backend",
+    [SimpleNamespace(audit_root_isolation="claude-pretooluse", model="fake"),
         SimpleNamespace(sandbox=True, model="fake"),
-    ],
-    ids=["strict-audit-inline", "sandbox-inline"],
+    ], ids=["strict-audit-inline", "sandbox-inline"],
 )
 async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, backend: Any
@@ -1540,28 +1145,22 @@ async def test_inline_prompt_names_no_private_path_on_non_clone_backends(
     prompts: list[str] = []
 
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    await deep._run_diagram_kind(
-        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
     )
 
     prompt = prompts[0]
-    for private in (
-        str(ctx.data["diff_path"]),
-        str(ctx.data["diff_path"].parent / "hunk-index.json"),
+    for private in (str(ctx.data["diff_path"]), str(ctx.data["diff_path"].parent / "hunk-index.json"),
         str(ctx.data["exploration_dir"]),
     ):
         assert private not in prompt, f"INLINE prompt leaked {private}"
     assert "inlined below" in prompt                      # the diff itself is still grounded
     assert "Sanctioned phase inputs" in prompt
 
-
 def test_clone_mode_diff_block_includes_its_banner_and_marker_in_the_budget() -> None:
-
     block = _diagram_diff_block(Path("/nowhere/diff.patch"), "é" * 20_000, clone_mode=True)
     assert "[diff truncated to fit the prompt budget]" in block
     assert len(block.encode("utf-8")) <= INLINE_DIFF_BUDGET_BYTES
-
 
 async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1576,19 +1175,14 @@ async def test_inline_legacy_prompt_builder_still_works_and_leaks_nothing(
     prompts: list[str] = []
 
     monkeypatch.setattr(deep, "run_agent", _recording_agent(prompts))
-    await deep._run_diagram_kind(
-        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
-        symbols=RepoSymbols(ctx.work.repo), recorder=None,
-        backend=SimpleNamespace(sandbox=True, model="fake"),
+    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+        symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=SimpleNamespace(sandbox=True, model="fake"),
     )
     assert prompts[0].startswith("legacy:")
     assert str(ctx.data["diff_path"]) not in prompts[0]
     assert "exploration=None" in prompts[0]
 
-
-async def test_author_and_repair_turns_share_one_prepared_set(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_author_and_repair_turns_share_one_prepared_set(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     ctx = await _session_test_ctx(tmp_path)
     seen: list[Any] = []
@@ -1602,8 +1196,7 @@ async def test_author_and_repair_turns_share_one_prepared_set(
 
     monkeypatch.setattr(deep, "run_agent", _fake_run_agent)
     backend = SimpleNamespace(read_only_disposable_clone=True, model="fake")
-    await deep._run_diagram_kind(
-        ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
+    await deep._run_diagram_kind(ctx, kind="sequence", eligibility=_clone_test_eligibility(), hunk_ranges={},
         symbols=RepoSymbols(ctx.work.repo), recorder=None, backend=backend,
     )
 

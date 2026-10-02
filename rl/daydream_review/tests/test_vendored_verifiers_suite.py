@@ -21,8 +21,7 @@ from pathlib import Path
 import pytest
 
 VENDORED_ENV_VAR = "PRIME_RL_VENDORED_VERIFIERS"
-SKIP_REASON = (
-    "AC10 gate not run: set PRIME_RL_VENDORED_VERIFIERS to prime-rl's vendored "
+SKIP_REASON = ("AC10 gate not run: set PRIME_RL_VENDORED_VERIFIERS to prime-rl's vendored "
     "verifiers checkout (e.g. <prime-rl>/deps/verifiers) and re-run — see "
     "rl/daydream_review/README.md 'Vendored-verifiers skew (AC10)'. A "
     "training claim is only valid when this gate has run green."
@@ -43,11 +42,6 @@ def test_env_suite_passes_under_vendored_verifiers() -> None:
     env = dict(os.environ)
     env["PYTHONPATH"] = vendored + os.pathsep + env.get("PYTHONPATH", "")
     r = subprocess.run(
-        ["uv", "run", "pytest", "tests/", "-q"],
-        cwd=ENV_DIR,
-        capture_output=True,
-        text=True,
-        timeout=1800,
-        env=env,
+        ["uv", "run", "pytest", "tests/", "-q"], cwd=ENV_DIR, capture_output=True, text=True, timeout=1800, env=env,
     )
     assert r.returncode == 0, r.stdout[-4000:] + r.stderr[-2000:]

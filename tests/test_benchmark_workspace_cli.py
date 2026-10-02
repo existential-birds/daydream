@@ -36,38 +36,16 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
     reports a failure whose diagnostics must never disclose the sentinel.
     """
 
-
     root = _write_curated_workspace(tmp_path, "ready")
     imp = next((root / "imports").glob("pr-*.json"))
     doc = json.loads(imp.read_text())
-    doc["evidence"] = [
-        {
-            "source_id": "github:inline_comment:4242",
-            "kind": "inline_comment",
-            "database_id": 4242,
-            "node_id": "DIFF_4242",
-            "author": {"login": "alice", "type": "User"},
-            "body": "SUPER_SECRET_EVIDENCE",
-            "body_sha256": hashlib.sha256(b"SUPER_SECRET_EVIDENCE").hexdigest(),
-            "created_at": "2026-01-01T00:00:00Z",
-            "updated_at": "2026-01-01T00:00:00Z",
-            "submitted_at": None,
-            "commit_id": None,
-            "original_commit_id": None,
-            "path": "feature.py",
-            "line": 2,
-            "original_line": 2,
-            "review_id": None,
-            "thread_id": None,
-            "reply_to_id": None,
-            "subject_type": "line",
-            "side": "RIGHT",
-            "start_side": None,
-            "resolved": False,
-            "outdated": False,
-            "dismissed": False,
-            "state": None,
-            "is_bot": False,
+    doc["evidence"] = [{"source_id": "github:inline_comment:4242", "kind": "inline_comment", "database_id": 4242,
+            "node_id": "DIFF_4242", "author": {"login": "alice", "type": "User"}, "body": "SUPER_SECRET_EVIDENCE",
+            "body_sha256": hashlib.sha256(b"SUPER_SECRET_EVIDENCE").hexdigest(), "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z", "submitted_at": None, "commit_id": None, "original_commit_id": None,
+            "path": "feature.py", "line": 2, "original_line": 2, "review_id": None, "thread_id": None,
+            "reply_to_id": None, "subject_type": "line", "side": "RIGHT", "start_side": None, "resolved": False,
+            "outdated": False, "dismissed": False, "state": None, "is_bot": False,
             "url": "https://github.com/o/r/pull/101#discussion_r4242",
         }
     ]
@@ -76,20 +54,13 @@ def _write_curated_workspace_with_sensitive_evidence(tmp_path: Path) -> Any:
     text = case.read_text()
     assert "The cache key is stable across writes" in text
     case.write_text(
-        text.replace(
-            "The cache key is stable across writes, so stale data is served.",
-            "SUPER_SECRET_EVIDENCE",
-        )
+        text.replace("The cache key is stable across writes, so stale data is served.", "SUPER_SECRET_EVIDENCE")
     )
     return root
 
 
 def _tree_bytes(root: Path) -> dict[str, bytes]:
-    return {
-        path.relative_to(root).as_posix(): path.read_bytes()
-        for path in sorted(root.rglob("*"))
-        if path.is_file()
-    }
+    return {path.relative_to(root).as_posix(): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
 def _git_states(root: Path) -> dict[str, tuple[str, bytes | None]]:
@@ -116,17 +87,12 @@ def test_benchmark_help_lists_subcommands() -> None:
     )
     assert r.returncode == 0 and "init" in r.stdout and "status" in r.stdout and "validate" in r.stdout
 
-
 def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     r = subprocess.run(  # noqa: S603
-        [
-            sys.executable, "-m", "daydream", "benchmark", "init", str(ws),
-            "--repo", "OWNER/REPO",
-            "--reviewer-host", "api.anthropic.com",
-            "--judge-host", "api.anthropic.com",
-        ],
-        capture_output=True, text=True,
+        [sys.executable, "-m", "daydream", "benchmark", "init", str(ws), "--repo", "OWNER/REPO",
+            "--reviewer-host", "api.anthropic.com", "--judge-host", "api.anthropic.com",
+        ], capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stdout + r.stderr
     assert "confidential" in r.stdout  # prints privacy classification
@@ -134,17 +100,14 @@ def test_benchmark_init_status_validate_roundtrip(tmp_path: Path) -> None:
     assert (ws / "benchmark.yaml").exists()
 
     r2 = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "daydream", "benchmark", "status", str(ws)],
-        capture_output=True, text=True,
+        [sys.executable, "-m", "daydream", "benchmark", "status", str(ws)], capture_output=True, text=True,
     )
     assert r2.returncode == 0 and "empty" in r2.stdout and "unresolved" in r2.stdout
 
     r3 = subprocess.run(  # noqa: S603
-        [sys.executable, "-m", "daydream", "benchmark", "validate", str(ws)],
-        capture_output=True, text=True,
+        [sys.executable, "-m", "daydream", "benchmark", "validate", str(ws)], capture_output=True, text=True,
     )
     assert r3.returncode == 2  # fresh workspace: structurally valid but incomplete
-
 
 def test_legacy_bench_is_rejected_not_routed() -> None:
     # The old `bench` verb is removed; it must exit non-zero with a clear error
@@ -157,10 +120,7 @@ def test_legacy_bench_is_rejected_not_routed() -> None:
     assert "no longer a command" in r.stderr
     assert "daydream benchmark" in r.stderr
 
-
-def test_validate_diagnostics_never_disclose_evidence_bodies(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
+def test_validate_diagnostics_never_disclose_evidence_bodies(tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     ws = _write_curated_workspace_with_sensitive_evidence(tmp_path)
     before = _tree_bytes(ws)
@@ -172,23 +132,15 @@ def test_validate_diagnostics_never_disclose_evidence_bodies(
     assert rc == 1
     assert _tree_bytes(ws) == before                # validate is read-only: nothing written
 
-
 def test_validate_exit_code_contract_preserved(tmp_path: Path) -> None:
     assert validate_workspace(_write_curated_workspace(tmp_path / "r1", "ready"))[0] == 0
     assert validate_workspace(_write_curated_workspace(tmp_path / "r2", "draft"))[0] == 2
     assert validate_workspace(_write_minimal_invalid_workspace(tmp_path / "r3"))[0] == 1
     assert validate_workspace(_write_curated_workspace(tmp_path / "r4", "ready", resolved=False))[0] == 2
 
-
 def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
-    tmp_path: Path,
-    fake_gh: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, fake_gh: Any, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
-
-
     parent = tmp_path / "workspace parent with spaces"
     parent.mkdir()
     ws, case_id, _head_sha = _seed_ready_case(parent, fake_gh, candidate=True)
@@ -222,10 +174,7 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
         raw["curation"]["findings"][0], case_id=raw["case_id"]
     )
     case_path.write_text(yaml.safe_dump(raw, sort_keys=False))
-    authored = {
-        "manifest": manifest,
-        "case": case_path.read_bytes(),
-        "import": import_path.read_bytes(),
+    authored = {"manifest": manifest, "case": case_path.read_bytes(), "import": import_path.read_bytes(),
         "bundle": bundle_path.read_bytes(),
     }
 
@@ -251,16 +200,10 @@ def test_real_cli_reports_and_rejects_stale_task_spec_without_mutation(
     assert _git_states(parent) == git_before
     assert not (ws / "cache" / "harbor-build-stage").exists()
 
-
 @pytest.mark.parametrize("digest", [None, "PRIVATE_DIGEST_SENTINEL"])
 def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
-    digest: str | None,
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], digest: str | None,
 ) -> None:
-
-
-
     ws = _write_curated_workspace(tmp_path / "malformed approval workspace", "ready")
     wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
     wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
@@ -277,9 +220,7 @@ def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation
     before = _tree_bytes(ws)
     git_before = _git_states(tmp_path)
 
-    commands = [
-        ["benchmark", "status", str(ws)],
-        ["benchmark", "validate", str(ws)],
+    commands = [["benchmark", "status", str(ws)], ["benchmark", "validate", str(ws)],
         ["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)],
     ]
     for command in commands:
@@ -292,7 +233,6 @@ def test_real_cli_rejects_corrupt_approval_digest_without_disclosure_or_mutation
         assert "Traceback" not in output
         assert _tree_bytes(ws) == before
         assert _git_states(tmp_path) == git_before
-
 
 def test_real_cli_validate_distinguishes_recovery_corruption_without_disclosure(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
@@ -314,15 +254,11 @@ def test_real_cli_validate_distinguishes_recovery_corruption_without_disclosure(
     assert "private unknown transaction residue" not in output
     assert _tree_bytes(ws) == before
 
-
 def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-
-
     workspaces = [
-        _write_curated_workspace(tmp_path / "current", "ready"),
-        _write_curated_workspace(tmp_path / "stale", "ready"),
+        _write_curated_workspace(tmp_path / "current", "ready"), _write_curated_workspace(tmp_path / "stale", "ready"),
     ]
     for ws in workspaces:
         manifest = load_yaml_strict(ws / "benchmark.yaml")
@@ -335,7 +271,6 @@ def test_real_cli_calibration_treats_current_and_stale_approval_identically(
         stale["curation"]["findings"][0], case_id=stale["case_id"]
     )
     stale_case.write_text(yaml.safe_dump(stale, sort_keys=False))
-
 
     responses = _scripted_responses(calibrate._load_fixture())
     fake_http, request_counter = _scripted_http(responses)
@@ -360,7 +295,6 @@ def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     for name, value in _env().items():
         monkeypatch.setenv(name, value)
 
-
     assert task_spec_approval(load_yaml_strict(next((workspaces[0] / "cases").glob("*.yaml")))).state == "current"
     assert task_spec_approval(load_yaml_strict(stale_case)).state == "stale"
     request_totals = []
@@ -375,15 +309,9 @@ def test_real_cli_calibration_treats_current_and_stale_approval_identically(
     assert request_totals == [72, 144]
     assert construction_totals == [72, 144]
 
-
 def test_real_cli_malformed_manifest_matrix_is_bounded_and_preserves_outputs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
-
-
-
     ws = _write_curated_workspace(tmp_path / "malformed workspace", "ready")
     wheel = tmp_path / f"daydream-{importlib.metadata.version('daydream')}-py3-none-any.whl"
     wheel.write_bytes(b"PK\x05\x06" + b"\x00" * 18)
@@ -408,9 +336,7 @@ def test_real_cli_malformed_manifest_matrix_is_bounded_and_preserves_outputs(
 
     monkeypatch.setattr(httpx, "AsyncClient", forbidden_http_client)
 
-    commands = [
-        ["benchmark", "status", str(ws)],
-        ["benchmark", "validate", str(ws)],
+    commands = [["benchmark", "status", str(ws)], ["benchmark", "validate", str(ws)],
         ["benchmark", "build-harbor", str(ws), "--daydream-wheel", str(wheel)],
         ["benchmark", "calibrate-judge", str(ws), "--yes"],
     ]
@@ -427,15 +353,10 @@ def test_real_cli_malformed_manifest_matrix_is_bounded_and_preserves_outputs(
     assert _tree_bytes(ws / "harbor") == harbor_before
     assert not (ws / "cache" / "harbor-build-stage").exists()
 
-
 def test_stale_approval_keeps_collecting_and_curating_priority_contract() -> None:
-    assert derive_workspace_state(
-        pull_requests=[{"import_state": "pending"}],
-        cases=[{"curation_state": "stale"}],
+    assert derive_workspace_state(pull_requests=[{"import_state": "pending"}], cases=[{"curation_state": "stale"}],
     ) == "collecting"
     assert derive_workspace_state(
-        pull_requests=[{"import_state": "fetched"}],
-        cases=[{"curation_state": "stale"}, {"curation_state": "draft"}],
+        pull_requests=[{"import_state": "fetched"}], cases=[{"curation_state": "stale"}, {"curation_state": "draft"}],
     ) == "curating"
-
 

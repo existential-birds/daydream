@@ -21,9 +21,7 @@ def test_supported_extension_loads(ext_dir: ExtDir) -> None:
     )
     assert build_registry().prompt("review")() == "v6-review"
 
-
-@pytest.mark.parametrize(
-    ("declaration", "message"),
+@pytest.mark.parametrize(("declaration", "message"),
     [
         pytest.param("99", r"99.*supports 6\.\.6", id="above-ceiling"),
         pytest.param("0", r"= 0;.*supports 6\.\.6", id="below-floor"),
@@ -33,16 +31,11 @@ def test_supported_extension_loads(ext_dir: ExtDir) -> None:
         pytest.param("True", r"= True;.*supports 6\.\.6", id="bool"),
     ],
 )
-def test_unsupported_extension_version_is_rejected(
-    ext_dir: ExtDir,
-    declaration: str,
-    message: str,
-) -> None:
+def test_unsupported_extension_version_is_rejected(ext_dir: ExtDir, declaration: str, message: str,) -> None:
     """Reject missing, malformed, boolean, and unsupported API declarations."""
     ext_dir.write_module("def register(registry): ...\n", api_version=declaration)
     with pytest.raises(ExtensionVersionError, match=message):
         build_registry()
-
 
 def test_register_exception_is_wrapped_and_named(ext_dir: ExtDir) -> None:
     ext_dir.write_module("def register(registry):\n    raise RuntimeError('boom')\n")

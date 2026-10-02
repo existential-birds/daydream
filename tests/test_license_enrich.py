@@ -19,9 +19,7 @@ from daydream.archive.license_enrich import (
 )
 
 
-def seed_admitted_runs(
-    stage: Path, specs: list[tuple[str, str | None, dict[str, str] | None]]
-) -> None:
+def seed_admitted_runs(stage: Path, specs: list[tuple[str, str | None, dict[str, str] | None]]) -> None:
     """Seed admitted derivatives directly under ``stage/runs/`` (the enrichment input set)."""
     for sid, slug, evidence in specs:
         d = stage / "runs" / sid
@@ -58,16 +56,12 @@ class FakeResolver:
 
 def _make_resolver(spdx: str = "MIT") -> FakeResolver:
     return FakeResolver({
-        "acme/widget": EnrichedEvidence(
-            spdx_id=spdx, source=f"github:acme/widget@{'b' * 40}", repo_commit="b" * 40,
-        ),
+        "acme/widget": EnrichedEvidence(spdx_id=spdx, source=f"github:acme/widget@{'b' * 40}", repo_commit="b" * 40,),
     })
-
 
 def test_enrich_fills_missing_evidence_and_skips_declared(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
-    seed_admitted_runs(stage, [
-        ("sess-legacy", "acme/widget", None),
+    seed_admitted_runs(stage, [("sess-legacy", "acme/widget", None),
         ("sess-declared", "acme/widget", {"spdx_id": "Apache-2.0", "source": "producer"}),
     ])
     resolver = _make_resolver()
@@ -80,12 +74,9 @@ def test_enrich_fills_missing_evidence_and_skips_declared(tmp_path: Path) -> Non
     assert "sess-declared" not in _as_entries(stage)
     # The enriched evidence was written into the session manifest for the gate to consume.
     manifest = json.loads((stage / "runs" / "sess-legacy" / "manifest.json").read_text())
-    assert manifest["license_evidence"] == {
-        "spdx_id": "MIT", "source": f"github:acme/widget@{'b' * 40}",
-    }
+    assert manifest["license_evidence"] == {"spdx_id": "MIT", "source": f"github:acme/widget@{'b' * 40}"}
     # Dedupe: one (repo, revision) queried even with two sessions in the same repo.
     assert resolver.queried == ["acme/widget"]
-
 
 def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
@@ -100,7 +91,6 @@ def test_enrich_publishes_cache_with_provenance_and_no_credentials(tmp_path: Pat
     # No token or authenticated URL anywhere in the published bytes.
     raw = cache_path.read_text()
     assert "ghp_" not in raw and "token" not in raw.lower()
-
 
 def test_enrich_records_stable_failure_codes_for_unresolvable(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
@@ -119,7 +109,6 @@ def test_enrich_records_stable_failure_codes_for_unresolvable(tmp_path: Path) ->
         manifest = json.loads((stage / "runs" / sid / "manifest.json").read_text())
         assert "license_evidence" not in manifest
 
-
 def test_enrich_reuses_cached_resolution_across_runs(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-1", "acme/widget", None)])
@@ -131,7 +120,6 @@ def test_enrich_reuses_cached_resolution_across_runs(tmp_path: Path) -> None:
     assert second.queried == []
     assert evidence["sess-2"]["spdx_id"] == "MIT"
 
-
 def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
     stage = tmp_path / "stage"
     seed_admitted_runs(stage, [("sess-legacy", "acme/widget", None)])
@@ -141,14 +129,11 @@ def test_enrichment_cache_copied_into_curated_prefix(tmp_path: Path) -> None:
     assert published.is_file()
     assert published.read_text() == (stage / "_enrich" / "evidence.jsonl").read_text()
 
-
 def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPatch) -> None:
     """Production adapter: GITHUB_TOKEN from the environment, never an argument or a URL.
 
-    Exercises the real GitHub API shapes: ``default_branch`` is a plain string,
-    the head commit lives on the branch resource, and the contents-style
-    license response carries a blob ``sha`` (no ``commit_sha`` field).
-    """
+    Exercises the real GitHub API shapes: ``default_branch`` is a plain string, the head commit lives on the
+    branch resource, and the contents-style license response carries a blob ``sha`` (no ``commit_sha`` field)."""
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_secrettokenvalue")
     resolver = GithubLicenseResolver()
     # The token never appears in the request URL — only in the Authorization header.
@@ -156,12 +141,8 @@ def test_github_resolver_reads_token_from_env_only(monkeypatch: pytest.MonkeyPat
     captured: dict[str, Any] = {}
     commit = "b" * 40
     responses: dict[str, dict[str, Any]] = {
-        f"{_GITHUB_API}/repos/acme/widget": {
-            "full_name": "acme/widget", "default_branch": "main",
-        },
-        f"{_GITHUB_API}/repos/acme/widget/branches/main": {
-            "name": "main", "commit": {"sha": commit},
-        },
+        f"{_GITHUB_API}/repos/acme/widget": {"full_name": "acme/widget", "default_branch": "main"},
+        f"{_GITHUB_API}/repos/acme/widget/branches/main": {"name": "main", "commit": {"sha": commit}},
         f"{_GITHUB_API}/repos/acme/widget/license?ref={commit}": {
             "name": "LICENSE", "sha": "c" * 40, "license": {"spdx_id": "MIT"},
         },

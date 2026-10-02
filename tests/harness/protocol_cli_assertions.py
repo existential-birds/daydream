@@ -19,8 +19,7 @@ from daydream.backends.osprey import OspreyBackend
 from daydream.backends.pi import PiBackend
 
 
-def assert_protocol_cli_invariants(
-    fixture: Any, target: Path, prompt: str, events: list[Any], backend: Any
+def assert_protocol_cli_invariants(fixture: Any, target: Path, prompt: str, events: list[Any], backend: Any
 ) -> dict[str, Any]:
     """Assert the transport invariants every protocol-CLI backend must hold.
 

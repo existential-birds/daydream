@@ -20,10 +20,7 @@ from tests.test_deep_orchestrator import _pin_findings_pr, _profile_with_pipelin
 
 
 async def test_budget_truncated_stack_lands_in_failed_stacks(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A truncated per-stack review is recorded as a failure, not a success."""
@@ -34,24 +31,16 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
     stub.runaway_stack = "python"
     mute_side_effects()
     with anyio.fail_after(30):
-        await run(
-            make_config(
-                multi_stack_target,
-                trajectory_path=tmp_path / "trajectory.json",
-                assume="yes",
-                output_mode="loop",
+        await run(make_config(
+                multi_stack_target, trajectory_path=tmp_path / "trajectory.json", assume="yes", output_mode="loop",
             )
         )
     failures = json.loads((multi_stack_target / ".daydream" / "deep" / "per-stack-failures.json").read_text())
     assert "python" in failures, failures
     assert "budget" in failures["python"].lower()
 
-
 async def test_runaway_test_turn_is_bounded_and_reaches_abort(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., 'RunConfig'],
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., 'RunConfig'],
     mute_side_effects: Callable[..., None],
 ) -> None:
     """A hung test turn is capped, so the run reaches the heal/abort path."""
@@ -66,43 +55,30 @@ async def test_runaway_test_turn_is_bounded_and_reaches_abort(
         exit_code = await run(make_config(multi_stack_target, trajectory_path=traj, assume="yes", output_mode="loop"))
     assert exit_code != 0
     assert [c for c in stub.calls if "run the project's test suite" in c["prompt"].lower()]
-    test_stop_reasons = _scan_trajectory_extra(
-        multi_stack_target / ".daydream", traj, "stop_reason", phase="test"
-    )
+    test_stop_reasons = _scan_trajectory_extra(multi_stack_target / ".daydream", traj, "stop_reason", phase="test")
     assert any("budget" in r for r in test_stop_reasons), test_stop_reasons
-
 
 @pytest.mark.parametrize(
     "phase", ["intent", "alternatives", "per_stack", "merge", "arbiter", "suppression", "supervisor"],
 )
 @pytest.mark.parametrize("budget", ["wall", "tool_call"])
 async def test_review_budget_stop_emits_partial_findings(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., RunConfig],
-    phase: str,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig], phase: str,
     budget: str,
 ) -> None:
     """Real agent budget stops cannot strand completed findings before Phase B."""
 
-
     fake = FakeClock().install(monkeypatch)
-    fragments = {
-        "intent": "present your understanding concisely",
-        "alternatives": "evaluate the implementation",
-        "per_stack": "you are reviewing the python stack",
-        "merge": "cross-stack merge agent",
-        "arbiter": "you are the arbiter",
-        "suppression": "you are the suppression reviewer",
+    fragments = {"intent": "present your understanding concisely", "alternatives": "evaluate the implementation",
+        "per_stack": "you are reviewing the python stack", "merge": "cross-stack merge agent",
+        "arbiter": "you are the arbiter", "suppression": "you are the suppression reviewer",
         "supervisor": "supervisor adjudication",
     }
 
     class BudgetBackend(StubBackend):
         exhaust = True
 
-        async def execute(
-            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-        ) -> AsyncIterator[AgentEvent]:
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
             if self.exhaust and fragments[phase] in prompt.lower():
                 for n in range(10):
                     if budget == "wall":
@@ -120,8 +96,7 @@ async def test_review_budget_stop_emits_partial_findings(
     elif phase == "suppression":
         stub.parse_severity = "low"
     file_config = DaydreamFileConfig(
-        supervisor="llm" if phase == "supervisor" else "off",
-        precision_mode=phase == "suppression",
+        supervisor="llm" if phase == "supervisor" else "off", precision_mode=phase == "suppression",
     )
     monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
@@ -129,8 +104,7 @@ async def test_review_budget_stop_emits_partial_findings(
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"
     with anyio.fail_after(30):
-        code = await run(make_config(
-            multi_stack_target, pr_number=7, findings_out=str(out), file_config=file_config,
+        code = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), file_config=file_config,
             review_profile=independent_alternatives_profile() if phase == "alternatives" else None,
         ))
     assert code == 0
@@ -142,18 +116,12 @@ async def test_review_budget_stop_emits_partial_findings(
 
     if phase == "merge":
         stub.exhaust = False
-        assert await run(make_config(
-            multi_stack_target, pr_number=7, findings_out=str(out), start_at="merge",
-        )) == 0
+        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at="merge",)) == 0
         assert not json.loads(out.read_text()).get("review_warnings")
 
-
 async def test_single_stack_alternatives_timeout_still_emits_findings(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: Callable[..., RunConfig],
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
-
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, tiny_diff_target)
     stub.runaway_alternatives = True
@@ -166,11 +134,9 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     artifact = json.loads(out.read_text())
     assert artifact["review_warnings"] == ["Alternatives: tool_call_budget_exceeded"]
 
-
 async def test_partial_checkpoint_survives_publication_and_merge_resume(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
-
 
     class CheckpointBackend(StubBackend):
         async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -190,9 +156,7 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"
     for start_at in (None, "merge"):
-        assert await run(make_config(
-            multi_stack_target, pr_number=7, findings_out=str(out), start_at=start_at,
-        )) == 0
+        assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), start_at=start_at,)) == 0
         saved = json.loads((multi_stack_target / ".daydream/deep/stack-python-records.json").read_text())
         assert saved["issues"], "validated checkpoint must survive adjudication and resume"
         assert saved["incomplete"] is True
@@ -200,17 +164,14 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
         assert published["findings"]
         assert any("python" in warning for warning in published["review_warnings"])
 
-
 async def test_spent_pipeline_budget_still_publishes_explicitly_incomplete_artifact(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: Callable[..., RunConfig],
 ) -> None:
-
     silence(monkeypatch)
     backend = install_stub_backend(monkeypatch, multi_stack_target)
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"
-    assert await run(make_config(
-        multi_stack_target, pr_number=7, findings_out=str(out),
+    assert await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out),
         review_profile=_profile_with_pipeline(review_wall_budget_s=0),
     )) == 0
     assert not backend.calls

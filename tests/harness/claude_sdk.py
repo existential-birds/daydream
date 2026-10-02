@@ -83,10 +83,7 @@ class MockResultMessage:
     stop_reason: str | None = None
 
 
-def patch_claude_sdk(
-    monkeypatch: pytest.MonkeyPatch,
-    client_class: type,
-) -> None:
+def patch_claude_sdk(monkeypatch: pytest.MonkeyPatch, client_class: type,) -> None:
     """Patch every SDK name ``daydream.backends.claude`` resolves at runtime.
 
     Args:
@@ -96,17 +93,10 @@ def patch_claude_sdk(
     """
     monkeypatch.setattr("daydream.backends.claude.ClaudeSDKClient", client_class)
 
-    def _injected_client(
-        *,
-        options: Any,
-        transport: Any,
-        initialize_timeout_s: float,
-    ) -> Any:
+    def _injected_client(*, options: Any, transport: Any, initialize_timeout_s: float,) -> Any:
         return client_class(options=options)
 
-    monkeypatch.setattr(
-        "daydream.backends.claude._RunLocalClaudeSDKClient", _injected_client
-    )
+    monkeypatch.setattr("daydream.backends.claude._RunLocalClaudeSDKClient", _injected_client)
     monkeypatch.setattr("daydream.backends.claude.AssistantMessage", MockAssistantMessage)
     monkeypatch.setattr("daydream.backends.claude.UserMessage", MockUserMessage)
     monkeypatch.setattr("daydream.backends.claude.ResultMessage", MockResultMessage)

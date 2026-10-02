@@ -51,11 +51,8 @@ PINNED_REVISION = hashlib.sha256(b"fixture-hub-snapshot-pinned-v1").hexdigest()[
 #   pin-unknown   — enrichment cannot resolve -> repo_commit_unresolved
 #   pin-c5        — C5-listed repo (getsentry/sentry) -> c5_excluded_repo
 _PINNED_SESSIONS: tuple[tuple[str, str, dict[str, str] | None], ...] = (
-    ("pin-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),
-    ("pin-enrich", "acme/widget", None),
-    ("pin-gpl", "acme/copyleft", None),
-    ("pin-unknown", "ghost/nope", None),
-    ("pin-c5", "getsentry/sentry", None),
+    ("pin-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}), ("pin-enrich", "acme/widget", None),
+    ("pin-gpl", "acme/copyleft", None), ("pin-unknown", "ghost/nope", None), ("pin-c5", "getsentry/sentry", None),
 )
 
 # The pinned policy: the same content as the checked-in production SPDX policy
@@ -76,33 +73,18 @@ def _snapshot_trajectory(session_id: str) -> dict[str, object]:
     recomputed from the evidence list so the fixture satisfies the shared
     serializer's digest contract by construction.
     """
-    evidence = [
-        {
-            "reply_id": "r1",
-            "body_sha256": hashlib.sha256(f"reply-1-{session_id}".encode()).hexdigest(),
-        }
-    ]
+    evidence = [{"reply_id": "r1", "body_sha256": hashlib.sha256(f"reply-1-{session_id}".encode()).hexdigest()}]
     trajectory: dict[str, object] = dict(_MINIMAL_TRAJECTORY)
     trajectory["session_id"] = session_id
     trajectory["trajectory_id"] = f"{session_id}:root"
-    trajectory["resolutions"] = [
-        {
-            "fingerprint": f"fp-{session_id}",
-            "disposition": "unanswered",
-            "evidence": evidence,
-            "evidence_digest": hashlib.sha256(
-                json.dumps(evidence, sort_keys=True).encode()
-            ).hexdigest(),
+    trajectory["resolutions"] = [{"fingerprint": f"fp-{session_id}", "disposition": "unanswered", "evidence": evidence,
+            "evidence_digest": hashlib.sha256(json.dumps(evidence, sort_keys=True).encode()).hexdigest(),
             # Native review-profile fields (issue #885, R12) — the shared
             # serializer nests these under ``profile`` in the canonical
             # record, so the projection must surface them at the two-bundle
             # boundary rather than dropping them.
-            "profile_schema_version": 2,
-            "profile_name": "pr_review",
-            "profile_source_kind": "builtin",
-            "profile_digest": "d" * 64,
-            "profile": "pr_review",
-            "stack": "python",
+            "profile_schema_version": 2, "profile_name": "pr_review", "profile_source_kind": "builtin",
+            "profile_digest": "d" * 64, "profile": "pr_review", "stack": "python",
         }
     ]
     return trajectory
@@ -116,40 +98,25 @@ def _snapshot_manifest(session_id: str, repo_slug: str, skill: str, outcome_labe
     orchestrator rewrites both to staging-local values at index time.
     """
     return Manifest(
-        session_id=session_id,
-        archived_at="2026-05-17T00:00:00+00:00",
-        status="complete",
-        pipeline_status="succeeded",
-        skill=skill,
-        repo_slug=repo_slug,
-        branch="feat/x",
-        base_branch="main",
-        head_sha="abc123",
-        outcome_labels=json.dumps(list(outcome_labels)),
-        archive_path=f"/archive/runs/{session_id}",
+        session_id=session_id, archived_at="2026-05-17T00:00:00+00:00", status="complete", pipeline_status="succeeded",
+        skill=skill, repo_slug=repo_slug, branch="feat/x", base_branch="main", head_sha="abc123",
+        outcome_labels=json.dumps(list(outcome_labels)), archive_path=f"/archive/runs/{session_id}",
         remote_url=f"https://github.com/{repo_slug}",
     )
 
 
-def _snapshot_files(
-    *,
-    trajectory_fn: Callable[[str], dict[str, object]] = _snapshot_trajectory,
-    manifest_hook: Callable[[dict[str, object]], None] | None = None,
-    hostile: bool = False,
+def _snapshot_files(*, trajectory_fn: Callable[[str], dict[str, object]] = _snapshot_trajectory,
+    manifest_hook: Callable[[dict[str, object]], None] | None = None, hostile: bool = False,
 ) -> dict[str, bytes]:
     """Materialize the snapshot's file tree for :func:`build_snapshot` variants."""
     files: dict[str, bytes] = {}
     for session_id, session in zip(_SNAPSHOT_SESSION_IDS, FIXTURE_SESSIONS, strict=False):
-        manifest = _snapshot_manifest(
-            session_id, session.repo_slug, session.skill, session.outcome_labels
-        )
+        manifest = _snapshot_manifest(session_id, session.repo_slug, session.skill, session.outcome_labels)
         data = manifest.to_dict()
         if manifest_hook is not None:
             manifest_hook(data)
         files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
-        files[f"{session_id}/trajectory.json"] = json.dumps(
-            trajectory_fn(session_id), indent=2
-        ).encode()
+        files[f"{session_id}/trajectory.json"] = json.dumps(trajectory_fn(session_id), indent=2).encode()
     # Non-run metadata and derived outputs: hydration must ignore them.
     files["README.md"] = b"production trajectory archive\n"
     files["dataset_info.json"] = b'{"dataset": "daydream-trajectories"}\n'
@@ -159,10 +126,7 @@ def _snapshot_files(
     files["bronze/manifest.json"] = b'{"bronze": true}\n'
     # Remote resume ledger, seeded empty: the Hub is the canonical resume state.
     curation_id = derive_pre_identity_curation_id(
-        SNAPSHOT_REVISION,
-        SANITIZER_VERSION,
-        HYDRATION_INDEX_SCHEMA_VERSION,
-        ADMISSION_POLICY_VERSION,
+        SNAPSHOT_REVISION, SANITIZER_VERSION, HYDRATION_INDEX_SCHEMA_VERSION, ADMISSION_POLICY_VERSION,
     )
     files[f"curated/{curation_id}/resume/ledger.jsonl"] = b""
 
@@ -194,9 +158,7 @@ def build_pinned_snapshot() -> FakeHub:
         if evidence is not None:
             data["license_evidence"] = evidence
         files[f"{session_id}/manifest.json"] = json.dumps(data, indent=2).encode()
-        files[f"{session_id}/trajectory.json"] = json.dumps(
-            _snapshot_trajectory(session_id), indent=2
-        ).encode()
+        files[f"{session_id}/trajectory.json"] = json.dumps(_snapshot_trajectory(session_id), indent=2).encode()
     hub = FakeHub(repo_id=REPO_ID, private=True, files=files)
     hub.commit_revision(PINNED_REVISION)
     return hub
@@ -212,14 +174,8 @@ class AnnotationsHub(FakeHub):
     boundaries without replacing any production publication behavior.
     """
 
-    def __init__(
-        self,
-        *,
-        curation_id: str = "",
-        snapshot_id: str = "",
-        private: bool = True,
-        files: dict[str, bytes] | None = None,
-        repo_id: str = REPO_ID,
+    def __init__(self, *, curation_id: str = "", snapshot_id: str = "", private: bool = True,
+        files: dict[str, bytes] | None = None, repo_id: str = REPO_ID,
     ) -> None:
         if bool(curation_id) != bool(snapshot_id):
             raise ValueError("both legacy annotation identity components are required")
@@ -247,20 +203,11 @@ class AnnotationsHub(FakeHub):
 
     def mutate_bundle(self, revision: str, session_id: str, content: bytes) -> None:
         """Reject the hydration fixture's legacy in-place mutation seam."""
-        raise NotImplementedError(
-            "immutable annotation revisions require mutate_annotation_file()"
-        )
+        raise NotImplementedError("immutable annotation revisions require mutate_annotation_file()")
 
-    def upload_files(
-        self, mapping: dict[str | Path, Path], commit_message: str,
-    ) -> None:
+    def upload_files(self, mapping: dict[str | Path, Path], commit_message: str,) -> None:
         """Preserve the legacy surface while committing atomically to main."""
-        self.commit_files_atomic(
-            mapping,
-            commit_message,
-            parent_commit=self._head,
-            branch="main",
-        )
+        self.commit_files_atomic(mapping, commit_message, parent_commit=self._head, branch="main",)
 
     def repo_info(self, revision: str | None = None) -> RepoInfo:
         self.info_revision_log.append(revision)
@@ -278,8 +225,7 @@ class AnnotationsHub(FakeHub):
         """Return a detached view, so assertions cannot mutate pinned content."""
         return self._revision_tree(self._resolve_revision(revision))
 
-    def queue_concurrent_commit(
-        self, stage: str, files: dict[str, bytes], message: str = "rival publication",
+    def queue_concurrent_commit(self, stage: str, files: dict[str, bytes], message: str = "rival publication",
     ) -> None:
         """Schedule one genuine competing tree commit before a matching attempt."""
         if stage not in {"batch", "data", "success"}:
@@ -294,17 +240,13 @@ class AnnotationsHub(FakeHub):
                 local = Path(staging) / str(index)
                 local.write_bytes(data)
                 mapping[path] = local
-            return super().commit_files_atomic(
-                mapping, message, parent_commit=self._head, branch="main",
-            )
+            return super().commit_files_atomic(mapping, message, parent_commit=self._head, branch="main",)
 
     def commit_files_atomic(
-        self, mapping: dict[str | Path, Path], commit_message: str, *,
-        parent_commit: str, branch: str,
+        self, mapping: dict[str | Path, Path], commit_message: str, *, parent_commit: str, branch: str,
     ) -> str:
         paths = sorted(map(str, mapping))
-        stage = (
-            "success" if any(path.endswith("/_SUCCESS") for path in paths)
+        stage = ("success" if any(path.endswith("/_SUCCESS") for path in paths)
             else "batch" if any(path.endswith("/batch-latest.json") for path in paths)
             else "data"
         )
@@ -316,9 +258,7 @@ class AnnotationsHub(FakeHub):
                 self._queued_rivals.pop(index)
                 self.seed_remote_files(payloads, message)
                 break
-        return super().commit_files_atomic(
-            mapping, commit_message, parent_commit=parent_commit, branch=branch,
-        )
+        return super().commit_files_atomic(mapping, commit_message, parent_commit=parent_commit, branch=branch,)
 
     def mutate_annotation_file(self, relpath: str, data: bytes) -> None:
         """Seed changed bytes at a new revision without corrupting old pins."""
@@ -347,10 +287,8 @@ def build_publication_hubs() -> PublicationHubs:
     from tests.fixtures.training.build_snapshot_decisive import build_snapshot_decisive
 
     return PublicationHubs(
-        source=build_snapshot_decisive(),
-        annotations=AnnotationsHub(repo_id="org/private-annotations"),
-        source_revision=SNAPSHOT_REVISION,
-        policy_path=PINNED_POLICY_FIXTURE,
+        source=build_snapshot_decisive(), annotations=AnnotationsHub(repo_id="org/private-annotations"),
+        source_revision=SNAPSHOT_REVISION, policy_path=PINNED_POLICY_FIXTURE,
     )
 
 

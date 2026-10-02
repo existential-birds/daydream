@@ -71,7 +71,6 @@ def _make_record_issue(issues: list[tuple[Any, ...]]) -> Callable[..., str]:
     def _record_issue(repo: Any, *, title: str, body: str, **kwargs: Any) -> str:
         issues.append((repo, title, body))
         return "https://github.com/owner/repo/issues/1"
-
     return _record_issue
 
 
@@ -87,10 +86,8 @@ def _merged_item_descriptions(target: Path) -> list[str]:
 
 def _install_post_recorder(monkeypatch: pytest.MonkeyPatch, received: list[dict[str, Any]]) -> None:
     """Stub the PR-posting boundary, recording each call's keyword arguments."""
-
     async def _record_post(*_args: Any, **kwargs: Any) -> None:
         received.append(kwargs)
-
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _record_post)
 
 
@@ -105,9 +102,7 @@ def _prime_merge_resume_records(target: Path, *, python_severity: str | None) ->
     if python_severity is not None:
         py_record |= {"severity": python_severity, "confidence": "HIGH", "rationale": "stub"}
     return _prime_merge_resume(
-        target,
-        python=[py_record],
-        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
+        target, python=[py_record], react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
         generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
         structure=[_record(description="structural issue", evidence="api.py:1")],
     )
@@ -127,9 +122,7 @@ def _iter_run_payloads(run_root: Path, traj: Path) -> Iterator[dict[str, Any]]:
             yield payload
 
 
-def _scan_trajectory_extra(
-    run_root: Path, traj: Path, key: str, *, phase: str | None = None
-) -> list[str]:
+def _scan_trajectory_extra(run_root: Path, traj: Path, key: str, *, phase: str | None = None) -> list[str]:
     """Collect ``step["extra"][key]`` across every trajectory JSON written for a run.
 
     An aborted/forked turn writes sibling trajectory files under the per-run dir, so
@@ -177,7 +170,6 @@ def _batched_group_size(stub: "_StubBackend", file_basename: str) -> int:
     The deep pipeline may inject an extra structural finding into a file group, so
     the group size is derived from the batched prompt rather than hard-coded.
     """
-
     for c in stub.calls:
         m = re.search(r"^Fix these (\d+) issues in (.+):$", c["prompt"], re.M)
         if m is not None and Path(m.group(2)).name == file_basename:
@@ -194,7 +186,6 @@ def _single_fix_calls_for(stub: "_StubBackend", file_basename: str) -> list[dict
     (whose allowed-files clause names api.py). Filtering on the ``File:`` line
     captures only the calls actually fixing *file_basename*.
     """
-
     out: list[dict[str, Any]] = []
     for c in stub.calls:
         prompt = c["prompt"]
@@ -221,20 +212,12 @@ def _install_accept_gate_pipeline(monkeypatch: pytest.MonkeyPatch, target: Path,
     _silence(monkeypatch, prompts=False)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute()
-
     return _install_stub_backend(monkeypatch, target)
 
 
 async def _run_loop(target: Path, make_config: Any) -> int:
     """Run the deep pipeline in loop output mode with *target*'s file config."""
-    return await _run(
-        make_config(
-            target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(target),
-        )
-    )
+    return await _run(make_config(target, assume="yes", output_mode="loop", file_config=load_file_config(target),))
 
 
 def _count_review_prompts(calls: list[dict[str, Any]]) -> int:
@@ -345,9 +328,7 @@ def _prime_uid_merge_resume(target: Path, python: list[dict[str, Any]]) -> Path:
     severities diverge, which muddies "exactly this record was adjudicated".
     """
     return _prime_merge_resume(
-        target,
-        python=python,
-        react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
+        target, python=python, react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1")],
         generic=[_record(description="docs issue", file="README.md", evidence="README.md:1")],
         structure=[_record(description="structural issue", line=5, evidence="api.py:5")],
     )
@@ -367,25 +348,15 @@ class _RejectingArbiterBackend(_StubBackend):
         super().__init__(target)
         self._reject_uid = reject_uid
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
         if "you are the arbiter" in prompt.lower():
             self.calls.append({"prompt": prompt, "model": self.model})
             match = re.search(r"listed in (\S*arbiter[-\w]*input\.json)", prompt)
             assert match is not None, "arbiter prompt did not point at its input artifact"
             entries = json.loads(Path(match.group(1)).read_text())
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "findings": [
-                        {
-                            "arb_id": entry["arb_id"],
-                            "keep": entry["uid"] != self._reject_uid,
+            yield ResultEvent(structured_output={"findings": [{
+                            "arb_id": entry["arb_id"], "keep": entry["uid"] != self._reject_uid,
                             "severity": entry.get("severity") or "high",
                             "confidence": entry.get("confidence") or "HIGH",
                             "description": f"ARBITRATED: {entry.get('description')}",
@@ -393,8 +364,7 @@ class _RejectingArbiterBackend(_StubBackend):
                         }
                         for entry in entries
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
             return
         async for event in super().execute(cwd, prompt, *args, **kwargs):
@@ -414,8 +384,7 @@ def _run_uid_pool(deep: Path) -> set[str]:
     asserting a shipped attribution is a subset of it is asserting the shipped
     item names a record that exists.
     """
-    return {
-        uid
+    return {uid
         for path in sorted(deep.glob("stack-*-records.json"))
         for record in _record_issues(json.loads(path.read_text()))
         if (uid := record.get("uid"))
@@ -432,11 +401,7 @@ def _source_uids_by_description(deep: Path) -> dict[str, Any]:
     return {str(item.get("description")): item.get("source_uids") for item in _merged_items(deep)}
 
 
-def _prime_source_uid_merge_resume(
-    target: Path,
-    *,
-    structure: list[dict[str, Any]] | None = None,
-) -> Path:
+def _prime_source_uid_merge_resume(target: Path, *, structure: list[dict[str, Any]] | None = None,) -> Path:
     """Prime a four-stack merge resume whose uid pool is known before the run.
 
     Every stack ``multi_stack_target`` detects gets exactly one grounded record,
@@ -456,44 +421,18 @@ def _prime_source_uid_merge_resume(
     primed with uid-less records (a pre-#1111 artifact) legitimately has an empty
     pool, and every uid a test made the agent cite would be dropped as invented.
     """
-    return _prime_merge_resume(
-        target,
-        python=[_record(description="py issue", evidence="api.py:1", uid="python:1")],
+    return _prime_merge_resume(target, python=[_record(description="py issue", evidence="api.py:1", uid="python:1")],
         react=[_record(description="tsx issue", file="App.tsx", evidence="App.tsx:1", uid="react:1")],
-        generic=[
-            _record(
-                description="docs issue",
-                file="README.md",
-                evidence="README.md:1",
-                uid="generic:1",
-            )
-        ],
-        structure=(
-            structure
+        generic=[_record(description="docs issue", file="README.md", evidence="README.md:1", uid="generic:1",)],
+        structure=(structure
             if structure is not None
-            else [
-                _record(
-                    description="structural issue",
-                    line=5,
-                    evidence="api.py:5",
-                    uid="structure:1",
-                )
-            ]
+            else [_record(description="structural issue", line=5, evidence="api.py:5", uid="structure:1",)]
         ),
     )
 
 
-def _provenance_item(
-    item_id: int,
-    description: str,
-    *,
-    file: str = "api.py",
-    line: int = 1,
-    source_uids: Any = None,
-    evidence: str | None = None,
-    severity: str = "medium",
-    rationale: str = "rationale",
-    omit_source_uids: bool = False,
+def _provenance_item(item_id: int, description: str, *, file: str = "api.py", line: int = 1, source_uids: Any = None,
+    evidence: str | None = None, severity: str = "medium", rationale: str = "rationale", omit_source_uids: bool = False,
 ) -> dict[str, Any]:
     """Build one merge-agent item with an explicitly chosen provenance claim.
 
@@ -501,15 +440,8 @@ def _provenance_item(
     value itself, including the shapes a real model gets wrong (a null, a bare
     string, an omitted key), so every one of them has to be settable.
     """
-    item: dict[str, Any] = {
-        "id": item_id,
-        "lens": "per-stack",
-        "file": file,
-        "line": line,
-        "severity": severity,
-        "description": description,
-        "confidence": "MEDIUM",
-        "rationale": rationale,
+    item: dict[str, Any] = {"id": item_id, "lens": "per-stack", "file": file, "line": line, "severity": severity,
+        "description": description, "confidence": "MEDIUM", "rationale": rationale,
         "evidence": f"{file}:{line}" if evidence is None else evidence,
     }
     if not omit_source_uids:
@@ -517,13 +449,8 @@ def _provenance_item(
     return item
 
 
-async def _fresh_uid_run(
-    target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute,
-) -> Path:
+async def _fresh_uid_run(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,) -> Path:
     """Run the standard multi-stack fixture and return its deep artifact directory."""
-
     _silence(monkeypatch)
     mute_side_effects()
     _install_stub_backend(monkeypatch, target)
@@ -536,12 +463,7 @@ def _item_uids(deep: Path) -> list[str]:
     return [str(item.get("item_uid")) for item in _merged_items(deep)]
 
 
-def _direct_fix_context(
-    repo: Path,
-    items: list[dict[str, Any]],
-    *,
-    changed_files: set[str],
-    start_at: str = "review",
+def _direct_fix_context(repo: Path, items: list[dict[str, Any]], *, changed_files: set[str], start_at: str = "review",
 ) -> Any:
     """Build the smallest real-Git FlowContext for fix-boundary unit tests."""
 
@@ -549,31 +471,20 @@ def _direct_fix_context(
     dd.mkdir(parents=True, exist_ok=True)
     items_file = dd / "merged-items.json"
     items_file.write_text(json.dumps({"items": items}))
-    return FlowContext(
-        config=RunConfig(target=str(repo), assume="yes", cleanup=False, start_at=start_at),
-        work=work_context(repo, run_id="session-current"),
-        registry=Registry(),
-        allow_standalone_artifacts=True,
-        data={
-            "dd": dd,
-            "items_file": items_file,
-            "merged_report": dd / "merged-review.md",
+    return FlowContext(config=RunConfig(target=str(repo), assume="yes", cleanup=False, start_at=start_at),
+        work=work_context(repo, run_id="session-current"), registry=Registry(), allow_standalone_artifacts=True,
+        data={"dd": dd, "items_file": items_file, "merged_report": dd / "merged-review.md",
             "changed_files": changed_files,
         },
     )
 
 
 def _direct_fix_state(ctx: Any, items: list[dict[str, Any]], reviewed: set[str]) -> Any:
-
     footprint = AuthorizedFixFootprint.build(ctx.work.repo, reviewed, items)
-    state = FixCycleState(
-        session_id="session-current",
-        stable_ref=git_ops.head_sha(ctx.work.repo),
-        stable_head=git_ops.head_sha(ctx.work.repo),
-        initial_index=git_ops.snapshot_index(ctx.work.repo),
+    state = FixCycleState(session_id="session-current", stable_ref=git_ops.head_sha(ctx.work.repo),
+        stable_head=git_ops.head_sha(ctx.work.repo), initial_index=git_ops.snapshot_index(ctx.work.repo),
         preexisting_untracked=git_ops.snapshot_untracked_paths(ctx.work.repo, include_runtime_artifacts=False),
-        preexisting_gitlinks=git_ops.snapshot_worktree_gitlinks(ctx.work.repo),
-        footprint=footprint,
+        preexisting_gitlinks=git_ops.snapshot_worktree_gitlinks(ctx.work.repo), footprint=footprint,
     )
     ctx.data["fix_cycle_state"] = state
     ctx.data["items"] = items
@@ -591,13 +502,8 @@ def _base_repo(tmp_path: Path, name: str) -> Path:
 
 
 def _remote_identity_context(
-    tmp_path: Path,
-    fake_gh: Any,
-    *,
-    head_repository: str | None,
-    configured_repository: str = "base-user/project",
-    base_ref: str = "main",
-    configured_pr: int = 7,
+    tmp_path: Path, fake_gh: Any, *, head_repository: str | None, configured_repository: str = "base-user/project",
+    base_ref: str = "main", configured_pr: int = 7,
 ) -> tuple[Any, str]:
 
     repo = _base_repo(tmp_path, "remote-identity")
@@ -613,17 +519,9 @@ def _remote_identity_context(
         head_row = {"name": name, "nameWithOwner": head_repository}
         head_owner = {"login": owner}
     fake_gh.set_response("repo-view", value="base-user/project")
-    fake_gh.serve_pr_view(
-        {
-            "number": 7,
-            "title": "Fix",
-            "body": "",
-            "state": "OPEN",
-            "headRefName": "feature",
-            "baseRefName": base_ref,
-            "headRefOid": sha,
-            "url": "https://github.com/base-user/project/pull/7",
-            "headRepository": head_row,
+    fake_gh.serve_pr_view({
+            "number": 7, "title": "Fix", "body": "", "state": "OPEN", "headRefName": "feature", "baseRefName": base_ref,
+            "headRefOid": sha, "url": "https://github.com/base-user/project/pull/7", "headRepository": head_row,
             "headRepositoryOwner": head_owner,
         }
     )
@@ -634,7 +532,6 @@ def _remote_identity_context(
 
 
 def _finalization_fixture(tmp_path: Path) -> tuple[Any, Any, Any]:
-
     repo = _base_repo(tmp_path, "finalization")
     items = [{**_merge_item(1, "a.py", "high"), "item_uid": "item:a", "related_files": []}]
     ctx = _direct_fix_context(repo, items, changed_files={"a.py"})
@@ -651,18 +548,11 @@ def _arbiter_stacks(severities: dict[str, str]) -> dict[str, dict[str, object]]:
     spans more than one co-located target. The descriptions differ so a dedup
     pass cannot fold the records together.
     """
-    locations = {
-        "python": ("api.py", "python finding"),
-        "react": ("App.tsx", "react finding"),
+    locations = {"python": ("api.py", "python finding"), "react": ("App.tsx", "react finding"),
         "generic": ("README.md", "generic finding"),
     }
-    return {
-        name: {
-            "severity": severities[name],
-            "confidence": "high",
-            "file": file,
-            "line": 1,
-            "description": description,
+    return {name: {
+            "severity": severities[name], "confidence": "high", "file": file, "line": 1, "description": description,
         }
         for name, (file, description) in locations.items()
     }

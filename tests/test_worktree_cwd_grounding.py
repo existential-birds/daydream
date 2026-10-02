@@ -35,36 +35,16 @@ def test_pre_scan_grounds_specialists_to_linked_worktree(linked_worktree: tuple[
 
     diff_text = subprocess.run(  # noqa: S603 - args are not user-controlled
         ["git", "diff", "main...HEAD"],  # noqa: S607 - git is a trusted command
-        cwd=linked,
-        capture_output=True,
-        text=True,
-        check=True,
+        cwd=linked, capture_output=True, text=True, check=True,
     ).stdout
     # 4 changed files => parallel tier => all three specialists run.
     assert "services/taste/parser.go" in diff_text
 
-    backend = ScriptedBackend(
-        responses_by_schema=[
-            (
-                PATTERN_SCANNER_SCHEMA,
-                [
-                    ResultEvent(
-                        structured_output={"conventions": [], "guidelines": []}, continuation=None
-                    )
-                ],
-            ),
-            (
-                DEPENDENCY_TRACER_SCHEMA,
-                [
-                    ResultEvent(
-                        structured_output={"affected_files": [], "dependencies": []}, continuation=None
-                    )
-                ],
-            ),
-            (
-                TEST_MAPPER_SCHEMA,
-                [ResultEvent(structured_output={"affected_files": []}, continuation=None)],
-            ),
+    backend = ScriptedBackend(responses_by_schema=[(PATTERN_SCANNER_SCHEMA,
+                [ResultEvent(structured_output={"conventions": [], "guidelines": []}, continuation=None)],
+            ), (DEPENDENCY_TRACER_SCHEMA,
+                [ResultEvent(structured_output={"affected_files": [], "dependencies": []}, continuation=None)],
+            ), (TEST_MAPPER_SCHEMA, [ResultEvent(structured_output={"affected_files": []}, continuation=None)],),
         ]
     )
 

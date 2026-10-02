@@ -39,28 +39,20 @@ from tests.harness.codex_replay import make_mock_process as codex_process
 from tests.harness.pi_replay import make_mock_process as pi_process
 
 _SCHEMA = {
-    "type": "object",
-    "properties": {"findings": {"type": "array", "items": {"type": "string"}}},
-    "required": ["findings"],
-    "additionalProperties": False,
+    "type": "object", "properties": {"findings": {"type": "array", "items": {"type": "string"}}},
+    "required": ["findings"], "additionalProperties": False,
 }
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("kind", "effort"), [
-    *[(kind, effort) for kind in ("pi", "codex") for effort in (None, "high", "low", "minimal")],
-    ("pi", "off"),
+    *[(kind, effort) for kind in ("pi", "codex") for effort in (None, "high", "low", "minimal")], ("pi", "off"),
     ("codex", "none"),
 ])
 async def test_cli_finalization_controls_are_local_to_overlapping_calls(
     tmp_path: Path, kind: str, effort: str | None,
 ) -> None:
-    backend = (PiBackend if kind == "pi" else CodexBackend)(
-        model="fixture-model", reasoning_effort=effort,
-    )
+    backend = (PiBackend if kind == "pi" else CodexBackend)(model="fixture-model", reasoning_effort=effort)
     started = asyncio.Event()
     commands: list[tuple[str, ...]] = []
-
     async def spawn(*args: str, **kwargs: Any) -> Any:
         commands.append(args)
         if len(commands) == 2:
@@ -72,16 +64,12 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
                     {"role": "assistant", "content": [{"type": "text", "text": '{"findings":[]}'}]},
                 ]}),
             ])
-        return codex_process([
-            json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}}),
-        ])
-
+        return codex_process([json.dumps({"type": "turn.completed", "usage": {"input_tokens": 1, "output_tokens": 1}})])
     async def run(finalization: bool) -> list[Any]:
         return [event async for event in backend.execute(
             tmp_path, "finalize" if finalization else "discover",
             output_schema=_SCHEMA, finalization=finalization, max_turns=1,
         )]
-
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", side_effect=spawn):
         final_events, normal_events = await asyncio.gather(run(True), run(False))
     final = next(event for event in final_events if isinstance(event, RequestEvent))
@@ -109,8 +97,6 @@ async def test_cli_finalization_controls_are_local_to_overlapping_calls(
         assert any(f'model_reasoning_effort="{expected}"' in args for args in commands)
         assert all("--no-tools" not in args for args in commands)
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("effort", [None, "high", "low"])
 async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, effort: str | None,
@@ -118,28 +104,22 @@ async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutati
     captured: dict[str, Any] = {}
     started = asyncio.Event()
     base = scripted_client([
-        MockAssistantMessage(content=[MockToolUseBlock(
-            id="schema", name="StructuredOutput", input={"findings": []},
-        )]),
+        MockAssistantMessage(content=[MockToolUseBlock(id="schema", name="StructuredOutput", input={"findings": []})]),
         MockResultMessage(structured_output={"findings": []}),
     ])
-
     class Client(base):  # type: ignore[misc,valid-type]
         async def query(self, prompt: str) -> None:
             captured[prompt] = self.options
             if len(captured) == 2:
                 started.set()
             await asyncio.wait_for(started.wait(), timeout=3)
-
     patch_claude_sdk(monkeypatch, Client)
     backend = ClaudeBackend(model="fixture-model", reasoning_effort=effort)
-
     async def run(finalization: bool) -> list[Any]:
         return [event async for event in backend.execute(
             tmp_path, "finalize" if finalization else "discover",
             output_schema=_SCHEMA, finalization=finalization, read_only=True,
         )]
-
     final_events, normal_events = await asyncio.gather(run(True), run(False))
     final_opts, normal_opts = captured["finalize"], captured["discover"]
     assert final_opts.effort == "low"
@@ -175,14 +155,11 @@ async def test_claude_finalization_keeps_schema_and_guards_without_shared_mutati
     assert isinstance(final_request.config, ClaudeRequestConfig)
     assert final_request.config.tools_count == 0
 
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize("custom_config", [False, True])
 async def test_effective_finalization_configuration_reaches_exported_telemetry(custom_config: bool) -> None:
     @dataclass(frozen=True)
     class CustomConfig(PiRequestConfig):
         private_data: str = "PRIVATE CONFIG"
-
     request_config = (CustomConfig if custom_config else PiRequestConfig)(
         finalization=True, no_tools=True, selected_tools_count=0,
     )
@@ -193,10 +170,7 @@ async def test_effective_finalization_configuration_reaches_exported_telemetry(c
     async with trace_run(config, registry, flow="review") as run:
         with agent_scope("review-finalize", backend="pi", model="fixture-model"):
             async with attempt_scope(1) as attempt:
-                attempt.observe(RequestEvent(
-                    prompt="PRIVATE PROMPT", reasoning_effort="low",
-                    config=request_config,
-                ))
+                attempt.observe(RequestEvent(prompt="PRIVATE PROMPT", reasoning_effort="low", config=request_config, ))
         run.finish(0)
     span = next(span for span in exporter.get_finished_spans()
                 if (span.attributes or {}).get("daydream.span.kind") == "attempt")
@@ -212,7 +186,6 @@ async def test_effective_finalization_configuration_reaches_exported_telemetry(c
     assert "PRIVATE PROMPT" not in str(attrs)
     assert "PRIVATE CONFIG" not in str(attrs)
 
-
 def test_new_request_controls_preserve_existing_positional_config_arguments() -> None:
     expected = {
         EffectiveRequestConfig: [
@@ -222,13 +195,8 @@ def test_new_request_controls_preserve_existing_positional_config_arguments() ->
             "permission_mode", "allowed_tools_count", "allowed_tools_present", "audit_tools_count",
             "audit_tools_present", "setting_sources_present", "native_output_format", "buffer_limit_bytes",
             "hooks_enabled",
-        ],
-        CodexRequestConfig: [
-            "sandbox_mode", "experimental_json", "native_output_schema", "read_only_isolation",
-        ],
-        PiRequestConfig: [
-            "selected_tools_count", "selected_tools_present", "no_skills", "schema_emulated",
-        ],
+        ], CodexRequestConfig: ["sandbox_mode", "experimental_json", "native_output_schema", "read_only_isolation"],
+        PiRequestConfig: ["selected_tools_count", "selected_tools_present", "no_skills", "schema_emulated"],
     }
     common = expected[EffectiveRequestConfig]
     for config_type, names in expected.items():

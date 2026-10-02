@@ -41,60 +41,31 @@ def _canonical_bytes(value: Any) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n").encode()
 
 
-def _download_final(
-    hub: AnnotationsHub,
-    curation_id: str,
-    snapshot_id: str,
-    revision: str,
-    destination: Path,
+def _download_final(hub: AnnotationsHub, curation_id: str, snapshot_id: str, revision: str, destination: Path,
 ) -> dict[str, Any]:
     """Download a final bundle by exact snapshot id and pinned revision."""
     return download_final_annotation_bundle(
-        hub,
-        curation_id=curation_id,
-        snapshot_id=snapshot_id,
-        revision=revision,
-        destination=destination,
+        hub, curation_id=curation_id, snapshot_id=snapshot_id, revision=revision, destination=destination,
     )
 
 
-def _observation(
-    *, record_id: str, observed_at: str, disposition: str, rationale: str
-) -> dict[str, Any]:
-    return {
-        "record_id": record_id,
-        "observed_at": observed_at,
-        "disposition": disposition,
-        "rationale": rationale,
+def _observation(*, record_id: str, observed_at: str, disposition: str, rationale: str) -> dict[str, Any]:
+    return {"record_id": record_id, "observed_at": observed_at, "disposition": disposition, "rationale": rationale,
         "role": "rater",
     }
 
 
 def _manifest_data(*, snapshot_id: str = _SID, note: str = "base") -> dict[str, Any]:
-    return {
-        "curation_id": _CID,
-        "snapshot_id": snapshot_id,
-        "index_revision": INDEX_REVISION,
-        "note": note,
-    }
+    return {"curation_id": _CID, "snapshot_id": snapshot_id, "index_revision": INDEX_REVISION, "note": note}
 
 
-def _state_v2(
-    tmp_path: Path,
-    *,
-    rows: list[dict[str, Any]] | None = None,
-    manifest: dict[str, Any] | None = None,
+def _state_v2(tmp_path: Path, *, rows: list[dict[str, Any]] | None = None, manifest: dict[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     state = tmp_path / "state"
     state.mkdir(parents=True)
     (state / "queue.json").write_bytes(_canonical_bytes([{"record_id": "r1", "state": "base"}]))
     observations = rows or [
-        _observation(
-            record_id="r1",
-            observed_at="2026-01-01T00:00:00Z",
-            disposition="accepted",
-            rationale="first",
-        )
+        _observation(record_id="r1", observed_at="2026-01-01T00:00:00Z", disposition="accepted", rationale="first")
     ]
     (state / "observations.jsonl").write_bytes(b"".join(_canonical_bytes(row) for row in observations))
     (state / "preview-ledger.json").write_bytes(_canonical_bytes({"cursor": "base"}))
@@ -103,26 +74,14 @@ def _state_v2(
 
 
 def _checkpoint_files(payloads: dict[str, bytes], *, manifest: dict[str, Any]) -> tuple[str, dict[str, bytes]]:
-    entries = [
-        {"path": name, "sha256": hashlib.sha256(data).hexdigest()}
-        for name, data in sorted(payloads.items())
-    ]
+    entries = [{"path": name, "sha256": hashlib.sha256(data).hexdigest()} for name, data in sorted(payloads.items())]
     identity = _canonical_bytes({"files": entries})
     batch_id = hashlib.sha256(identity).hexdigest()
     batch_prefix = f"annotations/{_CID}/checkpoints/batches/{batch_id}/"
-    observed = [
-        json.loads(line)
-        for line in payloads["observations.jsonl"].decode().splitlines()
-        if line.strip()
-    ]
+    observed = [json.loads(line) for line in payloads["observations.jsonl"].decode().splitlines() if line.strip()]
     pointer = {
-        "schema_version": "annotation-checkpoint/v1",
-        "curation_id": _CID,
-        "snapshot_id": manifest["snapshot_id"],
-        "batch_id": batch_id,
-        "batch_prefix": batch_prefix,
-        "files": entries,
-        "observation_count": len(observed),
+        "schema_version": "annotation-checkpoint/v1", "curation_id": _CID, "snapshot_id": manifest["snapshot_id"],
+        "batch_id": batch_id, "batch_prefix": batch_prefix, "files": entries, "observation_count": len(observed),
         "latest_observed_at": max((row.get("observed_at") for row in observed), default=None),
     }
     remote = {f"{batch_prefix}{name}": data for name, data in payloads.items()}
@@ -133,10 +92,7 @@ def _checkpoint_files(payloads: dict[str, bytes], *, manifest: dict[str, Any]) -
 def _published_payloads(hub: AnnotationsHub, revision: str) -> dict[str, bytes]:
     tree = hub.revision_files(revision)
     pointer = json.loads(tree[_STABLE_POINTER])
-    return {
-        entry["path"]: tree[f"{pointer['batch_prefix']}{entry['path']}"]
-        for entry in pointer["files"]
-    }
+    return {entry["path"]: tree[f"{pointer['batch_prefix']}{entry['path']}"] for entry in pointer["files"]}
 
 
 def test_mandatory_checkpoint_commits_immutable_batch_and_stable_pointer(tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -154,16 +110,12 @@ def test_mandatory_checkpoint_commits_immutable_batch_and_stable_pointer(tmp_pat
     assert hub.listed_revision_log == [hub.atomic_attempt_log[0]["parent_commit"]]
     assert hub.atomic_attempt_log[0]["branch"] == "main"
 
-
 def test_changed_same_time_observation_survives_and_exact_row_dedupes(tmp_path: Path, hub: AnnotationsHub) -> None:
-    first = _observation(
-        record_id="r1", observed_at="2026-01-01T00:00:00Z", disposition="accepted", rationale="first"
-    )
+    first = _observation(record_id="r1", observed_at="2026-01-01T00:00:00Z", disposition="accepted", rationale="first")
     changed = _observation(
         record_id="r1", observed_at="2026-01-01T00:00:00Z", disposition="rejected", rationale="changed"
     )
-    second = _observation(
-        record_id="r2", observed_at="2026-01-01T00:01:00Z", disposition="accepted", rationale="second"
+    second = _observation(record_id="r2", observed_at="2026-01-01T00:01:00Z", disposition="accepted", rationale="second"
     )
     state, manifest = _state_v2(tmp_path, rows=[first])
     publish_annotation_state(hub, state, manifest=manifest)
@@ -172,17 +124,12 @@ def test_changed_same_time_observation_survives_and_exact_row_dedupes(tmp_path: 
     )
 
     result = publish_annotation_state(hub, state, manifest=manifest)
-    rows = [
-        json.loads(line)
-        for line in _published_payloads(hub, result["checkpoint_revision"])[
-            "observations.jsonl"
-        ].splitlines()
+    rows = [json.loads(line)
+        for line in _published_payloads(hub, result["checkpoint_revision"])["observations.jsonl"].splitlines()
     ]
 
     assert [(row["record_id"], row["disposition"]) for row in rows] == [
-        ("r1", "accepted"),
-        ("r1", "rejected"),
-        ("r2", "accepted"),
+        ("r1", "accepted"), ("r1", "rejected"), ("r2", "accepted"),
     ]
     commits = len(hub.commit_order)
     repeated = publish_annotation_state(hub, state, manifest=manifest)
@@ -192,13 +139,9 @@ def test_changed_same_time_observation_survives_and_exact_row_dedupes(tmp_path: 
     assert repeated["uploaded"] == []
     assert len(hub.commit_order) == commits
 
-
 @pytest.mark.parametrize("name", ["queue.json", "preview-ledger.json", "preview-manifest.json", "index.db"])
 @pytest.mark.parametrize("mode", ["identical", "local-only", "remote-only", "divergent"])
-def test_three_way_checkpoint_non_observation_files(
-    name: str, mode: str, tmp_path: Path,
-    hub: AnnotationsHub,
-) -> None:
+def test_three_way_checkpoint_non_observation_files(name: str, mode: str, tmp_path: Path, hub: AnnotationsHub,) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     base_payloads = _published_payloads(hub, baseline["checkpoint_revision"])
@@ -220,8 +163,7 @@ def test_three_way_checkpoint_non_observation_files(
             (state / name).write_bytes(local_value)
     if mode in {"remote-only", "divergent"}:
         remote_payloads[name] = remote_value
-        rival_manifest = (
-            _manifest_data(note="remote")
+        rival_manifest = (_manifest_data(note="remote")
             if name == "preview-manifest.json"
             else manifest
         )
@@ -229,10 +171,7 @@ def test_three_way_checkpoint_non_observation_files(
         # Force a local commit attempt so the fixture can introduce the rival
         # after the publication's stable base read.
         local_observation = _observation(
-            record_id="local-race",
-            observed_at="2026-01-01T00:02:00Z",
-            disposition="accepted",
-            rationale="force CAS",
+            record_id="local-race", observed_at="2026-01-01T00:02:00Z", disposition="accepted", rationale="force CAS",
         )
         with (state / "observations.jsonl").open("ab") as handle:
             handle.write(_canonical_bytes(local_observation))
@@ -252,7 +191,6 @@ def test_three_way_checkpoint_non_observation_files(
     expected = local_value if mode == "local-only" else remote_value if mode == "remote-only" else base_payloads[name]
     assert resolved[name] == expected
 
-
 def test_superseded_manifest_identity_fails_instead_of_repointing(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
@@ -262,12 +200,8 @@ def test_superseded_manifest_identity_fails_instead_of_repointing(tmp_path: Path
     _, rival = _checkpoint_files(remote, manifest=superseded)
     hub.queue_concurrent_commit("batch", rival)
     with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(
-            _canonical_bytes(
-                _observation(
-                    record_id="local-race",
-                    observed_at="2026-01-01T00:02:00Z",
-                    disposition="accepted",
+        handle.write(_canonical_bytes(_observation(
+                    record_id="local-race", observed_at="2026-01-01T00:02:00Z", disposition="accepted",
                     rationale="force CAS",
                 )
             )
@@ -278,18 +212,12 @@ def test_superseded_manifest_identity_fails_instead_of_repointing(tmp_path: Path
 
     assert json.loads(hub.revision_files(hub.repo_info().sha)[_STABLE_POINTER])["snapshot_id"] == "f" * 64
 
-
 def test_concurrent_checkpoint_pointer_deletion_is_not_recreated(tmp_path: Path) -> None:
     class PointerDeletingHub(AnnotationsHub):
         delete_on_batch = False
 
         def commit_files_atomic(
-            self,
-            mapping: dict[str | Path, Path],
-            commit_message: str,
-            *,
-            parent_commit: str,
-            branch: str,
+            self, mapping: dict[str | Path, Path], commit_message: str, *, parent_commit: str, branch: str,
         ) -> str:
             if self.delete_on_batch and any(str(path).endswith("/batch-latest.json") for path in mapping):
                 self.delete_on_batch = False
@@ -300,23 +228,14 @@ def test_concurrent_checkpoint_pointer_deletion_is_not_recreated(tmp_path: Path)
                     _canonical_bytes({path: hashlib.sha256(data).hexdigest() for path, data in sorted(tree.items())})
                 ).hexdigest()[:40]
                 self.commit_revision(revision, ref="main")
-            return super().commit_files_atomic(
-                mapping,
-                commit_message,
-                parent_commit=parent_commit,
-                branch=branch,
-            )
+            return super().commit_files_atomic(mapping, commit_message, parent_commit=parent_commit, branch=branch)
 
     hub = PointerDeletingHub(repo_id="org/private-annotations")
     state, manifest = _state_v2(tmp_path)
     publish_annotation_state(hub, state, manifest=manifest)
     with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(
-            _canonical_bytes(
-                _observation(
-                    record_id="local-race",
-                    observed_at="2026-01-01T00:02:00Z",
-                    disposition="accepted",
+        handle.write(_canonical_bytes(_observation(
+                    record_id="local-race", observed_at="2026-01-01T00:02:00Z", disposition="accepted",
                     rationale="force CAS",
                 )
             )
@@ -327,7 +246,6 @@ def test_concurrent_checkpoint_pointer_deletion_is_not_recreated(tmp_path: Path)
         publish_annotation_state(hub, state, manifest=manifest)
 
     assert _STABLE_POINTER not in hub.revision_files(hub.repo_info("main").sha)
-
 
 def test_resume_stable_bootstrap_is_pinned_and_byte_identical(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
@@ -347,17 +265,13 @@ def test_resume_stable_bootstrap_is_pinned_and_byte_identical(tmp_path: Path, hu
     for name, data in _published_payloads(hub, published["checkpoint_revision"]).items():
         assert (destination / name).read_bytes() == data
 
-
 def test_resume_missing_checkpoint_is_an_error_not_empty_state(tmp_path: Path) -> None:
     destination = tmp_path / "fresh"
     with pytest.raises(HydrationError, match="no published checkpoint"):
         resume_annotation_state(
-            AnnotationsHub(repo_id="org/private-annotations"),
-            curation_id=_CID,
-            destination=destination,
+            AnnotationsHub(repo_id="org/private-annotations"), curation_id=_CID, destination=destination,
         )
     assert not destination.exists()
-
 
 def test_resume_auth_error_is_not_treated_as_missing(tmp_path: Path) -> None:
     class UnavailableHub(AnnotationsHub):
@@ -367,13 +281,10 @@ def test_resume_auth_error_is_not_treated_as_missing(tmp_path: Path) -> None:
     destination = tmp_path / "fresh"
     with pytest.raises(HydrationError) as excinfo:
         resume_annotation_state(
-            UnavailableHub(repo_id="org/private-annotations"),
-            curation_id=_CID,
-            destination=destination,
+            UnavailableHub(repo_id="org/private-annotations"), curation_id=_CID, destination=destination,
         )
     assert "hf_secret_token" not in str(excinfo.value)
     assert not destination.exists()
-
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
 def test_resume_requires_fresh_destination(kind: str, tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -391,7 +302,6 @@ def test_resume_requires_fresh_destination(kind: str, tmp_path: Path, hub: Annot
         resume_annotation_state(hub, curation_id=_CID, destination=destination)
     assert hub.info_revision_log == []
 
-
 def test_publish_path_guard_rejects_secret_bearing_outward_symlink(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     secret = tmp_path / "outside-secret"
@@ -403,7 +313,6 @@ def test_publish_path_guard_rejects_secret_bearing_outward_symlink(tmp_path: Pat
         publish_annotation_state(hub, state, manifest=manifest)
     assert hub.commit_order == []
 
-
 def test_publish_accepts_manifest_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     outside = tmp_path / "outside-manifest"
@@ -412,14 +321,9 @@ def test_publish_accepts_manifest_under_symlinked_ancestor(tmp_path: Path, hub: 
     linked_parent = tmp_path / "linked-manifest"
     linked_parent.symlink_to(outside, target_is_directory=True)
 
-    result = publish_annotation_state(
-        hub,
-        state,
-        manifest=linked_parent / "preview-manifest.json",
-    )
+    result = publish_annotation_state(hub, state, manifest=linked_parent / "preview-manifest.json")
 
     assert result["checkpoint_revision"] == hub.repo_info().sha
-
 
 def test_publish_accepts_real_state_root_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     actual = tmp_path / "actual"
@@ -432,7 +336,6 @@ def test_publish_accepts_real_state_root_under_symlinked_ancestor(tmp_path: Path
 
     assert result["checkpoint_revision"] == hub.repo_info().sha
 
-
 def test_publish_still_refuses_a_declared_symlink_state_root(tmp_path: Path, hub: AnnotationsHub) -> None:
     actual, manifest = _state_v2(tmp_path)
     linked = tmp_path / "linked-state"
@@ -442,7 +345,6 @@ def test_publish_still_refuses_a_declared_symlink_state_root(tmp_path: Path, hub
         publish_annotation_state(hub, linked, manifest=manifest)
 
     assert hub.info_revision_log == []
-
 
 def test_resume_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
@@ -455,7 +357,6 @@ def test_resume_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Pat
     resume_annotation_state(hub, curation_id=_CID, destination=alias / "fresh")
 
     assert (actual / "fresh" / "queue.json").is_file()
-
 
 @pytest.mark.parametrize("bad_name", ["../queue.json", "nested\\queue.json", "./queue.json", "queue.json/"])
 def test_resume_path_guard_rejects_malformed_pointer_names(bad_name: str, tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -470,7 +371,6 @@ def test_resume_path_guard_rejects_malformed_pointer_names(bad_name: str, tmp_pa
     with pytest.raises(ValueError, match="path"):
         resume_annotation_state(hub, curation_id=_CID, destination=destination)
     assert not destination.exists()
-
 
 def test_resume_failure_on_last_download_leaves_no_partial_install(tmp_path: Path) -> None:
     class LastDownloadFails(AnnotationsHub):
@@ -494,8 +394,7 @@ def test_resume_failure_on_last_download_leaves_no_partial_install(tmp_path: Pat
     assert list(tmp_path.glob(".fresh.*")) == []
 
 
-def _fail_parent_fsync_after_rename(
-    monkeypatch: pytest.MonkeyPatch, destination: Path, parent_identity: tuple[int, int]
+def _fail_parent_fsync_after_rename(monkeypatch: pytest.MonkeyPatch, destination: Path, parent_identity: tuple[int, int]
 ) -> None:
     real_fsync = os.fsync
 
@@ -509,8 +408,7 @@ def _fail_parent_fsync_after_rename(
 
 
 def test_resume_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    hub: AnnotationsHub,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: AnnotationsHub,
 ) -> None:
     state, manifest = _state_v2(tmp_path)
     publish_annotation_state(hub, state, manifest=manifest)
@@ -523,7 +421,6 @@ def test_resume_parent_fsync_failure_removes_owned_install(
     assert not destination.exists()
     assert list(tmp_path.glob(".fresh.*")) == []
 
-
 @pytest.mark.parametrize("name", ["queue.json", "observations.jsonl", "preview-ledger.json", "index.db"])
 def test_publish_secret_in_every_state_payload_commits_nothing(name: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
@@ -533,7 +430,6 @@ def test_publish_secret_in_every_state_payload_commits_nothing(name: str, tmp_pa
         publish_annotation_state(hub, state, manifest=manifest)
     assert hub.commit_order == []
 
-
 def test_publish_secret_in_manifest_identity_commits_nothing(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     manifest["curation_id"] = "cur-hf_abc123secret"
@@ -542,22 +438,15 @@ def test_publish_secret_in_manifest_identity_commits_nothing(tmp_path: Path, hub
         publish_annotation_state(hub, state, manifest=manifest)
     assert hub.commit_order == []
 
-
 def test_observation_only_concurrent_update_unions_remote_then_local_rows(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     remote = _published_payloads(hub, baseline["checkpoint_revision"])
     concurrent = _observation(
-        record_id="remote",
-        observed_at="2026-01-01T00:01:00Z",
-        disposition="rejected",
-        rationale="remote",
+        record_id="remote", observed_at="2026-01-01T00:01:00Z", disposition="rejected", rationale="remote",
     )
     local = _observation(
-        record_id="local",
-        observed_at="2026-01-01T00:02:00Z",
-        disposition="accepted",
-        rationale="local",
+        record_id="local", observed_at="2026-01-01T00:02:00Z", disposition="accepted", rationale="local",
     )
     remote["observations.jsonl"] += _canonical_bytes(concurrent)
     _, rival = _checkpoint_files(remote, manifest=manifest)
@@ -566,14 +455,10 @@ def test_observation_only_concurrent_update_unions_remote_then_local_rows(tmp_pa
         handle.write(_canonical_bytes(local))
 
     result = publish_annotation_state(hub, state, manifest=manifest)
-    rows = [
-        json.loads(line)
-        for line in _published_payloads(hub, result["checkpoint_revision"])[
-            "observations.jsonl"
-        ].splitlines()
+    rows = [json.loads(line)
+        for line in _published_payloads(hub, result["checkpoint_revision"])["observations.jsonl"].splitlines()
     ]
     assert [row["record_id"] for row in rows] == ["r1", "remote", "local"]
-
 
 def test_optional_index_absence_is_a_three_way_state(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
@@ -584,12 +469,8 @@ def test_optional_index_absence_is_a_three_way_state(tmp_path: Path, hub: Annota
     hub.queue_concurrent_commit("batch", rival)
     (state / "index.db").unlink()
     with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(
-            _canonical_bytes(
-                _observation(
-                    record_id="force",
-                    observed_at="2026-01-01T00:03:00Z",
-                    disposition="accepted",
+        handle.write(_canonical_bytes(_observation(
+                    record_id="force", observed_at="2026-01-01T00:03:00Z", disposition="accepted",
                     rationale="force CAS",
                 )
             )
@@ -597,7 +478,6 @@ def test_optional_index_absence_is_a_three_way_state(tmp_path: Path, hub: Annota
 
     with pytest.raises(HydrationError, match="concurrent state conflict for index.db"):
         publish_annotation_state(hub, state, manifest=manifest)
-
 
 def test_optional_index_local_removal_publishes_absence(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
@@ -608,7 +488,6 @@ def test_optional_index_local_removal_publishes_absence(tmp_path: Path, hub: Ann
 
     assert "index.db" not in _published_payloads(hub, result["checkpoint_revision"])
 
-
 def test_resume_expected_snapshot_mismatch_leaves_destination_absent(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     published = publish_annotation_state(hub, state, manifest=manifest)
@@ -616,19 +495,13 @@ def test_resume_expected_snapshot_mismatch_leaves_destination_absent(tmp_path: P
 
     with pytest.raises(HydrationError, match="expected snapshot"):
         resume_annotation_state(
-            hub,
-            curation_id=_CID,
-            expected_snapshot_id="f" * 64,
-            revision=published["checkpoint_revision"],
+            hub, curation_id=_CID, expected_snapshot_id="f" * 64, revision=published["checkpoint_revision"],
             destination=destination,
         )
     assert not destination.exists()
 
-
 @pytest.mark.parametrize("corruption", ["json", "digest", "duplicate"])
-def test_resume_refuses_corrupt_checkpoint_without_partial_install(
-    corruption: str, tmp_path: Path,
-    hub: AnnotationsHub,
+def test_resume_refuses_corrupt_checkpoint_without_partial_install(corruption: str, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     state, manifest = _state_v2(tmp_path)
     published = publish_annotation_state(hub, state, manifest=manifest)
@@ -646,37 +519,23 @@ def test_resume_refuses_corrupt_checkpoint_without_partial_install(
     destination = tmp_path / "fresh"
 
     with pytest.raises((ValueError, HydrationError)):
-        resume_annotation_state(
-            hub,
-            curation_id=_CID,
-            revision=bad_revision,
-            destination=destination,
-        )
+        resume_annotation_state(hub, curation_id=_CID, revision=bad_revision, destination=destination)
     assert not destination.exists()
     assert list(tmp_path.glob(".fresh.*")) == []
-
 
 def test_publish_refuses_secret_from_concurrent_remote_observation(tmp_path: Path, hub: AnnotationsHub) -> None:
     state, manifest = _state_v2(tmp_path)
     baseline = publish_annotation_state(hub, state, manifest=manifest)
     remote = _published_payloads(hub, baseline["checkpoint_revision"])
-    remote["observations.jsonl"] += _canonical_bytes(
-        _observation(
-            record_id="remote",
-            observed_at="2026-01-01T00:01:00Z",
-            disposition="rejected",
-            rationale="hf_abc123secret",
+    remote["observations.jsonl"] += _canonical_bytes(_observation(
+            record_id="remote", observed_at="2026-01-01T00:01:00Z", disposition="rejected", rationale="hf_abc123secret",
         )
     )
     _, rival = _checkpoint_files(remote, manifest=manifest)
     hub.queue_concurrent_commit("batch", rival)
     with (state / "observations.jsonl").open("ab") as handle:
-        handle.write(
-            _canonical_bytes(
-                _observation(
-                    record_id="local",
-                    observed_at="2026-01-01T00:02:00Z",
-                    disposition="accepted",
+        handle.write(_canonical_bytes(_observation(
+                    record_id="local", observed_at="2026-01-01T00:02:00Z", disposition="accepted",
                     rationale="force CAS",
                 )
             )
@@ -687,7 +546,6 @@ def test_publish_refuses_secret_from_concurrent_remote_observation(tmp_path: Pat
         publish_annotation_state(hub, state, manifest=manifest)
     assert len(hub.commit_order) == before + 1
 
-
 def test_publish_and_resume_refuse_public_repository(tmp_path: Path) -> None:
     state, manifest = _state_v2(tmp_path)
     public = AnnotationsHub(repo_id="org/public-annotations", private=False)
@@ -695,12 +553,7 @@ def test_publish_and_resume_refuse_public_repository(tmp_path: Path) -> None:
     with pytest.raises(PublicDestinationError, match="public Hub"):
         publish_annotation_state(public, state, manifest=manifest)
     with pytest.raises(PublicDestinationError, match="public Hub"):
-        resume_annotation_state(
-            public,
-            curation_id=_CID,
-            destination=tmp_path / "fresh",
-        )
-
+        resume_annotation_state(public, curation_id=_CID, destination=tmp_path / "fresh")
 
 # P14 complete final publication ----------------------------------------------------
 
@@ -714,48 +567,23 @@ def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
     labeler_version = "984-adjudicate-r1"
     rubric_version = "980-rubric-r2"
     classifier_version = "980-classifier-r1"
-    payloads: dict[str, object] = {
-        "annotations.jsonl": {"record_id": "r1"},
-        "sessions.jsonl": {"session_id": "s1"},
+    payloads: dict[str, object] = {"annotations.jsonl": {"record_id": "r1"}, "sessions.jsonl": {"session_id": "s1"},
         "label-observations.jsonl": {"record_id": "r1", "observed_at": "2026-01-01T00:00:00Z"},
-        "coverage-report.json": {
-            "outcome_coverage": {"adjudicated": 1, "total": 1},
-            "silver_task_only_count": 0,
-            "class_balance": {"accepted": 1, "rejected": 0},
-            "unresolved": 0,
-            "inter_rater": {"items": 0, "agreeing": 0},
-            "strata": {"python/pr_review": 1},
-            "evidence_after_as_of": [],
-            "admission_gate": {
-                "outcome_bearing_total": 1,
-                "total": 1,
-                "passes_80pct": True,
-                "class_balance_ok": False,
+        "coverage-report.json": {"outcome_coverage": {"adjudicated": 1, "total": 1}, "silver_task_only_count": 0,
+            "class_balance": {"accepted": 1, "rejected": 0}, "unresolved": 0,
+            "inter_rater": {"items": 0, "agreeing": 0}, "strata": {"python/pr_review": 1}, "evidence_after_as_of": [],
+            "admission_gate": {"outcome_bearing_total": 1, "total": 1, "passes_80pct": True, "class_balance_ok": False,
                 "gate_version": 1,
             },
-        },
-        "lineage.json": {
-            "curation_id": curation_id,
-            "sanitized_hub_commit": source,
-            "snapshot_id": snapshot_id,
-            "labeler_version": labeler_version,
-            "rubric_version": rubric_version,
-            "classifier_version": classifier_version,
-            "schema_version": "annotation-snapshot/1055-snapshot-r1",
-            "batch_fileset_digest": "5" * 64,
-            "as_of": "",
-        },
-        "preview-manifest.json": {
-            "curation_id": curation_id,
-            "source_hub_commit": source,
-            "sanitized_hub_commit": source,
-            "snapshot_id": snapshot_id,
-            "labeler_version": labeler_version,
-            "rubric_version": rubric_version,
-            "classifier_version": classifier_version,
-            "as_of": None,
-        },
-        "policy-binding.json": binding,
+        }, "lineage.json": {"curation_id": curation_id, "sanitized_hub_commit": source, "snapshot_id": snapshot_id,
+            "labeler_version": labeler_version, "rubric_version": rubric_version,
+            "classifier_version": classifier_version, "schema_version": "annotation-snapshot/1055-snapshot-r1",
+            "batch_fileset_digest": "5" * 64, "as_of": "",
+        }, "preview-manifest.json": {
+            "curation_id": curation_id, "source_hub_commit": source, "sanitized_hub_commit": source,
+            "snapshot_id": snapshot_id, "labeler_version": labeler_version, "rubric_version": rubric_version,
+            "classifier_version": classifier_version, "as_of": None,
+        }, "policy-binding.json": binding,
     }
     for name, value in payloads.items():
         encoded = (
@@ -767,21 +595,14 @@ def _final_bundle(tmp_path: Path) -> tuple[Path, str]:
     return root, curation_id
 
 
-def _seed_final_envelope(
-    hub: AnnotationsHub, bundle: Path
-) -> tuple[str, str, str]:
+def _seed_final_envelope(hub: AnnotationsHub, bundle: Path) -> tuple[str, str, str]:
     final_id, digests = final_snapshot_id(bundle)
     semantic = {name: (bundle / name).read_bytes() for name in FINAL_IDENTITY_FILES}
     preview = json.loads(semantic["preview-manifest.json"])
     curation_id = preview["curation_id"]
     prefix = f"annotations/{curation_id}/{final_id}/final/"
-    publication = _canonical_bytes(
-        {
-            "schema_version": "annotation-publication/v1",
-            "curation_id": curation_id,
-            "source_snapshot_id": preview["snapshot_id"],
-            "final_snapshot_id": final_id,
-            "files": digests,
+    publication = _canonical_bytes({"schema_version": "annotation-publication/v1", "curation_id": curation_id,
+            "source_snapshot_id": preview["snapshot_id"], "final_snapshot_id": final_id, "files": digests,
         }
     )
     data = {**semantic, "publication-manifest.json": publication}
@@ -791,20 +612,13 @@ def _seed_final_envelope(
     ).encode()
     data_oid = hub.seed_remote_files({f"{prefix}{name}": value for name, value in data.items()})
     success = _canonical_bytes(
-        {
-            "schema_version": "annotation-success/v1",
-            "final_snapshot_id": final_id,
-            "data_commit_oid": data_oid,
-        }
+        {"schema_version": "annotation-success/v1", "final_snapshot_id": final_id, "data_commit_oid": data_oid}
     )
     success_oid = hub.seed_remote_files({f"{prefix}_SUCCESS": success})
     return curation_id, final_id, success_oid
 
 
-@pytest.mark.parametrize(
-    "case",
-    ["missing-field", "bool-count", "contradictory-gate", "cross-count"],
-)
+@pytest.mark.parametrize("case", ["missing-field", "bool-count", "contradictory-gate", "cross-count"])
 def test_final_publish_rejects_nonproducer_coverage_report(case: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     path = bundle / "coverage-report.json"
@@ -827,11 +641,7 @@ def test_final_publish_rejects_nonproducer_coverage_report(case: str, tmp_path: 
 
     assert hub.commit_order == []
 
-
-@pytest.mark.parametrize(
-    "case",
-    ["missing-pin", "schema", "digest", "shared-pin", "as-of"],
-)
+@pytest.mark.parametrize("case", ["missing-pin", "schema", "digest", "shared-pin", "as-of"])
 def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     path = bundle / "lineage.json"
@@ -853,19 +663,15 @@ def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path, hu
 
     assert hub.commit_order == []
 
-
-@pytest.mark.parametrize(
-    ("mutation", "canonical"),
-    [
-        pytest.param({"schema_version": "1"}, True, id="wrong-schema"),
+@pytest.mark.parametrize(("mutation", "canonical"),
+    [pytest.param({"schema_version": "1"}, True, id="wrong-schema"),
         pytest.param({"policy_digest": "not-a-digest"}, True, id="invalid-digest"),
         pytest.param({"policy_version": "rival-v2"}, True, id="curation-mismatch"),
         pytest.param({}, False, id="non-canonical"),
     ],
 )
 def test_final_publish_rejects_tampered_policy_binding(
-    mutation: dict[str, Any], canonical: bool, tmp_path: Path,
-    hub: AnnotationsHub,
+    mutation: dict[str, Any], canonical: bool, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     """Publication reuses the construction-time v2 binding rules."""
     bundle, _curation_id = _final_bundle(tmp_path)
@@ -882,7 +688,6 @@ def test_final_publish_rejects_tampered_policy_binding(
 
     assert hub.commit_order == []
 
-
 def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     lineage_path = bundle / "lineage.json"
@@ -892,16 +697,11 @@ def test_final_download_revalidates_lineage_inside_valid_hash_envelope(tmp_path:
     curation_id, final_id, revision = _seed_final_envelope(hub, bundle)
 
     with pytest.raises(ValueError, match="lineage.json"):
-        _download_final(
-            hub, curation_id, final_id, revision, tmp_path / "download"
-        )
+        _download_final(hub, curation_id, final_id, revision, tmp_path / "download")
 
     assert not (tmp_path / "download").exists()
 
-
-def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(
-    tmp_path: Path,
-    hub: AnnotationsHub,
+def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
 
@@ -911,30 +711,20 @@ def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(
     assert result["data_commit_sha"] == hub.commit_order[-2]["sha"]
     assert len(hub.atomic_attempt_log[-2]["contains"]) == 9
     assert hub.commit_order[-1]["contains"] == [f"{result['prefix']}_SUCCESS"]
-    assert result["prefix"] == (
-        f"annotations/{curation_id}/{result['final_snapshot_id']}/final/"
+    assert result["prefix"] == (f"annotations/{curation_id}/{result['final_snapshot_id']}/final/"
     )
-    marker = json.loads(
-        hub.revision_files(result["hub_commit_sha"])[f"{result['prefix']}_SUCCESS"]
-    )
-    assert marker == {
-        "schema_version": "annotation-success/v1",
-        "final_snapshot_id": result["final_snapshot_id"],
+    marker = json.loads(hub.revision_files(result["hub_commit_sha"])[f"{result['prefix']}_SUCCESS"])
+    assert marker == {"schema_version": "annotation-success/v1", "final_snapshot_id": result["final_snapshot_id"],
         "data_commit_oid": result["data_commit_sha"],
     }
     commits = len(hub.commit_order)
     downloaded_before = len(hub.downloaded_revision_log)
     assert publish_final_annotation_bundle(hub, bundle) == result
     assert len(hub.commit_order) == commits
-    assert all(
-        revision is not None
-        for _, revision in hub.downloaded_revision_log[downloaded_before:]
-    )
-
+    assert all(revision is not None for _, revision in hub.downloaded_revision_log[downloaded_before:])
 
 def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    hub: AnnotationsHub,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: AnnotationsHub,
 ) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     annotations = (bundle / "annotations.jsonl").resolve()
@@ -967,11 +757,8 @@ def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement
     assert remote[f"{prefix}annotations.jsonl"] == original
 
     destination = tmp_path / "verified download"
-    _download_final(
-        hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
-    )
+    _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
     assert (destination / "annotations.jsonl").read_bytes() == original
-
 
 def test_final_publish_accepts_real_bundle_root_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     actual = tmp_path / "actual"
@@ -984,7 +771,6 @@ def test_final_publish_accepts_real_bundle_root_under_symlinked_ancestor(tmp_pat
 
     assert result["hub_commit_sha"] == hub.repo_info().sha
 
-
 def test_final_publish_still_refuses_a_declared_symlink_bundle_root(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     linked = tmp_path / "linked-final"
@@ -995,11 +781,8 @@ def test_final_publish_still_refuses_a_declared_symlink_bundle_root(tmp_path: Pa
 
     assert hub.info_revision_log == []
 
-
 @pytest.mark.parametrize("stage", ["data", "success"])
-def test_final_publish_retries_typed_compare_and_swap_conflicts(
-    stage: str, tmp_path: Path,
-    hub: AnnotationsHub,
+def test_final_publish_retries_typed_compare_and_swap_conflicts(stage: str, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     hub.queue_concurrent_commit(stage, {f"unrelated/{stage}.txt": b"rival"})
@@ -1008,7 +791,6 @@ def test_final_publish_retries_typed_compare_and_swap_conflicts(
 
     assert result["hub_commit_sha"] == hub.commit_order[-1]["sha"]
     assert [entry["stage"] for entry in hub.atomic_attempt_log].count(stage) >= 2
-
 
 def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
@@ -1021,35 +803,23 @@ def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path, h
         publish_final_annotation_bundle(hub, bundle)
     assert len(hub.commit_order) == before
 
-
-def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit(
-    tmp_path: Path,
-    hub: AnnotationsHub,
+def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit(tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     source_hub = AnnotationsHub(repo_id="org/source-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
     source_result = publish_final_annotation_bundle(source_hub, bundle)
     data_tree = source_hub.revision_files(source_result["data_commit_sha"])
-    data_mapping = {
-        path: value
-        for path, value in data_tree.items()
-        if path.startswith(source_result["prefix"])
-    }
+    data_mapping = {path: value for path, value in data_tree.items() if path.startswith(source_result["prefix"])}
 
     first_data = hub.seed_remote_files(data_mapping, "first identical data")
     rival_data = hub.seed_remote_files(data_mapping, "rival identical data")
     assert rival_data != first_data
-    marker = _canonical_bytes(
-        {
-            "schema_version": "annotation-success/v1",
-            "final_snapshot_id": source_result["final_snapshot_id"],
+    marker = _canonical_bytes({
+            "schema_version": "annotation-success/v1", "final_snapshot_id": source_result["final_snapshot_id"],
             "data_commit_oid": rival_data,
         }
     )
-    hub.queue_concurrent_commit(
-        "success",
-        {f"{source_result['prefix']}_SUCCESS": marker},
-    )
+    hub.queue_concurrent_commit("success", {f"{source_result['prefix']}_SUCCESS": marker})
     before = len(hub.commit_order)
 
     result = publish_final_annotation_bundle(hub, bundle)
@@ -1058,30 +828,19 @@ def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit
     assert result["hub_commit_sha"] == hub.commit_order[-1]["sha"]
     assert len(hub.commit_order) == before + 1
 
-
-@pytest.mark.parametrize(
-    "marker",
+@pytest.mark.parametrize("marker",
     [
         b"not-json\n",
         _canonical_bytes(
-            {
-                "schema_version": "annotation-success/v1",
-                "final_snapshot_id": "0" * 64,
-                "data_commit_oid": "a" * 40,
-            }
-        ),
-        _canonical_bytes(
-            {
-                "schema_version": "annotation-success/v1",
-                "final_snapshot_id": "PLACEHOLDER",
+            {"schema_version": "annotation-success/v1", "final_snapshot_id": "0" * 64, "data_commit_oid": "a" * 40}
+        ), _canonical_bytes({"schema_version": "annotation-success/v1", "final_snapshot_id": "PLACEHOLDER",
                 "data_commit_oid": "not-an-oid",
             }
         ),
     ],
 )
 def test_final_publish_refuses_malformed_or_mismatched_success_marker(
-    marker: bytes, tmp_path: Path,
-    hub: AnnotationsHub,
+    marker: bytes, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     first = publish_final_annotation_bundle(hub, bundle)
@@ -1094,17 +853,11 @@ def test_final_publish_refuses_malformed_or_mismatched_success_marker(
         publish_final_annotation_bundle(hub, bundle)
     assert len(hub.commit_order) == before
 
-
-def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(
-    tmp_path: Path,
-    hub: AnnotationsHub,
-) -> None:
+def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(tmp_path: Path, hub: AnnotationsHub,) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(hub, bundle)
-    marker = _canonical_bytes(
-        {
-            "schema_version": "annotation-success/v1",
-            "final_snapshot_id": result["final_snapshot_id"],
+    marker = _canonical_bytes({
+            "schema_version": "annotation-success/v1", "final_snapshot_id": result["final_snapshot_id"],
             "data_commit_oid": "f" * 40,
         }
     )
@@ -1113,22 +866,12 @@ def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(
     with pytest.raises(HydrationError, match="unknown revision"):
         publish_final_annotation_bundle(hub, bundle)
 
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "annotations.jsonl",
-        "sessions.jsonl",
-        "label-observations.jsonl",
-        "coverage-report.json",
-        "lineage.json",
-        "preview-manifest.json",
-        "policy-binding.json",
+@pytest.mark.parametrize("name",
+    ["annotations.jsonl", "sessions.jsonl", "label-observations.jsonl", "coverage-report.json", "lineage.json",
+        "preview-manifest.json", "policy-binding.json",
     ],
 )
-def test_final_publish_secret_in_every_semantic_file_commits_nothing(
-    name: str, tmp_path: Path,
-    hub: AnnotationsHub,
+def test_final_publish_secret_in_every_semantic_file_commits_nothing(name: str, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     (bundle / name).write_bytes((bundle / name).read_bytes() + b"hf_abc123secret")
@@ -1137,11 +880,7 @@ def test_final_publish_secret_in_every_semantic_file_commits_nothing(
         publish_final_annotation_bundle(hub, bundle)
     assert hub.commit_order == []
 
-
-def test_final_publish_rejects_symlinked_semantic_input_before_hub_access(
-    tmp_path: Path,
-    hub: AnnotationsHub,
-) -> None:
+def test_final_publish_rejects_symlinked_semantic_input_before_hub_access(tmp_path: Path, hub: AnnotationsHub,) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     outside = tmp_path / "outside"
     outside.write_text("hf_abc123secret")
@@ -1151,7 +890,6 @@ def test_final_publish_rejects_symlinked_semantic_input_before_hub_access(
     with pytest.raises(ValueError, match="regular file"):
         publish_final_annotation_bundle(hub, bundle)
     assert hub.info_revision_log == []
-
 
 @pytest.mark.parametrize("kind", ["file", "directory", "symlink"])
 def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -1169,11 +907,8 @@ def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path, hu
     hub.info_revision_log.clear()
 
     with pytest.raises(ValueError, match="must not exist"):
-        _download_final(
-            hub, curation_id, result["final_snapshot_id"], result["hub_commit_sha"], destination
-        )
+        _download_final(hub, curation_id, result["final_snapshot_id"], result["hub_commit_sha"], destination)
     assert hub.info_revision_log == []
-
 
 def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
@@ -1182,9 +917,7 @@ def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path:
     hub.downloaded_revision_log.clear()
     destination = tmp_path / "download"
 
-    result = _download_final(
-        hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
-    )
+    result = _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
 
     assert result["hub_commit_sha"] == published["hub_commit_sha"]
     assert result["data_commit_sha"] == published["data_commit_sha"]
@@ -1192,7 +925,6 @@ def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path:
     assert hub.info_revision_log[0] == published["hub_commit_sha"]
     assert all(revision is not None for _, revision in hub.downloaded_revision_log)
     assert list(tmp_path.glob(".download.*")) == []
-
 
 def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
@@ -1202,16 +934,12 @@ def test_final_download_accepts_fresh_destination_under_symlinked_ancestor(tmp_p
     alias = tmp_path / "alias"
     alias.symlink_to(actual, target_is_directory=True)
 
-    _download_final(
-        hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], alias / "download"
-    )
+    _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], alias / "download")
 
     assert (actual / "download" / "_SUCCESS").is_file()
 
-
 def test_final_download_parent_fsync_failure_removes_owned_install(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    hub: AnnotationsHub,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, hub: AnnotationsHub,
 ) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
@@ -1219,9 +947,7 @@ def test_final_download_parent_fsync_failure_removes_owned_install(
     parent_identity = (tmp_path.stat().st_dev, tmp_path.stat().st_ino)
     _fail_parent_fsync_after_rename(monkeypatch, destination, parent_identity)
     with pytest.raises(HydrationError, match="parent fsync failed"):
-        _download_final(
-            hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
-        )
+        _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
 
     assert not destination.exists()
     assert list(tmp_path.glob(".download.*")) == []
@@ -1251,8 +977,7 @@ def _open_fd_identity(fd: int) -> tuple[int, int] | None:
 
 @pytest.mark.parametrize("operation", ["download", "resume"])
 def test_final_download_cleanup_preserves_concurrent_destination_replacement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
-    hub: AnnotationsHub,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, hub: AnnotationsHub,
 ) -> None:
     if operation == "download":
         bundle, curation_id = _final_bundle(tmp_path)
@@ -1283,9 +1008,7 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
     monkeypatch.setattr(os, "fsync", replace_then_fail)
     with pytest.raises(HydrationError, match="parent fsync failed"):
         if operation == "download":
-            _download_final(
-                hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
-            )
+            _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
         else:
             resume_annotation_state(hub, curation_id=_CID, destination=destination)
 
@@ -1295,11 +1018,9 @@ def test_final_download_cleanup_preserves_concurrent_destination_replacement(
     assert directory_fds
     assert all(_open_fd_identity(fd) is None for fd in directory_fds)
 
-
 @pytest.mark.parametrize("operation", ["download", "resume"])
 def test_successful_installation_closes_directory_descriptors(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str,
-    hub: AnnotationsHub,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str, hub: AnnotationsHub,
 ) -> None:
     if operation == "download":
         bundle, curation_id = _final_bundle(tmp_path)
@@ -1311,9 +1032,7 @@ def test_successful_installation_closes_directory_descriptors(
     directory_fds = _record_open_directory_fds(monkeypatch)
 
     if operation == "download":
-        _download_final(
-            hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination
-        )
+        _download_final(hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"], destination)
     else:
         resume_annotation_state(hub, curation_id=_CID, destination=destination)
 
@@ -1322,16 +1041,12 @@ def test_successful_installation_closes_directory_descriptors(
     assert directory_fds
     assert all(_open_fd_identity(fd) is None for fd in directory_fds)
 
-
 @pytest.mark.parametrize("after_stage", ["data", "success"])
-def test_final_publish_verification_failure_never_returns_success(
-    after_stage: str, tmp_path: Path
-) -> None:
+def test_final_publish_verification_failure_never_returns_success(after_stage: str, tmp_path: Path) -> None:
     class CorruptingHub(AnnotationsHub):
         def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
             data = super().download_file(path_in_repo, revision)
-            if (
-                self.atomic_attempt_log
+            if (self.atomic_attempt_log
                 and self.atomic_attempt_log[-1]["stage"] == after_stage
                 and path_in_repo.endswith("/annotations.jsonl")
             ):
@@ -1350,19 +1065,15 @@ def test_final_publish_verification_failure_never_returns_success(
     else:
         assert stages == ["data", "success"]
 
-
 def test_final_publish_rejects_changed_data_behind_success_marker(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(hub, bundle)
-    hub.seed_remote_files(
-        {f"{result['prefix']}annotations.jsonl": b"changed-behind-marker\n"}
-    )
+    hub.seed_remote_files({f"{result['prefix']}annotations.jsonl": b"changed-behind-marker\n"})
     before = len(hub.commit_order)
 
     with pytest.raises(HydrationError, match="collision"):
         publish_final_annotation_bundle(hub, bundle)
     assert len(hub.commit_order) == before
-
 
 def test_final_publish_rejects_missing_data_behind_success_marker(tmp_path: Path) -> None:
     class MissingListingHub(AnnotationsHub):
@@ -1384,11 +1095,8 @@ def test_final_publish_rejects_missing_data_behind_success_marker(tmp_path: Path
         publish_final_annotation_bundle(hub, bundle)
     assert len(hub.commit_order) == before
 
-
 @pytest.mark.parametrize("bad_name", ["../escape", "nested\\escape", "./annotations.jsonl"])
-def test_final_publish_rejects_non_normalized_remote_prefix_paths(
-    bad_name: str, tmp_path: Path,
-    hub: AnnotationsHub,
+def test_final_publish_rejects_non_normalized_remote_prefix_paths(bad_name: str, tmp_path: Path, hub: AnnotationsHub,
 ) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     final_id, _digests = final_snapshot_id(bundle)
@@ -1397,7 +1105,6 @@ def test_final_publish_rejects_non_normalized_remote_prefix_paths(
 
     with pytest.raises(ValueError, match="path"):
         publish_final_annotation_bundle(hub, bundle)
-
 
 def test_final_publish_secret_shaped_identity_commits_nothing(tmp_path: Path, hub: AnnotationsHub) -> None:
     bundle, _curation_id = _final_bundle(tmp_path)
@@ -1409,7 +1116,6 @@ def test_final_publish_secret_shaped_identity_commits_nothing(tmp_path: Path, hu
     with pytest.raises(PublicDestinationError, match="credential-shaped"):
         publish_final_annotation_bundle(hub, bundle)
     assert hub.commit_order == []
-
 
 def test_final_download_last_remote_read_failure_leaves_no_stage(tmp_path: Path) -> None:
     class LastDownloadFails(AnnotationsHub):
@@ -1427,21 +1133,16 @@ def test_final_download_last_remote_read_failure_leaves_no_stage(tmp_path: Path)
     destination = tmp_path / "download"
 
     with pytest.raises(HydrationError, match="last final download failed"):
-        _download_final(
-            hub, curation_id, result["final_snapshot_id"], result["hub_commit_sha"], destination
-        )
+        _download_final(hub, curation_id, result["final_snapshot_id"], result["hub_commit_sha"], destination)
     assert not destination.exists()
     assert list(tmp_path.glob(".download.*")) == []
-
 
 def test_final_publish_and_download_refuse_public_repository(tmp_path: Path) -> None:
     bundle, curation_id = _final_bundle(tmp_path)
     private = AnnotationsHub(repo_id="org/private-annotations")
     published = publish_final_annotation_bundle(private, bundle)
     public = AnnotationsHub(
-        repo_id="org/public-annotations",
-        private=False,
-        files=private.revision_files(published["hub_commit_sha"]),
+        repo_id="org/public-annotations", private=False, files=private.revision_files(published["hub_commit_sha"]),
     )
 
     with pytest.raises(PublicDestinationError, match="public Hub"):

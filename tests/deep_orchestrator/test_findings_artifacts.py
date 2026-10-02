@@ -44,26 +44,19 @@ def _matching_prompt(calls: list[dict[str, Any]], fragment: str) -> str:
 
 
 def _spy_bound_deep_diff(
-    monkeypatch: pytest.MonkeyPatch,
-    bounded_results: list[str],
-    called_with: list[str] | None = None,
+    monkeypatch: pytest.MonkeyPatch, bounded_results: list[str], called_with: list[str] | None = None,
 ) -> None:
     """Patch ``orch_mod.bound_deep_diff`` to record each bounded result."""
-
     def spy(diff: str, budget: int = INLINE_DIFF_BUDGET_BYTES) -> Any:
         if called_with is not None:
             called_with.append(diff)
         result = bound_deep_diff(diff, budget)
         bounded_results.append(result[0])
         return result
-
     monkeypatch.setattr(orch_mod, "bound_deep_diff", spy)
 
-
 async def test_deep_findings_out_emits_artifact_and_stops(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """Real-path: a deep run with ``--findings-out`` writes the PR-pinned findings artifact from the canonical
     merged items and STOPS -- no PR post, no fix."""
@@ -76,11 +69,9 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
 
     pr = _pin_findings_pr(monkeypatch, multi_stack_target)
-
     out = multi_stack_target / "findings.json"
     reviewed_sources = ("api.py", "App.tsx", "README.md")
     source_before = {name: (multi_stack_target / name).read_text() for name in reviewed_sources}
-
     rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out)))
 
     # (b) exit 0
@@ -101,11 +92,8 @@ async def test_deep_findings_out_emits_artifact_and_stops(
     assert not list(multi_stack_target.glob(".fixed-*")), "fix sentinel present -- a fix ran"
     assert not (multi_stack_target / ".daydream-fix-applied").exists()
 
-
 async def test_cleanup_keeps_report_on_findings_out_run(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """Real-path: ``--findings-out --cleanup`` keeps ``.review-output.md``."""
 
@@ -119,22 +107,16 @@ async def test_cleanup_keeps_report_on_findings_out_run(
 
     out = multi_stack_target / "findings.json"
     report = multi_stack_target / REVIEW_OUTPUT_FILE
-
     rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), cleanup=True))
 
     assert rc == 0
     assert out.exists(), "--findings-out must still write the findings artifact"
-    assert report.exists(), (
-        "--findings-out --cleanup must keep .review-output.md: the run exits 0 but "
+    assert report.exists(), ("--findings-out --cleanup must keep .review-output.md: the run exits 0 but "
         "was asked to emit the report, so cleanup must not delete it"
     )
 
-
 async def test_test_verdict_artifact_written_on_passing_suite(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path: a run whose suite passes leaves ``test-verdict.json`` on disk."""
 
@@ -158,21 +140,14 @@ async def test_test_verdict_artifact_written_on_passing_suite(
     assert verdict["passed"] is True, verdict
     assert verdict["retries"] == 0, "a green suite must not have consumed a heal retry"
     assert verdict["local_host"] == {
-        "system": "Darwin",
-        "release": "25.1.0",
-        "machine": "arm64",
-        "python_implementation": "CPython",
+        "system": "Darwin", "release": "25.1.0", "machine": "arm64", "python_implementation": "CPython",
         "python_version": "3.13.7",
     }
     assert "Linux" not in json.dumps(verdict)
     assert "coverage" not in json.dumps(verdict).lower()
 
-
 async def test_test_verdict_artifact_written_on_failing_suite(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path: a permanently-red suite STILL leaves ``test-verdict.json``."""
 
@@ -192,12 +167,8 @@ async def test_test_verdict_artifact_written_on_failing_suite(
     assert verdict["passed"] is False, verdict
     assert verdict["retries"] == 1, "--yes grants exactly one bounded auto fix-and-retry"
 
-
 async def test_test_verdict_records_failure_when_operator_ignores_it(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path: heal-menu choice "3" continues the run WITHOUT claiming a green suite."""
 
@@ -217,7 +188,6 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     mute_side_effects(heal=False, commit=False)
 
     head_before = _git(tiny_diff_target, "rev-parse", "HEAD")
-
     rc = await run(make_config(tiny_diff_target, non_interactive=False))
     assert rc == 0, "choice '3' must continue the run, not abort it"
 
@@ -229,28 +199,21 @@ async def test_test_verdict_records_failure_when_operator_ignores_it(
     assert not (tiny_diff_target / ".fixed-api_py").exists()
     assert stub.test_suite_calls == 1, f"expected one test-suite run before the ignore, saw {stub.test_suite_calls}"
 
-
 async def test_deep_run_inlines_small_diff_into_intent_and_wonder(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Real path: a small diff is inlined into BOTH the intent and wonder prompts."""
     stub = _install_stub_backend(monkeypatch, tiny_diff_target)
-
     assert await _run_deep(tiny_diff_target, review_profile=independent_alternatives_profile()) == 0
-
     intent_prompt = _matching_prompt(stub.calls, "understand the intent of these changes")
     wonder_prompt = _matching_prompt(stub.calls, "evaluate the implementation")
-
     for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
         assert "diff --git" in prompt, f"{name} prompt did not inline the diff"
         assert "do NOT re-Read" in prompt, f"{name} prompt kept the read instruction"
     assert "Read the diff file at" not in intent_prompt
 
-
 async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An over-budget diff falls back to today's diff.patch pointer in both prompts."""
 
@@ -291,10 +254,8 @@ async def test_deep_run_keeps_pointer_when_diff_exceeds_budget(
     for name, prompt in (("intent", intent_prompt), ("wonder", wonder_prompt)):
         assert "line 500 of filler content" not in prompt, f"{name} inlined an over-budget diff"
 
-
 async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A multi-file over-budget diff whose trailing block is dropped keeps the diff.patch pointer in the
     intent/wonder prompts."""
@@ -336,10 +297,8 @@ async def test_deep_run_keeps_pointer_when_trailing_block_dropped(
     react_prompt = _matching_prompt(stub.calls, "you are reviewing the react stack")
     assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
 
-
 async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Gather stores the BOUNDED diff in ctx.data; diff.patch on disk stays FULL."""
 
@@ -386,80 +345,58 @@ async def test_deep_run_bounds_in_memory_diff_but_keeps_diff_patch_full(
     react_prompt = _matching_prompt(stub.calls, "you are reviewing the react stack")
     assert "diff --git" in react_prompt, "a fully-retained stack must keep its inline hunks"
 
-
-async def test_intent_artifact_survives_wonder_failure(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_intent_artifact_survives_wonder_failure(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """intent.md is on disk even when the wonder step dies."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fail_alternatives = True
-
     with pytest.raises(RuntimeError, match="alternatives blew up"):
         await _run_deep(multi_stack_target, review_profile=independent_alternatives_profile())
-
     intent_md = multi_stack_target / ".daydream" / "deep" / "intent.md"
     assert intent_md.read_text().strip(), "intent.md must survive the wonder failure"
     # The wonder half never ran, so its artifact is legitimately absent.
     assert not (multi_stack_target / ".daydream" / "deep" / "alternatives.json").exists()
 
-
-async def test_both_ttt_artifacts_written_on_the_happy_path(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_both_ttt_artifacts_written_on_the_happy_path(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Relocating the writer leaves contents and ctx.data pointers unchanged."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
-
     assert await _run_deep(multi_stack_target) == 0
-
     deep = multi_stack_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert json.loads((deep / "alternatives.json").read_text()) == []
-
 
 async def test_skip_tier_writes_empty_alternatives(tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Both artifacts exist even when the diff is small enough to run wonder."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, tiny_diff_target)
-
     assert await _run_deep(tiny_diff_target) == 0
-
     deep = tiny_diff_target / ".daydream" / "deep"
     assert (deep / "intent.md").read_text().strip()
     assert isinstance(json.loads((deep / "alternatives.json").read_text()), list)
 
-
 def test_deep_flow_has_no_feedback_prefix() -> None:
     """M2: the registered deep flow has no feedback-only prefix."""
-
     names = {step.name for step in STEPS}
     assert not names & {"fetch-feedback", "parse-feedback", "fix-items", "commit-push", "respond-feedback"}
 
-
 def test_no_feedback_mode_resolver() -> None:
     """M2: `_resolve_mode` cannot return `feedback`; no feedback runner exists."""
-
     assert not hasattr(deep_orchestrator, "_run_feedback_flow")
     config = RunConfig(target="/tmp", pr_number=7)
     assert deep_orchestrator._resolve_mode(config) != "feedback"
 
-
 def test_extension_api_version_is_six_and_alternatives_step_is_gone() -> None:
-
     assert EXTENSION_API_VERSION == 6
     names = [s.name for s in STEPS]
     assert "alternatives" not in names
     assert "per-stack-reviews" in names
 
-
 @pytest.mark.parametrize("change", ["committed", "worktree", "missing-key"])
 async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    change: str,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, change: str,
 ) -> None:
     """A resume stops before backend calls when its diff identity cannot be trusted."""
     _silence(monkeypatch)
@@ -483,10 +420,8 @@ async def test_start_at_merge_refuses_stale_or_unverifiable_artifacts(
     if change != "missing-key":
         assert key_file.read_text().strip() == original_key
 
-
 async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_key(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A fresh run cannot certify a new diff key alongside old deep outputs."""
     _silence(monkeypatch)
@@ -494,62 +429,41 @@ async def test_fresh_run_discards_stale_deep_artifacts_before_writing_its_diff_k
     deep.mkdir(parents=True)
     stale = deep / "obsolete-artifact.txt"
     stale.write_text("stale")
-
     _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target) == 0
     assert not stale.exists()
     assert (deep / "diff-key").is_file()
 
-
 async def test_start_at_merge_proceeds_when_the_diff_is_unchanged(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The freshness gate is not a blanket refusal: same diff still resumes."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target) == 0
-
     stub2 = _install_stub_backend(monkeypatch, multi_stack_target)
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
     assert any("cross-stack merge agent" in c["prompt"].lower() for c in stub2.calls)
 
-
-@pytest.mark.parametrize(
-    ("stack", "description", "lens"),
-    [
-        pytest.param(
-            "python",
-            "extract the repeated --flag branch pairs into a focused callable",
-            "per-stack",
-            id="python",
+@pytest.mark.parametrize(("stack", "description", "lens"),
+    [pytest.param(
+            "python", "extract the repeated --flag branch pairs into a focused callable", "per-stack", id="python",
         ),
         pytest.param(
-            "structure",
-            "structural: the --flag branch pairs grow main() past the extraction threshold",
-            "structural",
+            "structure", "structural: the --flag branch pairs grow main() past the extraction threshold", "structural",
             id="structure",
         ),
     ],
 )
 async def test_anti_slop_extraction_finding_keeps_medium_severity_through_merge(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    stack: str,
-    description: str,
-    lens: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stack: str, description: str, lens: str,
 ) -> None:
     """Python and structural extraction findings keep their reported severity."""
     _silence(monkeypatch)
     project = _eroded_main_repo(tmp_path)
     stub = _install_stub_backend(monkeypatch, project)
-    stub.parse_by_stack = {
-        stack: {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "main.py",
-            "line": 3,
-            "description": description,
+    stub.parse_by_stack = {stack: {
+            "severity": "medium", "confidence": "MEDIUM", "file": "main.py", "line": 3, "description": description,
         }
     }
 

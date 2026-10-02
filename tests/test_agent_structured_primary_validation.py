@@ -9,29 +9,18 @@ from daydream.backends import ResultEvent, TextEvent
 from daydream.trajectory import DaydreamPhase
 from tests.harness.backend import ScriptedBackend
 
-_FILE_SCHEMA = {
-    "type": "object",
-    "required": ["file"],
-    "properties": {"file": {"type": "string"}},
-}
-
+_FILE_SCHEMA = {"type": "object", "required": ["file"], "properties": {"file": {"type": "string"}}}
 
 async def test_primary_path_schema_violation_degrades_to_fallback(tmp_path: Path) -> None:
     backend = ScriptedBackend(
-        events=[
-            TextEvent(text='{"file": "src/a.py"}'),
-            ResultEvent(structured_output={"line": 3}, continuation=None),
-        ],
+        events=[TextEvent(text='{"file": "src/a.py"}'), ResultEvent(structured_output={"line": 3}, continuation=None)],
         model="mock-model",
     )
-    result, _, _ = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=_FILE_SCHEMA
-    )
+    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=_FILE_SCHEMA)
     # {"line": 3} is missing required "file" -> rejected; the fallback
     # re-extracts the valid {"file": "src/a.py"} from the agent text.
     assert result == {"file": "src/a.py"}
     assert isinstance(result, dict)
-
 
 async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(tmp_path: Path) -> None:
     # The Codex/Pi route parses structured output from the agent text, so text and
@@ -41,22 +30,16 @@ async def test_primary_path_unusable_text_and_structured_degrade_to_plain_text(t
     # unvalidated dict that leaked out before the primary gate existed.
     payload = {"line": 3}
     backend = ScriptedBackend(
-        events=[
-            TextEvent(text=json.dumps(payload)),
-            ResultEvent(structured_output=payload, continuation=None),
-        ],
+        events=[TextEvent(text=json.dumps(payload)), ResultEvent(structured_output=payload, continuation=None)],
         model="mock-model",
     )
-    result, _, _ = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=_FILE_SCHEMA)
+    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.REVIEW, output_schema=_FILE_SCHEMA)
     assert result == '{"line": 3}'   # identical invalid JSON in text and structured
     assert isinstance(result, str)
 
-
 async def test_primary_path_salvages_partial_dict(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["verdicts"], "properties": {
-        "verdicts": {"type": "array", "items": {
-            "type": "object", "required": ["issue_id", "verdict", "evidence"]}}}}
+        "verdicts": {"type": "array", "items": { "type": "object", "required": ["issue_id", "verdict", "evidence"]}}}}
     partial = {"verdicts": [
         {"issue_id": 1, "verdict": "consistent", "evidence": "matches"},
         {"issue_id": 2, "verdict": "bogus"},  # nested item missing "evidence"
@@ -65,11 +48,9 @@ async def test_primary_path_salvages_partial_dict(tmp_path: Path) -> None:
     # value, so this would pass even without the primary gate. Only the primary
     # return path can yield ``partial`` here.
     backend = ScriptedBackend(events=[ResultEvent(structured_output=partial, continuation=None)], model="mock-model")
-    result, _, _ = await run_agent(
-        backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema)
+    result, _, _ = await run_agent(backend, tmp_path, "go", phase=DaydreamPhase.VERIFY, output_schema=schema)
     assert result == partial          # salvage-tolerant: nested validity not gated
     assert isinstance(result, dict)
-
 
 async def test_primary_path_bare_array_reaches_merge_shape(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["items"], "properties": {
@@ -79,16 +60,13 @@ async def test_primary_path_bare_array_reaches_merge_shape(tmp_path: Path) -> No
     # value, so this would pass even without the primary gate. Only the primary
     # return path can yield ``items`` here.
     backend = ScriptedBackend(events=[ResultEvent(structured_output=items, continuation=None)], model="mock-model")
-    result, _, _ = await run_agent(
-        backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema)
+    result, _, _ = await run_agent(backend, tmp_path, "merge", phase=DaydreamPhase.DEEP, output_schema=schema)
     assert result == items            # bare array is a salvageable form
     assert isinstance(result, list)
 
-
 async def test_primary_path_respects_validate_structured_output_false(tmp_path: Path) -> None:
     backend = ScriptedBackend(
-        events=[ResultEvent(structured_output={"line": 3}, continuation=None)],
-        model="mock-model",
+        events=[ResultEvent(structured_output={"line": 3}, continuation=None)], model="mock-model",
     )
     result, _, _ = await run_agent(
         backend, tmp_path, "go", phase=DaydreamPhase.RECON,
@@ -96,11 +74,9 @@ async def test_primary_path_respects_validate_structured_output_false(tmp_path: 
     assert result == {"line": 3}      # opt-out passes through unvalidated, as today
     assert isinstance(result, dict)
 
-
 async def test_primary_path_valid_structured_output_returned(tmp_path: Path) -> None:
     schema = {"type": "object", "required": ["issues"], "properties": {"issues": {"type": "array"}}}
     payload = {"issues": [{"id": 1, "description": "Fix type hints", "file": "app.py", "line": 5}]}
     backend = ScriptedBackend(events=[ResultEvent(structured_output=payload, continuation=None)], model="mock-model")
-    result, _, _ = await run_agent(
-        backend, tmp_path, "Parse", phase=DaydreamPhase.REVIEW, output_schema=schema)
+    result, _, _ = await run_agent(backend, tmp_path, "Parse", phase=DaydreamPhase.REVIEW, output_schema=schema)
     assert result == payload          # valid codex-shaped output returned unchanged

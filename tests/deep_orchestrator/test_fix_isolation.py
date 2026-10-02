@@ -66,13 +66,9 @@ for root in (Path.cwd(), Path(sys.argv[1])):
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
-
 @pytest.mark.parametrize("outcome", ["success", "failure", "timeout"])
 async def test_run_contains_shell_writes_and_keeps_successful_sibling(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     outcome: str,
 ) -> None:
     target = multi_stack_target
@@ -87,8 +83,7 @@ async def test_run_contains_shell_writes_and_keeps_successful_sibling(
     monkeypatch.setattr("daydream.runner.create_backend", lambda *args, **kwargs: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     with anyio.fail_after(30):
-        exit_code = await run(make_config(
-            target, assume="yes", output_mode="loop",
+        exit_code = await run(make_config(target, assume="yes", output_mode="loop",
             file_config=DaydreamFileConfig(group_max_wall_s=2.0, quality_gate_enabled=False),
         ))
 
@@ -102,12 +97,8 @@ async def test_run_contains_shell_writes_and_keeps_successful_sibling(
     assert (target / "App.tsx").read_text() == ("// assigned fix\n" if outcome == "success" else before_app)
     assert exit_code == (1 if outcome == "failure" else 0)
 
-
 async def test_run_publishes_only_assigned_shell_fixes_with_real_checks_and_hooks(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    no_ci_remote: NoCIRemote,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, no_ci_remote: NoCIRemote,
 ) -> None:
     target = multi_stack_target
     bare = _add_bare_remote(target)
@@ -122,15 +113,13 @@ async def test_run_publishes_only_assigned_shell_fixes_with_real_checks_and_hook
     hook = target / ".git/hooks/pre-commit"
     hook.write_text(f"#!/bin/sh\nprintf ran > '{hook_marker}'\n")
     hook.chmod(0o755)
-    check = (
-        f'{sys.executable} -c "from pathlib import Path; '
+    check = (f'{sys.executable} -c "from pathlib import Path; '
         "assert 'successful sibling' in Path('api.py').read_text(); "
         "assert 'unauthorized' not in Path('README.md').read_text(); "
         "assert not Path('orphan.py').exists()\""
     )
     with anyio.fail_after(120):
-        exit_code = await run(make_config(
-            target, assume="yes", output_mode="loop", test_command=check,
+        exit_code = await run(make_config(target, assume="yes", output_mode="loop", test_command=check,
             file_config=DaydreamFileConfig(quality_gate_enabled=False),
             pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
         ))
@@ -141,11 +130,8 @@ async def test_run_publishes_only_assigned_shell_fixes_with_real_checks_and_hook
     assert set(git(target, "show", "--name-only", "--format=", "HEAD").splitlines()) == {"App.tsx", "api.py"}
     assert git(target, "rev-parse", "HEAD") == git(bare, "rev-parse", "refs/heads/feature")
 
-
 async def test_run_preserves_preexisting_staged_and_unstaged_owner_edits(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     target = multi_stack_target
     _silence(monkeypatch)
@@ -163,7 +149,6 @@ async def test_run_preserves_preexisting_staged_and_unstaged_owner_edits(
     assert (target / "README.md").read_text() == "owner staged plus unstaged edit\n"
     assert (target / "owner-draft.txt").read_text() == "private owner draft\n"
     assert not (target / "orphan.py").exists()
-
 
 @pytest.mark.parametrize("index_kind", ["staged", "intent-to-add", "assume-unchanged"])
 def test_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
@@ -194,8 +179,7 @@ def test_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
     index_before = git_ops.snapshot_raw_index(target)
     item = {**_merge_item(1, "App.tsx", "high"), "item_uid": "item:1"}
     footprint = AuthorizedFixFootprint.build(target, {"api.py", "App.tsx", "README.md"}, [item])
-    work = WorkContext(
-        target, target, "main", git(target, "rev-parse", "main"), "feature",
+    work = WorkContext(target, target, "main", git(target, "rev-parse", "main"), "feature",
         git(target, "rev-parse", "HEAD"), False, "scope-regression",
     )
     isolation = FixIsolationRound(work, footprint)
@@ -228,7 +212,6 @@ def test_round_recovers_parent_types_modes_ignored_owner_files_and_exact_index(
     finally:
         isolation.close()
 
-
 def test_round_accepts_owner_deletion_of_a_tracked_directory(multi_stack_target: Path) -> None:
     target = multi_stack_target
     (target / "pkg").mkdir()
@@ -239,8 +222,7 @@ def test_round_accepts_owner_deletion_of_a_tracked_directory(multi_stack_target:
     (target / "pkg").rmdir()
     item = {**_merge_item(1, "App.tsx", "high"), "item_uid": "item:1"}
     footprint = AuthorizedFixFootprint.build(target, {"App.tsx"}, [item])
-    work = WorkContext(
-        target, target, "main", git(target, "rev-parse", "main"), "feature",
+    work = WorkContext(target, target, "main", git(target, "rev-parse", "main"), "feature",
         git(target, "rev-parse", "HEAD"), False, "deleted-directory",
     )
     isolation = FixIsolationRound(work, footprint)

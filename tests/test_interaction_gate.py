@@ -15,8 +15,7 @@ import pytest
 from daydream.agent import resolve_gate
 
 
-@pytest.mark.parametrize(
-    "assume,interactive,expected",
+@pytest.mark.parametrize("assume,interactive,expected",
     [
         (None, True, None),  # interactive, no assumption -> prompt
         (None, False, False),  # unattended, no assumption -> safe default (decline)
@@ -28,7 +27,6 @@ from daydream.agent import resolve_gate
 )
 def test_resolve_gate(assume: str | None, interactive: bool, expected: bool | None) -> None:
     assert resolve_gate(assume=assume, interactive=interactive, safe_default=False) is expected
-
 
 def test_resolve_gate_safe_default_true_when_unattended() -> None:
     # A gate whose unattended safe default is "yes" (e.g. auto-commit) returns

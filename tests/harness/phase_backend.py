@@ -18,10 +18,7 @@ from typing import Any
 from daydream.backends import AgentEvent, ResultEvent, TextEvent
 
 
-def _shape_issues(
-    issues: list[dict[str, Any]],
-    severity: str | None = None,
-) -> list[dict[str, Any]]:
+def _shape_issues(issues: list[dict[str, Any]], severity: str | None = None,) -> list[dict[str, Any]]:
     """Shape a parsed issue list into harness ground-shaped structured records.
 
     Shared by the review and extract-json dispatch branches (both were
@@ -29,21 +26,10 @@ def _shape_issues(
     per-item fields still win over the grounded defaults. Only the review
     branch pins a default ``severity``.
     """
-    grounded: dict[str, Any] = {
-        "confidence": "HIGH",
-        "rationale": "harness fixture",
-        "evidence": "",
-    }
+    grounded: dict[str, Any] = {"confidence": "HIGH", "rationale": "harness fixture", "evidence": ""}
     if severity is not None:
         grounded["severity"] = severity
-    return [
-        {
-            **grounded,
-            "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}",
-            **it,
-        }
-        for it in issues
-    ]
+    return [{**grounded, "evidence": f"{it.get('file') or 'harness.py'}:{it.get('line') or 1}", **it} for it in issues]
 
 
 class PhaseDispatchBackend:
@@ -66,10 +52,7 @@ class PhaseDispatchBackend:
     model = "mock-model"
 
     def __init__(
-        self,
-        parse_results: list[list[dict[str, Any]]] | None = None,
-        *,
-        events: list[AgentEvent] | None = None,
+        self, parse_results: list[list[dict[str, Any]]] | None = None, *, events: list[AgentEvent] | None = None,
         tests_pass: bool = True,
     ) -> None:
         """Configure the fake.
@@ -103,29 +86,14 @@ class PhaseDispatchBackend:
         """Full prompt of each recorded call, in call order."""
         return [call["prompt"] for call in self.calls]
 
-    async def execute(
-        self,
-        cwd: Any,
-        prompt: str,
-        output_schema: Any=None,
-        continuation: Any=None,
-        agents: Any=None,
-        max_turns: Any=None,
-        read_only: Any=False,
-        persist_session: bool = True,
+    async def execute(self, cwd: Any, prompt: str, output_schema: Any=None, continuation: Any=None, agents: Any=None,
+        max_turns: Any=None, read_only: Any=False, persist_session: bool = True,
     ) -> AsyncGenerator[AgentEvent, None]:
         self.last_prompt = prompt
         self.call_count += 1
-        self.calls.append(
-            {
-                "cwd": cwd,
-                "prompt": prompt,
-                "output_schema": output_schema,
-                "agents": agents,
-                "model": self.model,
-                "continuation": continuation,
-                "max_turns": max_turns,
-                "read_only": read_only,
+        self.calls.append({
+                "cwd": cwd, "prompt": prompt, "output_schema": output_schema, "agents": agents, "model": self.model,
+                "continuation": continuation, "max_turns": max_turns, "read_only": read_only,
                 "persist_session": persist_session,
             }
         )
@@ -149,8 +117,7 @@ class PhaseDispatchBackend:
             "assigned to this stack",  # authored per-stack strategy (post-threading)
             "repository-wide interactions",  # authored structural strategy (post-threading)
         )
-        if (
-            "beagle-" in prompt_lower
+        if ("beagle-" in prompt_lower
             and "review" in prompt_lower
             or any(marker in prompt_lower for marker in _review_markers)
         ):
@@ -160,46 +127,29 @@ class PhaseDispatchBackend:
                 # Issue #745 (AC4): the per-stack reviewer emits
                 # PER_STACK_RECORD_SCHEMA structured output directly (the
                 # deep-shallow spine no longer has a separate parse step).
-                issues = (
-                    self._parse_results[self._review_call]
+                issues = (self._parse_results[self._review_call]
                     if self._review_call < len(self._parse_results)
                     else []
                 )
                 self._review_call += 1
                 issues = _shape_issues(issues, severity="medium")
-                yield ResultEvent(
-                    structured_output={"issues": issues},
-                    continuation=None,
-                )
+                yield ResultEvent(structured_output={"issues": issues}, continuation=None,)
             else:
                 yield ResultEvent(structured_output=None, continuation=None)
         elif "extract" in prompt_lower and "json" in prompt_lower:
-            issues = (
-                self._parse_results[self._parse_call]
-                if self._parse_call < len(self._parse_results)
-                else []
-            )
+            issues = (self._parse_results[self._parse_call] if self._parse_call < len(self._parse_results) else [])
             self._parse_call += 1
             issues = _shape_issues(issues)
             yield TextEvent(text="Parsed.")
-            yield ResultEvent(
-                structured_output={"issues": issues}, continuation=None
-            )
+            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
         elif "post-fix fix-verifier agent" in prompt_lower:
             ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             yield TextEvent(text="")
-            yield ResultEvent(
-                structured_output={
-                    "verdicts": [
-                        {
-                            "issue_id": issue_id,
-                            "verdict": "resolved",
-                            "reason": "harness fix accepted",
-                        }
+            yield ResultEvent(structured_output={"verdicts": [
+                        {"issue_id": issue_id, "verdict": "resolved", "reason": "harness fix accepted"}
                         for issue_id in ids
                     ]
-                },
-                continuation=None,
+                }, continuation=None,
             )
         elif "fix this issue" in prompt_lower or prompt_lower.startswith("fix these"):
             yield TextEvent(text="Fixed.")

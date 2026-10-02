@@ -54,12 +54,8 @@ def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path
     (repo / "pkg_b").mkdir(parents=True)
     (repo / "pkg_a" / "__init__.py").write_text("", encoding="utf-8")
     (repo / "pkg_b" / "__init__.py").write_text("", encoding="utf-8")
-    (repo / "pkg_a" / "core.py").write_text(
-        "def handle(payload):\n    return payload\n", encoding="utf-8"
-    )
-    (repo / "pkg_a" / "util.py").write_text(
-        "def normalize(text):\n    return text\n", encoding="utf-8"
-    )
+    (repo / "pkg_a" / "core.py").write_text("def handle(payload):\n    return payload\n", encoding="utf-8")
+    (repo / "pkg_a" / "util.py").write_text("def normalize(text):\n    return text\n", encoding="utf-8")
     (repo / "pkg_b" / "client.py").write_text(
         "from pkg_a.core import handle\n\n\ndef call_handle(payload):\n"
         "    return handle(payload)\n",
@@ -67,9 +63,7 @@ def _build_cross_module_variant(root: Path, name: str, client_body: str) -> Path
     )
     _branch_off_main(repo)
     (repo / "pkg_a" / "core.py").write_text(CORE_PY, encoding="utf-8")
-    (repo / "pkg_a" / "util.py").write_text(
-        "def normalize(text):\n    return text.strip()\n", encoding="utf-8"
-    )
+    (repo / "pkg_a" / "util.py").write_text("def normalize(text):\n    return text.strip()\n", encoding="utf-8")
     (repo / "pkg_b" / "client.py").write_text(client_body, encoding="utf-8")
     return _finish(repo)
 
@@ -99,21 +93,12 @@ def _large_client_body(marker: str, lines: int) -> str:
     """``pkg_b/client.py``: imports ``handle`` from ``pkg_a.core`` (the edge)."""
     body = [f"# pkg_b/client.py {marker} line {i:03d}" for i in range(lines - 2)]
     return (
-        "\n".join(
-            [
-                "from pkg_a.core import handle",
-                *body,
-                "def call_handle(payload):",
-                "    return handle(payload)",
-            ]
-        )
+        "\n".join(["from pkg_a.core import handle", *body, "def call_handle(payload):", "    return handle(payload)"])
         + "\n"
     )
 
 
-def build_large_cross_module_repo(
-    root: Path, *, modules: int = 220, lines: int = 110
-) -> Path:
+def build_large_cross_module_repo(root: Path, *, modules: int = 220, lines: int = 110) -> Path:
     """A cross-module fixture far beyond the advisory-input budget.
 
     Same ``init_repo`` / commit / ``checkout -b feature`` sequence as
@@ -139,15 +124,13 @@ def build_large_cross_module_repo(
 
     def _write(marker: str) -> None:
         for name in pkg_a_names:
-            body = (
-                _large_core_body(marker, lines)
+            body = (_large_core_body(marker, lines)
                 if name == "core.py"
                 else _large_module_body(f"pkg_a/{name}", marker, lines)
             )
             (repo / "pkg_a" / name).write_text(body, encoding="utf-8")
         for name in pkg_b_names:
-            body = (
-                _large_client_body(marker, lines)
+            body = (_large_client_body(marker, lines)
                 if name == "client.py"
                 else _large_module_body(f"pkg_b/{name}", marker, lines)
             )
@@ -169,9 +152,7 @@ def build_branch_heavy_repo(root: Path) -> Path:
     """
     repo = root / "branch_heavy"
     (repo / "app").mkdir(parents=True)
-    (repo / "app" / "pipeline.py").write_text(
-        "def run(payload):\n    return payload\n", encoding="utf-8"
-    )
+    (repo / "app" / "pipeline.py").write_text("def run(payload):\n    return payload\n", encoding="utf-8")
     (repo / "README.md").write_text("# app\n", encoding="utf-8")
     _branch_off_main(repo)
     (repo / "app" / "pipeline.py").write_text(PIPELINE_PY, encoding="utf-8")
@@ -202,15 +183,9 @@ def build_cross_service_repo(root: Path) -> Path:
     for service in ("alpha", "beta"):
         service_root = repo / "services" / service
         service_root.mkdir(parents=True)
-        (service_root / "pyproject.toml").write_text(
-            f'[project]\nname = "{service}"\n', encoding="utf-8"
-        )
-        (service_root / "api.py").write_text(
-            f'def endpoint():\n    return "{service}"\n', encoding="utf-8"
-        )
-    (repo / "pyproject.toml").write_text(
-        '[project]\nname = "cross-service"\n', encoding="utf-8"
-    )
+        (service_root / "pyproject.toml").write_text(f'[project]\nname = "{service}"\n', encoding="utf-8")
+        (service_root / "api.py").write_text(f'def endpoint():\n    return "{service}"\n', encoding="utf-8")
+    (repo / "pyproject.toml").write_text('[project]\nname = "cross-service"\n', encoding="utf-8")
     _branch_off_main(repo)
     for service in ("alpha", "beta"):
         (repo / "services" / service / "api.py").write_text(
@@ -290,22 +265,8 @@ def _participant(name: str, files: list[str], *, service: str | None = None) -> 
     return {"name": name, "kind": "internal", "files": files, "service": service}
 
 
-def _message(
-    frm: str,
-    to: str,
-    label: str,
-    kind: str,
-    *,
-    file: str,
-    line: int,
-    symbol: str,
-) -> dict[str, Any]:
-    return {
-        "from": frm,
-        "to": to,
-        "label": label,
-        "kind": kind,
-        "changed": True,
+def _message(frm: str, to: str, label: str, kind: str, *, file: str, line: int, symbol: str,) -> dict[str, Any]:
+    return {"from": frm, "to": to, "label": label, "kind": kind, "changed": True,
         "evidence": {"file": file, "line": line, "symbol": symbol},
     }
 
@@ -321,35 +282,19 @@ def sequence_spec() -> dict[str, Any]:
     the reads for ``pkg_b/client.py`` still leaves a renderable diagram behind,
     making a PARTIAL prune observable.
     """
-    return {
-        "participants": [
-            _participant("Client", ["pkg_b/client.py"]),
-            _participant("Core", ["pkg_a/core.py"]),
+    return {"participants": [_participant("Client", ["pkg_b/client.py"]), _participant("Core", ["pkg_a/core.py"]),
             _participant("Util", ["pkg_a/util.py"]),
         ],
-        "messages": [
+        "messages": [_message(
+                "Client", "Util", "Normalize payload", "call", file="pkg_b/client.py", line=6, symbol="normalize",
+            ), _message("Util", "Client", "Stripped text", "reply", file="pkg_a/util.py", line=2, symbol="normalize",),
             _message(
-                "Client", "Util", "Normalize payload", "call",
-                file="pkg_b/client.py", line=6, symbol="normalize",
-            ),
-            _message(
-                "Util", "Client", "Stripped text", "reply",
-                file="pkg_a/util.py", line=2, symbol="normalize",
-            ),
-            _message(
-                "Client", "Core", "Handle cleaned payload", "call",
-                file="pkg_b/client.py", line=7, symbol="handle",
-            ),
-            _message(
-                "Core", "Client", "Cleaned payload", "reply",
-                file="pkg_a/core.py", line=3, symbol="handle",
-            ),
-            _message(
-                "Core", "Core", "Normalize inside handler", "self",
+                "Client", "Core", "Handle cleaned payload", "call", file="pkg_b/client.py", line=7, symbol="handle",
+            ), _message("Core", "Client", "Cleaned payload", "reply", file="pkg_a/core.py", line=3, symbol="handle",),
+            _message("Core", "Core", "Normalize inside handler", "self",
                 file="pkg_a/core.py", line=2, symbol="normalize_payload",
             ),
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }
 
 
@@ -367,31 +312,18 @@ def flowchart_spec(*, root_file: str = "app/pipeline.py", offset: int = 0) -> di
     """
 
     def _node(node_id: str, kind: str, label: str, line: int, symbol: str | None) -> dict[str, Any]:
-        return {
-            "id": node_id,
-            "kind": kind,
-            "label": label,
+        return {"id": node_id, "kind": kind, "label": label,
             "evidence": {"file": root_file, "line": line + offset, "symbol": symbol},
         }
 
-    return {
-        "root": {"file": root_file, "name": "run", "line": 1 + offset},
-        "nodes": [
-            _node("start", "start", "run", 1, "run"),
-            _node("d1", "decision", "payload is None?", 2, None),
-            _node("e1", "end", "Return empty", 3, None),
-            _node("d2", "decision", "fast mode?", 4, None),
-            _node("s1", "subroutine", "fast_path", 5, "fast_path"),
-            _node("p1", "process", "Scan items", 6, None),
+    return {"root": {"file": root_file, "name": "run", "line": 1 + offset},
+        "nodes": [_node("start", "start", "run", 1, "run"), _node("d1", "decision", "payload is None?", 2, None),
+            _node("e1", "end", "Return empty", 3, None), _node("d2", "decision", "fast mode?", 4, None),
+            _node("s1", "subroutine", "fast_path", 5, "fast_path"), _node("p1", "process", "Scan items", 6, None),
             _node("e2", "end", "Return none", 9, None),
-        ],
-        "edges": [
-            {"from": "start", "to": "d1", "label": None},
-            {"from": "d1", "to": "e1", "label": "yes"},
-            {"from": "d1", "to": "d2", "label": "no"},
-            {"from": "d2", "to": "s1", "label": "yes"},
-            {"from": "d2", "to": "p1", "label": "no"},
-            {"from": "s1", "to": "e2", "label": None},
+        ], "edges": [{"from": "start", "to": "d1", "label": None}, {"from": "d1", "to": "e1", "label": "yes"},
+            {"from": "d1", "to": "d2", "label": "no"}, {"from": "d2", "to": "s1", "label": "yes"},
+            {"from": "d2", "to": "p1", "label": "no"}, {"from": "s1", "to": "e2", "label": None},
             {"from": "p1", "to": "e2", "label": None},
         ],
     }
@@ -399,24 +331,16 @@ def flowchart_spec(*, root_file: str = "app/pipeline.py", offset: int = 0) -> di
 
 def cross_service_sequence_spec() -> dict[str, Any]:
     """A three-message sequence spec for the cross-service fixture."""
-    return {
-        "participants": [
-            _participant("Alpha", ["services/alpha/api.py"], service="alpha"),
+    return {"participants": [_participant("Alpha", ["services/alpha/api.py"], service="alpha"),
             _participant("Beta", ["services/beta/api.py"], service="beta"),
-        ],
-        "messages": [
-            _message(
-                "Alpha", "Alpha", "Call alpha endpoint", "call",
+        ], "messages": [_message("Alpha", "Alpha", "Call alpha endpoint", "call",
                 file="services/alpha/api.py", line=1, symbol="endpoint",
             ),
             _message(
-                "Alpha", "Alpha", "Return alpha body", "reply",
-                file="services/alpha/api.py", line=2, symbol="endpoint",
+                "Alpha", "Alpha", "Return alpha body", "reply", file="services/alpha/api.py", line=2, symbol="endpoint",
             ),
             _message(
-                "Beta", "Beta", "Serve beta endpoint", "self",
-                file="services/beta/api.py", line=1, symbol="endpoint",
+                "Beta", "Beta", "Serve beta endpoint", "self", file="services/beta/api.py", line=1, symbol="endpoint",
             ),
-        ],
-        "blocks": [],
+        ], "blocks": [],
     }

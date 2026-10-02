@@ -41,11 +41,7 @@ def _prepare_fix_stub(target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_e
 
 
 def _supervision_stub(
-    target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mute_side_effects: Mute | None = None,
-    *,
-    pin_pr: bool = False,
+    target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute | None = None, *, pin_pr: bool = False,
     **install_kwargs: Any,
 ) -> StubBackend:
     """Silence UI, optionally mute/pin findings-out, then install the stub backend."""
@@ -57,18 +53,9 @@ def _supervision_stub(
     return _install_stub_backend(monkeypatch, target, **install_kwargs)
 
 
-def _findings_out_config(
-    make_config: MakeConfig,
-    target: Path,
-    out: Path,
-    trajectory: Path | None = None,
-) -> Any:
+def _findings_out_config(make_config: MakeConfig, target: Path, out: Path, trajectory: Path | None = None,) -> Any:
     """Build the shared findings-out run config (PR 7, target file config)."""
-    kwargs: dict[str, Any] = {
-        "pr_number": 7,
-        "findings_out": str(out),
-        "file_config": load_file_config(target),
-    }
+    kwargs: dict[str, Any] = {"pr_number": 7, "findings_out": str(out), "file_config": load_file_config(target)}
     if trajectory is not None:
         kwargs["trajectory_path"] = trajectory
     return make_config(target, **kwargs)
@@ -76,24 +63,17 @@ def _findings_out_config(
 
 def _forbid_pr_post(monkeypatch: pytest.MonkeyPatch) -> None:
     """Install a findings-out PR poster that fails if it is ever invoked."""
-
     async def _post_forbidden(*_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("findings-out must not post to the PR")
-
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", _post_forbidden)
 
-
 async def test_supervise_rules_drops_deny_globbed_finding(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """Rule supervision rewrites the canonical items before findings-out."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, pin_pr=True)
-    stub.merge_items = [
-        _merge_item(1, "vendor/generated.py", "high", desc="drop this finding"),
+    stub.merge_items = [_merge_item(1, "vendor/generated.py", "high", desc="drop this finding"),
         _merge_item(2, "src/app.py", "low", desc="keep this finding"),
     ]
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "rules"\nsupervisor_deny_globs = ["vendor/**"]\n')
@@ -113,28 +93,21 @@ async def test_supervise_rules_drops_deny_globbed_finding(
     assert "drop this finding" not in finding_descriptions
     assert "keep this finding" in finding_descriptions
     events = _scan_phase_events(multi_stack_target / ".daydream", traj, "supervisor_verdict")
-    assert any(
-        event.get("metadata", {}).get("finding_id") == 1 and event.get("metadata", {}).get("action") == "drop"
+    assert any(event.get("metadata", {}).get("finding_id") == 1 and event.get("metadata", {}).get("action") == "drop"
         for event in events
     )
 
-
 async def test_supervise_hold_excluded_but_rendered(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Held findings leave the actionable items but remain visible in the report."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects)
-    stub.merge_items = [
-        _merge_item(1, "vendor/generated.py", "high", desc="hold this finding"),
+    stub.merge_items = [_merge_item(1, "vendor/generated.py", "high", desc="hold this finding"),
         _merge_item(2, "src/app.py", "low", desc="keep this finding"),
     ]
     stub.supervise_verdicts = {
-        1: {"action": "hold", "reason": "needs human review"},
-        2: {"action": "allow", "reason": "confirmed"},
+        1: {"action": "hold", "reason": "needs human review"}, 2: {"action": "allow", "reason": "confirmed"},
     }
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
 
@@ -150,23 +123,17 @@ async def test_supervise_hold_excluded_but_rendered(
     assert "Held Findings" in report
     assert "hold this finding" in report
 
-
 async def test_supervise_llm_drop_records_step(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """LLM supervision drops by canonical id and records its deep stage."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, pin_pr=True)
     stub.merge_items = [
-        _merge_item(1, "api.py", "high", desc="drop by llm"),
-        _merge_item(2, "App.tsx", "low", desc="keep by llm"),
+        _merge_item(1, "api.py", "high", desc="drop by llm"), _merge_item(2, "App.tsx", "low", desc="keep by llm"),
     ]
     stub.supervise_verdicts = {
-        1: {"action": "drop", "reason": "duplicate"},
-        2: {"action": "allow", "reason": "confirmed"},
+        1: {"action": "drop", "reason": "duplicate"}, 2: {"action": "allow", "reason": "confirmed"},
     }
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
     out = multi_stack_target / "findings.json"
@@ -183,23 +150,16 @@ async def test_supervise_llm_drop_records_step(
     starts = _scan_phase_events(multi_stack_target / ".daydream", traj, "phase_start")
     assert any(event.get("metadata", {}).get("stage") == "supervise" for event in starts)
 
-
 async def test_supervise_llm_edit_revises_severity(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """LLM edit verdicts revise severity in canonical items and findings-out."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="downgrade me")]
-    stub.supervise_verdicts = {
-        1: {"action": "edit", "reason": "less severe", "severity": "low"},
-    }
+    stub.supervise_verdicts = {1: {"action": "edit", "reason": "less severe", "severity": "low"}}
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "llm"\n')
     out = multi_stack_target / "findings.json"
-
     rc = await run(_findings_out_config(make_config, multi_stack_target, out))
 
     assert rc == 0
@@ -209,41 +169,28 @@ async def test_supervise_llm_edit_revises_severity(
     findings = json.loads(out.read_text())["findings"]
     assert any(finding["title"] == "downgrade me" and finding["severity"] == "low" for finding in findings)
 
-
 async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """All findings may be dropped while findings-out still writes an empty artifact."""
-
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop everything")]
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "rules"\nsupervisor_deny_globs = ["**"]\n')
     out = multi_stack_target / "findings.json"
-
     rc = await run(_findings_out_config(make_config, multi_stack_target, out))
-
     assert rc == 0
     assert json.loads(out.read_text())["findings"] == []
 
-
 async def test_supervise_off_byte_identical(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """No config and explicit off produce the same canonical items bytes."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [
-        _merge_item(1, "api.py", "high", desc="first finding"),
-        _merge_item(2, "App.tsx", "low", desc="second finding"),
+        _merge_item(1, "api.py", "high", desc="first finding"), _merge_item(2, "App.tsx", "low", desc="second finding"),
     ]
     out = multi_stack_target / "findings.json"
-
     empty_config = load_file_config(multi_stack_target)
     first_rc = await run(make_config(multi_stack_target, pr_number=7, findings_out=str(out), file_config=empty_config))
     first_items = (multi_stack_target / ".daydream" / "deep" / "merged-items.json").read_bytes()
@@ -258,29 +205,19 @@ async def test_supervise_off_byte_identical(
     assert first_items == second_items
     assert first_findings == second_findings
 
-
 async def test_supervise_dropped_finding_never_reaches_fix(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """A dropped finding is absent from the real fix prompt and remains unmodified."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects)
-    stub.merge_items = [
-        _merge_item(1, "api.py", "high", desc="drop before fix"),
+    stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop before fix"),
         _merge_item(2, "App.tsx", "low", desc="fix this survivor"),
     ]
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "rules"\nsupervisor_deny_globs = ["api.py"]\n')
     source_before = (multi_stack_target / "api.py").read_bytes()
-
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
+    rc = await run(make_config(
+            multi_stack_target, assume="yes", output_mode="loop", file_config=load_file_config(multi_stack_target),
         )
     )
 
@@ -289,12 +226,8 @@ async def test_supervise_dropped_finding_never_reaches_fix(
     prompts = "\n".join(_fix_prompts(stub))
     assert "drop before fix" not in prompts
 
-
 async def test_run_deep_renders_prescan_summary_not_json(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path: the pre-scan summary renders as a readable panel, not raw JSON."""
 
@@ -321,15 +254,10 @@ async def test_run_deep_renders_prescan_summary_not_json(
     assert "OpenAPI First" in out  # convention surfaced by the summary
     assert '{"conventions"' not in out and "pattern-scanner" not in out  # no raw JSON envelope
 
-
 async def test_parallel_fix_applies_all_disjoint_files(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """AC#3: every disjoint-file group receives its own fixer dispatch."""
-
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
     _add_to_reviewed_diff(multi_stack_target, files)
@@ -340,12 +268,8 @@ async def test_parallel_fix_applies_all_disjoint_files(
     for f in files:
         assert any(f in prompt for prompt in prompts), f"no fixer dispatched for {f}"
 
-
 async def test_long_fix_is_not_turn_capped(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    archive_dir: Path,
-    make_config: MakeConfig,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """Real-path: a fix that needs many turns lands instead of dying on max_turns."""
@@ -353,19 +277,11 @@ async def test_long_fix_is_not_turn_capped(
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.fix_turns_needed = 200
     stub.merge_items = [
-        _merge_item(1, "api.py", "high"),
-        _merge_item(2, "App.tsx", "high"),
-        _merge_item(3, "App.tsx", "medium"),
+        _merge_item(1, "api.py", "high"), _merge_item(2, "App.tsx", "high"), _merge_item(3, "App.tsx", "medium"),
     ]
 
     exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=True,
-        )
+        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=True,)
     )
 
     assert exit_code == 0
@@ -379,12 +295,8 @@ async def test_long_fix_is_not_turn_capped(
     assert manifest["status"] == "complete"
     assert not manifest["fix_failures"]
 
-
 async def test_parallel_fix_same_file_no_race(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """3 items on ONE file + 1 on another. The 3 same-file findings collapse into ONE batched fix turn that
     addresses every marker in severity order, while the other file's group runs concurrently. The
@@ -396,21 +308,15 @@ async def test_parallel_fix_same_file_no_race(
     _add_to_reviewed_diff(multi_stack_target, ["shared.py", "other.py"])
     stub.fix_append_path = shared
     stub.merge_items = [
-        _merge_item(1, "shared.py", "high", desc="marker-1"),
-        _merge_item(2, "shared.py", "medium", desc="marker-2"),
-        _merge_item(3, "shared.py", "low", desc="marker-3"),
-        _merge_item(4, "other.py", "high", desc="other"),
+        _merge_item(1, "shared.py", "high", desc="marker-1"), _merge_item(2, "shared.py", "medium", desc="marker-2"),
+        _merge_item(3, "shared.py", "low", desc="marker-3"), _merge_item(4, "other.py", "high", desc="other"),
     ]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
     assert exit_code == 0
     assert shared.read_text().split() == ["marker-1", "marker-2", "marker-3"]
 
-
 async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """A finding whose footprint intersects another group is dispatched to ONE
     agent owning both -- observable as ONE batched fix turn covering both files,
@@ -418,9 +324,7 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
 
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     _add_to_reviewed_diff(multi_stack_target, ["a.py", "b.py", "c.py"])
-    stub.merge_items = [
-        _merge_item(1, "a.py", "high"),
-        {**_merge_item(2, "b.py", "high"), "related_files": ["a.py"]},
+    stub.merge_items = [_merge_item(1, "a.py", "high"), {**_merge_item(2, "b.py", "high"), "related_files": ["a.py"]},
         _merge_item(3, "c.py", "high"),
     ]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
@@ -428,8 +332,7 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     # a.py and b.py findings fixed in ONE batched turn (footprint union);
     # c.py is a separate per-finding turn. (The fixture also dispatches its own
     # in-scope structural item -- api.py "Sample issue" -- as its own turn.)
-    fix_calls = [
-        c
+    fix_calls = [c
         for c in stub.calls
         if c["prompt"].lower().startswith("fix this issue") or c["prompt"].lower().startswith("fix these")
     ]
@@ -438,17 +341,12 @@ async def test_parallel_fix_footprint_intersection_dispatches_to_one_agent(
     assert "issues in " in batched[0]["prompt"]
     assert len(fix_calls) == 3  # merged {a,b} group + c.py + fixture structural item
 
-
 async def test_fix_verify_turn_is_read_only(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """AC: verification is strictly read-only. The stub records ``read_only``
     per call (stub_backend.py:276), so the real-path run must show every
     fix-verify turn arriving with ``read_only=True``."""
-
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False))
@@ -457,12 +355,8 @@ async def test_fix_verify_turn_is_read_only(
     assert verify_calls, "expected a fix-verify turn"
     assert all(c["read_only"] is True for c in verify_calls)
 
-
 async def test_fix_verify_uses_verify_backend_key_through_runner(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """The registered fix-verify step deliberately resolves the verify model."""
 
@@ -473,13 +367,7 @@ async def test_fix_verify_uses_verify_backend_key_through_runner(
     _force_interactive(monkeypatch)
     mute_side_effects()
     calls = _install_model_capturing_stubs(monkeypatch, multi_stack_target)
-
-    exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
+    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False,
             file_config=load_file_config(multi_stack_target),
         )
     )
@@ -492,12 +380,8 @@ async def test_fix_verify_uses_verify_backend_key_through_runner(
     outcomes = json.loads((multi_stack_target / ".daydream" / "deep" / "fix-outcomes.json").read_text())
     assert outcomes["outcomes"]
 
-
 async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Spec: every dispatched finding has a recorded terminal outcome; all
     resolved -> BreakLoop on round 1 (one fix pass per group, no re-dispatch)."""
@@ -517,17 +401,12 @@ async def test_fix_verify_writes_outcomes_and_breaks_on_resolved(
     fix_calls = [c for c in stub.calls if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
     assert len(fix_calls) == 2  # one per file group, no re-dispatch
 
-
 async def test_fix_verify_loop_redispatch_resolves_second_round(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Spec AC#2: a partial first fix verifies unresolved, re-dispatches in a
     second round, verifies resolved -> the loop ran twice and the outcome is
     resolved."""
-
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 2  # round 1 -> unresolved, round 2 -> resolved
@@ -539,12 +418,8 @@ async def test_fix_verify_loop_redispatch_resolves_second_round(
     fix_calls = [c for c in stub.calls if "fix this" in c["prompt"].lower() or "fix these" in c["prompt"].lower()]
     assert len(fix_calls) == 2  # loop ran twice: round 1 + re-dispatch round 2
 
-
 async def test_fix_verify_wrong_target_retargets_within_scope(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Spec: a wrong_target retarget re-dispatches to the corrected file, but
     only inside the allowed edit set (#336 net never widens)."""
@@ -568,17 +443,12 @@ async def test_fix_verify_wrong_target_retargets_within_scope(
     assert accepted[0]["round_number"] == 2
     assert audit["policy_revision"] == 1
 
-
 async def test_unresolved_finding_reported_attempted_not_fixed(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Spec: a finding still unresolved after the last round appears as
     attempted-not-fixed, never counted/shown as fixed."""
-
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_verify_resolve_after_round = 99  # never resolves -> attempted-not-fixed
@@ -590,12 +460,8 @@ async def test_unresolved_finding_reported_attempted_not_fixed(
     # fix applied was NOT asserted for the unresolved finding (no "Fix applied" line for it)
     assert all(v["verdict"] == "unresolved" for v in outcomes["outcomes"].values())
 
-
 async def test_parallel_fix_failure_isolated_returns_nonzero(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """AC#5: a failed fix group is isolated, surfaced, and exits nonzero."""
@@ -608,9 +474,7 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     stub.fix_fail_file = "bad.py"
     stub.fix_edit_line = "# retained successful group\n"
     stub.merge_items = [
-        _merge_item(1, "good1.py", "high"),
-        _merge_item(2, "bad.py", "high"),
-        _merge_item(3, "good2.py", "low"),
+        _merge_item(1, "good1.py", "high"), _merge_item(2, "bad.py", "high"), _merge_item(3, "good2.py", "low"),
     ]
     warnings = _capture_warnings(monkeypatch, "daydream.deep.fix_steps.print_warning")
     commit_calls: list[int] = []

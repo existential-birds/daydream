@@ -23,8 +23,7 @@ from pathlib import Path
 # stall every test on the TERMINATE_GRACE_S window. The print-after-fork makes
 # these tests deterministic: the code under test is always exercised against a
 # live process group, never racy against the CLI's fork.
-GROUP_HOLDER_CLI = (
-    "import subprocess, time; "
+GROUP_HOLDER_CLI = ("import subprocess, time; "
     "subprocess.Popen(['sleep', '30']); "
     "print('UP', flush=True); "
     "time.sleep(1000)"
@@ -80,9 +79,7 @@ async def wait_for_fd_baseline(baseline: int | None, *, timeout_s: float = 30.0)
     deadline = loop.time() + timeout_s
     while fd_count() != baseline:
         if loop.time() > deadline:
-            raise TimeoutError(
-                f"fd count {fd_count()} did not return to baseline {baseline} after {timeout_s}s"
-            )
+            raise TimeoutError(f"fd count {fd_count()} did not return to baseline {baseline} after {timeout_s}s")
         await asyncio.sleep(0.01)
 
 

@@ -14,19 +14,16 @@ def _raw_item(**overrides: object) -> dict[str, object]:
     item.update(overrides)
     return item
 
-
 def test_schema_accepts_related_files() -> None:
     item = _raw_item(line=4, evidence="a.py:4", lens="cross-stack", severity="high",
                      related_files=["b.py", "svc/handler.py"],
                      source_uids=["python:1", "react:2"])
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
 
-
 def test_schema_rejects_non_string_related_files() -> None:
     item = _raw_item(line=4, evidence="a.py:4", related_files=[42], source_uids=[])
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
-
 
 def test_schema_requires_lens_and_severity() -> None:
     item = _raw_item(line=4, evidence="a.py:4", lens="structural", severity="high",
@@ -36,7 +33,6 @@ def test_schema_requires_lens_and_severity() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
 
-
 def test_normalize_assigns_unique_ids_across_lenses() -> None:
     raw = [{"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x",
             "confidence": "HIGH", "rationale": "r", "severity": "low"},
@@ -45,10 +41,8 @@ def test_normalize_assigns_unique_ids_across_lenses() -> None:
     out = normalize_items(raw)
     assert len({i["id"] for i in out}) == 2   # collision resolved, not preserved
 
-
 def test_verdict_join_matches_after_collision_resolution() -> None:
-    items = normalize_items([
-        {"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",
+    items = normalize_items([{"id": 1, "lens": "structural", "file": "b.py", "line": 1, "description": "y",
          "confidence": "HIGH", "rationale": "r", "severity": "high"},
         {"id": 1, "lens": "per-stack", "file": "a.py", "line": 1, "description": "x",
          "confidence": "HIGH", "rationale": "r", "severity": "low"}])
@@ -58,12 +52,10 @@ def test_verdict_join_matches_after_collision_resolution() -> None:
     assert joined[0].get("verifier_verdict") is None       # structural NOT mismatched
     assert joined[1]["verifier_verdict"] == "contradicts"  # right item got the verdict
 
-
 def test_schema_accepts_wonder_lens() -> None:
     item = _raw_item(line=4, evidence="a.py:4", confidence="MEDIUM", lens="wonder",
                      related_files=None, source_uids=None)
     jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)  # must pass
-
 
 def test_schema_requires_source_uids() -> None:
     """Provenance is not optional in the contract (issue #1111).
@@ -80,7 +72,6 @@ def test_schema_requires_source_uids() -> None:
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [bad]}, MERGED_ITEMS_SCHEMA)
 
-
 def test_schema_rejects_non_string_source_uids() -> None:
     """A uid is a string handle; a numeric entry is a malformed citation.
 
@@ -91,7 +82,6 @@ def test_schema_rejects_non_string_source_uids() -> None:
     item = _raw_item(line=4, evidence="a.py:4", related_files=None, source_uids=[7])
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate({"items": [item]}, MERGED_ITEMS_SCHEMA)
-
 
 def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:
     """Renumbering ``id`` is not enough: the item also needs a stable handle (#1111).
@@ -115,7 +105,6 @@ def test_normalize_mints_a_durable_handle_beside_the_renumbered_id() -> None:
     # The inputs are never mutated: the durable handle lands on the fresh dicts.
     assert all("item_uid" not in item for item in raw), raw
 
-
 def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
     """The divergence that makes two fields necessary (#1111).
 
@@ -132,7 +121,6 @@ def test_existing_item_uid_is_preserved_while_id_is_reassigned() -> None:
     assert [item["id"] for item in out] == [1, 2]
     assert out[0]["item_uid"] == "item:9", "a minted handle was reassigned"
     assert out[1]["item_uid"] not in ("", None) and out[1]["item_uid"] != "item:9", out
-
 
 def test_preserved_item_uid_out_of_position_does_not_collide_with_a_minted_one() -> None:
     """REGRESSION: minting per display position could emit a duplicate (#1111).

@@ -32,16 +32,13 @@ def test_annotation_hub_initial_revision_is_content_addressed_and_branch_pinned(
     assert first.repo_info("main").sha == head
     assert first.repo_info(head).private is True
 
-
 def test_publication_hubs_are_separate_durable_stores_with_packaged_pins() -> None:
-
     hubs = build_publication_hubs()
     assert hubs.source is not hubs.annotations
     assert hubs.source.repo_id != hubs.annotations.repo_id
     assert hubs.source.repo_info(hubs.source_revision).sha == hubs.source_revision
     assert hubs.annotations.list_repo_files(hubs.annotations.repo_info("main").sha) == []
     assert hubs.policy_path.is_file()
-
 
 def test_annotation_hub_atomic_commit_preserves_pinned_trees_and_logs(tmp_path: Path) -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap", files={"a": b"old"})
@@ -64,9 +61,7 @@ def test_annotation_hub_atomic_commit_preserves_pinned_trees_and_logs(tmp_path: 
     assert hub.atomic_attempt_log[-1]["parent_commit"] == base
     assert hub.atomic_attempt_log[-1]["branch"] == "main"
 
-
 def test_annotation_hub_stale_parent_has_no_tree_commit(tmp_path: Path) -> None:
-
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     before = hub.repo_info("main").sha
     tree = hub.revision_files(before)
@@ -78,17 +73,11 @@ def test_annotation_hub_stale_parent_has_no_tree_commit(tmp_path: Path) -> None:
     assert hub.files == tree
     assert hub.commit_order == []
 
-
 @pytest.mark.parametrize("stage", ["batch", "data", "success"])
-def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(
-    tmp_path: Path, stage: str,
-) -> None:
-
+def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(tmp_path: Path, stage: str,) -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     base = hub.repo_info("main").sha
-    path = {
-        "batch": "annotations/cur/checkpoints/batch-latest.json",
-        "data": "annotations/cur/final/annotations.jsonl",
+    path = {"batch": "annotations/cur/checkpoints/batch-latest.json", "data": "annotations/cur/final/annotations.jsonl",
         "success": "annotations/cur/final/_SUCCESS",
     }[stage]
     mapping = _mapping(tmp_path / "input", {path: b"candidate"})
@@ -105,14 +94,12 @@ def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(
     assert hub.download_file("rival", final) == b"durable remote state"
     assert len(hub.commit_order) == 2
 
-
 def test_annotation_hub_commit_identity_binds_parent_message_paths_and_bytes(tmp_path: Path) -> None:
     def commit(label: str, *, content: bytes = b"one", message: str = "same", path: str = "a") -> str:
         hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
         parent = hub.repo_info("main").sha
         return hub.commit_files_atomic(
-            _mapping(tmp_path / label, {path: content}), message,
-            parent_commit=parent, branch="main",
+            _mapping(tmp_path / label, {path: content}), message, parent_commit=parent, branch="main",
         )
 
     baseline = commit("baseline")
@@ -122,13 +109,10 @@ def test_annotation_hub_commit_identity_binds_parent_message_paths_and_bytes(tmp
     assert baseline != commit("path", path="b")
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     mapping = _mapping(tmp_path / "parent", {"a": b"one"})
-    first = hub.commit_files_atomic(
-        mapping, "same", parent_commit=hub.repo_info("main").sha, branch="main",
-    )
+    first = hub.commit_files_atomic(mapping, "same", parent_commit=hub.repo_info("main").sha, branch="main")
     second = hub.commit_files_atomic(mapping, "same", parent_commit=first, branch="main")
     assert first == baseline
     assert second != first
-
 
 def test_annotation_hub_rejects_legacy_in_place_bundle_mutation() -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
@@ -141,7 +125,6 @@ def test_annotation_hub_rejects_legacy_in_place_bundle_mutation() -> None:
     assert hub.repo_info("main").sha == revision
     assert hub.revision_files(revision) == before
     assert hub.commit_order == []
-
 
 def test_annotation_hub_supported_mutation_creates_one_immutable_revision() -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
@@ -157,7 +140,6 @@ def test_annotation_hub_supported_mutation_creates_one_immutable_revision() -> N
     assert hub.download_file(path, changed_revision) == b"changed"
     assert hub.commit_order == [{"contains": [path], "sha": changed_revision}]
 
-
 def test_annotation_hub_commit_revision_cannot_rewrite_an_existing_pin() -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap", files={"a": b"old"})
     revision = hub.repo_info("main").sha
@@ -171,7 +153,6 @@ def test_annotation_hub_commit_revision_cannot_rewrite_an_existing_pin() -> None
     assert hub.repo_info("main").sha == revision
     assert hub.revision_files(revision) == before
 
-
 @pytest.mark.parametrize("revision", ["short", "A" * 40])
 def test_annotation_hub_rejects_noncanonical_revision_ids(revision: str) -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
@@ -181,7 +162,6 @@ def test_annotation_hub_rejects_noncanonical_revision_ids(revision: str) -> None
         hub.commit_revision(revision)
 
     assert hub.repo_info("main").sha == head
-
 
 def test_annotation_hub_legacy_upload_uses_atomic_main_commits(tmp_path: Path) -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap", files={"a": b"old"})

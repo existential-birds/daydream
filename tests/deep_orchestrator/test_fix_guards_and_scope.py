@@ -45,24 +45,13 @@ from tests.test_deep_orchestrator import (
 
 
 async def test_fix_quality_gate_clamps_invalid_thresholds(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Real-path (#329/Finding 7): invalid thresholds resolve to the default, never the bad value."""
 
     target = _build_gate_target(tmp_path, "gate_clamped_thresholds")
-    exit_code = await _run_quality_gate_fixture(
-        target,
-        monkeypatch,
-        make_config,
-        mute_side_effects,
-        fix_edit_line=None,
-        file_config=DaydreamFileConfig(
-            quality_gate_erosion_delta=-0.1,
-            quality_gate_verbosity_delta=float("nan"),
-        ),
+    exit_code = await _run_quality_gate_fixture(target, monkeypatch, make_config, mute_side_effects, fix_edit_line=None,
+        file_config=DaydreamFileConfig(quality_gate_erosion_delta=-0.1, quality_gate_verbosity_delta=float("nan"),),
     )
     assert exit_code == 0
 
@@ -74,12 +63,8 @@ async def test_fix_quality_gate_clamps_invalid_thresholds(
     assert entry["erosion_delta"] == 0.0
     assert entry["flagged"] is False
 
-
 async def test_fix_guard_reverts_generated_migration_edit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     no_ci_remote: NoCIRemote,
 ) -> None:
 
@@ -105,8 +90,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
     mute_side_effects(heal=False, commit=False)
     stub = _install_stub_backend(monkeypatch, project, pin_skill_availability=False)
-    stub.merge_items = [
-        _merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
+    stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix"),
         _merge_item(2, "api.py", "high", desc="source fix"),
         _merge_item(3, "migrations/0000_local_draft.sql", "high", desc="local schema fix"),
     ]
@@ -115,16 +99,8 @@ async def test_fix_guard_reverts_generated_migration_edit(
     stub.merge_items[1]["related_files"] = ["migrations/0002_add_x.sql"]
     stub.fix_edit_line = "\n-- FORBIDDEN EDIT\n"
     stub.fix_new_generated = "migrations/0002_add_x.sql"
-
-    exit_code = await run(
-        make_config(
-            project,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
+    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
         )
     )
 
@@ -141,10 +117,7 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert violations_payload["session_id"]
     assert violations_payload["phase"] == "fix"
     assert violations_payload["round_number"] == 1
-    assert set(violations_payload["violations"]) == {
-        "migrations/0001_init.sql",
-        "migrations/0000_local_draft.sql",
-    }
+    assert set(violations_payload["violations"]) == {"migrations/0001_init.sql", "migrations/0000_local_draft.sql"}
     head_after = _git(project, "rev-parse", "HEAD")
     assert head_after != head_before
     committed_paths = _git(project, "show", "--name-only", "--format=", "HEAD").split()
@@ -155,12 +128,8 @@ async def test_fix_guard_reverts_generated_migration_edit(
     assert f"Daydream-Version: {daydream.__version__}" in commit_message
     assert head_after in _git(project, "ls-remote", "--heads", "origin", "feature")
 
-
 async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     no_ci_remote: NoCIRemote,
 ) -> None:
     """Real path: a fix writing U+201D into a changed .go comment is scrubbed pre-commit."""
@@ -176,25 +145,13 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     # A one-file diff collapses to single-stack mode (no cross-stack merge
     # agent), so the finding is driven through the per-stack parse: the go
     # review's record points at the sole reviewed file, main.go.
-    stub.parse_by_stack = {
-        "go": {
-            "severity": "high",
-            "confidence": "HIGH",
-            "file": "main.go",
-            "line": 1,
-            "description": "comment doc fix",
+    stub.parse_by_stack = {"go": {
+            "severity": "high", "confidence": "HIGH", "file": "main.go", "line": 1, "description": "comment doc fix",
         }
     }
     stub.fix_edit_line = "\n// not \u201d\n"  # fix agent writes U+201D into the changed .go comment
-    exit_code = await run(
-        make_config(
-            project,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
+    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -204,12 +161,8 @@ async def test_fix_scrub_normalizes_smart_quote_in_changed_go_comment(
     assert (project / "notes.md").read_bytes() == notes_before  # non-changed file untouched
     assert _git(project, "rev-parse", "HEAD") != head_before
 
-
 async def test_test_healing_guard_reverts_generated_migration_edit(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """The runner snapshots and restores a forbidden edit made by a heal turn."""
 
@@ -222,15 +175,7 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     stub.fail_first_test_run = True
     stub.heal_fix_generated = "migrations/0001_init.sql"
     stub.heal_fix_new_generated = "migrations/0002_add_x.sql"
-
-    exit_code = await run(
-        make_config(
-            project,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-        )
+    exit_code = await run(make_config(project, assume="yes", output_mode="loop", non_interactive=False, archive=False,)
     )
 
     assert exit_code == 0
@@ -240,17 +185,10 @@ async def test_test_healing_guard_reverts_generated_migration_edit(
     assert new_migration.read_text() == "-- new healing migration\n"
     assert not (project / ".daydream-heal-fix-applied").exists()
     violations = project / ".daydream" / "deep" / "generated-file-violations.json"
-    assert json.loads(violations.read_text()) == {
-        "violations": ["migrations/0001_init.sql"],
-        "ref": "HEAD",
-    }
-
+    assert json.loads(violations.read_text()) == {"violations": ["migrations/0001_init.sql"], "ref": "HEAD"}
 
 async def test_fix_guard_restore_failure_aborts_before_commit(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """A forbidden generated edit cannot reach commit when restoration fails."""
 
@@ -266,30 +204,19 @@ async def test_fix_guard_restore_failure_aborts_before_commit(
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "migrations/0001_init.sql", "high", desc="schema fix")]
     stub.fix_edit_line = "-- FORBIDDEN EDIT\n"
-    monkeypatch.setattr(
-        "daydream.git_ops.restore_paths_from_ref",
+    monkeypatch.setattr("daydream.git_ops.restore_paths_from_ref",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
     )
 
     exit_code = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-        )
+        make_config(multi_stack_target, assume="yes", output_mode="loop", non_interactive=False, archive=False,)
     )
 
     assert exit_code == 1
     assert _git(multi_stack_target, "rev-parse", "HEAD") == head_before
 
-
 async def test_parallel_fix_commit_runs_once_after_all(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """AC#6: commit stays serial and runs exactly once, after every parallel fix lands."""
 
@@ -312,15 +239,10 @@ async def test_parallel_fix_commit_runs_once_after_all(
     assert exit_code == 0
     assert seen_at_commit == [True]  # exactly one commit, and every fix already landed
 
-
 @pytest.mark.parametrize("scope_issue_filing", [False, True])
 async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-    no_ci_remote: NoCIRemote,
-    scope_issue_filing: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
+    no_ci_remote: NoCIRemote, scope_issue_filing: bool,
 ) -> None:
     """Revert an out-of-diff edit before commit; file an issue only when opted in."""
 
@@ -347,15 +269,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _record_issue)
 
-    exit_code = await run(
-        make_config(
-            target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-            scope_issue_filing=scope_issue_filing,
-            pr_number=no_ci_remote.pr_number,
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,
+            scope_issue_filing=scope_issue_filing, pr_number=no_ci_remote.pr_number,
             pr_repo=no_ci_remote.base_repository,
         )
     )
@@ -365,7 +280,6 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     assert (target / "unrelated.py").read_text() == pre_fix_unrelated
     unrelated_diff = _git(target, "diff", "HEAD", "--", "unrelated.py")
     assert unrelated_diff == "", f"unrelated.py still differs from HEAD:\n{unrelated_diff}"
-
     assert len(issues) == int(scope_issue_filing), issues
     if scope_issue_filing:
         assert "unrelated.py" in issues[0][2]
@@ -381,12 +295,8 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff(
     # The fix itself landed (api.py carries the daydream edit).
     assert "# daydream fix" in (target / "api.py").read_text()
 
-
 async def test_reverted_edit_dedups_across_runs(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     no_ci_remote: NoCIRemote,
 ) -> None:
     """#1051 regression: an opted-in run does not re-file an issue for a
@@ -428,26 +338,16 @@ async def test_reverted_edit_dedups_across_runs(
 
     def _list_with_prior_marker(repo: Any, **kw: Any) -> list[dict[str, Any]]:
         marker = _scope_edit_marker(_scope_edit_fingerprint("unrelated.py", recorded[-1]))
-        return [
-            {
-                "number": 11,
-                "title": "[daydream] out-of-scope edit reverted: unrelated.py",
+        return [{"number": 11, "title": "[daydream] out-of-scope edit reverted: unrelated.py",
                 "body": f"prior run\n{marker}",
                 "url": "u",
             }
         ]
 
     monkeypatch.setattr("daydream.git_ops.gh_issue_list", _list_with_prior_marker)
-    exit_code = await run(
-        make_config(
-            target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-            scope_issue_filing=True,
-            pr_number=no_ci_remote.pr_number,
-            pr_repo=no_ci_remote.base_repository,
+    exit_code = await run(make_config(
+            target, assume="yes", output_mode="loop", non_interactive=False, archive=False, scope_issue_filing=True,
+            pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
         )
     )
     assert exit_code == 0
@@ -456,12 +356,8 @@ async def test_reverted_edit_dedups_across_runs(
     assert "unrelated.py" not in committed_paths
     assert created == [], f"stale revert must not re-file, got {created!r}"
 
-
 async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """#336 real-path: a failed residual revert aborts before commit."""
 
@@ -483,30 +379,18 @@ async def test_fix_reverts_post_fix_edit_outside_reviewed_diff_restore_failure(
     stub.fix_edit_line = "\n# daydream fix\n"
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    monkeypatch.setattr(
-        "daydream.git_ops.restore_group_worktree_from_snapshot",
+    monkeypatch.setattr("daydream.git_ops.restore_group_worktree_from_snapshot",
         lambda *args, **kwargs: (_ for _ in ()).throw(GitError("restore failed")),
     )
 
-    exit_code = await run(
-        make_config(
-            target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=False,
-        )
+    exit_code = await run(make_config(target, assume="yes", output_mode="loop", non_interactive=False, archive=False,)
     )
 
     assert exit_code == 1
     assert _git(target, "rev-parse", "HEAD") == head_before
 
-
 async def test_fix_tool_veto_blocks_denied_write(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
     """Built-in rules veto a deferred denied Write and record the abort/event."""
@@ -521,13 +405,8 @@ async def test_fix_tool_veto_blocks_denied_write(
     )
     source_before = (multi_stack_target / "api.py").read_bytes()
     traj = tmp_path / "trajectory.json"
-
-    rc = await run(
-        make_config(
-            multi_stack_target,
-            assume="yes",
-            output_mode="loop",
-            file_config=load_file_config(multi_stack_target),
+    rc = await run(make_config(
+            multi_stack_target, assume="yes", output_mode="loop", file_config=load_file_config(multi_stack_target),
             trajectory_path=traj,
         )
     )
@@ -539,12 +418,8 @@ async def test_fix_tool_veto_blocks_denied_write(
     events = _scan_phase_events(multi_stack_target / ".daydream", traj, "tool_veto")
     assert any(event.get("metadata", {}).get("tool_name") == "Write" for event in events)
 
-
 async def test_fix_tool_veto_allows_unmatched_write(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Built-in rules allow a Write whose path does not match the deny glob."""
 
@@ -563,12 +438,8 @@ async def test_fix_tool_veto_allows_unmatched_write(
     assert (multi_stack_target / "App.tsx").read_text() == "backend resumed"
     assert not _scan_trajectory_extra(multi_stack_target / ".daydream", Path("/missing"), "stop_reason")
 
-
 async def test_fix_tool_veto_stops_subsequent_calls(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """A vetoed first deferred Write prevents the generator's later Write."""
 
@@ -582,50 +453,35 @@ async def test_fix_tool_veto_stops_subsequent_calls(
     )
     api_before = (multi_stack_target / "api.py").read_bytes()
     app_before = (multi_stack_target / "App.tsx").read_bytes()
-
     rc = await _run_loop(multi_stack_target, make_config)
 
     assert isinstance(rc, int)
     assert (multi_stack_target / "api.py").read_bytes() == api_before
     assert (multi_stack_target / "App.tsx").read_bytes() == app_before
 
-
 async def test_fix_tool_supervisor_off_writes(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """With tool supervision off, the deferred Write resumes and writes."""
-
     _silence(monkeypatch)
     mute_side_effects()
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="unprotected write")]
     stub.deferred_write_pairs = ["api.py"]
     (multi_stack_target / ".daydream.toml").write_text('tool_supervisor = "off"\n')
-
     rc = await _run_loop(multi_stack_target, make_config)
-
     assert isinstance(rc, int)
     assert (multi_stack_target / "api.py").read_text() == "backend resumed"
 
-
 async def test_confirmed_intent_reaches_fix_prompt(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """The confirmed author intent reaches every deep fix prompt so a fixer can't undo a deliberate decision."""
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)
     mute_side_effects()
-    monkeypatch.setattr(
-        "daydream.git_ops.gh_pr_view",
-        lambda repo, pr=None, **_kwargs: {"body": INTENT_SENTINEL},
-    )
+    monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None, **_kwargs: {"body": INTENT_SENTINEL},)
 
     observed_intent: list[str] = []
 
@@ -637,21 +493,11 @@ async def test_confirmed_intent_reaches_fix_prompt(
             return None
 
     stub = _IntentReadingStub(multi_stack_target)
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: stub,
-    )
+    monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub,)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
-
     rc = await run(
-        make_config(
-            multi_stack_target,
-            pr_number=7,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-        )
+        make_config(multi_stack_target, pr_number=7, assume="yes", output_mode="loop", non_interactive=False,)
     )
     assert rc == 0
     fix_prompts = _fix_prompts(stub)

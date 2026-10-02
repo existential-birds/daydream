@@ -28,11 +28,9 @@ from tests.test_archive_hydrate import _fake_resolver, _FakeLicenseResolver, _wr
 
 REVISION = SNAPSHOT_REVISION  # 40-hex pinned by the fixture builder
 
-
 @pytest.fixture(autouse=True)
 def _offline_enrichment(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_resolver(monkeypatch)
-
 
 def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
     """Probe the production post-gate v2 identity derivation (issue #1094):
@@ -45,12 +43,10 @@ def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
     license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=REVISION)
     hydrate.apply_license_gate(
-        stage, revision=REVISION, license_policy_path=_write_policy(tmp_path),
-        allow_copyleft=frozenset(),
+        stage, revision=REVISION, license_policy_path=_write_policy(tmp_path), allow_copyleft=frozenset(),
     )
     binding = hydrate.resolve_curation_identity(
-        stage, source_commit=REVISION, license_policy_path=_write_policy(tmp_path),
-        allow_copyleft=frozenset(),
+        stage, source_commit=REVISION, license_policy_path=_write_policy(tmp_path), allow_copyleft=frozenset(),
     )
     return str(binding["curation_id"])
 
@@ -58,29 +54,18 @@ def _v2_curation_id(hub: FakeHub, tmp_path: Path) -> str:
 # paths) or across runs (row timestamps) — determinism is asserted on the rest.
 _VOLATILE_ROW_KEYS = frozenset({"archive_path", "source_path", "created_at", "updated_at"})
 
-
 @pytest.fixture()
 def hub() -> FakeHub:
     return build_snapshot()  # repo org/private-ds, private, bundles for 3 sessions
 
-
 def _config(stage: Path, policy_dir: Path | None = None) -> hydrate.HydrateHubConfig:
     return hydrate.HydrateHubConfig(
-        source_repo="org/private-ds",
-        source_revision=REVISION,
-        destination_repo="org/private-ds",
-        stage_dir=stage,
+        source_repo="org/private-ds", source_revision=REVISION, destination_repo="org/private-ds", stage_dir=stage,
         license_policy_path=_write_policy(stage.parent if policy_dir is None else policy_dir),
     )
 
-
 def _index_rows(stage: Path) -> list[dict[str, object]]:
-
-    return [
-        {k: v for k, v in row.items() if k not in _VOLATILE_ROW_KEYS}
-        for row in query_runs(stage)
-    ]
-
+    return [{k: v for k, v in row.items() if k not in _VOLATILE_ROW_KEYS} for row in query_runs(stage)]
 
 class TestCleanImport:
     def test_hydrate_discovers_all_snapshot_sessions(self, hub: FakeHub, tmp_path: Path) -> None:
@@ -88,11 +73,9 @@ class TestCleanImport:
         summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
         assert summary.verified
         # M1: the hydrated staging archive is harvest-discoverable from disk alone.
-
         assert len(query_runs(stage)) == 3
         assert summary.dry_run_discovered == 3
         assert summary.dry_run_admitted + summary.dry_run_rejected == 3
-
         snapshot_dir = stage / "downloads" / REVISION
         assert (snapshot_dir / "bundles" / "sess-a" / "manifest.json").is_file()
         assert not (snapshot_dir / "sess-a").exists()
@@ -113,7 +96,6 @@ class TestCleanImport:
         assert new_keys and all(k.startswith("curated/") for k in new_keys)
         assert not any(k.startswith("bronze/") for k in new_keys)
 
-
 class TestInterruptionResume:
     def test_resume_after_kill_completes_without_duplicates(self, hub: FakeHub, tmp_path: Path) -> None:
         stage = tmp_path / "stage"
@@ -124,13 +106,10 @@ class TestInterruptionResume:
         # The candidate prefix is the post-gate v2 curation id (issue #1094):
         # probe it through the production derivation, never the v1 inputs.
         curation_id = _v2_curation_id(hub, tmp_path)
-        state = hydrate.resume_state(
-            hub, curation_id=curation_id, stage_dir=tmp_path / "fresh"
-        )
+        state = hydrate.resume_state(hub, curation_id=curation_id, stage_dir=tmp_path / "fresh")
         assert state.completed_sessions is not None
         summary = hydrate.run_hydrate_hub(_config(stage), client=hub)
         assert summary.verified
-
         assert len(query_runs(stage)) == 3  # no duplicate sessions after resume
 
     def test_resume_between_publish_and_finalize_proceeds(self, hub: FakeHub, tmp_path: Path) -> None:
@@ -144,9 +123,7 @@ class TestInterruptionResume:
         stage = tmp_path / "stage"
 
         def _die_before_finalize(*_args: object, **_kwargs: object) -> str:
-            raise KeyboardInterrupt(
-                "simulated death between publish_batches and finalize"
-            )
+            raise KeyboardInterrupt("simulated death between publish_batches and finalize")
 
         with pytest.MonkeyPatch.context() as mp:
             mp.setattr(hydrate, "finalize", _die_before_finalize)
@@ -157,9 +134,7 @@ class TestInterruptionResume:
         # complete the run instead of refusing the prefix as legacy.
         summary = hydrate.run_hydrate_hub(_config(tmp_path / "resume"), client=hub)
         assert summary.verified
-
         assert len(query_runs(tmp_path / "resume")) == 3  # no duplicate sessions
-
 
 class TestCollision:
     def test_same_identity_different_content_quarantines(self, hub: FakeHub, tmp_path: Path) -> None:
@@ -170,26 +145,20 @@ class TestCollision:
         staged = stage / "downloads" / REVISION / "bundles" / "sess-a" / "manifest.json"
         staged.unlink()
         rerun = hydrate.run_hydrate_hub(_config(stage), client=hub)  # collision is reported, not silent
-
         rows = [r for r in query_runs(stage) if r["session_id"] == "sess-a"]
         assert len(rows) == 1  # original intact
         # the collision is a recorded rejection with the stable reason code
-        ledger = json.loads(
-            (stage / "curated" / rerun.curation_id / "import-ledger.json").read_text()
-        )
+        ledger = json.loads((stage / "curated" / rerun.curation_id / "import-ledger.json").read_text())
         quarantined = {e["session_id"]: e["reason_code"] for e in ledger["quarantined"]}
         assert quarantined.get("sess-a") == hydrate_rules.REASON_CODE_IDENTITY_COLLISION
         # the published curation manifest lists the collided session exactly once,
         # as quarantined at the real collision directory (never double-listed)
-        manifest = json.loads(
-            hub.files[f"curated/{rerun.curation_id}/curation-manifest.json"].decode()
-        )
+        manifest = json.loads(hub.files[f"curated/{rerun.curation_id}/curation-manifest.json"].decode())
         sess_rows = [b for b in manifest["batches"] if b["session_id"] == "sess-a"]
         assert len(sess_rows) == 1
         assert sess_rows[0]["status"] == "quarantined"
         assert sess_rows[0]["reason_code"] == hydrate_rules.REASON_CODE_IDENTITY_COLLISION
         assert sess_rows[0]["artifact_relpath"] == "quarantine/sess-a.conflict"
-
 
 class TestPathTraversal:
     def test_hostile_snapshot_escapes_nothing(self, tmp_path: Path) -> None:
@@ -199,12 +168,10 @@ class TestPathTraversal:
         assert not (tmp_path / "escape.txt").exists()
         assert not (tmp_path / "etc").exists()
 
-
 # ---------------------------------------------------------------------------
 # Pinned archive fixture (issue #1094 Task 10): enrichment -> gate -> v2
 # identity -> publication over a committed, digest-pinned snapshot + policy.
 # ---------------------------------------------------------------------------
-
 
 class _PinnedResolver:
     """Canned per-slug enrichment results; records queried slugs."""
@@ -214,14 +181,12 @@ class _PinnedResolver:
         self.queried: list[str] = []
 
     def resolve(self, repo_slug: str, repo_commit: str | None):  # type: ignore[no-untyped-def]
-
         self.queried.append(repo_slug)
         evidence = self.results.get(repo_slug)
         if evidence is None:
             return None
         assert isinstance(evidence, license_enrich.EnrichedEvidence)
         return evidence
-
 
 class _ReplayResolver:
     """Fresh-VM replay resolver: serves only from the published
@@ -241,27 +206,20 @@ class _ReplayResolver:
         self.served: list[str] = []
 
     def resolve(self, repo_slug: str, repo_commit: str | None):  # type: ignore[no-untyped-def]
-
         entry = self.by_slug.get(repo_slug)
-        assert entry is not None, (
-            f"replay resolver asked for {repo_slug!r}, which the published "
+        assert entry is not None, (f"replay resolver asked for {repo_slug!r}, which the published "
             "cache never resolved — the live source would be re-queried"
         )
         self.served.append(repo_slug)
         if entry.get("status") != "resolved":
             return None
         return license_enrich.EnrichedEvidence(
-            spdx_id=str(entry["spdx_id"]),
-            source=str(entry["source"]),
-            repo_commit=str(entry["repo_commit"]),
+            spdx_id=str(entry["spdx_id"]), source=str(entry["source"]), repo_commit=str(entry["repo_commit"]),
         )
 
-
 def _pinned_resolver() -> _PinnedResolver:
-
     commit = "d" * 40
-    return _PinnedResolver({
-        "acme/widget": license_enrich.EnrichedEvidence(
+    return _PinnedResolver({"acme/widget": license_enrich.EnrichedEvidence(
             spdx_id="MIT", source=f"github:acme/widget@{commit}", repo_commit=commit,
         ),
         "acme/copyleft": license_enrich.EnrichedEvidence(
@@ -273,41 +231,28 @@ def _pinned_resolver() -> _PinnedResolver:
         ),
     })
 
-
-def run_pinned_fixture_hydration(
-    stage_root: Path,
-    *,
-    hub: FakeHub | None = None,
-    resolver: object | None = None,
+def run_pinned_fixture_hydration(stage_root: Path, *, hub: FakeHub | None = None, resolver: object | None = None,
 ) -> hydrate.HydrateSummary:
     """One full ``run_hydrate_hub`` pass over the pinned snapshot + policy fixture.
 
     ``resolver`` (default: the canned pinned resolver) is injected through the
     production ``_make_license_resolver`` seam.
     """
-
     hub = hub if hub is not None else build_pinned_snapshot()
     resolver = resolver if resolver is not None else _pinned_resolver()
     stage_root.mkdir(parents=True, exist_ok=True)
     policy = stage_root / "license-policy.json"
     policy.write_bytes(PINNED_POLICY_FIXTURE.read_bytes())
     config = hydrate.HydrateHubConfig(
-        source_repo=REPO_ID,
-        source_revision=PINNED_REVISION,
-        destination_repo=REPO_ID,
-        stage_dir=stage_root / "stage",
-        license_policy_path=str(policy),
-        allow_copyleft=frozenset(),
+        source_repo=REPO_ID, source_revision=PINNED_REVISION, destination_repo=REPO_ID, stage_dir=stage_root / "stage",
+        license_policy_path=str(policy), allow_copyleft=frozenset(),
     )
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr(license_enrich, "_make_license_resolver", lambda: resolver)
         return hydrate.run_hydrate_hub(config, client=hub)
 
-
 class TestPinnedArchiveFixture:
-    def test_pinned_archive_fixture_full_path_enrich_gate_identity_publish(
-        self, tmp_path: Path
-    ) -> None:
+    def test_pinned_archive_fixture_full_path_enrich_gate_identity_publish(self, tmp_path: Path) -> None:
         # Pinned snapshot fixture (committed builder bytes, digest-pinned
         # revision) + pinned policy fixture: enrichment fills legacy evidence,
         # the gate excludes per stable code, the v2 identity binds, publication
@@ -326,11 +271,7 @@ class TestPinnedArchiveFixture:
             "license_evidence_missing": 1,  # unresolvable repo
         }
         assert summary.dry_run_discovered == 5
-        assert (
-            summary.dry_run_admitted
-            + summary.dry_run_rejected
-            == summary.dry_run_discovered
-        )
+        assert (summary.dry_run_admitted + summary.dry_run_rejected == summary.dry_run_discovered)
 
         # Fresh-VM replay: identical decisions and identity from the published
         # cache + pinned inputs — the replay resolver reads the published
@@ -346,10 +287,7 @@ class TestPinnedArchiveFixture:
         assert replay.license_admission == summary.license_admission
         assert replay.verified is True
         # Every enrichment slug was served from the published cache, never the live source.
-        assert set(replay_resolver.served) == {
-            "acme/widget", "acme/copyleft", "ghost/nope", "getsentry/sentry",
-        }
-
+        assert set(replay_resolver.served) == {"acme/widget", "acme/copyleft", "ghost/nope", "getsentry/sentry",}
 
 class TestDeterministicReindex:
     def test_rerun_yields_identical_index_and_curation_id(self, hub: FakeHub, tmp_path: Path) -> None:

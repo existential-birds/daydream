@@ -86,20 +86,11 @@ def _silence_cli_and_runner(monkeypatch: pytest.MonkeyPatch) -> None:
     - signal-handler install is a no-op concern here; leave it real — it is a
       cheap, side-effect-free part of the production entrypoint we want covered.
     """
-    def repo_view(
-        repo: Path,
-        *,
-        auth: git_ops.GitHubAuth,
-    ) -> tuple[str, str]:
+    def repo_view(repo: Path, *, auth: git_ops.GitHubAuth,) -> tuple[str, str]:
         assert auth is git_ops.INHERIT_GITHUB_AUTH
         return "acme", Path(repo).name
 
-    def pr_view(
-        _repo: Path,
-        _branch: int | None,
-        *,
-        auth: git_ops.GitHubAuth,
-    ) -> None:
+    def pr_view(_repo: Path, _branch: int | None, *, auth: git_ops.GitHubAuth,) -> None:
         assert auth is git_ops.INHERIT_GITHUB_AUTH
 
     monkeypatch.setattr("daydream.git_ops.gh_repo_view", repo_view)
@@ -119,10 +110,7 @@ def _denied_observability(*a: Any, **k: Any) -> Any:
     """Injected failing observability resolver: the pre-config failure case."""
     raise RuntimeError("observability boom")
 
-
-def test_cli_main_clean_deep_run_exits_0(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_clean_deep_run_exits_0(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A clean default deep run drives cli.main -> anyio.run -> sys.exit(0).
 
     ``multi_stack_target`` is a real git repo checked out on ``feature`` with a
@@ -138,11 +126,8 @@ def test_cli_main_clean_deep_run_exits_0(
     # anyio.run -> sys.exit. Not a hardcoded 0 (see TDD proof in the PR).
     assert _cli_main_exit(monkeypatch, str(multi_stack_target)) == 0
 
-
 def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
-    multi_stack_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end provenance: the written trajectory's extra.pr_repo is the
     target checkout's slug, not the invoking cwd (#128).
@@ -160,20 +145,14 @@ def test_cli_main_trajectory_pr_repo_is_target_not_cwd(
     _install_stub_backend(monkeypatch, multi_stack_target)
 
     trajectory_path = tmp_path / "trajectory.json"
-    assert (
-        _cli_main_exit(monkeypatch, "--trajectory", str(trajectory_path), str(multi_stack_target))
-        == 0
-    )
+    assert (_cli_main_exit(monkeypatch, "--trajectory", str(trajectory_path), str(multi_stack_target)) == 0)
 
     assert trajectory_path.exists(), "deep run must write the trajectory to disk"
     data = json.loads(trajectory_path.read_text(encoding="utf-8"))
     assert data["extra"]["pr_repo"] == f"acme/{multi_stack_target.name}"
     assert data["extra"]["pr_repo"] != f"acme/{Path.cwd().name}"
 
-
-def test_cli_main_wrong_branch_exits_1(
-    git_repo: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_wrong_branch_exits_1(git_repo: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The WrongBranch guard drives cli.main's dedicated except clause -> exit 1.
 
     ``git_repo`` is a real repo checked out on ``main`` (the base branch) with a
@@ -190,11 +169,8 @@ def test_cli_main_wrong_branch_exits_1(
 
     assert _cli_main_exit(monkeypatch, str(git_repo)) == 1
 
-
 def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
-    git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A confinement rejection that reaches cli.main renders actionably.
 
@@ -217,10 +193,7 @@ def test_cli_main_confinement_valueerror_is_actionable_not_fatal(
     assert "Finding file must be a confined repository-relative path" in out
     assert "Fatal Error" not in out  # actionable, not the bare generic string
 
-
-def test_cli_main_rejects_workspace_copy_traversal(
-    repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_rejects_workspace_copy_traversal(repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An invalid --copy entry through the real entrypoint exits 1, touches no
     external file, and leaves no stray ephemeral worktree.
 
@@ -236,23 +209,14 @@ def test_cli_main_rejects_workspace_copy_traversal(
     monkeypatch.setattr("daydream.runner.print_error", lambda *a, **kw: None)
 
     code = _cli_main_exit(
-        monkeypatch,
-        str(repo_with_origin),
-        "--worktree",
-        "--copy",
-        "safe.txt",
-        "--copy",
-        "../outside-source.txt",
+        monkeypatch, str(repo_with_origin), "--worktree", "--copy", "safe.txt", "--copy", "../outside-source.txt",
     )
     assert code == 1
     # No stray ephemeral worktree child remains after cleanup.
     wt_root = repo_with_origin / ".daydream" / "worktrees"
     assert not wt_root.exists() or not any(wt_root.iterdir())
 
-
-def test_non_tty_auto_enables_non_interactive(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_non_tty_auto_enables_non_interactive(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A piped (non-TTY) stdin auto-enables non-interactive with no flag.
 
     This drives the production entrypoint (``cli.main`` -> ``runner.run``) with a
@@ -273,10 +237,7 @@ def test_non_tty_auto_enables_non_interactive(
 
     assert (multi_stack_target / ".review-output.md").exists()
 
-
-def test_cli_main_prune_reanchor_removes_and_exits_0(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_prune_reanchor_removes_and_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     repo, _ = _repo(tmp_path)
     target = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
@@ -289,25 +250,17 @@ def test_cli_main_prune_reanchor_removes_and_exits_0(
     assert not target.exists()
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
-
-def test_cli_main_prune_reanchor_rejects_name_exits_1(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_prune_reanchor_rejects_name_exits_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
     repo, _ = _repo(tmp_path)
     _silence_all(monkeypatch)
     monkeypatch.setattr("daydream.cli.print_success", lambda *a, **k: None)
     monkeypatch.setattr("daydream.cli.print_error", lambda *a, **k: None)
     assert _cli_main_exit(monkeypatch, "improve", "prune-reanchor", "run-abc", str(repo)) == 1
-    assert not any(
-        p.name == "run-abc" for p in (repo / ".daydream" / "worktrees").glob("*")
-    )
+    assert not any(p.name == "run-abc" for p in (repo / ".daydream" / "worktrees").glob("*"))
     assert not (repo / ".daydream" / "worktrees" / "run-abc").exists()
 
-
-def test_cli_main_list_reanchor_lists_and_exits_0(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_list_reanchor_lists_and_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``improve list-reanchor`` through cli.main exits 0 and names the
     re-anchor worktrees the automatic prune would remove.
 
@@ -322,17 +275,11 @@ def test_cli_main_list_reanchor_lists_and_exits_0(
 
     _silence_all(monkeypatch)
     listed: list[str] = []
-    monkeypatch.setattr(
-        "daydream.cli.print_info",
-        lambda _console, name: listed.append(str(name)),
-    )
+    monkeypatch.setattr("daydream.cli.print_info", lambda _console, name: listed.append(str(name)),)
     assert _cli_main_exit(monkeypatch, "improve", "list-reanchor", str(repo)) == 0
     assert listed == ["run-abcd-reanchor"]
 
-
-def test_cli_main_list_reanchor_empty_exits_0(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_cli_main_list_reanchor_empty_exits_0(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty re-anchor set still exits 0 — listing nothing is not an error."""
 
     repo, _ = _repo(tmp_path)
@@ -363,8 +310,7 @@ SANCTIONED_INPUT_CANARY = "SANCTIONED_INPUT_CANARY"
 PRIVATE_ROOT_CANARY = "PRIVATE_ROOT_CANARY"
 RUNTIME_STATE_CANARY = "RUNTIME_STATE_CANARY"
 # Everything that must stay dark in the model's cwd for the whole run.
-_DARK_CANARIES = (
-    PRIOR_REASONING_CANARY, CURRENT_REASONING_CANARY, SIBLING_REASONING_CANARY,
+_DARK_CANARIES = (PRIOR_REASONING_CANARY, CURRENT_REASONING_CANARY, SIBLING_REASONING_CANARY,
     RESUME_CACHE_CANARY, SANCTIONED_INPUT_CANARY, PRIVATE_ROOT_CANARY, RUNTIME_STATE_CANARY,
 )
 # Shared argv tail: the probe flow on the real Codex fixture executable.
@@ -385,17 +331,11 @@ class _VisibilityCase:
 
 @pytest.fixture
 def visibility_case(
-    tiny_diff_target: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: Any,
-    artifact_runtime_root: Path,
+    tiny_diff_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, artifact_runtime_root: Path,
 ) -> Callable[..., _VisibilityCase]:
     """Seed the canaries, register the probe flow, install the Codex fixture."""
 
-    def _setup(
-        *,
-        oversize: bool = False,
+    def _setup(*, oversize: bool = False,
         response_mode: Literal["success", "model_error", "process_error", "block"] = "success",
         payload: str = SANCTIONED_INPUT_CANARY,
     ) -> _VisibilityCase:
@@ -406,13 +346,9 @@ def visibility_case(
         sanctioned_dir.mkdir()
         sanctioned_path = (sanctioned_dir / "evidence artifact.txt").resolve()
         sanctioned_path.write_text(payload, encoding="utf-8")
-        _write_probe_extension(
-            ext_dir, sanctioned_path, read_only=oversize, oversize=oversize
-        )
+        _write_probe_extension(ext_dir, sanctioned_path, read_only=oversize, oversize=oversize)
         fixture = install_protocol_cli(
-            tmp_path / "codex protocol fixture with spaces",
-            "codex",
-            response_mode=response_mode,
+            tmp_path / "codex protocol fixture with spaces", "codex", response_mode=response_mode,
             sanctioned_files=(sanctioned_path,),
         )
         monkeypatch.setenv("PATH", f"{fixture.bin_dir}{os.pathsep}{os.environ['PATH']}")
@@ -436,9 +372,7 @@ def _assert_no_hidden_reasoning(observation: dict[str, Any]) -> None:
     assert not any(entry == ".daydream" or entry.startswith(".daydream/") for entry in entries)
 
 
-def _assert_codex_observations(
-    case: _VisibilityCase, *, expected_cwd: Path | None = None
-) -> set[Path]:
+def _assert_codex_observations(case: _VisibilityCase, *, expected_cwd: Path | None = None) -> set[Path]:
     """External observation is the authority for what the child really saw.
 
     Returns the distinct model cwds the two invocations actually ran in.
@@ -463,8 +397,7 @@ def _assert_codex_observations(
     return model_cwds
 
 
-def _replace_destination_after_entered(
-    fixture: ProtocolCli, destination: Path, replacement: bytes, *,
+def _replace_destination_after_entered(fixture: ProtocolCli, destination: Path, replacement: bytes, *,
     expected_pids: int, stop: threading.Event, failures: list[BaseException],
 ) -> None:
     """Host helper thread: coordinate with the blocked executable over its FIFO.
@@ -500,7 +433,6 @@ def _replace_destination_after_entered(
     except BaseException as exc:  # surfaced by the test body
         failures.append(exc)
 
-
 def test_artifact_visibility_cli_codex_in_place_publishes_after_model(
     visibility_case: Callable[..., _VisibilityCase], tmp_path: Path, archive_dir: Path
 ) -> None:
@@ -520,17 +452,14 @@ def test_artifact_visibility_cli_codex_in_place_publishes_after_model(
 
     with pytest.raises(SystemExit) as exc:
         cli.main([
-            str(case.repo), *_PROBE_ARGV,
-            "--trajectory", str(explicit_trajectory), "--dump-artifacts", str(dump_dir),
+            str(case.repo), *_PROBE_ARGV, "--trajectory", str(explicit_trajectory), "--dump-artifacts", str(dump_dir),
         ])
     assert exc.value.code == 0
 
     _assert_codex_observations(case, expected_cwd=case.repo)
     _assert_frozen_outputs(
-        case.repo, archive_dir, explicit_trajectory, dump_dir,
-        backend="codex", model="fixture-model",
+        case.repo, archive_dir, explicit_trajectory, dump_dir, backend="codex", model="fixture-model",
     )
-
 
 def test_artifact_visibility_cli_codex_worktree_branch_and_paths_with_spaces(
     visibility_case: Callable[..., _VisibilityCase], tmp_path: Path, archive_dir: Path
@@ -552,8 +481,7 @@ def test_artifact_visibility_cli_codex_worktree_branch_and_paths_with_spaces(
     dump_dir = tmp_path / "worktree artifact dump with spaces"
 
     with pytest.raises(SystemExit) as exc:
-        cli.main([
-            str(repo), *_PROBE_ARGV, "--worktree", "--branch", "feature",
+        cli.main([str(repo), *_PROBE_ARGV, "--worktree", "--branch", "feature",
             "--trajectory", str(explicit_trajectory), "--dump-artifacts", str(dump_dir),
         ])
     assert exc.value.code == 0
@@ -569,12 +497,10 @@ def test_artifact_visibility_cli_codex_worktree_branch_and_paths_with_spaces(
     assert not model_cwd.exists(), "ephemeral worktree must be gone after the run"
 
     session_id = _assert_frozen_outputs(
-        repo, archive_dir, explicit_trajectory, dump_dir,
-        backend="codex", model="fixture-model",
+        repo, archive_dir, explicit_trajectory, dump_dir, backend="codex", model="fixture-model",
     )
     # The public run is published to the SOURCE checkout, not the worktree.
     assert (repo / ".daydream" / "runs" / session_id / "trajectory.json").exists()
-
 
 def test_artifact_visibility_cli_codex_oversize_inline_input_fails_before_spawn(
     visibility_case: Callable[..., _VisibilityCase],
@@ -596,7 +522,6 @@ def test_artifact_visibility_cli_codex_oversize_inline_input_fails_before_spawn(
     assert list(case.fixture.observations.iterdir()) == []
     assert not case.fixture.entered.exists()
 
-
 def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_one(
     visibility_case: Callable[..., _VisibilityCase], tmp_path: Path
 ) -> None:
@@ -616,10 +541,8 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
     stop = threading.Event()
     failures: list[BaseException] = []
     releaser = threading.Thread(
-        target=_replace_destination_after_entered,
-        args=(case.fixture, explicit_trajectory, replacement),
-        kwargs={"expected_pids": 2, "stop": stop, "failures": failures},
-        name="artifact-visibility-cli-collision",
+        target=_replace_destination_after_entered, args=(case.fixture, explicit_trajectory, replacement),
+        kwargs={"expected_pids": 2, "stop": stop, "failures": failures}, name="artifact-visibility-cli-collision",
         daemon=True,
     )
     releaser.start()
@@ -644,21 +567,16 @@ def test_artifact_visibility_cli_codex_publication_collision_restores_and_exits_
     assert explicit_trajectory.read_bytes() == replacement
 
 
-def _install_chained_failure_backend(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-    outer: BaseException | None = None,
+def _install_chained_failure_backend(monkeypatch: pytest.MonkeyPatch, target: Path, outer: BaseException | None = None,
 ) -> None:
     """Install a ScriptedBackend that raises a CodexError chained to a GitError."""
 
     if outer is None:
         outer = CodexError("failed to create disposable read-only checkout")
         outer.__cause__ = git_ops.GitError("isolation probe failure")
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
+    monkeypatch.setattr("daydream.runner.create_backend",
         lambda name, model=None, **kwargs: ScriptedBackend(events=[outer], retryable=False),
     )
-
 
 def test_verbose_token_scan_semantics() -> None:
     scan = cli._verbose_token_in_argv
@@ -671,11 +589,8 @@ def test_verbose_token_scan_semantics() -> None:
     assert scan(["/t"]) is False
     assert scan([]) is False
 
-
 def test_cli_main_fatal_default_concise_no_traceback(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _silence_all(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
@@ -690,11 +605,8 @@ def test_cli_main_fatal_default_concise_no_traceback(
     assert "During handling" not in err
     assert "GitError" not in err
 
-
 def test_cli_main_verbose_prints_redacted_chain_on_stderr(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _silence_all(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
@@ -710,11 +622,8 @@ def test_cli_main_verbose_prints_redacted_chain_on_stderr(
     assert err.index("CodexError") < err.index("GitError")
     assert "isolation probe failure" not in out
 
-
 def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _silence_all(monkeypatch)
     sentinel = "ghp_" + "Q" * 12
@@ -732,11 +641,8 @@ def test_cli_main_verbose_neutralizes_canaries_on_both_streams(
     assert "[REDACTED" in err
     assert "CodexError" in err
 
-
 def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _silence_all(monkeypatch)
     _install_chained_failure_backend(monkeypatch, multi_stack_target)
@@ -753,11 +659,8 @@ def test_cli_main_formatter_failure_emits_fixed_marker_keeps_exit(
     assert "formatter exploded" not in err
     assert "failed to create disposable read-only checkout" in out + err
 
-
 def test_cli_main_verbose_diagnoses_pre_config_failure(
-    git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _silence(monkeypatch)
 
@@ -769,11 +672,8 @@ def test_cli_main_verbose_diagnoses_pre_config_failure(
     assert "RuntimeError" in err
     assert "observability boom" in err
 
-
 def test_cli_main_default_hides_pre_config_failure_details(
-    git_repo: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    git_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     _silence(monkeypatch)
 
@@ -792,26 +692,19 @@ class _ExplodingStrError(RuntimeError):
         raise RuntimeError("cannot stringify hostile exception")
 
 
-def _install_exploding_str_backend(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _install_exploding_str_backend(monkeypatch: pytest.MonkeyPatch,) -> None:
     """Install a ScriptedBackend whose failure exception cannot be str()ed.
 
     The exception escapes ``runner.run`` into ``cli.main``'s generic fatal
     handler — the exact shape issue #1236's fail-closed contract covers.
     """
-    monkeypatch.setattr(
-        "daydream.runner.create_backend",
-        lambda name, model=None, **kwargs: ScriptedBackend(
-            events=[_ExplodingStrError("hostile fatal")], retryable=False
+    monkeypatch.setattr("daydream.runner.create_backend",
+        lambda name, model=None, **kwargs: ScriptedBackend(events=[_ExplodingStrError("hostile fatal")], retryable=False
         ),
     )
 
-
 def test_cli_main_hostile_str_fatal_default_fails_closed(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A fatal exception whose ``__str__`` raises must not escape the generic
     handler: the panel is empty-safe, never a raw interpreter traceback, never
@@ -827,11 +720,8 @@ def test_cli_main_hostile_str_fatal_default_fails_closed(
     assert "Traceback (most recent call last)" not in err
     assert "Fatal Error" in out + err
 
-
 def test_cli_main_hostile_str_fatal_verbose_emits_unavailable_marker(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """The verbose variant still fails closed: the verbose diagnostic is the
     fixed unavailable marker (never a secondary traceback), the panel stays

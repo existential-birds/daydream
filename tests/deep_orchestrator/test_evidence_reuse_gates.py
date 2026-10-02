@@ -30,11 +30,7 @@ from tests.test_deep_orchestrator import MakeConfig, _silence
 
 
 async def _run_real_fix_flow(
-    tmp_path: Path,
-    make_config: MakeConfig,
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    test_command: str = "true",
+    tmp_path: Path, make_config: MakeConfig, monkeypatch: pytest.MonkeyPatch, *, test_command: str = "true",
 ) -> int:
     """Drive the real deep review -> fix -> test -> commit flow to its commit gate.
 
@@ -51,10 +47,7 @@ async def _run_real_fix_flow(
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _silence(monkeypatch)
-    return await run(
-        make_config(repo, assume="yes", output_mode="loop", test_command=test_command)
-    )
-
+    return await run(make_config(repo, assume="yes", output_mode="loop", test_command=test_command))
 
 @pytest.mark.asyncio
 async def test_the_retained_test_evidence_reaches_the_commit_gate(
@@ -81,50 +74,33 @@ async def test_the_retained_test_evidence_reaches_the_commit_gate(
     assert evidence.identity.output_tree_key  # bound to the retained tree
     assert retained_keys[0] == evidence.identity.output_tree_key
 
-
 @pytest.mark.asyncio
-async def test_a_half_formed_offer_is_refused(
-    tmp_path: Path, make_work: Any, make_config: MakeConfig
-) -> None:
+async def test_a_half_formed_offer_is_refused(tmp_path: Path, make_work: Any, make_config: MakeConfig) -> None:
     """One half of the evidence/tree pair is a caller bug, not a silent fallback."""
     work = make_work(tmp_path / "half-formed")
     config = make_config(work.repo)
     evidence = TestAttemptEvidence(
-        session_id="s", kind="host", command=("true",), passed=True,
-        input_tree_key="t", output_tree_key="t",
+        session_id="s", kind="host", command=("true",), passed=True, input_tree_key="t", output_tree_key="t",
     )
-
     with pytest.raises(ValueError, match="together"):
         await phase_commit_push(ScriptedBackend(), work, config=config, evidence=evidence)
     with pytest.raises(ValueError, match="together"):
-        await phase_commit_push(
-            ScriptedBackend(), work, config=config, retained_tree_key="t"
-        )
-
+        await phase_commit_push(ScriptedBackend(), work, config=config, retained_tree_key="t")
 
 @pytest.mark.asyncio
-async def test_a_tree_key_mismatch_is_refused(
-    tmp_path: Path, make_work: Any, make_config: MakeConfig
-) -> None:
+async def test_a_tree_key_mismatch_is_refused(tmp_path: Path, make_work: Any, make_config: MakeConfig) -> None:
     """A retained key that disagrees with the evidence names no valid offer."""
     work = make_work(tmp_path / "mismatch")
     config = make_config(work.repo)
-    identity = TestExecutionIdentity(
-        session_id="s", argv=("true",), cwd_relative=".", runner=None, interpreter=None,
+    identity = TestExecutionIdentity(session_id="s", argv=("true",), cwd_relative=".", runner=None, interpreter=None,
         config_digest=None, absent_components=(), input_tree_key="t", output_tree_key="t",
         head_sha="a" * 40, branch="feature", kind="host", outcome="passed",
     )
-    evidence = TestAttemptEvidence(
-        session_id="s", kind="host", command=("true",), passed=True,
+    evidence = TestAttemptEvidence(session_id="s", kind="host", command=("true",), passed=True,
         input_tree_key="t", output_tree_key="t", identity=identity,
     )
-
     with pytest.raises(ValueError, match="does not match"):
-        await phase_commit_push(
-            ScriptedBackend(), work, config=config,
-            evidence=evidence, retained_tree_key="other",
-        )
-
+        await phase_commit_push(ScriptedBackend(), work, config=config, evidence=evidence, retained_tree_key="other",)
 
 @pytest.mark.asyncio
 async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
@@ -162,20 +138,14 @@ async def test_real_flow_skips_the_pre_push_suite_run_but_still_runs_the_hook(
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _silence(monkeypatch)
 
-    await run(
-        make_config(
-            repo, assume="yes", output_mode="loop",
-            test_command=f"{sys.executable} {script} {counter}",
-        )
+    await run(make_config(repo, assume="yes", output_mode="loop", test_command=f"{sys.executable} {script} {counter}",)
     )
 
-    assert counter.read_text() == "1", (
-        "the TEST phase is the only orchestrator suite run; the commit gate "
+    assert counter.read_text() == "1", ("the TEST phase is the only orchestrator suite run; the commit gate "
         "reused the matching evidence instead of re-running it"
     )
     assert hook_log.read_text().splitlines() == ["pre-push"]
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
-
 
 @pytest.mark.asyncio
 async def test_the_pre_push_reuse_decision_is_persisted_in_the_real_flow(

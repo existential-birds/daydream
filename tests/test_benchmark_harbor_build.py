@@ -8,7 +8,7 @@ import subprocess
 import tomllib
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import pytest
 import yaml
@@ -32,25 +32,14 @@ REPO = Path(__file__).resolve().parents[1]
 # ``git()`` merges ``{**os.environ, **env}`` with ``env`` later — an
 # import-time ``os.environ`` snapshot would shadow call-time
 # ``GIT_CONFIG_*`` entries added by tests after import.
-_BUNDLE_ENV: dict[str, str] = {
-    "GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z",
-    "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z",
-}
+_BUNDLE_ENV: dict[str, str] = {"GIT_AUTHOR_DATE": "2026-01-01T00:00:00Z", "GIT_COMMITTER_DATE": "2026-01-01T00:00:00Z"}
 
 
 def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "a" * 40) -> dict[str, Any]:
     """A canned GitHub PR-header response for *number*."""
-    return {
-        "number": number,
-        "url": f"https://github.com/o/r/pull/{number}",
-        "title": "Fix cache",
-        "state": "open",
-        "base": {"ref": "main", "sha": base_sha},
-        "head": {"ref": "feature/cache", "sha": head_sha},
-        "merged_at": None,
-        "closed_at": None,
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z",
+    return {"number": number, "url": f"https://github.com/o/r/pull/{number}", "title": "Fix cache", "state": "open",
+        "base": {"ref": "main", "sha": base_sha}, "head": {"ref": "feature/cache", "sha": head_sha}, "merged_at": None,
+        "closed_at": None, "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
         "user": {"login": "alice", "type": "User"},
     }
 
@@ -58,11 +47,8 @@ def _pr_header(number: int = 101, *, base_sha: str = "b" * 40, head_sha: str = "
 def _seed_preflight(fake_gh: FakeGh, *, number: int = 101) -> None:
     """Seed canned identity + preflight/REST responses for one PR."""
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
-    fake_gh.set_response(
-        "repo-view-full",
-        value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
-               "url": "https://github.com/o/r", "visibility": "PRIVATE",
-               "defaultBranchRef": {"name": "main"}},
+    fake_gh.set_response("repo-view-full", value={"id": "R_kgDOABC123", "nameWithOwner": "o/r",
+               "url": "https://github.com/o/r", "visibility": "PRIVATE", "defaultBranchRef": {"name": "main"}},
     )
     fake_gh.set_response("GET", f"repos/o/r/pulls/{number}/reviews", [])
     fake_gh.set_response("GET", f"repos/o/r/pulls/{number}/comments", [])
@@ -77,41 +63,23 @@ def _seed_local_origin(tmp_path: Path, fake_gh: FakeGh, *, number: int = 101, li
     ``_seed_preflight``) first; this only adds the canned PR header.
     """
     origin_url, base_sha, head_sha = seed_pr_origin(
-        tmp_path,
-        repo_name=f"local_wt_{number}",
-        bare_name=f"origin_{number}.git",
+        tmp_path, repo_name=f"local_wt_{number}", bare_name=f"origin_{number}.git",
         feature_body="".join(f"LINE {i}\n" for i in range(1, lines + 1)),
-        feature_message=f"feature{number}",
-        number=number,
+        feature_message=f"feature{number}", number=number,
     )
     header = _pr_header(number, base_sha=base_sha, head_sha=head_sha)
     fake_gh.set_response("GET", f"repos/o/r/pulls/{number}", header)
     return origin_url, base_sha, head_sha
 
 
-def _seed_candidate(
-    fake_gh: FakeGh, *, number: int = 101, head_sha: str, body: str = "please fix",
-) -> None:
+def _seed_candidate(fake_gh: FakeGh, *, number: int = 101, head_sha: str, body: str = "please fix",) -> None:
     """Seed one REST inline comment so the case has one exact-acceptable candidate."""
-    comment = {
-        "id": number,
-        "node_id": f"DIFF_{number}",
-        "user": {"login": "alice", "type": "User"},
-        "body": body,
-        "commit_id": head_sha,
-        "original_commit_id": head_sha,
-        "path": "feature.py",
-        "line": 2,
-        "original_line": 2,
-        "subject_type": "line",
-        "side": "RIGHT",
-        "in_reply_to_id": None,
-        "created_at": "2026-01-01T00:00:00Z",
-        "updated_at": "2026-01-01T00:00:00Z",
-        "html_url": f"https://github.com/o/r/pull/{number}#discussion_r{number}",
+    comment = {"id": number, "node_id": f"DIFF_{number}", "user": {"login": "alice", "type": "User"}, "body": body,
+        "commit_id": head_sha, "original_commit_id": head_sha, "path": "feature.py", "line": 2, "original_line": 2,
+        "subject_type": "line", "side": "RIGHT", "in_reply_to_id": None, "created_at": "2026-01-01T00:00:00Z",
+        "updated_at": "2026-01-01T00:00:00Z", "html_url": f"https://github.com/o/r/pull/{number}#discussion_r{number}",
     }
     fake_gh.set_response("GET", f"repos/o/r/pulls/{number}/comments", [comment])
-
 
 _SEED_SEQ = {"n": 0}
 
@@ -120,13 +88,9 @@ def _mark_ready(ws: Path, case_id: str, head_sha: str) -> None:
     """Mark *case_id* ready with the freshly-rendered task-spec digest."""
 
     task_spec_sha256 = hashlib.sha256(
-        build.render_task_spec(
-            load_yaml_strict(ws / "cases" / f"{case_id}.yaml"),
-            instruction=build.ASSIGNMENT_TEXT,
-        )
+        build.render_task_spec(load_yaml_strict(ws / "cases" / f"{case_id}.yaml"), instruction=build.ASSIGNMENT_TEXT)
     ).hexdigest()
     cu.mark_ready(ws, case_id, head_sha=head_sha, task_spec_sha256=task_spec_sha256)
-
 
 PK_BODY = b"PK\x05\x06" + b"\x00" * 18
 
@@ -143,8 +107,7 @@ def _stub_wheel(directory: Path, content: bytes = PK_BODY) -> tuple[Path, str]:
     return wheel, version
 
 
-def _import_case(
-    tmp_path: Path, fake_gh: FakeGh, *, number: int, lines: int = 3,
+def _import_case(tmp_path: Path, fake_gh: FakeGh, *, number: int, lines: int = 3,
     ws: Path | None = None, with_candidate: bool = True,
 ) -> tuple[Path, str, str]:
     """Import one PR into a fresh (or given) workspace; returns (ws, case_id, head_sha)."""
@@ -170,10 +133,7 @@ def _seed_ready_workspace(tmp_path: Path, fake_gh: FakeGh, *, lines: int = 3) ->
     """
 
     ws, case_id, head_sha = _import_case(tmp_path, fake_gh, number=101, lines=lines)
-    candidate = next(
-        c for c in cu.get_case(ws, case_id)["candidates"]
-        if c["exact_acceptable"]
-    )
+    candidate = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     cu.accept_candidate(ws, case_id, candidate["source_id"])
     _mark_ready(ws, case_id, head_sha)
     return ws, case_id, head_sha
@@ -200,10 +160,7 @@ def _seed_second_ready_case(ws: Path, tmp_path: Path, fake_gh: FakeGh, *, lines:
     """
 
     _, case_id, head_sha = _import_case(tmp_path, fake_gh, number=102, lines=lines, ws=ws)
-    candidate = next(
-        c for c in cu.get_case(ws, case_id)["candidates"]
-        if c["exact_acceptable"]
-    )
+    candidate = next(c for c in cu.get_case(ws, case_id)["candidates"] if c["exact_acceptable"])
     cu.accept_candidate(ws, case_id, candidate["source_id"])
     _mark_ready(ws, case_id, head_sha)
     return case_id
@@ -260,22 +217,13 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     head = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
     m = snapshot.ensure_mirror(tmp_path)
     # push the base/head commits (objects + refs) into the mirror so build_bundle can resolve trees
-    _seed_git(
-        src,
-        "push",
-        str(m),
-        f"{base}:refs/heads/base",
-        f"{head}:refs/heads/head",
-        env=_BUNDLE_ENV,
-    )
+    _seed_git(src, "push", str(m), f"{base}:refs/heads/base", f"{head}:refs/heads/head", env=_BUNDLE_ENV)
     bundle = tmp_path / "b.bundle"
     snapshot.build_bundle(m, base, head, bundle)
     return m, bundle.read_bytes()
 
 
-def test_bundle_env_honours_call_time_environment(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """``_BUNDLE_ENV`` must not replay an import-time snapshot of ``os.environ``.
 
     ``tests/conftest.py`` installs ``GIT_CONFIG_*`` entries at import time; a
@@ -293,13 +241,11 @@ def test_bundle_env_honours_call_time_environment(
 
     assert _seed_git(repo, "config", "--get", "user.email", env=_BUNDLE_ENV) == "call-time@example.com"
 
-
 def test_spike_bundle_heads_is_exactly_base_head(tmp_path: Path) -> None:
     _, bundle_bytes = _seed_bare_bundle(tmp_path)
     (tmp_path / "b.bundle").write_bytes(bundle_bytes)
     heads = snapshot.bundle_heads(tmp_path / "b.bundle")
     assert heads == {"refs/heads/base", "refs/heads/head"}
-
 
 def test_derive_task_key_is_opaque_and_deterministic() -> None:
     case_id = "pr-000101-1a2b3c4d5e6f"
@@ -310,7 +256,6 @@ def test_derive_task_key_is_opaque_and_deterministic() -> None:
     assert "pr-" not in k and case_id not in k          # reveals no authoring case id
     assert all(c in "0123456789abcdef" for c in k[len("case-"):])  # hex suffix
 
-
 def test_bounded_pr_context_short_no_truncation() -> None:
     ctx = build.bounded_pr_context({"title": "Fix cache", "body": "narrowly scoped"})
     assert ctx == (
@@ -318,7 +263,6 @@ def test_bounded_pr_context_short_no_truncation() -> None:
         "</historical_pr_context>"
     )
     assert "[truncated" not in ctx
-
 
 def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     emoji = "😀"  # 4 UTF-8 bytes
@@ -335,31 +279,25 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     assert "[truncated; full_body_sha256=" in ctx
     # the truncated body must end on a whole UTF-8 char (no replacement chars / no split bytes)
     inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
-    body_line = next(
-        line for line in inner.splitlines() if line.startswith("body: ")
-    ).removeprefix("body: ")
+    body_line = next(line for line in inner.splitlines() if line.startswith("body: ")).removeprefix("body: ")
     body_line.encode("utf-8")                            # decodes the whole: boundary is valid
     assert body_line.endswith(emoji)                      # kept the whole emoji, never split one
     assert len(body_line.encode("utf-8")) <= 1021
     digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()   # stored normalized-body digest
 
-
 def test_bounded_pr_context_marker_emits_persisted_body_sha256() -> None:
     body = "a" * 1000 + "\U0001F600" * 50 + "Z" * 500
     stored = hashlib.sha256(body.encode("utf-8")).hexdigest()
-    ctx = build.bounded_pr_context(
-        {"title": "T", "body": body, "body_sha256": stored}, max_bytes=1021)
+    ctx = build.bounded_pr_context({"title": "T", "body": body, "body_sha256": stored}, max_bytes=1021)
     digest = _truncation_marker_digest(ctx)
     assert digest == stored                  # persisted normalized-body digest, not re-derived
-
 
 def test_bounded_pr_context_marker_falls_back_deterministically_without_digest() -> None:
     body = "a" * 1000 + "Z" * 500
     ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)
     digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # predate: sha256(stored body)
-
 
 def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest() -> None:
     body = "a" * 1000 + "\U0001F600" * 50 + "Z" * 500
@@ -372,14 +310,11 @@ def test_bounded_pr_context_marker_never_interpolates_unvalidated_digest() -> No
         "0" * 63,                                   # wrong length
         "0" * 64 + "1",                             # too long
     ):
-        ctx = build.bounded_pr_context(
-            {"title": "T", "body": body, "body_sha256": bad}, max_bytes=1021
-        )
+        ctx = build.bounded_pr_context({"title": "T", "body": body, "body_sha256": bad}, max_bytes=1021)
         assert ctx.count("</historical_pr_context>") == 1
         assert "secret-sentinel-9b2c" not in ctx
         digest = _truncation_marker_digest(ctx)
         assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
-
 
 def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest() -> None:
     body = "a" * 1000 + "Z" * 500
@@ -388,21 +323,16 @@ def test_bounded_pr_context_marker_drops_inconsistent_persisted_digest() -> None
     # sha256 of the stored body so it never attests a digest that no longer
     # matches the compiled body
     stale = hashlib.sha256(b"different body").hexdigest()
-    ctx = build.bounded_pr_context(
-        {"title": "T", "body": body, "body_sha256": stale}, max_bytes=1021
-    )
+    ctx = build.bounded_pr_context({"title": "T", "body": body, "body_sha256": stale}, max_bytes=1021)
     digest = _truncation_marker_digest(ctx)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()
-
 
 def test_bounded_pr_context_missing_body_is_empty() -> None:
     ctx = build.bounded_pr_context({"title": "Fix cache"})          # no body key
     assert "body: \n" in ctx and "[truncated" not in ctx
 
-
 def test_build_gold_list_is_provenance_free() -> None:
-    findings = [
-        {"finding_id": "c" * 64, "title": "Cache", "body": "collides", "severity": "high",
+    findings = [{"finding_id": "c" * 64, "title": "Cache", "body": "collides", "severity": "high",
          "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
          "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
         {"finding_id": "a" * 64, "title": "Escape", "body": "unvalidated", "severity": "medium",
@@ -414,8 +344,7 @@ def test_build_gold_list_is_provenance_free() -> None:
     def _id(f: dict[str, Any]) -> Any:
         loc = f["location"]
         payload = "\x1f".join(["case-key", str(f["title"]), str(f["body"]),
-                                str(f["severity"]), str(loc["path"]),
-                                str(loc["start_line"]), str(loc["end_line"])])
+                                str(f["severity"]), str(loc["path"]), str(loc["start_line"]), str(loc["end_line"])])
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
     expected = sorted(_id(f) for f in findings)
     assert [f["finding_id"] for f in gold] == expected                  # ordered by finding_id
@@ -423,15 +352,12 @@ def test_build_gold_list_is_provenance_free() -> None:
                for f in gold)                                             # no provenance/source/gold keys
     assert gold[0]["path"] == "src/render.py" and gold[0]["start_line"] == 10
 
-
 def test_build_gold_list_clean_is_empty() -> None:
     assert build.build_gold_list([], key="case-key") == []
 
-
 def test_build_gold_list_accepts_locationless_and_emits_nulls() -> None:
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    finding = {
-        "finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
+    finding = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
         "location": None, "provenance": {"kind": "authored", "source_ids": []},
     }
     gold = build.build_gold_list([finding], key=key)
@@ -446,29 +372,21 @@ def test_build_gold_list_accepts_locationless_and_emits_nulls() -> None:
     assert entry["finding_id"] == expected
     assert entry["finding_id"] != "a" * 64
 
-
 def test_build_gold_list_rejects_partially_populated_location() -> None:
     with pytest.raises(CompileError):
-        build.build_gold_list([{
-            "finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
+        build.build_gold_list([{"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
             "location": {"path": "src/a.py", "start_line": None, "end_line": None},
             "provenance": {"kind": "authored", "source_ids": []},
         }], key=build.derive_task_key("pr-000101-1a2b3c4d5e6f"))
 
-
-@pytest.mark.parametrize(
-    ("field", "value"),
+@pytest.mark.parametrize(("field", "value"),
     [("title", ""), ("body", "bad\x00body"), ("severity", "critical"),
      ("location", {"path": "../escape", "start_line": 1, "end_line": 1}),
      ("location", []), ("location", ""), ("location", 0), ("location", False)],
 )
 @pytest.mark.parametrize("oracle", [False, True])
-def test_build_gold_and_oracle_reject_invalid_finding_content(
-    field: str, value: object, oracle: bool
-) -> None:
-
-    finding: dict[str, Any] = {
-        "finding_id": "a" * 64, "title": "T", "body": "B", "severity": "low",
+def test_build_gold_and_oracle_reject_invalid_finding_content(field: str, value: object, oracle: bool) -> None:
+    finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": "low",
         "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
         "provenance": {"kind": "authored", "source_ids": []},
     }
@@ -480,17 +398,11 @@ def test_build_gold_and_oracle_reject_invalid_finding_content(
         else:
             build.build_gold_list([finding], key=key)
 
-
-@pytest.mark.parametrize(
-    ("present", "location"),
-    [(False, None), (True, None), (True, {}), (True, {"path": None}),
-     (True, {"start_line": None, "end_line": None})],
+@pytest.mark.parametrize(("present", "location"),
+    [(False, None), (True, None), (True, {}), (True, {"path": None}), (True, {"start_line": None, "end_line": None})],
 )
 def test_gold_and_oracle_preserve_locationless_inputs(present: bool, location: object) -> None:
-
-    finding: dict[str, Any] = {
-        "finding_id": "a" * 64, "title": "T", "body": "B", "severity": None,
-    }
+    finding: dict[str, Any] = {"finding_id": "a" * 64, "title": "T", "body": "B", "severity": None}
     if present:
         finding["location"] = location
     [gold] = build.build_gold_list([finding], key="case-locationless")
@@ -498,38 +410,25 @@ def test_gold_and_oracle_preserve_locationless_inputs(present: bool, location: o
     for parsed in (gold, oracle):
         assert (parsed["path"], parsed["start_line"], parsed["end_line"]) == (None, None, None)
 
-
-@pytest.mark.parametrize(("oracle", "count"), [(False, 51), (True, 101)])
-def test_build_gold_and_oracle_reject_over_cap(oracle: bool, count: int) -> None:
-
-    findings = [{
-        "finding_id": f"{i:064x}", "title": f"T{i}", "body": "B", "severity": "low",
+@pytest.mark.parametrize(
+    ("oracle", "count", "accepted"), [(False, 50, True), (False, 51, False), (True, 100, True), (True, 101, False)],
+)
+def test_build_gold_and_oracle_cap(oracle: bool, count: int, accepted: bool) -> None:
+    findings = [{"finding_id": f"{i:064x}", "title": f"T{i}", "body": "B", "severity": "low",
         "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
         "provenance": {"kind": "authored", "source_ids": []},
     } for i in range(count)]
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    with pytest.raises(build.CompileError):
+    def build_artifact() -> list[dict[str, Any]]:
         if oracle:
-            build.build_oracle_artifact(key, findings)
-        else:
-            build.build_gold_list(findings, key=key)
+            return cast(list[dict[str, Any]], build.build_oracle_artifact(key, findings)["findings"])
+        return build.build_gold_list(findings, key=key)
 
-
-@pytest.mark.parametrize(("oracle", "count"), [(False, 50), (True, 100)])
-def test_build_gold_and_oracle_accept_at_cap(oracle: bool, count: int) -> None:
-
-    findings = [{
-        "finding_id": f"{i:064x}", "title": f"T{i}", "body": "B", "severity": "low",
-        "location": {"path": "src/a.py", "start_line": 1, "end_line": 1},
-        "provenance": {"kind": "authored", "source_ids": []},
-    } for i in range(count)]
-    key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
-    if oracle:
-        artifact = build.build_oracle_artifact(key, findings)
-        assert len(artifact["findings"]) == count
+    if accepted:
+        assert len(build_artifact()) == count
     else:
-        assert len(build.build_gold_list(findings, key=key)) == count
-
+        with pytest.raises(build.CompileError):
+            build_artifact()
 
 def test_build_oracle_artifact_locationless_passes_validation() -> None:
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
@@ -542,10 +441,8 @@ def test_build_oracle_artifact_locationless_passes_validation() -> None:
     assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
     assert vc.validate_candidate_artifact(art)  # round-trips; candidate_id matches derived
 
-
 def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> None:
-    findings: list[dict[str, Any]] = [
-        {"finding_id": "b" * 64, "title": "Cache", "body": "collides", "severity": "high",
+    findings: list[dict[str, Any]] = [{"finding_id": "b" * 64, "title": "Cache", "body": "collides", "severity": "high",
          "location": {"path": "src/cache.py", "start_line": 42, "end_line": 42},
          "provenance": {"kind": "historical", "source_ids": ["github:review:1"]}},
         {"finding_id": "a" * 64, "title": "Escape", "body": "unvalidated", "severity": None,
@@ -557,8 +454,7 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> 
     assert art["schema_version"] == 1 and art["case_id"] == key
     assert art["base_ref"] == "base" and art["head_ref"] == "head"
     # findings are ordered by finding_id ascending; ordinal = position in that order
-    flat = [
-        {"title": f["title"], "body": f["body"], "severity": f["severity"],
+    flat = [{"title": f["title"], "body": f["body"], "severity": f["severity"],
          "path": f["location"]["path"], "start_line": f["location"]["start_line"],
          "end_line": f["location"]["end_line"]}
         for f in sorted(findings, key=lambda f: f["finding_id"])
@@ -573,11 +469,9 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> 
     assert [f["candidate_id"] for f in art["findings"]] == expected_ids
     # exactly candidate-shaped: gold-only finding_id and provenance are absent
     for entry in art["findings"]:
-        assert set(entry) == {"candidate_id", "title", "body", "severity",
-                              "path", "start_line", "end_line"}
+        assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
     # round-trips through the verifier's own validation
     assert vc.validate_candidate_artifact(art)
-
 
 def test_build_oracle_artifact_clean_has_empty_findings() -> None:
     key = build.derive_task_key("pr-000101-1a2b3c4d5e6f")
@@ -585,12 +479,10 @@ def test_build_oracle_artifact_clean_has_empty_findings() -> None:
     assert art["findings"] == []
     assert vc.validate_candidate_artifact(art) == []
 
-
 def test_copy_assets_places_templates_and_keeps_verifier_core_byte_identical(tmp_path: Path) -> None:
     dst = tmp_path / "case"
     build._copy_assets(dst)
-    expected = {
-        "tests/score_review.py", "tests/verifier_core.py", "tests/judge_prompt.md",
+    expected = {"tests/score_review.py", "tests/verifier_core.py", "tests/judge_prompt.md",
         "tests/test.sh", "tests/Dockerfile", "solution/solve.sh",
     }
     assert {str(p.relative_to(dst)) for p in dst.rglob("*") if p.is_file()} == expected
@@ -610,9 +502,6 @@ def _load_json(path: Path) -> Any:
 def test_finding_marker_import_curate_compile_preserves_raw_source(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-
-
-
     marker = finding_marker("f" * 64)
     raw_body = f"\n{marker}\n## Cache race\nProtect the shared cache.\n{marker}\n"
     ws = tmp_path / "ws-marker-flow"
@@ -635,10 +524,7 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
     evidence = import_doc["evidence"][0]
     assert evidence["body"] == raw_body
     assert evidence["body_sha256"] == hashlib.sha256(raw_body.encode()).hexdigest()
-    payload = {
-        key: import_doc[key]
-        for key in ("schema_version", "repository", "pull_request", "evidence")
-    }
+    payload = {key: import_doc[key] for key in ("schema_version", "repository", "pull_request", "evidence")}
     assert import_doc["fetch"]["payload_sha256"] == gi._payload_sha256(payload)
     assert ledger_entry["import_sha256"] == storage.sha256_file(import_path)
     candidate = case["candidates"][0]
@@ -650,16 +536,12 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
 
     edited_body = candidate["body"] + "\nCurator clarification."
     fragment = tmp_path / "gold.yaml"
-    fragment.write_text(yaml.safe_dump({
-        "findings": [{
+    fragment.write_text(yaml.safe_dump({"findings": [{
             "title": candidate["title"], "body": edited_body, "severity": None,
             "location": candidate["location"], "source_ids": [candidate["source_id"]],
-        }],
-        "exclusions": [], "case_exclusion": None, "clean": False,
+        }], "exclusions": [], "case_exclusion": None, "clean": False,
     }, sort_keys=False))
-    assert _handle_benchmark_command([
-        "curate", str(ws), "--case", case_id, "--apply-gold", str(fragment),
-    ]) == 0
+    assert _handle_benchmark_command(["curate", str(ws), "--case", case_id, "--apply-gold", str(fragment)]) == 0
     curated = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     finding = curated["curation"]["findings"][0]
     assert finding["provenance"]["kind"] == "edited"
@@ -667,9 +549,7 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
     assert finding["body"] == edited_body
     _mark_ready(ws, case_id, head_sha)
     wheel, _ = _stub_wheel(tmp_path)
-    assert _handle_benchmark_command([
-        "build-harbor", str(ws), "--daydream-wheel", str(wheel),
-    ]) == 0
+    assert _handle_benchmark_command(["build-harbor", str(ws), "--daydream-wheel", str(wheel)]) == 0
 
     compiled = ws / "harbor" / build.derive_task_key(case_id)
     for relative in ("tests/golden-review.json", "solution/golden-review.json"):
@@ -682,7 +562,6 @@ def test_finding_marker_import_curate_compile_preserves_raw_source(
         assert len(emitted) == 1
         assert emitted[0]["title"] == "Cache race"
         assert emitted[0]["body"] == edited_body
-
 
 def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, head_sha = _seed_ready_workspace(tmp_path, fake_gh)
@@ -747,7 +626,6 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
             continue
         assert lock["files"][rel] == hashlib.sha256(data).hexdigest()
 
-
 def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The compiled lock row + authoring-input digest carry the corrected base provenance:
     ``requested_base_sha`` alongside the merge-base ``original_base_sha``, with the
@@ -775,12 +653,10 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
     moved["snapshot"]["requested_base_sha"] = "0" * 40
     assert build._authoring_input_digest({case_id: moved}, manifest) != lock["authoring_input_digest"]
 
-
 def test_clean_attested_draft_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # draft-clean
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
-
 
 def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh)
@@ -791,7 +667,6 @@ def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path: Path, fake_gh: F
     assert storage.load_json_strict(case / "solution" / "golden-review.json")["findings"] == []
     assert vc.validate_gold_set(_load_json(case / "tests" / "golden-review.json")) == []
     assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
-
 
 def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A ready empty-gold case with no clean attestation must not compile.
@@ -816,7 +691,6 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: P
         build.compile_workspace(ws)
     assert not (ws / "harbor").exists()    # failed compile leaves no bundle
 
-
 def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     # inject a long, Unicode, delimiter-bearing body into the case doc
@@ -839,7 +713,6 @@ def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_
         p = ws / "harbor" / rel
         if p.is_file() and rel.endswith((".md", ".json")):
             assert "secret-sentinel-7f3c" not in p.read_text(errors="replace")
-
 
 def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -875,7 +748,6 @@ def test_compile_guards_marker_digest_against_raw_doc_injection(tmp_path: Path, 
     digest = _truncation_marker_digest(instr)
     assert digest == hashlib.sha256(body.encode("utf-8")).hexdigest()  # truthful attestation
 
-
 def test_compile_never_refetches_live_pr_text(tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch) -> None:
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
 
@@ -886,7 +758,6 @@ def test_compile_never_refetches_live_pr_text(tmp_path: Path, fake_gh: FakeGh, m
     lock = compile_workspace(ws)      # must succeed without any GitHub fetch
     assert lock["cases"]
 
-
 def test_compile_fails_closed_on_missing_pr_number(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     case_path = ws / "cases" / f"{case_id}.yaml"
@@ -895,7 +766,6 @@ def test_compile_fails_closed_on_missing_pr_number(tmp_path: Path, fake_gh: Fake
     storage.atomic_write_yaml(case_path, raw)
     with pytest.raises((CompileError, WorkspaceCorrupt)):
         compile_workspace(ws)
-
 
 def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -908,7 +778,6 @@ def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path: Path,
     # no timestamps anywhere in any compiled file or lock
     lock_text = (ws / "harbor" / "benchmark.lock.json").read_text()
     assert "created_at" not in lock_text and "timestamp" not in lock_text
-
 
 def test_harbor_bytes_identical_under_anchor_metadata_change(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Anchor metadata never reaches the compiled tree or the lock digest:
@@ -929,8 +798,7 @@ def test_harbor_bytes_identical_under_anchor_metadata_change(tmp_path: Path, fak
 
     # derived -> path-unavailable: flip the status AND unset the derived data
     # fields (the schema's fail-closed shape), nothing else in the record.
-    rec["authoring_anchor"] = {
-        "version": 1, "status": "path-unavailable",
+    rec["authoring_anchor"] = {"version": 1, "status": "path-unavailable",
         "commit_id": None, "path": None, "start_line": None, "end_line": None,
     }
     storage.atomic_write_json(import_path, imp)
@@ -938,7 +806,6 @@ def test_harbor_bytes_identical_under_anchor_metadata_change(tmp_path: Path, fak
     lock_b = build.compile_workspace(ws)
     tree_b = _harbor_tree_bytes(ws)
     assert lock_a == lock_b and tree_a == tree_b
-
 
 def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Prioritization facts and the derived ranked view never reach the compiled
@@ -969,7 +836,6 @@ def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path,
     tree_c = _harbor_tree_bytes(ws)
     assert lock_a == lock_c and tree_a == tree_c
 
-
 def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     _seed_second_ready_case(ws, tmp_path, fake_gh)
@@ -991,7 +857,6 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path,
     assert dirs == sorted(build.derive_task_key(c) for c in case_ids)
     assert list(lock_a["cases"].keys()) == sorted(lock_a["cases"].keys())
 
-
 def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     build.compile_workspace(ws)                                # successful baseline
@@ -1004,11 +869,8 @@ def test_staging_failure_preserves_prior_tree(tmp_path: Path, fake_gh: FakeGh) -
     assert _harbor_tree_bytes(ws) == before                    # prior tree fully intact
     assert not (ws / "cache" / "harbor-build-stage").exists()  # no stage residue at the output
 
-
 def test_leakage_scan_covers_task_toml_and_job_configs() -> None:
-
-    cases = {
-        "case-abcdef123456/task.toml": (
+    cases = {"case-abcdef123456/task.toml": (
             'schema_version = "1.4"\n# leak: ghp_abcdefghijklmnopqrstuv\n'
         ),
         "harbor-job.yaml": "jobs_dir: jobs\n# leak: https://user:pass@github.com/o/r\n",
@@ -1017,7 +879,6 @@ def test_leakage_scan_covers_task_toml_and_job_configs() -> None:
         build.leakage_scan(cases, repository_slug="o/r")
     assert "case-abcdef123456/task.toml" in str(rejected.value)
     assert "harbor-job.yaml" in str(rejected.value)
-
 
 def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token() -> None:
     cases = {
@@ -1037,7 +898,6 @@ def test_leakage_scan_rejects_forbidden_tokens_and_names_file_and_token() -> Non
     assert "case-abcdef123456/README.md" in msg           # names the file
     assert "pr-000101" in msg or "gold_status" in msg     # names a forbidden token
 
-
 def test_leakage_scan_permits_bounded_block_raw_text() -> None:
     instr = (
         "assignment text\n"
@@ -1048,14 +908,11 @@ def test_leakage_scan_permits_bounded_block_raw_text() -> None:
     )
     build.leakage_scan({"case-x/instruction.md": instr}, repository_slug="o/r")   # no raise
 
-
 def test_leakage_scan_rejects_clean_readme() -> None:
     # clean marker leaks into a README
     with pytest.raises(CompileError) as rejected:
-        build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"},
-                           repository_slug="o/r")
+        build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"}, repository_slug="o/r")
     assert "clean_attested" in str(rejected.value)
-
 
 def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path) -> None:
     _, bundle_bytes = _seed_bare_bundle(tmp_path)
@@ -1063,26 +920,15 @@ def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path
     bp.write_bytes(bundle_bytes)
     build.validate_bundle_inventory(bp)
 
-
 def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
     m, _ = _seed_bare_bundle(tmp_path)
     bp = tmp_path / "bad.bundle"
     # add an extra ref to the mirror, then rebuild the bundle including it
     _seed_git(m, "update-ref", "refs/heads/extra", "refs/heads/base")
-    _seed_git(
-        m,
-        "bundle",
-        "create",
-        str(bp),
-        "refs/heads/base",
-        "refs/heads/head",
-        "refs/heads/extra",
-        env=_BUNDLE_ENV,
-    )
+    _seed_git(m, "bundle", "create", str(bp), "refs/heads/base", "refs/heads/head", "refs/heads/extra", env=_BUNDLE_ENV)
     with pytest.raises(CompileError) as rejected:
         build.validate_bundle_inventory(bp)
     assert "ref" in str(rejected.value)
-
 
 def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1091,12 +937,10 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: 
     forbidden_substrs = ("imports/", "cases/", "benchmark.yaml", "provenance", "exclusions")
     assert not any(any(f in r for f in forbidden_substrs) for r in rels)
     # every compiled path lives under a case dir, root control files, or the metric
-    root_files = {
-        "README.md", "benchmark.lock.json", "metric.py", "verifier_core.py",
+    root_files = {"README.md", "benchmark.lock.json", "metric.py", "verifier_core.py",
         "harbor-job.yaml", "harbor-oracle.yaml"
     }
     assert all(r.startswith("case-") or r in root_files for r in rels)
-
 
 def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
@@ -1115,7 +959,6 @@ def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     absolute spelling of the same workspace, and self-deadlock on nested
     acquisition; this test fails on exactly that mutation instead of hanging.
     """
-
 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     ws_resolved = ws.resolve()
@@ -1167,11 +1010,9 @@ def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     # the lock is keyed on the resolved workspace, so absolute/relative/"."
     # spellings share one key.
     assert constructed_roots, "WorkspaceLock was never constructed"
-    assert constructed_roots[-1] == ws_resolved, (
-        f"lock keyed on non-canonical root {constructed_roots[-1]!r}, "
+    assert constructed_roots[-1] == ws_resolved, (f"lock keyed on non-canonical root {constructed_roots[-1]!r}, "
         f"expected resolved {ws_resolved!s}"
     )
-
 
 def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # mark_ready done
@@ -1183,9 +1024,7 @@ def test_compile_rejects_when_a_case_is_not_compilable(tmp_path: Path, fake_gh: 
         build.compile_workspace(ws)
     assert case_id in str(rejected.value)
 
-
 def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
-
     ws, included_case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     excluded_case_id = _seed_second_ready_case(ws, tmp_path, fake_gh)
     cu.exclude_case(ws, excluded_case_id, reason="duplicate_case")
@@ -1197,7 +1036,6 @@ def test_compile_skips_excluded_cases(tmp_path: Path, fake_gh: FakeGh) -> None:
     assert set(lock["cases"]) == {included_key}
     assert (ws / "harbor" / included_key).is_dir()
     assert not (ws / "harbor" / excluded_key).exists()
-
 
 def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path, fake_gh: FakeGh) -> None:
     _run_oracle(sr_module, tmp_path, fake_gh)
@@ -1219,10 +1057,7 @@ def _restamp_gold(case: Path, gold_bytes: bytes) -> None:
     meta_path.write_bytes(json.dumps(meta, sort_keys=True).encode("utf-8"))
 
 
-def _run_oracle(
-    sr_module: Any,
-    tmp_path: Path,
-    fake_gh: FakeGh,
+def _run_oracle(sr_module: Any, tmp_path: Path, fake_gh: FakeGh,
     make_finding: Callable[[str, list[dict[str, Any]]], dict[str, Any]] | None = None,
 ) -> tuple[Path, Path, Any]:
     """Compile the seeded case, optionally restamp its gold/oracle, then score it."""
@@ -1233,27 +1068,20 @@ def _run_oracle(
     if make_finding is not None:
         gold = json.loads((case / "tests" / "golden-review.json").read_bytes())
         finding = make_finding(key, gold)
-        _restamp_gold(
-            case,
-            json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8"),
-        )
+        _restamp_gold(case, json.dumps(build.build_gold_list([finding], key=key), indent=1).encode("utf-8"))
         (case / "solution" / "golden-review.json").write_bytes(
             json.dumps(build.build_oracle_artifact(key, [finding])).encode("utf-8")
         )
     out = tmp_path / "out"
     reward = sr_module.run_verifier(
-        case / "tests" / "golden-review.json",
-        case / "solution" / "golden-review.json",
-        out,
-        client=MatchClient(),
+        case / "tests" / "golden-review.json", case / "solution" / "golden-review.json", out, client=MatchClient(),
         env=judge_env(),
     )
     assert reward.reward == 1.0 and reward.verifier_error == 0
     return case, out, reward
 
 
-def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
-    sr_module: Any, tmp_path: Path, fake_gh: FakeGh
+def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(sr_module: Any, tmp_path: Path, fake_gh: FakeGh
 ) -> None:
     """Compiled-path oracle: reward 1.0 with both reported axes perfect.
 
@@ -1264,11 +1092,8 @@ def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
     """
 
     def make_finding(_key: str, gold: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"],
-            "severity": "high",
-            "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"],
-                         "end_line": gold[0]["end_line"]},
+        return {"finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"], "severity": "high",
+            "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"], "end_line": gold[0]["end_line"]},
             "provenance": {"kind": "authored", "source_ids": []},
         }
 
@@ -1278,9 +1103,7 @@ def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(
     assert rj["severity_present"] == 1
     assert rj["severity_exact"] == rj["tp"] and rj["severity_credit"] == 1.0
 
-
-def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
-    sr_module: Any, tmp_path: Path, fake_gh: FakeGh
+def test_compiled_findings_oracle_locationless_null_severity_axes_absent(sr_module: Any, tmp_path: Path, fake_gh: FakeGh
 ) -> None:
     """Locationless / null-severity gold: axes absent, reward still 1.0.
 
@@ -1289,8 +1112,7 @@ def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
     """
 
     def make_finding(_key: str, _gold: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
-            "finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
+        return {"finding_id": "a" * 64, "title": "Cache", "body": "collides", "severity": None,
             "location": None, "provenance": {"kind": "historical", "source_ids": ["github:review:1"]},
         }
 
@@ -1299,11 +1121,7 @@ def test_compiled_findings_oracle_locationless_null_severity_axes_absent(
     assert rj["location_present"] == 0 and rj["severity_present"] == 0
     assert rj["location_miss"] == 0  # absent, never imputed to a miss
 
-
-def test_compile_uses_shared_model_gated_loader(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-) -> None:
+def test_compile_uses_shared_model_gated_loader(tmp_path: Path, fake_gh: FakeGh,) -> None:
     """Reject an invalid case before replacing an existing compiled workspace."""
 
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1318,7 +1136,6 @@ def test_compile_uses_shared_model_gated_loader(
     with pytest.raises(WorkspaceCorrupt, match=f"case cases/{case_id}.yaml is not a valid case document"):
         build.compile_workspace(ws)
     assert _harbor_tree_bytes(ws) == before
-
 
 def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)  # after Task 4, this already sets a digest
@@ -1343,27 +1160,18 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh
     raw2["pull_request"]["title"] = "Other"
     assert build.render_task_spec(raw2, instruction=build.ASSIGNMENT_TEXT) != b1
 
-
 def test_task_md_prose_describes_reported_axes_contract(tmp_path: Path, fake_gh: FakeGh) -> None:
-
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     spec = build.render_task_spec(raw, instruction=build.ASSIGNMENT_TEXT).decode()
     assert "reported" in spec  # axes are reported, never gating
     assert "severity, location, and content are graded" not in spec  # the false claim is gone (R10)
 
-
-def test_compile_records_template_version_and_rejects_stale_task_spec(
-    tmp_path: Path, fake_gh: FakeGh
-) -> None:
-
-
+def test_compile_records_template_version_and_rejects_stale_task_spec(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock = build.compile_workspace(ws)
     key = build.derive_task_key(case_id)
-    metadata = json.loads(
-        (ws / "harbor" / key / "tests" / "verifier-metadata.json").read_bytes()
-    )
+    metadata = json.loads((ws / "harbor" / key / "tests" / "verifier-metadata.json").read_bytes())
     assert lock["template_version"] == build.TEMPLATE_VERSION
     assert metadata["template_version"] == lock["template_version"]
 
@@ -1372,9 +1180,7 @@ def test_compile_records_template_version_and_rejects_stale_task_spec(
     raw = storage.load_yaml_strict(case_path)
     raw["pull_request"] = dict(raw["pull_request"])
     raw["pull_request"]["title"] = "Changed after approval"
-    raw["pull_request"]["title_sha256"] = hashlib.sha256(
-        b"Changed after approval"
-    ).hexdigest()
+    raw["pull_request"]["title_sha256"] = hashlib.sha256(b"Changed after approval").hexdigest()
     # Retain the previously approved task-spec digest; the changed rendered
     # spec must not replace the compiled tree without fresh approval.
     storage.atomic_write_yaml(case_path, raw)
@@ -1383,9 +1189,7 @@ def test_compile_records_template_version_and_rejects_stale_task_spec(
         build.compile_workspace(ws)
     assert _harbor_tree_bytes(ws) == before
 
-
 def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_gh: FakeGh) -> None:
-
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)   # ready with a rendered digest (Task 4)
     key = build.derive_task_key(case_id)
     lock = build.compile_workspace(ws)
@@ -1405,9 +1209,7 @@ def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_
     assert not any(r.startswith("tests/") and r.endswith("Task.md") for r in rels)
     assert not any(r.startswith("environment/") and r.endswith("Task.md") for r in rels)
 
-
 def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
-
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock1 = build.compile_workspace(ws)
     # mutate the instruction-relevant input (PR title), re-render, re-approve, recompile
@@ -1435,7 +1237,6 @@ def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
     key = build.derive_task_key(case_id)
     assert lock2["cases"][key]["task_spec_sha256"] != lock1["cases"][key]["task_spec_sha256"]
 
-
 def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> None:
     prose = ("## Purpose\nreview the change\n## Scoring contract\n"
              "The gold_status and clean_attested markers and the curation flow "
@@ -1445,7 +1246,6 @@ def test_leakage_scan_task_md_permits_spec_prose_and_rejects_identifiers() -> No
     with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"case-x/Task.md": leaky}, repository_slug="o/r")
     assert "Task.md" in str(rejected.value)
-
 
 def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1460,16 +1260,13 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path: Path, fa
     # Agent task surface is instruction.md; environment packaging contains the
     # repository bundle, agent-safe Dockerfile, and packaged runtime lock.
     env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
-    assert env_files == {
-        "repository.bundle", "Dockerfile", "runtime-requirements.lock"
+    assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
     }, f"unexpected environment files: {env_files}"
-
 
 def test_compiled_policy_comes_from_workspace_allowlists(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The compiled task TOML's agent/verifier host policies are populated from the
     workspace's persisted privacy allowlists (reviewer -> [agent].allowed_hosts,
     judge -> [verifier.environment].allowed_hosts), kept as separate boundaries."""
-
 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock = build.compile_workspace(ws)                 # h1.example.com / h2.example.com
@@ -1481,14 +1278,12 @@ def test_compiled_policy_comes_from_workspace_allowlists(tmp_path: Path, fake_gh
     assert "h1.example.com" not in doc["verifier"]["environment"]["allowed_hosts"]
     assert "h2.example.com" not in doc["agent"]["allowed_hosts"]
 
-
 def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake_gh: FakeGh) -> None:
     """The OpenRouter workspace resolves both persisted allowlists to
     ``openrouter.ai``; the compiled task.toml carries that host in both egress
     boundaries and the control-plane leakage scan does not flag a bare
     legitimate hostname.
     """
-
 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
@@ -1501,7 +1296,6 @@ def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake
     assert doc["agent"]["allowed_hosts"] == ["openrouter.ai"]
     assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
 
-
 def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) -> None:
     """A malformed judge host must fail compilation (fail closed), never be
     silently normalized or defaulted.
@@ -1513,7 +1307,6 @@ def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) 
     storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
     with pytest.raises(build.CompileError):
         build.compile_workspace(ws)
-
 
 def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Changing a persisted privacy allowlist changes the compiled task.toml bytes
@@ -1532,20 +1325,14 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     assert digest_a != digest_b
     assert lock_a != lock_b          # lock bytes differ -> compiled_lock_sha256 differs
 
-
 def test_harbor_build_null_gold_severity_labeled_not_silent() -> None:
     # build.py emits "unknown" for null gold severity — must remain an EXPLICIT
     # labeled value, documented at the emission site (label, not canonical
     # passthrough).
-
     assert build._gold_severity_label(None) == "unknown"
     assert build._gold_severity_label("HIGH") == "high"
 
-
-def test_compiled_stage_carries_canonical_module_and_metric_loads_it(
-    tmp_path: Path,
-    fake_gh: FakeGh,
-) -> None:
+def test_compiled_stage_carries_canonical_module_and_metric_loads_it(tmp_path: Path, fake_gh: FakeGh,) -> None:
     """Compiled stage root carries the canonical verifier_core.py and the rendered
     metric loads it end-to-end (reuses this module's `_seed_ready_workspace` +
     `_compile` compiled-build fixture pattern)."""
@@ -1561,19 +1348,14 @@ def test_compiled_stage_carries_canonical_module_and_metric_loads_it(
     lock = json.loads((stage / "benchmark.lock.json").read_text())
     assert "metric.py" in lock["files"] and "verifier_core.py" in lock["files"]
     # lock hash agrees with the deployed bytes
-    assert lock["files"]["verifier_core.py"] == hashlib.sha256(
-        (stage / "verifier_core.py").read_bytes()
-    ).hexdigest()
+    assert lock["files"]["verifier_core.py"] == hashlib.sha256((stage / "verifier_core.py").read_bytes()).hexdigest()
     # rendered metric runs end-to-end via uv against the colocated module
     rows = stage / "rewards.jsonl"
-    rows.write_text(
-        json.dumps({"reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
+    rows.write_text(json.dumps({"reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
                     "verifier_error": 0, "clean_task": 1, "clean_pass": 1}) + "\n"
     )
     out = tmp_path / "m.json"
-    proc = subprocess.run(
-        ["uv", "run", "--script", str(stage / "metric.py"),
-         "-i", str(rows), "-o", str(out)],
+    proc = subprocess.run(["uv", "run", "--script", str(stage / "metric.py"), "-i", str(rows), "-o", str(out)],
         capture_output=True, text=True, timeout=120)
     assert proc.returncode == 0, proc.stderr
     assert json.loads(out.read_text())["total_tp"] == 1

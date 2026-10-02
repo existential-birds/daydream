@@ -34,8 +34,7 @@ from daydream_review.taskset import load_manifest
 from images import build_images
 
 DOCKER_REQUIRED = pytest.mark.skipif(
-    not docker_daemon_is_available(),
-    reason="docker is not installed or the daemon is unavailable",
+    not docker_daemon_is_available(), reason="docker is not installed or the daemon is unavailable",
 )
 
 FIXTURE_IMAGE = "daydream-rl/fixture"
@@ -47,22 +46,16 @@ def _build(base_image: str, *args: str, slug: str = FIXTURE_SLUG) -> subprocess.
     """Build the repo image for ``slug`` (the fixture by default); ``base_image`` owns the base."""
     return subprocess.run(
         ["uv", "run", "python", "images/build_images.py", "--only", slug, "--no-base", base_image, *args],
-        cwd=PROJECT_ROOT,
-        capture_output=True,
-        text=True,
-        check=False,
+        cwd=PROJECT_ROOT, capture_output=True, text=True, check=False,
     )
 
 
 def _tags() -> set[str]:
     listed = subprocess.run(
-        ["docker", "images", f"{FIXTURE_IMAGE}", "--format", "{{.Repository}}:{{.Tag}}"],
-        capture_output=True,
-        text=True,
-        check=False,
+        ["docker", "images", f"{FIXTURE_IMAGE}", "--format", "{{.Repository}}:{{.Tag}}"], capture_output=True,
+        text=True, check=False,
     )
     return {line.strip() for line in listed.stdout.splitlines() if line.strip()}
-
 
 MANIFEST = PROJECT_ROOT / "images" / "manifest.toml"
 REFERENCE_IMAGE = "daydream-rl/itsdangerous"
@@ -94,20 +87,9 @@ def _write_manifest(path: Path, entries: list[tuple[str, list[tuple[int, str, st
     return path
 
 
-@pytest.mark.parametrize(
-    "argv,expected_stderr",
-    [
-        pytest.param(
-            ["--red", "--base-only"],
-            "--red cannot be combined with --base-only",
-            id="base-only",
-        ),
-        pytest.param(
-            [
-                "--red",
-                "--only",
-                REFERENCE_SLUG,
-            ],
+@pytest.mark.parametrize("argv,expected_stderr",
+    [pytest.param(["--red", "--base-only"], "--red cannot be combined with --base-only", id="base-only"),
+        pytest.param(["--red", "--only", REFERENCE_SLUG],
             "--red requires at least one selected fixture PR backed by fixture://daydream-rl-fixture",
             id="non-fixture-only",
         ),
@@ -127,7 +109,6 @@ def test_red_rejects_invocations_without_fixture(
     assert captured.out == ""
     assert captured.err == f"{expected_stderr}\n"
 
-
 def test_no_base_requires_immutable_base_identity() -> None:
     """A --no-base snapshot build needs an explicit immutable base identity (status 2)."""
     # Missing value: argparse refuses the invocation before any build.
@@ -139,10 +120,7 @@ def test_no_base_requires_immutable_base_identity() -> None:
     status = build_images.main(["--no-base", build_images.BASE_LATEST])
     assert status == 2
 
-
-def test_no_base_requires_the_base_image_to_exist(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_no_base_requires_the_base_image_to_exist(monkeypatch: pytest.MonkeyPatch,) -> None:
     """A well-formed but locally absent --no-base identity fails fast (status 2).
 
     It must never reach a per-repo build: the failure is a configuration error
@@ -156,13 +134,10 @@ def test_no_base_requires_the_base_image_to_exist(
     assert status == 2
     assert not built, "an absent base image must be refused before any repo build"
 
-
 def test_immutable_base_image_accepts_only_versioned_identities() -> None:
     """The validator accepts versioned tags/digests; aliases and junk are refused."""
     digest_hex = "a" * 64
-    accepted = [
-        "daydream-rl/base:v1.2.3",
-        "daydream-rl/base:1.2.3",
+    accepted = ["daydream-rl/base:v1.2.3", "daydream-rl/base:1.2.3",
         "daydream-rl/base:v0.1.2-3-g5ce4c0e-dirty",  # git describe output
         f"daydream-rl/base@sha256:{digest_hex}",
         "daydream-rl/base:r2d2",  # Docker-grammar tag containing a digit
@@ -172,9 +147,7 @@ def test_immutable_base_image_accepts_only_versioned_identities() -> None:
     rejected = [
         build_images.BASE_LATEST,           # the mutable alias
         "daydream-rl/base:stable",          # unversioned aliases
-        "daydream-rl/base:dev",
-        "daydream-rl/base:nightly",
-        "daydream-rl/base:main",
+        "daydream-rl/base:dev", "daydream-rl/base:nightly", "daydream-rl/base:main",
         "daydream-rl/base:-foo",            # docker grammar: leading dash
         "daydream-rl/base:foo/bar",         # docker grammar: slash
         "daydream-rl/base:has space",       # docker grammar: whitespace
@@ -188,7 +161,6 @@ def test_immutable_base_image_accepts_only_versioned_identities() -> None:
         assert build_images._immutable_base_image(value) == value, value
     for value in rejected:
         assert build_images._immutable_base_image(value) is None, value
-
 
 def test_build_base_selects_the_versioned_tag_not_the_alias(monkeypatch: pytest.MonkeyPatch) -> None:
     """_build_base returns the immutable versioned tag by shape, never by position."""
@@ -206,20 +178,14 @@ def test_build_base_selects_the_versioned_tag_not_the_alias(monkeypatch: pytest.
     monkeypatch.setattr(build_images, "build_base_image", lambda: [build_images.BASE_LATEST])
     assert build_images._build_base() == (1, None)
 
-
-def test_main_uses_immutable_base_for_repository_builds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_main_uses_immutable_base_for_repository_builds(monkeypatch: pytest.MonkeyPatch,) -> None:
     """Fresh and --no-base paths both pass exactly one immutable base to every repo build."""
     versioned = "daydream-rl/base:v1.2.3"
     digest = "daydream-rl/base@sha256:" + "a" * 64
 
     received: list[str] = []
 
-    def _record(
-        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
-        mirror: Path,
-    ) -> str:
+    def _record(entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool, mirror: Path,) -> str:
         received.append(base_image)
         return f"{entry.image}:{head_sha[:12]}"
 
@@ -240,10 +206,7 @@ def test_main_uses_immutable_base_for_repository_builds(
     # The mutable alias is never selected for a snapshot build.
     assert build_images.BASE_LATEST not in received
 
-
-def test_main_acquires_upstream_mirror_once_per_slug(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_main_acquires_upstream_mirror_once_per_slug(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Two same-slug PR snapshots in one main() invocation acquire the upstream
     mirror exactly once — the second PR hits the per-slug mirror cache instead
     of re-cloning."""
@@ -256,10 +219,7 @@ def test_main_acquires_upstream_mirror_once_per_slug(
         if cmd[:2] == ["git", "clone"] and "--mirror" in cmd:
             clones.append(cmd[3])
 
-    def _record(
-        entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool,
-        mirror: Path,
-    ) -> str:
+    def _record(entry: Any, *, head_sha: str, base_sha: str, base_image: str, red: bool, mirror: Path,) -> str:
         del base_sha, base_image, red, mirror  # the tag only depends on these two
         return f"{entry.image}:{head_sha[:12]}"
 
@@ -268,17 +228,8 @@ def test_main_acquires_upstream_mirror_once_per_slug(
     # path, never the network), so only a network clone_url can pin the
     # once-per-slug mirror cache. The SHAs are synthetic — _stream and
     # build_repo_image are faked, so no checkout ever happens.
-    manifest = _write_manifest(
-        tmp_path / "manifest-two-pr-network.toml",
-        [
-            (
-                REFERENCE_SLUG,
-                [
-                    (2, "1" * 40, "2" * 40),
-                    (1, "3" * 40, "4" * 40),
-                ],
-            )
-        ],
+    manifest = _write_manifest(tmp_path / "manifest-two-pr-network.toml",
+        [(REFERENCE_SLUG, [(2, "1" * 40, "2" * 40), (1, "3" * 40, "4" * 40)])],
     )
 
     monkeypatch.setattr(build_images, "_build_base", lambda: (0, "daydream-rl/base:v1.2.3"))
@@ -294,7 +245,6 @@ def test_main_acquires_upstream_mirror_once_per_slug(
         f"expected one upstream mirror acquisition ({upstream_clone_url}), got {clones}"
     )
 
-
 def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
     """repo.Dockerfile must declare ARG BASE_IMAGE with no mutable default."""
     text = (PROJECT_ROOT / "images" / "repo.Dockerfile").read_text(encoding="utf-8")
@@ -308,7 +258,6 @@ def test_repo_dockerfile_requires_an_immutable_base_image_arg() -> None:
     # the single source of truth in build_images.py, so a grammar change cannot
     # leave this Dockerfile silently out of date.
     assert build_images.IMMUTABLE_BASE_FORMAT in text
-
 
 @pytest.mark.slow
 @DOCKER_REQUIRED
@@ -333,10 +282,8 @@ def test_green_baseline_gate_fails_the_build_on_a_red_suite(base_image: str) -> 
     with tempfile.TemporaryDirectory(prefix="daydream-rl-redhead-") as tmp:
         red_head = build_fixture_repo(Path(tmp) / "repo", red=True).pr2_head_sha
     red_tag = f"{FIXTURE_IMAGE}:{red_head[:12]}"
-    assert red_tag not in _tags(), (
-        f"a tag was published for the red baseline: {red_tag} (have {_tags()})"
+    assert red_tag not in _tags(), (f"a tag was published for the red baseline: {red_tag} (have {_tags()})"
     )
-
 
 @pytest.mark.slow
 @DOCKER_REQUIRED
@@ -349,21 +296,15 @@ def test_green_baseline_builds_and_bakes_the_checkout(base_image: str) -> None:
     tag = f"{FIXTURE_IMAGE}:{'dd5245c87c336bcdbc6401aa78b387ffbc474d41'[:12]}"
     assert tag in _tags(), f"{tag} not built; have {_tags()}"
 
-    probe = subprocess.run(
-        [
-            "docker", "run", "--rm", tag, "sh", "-c",
+    probe = subprocess.run(["docker", "run", "--rm", tag, "sh", "-c",
             "cd /work/repo && git rev-parse HEAD && git remote get-url origin && python -m unittest discover -q",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+        ], capture_output=True, text=True, check=False,
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
     assert "dd5245c87c336bcdbc6401aa78b387ffbc474d41" in probe.stdout
     # origin is the in-container mirror, so daydream's terminal push stays inside
     # the container and no rollout needs a credential.
     assert "/srv/mirror.git" in probe.stdout
-
 
 def test_reference_manifest_entry_consumes_its_committed_lock() -> None:
     """The itsdangerous entry installs strictly from its committed uv.lock."""
@@ -375,14 +316,12 @@ def test_reference_manifest_entry_consumes_its_committed_lock() -> None:
     assert 'test_command = "/opt/repo-venv/bin/python -m pytest -q"' in entry
     assert "pip install" not in entry
 
-
 def test_fixture_manifest_entry_stays_dependency_free() -> None:
     """The deterministic fixture entry is untouched: no setup, its unittest command."""
     text = MANIFEST.read_text(encoding="utf-8")
     head = text[: text.index('[repos."pallets/itsdangerous"]')]
     assert 'setup_cmds = []' in head
     assert 'test_command = "python -m unittest discover -q"' in head
-
 
 @pytest.mark.slow
 @DOCKER_REQUIRED
@@ -397,8 +336,7 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
     # It also pins the editable-install invariant: the package under test must
     # resolve from the baked /work/repo checkout, not a venv copy, so the rollout
     # re-run in suite_non_regression exercises the agent's edits rather than stale code.
-    probe = subprocess.run(
-        ["docker", "run", "--rm", REFERENCE_TAG, "sh", "-c",
+    probe = subprocess.run(["docker", "run", "--rm", REFERENCE_TAG, "sh", "-c",
          "test -x /opt/repo-venv/bin/python && /opt/repo-venv/bin/python -c '"
          "import pytest, freezegun; "
          "import itsdangerous; "
@@ -406,7 +344,6 @@ def test_reference_image_builds_with_locked_dependencies(base_image: str) -> Non
         capture_output=True, text=True, check=False,
     )
     assert probe.returncode == 0, probe.stdout + probe.stderr
-
 
 @pytest.mark.slow
 @DOCKER_REQUIRED
@@ -432,10 +369,7 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
     tag = f"{build_images.BASE_REPOSITORY}:warmhost-{uuid.uuid4().hex[:8]}"
     try:
         result = subprocess.run(
-            build_images._base_build_cmd(wheel, [tag], no_cache=True),
-            cwd=PROJECT_ROOT,
-            capture_output=True,
-            text=True,
+            build_images._base_build_cmd(wheel, [tag], no_cache=True), cwd=PROJECT_ROOT, capture_output=True, text=True,
             check=False,
         )
         combined = result.stdout + result.stderr
@@ -446,17 +380,13 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         # re-run (a failed gpg verify or checksum mismatch would have died the
         # build).
         probe = subprocess.run(
-            ["docker", "image", "history", tag, "--no-trunc", "--format", "{{.CreatedBy}}"],
-            capture_output=True,
-            text=True,
-            check=False,
+            ["docker", "image", "history", tag, "--no-trunc", "--format", "{{.CreatedBy}}"], capture_output=True,
+            text=True, check=False,
         )
         assert probe.returncode == 0, f"throwaway image {tag} not produced"
-        assert "gpg --batch --verify" in probe.stdout, (
-            "built image lacks the gpg-verify hardening layer"
+        assert "gpg --batch --verify" in probe.stdout, ("built image lacks the gpg-verify hardening layer"
         )
-        assert "sha256sum -c" in probe.stdout, (
-            "built image lacks the checksum-verification hardening layer"
+        assert "sha256sum -c" in probe.stdout, ("built image lacks the checksum-verification hardening layer"
         )
         # The privilege-drop seam must actually work in the built image, not
         # just be declared: the image's default user stays root, and the
@@ -464,12 +394,10 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         # user). A missing or non-executable wrapper is exactly the
         # rollout-time failure this probe catches at build time.
         default_uid = subprocess.run(
-            ["docker", "run", "--rm", tag, "id", "-u"],
-            capture_output=True, text=True, check=False,
+            ["docker", "run", "--rm", tag, "id", "-u"], capture_output=True, text=True, check=False,
         )
         dropped_uid = subprocess.run(
-            ["docker", "run", "--rm", tag, "run-as-agent", "id", "-u"],
-            capture_output=True, text=True, check=False,
+            ["docker", "run", "--rm", tag, "run-as-agent", "id", "-u"], capture_output=True, text=True, check=False,
         )
         assert default_uid.returncode == 0, default_uid.stdout + default_uid.stderr
         assert dropped_uid.returncode == 0, dropped_uid.stdout + dropped_uid.stderr
@@ -477,7 +405,6 @@ def test_base_layer_hardening_executes_on_warm_host() -> None:
         assert dropped_uid.stdout.strip() != "0", "run-as-agent must drop off root"
     finally:
         subprocess.run(["docker", "rmi", tag], capture_output=True, text=True, check=False)
-
 
 @pytest.mark.slow
 @DOCKER_REQUIRED
@@ -546,23 +473,20 @@ def test_real_docker_deep_flow_fix_pipeline_write_as_agent(base_image: str) -> N
         # Same container: prove the write reached the in-container mirror.
         "git --git-dir=/srv/mirror.git show main:calc.py"
     )
-    probe = subprocess.run(
-        ["docker", "run", "--rm", "-i", tag, "sh", "-c", script],
+    probe = subprocess.run(["docker", "run", "--rm", "-i", tag, "sh", "-c", script],
         input=fix_patch, capture_output=True, text=True, check=False,
     )
     # The write reached the in-container origin mirror: the same container that
     # pushed now reads main:calc.py back out of /srv/mirror.git and it carries
     # the agent's fix (each docker run --rm starts from the baked image, so the
     # mirror state must be verified inside the one container that wrote it).
-    assert probe.returncode == 0, (
-        "real docker fix-pipeline write failed as agent uid: "
+    assert probe.returncode == 0, ("real docker fix-pipeline write failed as agent uid: "
         f"{probe.stdout}{probe.stderr}"
     )
     assert "# fixed" in probe.stdout, (
         "the agent's fix did not reach the in-container origin mirror: "
         f"{probe.stdout}{probe.stderr}"
     )
-
 
 def test_docker_required_gates_on_daemon_reachability() -> None:
     """The per-test Docker skip must gate on daemon reachability, not client presence."""
@@ -571,8 +495,7 @@ def test_docker_required_gates_on_daemon_reachability() -> None:
     assert "docker_daemon_is_available" in vars(module), "reachability predicate import missing"
     # ...and the stale client-presence probe is gone.
     assert "shutil" not in vars(module), "stale shutil.which probe remains"
-    assert (
-        DOCKER_REQUIRED.mark.kwargs["reason"]
+    assert (DOCKER_REQUIRED.mark.kwargs["reason"]
         == "docker is not installed or the daemon is unavailable"
     )
 
@@ -580,8 +503,7 @@ def test_docker_required_gates_on_daemon_reachability() -> None:
 def _slow_test_names() -> list[str]:
     """Names of this module's @pytest.mark.slow tests, derived from the marker
     itself so a newly added slow test is covered without editing a name list."""
-    return sorted(
-        name
+    return sorted(name
         for name, obj in vars(sys.modules[__name__]).items()
         if any(getattr(m, "name", None) == "slow" for m in getattr(obj, "pytestmark", ()))
     )
@@ -604,59 +526,36 @@ def test_docker_skip_is_per_test_not_module_wide() -> None:
         test_func = getattr(module, name)
         marks = getattr(test_func, "pytestmark", [])
         assert marks, f"{name} has no pytestmark (would not skip)"
-        assert any(getattr(m, "name", None) == "skipif" for m in marks), (
-            f"{name} missing a skipif marker"
+        assert any(getattr(m, "name", None) == "skipif" for m in marks), (f"{name} missing a skipif marker"
         )
 
-
-@pytest.mark.parametrize(
-    "required_literal",
-    [
-        pytest.param(
-            "FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
+@pytest.mark.parametrize("required_literal",
+    [pytest.param("FROM python:3.12.13-slim@sha256:229a2c5bfa27522db7815ea81f9bed70af17ccb9de9fc7ad142b1877b5830d36",
             id="python-base-index-digest",
         ),
-        pytest.param(
-            (
-                "FROM ghcr.io/astral-sh/uv:0.11.29@"
+        pytest.param(("FROM ghcr.io/astral-sh/uv:0.11.29@"
                 "sha256:eb2843a1e56fd9e30c7276ce1a52cba86e64c7b385f5e3279a0e08e02dd058fc AS uv"
-            ),
-            id="uv-image-digest-pin",
-        ),
-        pytest.param("COPY --from=uv /uv /uvx /bin/", id="uv-copy-from-image"),
+            ), id="uv-image-digest-pin",
+        ), pytest.param("COPY --from=uv /uv /uvx /bin/", id="uv-copy-from-image"),
         pytest.param("ARG CLAUDE_CODE_VERSION=2.1.214", id="claude-version"),
-        pytest.param(
-            "release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE",
-            id="claude-release-fingerprint",
-        ),
-        pytest.param(
-            (
-                "ARG CODEX_VERSION=0.145.0",
-                (
-                    "amd64) target=x86_64-unknown-linux-musl; "
+        pytest.param("release_fingerprint=31DDDE24DDFAB679F42D7BD2BAA929FF1A7ECACE", id="claude-release-fingerprint"),
+        pytest.param(("ARG CODEX_VERSION=0.145.0",
+                ("amd64) target=x86_64-unknown-linux-musl; "
                     "checksum=bfaf13c9ba34f2ad764e4a916c49cf7177aeba329cf0f719e2227566fc8d662a ;;"
                 ),
-                (
-                    "arm64) target=aarch64-unknown-linux-musl; "
+                ("arm64) target=aarch64-unknown-linux-musl; "
                     "checksum=d384f90bc842450b42bd675feef06a12a46a3b1ca97efcb22566b270e4a11227 ;;"
                 ),
-            ),
-            id="codex-version-and-checksums",
+            ), id="codex-version-and-checksums",
         ),
-        pytest.param(
-            (
-                "ARG NODE_VERSION=22.17.1",
+        pytest.param(("ARG NODE_VERSION=22.17.1",
                 "amd64) node_arch=x64; checksum=cfb6ac0cf339825fe36efd1f18a79016b02aca19fbfa6c9547c57e27dc09f6ea ;;",
                 "arm64) node_arch=arm64; checksum=f53510706998cf044f634190416f0588e7e1937aecea938768952e0f0ac1f41b ;;",
-            ),
-            id="node-version-and-checksums",
-        ),
-        pytest.param("ARG PI_VERSION=0.82.1", id="pi-version"),
+            ), id="node-version-and-checksums",
+        ), pytest.param("ARG PI_VERSION=0.82.1", id="pi-version"),
     ],
 )
-def test_base_dockerfile_pins_immutable_versions_and_checksums(
-    required_literal: str | tuple[str, ...],
-) -> None:
+def test_base_dockerfile_pins_immutable_versions_and_checksums(required_literal: str | tuple[str, ...],) -> None:
     """M1/M2/M3/M4 pin contract: every immutable identifier is present verbatim.
 
     Each version ARG that has inline checksums is bundled into a single
@@ -674,17 +573,12 @@ def test_base_dockerfile_pins_immutable_versions_and_checksums(
         pos = text.find(required_literal[0])
         for literal in required_literal[1:]:
             nxt = text.find(literal, pos + 1)
-            assert nxt > pos, (
-                f"checksum {literal!r} must appear after {required_literal[0]!r}"
+            assert nxt > pos, (f"checksum {literal!r} must appear after {required_literal[0]!r}"
             )
             pos = nxt
 
-
-@pytest.mark.parametrize(
-    "marker_chain",
-    [
-        pytest.param(
-            (
+@pytest.mark.parametrize("marker_chain",
+    [pytest.param((
                 "claude-code.asc",        # release-key download
                 '!= "${release_fingerprint}"',  # fingerprint-mismatch guard (real `!=` on the pin)
                 "--import",               # gpg signing-key import
@@ -694,32 +588,25 @@ def test_base_dockerfile_pins_immutable_versions_and_checksums(
                 '"checksum"',             # manifest checksum extraction
                 "sha256sum -c -",         # binary checksum verification
                 "install -D -m 0755",     # install onto PATH
-            ),
-            id="claude",
+            ), id="claude",
         ),
-        pytest.param(
-            (
+        pytest.param((
                 "codex-${target}.tar.gz",  # archive download
                 "sha256sum -c -",          # verify
                 "tar -xzf",                # extract
-            ),
-            id="codex",
+            ), id="codex",
         ),
-        pytest.param(
-            (
+        pytest.param((
                 "node-v${NODE_VERSION}-linux-${node_arch}.tar.gz",  # archive download
                 "sha256sum -c -",                                   # verify
                 "tar -xzf",                                         # extract
-            ),
-            id="node",
+            ), id="node",
         ),
-        pytest.param(
-            (
+        pytest.param((
                 "pi-coding-agent-${PI_VERSION}.tgz",  # pi package tarball download
                 "sha256sum -c -",                     # verify
                 "npm install -g",                     # install from verified tarball
-            ),
-            id="pi",
+            ), id="pi",
         ),
     ],
 )
@@ -733,12 +620,8 @@ def test_base_dockerfile_verifies_downloads_before_use(marker_chain: tuple[str, 
         assert nxt > pos, f"{marker!r} must appear after {text[pos : pos + 40]!r}"
         pos = nxt
 
-
-@pytest.mark.parametrize(
-    "forbidden_literal",
-    [
-        pytest.param("https://claude.ai/install.sh", id="remote-installer"),
-        pytest.param("| bash", id="bash-pipe"),
+@pytest.mark.parametrize("forbidden_literal",
+    [pytest.param("https://claude.ai/install.sh", id="remote-installer"), pytest.param("| bash", id="bash-pipe"),
         pytest.param("| tar", id="tar-pipe"),
     ],
 )
@@ -747,10 +630,7 @@ def test_base_dockerfile_does_not_pipe_downloads_into_shell_or_tar(forbidden_lit
     text = BASE_DOCKERFILE.read_text(encoding="utf-8")
     assert forbidden_literal not in text, f"Dockerfile must not contain {forbidden_literal!r}"
 
-
-def test_build_emits_canonical_argv_for_all_call_sites(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_build_emits_canonical_argv_for_all_call_sites(monkeypatch: pytest.MonkeyPatch,) -> None:
     """F1: _build is the single helper; slug defaults to the fixture, and the
     reference build passes the reference slug through the same argv."""
     captured: list[list[str]] = []
@@ -767,8 +647,7 @@ def test_build_emits_canonical_argv_for_all_call_sites(
     # the visible invariant, not two verbatim argv copies.
     prefix = ["uv", "run", "python", "images/build_images.py", "--only"]
     cases: list[tuple[tuple[str, ...], str | None, list[str]]] = [
-        ((), None, [FIXTURE_SLUG, "--no-base", base]),
-        (("--red",), None, [FIXTURE_SLUG, "--no-base", base, "--red"]),
+        ((), None, [FIXTURE_SLUG, "--no-base", base]), (("--red",), None, [FIXTURE_SLUG, "--no-base", base, "--red"]),
         ((), REFERENCE_SLUG, [REFERENCE_SLUG, "--no-base", base]),
     ]
     for extra_args, slug, expected_tail in cases:
@@ -777,7 +656,6 @@ def test_build_emits_canonical_argv_for_all_call_sites(
         assert captured[-1] == prefix + expected_tail, captured[-1]
 
     assert "_build_reference" not in vars(sys.modules[__name__])
-
 
 def test_run_as_agent_wrapper_drops_privilege() -> None:
     """The wrapper setprivs down to the agent identity (image contract). Root
@@ -791,7 +669,6 @@ def test_run_as_agent_wrapper_drops_privilege() -> None:
     assert "setpriv" in text, "wrapper must drop privileges via setpriv"
     assert "agent" in text, "wrapper must target the non-root agent user"
 
-
 def test_base_image_has_distinct_agent_identity() -> None:
     """base.Dockerfile declares non-root agent and verifier users, an
     agent-owned archive, and the explicit setpriv provider (util-linux)."""
@@ -801,7 +678,6 @@ def test_base_image_has_distinct_agent_identity() -> None:
     assert "agent" in dockerfile
     assert "verifier" in dockerfile  # read-only verifier identity provisioned
     assert "chown" in dockerfile and "agent:agent" in dockerfile  # /rollout (incl. archive) is agent-owned
-
 
 def test_repo_image_chowns_checkout_to_agent() -> None:
     """repo.Dockerfile must hand both trees to the agent uid in one layer.
@@ -824,7 +700,6 @@ def test_repo_image_chowns_checkout_to_agent() -> None:
     assert chown_layer in dockerfile
     assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && sh /tmp/setup.sh")
     assert dockerfile.index(chown_layer) > dockerfile.index("RUN cd /work/repo && ${TEST_COMMAND}")
-
 
 def test_configs_and_pyproject_reflect_the_new_contract() -> None:
     docker = (PROJECT_ROOT / "configs" / "eval-docker.toml").read_text(encoding="utf-8")

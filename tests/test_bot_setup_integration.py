@@ -21,11 +21,7 @@ from tests.harness.scripts import cli_main
 
 
 def _install_workflows(
-    repo: Path,
-    *,
-    drift: tuple[str, str, str] | None = None,
-    unique: bool = True,
-    message: str = "add workflows",
+    repo: Path, *, drift: tuple[str, str, str] | None = None, unique: bool = True, message: str = "add workflows",
     push: bool = True,
 ) -> Path:
     """Write every packaged workflow template into *repo*, optionally applying
@@ -54,11 +50,9 @@ def _install_workflows(
         _git(repo, "push", "origin", "main")
     return workflows_dir
 
-
 def test_callback_listener_captures_code_then_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
     """The callback seam exchanges the manifest code for creds + slug."""
-    monkeypatch.setattr(
-        "daydream.bot_setup.exchange_manifest_code",
+    monkeypatch.setattr("daydream.bot_setup.exchange_manifest_code",
         lambda repo, code, **kwargs: (AppCredentials(7, "-----BEGIN-----\n"), "acme-bot"),
     )
     listener = bot_setup._ManifestListener(repo_dir=Path("."), org=None)
@@ -67,21 +61,16 @@ def test_callback_listener_captures_code_then_exchanges(monkeypatch: pytest.Monk
     assert creds.private_key == "-----BEGIN-----\n"
     assert slug == "acme-bot"
 
-
 def test_manifest_events_exclude_pull_request() -> None:
     """The App subscribes only to events consumed by approval-gated workflows."""
     assert bot_setup._MANIFEST_EVENTS == ("issue_comment", "workflow_run")
 
-
 def test_app_manifest_requests_issue_write_for_improve_publication() -> None:
-    manifest = bot_setup._manifest_payload(
-        redirect_url="http://localhost:8080/callback",
-    )
+    manifest = bot_setup._manifest_payload(redirect_url="http://localhost:8080/callback",)
 
     permissions = manifest["default_permissions"]
     assert isinstance(permissions, dict)
     assert permissions["issues"] == "write"
-
 
 def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch: pytest.MonkeyPatch) -> None:
     """The seam threads the listener's repo_dir and the callback code unchanged."""
@@ -98,7 +87,6 @@ def test_callback_listener_passes_repo_dir_and_code_through(monkeypatch: pytest.
     assert captured["repo"] == Path("/tmp/repo")
     assert captured["code"] == "codeABC"
     assert creds.app_id == 42 and slug == "slug-x"
-
 
 def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch: pytest.MonkeyPatch) -> None:
     """An empty/missing callback code (user declined) aborts with a clear error."""
@@ -120,28 +108,18 @@ def test_missing_code_raises_cancelled_and_never_exchanges(monkeypatch: pytest.M
 
 # --- Task 7: land_workflows -------------------------------------------------
 
-
-def test_land_workflows_writes_three_files_on_branch_and_opens_pr(
-    fake_gh: FakeGh, repo_with_origin: Path
-) -> None:
+def test_land_workflows_writes_three_files_on_branch_and_opens_pr(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """land_workflows copies the templates on a new branch, pushes, opens a PR."""
     fake_gh.set_response("pr-list", value=[])
     fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/3")
     url = bot_setup.land_workflows(repo_with_origin, branch="daydream/setup-bot")
     wf = repo_with_origin / ".github/workflows"
-    assert {p.name for p in wf.glob("*.yml")} == {
-        "daydream-review.yml",
-        "daydream-command.yml",
-        "daydream-post.yml",
-    }
+    assert {p.name for p in wf.glob("*.yml")} == {"daydream-review.yml", "daydream-command.yml", "daydream-post.yml"}
     assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
     assert git_ops.current_branch(repo_with_origin) != git_ops.default_branch(repo_with_origin)
     assert url == "https://github.com/o/r/pull/3"
 
-
-def test_land_workflows_idempotent_returns_sentinel_when_all_present(
-    fake_gh: FakeGh, repo_with_origin: Path
-) -> None:
+def test_land_workflows_idempotent_returns_sentinel_when_all_present(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """If all three templates already exist verbatim, skip branch/PR and signal it.
 
     The "already installed" sentinel must be distinguishable from a PR URL so
@@ -165,7 +143,6 @@ def test_land_workflows_idempotent_returns_sentinel_when_all_present(
 
 # --- Task 8: run_verify (the doctor) ----------------------------------------
 
-
 def test_verify_reports_missing_secret_with_remediation(fake_gh: FakeGh, git_repo: Path) -> None:
     """N=1 missing secret → ok is False and the failed check names it + remediation."""
     fake_gh.serve_secret_list(["DAYDREAM_APP_ID", "ANTHROPIC_API_KEY"])  # PRIVATE_KEY absent
@@ -176,11 +153,8 @@ def test_verify_reports_missing_secret_with_remediation(fake_gh: FakeGh, git_rep
     failed = [c for c in result.checks if not c.passed]
     assert any("DAYDREAM_APP_PRIVATE_KEY" in c.detail for c in failed)
 
-
 def test_verify_healthy_install_passes_all_checks(
-    fake_gh: FakeGh,
-    repo_with_origin: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A complete install (creds + secrets + var + installed App + workflows) → ok is True.
 
@@ -214,20 +188,16 @@ def test_verify_healthy_install_passes_all_checks(
     # The App-installed check actually consulted the installations endpoint.
     assert fake_gh.calls("GET", "/app/installations")
 
-
 def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """A present but stale workflow — one that lost the approval gate — fails the doctor."""
 
-    _install_workflows(
-        repo_with_origin,
+    _install_workflows(repo_with_origin,
         # Pre-gate shape: auto-triggers on PR open instead of binding an
         # approved head, re-opening the unapproved-review hole.
-        drift=(
-            "daydream-review.yml",
+        drift=("daydream-review.yml",
             "on:\n  workflow_dispatch:",
             "on:\n  pull_request:\n    types: [opened, ready_for_review]\n  workflow_dispatch:",
-        ),
-        message="add stale workflows",
+        ), message="add stale workflows",
     )
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
@@ -240,21 +210,14 @@ def test_verify_rejects_outdated_workflow_file(fake_gh: FakeGh, repo_with_origin
     assert "Out of date workflow file(s): .github/workflows/daydream-review.yml" in workflows_check.detail
     assert "Missing workflow file(s)" not in workflows_check.detail
 
-
-@pytest.mark.parametrize(
-    ("target", "old", "new"),
-    [
-        pytest.param(
-            "daydream-review.yml",
+@pytest.mark.parametrize(("target", "old", "new"),
+    [pytest.param("daydream-review.yml",
             "        type: choice\n        options: [review, sequence, flowchart]\n",
             "        type: string\n",
             id="unbounded-command-input",
-        ),
-        pytest.param(
-            "daydream-command.yml",
+        ), pytest.param("daydream-command.yml",
             '            -f approved_head_sha="$HEAD_SHA" \\\n',
-            "",
-            id="head-binding-removed",
+            "", id="head-binding-removed",
         ),
     ],
 )
@@ -269,9 +232,7 @@ def test_verify_rejects_workflow_that_loosens_the_command_contract(
     stops binding the resolved live head to ``approved_head_sha``.
     """
 
-    _install_workflows(
-        repo_with_origin, drift=(target, old, new), message="add loosened workflows"
-    )
+    _install_workflows(repo_with_origin, drift=(target, old, new), message="add loosened workflows")
 
     result = bot_setup.run_verify(repo_with_origin, scope=bot_setup.Scope(repo="o/r"))
     workflows_check = next(check for check in result.checks if check.name == "workflows")
@@ -280,20 +241,15 @@ def test_verify_rejects_workflow_that_loosens_the_command_contract(
     assert f"Out of date workflow file(s): .github/workflows/{target}" in workflows_check.detail
     assert "Missing workflow file(s)" not in workflows_check.detail
 
-
-def test_verify_accepts_customized_workflow_with_intact_gate(
-    fake_gh: FakeGh, repo_with_origin: Path
-) -> None:
+def test_verify_accepts_customized_workflow_with_intact_gate(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     """A divergent-but-gated workflow (e.g. a different backend) passes with a warning."""
     fake_gh.serve_secret_list(list(config.SETUP_SECRET_NAMES))
     fake_gh.serve_variable_list([config.BOT_HANDLE_VAR])
 
-    _install_workflows(
-        repo_with_origin,
+    _install_workflows(repo_with_origin,
         # Backend-variant customization: the gate (approved_head_sha input,
         # no pull_request trigger) is intact, credential/backend swapped.
-        drift=("daydream-review.yml", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
-        unique=False,
+        drift=("daydream-review.yml", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"), unique=False,
         message="add customized workflows",
     )
 
@@ -304,20 +260,14 @@ def test_verify_accepts_customized_workflow_with_intact_gate(
     assert "daydream-review.yml" in workflows_check.detail
     assert "intentionally unsupported" in workflows_check.detail
 
-
 def test_land_workflows_warns_before_overwriting_customized_workflow(
-    fake_gh: FakeGh,
-    repo_with_origin: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """land_workflows warns that customization is unsupported before replacing it."""
 
     workflows_dir = _install_workflows(
-        repo_with_origin,
-        drift=("daydream-review.yml", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"),
-        unique=False,
-        message="add customized workflows",
-        push=False,
+        repo_with_origin, drift=("daydream-review.yml", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"), unique=False,
+        message="add customized workflows", push=False,
     )
 
     warnings: list[str] = []
@@ -338,11 +288,8 @@ def test_land_workflows_warns_before_overwriting_customized_workflow(
 
 
 
-
 def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
-    fake_gh: FakeGh,
-    repo_with_origin: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end ``daydream setup`` (full-auto) through cli.main: secrets land, PR opens.
 
@@ -355,8 +302,7 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     """
     pem = generate_rsa_pem()
     monkeypatch.setattr(
-        "daydream.bot_setup.register_app_via_manifest",
-        lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
+        "daydream.bot_setup.register_app_via_manifest", lambda repo, org=None: (AppCredentials(7, pem), "acme-bot"),
     )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant")
     # App already installed on the owner → the Install-click wait is satisfied.
@@ -374,10 +320,7 @@ def test_setup_verb_full_auto_deposits_secrets_and_opens_pr(
     assert len(pr_calls) == 1
     assert git_ops.ref_exists(repo_with_origin, "origin/daydream/setup-bot")
 
-
-def test_land_workflows_pr_lookup_failure_never_creates_duplicate_pr(
-    fake_gh: FakeGh, repo_with_origin: Path
-) -> None:
+def test_land_workflows_pr_lookup_failure_never_creates_duplicate_pr(fake_gh: FakeGh, repo_with_origin: Path) -> None:
     fake_gh.set_response("pr-list", value={"__error__": "authentication required"})
     fake_gh.set_response("pr-create", value="https://github.com/o/r/pull/unsafe")
 
@@ -386,11 +329,8 @@ def test_land_workflows_pr_lookup_failure_never_creates_duplicate_pr(
 
     assert fake_gh.command_calls("pr create") == []
 
-
 def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
-    fake_gh: FakeGh,
-    repo_with_origin: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    fake_gh: FakeGh, repo_with_origin: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No key + a non-interactive stdin → clean pre-flight exit 1, nothing deposited.
 
@@ -415,12 +355,10 @@ def test_setup_fails_cleanly_when_key_absent_and_noninteractive(
     assert register_called is False
     assert fake_gh.secret_set_calls() == []
 
-
 def test_prompt_for_anthropic_key_returns_none_on_non_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     """The prompt seam returns None (never blocks) when stdin is not a TTY."""
     monkeypatch.setattr("daydream.bot_setup.sys.stdin.isatty", lambda: False)
     assert bot_setup._prompt_for_anthropic_key() is None
-
 
 def test_prompt_for_anthropic_key_reads_hidden_input_on_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     """On a TTY the seam returns the hidden-entered key, stripped."""
@@ -428,10 +366,7 @@ def test_prompt_for_anthropic_key_reads_hidden_input_on_tty(monkeypatch: pytest.
     monkeypatch.setattr("daydream.bot_setup.getpass.getpass", lambda prompt="": "  sk-ant-typed  ")
     assert bot_setup._prompt_for_anthropic_key() == "sk-ant-typed"
 
-
-def test_setup_verify_flag_exits_nonzero_when_incomplete(
-    fake_gh: FakeGh, git_repo: Path
-) -> None:
+def test_setup_verify_flag_exits_nonzero_when_incomplete(fake_gh: FakeGh, git_repo: Path) -> None:
     """``daydream setup <dir> --repo o/r --verify`` on an incomplete install exits 1.
 
     No secrets, no variable → the doctor's required checks fail → the handler
@@ -447,24 +382,20 @@ def test_setup_verify_flag_exits_nonzero_when_incomplete(
 
 # --- _bot_handle_for unit tests ---------------------------------------------
 
-
 def test_bot_handle_for_returns_slug_when_slug_is_set() -> None:
     """When a slug is available it takes priority over the scope owner."""
     scope = bot_setup.Scope(repo="owner/repo")
     assert bot_setup._bot_handle_for("acme-bot", scope) == "acme-bot"
-
 
 def test_bot_handle_for_falls_back_to_repo_owner_when_slug_is_none() -> None:
     """With no slug, the owner extracted from the repo slug is used."""
     scope = bot_setup.Scope(repo="owner/repo")
     assert bot_setup._bot_handle_for(None, scope) == "owner"
 
-
 def test_bot_handle_for_falls_back_to_org_when_slug_is_none() -> None:
     """With no slug and an org scope, the org login is used."""
     scope = bot_setup.Scope(org="acme-org")
     assert bot_setup._bot_handle_for(None, scope) == "acme-org"
-
 
 def test_bot_handle_for_returns_slug_over_org_when_slug_is_set() -> None:
     """Slug wins even when the scope is org-scoped."""

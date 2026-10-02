@@ -82,34 +82,18 @@ def _phase_row(markdown: str, label: str) -> str:
 FIXTURE_MODEL_ID = "fixture-sdk-model-id"
 
 
-def _stream(
-    text: str,
-    cost: float,
-    *,
-    input_tokens: int,
-    output_tokens: int,
-    cache_read_input_tokens: int,
+def _stream(text: str, cost: float, *, input_tokens: int, output_tokens: int, cache_read_input_tokens: int,
 ) -> list[Any]:
     """One assistant turn plus its result usage; the shape every test streams."""
-    return [
-        MockAssistantMessage(
-            content=[MockTextBlock(text=text)],
-            model=FIXTURE_MODEL_ID,
-        ),
-        MockResultMessage(
-            total_cost_usd=cost,
-            usage={
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
+    return [MockAssistantMessage(content=[MockTextBlock(text=text)], model=FIXTURE_MODEL_ID,),
+        MockResultMessage(total_cost_usd=cost,
+            usage={"input_tokens": input_tokens, "output_tokens": output_tokens,
                 "cache_read_input_tokens": cache_read_input_tokens,
             },
         ),
     ]
 
-
-async def test_render_uses_real_sdk_model_id_not_backend_alias(
-    tmp_path: Path, patch_sdk: Any
-) -> None:
+async def test_render_uses_real_sdk_model_id_not_backend_alias(tmp_path: Path, patch_sdk: Any) -> None:
     """Bug A: rendered model line must surface the SDK model id.
 
     The real ``AssistantMessage`` has a ``model`` field carrying the actual
@@ -131,8 +115,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
     markdown = render_run_info_block([target_path])
 
     model_line = _line(markdown, "- **Model:**")
-    assert FIXTURE_MODEL_ID in model_line, (
-        f"Bug A: expected real SDK model id {FIXTURE_MODEL_ID!r} in Model line, "
+    assert FIXTURE_MODEL_ID in model_line, (f"Bug A: expected real SDK model id {FIXTURE_MODEL_ID!r} in Model line, "
         f"got: {model_line!r}\n\nFull markdown:\n{markdown}"
     )
     # Exact-line check: real id begins with "claude-", so a substring match on
@@ -141,10 +124,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(
         f"Bug A: Model line is the backend alias instead of the SDK model id: {model_line!r}"
     )
 
-
-async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
-    tmp_path: Path, patch_sdk: Any
-) -> None:
+async def test_render_shows_real_cost_and_tokens_from_sdk_usage(tmp_path: Path, patch_sdk: Any) -> None:
     """Bugs B + C: rollup cost / tokens must reflect SDK usage data.
 
     The renderer aggregates per-step ``Step.metrics``. With Bug B (no
@@ -226,10 +206,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(
             f"  per-step metrics: {per_step_metrics}"
         )
 
-
-async def test_per_phase_rollup_distinguishes_phases(
-    tmp_path: Path, patch_sdk: Any
-) -> None:
+async def test_per_phase_rollup_distinguishes_phases(tmp_path: Path, patch_sdk: Any) -> None:
     """Bug B/C end-to-end: the per-phase breakdown must show one row per phase.
 
     Two separate ``run_agent()`` calls under different phases must produce

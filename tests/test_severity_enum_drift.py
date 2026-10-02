@@ -49,14 +49,9 @@ PATCHED_MODEL_FACING = ["critical", "low", "medium", "high"]
 
 # Presence guard (NOT the discovery mechanism): every schema constant that carried a
 # model-facing severity enum before this change.
-_EXPECTED_ROOTS = frozenset(
-    {
-        "ALTERNATIVE_REVIEW_SCHEMA",
-        "ARBITER_SCHEMA",
-        "MERGED_ITEMS_SCHEMA",
-        "PER_STACK_RECORD_SCHEMA",
-        "SUPERVISE_SCHEMA",
-        "SUPPRESSION_SCHEMA",
+_EXPECTED_ROOTS = frozenset({
+        "ALTERNATIVE_REVIEW_SCHEMA", "ARBITER_SCHEMA", "MERGED_ITEMS_SCHEMA", "PER_STACK_RECORD_SCHEMA",
+        "SUPERVISE_SCHEMA", "SUPPRESSION_SCHEMA",
     }
 )
 
@@ -99,10 +94,7 @@ def _walk(node: Any, path: str, out: list[tuple[str, dict[str, Any]]]) -> None:
 
 # Every module whose public ``*_SCHEMA`` constants carry a model-facing severity enum.
 # One walker and one rebuild template cover them all, so a traversal fix reaches both.
-_MODULES: dict[str, Any] = {
-    "phases": phases,
-    "improve.prompts": improve_prompts,
-}
+_MODULES: dict[str, Any] = {"phases": phases, "improve.prompts": improve_prompts}
 
 
 def _severity_sites(module: Any) -> list[tuple[str, dict[str, Any]]]:
@@ -131,45 +123,34 @@ def _root_of(site: str) -> str:
 
 
 _SITES_BY_MODULE = {key: _severity_sites(module) for key, module in _MODULES.items()}
-_ALL_SITES = [
-    (key, site, fragment)
-    for key, sites in _SITES_BY_MODULE.items()
-    for site, fragment in sites
-]
+_ALL_SITES = [(key, site, fragment) for key, sites in _SITES_BY_MODULE.items() for site, fragment in sites]
 _ALL_SITE_IDS = [f"{key}::{site}" for key, site, _ in _ALL_SITES]
 
 # The phases-only view, kept for the guards that are specific to ``daydream.phases``.
 _SITES = _SITES_BY_MODULE["phases"]
 _SITE_IDS = [site for site, _ in _SITES]
 
-
 def test_severity_sites_are_discovered() -> None:
     """Guard the guard: discovery must not match zero sites, and no known site may vanish."""
     assert _SITES, "no severity-bearing *_SCHEMA discovered — collection is broken"
     assert _EXPECTED_ROOTS <= {_root_of(site) for site in _SITE_IDS}
 
-
 @pytest.mark.parametrize("_key,site,fragment", _ALL_SITES, ids=_ALL_SITE_IDS)
-def test_site_emits_the_frozen_model_facing_order(
-    _key: str, site: str, fragment: dict[str, Any]
-) -> None:
+def test_site_emits_the_frozen_model_facing_order(_key: str, site: str, fragment: dict[str, Any]) -> None:
     assert _levels(fragment) == FROZEN_MODEL_FACING, (
         f"{site} emits {_levels(fragment)}; the frozen model-facing order is {FROZEN_MODEL_FACING}"
     )
 
 
 @pytest.fixture(scope="module")
-def rebuilt_under_patched_declaration(
-    tmp_path_factory: pytest.TempPathFactory,
+def rebuilt_under_patched_declaration(tmp_path_factory: pytest.TempPathFactory,
 ) -> dict[str, dict[str, dict[str, Any]]]:
     """Rebuild every severity-bearing module under the patched declaration, once each."""
     rebuilt: dict[str, dict[str, dict[str, Any]]] = {}
     for key, module in _MODULES.items():
         script = tmp_path_factory.mktemp(f"rebuild-{key}") / "rebuild.py"
         script.write_text(_rebuild_script(module.__name__))
-        proc = subprocess.run(
-            [sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300
-        )
+        proc = subprocess.run([sys.executable, str(script)], cwd=REPO, capture_output=True, text=True, timeout=300)
         assert proc.returncode == 0, proc.stderr
         sites: list[tuple[str, dict[str, Any]]] = []
         for name, schema in json.loads(proc.stdout).items():
@@ -177,12 +158,8 @@ def rebuilt_under_patched_declaration(
         rebuilt[key] = dict(sites)
     return rebuilt
 
-
 @pytest.mark.parametrize("key,site,fragment", _ALL_SITES, ids=_ALL_SITE_IDS)
-def test_site_follows_the_declaration_when_the_declaration_moves(
-    key: str,
-    site: str,
-    fragment: dict[str, Any],
+def test_site_follows_the_declaration_when_the_declaration_moves(key: str, site: str, fragment: dict[str, Any],
     rebuilt_under_patched_declaration: dict[str, dict[str, dict[str, Any]]],
 ) -> None:
     module_sites = rebuilt_under_patched_declaration[key]
@@ -194,51 +171,35 @@ def test_site_follows_the_declaration_when_the_declaration_moves(
         f"cannot follow a later change."
     )
 
-
 def test_supervise_severity_still_accepts_null() -> None:
     fragment = phases.SUPERVISE_SCHEMA["properties"]["verdicts"]["items"]["properties"]["severity"]
     assert _levels(fragment) == FROZEN_MODEL_FACING
     assert {"type": "null"} in fragment["anyOf"]
-
 
 def test_no_two_sites_share_one_enum_list_object() -> None:
     owners = [(_root_of(site), _levels(fragment)) for site, fragment in _SITES]
     shared = len({id(levels) for _, levels in owners}) != len(owners)
     assert not shared, f"severity enum list objects are shared between schemas: {sorted(owners)}"
 
-
-def test_pr_review_severity_breakdown_follows_the_declaration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_pr_review_severity_breakdown_follows_the_declaration(monkeypatch: pytest.MonkeyPatch,) -> None:
     # Declaration reversed: the model-facing order must follow it, so a hand-written
     # tuple at the call site renders "1 high, 1 low" and fails here.
     monkeypatch.setattr(severity, "CANONICAL_LEVELS", ("high", "medium", "low"))
-    classified = _ClassifiedIssues(
-        body_only=[
+    classified = _ClassifiedIssues(body_only=[
             ParsedIssue(path="a.py", line=10, title="t1", body="b", confidence="HIGH", severity="high"),
             ParsedIssue(path="a.py", line=12, title="t2", body="b", confidence="LOW", severity="low"),
         ]
     )
     body = build_payload(
-        sample_pr(),
-        classified,
-        renderers=ReviewRenderers(default_render_finding, default_render_summary),
+        sample_pr(), classified, renderers=ReviewRenderers(default_render_finding, default_render_summary),
         run_info=pr_comment_renderer._render_fallback(),
     )["body"]
     assert "- **Severity:** 1 low, 1 high" in body
 
-
 def test_fenced_verifier_accepts_exactly_the_canonical_vocabulary() -> None:
     """verifier_core deploys byte-for-byte into a daydream-free image, so it keeps its
     literal; this test is the drift protection instead of an import (spec requirement 11)."""
-    base = {
-        "candidate_id": "a" * 64,
-        "title": "t",
-        "body": "b",
-        "path": "src/a.py",
-        "start_line": 1,
-        "end_line": 1,
-    }
+    base = {"candidate_id": "a" * 64, "title": "t", "body": "b", "path": "src/a.py", "start_line": 1, "end_line": 1}
     for level in severity.CANONICAL_LEVELS:
         assert verifier_core.parse_candidate_finding({**base, "severity": level}).severity == level
     with pytest.raises(verifier_core.VerifierError):
@@ -257,7 +218,6 @@ def test_fenced_verifier_accepts_exactly_the_canonical_vocabulary() -> None:
 _IMPROVE_SITES = _SITES_BY_MODULE["improve.prompts"]
 _IMPROVE_SITE_IDS = [site for site, _ in _IMPROVE_SITES]
 
-
 def test_improve_severity_sites_are_discovered() -> None:
     """Guard the guard: the improve walk must find the vet verdict severity site."""
     assert _IMPROVE_SITES, "no severity-bearing *_SCHEMA discovered in daydream.improve.prompts"
@@ -265,10 +225,8 @@ def test_improve_severity_sites_are_discovered() -> None:
         f"the vet verdict severity site vanished from discovery: {_IMPROVE_SITE_IDS}"
     )
 
-
 def test_improve_vet_severity_still_accepts_null() -> None:
-    fragment = next(
-        fragment
+    fragment = next(fragment
         for site, fragment in _IMPROVE_SITES
         if site.endswith("VET_SCHEMA.properties.verdicts.items.properties")
     )

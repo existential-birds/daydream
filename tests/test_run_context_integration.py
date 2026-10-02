@@ -49,19 +49,14 @@ def _write_policy_flow(ext_dir: ExtDir) -> None:
         "    registry.set_flow('policy-probe', ['probe'])\n"
     )
 
-
 async def test_standalone_phase_binds_explicit_policy_for_surrounding_output(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_work: Callable[..., WorkContext],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
 ) -> None:
     """The phase's own output uses its runtime before and after the agent."""
     outer = RunContext(InteractionPolicy(log_mode=False))
     explicit = RunContext(InteractionPolicy(log_mode=True))
     sentinel = "ghp_" + "x" * 16
-    backend = ScriptedBackend(
-        model=sentinel,
-        events=[ResultEvent(structured_output={"issues": []}, continuation=None)],
+    backend = ScriptedBackend(model=sentinel, events=[ResultEvent(structured_output={"issues": []}, continuation=None)],
     )
     diff_path = tmp_path / "diff.patch"
     diff_path.write_text("diff --git a/app.py b/app.py\n")
@@ -80,8 +75,7 @@ async def test_standalone_phase_binds_explicit_policy_for_surrounding_output(
     monkeypatch.setattr(console, "print", record_output)
     with bind_run_context(outer), console.capture() as captured:
         assert await phase_alternative_review(
-            backend, make_work(tmp_path), diff_path, "Update app",
-            run_context=explicit,
+            backend, make_work(tmp_path), diff_path, "Update app", run_context=explicit,
         ) == []
         assert current_run_context() is outer
 
@@ -90,12 +84,8 @@ async def test_standalone_phase_binds_explicit_policy_for_surrounding_output(
     assert "REDACTED_API_KEY" in captured.get()
     assert current_run_context() is None
 
-
 async def test_overlapping_runs_keep_prompt_and_console_policy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: ExtDir,
-    make_config: Callable[..., RunConfig],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, make_config: Callable[..., RunConfig],
 ) -> None:
     """An interactive sibling cannot enable stdin or disable log redaction."""
     logged_repo = _feature_repo(tmp_path / "logged")
@@ -121,8 +111,7 @@ async def test_overlapping_runs_keep_prompt_and_console_policy(
     sentinel = "ghp_" + "x" * 16
 
     class SharedBackend(ScriptedBackend):
-        async def execute(
-            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
         ) -> AsyncGenerator[AgentEvent, None]:
             label = "logged" if cwd == logged_repo else "plain"
             runtime = current_run_context()
@@ -145,11 +134,9 @@ async def test_overlapping_runs_keep_prompt_and_console_policy(
     backend = SharedBackend()
     monkeypatch.setattr(runner, "create_backend", lambda *args, **kwargs: backend)
     logged_config = make_config(
-        logged_repo, flow_name="policy-probe", backend="claude",
-        log_mode=True, quiet=True, non_interactive=True,
+        logged_repo, flow_name="policy-probe", backend="claude", log_mode=True, quiet=True, non_interactive=True,
     )
-    plain_config = make_config(
-        plain_repo, flow_name="policy-probe", backend="claude",
+    plain_config = make_config(plain_repo, flow_name="policy-probe", backend="claude",
         log_mode=False, quiet=False, non_interactive=False, assume="yes",
     )
 
@@ -190,12 +177,8 @@ async def test_overlapping_runs_keep_prompt_and_console_policy(
     assert active_backends() == ()
     assert current_run_context() is None
 
-
 async def test_failed_run_releases_policy_and_backends_before_later_run(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    ext_dir: ExtDir,
-    make_config: Callable[..., RunConfig],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: ExtDir, make_config: Callable[..., RunConfig],
 ) -> None:
     """A failed logged run cannot leave policy or active backends behind."""
     failed_repo = _feature_repo(tmp_path / "failed")
@@ -208,8 +191,7 @@ async def test_failed_run_releases_policy_and_backends_before_later_run(
     monkeypatch.setattr("builtins.input", lambda: "later-answer")
 
     class FailingThenSuccessfulBackend(ScriptedBackend):
-        async def execute(
-            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
         ) -> AsyncGenerator[AgentEvent, None]:
             if cwd == failed_repo:
                 console.print(f"failed-token={sentinel}", markup=False, highlight=False)
@@ -223,14 +205,12 @@ async def test_failed_run_releases_policy_and_backends_before_later_run(
     with console.capture() as captured:
         with pytest.raises(ValueError, match="intentional backend failure"):
             await runner.run(make_config(
-                failed_repo, flow_name="policy-probe", backend="claude",
-                log_mode=True, non_interactive=True,
+                failed_repo, flow_name="policy-probe", backend="claude", log_mode=True, non_interactive=True,
             ))
         assert current_run_context() is None
         assert active_backends() == ()
         assert await runner.run(make_config(
-            later_repo, flow_name="policy-probe", backend="claude",
-            log_mode=False, non_interactive=False,
+            later_repo, flow_name="policy-probe", backend="claude", log_mode=False, non_interactive=False,
         )) == 0
     assert choices == ["later-answer"]
     assert f"failed-token={sentinel}" not in captured.get()

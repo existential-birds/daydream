@@ -49,39 +49,23 @@ DURATION_NS = 395_332_000_000
 
 def _iq(recorder: Any, phase: DaydreamPhase = DaydreamPhase.REVIEW) -> Invocation:
     """One fresh Invocation bound to a harness recorder (A-invariant: A1)."""
-    return Invocation(
-        recorder=recorder,
-        phase=phase,
-        invocation_id=f"inv-{phase.value}",
-    )
+    return Invocation(recorder=recorder, phase=phase, invocation_id=f"inv-{phase.value}",)
 
 
 def _choice_parts() -> tuple[Any, ...]:
-    return (
-        ReasoningChoicePart(text="THINK_ONE"),
-        TextChoicePart(text="TEXT_ONE"),
+    return (ReasoningChoicePart(text="THINK_ONE"), TextChoicePart(text="TEXT_ONE"),
         ToolCallChoicePart(call_id="call_001", name="read_file", arguments={"path": "src/example.py"}),
     )
 
 
 def _end_event(
-    generation_id: str = "g1",
-    *,
-    native_start_ms: int | None = NATIVE_START_MS,
-    ended_at_ns: int = HOST_END_NS,
+    generation_id: str = "g1", *, native_start_ms: int | None = NATIVE_START_MS, ended_at_ns: int = HOST_END_NS,
     boundary_complete: bool = True,
 ) -> GenerationEndEvent:
     return GenerationEndEvent(
-        generation_id=generation_id,
-        native_started_at_unix_ms=native_start_ms,
-        ended_at_unix_ns=ended_at_ns,
-        end_source="host_observed_message_end",
-        choice_parts=_choice_parts(),
-        response_id="resp_gen_01",
-        model_name="glm-4.6",
-        provider_name="nous",
-        finish_reason="toolUse",
-        boundary_complete=boundary_complete,
+        generation_id=generation_id, native_started_at_unix_ms=native_start_ms, ended_at_unix_ns=ended_at_ns,
+        end_source="host_observed_message_end", choice_parts=_choice_parts(), response_id="resp_gen_01",
+        model_name="glm-4.6", provider_name="nous", finish_reason="toolUse", boundary_complete=boundary_complete,
     )
 
 
@@ -93,17 +77,12 @@ def _seal_generations(inv: Invocation, count: int) -> None:
         inv.observe(_end_event(generation_id=gid))
 
 
-def _sealed_invocation(
-    tmp_path: Path,
-    *,
-    native_start_ms: int | None = NATIVE_START_MS,
-    ended_at_ns: int = HOST_END_NS,
+def _sealed_invocation(tmp_path: Path, *, native_start_ms: int | None = NATIVE_START_MS, ended_at_ns: int = HOST_END_NS,
     boundary_complete: bool = True,
 ) -> tuple[Any, Invocation]:
     recorder = make_recorder(tmp_path)
     inv = _iq(recorder)
-    inv.observe(
-        GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000, boundary_complete=boundary_complete)
+    inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000, boundary_complete=boundary_complete)
     )
     inv.observe(
         _end_event(native_start_ms=native_start_ms, ended_at_ns=ended_at_ns, boundary_complete=boundary_complete)
@@ -111,40 +90,25 @@ def _sealed_invocation(
     return recorder, inv
 
 
-def _usage(
-    recorder: Any, inv: Invocation, generation_id: str = "g1", *, input_tokens: int = 10, output_tokens: int = 5
+def _usage(recorder: Any, inv: Invocation, generation_id: str = "g1", *, input_tokens: int = 10, output_tokens: int = 5
 ) -> None:
-    inv.observe(
-        MetricsEvent(
-            message_id="",
-            prompt_tokens=input_tokens,
-            completion_tokens=output_tokens,
-            cached_tokens=0,
-            cost_usd=0.00402781,
-            model_name="glm-4.6",
-            usage_scope="message",
-            measurement_source="turn_end",
+    inv.observe(MetricsEvent(
+            message_id="", prompt_tokens=input_tokens, completion_tokens=output_tokens, cached_tokens=0,
+            cost_usd=0.00402781, model_name="glm-4.6", usage_scope="message", measurement_source="turn_end",
             generation_id=generation_id,
         )
     )
 
 
 def _total(recorder: Any, inv: Invocation, *, input_tokens: int = 10, output_tokens: int = 5) -> None:
-    inv.observe(
-        CostEvent(
-            cost_usd=0.00402781,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
-            cached_tokens=0,
-            measurement_source="terminal",
-            cost_source="reported",
+    inv.observe(CostEvent(cost_usd=0.00402781, input_tokens=input_tokens, output_tokens=output_tokens, cached_tokens=0,
+            measurement_source="terminal", cost_source="reported",
         )
     )
 
 
 def _summary(inv: Invocation) -> dict[str, Any]:
     return inv._generation_ledger.to_dict()
-
 
 class TestPendingDraftLifecycle:
     """Decision 1: drafts stay UNENDED until billing ownership resolves."""
@@ -212,7 +176,6 @@ class TestPendingDraftLifecycle:
         assert draft["sealed_end_unix_ns"] == HOST_END_NS
         assert draft["duration_ns"] == DURATION_NS  # 395.332 s exactly
 
-
 class TestNativeTimingValidation:
     """Decision 4: non-bool bounded int ms, exact ns conversion, explicit fallbacks."""
 
@@ -222,13 +185,11 @@ class TestNativeTimingValidation:
         assert draft["native_started_at_unix_ms"] == NATIVE_START_MS
         assert draft["native_started_at_unix_ns"] == NATIVE_START_NS
 
-    @pytest.mark.parametrize(
-        ("native_start", "fallback"),
+    @pytest.mark.parametrize(("native_start", "fallback"),
         [
             (True, "invalid"),  # bool is not an int timestamp
             (2**63 // 1_000_000 + 1, "invalid"),  # out of int64-ns range
-            (-5, "invalid"),
-            (None, "missing"),
+            (-5, "invalid"), (None, "missing"),
         ],
     )
     def test_invalid_native_start_falls_back_explicitly(
@@ -247,7 +208,6 @@ class TestNativeTimingValidation:
         draft = _summary(inv)["drafts"][0]
         assert draft["start_fallback"] == "reversed"
         assert draft["duration_ns"] is None
-
 
 class TestBillingOwnerResolution:
     """Decision 5: closed owner before export; children|structural|none."""
@@ -358,7 +318,6 @@ class TestBillingOwnerResolution:
         assert summary["authoritative_total"]["input_tokens"] == 13
         assert summary["drafts"][0]["billed"] is False
 
-
 class TestPendingBounds:
     """Decision 1 bounds: 512 drafts / 10 MiB retained choice bytes."""
 
@@ -392,14 +351,9 @@ class TestPendingBounds:
         inv = _iq(recorder)
         huge = TextChoicePart(text="x" * (10 * 1024 * 1024))
         inv.observe(GenerationStartEvent(generation_id="g1", observed_at_unix_ns=1_000))
-        inv.observe(
-            GenerationEndEvent(
-                generation_id="g1",
-                native_started_at_unix_ms=NATIVE_START_MS,
-                ended_at_unix_ns=HOST_END_NS,
-                end_source="host_observed_message_end",
-                choice_parts=(huge,),
-                boundary_complete=True,
+        inv.observe(GenerationEndEvent(
+                generation_id="g1", native_started_at_unix_ms=NATIVE_START_MS, ended_at_unix_ns=HOST_END_NS,
+                end_source="host_observed_message_end", choice_parts=(huge,), boundary_complete=True,
             )
         )
         summary = _summary(inv)
@@ -407,7 +361,6 @@ class TestPendingBounds:
         assert summary["drafts"][0]["billed"] is False
         cap_diags = [d for d in summary["diagnostics"] if "cap" in d]
         assert len(cap_diags) == 1
-
 
 class TestUnbilledOrNoneCapOwner:
     """Cap drain locks ownership to structural (if a later total exists) or none."""
@@ -423,24 +376,17 @@ class TestUnbilledOrNoneCapOwner:
     def test_cap_drained_drafts_never_bill_even_with_matching_sums(self, tmp_path: Path) -> None:
         """Cap drain locks ownership: matching usage sums must not bill children.
 
-        Post-cap drafts may carry late usage whose input/output sums equal the
-        authoritative total. The documented cap invariant (no native bill on
-        cap-drained children) must win: the owner stays structural and every
-        draft remains custom/unbilled, never ``generation_children``.
-        """
+        Post-cap drafts may carry late usage whose input/output sums equal the authoritative total. The documented
+        cap invariant (no native bill on cap-drained children) must win: the owner stays structural and every
+        draft remains custom/unbilled, never ``generation_children``."""
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
         for i in range(513):
             gid = f"g{i:04d}"
             inv.observe(GenerationStartEvent(generation_id=gid, observed_at_unix_ns=1_000))
             inv.observe(_end_event(generation_id=gid))
-            inv.observe(
-                MetricsEvent(
-                    message_id=gid,
-                    prompt_tokens=1,
-                    completion_tokens=1,
-                    cached_tokens=0,
-                    cost_usd=0.001,
+            inv.observe(MetricsEvent(
+                    message_id=gid, prompt_tokens=1, completion_tokens=1, cached_tokens=0, cost_usd=0.001,
                     generation_id=gid,
                 )
             )
@@ -458,7 +404,6 @@ class TestUnbilledOrNoneCapOwner:
         inv.finish()
         assert _summary(inv)["billing_owner"] == "none"
 
-
 class TestEventDispatchAndSummary:
     """Dispatch routing, subtrajectory surfacing, no behavior change without generations."""
 
@@ -466,13 +411,7 @@ class TestEventDispatchAndSummary:
         recorder = make_recorder(tmp_path)
         inv = _iq(recorder)
         inv.observe(
-            MetricsEvent(
-                message_id="m1",
-                prompt_tokens=5,
-                completion_tokens=3,
-                cached_tokens=0,
-                cost_usd=0.001,
-            )
+            MetricsEvent(message_id="m1", prompt_tokens=5, completion_tokens=3, cached_tokens=0, cost_usd=0.001,)
         )
         inv.observe(TurnEndEvent(message_id="m1"))
         inv.finish()

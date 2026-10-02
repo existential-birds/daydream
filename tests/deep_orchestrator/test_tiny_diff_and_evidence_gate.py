@@ -38,10 +38,8 @@ from tests.test_deep_orchestrator import (
 )
 
 
-@pytest.mark.parametrize(
-    ("files", "mode", "expected_stack"),
-    [
-        pytest.param(["api.py"], "tiny", "python", id="tiny-one-language"),
+@pytest.mark.parametrize(("files", "mode", "expected_stack"),
+    [pytest.param(["api.py"], "tiny", "python", id="tiny-one-language"),
         pytest.param(["api.py", "App.tsx"], "tiny", "generic", id="tiny-two-languages"),
         pytest.param(["api.py", "README.md"], "tiny", "python", id="tiny-code-and-docs"),
         pytest.param(["api.py", "App.tsx"], "disabled", None, id="tiny-disabled"),
@@ -50,10 +48,7 @@ from tests.test_deep_orchestrator import (
         pytest.param(["api.py", "App.tsx"], "explicit", "python", id="shallow-explicit-stack"),
     ],
 )
-def test_collapse_stacks_preserves_scope_and_reduces_fanout(
-    files: list[str],
-    mode: str,
-    expected_stack: str | None,
+def test_collapse_stacks_preserves_scope_and_reduces_fanout(files: list[str], mode: str, expected_stack: str | None,
 ) -> None:
     """Tiny and shallow runs combine language scopes while retaining structure."""
 
@@ -78,14 +73,9 @@ def test_collapse_stacks_preserves_scope_and_reduces_fanout(
     if mode == "tiny":
         assert _single_stack_agent_count(len(collapsed)) < total_agent_count(len(stacks))
 
-
 async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_phase(
-    tiny_diff_target: Path,
-    multi_stack_target: Path,
-    archive_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, multi_stack_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch,
+    make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """AC2 (real-path): a ≤2-file two-language diff collapses the fan-out."""
 
@@ -127,27 +117,21 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     tiny_merge = _root_phase_events(tiny_diff_target, "merge")
     multi_merge = _root_phase_events(multi_stack_target, "merge")
     assert [event["metadata"] for event in tiny_merge] == [
-        {"stage": "single-stack-host"},
-        {"stage": "single-stack-host"},
+        {"stage": "single-stack-host"}, {"stage": "single-stack-host"},
     ]
     assert [event["metadata"] for event in multi_merge] == [
-        {"stage": "cross-stack-agent"},
-        {"stage": "cross-stack-agent"},
+        {"stage": "cross-stack-agent"}, {"stage": "cross-stack-agent"},
     ]
     assert tiny_merge[-1]["status"] == "succeeded"
     assert multi_merge[-1]["status"] == "succeeded"
 
     tiny_trajectory = next((tiny_diff_target / ".daydream" / "runs").glob("*/trajectory.json"))
     tiny_session_id = tiny_trajectory.parent.name
-    trajectory_documents = [
-        tiny_trajectory,
-        *sorted((tiny_trajectory.parent / "trajectories").glob("*.json")),
-    ]
+    trajectory_documents = [tiny_trajectory, *sorted((tiny_trajectory.parent / "trajectories").glob("*.json"))]
     merge_invocations: list[dict[str, Any]] = []
     for document in trajectory_documents:
         payload = json.loads(document.read_text(encoding="utf-8"))
-        merge_invocations.extend(
-            summary
+        merge_invocations.extend(summary
             for summary in (payload.get("extra") or {}).get("subtrajectories", [])
             if isinstance(summary, dict) and "invocation_id" in summary and summary.get("phase") == "merge"
         )
@@ -156,12 +140,8 @@ async def test_ac2_tiny_diff_collapses_fanout_and_skips_merge_tiny_host_merge_ph
     manifest = json.loads((archive_dir / "runs" / tiny_session_id / "manifest.json").read_text())
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
 
-
 async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
-    multi_stack_target: Path,
-    archive_dir: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    multi_stack_target: Path, archive_dir: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
 
     _silence(monkeypatch)
@@ -170,8 +150,7 @@ async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     stale_deep = multi_stack_target / ".daydream" / "deep"
     stale_deep.mkdir(parents=True, exist_ok=True)
     (stale_deep / "merged-items.json").write_text(
-        json.dumps({"items": [{"id": 999, "description": "stale success"}]}),
-        encoding="utf-8",
+        json.dumps({"items": [{"id": 999, "description": "stale success"}]}), encoding="utf-8",
     )
 
     exit_code = await run(make_config(multi_stack_target, archive=True, run_eval=False))
@@ -196,12 +175,8 @@ async def test_merge_failure_phase_state_domain_failure_closes_failed_scope(
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "failed"}
     assert manifest["pipeline_status"] == "failed"
 
-
 async def test_ac5_per_stack_prompt_inlines_diff_hunks(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """AC5 (real-path): per-stack review prompts contain inlined diff hunks and NO ``Read it directly`` / diff_path
     instruction."""
@@ -215,8 +190,7 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
 
     # The per-stack review prompt is the one carrying the scope discriminator.
     # (The structural prompt is intentionally NOT inlined — Fix B excludes it.)
-    per_stack_review_prompts = [
-        c["prompt"]
+    per_stack_review_prompts = [c["prompt"]
         for c in shared_calls
         if "you are reviewing the" in c["prompt"].lower() and "stack" in c["prompt"].lower()
     ]
@@ -246,12 +220,8 @@ async def test_ac5_per_stack_prompt_inlines_diff_hunks(
     assert structural_diff.name == "diff.patch"
     assert diff_path_str not in structural_prompts[0]
 
-
 async def test_ac6_single_stack_merged_items_carry_structural_lens(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """AC6: tiny-diff single-stack writer tags structural items ``lens="structural"``."""
 
@@ -272,12 +242,8 @@ async def test_ac6_single_stack_merged_items_carry_structural_lens(
     assert all(isinstance(i.get("id"), int) for i in items), "non-integer id in merged items"
     assert [i["id"] for i in items] == list(range(1, len(items) + 1)), "ids not contiguous"
 
-
 async def test_ac_fix_resume_on_tiny_diff(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Issue #172 risk: ``--start-at fix`` resume on a tiny diff works."""
 
@@ -301,13 +267,8 @@ async def test_ac_fix_resume_on_tiny_diff(
     fix_prompts = [c for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
     assert fix_prompts, "fix loop did not run on --start-at fix resume"
 
-
 async def test_host_only_merge_resume_publishes_and_archives_system_root(
-    tmp_path: Path,
-    archive_dir: Path,
-    ext_dir: Any,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
+    tmp_path: Path, archive_dir: Path, ext_dir: Any, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """A registered host-only merge retains its output through real finalization."""
 
@@ -349,7 +310,6 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     monkeypatch.setattr(runner, "create_backend", fail_backend_construction)
 
     rc = await runner.run(make_config(target, flow_name="host-only-flow", archive=True, run_eval=False))
-
     public_items = target / ".daydream" / "deep" / "merged-items.json"
     public_runs = list((target / ".daydream" / "runs").glob("*"))
     archived_runs = list((archive_dir / "runs").glob("*"))
@@ -369,16 +329,9 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     trajectory = json.loads(public_trajectory.read_bytes())
     assert atif_validate(trajectory, validate_images=False)
     assert trajectory["session_id"] == trajectory["trajectory_id"] == public_run.name
-    assert trajectory["steps"] == [
-        {
-            "step_id": 1,
-            "timestamp": trajectory["extra"]["run_ended_at"],
-            "source": "system",
+    assert trajectory["steps"] == [{"step_id": 1, "timestamp": trajectory["extra"]["run_ended_at"], "source": "system",
             "message": "Daydream host-only run snapshot",
-            "extra": {
-                "daydream_run_flow": "custom",
-                "host_event": "host_only_final_snapshot",
-            },
+            "extra": {"daydream_run_flow": "custom", "host_event": "host_only_final_snapshot"},
         }
     ]
     assert trajectory["final_metrics"] == {"total_steps": 1}
@@ -396,12 +349,8 @@ async def test_host_only_merge_resume_publishes_and_archives_system_root(
     assert manifest["archive_status"] == "complete"
     assert manifest["phase_states"]["merge"] == {"ran": True, "status": "succeeded"}
 
-
 async def test_ac_merge_resume_on_tiny_diff(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Issue #172: ``--start-at merge`` resume on a tiny diff routes to the single-stack merge writer, not the
     multi-stack merge agent."""
@@ -422,8 +371,7 @@ async def test_ac_merge_resume_on_tiny_diff(
     # tiny-diff collapse yields a ``generic`` (collapsed language) stack plus
     # the ``structure`` meta-stack, so records files must match both.
     _prime_merge_resume(
-        tiny_diff_target,
-        generic=[_record(id="gen-1", description="generic per-stack issue", evidence="api.py:1")],
+        tiny_diff_target, generic=[_record(id="gen-1", description="generic per-stack issue", evidence="api.py:1")],
         structure=[_record(id="structure-1", description="file-size budget violated", evidence="api.py:1")],
     )
 
@@ -447,38 +395,20 @@ async def test_ac_merge_resume_on_tiny_diff(
     structural = [item for item in items if item.get("lens") == "structural"]
     assert structural[0]["source_uids"] == ["structure:1"]
 
-
-async def test_evidence_gate_drops_speculative_finding(
-    multi_stack_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
+async def test_evidence_gate_drops_speculative_finding(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Issue #227 (AC2/AC3/AC6): the structural evidence gate keeps an evidenced finding but drops a speculative
     one before it reaches merged-items.json."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [
-        {
-            "id": 1,
-            "lens": "per-stack",
-            "file": "api.py",
-            "line": 42,
-            "severity": "high",
-            "description": "Grounded evidenced finding",
-            "confidence": "HIGH",
-            "rationale": "verified against src/foo.py",
-            "evidence": "src/foo.py:42",
+    stub.merge_items = [{"id": 1, "lens": "per-stack", "file": "api.py", "line": 42, "severity": "high",
+            "description": "Grounded evidenced finding", "confidence": "HIGH",
+            "rationale": "verified against src/foo.py", "evidence": "src/foo.py:42",
         },
-        {
-            "id": 2,
-            "lens": "per-stack",
-            "file": "App.tsx",
-            "line": 1,
-            "severity": "low",
-            "description": "Speculative unfounded finding",
-            "confidence": "LOW",
-            "rationale": "inferred from the diff alone, no exploration evidence",
-            "evidence": "",
+        {"id": 2, "lens": "per-stack", "file": "App.tsx", "line": 1, "severity": "low",
+            "description": "Speculative unfounded finding", "confidence": "LOW",
+            "rationale": "inferred from the diff alone, no exploration evidence", "evidence": "",
         },
     ]
 
@@ -502,12 +432,8 @@ async def test_evidence_gate_drops_speculative_finding(
     assert "Speculative unfounded finding" in json.dumps(dropped["dropped_items"])
     assert 2 in dropped["dropped_ids"]
 
-
 async def test_evidence_gate_all_speculative_yields_empty(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Issue #227 (AC5, N=1): a single-stack run whose only findings are all speculative writes an EMPTY
     merged-items.json without crashing and records every drop -- never a silent success."""
@@ -516,23 +442,13 @@ async def test_evidence_gate_all_speculative_yields_empty(
     _install_stub_backend(monkeypatch, tiny_diff_target)
     mute_side_effects()
 
-    deep = _prime_merge_resume(
-        tiny_diff_target,
-        generic=[
-            _record(
-                id="gen-1",
-                description="speculative generic finding",
-                confidence="MEDIUM",
-                rationale="inferred from the diff alone, no exploration evidence",
-                evidence="",
+    deep = _prime_merge_resume(tiny_diff_target,
+        generic=[_record(id="gen-1", description="speculative generic finding", confidence="MEDIUM",
+                rationale="inferred from the diff alone, no exploration evidence", evidence="",
             )
         ],
-        structure=[
-            _record(
-                id="structure-1",
-                description="speculative structural finding",
-                confidence="LOW",
-                rationale="hunch",
+        structure=[_record(
+                id="structure-1", description="speculative structural finding", confidence="LOW", rationale="hunch",
                 evidence="api.py:1",
             )
         ],
@@ -550,12 +466,8 @@ async def test_evidence_gate_all_speculative_yields_empty(
     assert "speculative generic finding" in dropped_desc
     assert "speculative structural finding" in dropped_desc
 
-
 async def test_evidence_gate_keeps_whole_file_structural_finding(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Issue #227 (findings 3/5): a structural (host-tagged, whole-file) finding with ``line: 0`` and colon-free
     evidence SURVIVES the gate -- the structural lens is high-conviction by construction and must not be
@@ -565,26 +477,14 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
     _install_stub_backend(monkeypatch, tiny_diff_target)
     mute_side_effects()
 
-    deep = _prime_merge_resume(
-        tiny_diff_target,
-        generic=[
-            _record(
-                id="gen-1",
-                description="grounded generic finding",
-                confidence="MEDIUM",
-                rationale="r",
+    deep = _prime_merge_resume(tiny_diff_target,
+        generic=[_record(id="gen-1", description="grounded generic finding", confidence="MEDIUM", rationale="r",
                 evidence="api.py:1",
             )
         ],
-        structure=[
-            _record(
-                id="structure-1",
-                description="module exceeds 800 LOC budget",
-                file="big.py",
-                line=0,
-                confidence="HIGH",
-                rationale="file-size budget violated",
-                evidence="big.py is 800 lines",
+        structure=[_record(
+                id="structure-1", description="module exceeds 800 LOC budget", file="big.py", line=0, confidence="HIGH",
+                rationale="file-size budget violated", evidence="big.py is 800 lines",
             )
         ],
     )
@@ -599,12 +499,8 @@ async def test_evidence_gate_keeps_whole_file_structural_finding(
     assert structural, f"whole-file structural finding was dropped by the gate: {items}"
     assert structural[0].get("line") == 0
 
-
 async def test_evidence_gate_clears_stale_dropped_sidecar(
-    tiny_diff_target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
+    tiny_diff_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
     """Issue #227 (findings 4/6): a resume that drops 0 findings clears a stale ``dropped-speculative.json`` left
     by a prior run, so the sidecar cannot report phantom drops to eval/benchmark/human auditors."""
@@ -613,25 +509,14 @@ async def test_evidence_gate_clears_stale_dropped_sidecar(
     _install_stub_backend(monkeypatch, tiny_diff_target)
     mute_side_effects()
 
-    deep = _prime_merge_resume(
-        tiny_diff_target,
-        generic=[
-            _record(
-                id="gen-1",
-                description="grounded generic finding",
-                confidence="MEDIUM",
-                rationale="r",
+    deep = _prime_merge_resume(tiny_diff_target,
+        generic=[_record(id="gen-1", description="grounded generic finding", confidence="MEDIUM", rationale="r",
                 evidence="api.py:1",
             )
         ],
-        structure=[
-            _record(
-                id="structure-1",
-                description="grounded structural finding",
-                file="big.py",
-                confidence="HIGH",
-                rationale="r",
-                evidence="big.py:1",
+        structure=[_record(
+                id="structure-1", description="grounded structural finding", file="big.py", confidence="HIGH",
+                rationale="r", evidence="big.py:1",
             )
         ],
     )

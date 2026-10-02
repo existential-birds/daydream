@@ -34,31 +34,24 @@ from tests.test_training_adjudication_publish import _final_bundle
     # Unresolved findings in the data are not process failure (spec KD).
     ({"considered": 3, "annotated": 1, "skipped": 2, "errors": 0, "aborted": 0}, 0),
 ])
-def test_corpus_harvest_exit_code_maps_summary(
-    monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any], expected: int
+def test_corpus_harvest_exit_code_maps_summary(monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any], expected: int
 ) -> None:
     async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
         return summary
-
     monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
     assert cli_main(["corpus", "harvest", "--dry-run"]) == expected
 
-
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
-
     async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
         called["hit"] = True
         return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
-
     monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
     assert cli_main(["corpus", "harvest", "--dry-run"]) == 0
     assert called["hit"]
 
-
 def test_corpus_label_route(monkeypatch: pytest.MonkeyPatch) -> None:
     label_called = {}
-
     def _fake_label(argv: list[str]) -> int:
         label_called["argv"] = argv
         return 0
@@ -71,7 +64,6 @@ def test_corpus_label_route(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli_main(["corpus", "label", "sess-0001", "--outcome", "accepted"]) == 0
     assert label_called["argv"] == ["sess-0001", "--outcome", "accepted"]
 
-
 def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> None:
     assert cli_main(["corpus"]) == 2
     captured = capsys.readouterr()
@@ -83,19 +75,12 @@ def test_bare_corpus_prints_help_exits_2(capsys: pytest.CaptureFixture[str]) -> 
     assert "harvest" in captured.out
     assert "label" in captured.out
 
-
-def test_adjudicate_publication_commands_run_through_main(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_adjudicate_publication_commands_run_through_main(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,) -> None:
     state, manifest = write_checkpoint_inputs(tmp_path, curation_id="cur-main")
     hub = AnnotationsHub(repo_id="org/private-annotations")
     monkeypatch.setattr(adjudication_cli, "_make_client", lambda _repo_id: hub)
 
-    assert cli_main([
-        "corpus", "adjudicate", "publish-state",
-        "--state-dir", str(state),
-        "--manifest", str(manifest),
+    assert cli_main(["corpus", "adjudicate", "publish-state", "--state-dir", str(state), "--manifest", str(manifest),
         "--hub-repo", hub.repo_id,
     ]) == 0
     revision = hub.repo_info("main").sha
@@ -103,9 +88,7 @@ def test_adjudicate_publication_commands_run_through_main(
 
     destination = tmp_path / "restored"
     assert cli_main([
-        "corpus", "adjudicate", "resume-state",
-        "--curation-id", "cur-main",
-        "--destination", str(destination),
+        "corpus", "adjudicate", "resume-state", "--curation-id", "cur-main", "--destination", str(destination),
         "--hub-repo", hub.repo_id,
     ]) == 0
     assert (destination / "preview-manifest.json").read_bytes() == manifest.read_bytes()
@@ -113,13 +96,9 @@ def test_adjudicate_publication_commands_run_through_main(
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(hub, bundle)
     final_destination = tmp_path / "downloaded-final"
-    assert cli_main([
-        "corpus", "adjudicate", "download-final",
-        "--curation-id", curation_id,
-        "--snapshot-id", published["final_snapshot_id"],
-        "--revision", published["hub_commit_sha"],
-        "--destination", str(final_destination),
-        "--hub-repo", hub.repo_id,
+    assert cli_main(["corpus", "adjudicate", "download-final", "--curation-id", curation_id,
+        "--snapshot-id", published["final_snapshot_id"], "--revision", published["hub_commit_sha"],
+        "--destination", str(final_destination), "--hub-repo", hub.repo_id,
     ]) == 0
     assert (final_destination / "_SUCCESS").is_file()
 
@@ -132,52 +111,37 @@ def test_adjudicate_publication_commands_run_through_main(
 # ---------------------------------------------------------------------------
 
 
-def _run_build_v2(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]
-) -> tuple[int, str]:
+def _run_build_v2(tmp_path: Path, capsys: pytest.CaptureFixture[str], extra_args: list[str]) -> tuple[int, str]:
     """Drive ``daydream corpus build`` through ``cli.main`` over the
     standard fixture bundle pair (from tests.test_corpus_projection) and return
     (exit code, captured stdout+stderr)."""
     bundle_dir = _write_bundle(tmp_path)
     snap = _write_annotations_snapshot(bundle_dir, dispositions=["accepted"])
     out_dir = tmp_path / "corpus-out"
-    rc = cli_main([
-        "corpus", "build",
-        "--bundle-root", str(bundle_dir),
-        "--annotation-bundle-root", str(snap.parent),
-        "--out", str(out_dir / "corpus.jsonl"),
-        *extra_args,
+    rc = cli_main(["corpus", "build", "--bundle-root", str(bundle_dir), "--annotation-bundle-root", str(snap.parent),
+        "--out", str(out_dir / "corpus.jsonl"), *extra_args,
     ])
     captured = capsys.readouterr()
     return rc, captured.out + captured.err
 
-
-def test_build_v2_accepts_license_policy_and_repeatable_opt_in(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_build_v2_accepts_license_policy_and_repeatable_opt_in(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     policy = tmp_path / "license-policy.json"
     policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
     rc, _out = _run_build_v2(tmp_path, capsys, [
-        "--license-policy", str(policy),
-        "--allow-copyleft", "a/b", "--allow-copyleft", "c/d",
+        "--license-policy", str(policy), "--allow-copyleft", "a/b", "--allow-copyleft", "c/d",
     ])
     assert rc == 0
     lineage = json.loads((tmp_path / "corpus-out" / "lineage.json").read_text())
     assert lineage["license_policy"]["policy_version"] == "1"
     assert lineage["copyleft_opt_ins"] == ["a/b", "c/d"]
 
-
-def test_build_v2_requires_license_policy(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_build_v2_requires_license_policy(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     rc, out = _run_build_v2(tmp_path, capsys, [])
     assert rc == 1
     assert "license-policy" in out
 
-
-def test_build_v2_refuses_unknown_policy_version(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_build_v2_refuses_unknown_policy_version(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     # Refused before any build work: no output directory is created.
     policy_path = tmp_path / "bad-policy.json"
     policy_path.write_text(json.dumps({"policy_version": "", "spdx_decisions": {}}))
@@ -186,22 +150,15 @@ def test_build_v2_refuses_unknown_policy_version(
     assert "policy_version" in out
     assert not (tmp_path / "corpus-out").exists()
 
-
-def test_build_v2_refuses_raw_authenticated_url_as_identity(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+def test_build_v2_refuses_raw_authenticated_url_as_identity(tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # A raw remote URL is never a repo identity: any URL-shaped --repo-slug
     # value is refused before it can reach BuildFrozenCorpusConfig.
-    rc, out = _run_build_v2(tmp_path, capsys, [
-        "--repo-slug", "https://user:token@github.com/owner/repo",
-    ])
+    rc, out = _run_build_v2(tmp_path, capsys, ["--repo-slug", "https://user:token@github.com/owner/repo"])
     assert rc == 1
     assert "Unsupported --repo-slug" in out
 
-
-def test_bare_harvest_is_unknown_verb_treated_as_review_target(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_bare_harvest_is_unknown_verb_treated_as_review_target(capsys: pytest.CaptureFixture[str],) -> None:
     # 'harvest' is no longer a verb; _first_verb falls through to review,
     # which then rejects the unknown '--dry-run' flag (argparse error → exit 2).
     assert cli_main(["harvest", "--dry-run"]) == 2

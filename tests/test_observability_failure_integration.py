@@ -80,33 +80,22 @@ def _config(
 class _RetryableFailure(RuntimeError):
     retryable = True
 
-
 async def test_runner_retry_keeps_failed_billed_attempt_separate_from_success(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flow(ext_dir)
     backend = ScriptedBackend(
         script=[
             [
-                RequestEvent("failed attempt request"),
-                TextEvent("failed partial response"),
-                CostEvent(0.03, 30, 3),
+                RequestEvent("failed attempt request"), TextEvent("failed partial response"), CostEvent(0.03, 30, 3),
                 _RetryableFailure("retry this transport failure"),
             ],
             [
-                RequestEvent("successful attempt request"),
-                TextEvent("successful final response"),
-                CostEvent(0.02, 20, 2),
-                ResultEvent(None, None),
+                RequestEvent("successful attempt request"), TextEvent("successful final response"),
+                CostEvent(0.02, 20, 2), ResultEvent(None, None),
             ],
-        ],
-        retry_attempts=1,
-        retry_base_delay_s=0,
-        retry_max_delay_s=0,
+        ], retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
     )
     install_backend(backend)
     with otlp_collector() as collector:
@@ -156,13 +145,9 @@ class _FanoutBackend(_NoCancelBackend):
         yield CostEvent(0.01, 10, 1)
         yield ResultEvent(None, None)
 
-
 async def test_runner_fanout_shared_backend_and_tool_ids_keep_sibling_content_isolated(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flow(
         ext_dir,
@@ -184,8 +169,7 @@ async with anyio.create_task_group() as group:
         with anyio.fail_after(15):
             assert await runner.run(_config(make_config, feature_branch_repo, collector.base_url, monkeypatch)) == 0
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
-        "left": "answer for left",
-        "right": "answer for right",
+        "left": "answer for left", "right": "answer for right",
     }
     assert backend.entered == 2
     spans = collector.spans
@@ -230,13 +214,9 @@ class _ActiveToolBackend:
     async def cancel(self) -> None:
         self.cancelled = True
 
-
 async def test_runner_cancellation_reaches_caller_and_flushes_root_and_active_tool(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flow(ext_dir)
     backend = _ActiveToolBackend()
@@ -270,14 +250,9 @@ async def test_runner_cancellation_reaches_caller_and_flushes_root_and_active_to
     assert attributes(tool)["daydream.outcome"] == "cancelled"
     assert all(int(span["endTimeUnixNano"]) >= int(span["startTimeUnixNano"]) for span in spans)
 
-
 async def test_runner_export_outage_warns_and_preserves_review_result_and_output(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
-    caplog: pytest.LogCaptureFixture,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     _flow(ext_dir)
     install_backend(ScriptedBackend(events=[TextEvent("review completed during outage"), ResultEvent(None, None)]))
@@ -286,22 +261,16 @@ async def test_runner_export_outage_warns_and_preserves_review_result_and_output
             rc = await runner.run(_config(make_config, feature_branch_repo, collector.base_url, monkeypatch))
     assert rc == 0
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
-        "output": "review completed during outage",
-        "aborted": None,
+        "output": "review completed during outage", "aborted": None,
     }
     assert collector.requests
     assert attributes(_kind(collector.spans, "run")[0])["daydream.exit_code"] == 0
     assert "Trace export failed; review execution continues" in caplog.text
 
-
 @pytest.mark.parametrize("interruption", ["supervisor", "tools", "wall"])
 async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
-    interruption: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    interruption: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     controls = {"supervisor": "", "tools": "tool_call_budget=0,", "wall": "wall_budget_s=0.05,"}[interruption]
     reason = {"supervisor": "tool_vetoed:Write", "tools": "tool_call_budget_exceeded", "wall": "wall_budget_exceeded"}[
@@ -315,8 +284,7 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
             assert await runner.run(_config(make_config, feature_branch_repo, collector.base_url, monkeypatch)) == 1
     assert backend.finished
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
-        "output": "partial response before interruption",
-        "aborted": reason,
+        "output": "partial response before interruption", "aborted": reason,
     }
     spans = collector.spans
     assert len(spans) == 5
@@ -326,17 +294,11 @@ async def test_runner_partial_outcome_preserves_veto_and_budget_reasons(
     assert attributes(_kind(spans, "attempt")[0])["gen_ai.usage.cost"] == 0.005
     assert attributes(_kind(spans, "run")[0])["daydream.exit_code"] == 1
 
-
 @pytest.mark.parametrize("terminal_result", [False, True])
 @pytest.mark.parametrize("last_duration_source", ["tool", "message"])
 async def test_runner_attempt_duration_requires_terminal_result(
-    terminal_result: bool,
-    last_duration_source: str,
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    terminal_result: bool, last_duration_source: str, ext_dir: ExtDir, feature_branch_repo: Path,
+    make_config: Callable[..., RunConfig], install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flow(ext_dir)
     emitted = anyio.Event()
@@ -390,13 +352,9 @@ async def test_runner_attempt_duration_requires_terminal_result(
     assert attributes(_kind(collector.spans, "tool")[0])["daydream.tool.duration_ms"] == 42
     assert json.loads(metadata["daydream.message_usage"])[0]["duration_ms"] == 123
 
-
 async def test_codex_prelaunch_failure_does_not_export_an_effective_request(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _flow(ext_dir, body='''
 from daydream.backends import ContinuationToken
@@ -438,24 +396,15 @@ def _gen_start(generation_id: str) -> GenerationStartEvent:
 
 
 def _gen_end(
-    generation_id: str,
-    text: str,
-    *,
-    native_started_at_unix_ms: int | None = 1_778_000_000_000,
-    ended_at_unix_ns: int = 1_778_000_000_500_000_000,
-    response_id: str | None = None,
+    generation_id: str, text: str, *, native_started_at_unix_ms: int | None = 1_778_000_000_000,
+    ended_at_unix_ns: int = 1_778_000_000_500_000_000, response_id: str | None = None,
 ) -> GenerationEndEvent:
     return GenerationEndEvent(
-        generation_id=generation_id,
-        native_started_at_unix_ms=native_started_at_unix_ms,
-        ended_at_unix_ns=ended_at_unix_ns,
-        end_source="host_observed_message_end",
+        generation_id=generation_id, native_started_at_unix_ms=native_started_at_unix_ms,
+        ended_at_unix_ns=ended_at_unix_ns, end_source="host_observed_message_end",
         choice_parts=(TextChoicePart(text=text), ToolCallChoicePart(call_id=f"{generation_id}-call",
                                                                    name="Read", arguments={"path": "src/x.py"})),
-        response_id=response_id,
-        model_name="gen-model",
-        provider_name="gen-provider",
-        finish_reason="stop",
+        response_id=response_id, model_name="gen-model", provider_name="gen-provider", finish_reason="stop",
     )
 
 
@@ -471,13 +420,8 @@ def _read_subtrajectory(repo: Path) -> dict[str, Any]:
 
 
 async def _run_lifecycle_flow(
-    ext_dir: ExtDir,
-    repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
-    backend: object,
-    body: str | None = None,
+    ext_dir: ExtDir, repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
+    monkeypatch: pytest.MonkeyPatch, backend: object, body: str | None = None,
 ) -> TraceCollector:
     """One real runner.run() over a scripted backend, returning the collector."""
     _flow(ext_dir, body=body) if body is not None else _flow(ext_dir)
@@ -509,20 +453,14 @@ class _ExactAllocationBackend(_NoCancelBackend):
         yield ResultEvent(None, None)
         self.ended = True
 
-
 async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Complete children + late usage matching the terminal total: chain bills.
 
-    Ledger decision 5 at the wire boundary: owner generation_children, both
-    children carry standard aliases + usage + OK, and child token sums equal
-    the attempt aggregate exactly.
-    """
+    Ledger decision 5 at the wire boundary: owner generation_children, both children carry standard aliases +
+    usage + OK, and child token sums equal the attempt aggregate exactly."""
     backend = _ExactAllocationBackend()
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend
@@ -530,16 +468,14 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "generation_children"
     assert {draft["generation_id"]: draft["billed"] for draft in lifecycle["drafts"]} == {
-        "gen-a": True,
-        "gen-b": True,
+        "gen-a": True, "gen-b": True,
     }
     spans = collector.spans
     gens = {attributes(span)["daydream.generation.id"]: span for span in _kind(spans, "generation")}
     assert set(gens) == {"gen-a", "gen-b"}
     attempt = _kind(spans, "attempt")[0]
     for generation_id, (input_tokens, output_tokens, cost) in {
-        "gen-a": (100, 20, 0.002),
-        "gen-b": (50, 10, 0.001),
+        "gen-a": (100, 20, 0.002), "gen-b": (50, 10, 0.001),
     }.items():
         meta = attributes(gens[generation_id])
         assert gens[generation_id]["status"]["code"] == "STATUS_CODE_OK"
@@ -570,22 +506,16 @@ class _LateMissingMetricsBackend(_NoCancelBackend):
         yield TextEvent("answer")
         yield ResultEvent(None, None)
 
-
 async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Late/missing per-generation usage with a terminal total: chain bills only.
 
-    Children keep explicit non-billed custom generation evidence (no invented
-    usage, no standard usage aliases) while the attempt owns the bill.
-    """
+    Children keep explicit non-billed custom generation evidence (no invented usage, no standard usage aliases)
+    while the attempt owns the bill."""
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _LateMissingMetricsBackend(),
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _LateMissingMetricsBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "structural_attempt"
@@ -617,22 +547,16 @@ class _DuplicateMetricsBackend(_NoCancelBackend):
         yield TextEvent("answer")
         yield ResultEvent(None, None)
 
-
 async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Child sum contradicting the terminal total: owner none, nothing billed.
 
-    Neither side is rewritten; the attempt carries no standard usage and the
-    fixed contradiction diagnostic lands in the trajectory lifecycle only.
-    """
+    Neither side is rewritten; the attempt carries no standard usage and the fixed contradiction diagnostic lands
+    in the trajectory lifecycle only."""
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _DuplicateMetricsBackend(),
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _DuplicateMetricsBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "none"
@@ -663,17 +587,12 @@ class _DuplicateIdempotentBackend(_NoCancelBackend):
         yield TextEvent("answer")
         yield ResultEvent(None, None)
 
-
 async def test_runner_duplicate_identical_totals_are_idempotent(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _DuplicateIdempotentBackend(),
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _DuplicateIdempotentBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "generation_children"
@@ -695,23 +614,16 @@ class _ResidualTotalBackend(_NoCancelBackend):
         yield TextEvent(" more")
         yield ResultEvent(None, None)
 
-
 async def test_runner_residual_unallocated_total_folds_onto_chain(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Terminal total exceeding the per-message sum: attempt bills the whole.
 
-    The per-dimension take-max residual (issue #747) keeps the wire aggregate
-    authoritative; no generation evidence exists so the structural chain owns
-    the complete bill.
-    """
+    The per-dimension take-max residual (issue #747) keeps the wire aggregate authoritative; no generation
+    evidence exists so the structural chain owns the complete bill."""
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _ResidualTotalBackend(),
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _ResidualTotalBackend(),
     )
     attempt = _kind(collector.spans, "attempt")[0]
     meta = attributes(attempt)
@@ -737,23 +649,16 @@ class _ToolErrorAfterSealBackend(_NoCancelBackend):
         yield TextEvent("recovered answer")
         yield ResultEvent(None, None)
 
-
 async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A later tool error never unseals or unbills the completed generation.
 
-    The tool span closes ERROR with the sanitized message, the sealed
-    generation keeps its billing allocation with historical end, and the run
-    still completes successfully.
-    """
+    The tool span closes ERROR with the sanitized message, the sealed generation keeps its billing allocation with
+    historical end, and the run still completes successfully."""
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _ToolErrorAfterSealBackend(),
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _ToolErrorAfterSealBackend(),
     )
     spans = collector.spans
     tool = _kind(spans, "tool")[0]
@@ -783,23 +688,16 @@ class _PendingCapBackend(_NoCancelBackend):
         yield TextEvent("done")
         yield ResultEvent(None, None)
 
-
 async def test_runner_pending_count_cap_drains_children_stay_unbilled(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """512-draft cap at the wire: owner structural, zero billed children.
 
-    Mirrors the T2 cap unit test through the real runner: all drafts drain
-    ended, the fixed count-only cap diagnostic is stored locally, and no
-    child carries standard usage aliases.
-    """
+    Mirrors the T2 cap unit test through the real runner: all drafts drain ended, the fixed count-only cap
+    diagnostic is stored locally, and no child carries standard usage aliases."""
     collector = await _run_lifecycle_flow(
-        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch,
-        _PendingCapBackend(),
+        ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _PendingCapBackend(),
     )
     lifecycle = _read_subtrajectory(feature_branch_repo)
     assert lifecycle["billing_owner"] == "structural_attempt"
@@ -816,32 +714,24 @@ async def test_runner_pending_count_cap_drains_children_stay_unbilled(
     payload = json.dumps([request["body"] for request in collector.requests])
     assert "generation_pending_cap" not in payload  # diagnostics never on the wire
 
-
 async def test_runner_resume_native_conversation_distinct_from_daydream_session(
-    ext_dir: ExtDir,
-    feature_branch_repo: Path,
-    make_config: Callable[..., RunConfig],
-    install_backend: Callable[[object], object],
-    monkeypatch: pytest.MonkeyPatch,
+    ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Resume with a native conversation distinct from the Daydream session.
 
-    The second invocation resumes the first's native continuation (the token
-    the backend minted reaches the resumed execute call) while every span's
-    session identity — trajectory session id and traceloop association — stays
-    the one Daydream session. The native conversation id surfaces only on the
-    resumed attempt via gen_ai.conversation.id.
-    """
+    The second invocation resumes the first's native continuation (the token the backend minted reaches the
+    resumed execute call) while every span's session identity — trajectory session id and traceloop association —
+    stays the one Daydream session. The native conversation id surfaces only on the resumed attempt via
+    gen_ai.conversation.id."""
     backend = ScriptedBackend(
         script=[
             [
-                RequestEvent("original invocation"),
-                TextEvent("first answer"),
+                RequestEvent("original invocation"), TextEvent("first answer"),
                 ResultEvent(None, ContinuationToken("scripted", {"thread_id": "native-thread-77"})),
             ],
             [
-                RequestEvent("resumed invocation"),
-                TextEvent("resumed answer"),
+                RequestEvent("resumed invocation"), TextEvent("resumed answer"),
                 ResultEvent(None, None, session_id="native-thread-77"),
             ],
         ],
@@ -866,8 +756,7 @@ return None
     assert backend.continuations[0] is None
     assert backend.continuations[1].data == {"thread_id": "native-thread-77"}
     assert json.loads((feature_branch_repo / _RESULT_FILE).read_text()) == {
-        "first": "first answer",
-        "resumed": "resumed answer",
+        "first": "first answer", "resumed": "resumed answer",
     }
     trajectory_paths = list((feature_branch_repo / ".daydream/runs").glob("*/trajectory.json"))
     assert len(trajectory_paths) == 1

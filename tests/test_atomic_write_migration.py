@@ -78,7 +78,6 @@ def _instrument(monkeypatch: pytest.MonkeyPatch, module: str) -> list[tuple[Path
     monkeypatch.setattr(f"{module}.atomic_write_bytes", spy)
     return calls
 
-
 class TestWriterCharacterization:
     def test_materialize_bytes_and_umask_mode(self, tmp_path: Path) -> None:
         root = _index(tmp_path)
@@ -101,8 +100,7 @@ class TestWriterCharacterization:
         out = tmp_path / "export.jsonl"
         with _umask(0o022):
             assert cli._handle_corpus_command(
-                ["adjudicate", "export", "--index-root", str(root),
-                 "--state-dir", str(state), "--out", str(out)]
+                ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
             ) == 0
         rows = [json.loads(line) for line in out.read_text().splitlines()]
         raw = out.read_bytes()
@@ -125,11 +123,8 @@ class TestWriterCharacterization:
         run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
         out = tmp_path / "final-bundle"
         with _umask(0o022):
-            build_final_bundle(index_root=index_root, materialize_dir=mat,
-                               archive_dir=archive_dir, out_dir=out)
-        for name, source in (
-            ("annotations.jsonl", "annotations.jsonl"),
-            ("sessions.jsonl", "annotations.jsonl"),
+            build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
+        for name, source in (("annotations.jsonl", "annotations.jsonl"), ("sessions.jsonl", "annotations.jsonl"),
             ("preview-manifest.json", "preview-manifest.json"),
         ):
             assert (out / name).read_bytes() == (mat / source).read_bytes(), name
@@ -189,8 +184,7 @@ class TestWriterCharacterization:
         assert stat.S_IMODE(dest.stat().st_mode) == 0o644
         assert list(dest.parent.glob("*.tmp")) == []
 
-    def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path,
-                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_projection_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         bundle_dir = _write_bundle(tmp_path)
         _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
         out = tmp_path / "proj"
@@ -199,14 +193,12 @@ class TestWriterCharacterization:
             build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
         assert list(out.iterdir()) == []       # projector's unlink-on-failure must not be weakened
 
-    def test_calibration_failure_leaves_no_stray_temp(self, tmp_path: Path,
-                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_calibration_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         config = _config(_build_fixture(tmp_path), tmp_path)
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
             run_calibration(config)
         assert list(config.out_dir.iterdir()) == []   # its try/finally already unlinks both temps
-
 
 class TestExportKnobs:
     def test_export_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
@@ -218,8 +210,7 @@ class TestExportKnobs:
         # site passes umask_derived_mode(), not a hard-coded 0o644.
         with _umask(0o077):
             assert cli._handle_corpus_command(
-                ["adjudicate", "export", "--index-root", str(root),
-                 "--state-dir", str(state), "--out", str(out)]
+                ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
             ) == 0
         [(target, content, kwargs)] = calls
         assert target == out
@@ -234,12 +225,10 @@ class TestExportKnobs:
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
             cli._handle_corpus_command(
-                ["adjudicate", "export", "--index-root", str(root),
-                 "--state-dir", str(state), "--out", str(out)]
+                ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
             )
         assert out.read_bytes() == b"prior\n"
         assert list(tmp_path.glob("*.tmp")) == []
-
 
 class TestMaterializeKnobs:
     def test_materialize_calls_the_primitive_for_both_artifacts(self, tmp_path: Path,
@@ -248,15 +237,13 @@ class TestMaterializeKnobs:
         with _umask(0o077):
             run_materialize(_index(tmp_path), tmp_path / "mat", pin=_PIN)
         by_target = {target: (content, kwargs) for target, content, kwargs in calls}
-        assert set(by_target) == {tmp_path / "mat" / "sessions.jsonl",
-                                  tmp_path / "mat" / "preview-manifest.json"}
+        assert set(by_target) == {tmp_path / "mat" / "sessions.jsonl", tmp_path / "mat" / "preview-manifest.json"}
         assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
                    for _content, kwargs in by_target.values())
         for target, (content, _kwargs) in by_target.items():
             assert target.read_bytes() == content
 
-    def test_materialize_failure_leaves_no_stray_temp(self, tmp_path: Path,
-                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_materialize_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         out = tmp_path / "mat"
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
@@ -268,10 +255,8 @@ class TestMaterializeKnobs:
         run_materialize(_index(tmp_path), out, pin=_PIN, dry_run=True)
         assert not out.exists()
 
-
 class TestCanonicalKnobs:
-    def test_canonical_harvest_calls_the_primitive(self, tmp_path: Path,
-                                                   monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_canonical_harvest_calls_the_primitive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
         calls = _instrument(monkeypatch, "daydream.training.adjudication.canonical")
         with _umask(0o077):
@@ -282,8 +267,7 @@ class TestCanonicalKnobs:
         assert kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
         assert list(mat.glob("*.tmp")) == []
 
-    def test_canonical_failure_leaves_no_stray_temp(self, tmp_path: Path,
-                                                    monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_canonical_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
         run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
         before = (mat / "annotations.jsonl").read_bytes()
@@ -295,7 +279,6 @@ class TestCanonicalKnobs:
             ["annotations.jsonl", "sessions.jsonl", "preview-manifest.json"]
         )
 
-
 class TestFinalBundleKnobs:
     def test_final_bundle_routes_all_seven_files_through_the_primitive(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -305,61 +288,42 @@ class TestFinalBundleKnobs:
         calls = _instrument(monkeypatch, "daydream.training.adjudication.final_bundle")
         out = tmp_path / "final-bundle"
         with _umask(0o077):
-            build_final_bundle(
-                index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-            )
+            build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
         assert {target.name for target, _c, _k in calls} == {
-            "annotations.jsonl",
-            "sessions.jsonl",
-            "preview-manifest.json",
-            "policy-binding.json",
-            "label-observations.jsonl",
-            "coverage-report.json",
-            "lineage.json",
+            "annotations.jsonl", "sessions.jsonl", "preview-manifest.json", "policy-binding.json",
+            "label-observations.jsonl", "coverage-report.json", "lineage.json",
         }
-        assert all(
-            kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600}
-            for _t, _c, kwargs in calls
-        )
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o600} for _t, _c, kwargs in calls)
         for target, content, _kwargs in calls:
             assert target.read_bytes() == content
 
-    def test_final_bundle_failure_leaves_no_stray_temp(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_final_bundle_failure_leaves_no_stray_temp(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         index_root, mat, archive_dir, _pin = seed_final_bundle_state(tmp_path)
         run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
         out = tmp_path / "final-bundle"
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
-            build_final_bundle(
-                index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out
-            )
+            build_final_bundle(index_root=index_root, materialize_dir=mat, archive_dir=archive_dir, out_dir=out)
         assert list(out.iterdir()) == []
 
-
 class TestProjectorKnobs:
-    def test_projection_routes_every_member_through_the_primitive(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    def test_projection_routes_every_member_through_the_primitive(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         bundle_dir = _write_bundle(tmp_path)
         _write_annotations_snapshot(bundle_dir, dispositions=["accepted", "rejected"])
         out = tmp_path / "proj"
         calls = _instrument(monkeypatch, "daydream.training.corpus_projection.projector")
         build_frozen_corpus(_config_for(bundle_dir, tmp_path, out_dir=out))
-        assert {target.name for target, _c, _k in calls} >= {
-            "corpus.jsonl", "adjudication-report.json", "schema.json",
+        assert {target.name for target, _c, _k in calls} >= {"corpus.jsonl", "adjudication-report.json", "schema.json",
             "lineage.json", "license-report.json", "_SUCCESS",
         }
         # mode=None keeps mkstemp's 0600: this site must NOT be widened to the
         # umask-derived 0644 the other seven get.
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": None}
-                   for _t, _c, kwargs in calls)
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": None} for _t, _c, kwargs in calls)
         content_by_name = {target.name: content for target, content, _k in calls}
         assert content_by_name["_SUCCESS"] == b"ok\n"
         for target, content, _kwargs in calls:
             assert target.read_bytes() == content
-
 
 class TestCalibrationKnobs:
     def test_calibration_calls_the_primitive_report_first(self, tmp_path: Path,
@@ -367,25 +331,20 @@ class TestCalibrationKnobs:
         config = _config(_build_fixture(tmp_path), tmp_path)
         calls: list[tuple[Path, bytes, dict[str, Any]]] = []
         real = atomic_write_pair
-
-        def spy(first: tuple[Path, bytes], second: tuple[Path, bytes],
-                **kwargs: Any) -> None:
+        def spy(first: tuple[Path, bytes], second: tuple[Path, bytes], **kwargs: Any) -> None:
             calls.append((Path(first[0]), first[1], kwargs))
             calls.append((Path(second[0]), second[1], kwargs))
             real(first, second, **kwargs)
-
         monkeypatch.setattr("daydream.training.calibration.atomic_write_pair", spy)
         with _umask(0o022):
             run_calibration(config)
         # M8: report.md is published before calibration.json, and the pair goes
         # through the primitive with the same explicit knobs.
         assert [target.name for target, _c, _k in calls] == ["report.md", "calibration.json"]
-        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644}
-                   for _t, _c, kwargs in calls)
+        assert all(kwargs == {"fsync": False, "dir_fsync": False, "mode": 0o644} for _t, _c, kwargs in calls)
         for target, content, _kwargs in calls:
             assert target.read_bytes() == content
         assert sorted(p.name for p in config.out_dir.iterdir()) == ["calibration.json", "report.md"]
-
 
 class TestCandidateKnobs:
     def test_candidate_calls_the_primitive_with_the_documented_knobs(self, tmp_path: Path,
@@ -413,10 +372,8 @@ class TestCandidateKnobs:
         assert isinstance(failure.value.__cause__, OSError)
         assert list(out.iterdir()) == [dest]           # no uuid temp survives the failure
 
-
 class TestQueueKnobs:
-    def test_queue_calls_the_primitive_and_keeps_0600(self, tmp_path: Path,
-                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_queue_calls_the_primitive_and_keeps_0600(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         write_sessions_index(tmp_path)
         state = tmp_path / "adj"
         calls = _instrument(monkeypatch, "daydream.training.adjudication.cli")
@@ -439,8 +396,7 @@ class TestQueueKnobs:
         prior = (state / "queue.json").read_bytes()
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
-            cli._handle_corpus_command(
-                ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
+            cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
             )
         assert (state / "queue.json").read_bytes() == prior
         assert sorted(p.name for p in state.iterdir()) == ["queue.json"]

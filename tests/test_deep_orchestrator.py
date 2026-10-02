@@ -45,23 +45,18 @@ MakeConfig = Callable[..., "RunConfig"]
 
 Mute = Callable[..., None]
 
-
 def _accept_intent_decline_other(_console: Any, message: str, _default: str = "") -> str:
     """Accept intent confirmation while declining later optional gates."""
     return "y" if "understanding correct" in message.lower() else "n"
 
-
 def _recording_prompter(asked: list[str]) -> Callable[..., str]:
     """Accept intent confirmation, recording then declining later optional gates."""
-
     def _prompt(_console: Any, message: str, _default: str = "") -> str:
         if "understanding correct" in message.lower():
             return "y"
         asked.append(message)
         return "n"
-
     return _prompt
-
 
 def _add_bare_remote(repo: Path) -> Path:
     """Give *repo* a real, pushable ``origin``: a sibling bare clone.
@@ -72,23 +67,12 @@ def _add_bare_remote(repo: Path) -> Path:
     """
     bare = repo.parent / (repo.name + "-remote.git")
     subprocess.run(["git", "init", "--bare", str(bare)], check=True, capture_output=True)
-    subprocess.run(
-        ["git", "-C", str(repo), "remote", "add", "origin", str(bare)],
-        check=True,
-        capture_output=True,
-    )
+    subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", str(bare)], check=True, capture_output=True,)
     return bare
 
-
-def _install_model_capturing_stubs(
-    monkeypatch: pytest.MonkeyPatch,
-    target: Path,
-    *,
-    parse_severity: str | None = None,
-    merge_echo_records: bool = False,
-    arbiter_omit_verdicts: bool = False,
-    parse_by_stack: dict[str, dict[str, Any]] | None = None,
-    suppression_keep: bool = True,
+def _install_model_capturing_stubs(monkeypatch: pytest.MonkeyPatch, target: Path, *, parse_severity: str | None = None,
+    merge_echo_records: bool = False, arbiter_omit_verdicts: bool = False,
+    parse_by_stack: dict[str, dict[str, Any]] | None = None, suppression_keep: bool = True,
 ) -> list[dict[str, Any]]:
     """Patch create_backend with a per-(name, model) stub factory (#168).
 
@@ -115,41 +99,23 @@ def _install_model_capturing_stubs(
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     return shared_calls
 
-
 def _profile_with_pipeline(**overrides: object) -> "ResolvedProfile":
     """Build a test ResolvedProfile with the default strategies + pipeline overrides."""
     pipeline = "\n".join(f"{key} = {json.dumps(value)}" for key, value in overrides.items())
     parsed = parse_profile(f"[pipeline]\n{pipeline}")
-    return ResolvedProfile(
-        profile=replace(build_default_profile(), pipeline=parsed.pipeline),
-        source_kind="test",
-    )
-
+    return ResolvedProfile(profile=replace(build_default_profile(), pipeline=parsed.pipeline), source_kind="test",)
 
 async def _run_deep(
-    target: Path,
-    *,
-    start_at: str = "review",
-    precision_mode: bool = False,
-    approve_on_clean: bool = False,
-    review_profile: "ResolvedProfile | None" = None,
-    review_cache_enabled: bool = True,
+    target: Path, *, start_at: str = "review", precision_mode: bool = False, approve_on_clean: bool = False,
+    review_profile: "ResolvedProfile | None" = None, review_cache_enabled: bool = True,
 ) -> int:
     # cleanup=False suppresses the interactive cleanup prompt; deep is the default.
-    config = RunConfig(
-        target=str(target),
-        start_at=start_at,
-        cleanup=False,
-        precision_mode=precision_mode,
-        approve_on_clean=approve_on_clean,
-        review_profile=review_profile,
-        review_cache_enabled=review_cache_enabled,
+    config = RunConfig(target=str(target), start_at=start_at, cleanup=False, precision_mode=precision_mode,
+        approve_on_clean=approve_on_clean, review_profile=review_profile, review_cache_enabled=review_cache_enabled,
     )
     return await run(config)
 
-
 _SEVERITY_SORT_RANK = {"high": 0, "medium": 1, "low": 2}
-
 
 def _severity_sort_key(s: str) -> int:
     """Sort rank for canonical severities; errors naming unknown/absent values."""
@@ -158,21 +124,12 @@ def _severity_sort_key(s: str) -> int:
     except KeyError:
         raise ValueError(f"unexpected severity in fixture: {s!r}") from None
 
-
 def _merge_item(item_id: int, file: str, severity: str, *, desc: str | None = None) -> dict[str, Any]:
     """Build a validated merged item (shape copied from the stub default)."""
-    return {
-        "id": item_id,
-        "lens": "per-stack",
-        "file": file,
-        "line": 1,
-        "severity": severity,
-        "description": desc if desc is not None else f"{severity} issue in {file}",
-        "confidence": "MEDIUM",
-        "rationale": "rationale",
-        "evidence": f"{file}:1",
+    return {"id": item_id, "lens": "per-stack", "file": file, "line": 1, "severity": severity,
+        "description": desc if desc is not None else f"{severity} issue in {file}", "confidence": "MEDIUM",
+        "rationale": "rationale", "evidence": f"{file}:1",
     }
-
 
 def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
     """Commit *files* to the branch for tests that need reviewed-diff fixtures."""
@@ -181,13 +138,10 @@ def _add_to_reviewed_diff(target: Path, files: list[str]) -> None:
     _git(target, "add", *files)
     _commit(target, f"test: add {' '.join(files)} to the reviewed diff")
 
-
 def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     """Build a feature-branch fixture with one historical migration."""
     migration_rel = "migrations/0001_init.sql"
-    project = _feature_branch_repo(
-        tmp_path,
-        name,
+    project = _feature_branch_repo(tmp_path, name,
         initial={
             "api.py": "def hello():\n    return 'world'\n",
             "App.tsx": "export const App = () => <div>hello</div>;\n",
@@ -203,25 +157,20 @@ def _migration_project(tmp_path: Path, name: str) -> tuple[Path, Path]:
     )
     return project, project / migration_rel
 
-
 def _go_quote_project(tmp_path: Path) -> Path:
     """Build a feature-branch fixture whose reviewed diff is a single Go file."""
     # Only main.go changes in the feature-branch commit: it is the sole
     # reviewed-diff file, so a fix to it is the only edit the run commits.
-    return _feature_branch_repo(
-        tmp_path,
-        "go_quote_repo",
+    return _feature_branch_repo(tmp_path, "go_quote_repo",
         initial={"main.go": "package main\n\n// doc\n", "notes.md": "# Notes\n"},
         changed={"main.go": "package main\n\n// doc updated\n"},
     )
-
 
 def _record(**overrides: Any) -> dict[str, Any]:
     """Build one on-disk per-stack record (the shape a merge resume reads back)."""
     record: dict[str, Any] = {"id": 1, "description": "issue", "file": "api.py", "line": 1}
     record.update(overrides)
     return record
-
 
 def _write_matching_diff_key(target: Path, deep: Path) -> None:
     """Write ``diff-key`` for *target*'s current diff into *deep*.
@@ -233,7 +182,6 @@ def _write_matching_diff_key(target: Path, deep: Path) -> None:
     diff = git_ops.diff(target, base)
     diff_key_path(deep).write_text(diff_key(diff or ""), encoding="utf-8")
 
-
 def _record_issues(loaded: Any) -> list[dict[str, Any]]:
     """Normalize a per-stack records file to its bare issues list.
 
@@ -243,14 +191,9 @@ def _record_issues(loaded: Any) -> list[dict[str, Any]]:
     issues = _records_issues(loaded)
     return issues if issues is not None else []
 
-
 def _prime_merge_resume(
-    target: Path,
-    *,
-    python: list[dict[str, Any]] | None = None,
-    react: list[dict[str, Any]] | None = None,
-    generic: list[dict[str, Any]] | None = None,
-    structure: list[dict[str, Any]] | None = None,
+    target: Path, *, python: list[dict[str, Any]] | None = None, react: list[dict[str, Any]] | None = None,
+    generic: list[dict[str, Any]] | None = None, structure: list[dict[str, Any]] | None = None,
 ) -> Path:
     """Prime the deep artifacts a ``--start-at`` resume reads, returning the deep dir.
 
@@ -266,16 +209,10 @@ def _prime_merge_resume(
     _write_matching_diff_key(target, deep)
     (deep / "intent.md").write_text("primed intent")
     (deep / "alternatives.json").write_text("[]")
-    for stack, records in (
-        ("python", python),
-        ("react", react),
-        ("generic", generic),
-        ("structure", structure),
-    ):
+    for stack, records in (("python", python), ("react", react), ("generic", generic), ("structure", structure),):
         if records is not None:
             (deep / f"stack-{stack}-records.json").write_text(json.dumps(records))
     return deep
-
 
 async def _ok(*_a: Any, **kwargs: Any) -> Any:
     """Async stand-in for phase_test_and_heal that always passes.
@@ -284,52 +221,30 @@ async def _ok(*_a: Any, **kwargs: Any) -> Any:
     tests in this module use the ``mute_side_effects`` fixture instead.
     """
     key = kwargs["capture_tree_key"]()
-    return TestAndHealResult(
-        passed=True,
-        retries=0,
-        proceed=True,
-        ignored=False,
-        attempts=(
-            TestAttemptEvidence(
-                session_id=kwargs["session_id"],
-                kind="agent",
-                command=None,
-                passed=True,
-                input_tree_key=key,
+    return TestAndHealResult(passed=True, retries=0, proceed=True, ignored=False,
+        attempts=(TestAttemptEvidence(
+                session_id=kwargs["session_id"], kind="agent", command=None, passed=True, input_tree_key=key,
                 output_tree_key=key,
             ),
         ),
     )
 
-
 async def _noop_commit(*_a: Any, **_k: Any) -> None:
     """Async no-op stand-in for phase_commit_push (see ``_ok`` on why it stays)."""
     return None
-
 
 def _pin_findings_pr(monkeypatch: pytest.MonkeyPatch, target: Path) -> "PRInfo":
     """Provide the PR metadata required by the findings-out artifact."""
     head = git_ops.head_sha(target)
     base = subprocess.run(  # noqa: S603 - arguments are not user-controlled
         ["git", "rev-parse", "main"],  # noqa: S607 - git is a trusted command
-        cwd=target,
-        capture_output=True,
-        text=True,
-        check=True,
+        cwd=target, capture_output=True, text=True, check=True,
     ).stdout.strip()
-    pr = PRInfo(
-        number=7,
-        head_sha=head,
-        base_sha=base,
-        base_ref="main",
-        head_ref="feature",
-        owner="o",
-        repo="r",
+    pr = PRInfo(number=7, head_sha=head, base_sha=base, base_ref="main", head_ref="feature", owner="o", repo="r",
         url="https://example.invalid/pr/7",
     )
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda target_dir, n, **_kwargs: pr)
     return pr
-
 
 _FIX_EDIT_VERBOSE = (
     "\ndef choose(x):\n"
@@ -369,35 +284,18 @@ _FIX_EDIT_ERODED = (
     "        return 0\n"
 )
 
-
-def _feature_branch_repo(
-    tmp_path: Path,
-    name: str,
-    *,
-    initial: dict[str, str],
-    changed: dict[str, str],
-) -> Path:
+def _feature_branch_repo(tmp_path: Path, name: str, *, initial: dict[str, str], changed: dict[str, str],) -> Path:
     """Commit ``initial`` on the default branch, branch, then commit ``changed``."""
     project = tmp_path / name
-    seed_feature_branch(
-        project,
-        base=initial,
-        feature=changed,
-        base_message="init",
-        feature_message="change",
-    )
+    seed_feature_branch(project, base=initial, feature=changed, base_message="init", feature_message="change",)
     return project
-
 
 def _build_gate_target(tmp_path: Path, name: str) -> Path:
     """Build a python-only fixture repo (the shape the quality gate measures)."""
-    return _feature_branch_repo(
-        tmp_path,
-        name,
+    return _feature_branch_repo(tmp_path, name,
         initial={"api.py": "def hello():\n    return 'universe'\n"},
         changed={"api.py": "def hello():\n    return 'galaxy'\n"},
     )
-
 
 def _build_gate_target_no_functions(tmp_path: Path, name: str) -> Path:
     """A python-only fixture repo whose api.py has NO functions (erosion None pre-fix)."""
@@ -411,12 +309,8 @@ def _build_gate_target_no_functions(tmp_path: Path, name: str) -> Path:
         "CONFIG = os.environ.get('APP_CONFIG', 'default')\n"
     )
     return _feature_branch_repo(
-        tmp_path,
-        name,
-        initial={"api.py": initial},
-        changed={"api.py": initial.replace("1.0.0", "1.0.1")},
+        tmp_path, name, initial={"api.py": initial}, changed={"api.py": initial.replace("1.0.0", "1.0.1")},
     )
-
 
 def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
     """``_build_gate_target`` plus a second tracked python file (helper.py).
@@ -431,7 +325,6 @@ def _build_gate_target_with_helper(tmp_path: Path, name: str) -> Path:
     _commit(project, "add helper")
     return project
 
-
 def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
     """A python-only fixture repo whose diff does NOT include a tracked module.
 
@@ -441,16 +334,13 @@ def _build_scope_creep_target(tmp_path: Path, name: str) -> Path:
     must protect: a fix agent editing ``unrelated.py`` is editing outside the
     reviewed diff.
     """
-    return _feature_branch_repo(
-        tmp_path,
-        name,
+    return _feature_branch_repo(tmp_path, name,
         initial={
             "api.py": "def hello():\n    return 'universe'\n",
             "unrelated.py": "def util():\n    return 'untouched'\n",
         },
         changed={"api.py": "def hello():\n    return 'galaxy'\n"},
     )
-
 
 class _PromptHookStub(_StubBackend):
     """``_StubBackend`` whose ``intercept`` hook may answer one prompt itself.
@@ -462,13 +352,7 @@ class _PromptHookStub(_StubBackend):
     def intercept(self, cwd: Path, prompt: str) -> Sequence[AgentEvent] | None:
         return None
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
         own = self.intercept(cwd, prompt)
         if own is not None:
             for event in own:
@@ -477,11 +361,9 @@ class _PromptHookStub(_StubBackend):
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
 
-
 def _prompt_ref(prompt: str, label: str) -> str:
     """The value named by the prompt's single ``- <label>: <value>`` pointer line."""
     return next(line.removeprefix(f"- {label}: ") for line in prompt.splitlines() if line.startswith(f"- {label}: "))
-
 
 def _sanctioned_inputs(prompt: str) -> dict[str, Path]:
     """The label -> path map the rendered sanctioned-inputs block enumerates."""
@@ -495,7 +377,6 @@ def _sanctioned_inputs(prompt: str) -> dict[str, Path]:
         sanctioned[label] = Path(path)
     return sanctioned
 
-
 class _ExtraEditBackend(_StubBackend):
     """Make a fix turn also edit a second file, optionally creating it."""
 
@@ -505,13 +386,7 @@ class _ExtraEditBackend(_StubBackend):
         self._text = text
         self._append = append
 
-    async def execute(
-        self,
-        cwd: Path,
-        prompt: str,
-        *args: Any,
-        **kwargs: Any,
-    ) -> AsyncIterator[AgentEvent]:
+    async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
         async for event in super().execute(cwd, prompt, *args, **kwargs):
             yield event
         if prompt.lower().startswith(("fix this issue", "fix these")):
@@ -519,21 +394,14 @@ class _ExtraEditBackend(_StubBackend):
             before = extra.read_text() if self._append else ""
             extra.write_text(before + self._text)
 
-
 def _read_quality_gate(target: Path) -> dict[str, Any]:
     gate_p = target / ".daydream" / "deep" / "fix-quality-gate.json"
     assert gate_p.is_file(), "fix-quality-gate.json must be written"
     return cast(dict[str, Any], json.loads(gate_p.read_text(encoding="utf-8")))
 
-
 async def _run_quality_gate_fixture(
-    target: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    mute_side_effects: Mute,
-    *,
-    fix_edit_line: str | None = _FIX_EDIT_VERBOSE,
-    file_config: DaydreamFileConfig | None = None,
+    target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute, *,
+    fix_edit_line: str | None = _FIX_EDIT_VERBOSE, file_config: DaydreamFileConfig | None = None,
 ) -> int:
     """Drive a deep run to the fix phase over *target*, editing api.py verbosely.
 
@@ -546,39 +414,27 @@ async def _run_quality_gate_fixture(
     stub = _install_stub_backend(monkeypatch, target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_edit_line = fix_edit_line
-    return await run(
-        make_config(
-            target,
-            assume="yes",
-            output_mode="loop",
-            non_interactive=False,
-            archive=True,
-            file_config=file_config,
+    return await run(make_config(
+            target, assume="yes", output_mode="loop", non_interactive=False, archive=True, file_config=file_config,
         )
     )
 
-
 INTENT_SENTINEL = "SKIP_IF_NO_QUERY_IS_A_DELIBERATE_GUARD"
-
 
 def _fix_prompts(stub: _StubBackend) -> list[str]:
     # Same-file findings are batched into one "Fix these N issues" turn; a lone
     # finding still uses the single-finding "Fix this issue" prompt. Match both.
     return [c["prompt"] for c in stub.calls if c["prompt"].startswith(("Fix this issue", "Fix these"))]
 
-
 PR_SENTINEL = "DELIBERATE_RATIO_PASS_THROUGH_IS_INTENTIONAL"
-
 
 def _intent_calls(stub: _StubBackend) -> list[dict[str, Any]]:
     """Recover the intent-phase calls by their stable instruction text."""
     return [c for c in stub.calls if "understand the intent of these changes" in c["prompt"].lower()]
 
-
 def _intent_prompt(stub: _StubBackend) -> str:
     """Recover the intent-phase prompt by its stable instruction text."""
     return cast(str, next(c["prompt"] for c in _intent_calls(stub)))
-
 
 def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
     """Classify captured prompts for the finding-producing builders (#279).
@@ -587,11 +443,7 @@ def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
     and ``merge``; each is identified by its stable opening phrase.
     """
     by_kind: dict[str, list[str]] = {
-        "per-stack": [],
-        "generic-fallback": [],
-        "structural": [],
-        "arbiter": [],
-        "merge": [],
+        "per-stack": [], "generic-fallback": [], "structural": [], "arbiter": [], "merge": [],
     }
     for c in stub.calls:
         pl = c["prompt"].lower()
@@ -607,15 +459,13 @@ def _review_prompts_by_kind(stub: _StubBackend) -> dict[str, list[str]]:
             by_kind["merge"].append(c["prompt"])
     return by_kind
 
-
 def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool) -> None:
     """Assert the precedence rule AND the #579 untrusted framing are present/absent
     in every finding-producing prompt."""
     by_kind = _review_prompts_by_kind(stub)
     missing = [k for k, prompts in by_kind.items() if not prompts]
     assert not missing, f"expected prompts for all five kinds, missing: {missing}"
-    gated_constants = {
-        "AUTHORITATIVE_INTENT_RULE": AUTHORITATIVE_INTENT_RULE,
+    gated_constants = {"AUTHORITATIVE_INTENT_RULE": AUTHORITATIVE_INTENT_RULE,
         "PR_DESCRIPTION_UNTRUSTED_FRAMING": PR_DESCRIPTION_UNTRUSTED_FRAMING,
     }
     for kind, prompts in by_kind.items():
@@ -624,19 +474,15 @@ def _assert_authoritative_rule_gated(stub: _StubBackend, *, expect_present: bool
                 f"{kind}: expected {name} {'in' if expect_present else 'absent from'} every prompt"
             )
 
-
 def _registry_text(plugin_names: list[str]) -> str:
     return '{"version": 2, "plugins": {' + ", ".join(f'"{name}@marketplace": []' for name in plugin_names) + "}}"
-
 
 def _write_plugin_registry(config_dir: Path, plugin_names: list[str]) -> None:
     registry = config_dir / "plugins" / "installed_plugins.json"
     registry.parent.mkdir(parents=True, exist_ok=True)
     registry.write_text(_registry_text(plugin_names))
 
-
 _TWIN_DESCRIPTION = "The staging cache URL does not match the documented shared instance"
-
 
 def _twin_parse_by_stack(structural_line: int) -> dict[str, dict[str, Any]]:
     """Stub per-stack overrides staging one structural/language twin on api.py.
@@ -647,37 +493,19 @@ def _twin_parse_by_stack(structural_line: int) -> dict[str, dict[str, Any]]:
     moved onto their own files so nothing else collides at that location and the
     arbiter's target set is exactly the twin.
     """
-    return {
-        "python": {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "api.py",
-            "line": 1,
+    return {"python": {
+            "severity": "medium", "confidence": "MEDIUM", "file": "api.py", "line": 1, "description": _TWIN_DESCRIPTION,
+        },
+        "structure": {"severity": "high", "confidence": "HIGH", "file": "api.py", "line": structural_line,
             "description": _TWIN_DESCRIPTION,
         },
-        "structure": {
-            "severity": "high",
-            "confidence": "HIGH",
-            "file": "api.py",
-            "line": structural_line,
-            "description": _TWIN_DESCRIPTION,
-        },
-        "react": {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "App.tsx",
-            "line": 1,
+        "react": {"severity": "medium", "confidence": "MEDIUM", "file": "App.tsx", "line": 1,
             "description": "Unrelated React concern",
         },
-        "generic": {
-            "severity": "medium",
-            "confidence": "MEDIUM",
-            "file": "README.md",
-            "line": 1,
+        "generic": {"severity": "medium", "confidence": "MEDIUM", "file": "README.md", "line": 1,
             "description": "Unrelated docs concern",
         },
     }
-
 
 _PRECISION_STACKS: dict[str, dict[str, Any]] = {
     "python": {"severity": "high", "confidence": "HIGH", "file": "api.py", "line": 1},
@@ -689,18 +517,9 @@ _CONFIDENCE_KNOB_STACKS: dict[str, dict[str, Any]] = {
     "react": {"severity": "medium", "confidence": "MEDIUM", "file": "App.tsx", "line": 1},
 }
 
-_SUPPRESSION_COLLISION_STACKS: dict[str, dict[str, Any]] = {
-    "python": {
-        "severity": "high",
-        "confidence": "HIGH",
-        "file": "py_module.py",
-        "line": 7,
-        "description": "the HIGH finding",
-        "extra": {
-            "severity": "low",
-            "confidence": "MEDIUM",
-            "file": "py_module.py",
-            "line": 7,
+_SUPPRESSION_COLLISION_STACKS: dict[str, dict[str, Any]] = {"python": {
+        "severity": "high", "confidence": "HIGH", "file": "py_module.py", "line": 7, "description": "the HIGH finding",
+        "extra": {"severity": "low", "confidence": "MEDIUM", "file": "py_module.py", "line": 7,
             "description": "borderline sibling sharing the HIGH location",
         },
     },

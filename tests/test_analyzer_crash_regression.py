@@ -26,7 +26,6 @@ _WORKER = textwrap.dedent(
     """
 )
 
-
 def test_analyze_quality_survives_in_subprocess(tmp_path: Path) -> None:
     # Production shape: analyze_quality(daydream_dir) scans daydream_dir.parent
     # (the workspace), so the analyzed dir is a .daydream inside the workspace.
@@ -41,9 +40,7 @@ def test_analyze_quality_survives_in_subprocess(tmp_path: Path) -> None:
     )
     proc = subprocess.run(
         [sys.executable, "-c", _WORKER, str(daydream_dir)],  # venv's own interpreter
-        capture_output=True,
-        text=True,
-        timeout=120,
+        capture_output=True, text=True, timeout=120,
     )
     assert proc.returncode == 0, f"crashed rc={proc.returncode}: {proc.stderr[-2000:]}"
     out = json.loads(proc.stdout)

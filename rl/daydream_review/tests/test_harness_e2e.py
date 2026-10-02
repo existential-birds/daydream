@@ -41,29 +41,10 @@ def _stage(root: Path) -> dict[str, Path]:
     return {"repo": repo, "archive": archive, "home": home, "out": root / "out"}
 
 
-def _run_eval(
-    paths: dict[str, Path],
-    *,
-    model: str,
-    base_url: str | None,
-    backend: str | None = None,
+def _run_eval(paths: dict[str, Path], *, model: str, base_url: str | None, backend: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    argv = [
-        "uv",
-        "run",
-        "eval",
-        "@",
-        "configs/eval-stub.toml",
-        "-m",
-        model,
-        "--no-rich",
-        "-o",
-        str(paths["out"]),
-        "--harness.repo-path",
-        str(paths["repo"]),
-        "--harness.archive-root",
-        str(paths["archive"]),
-        "--harness.home",
+    argv = ["uv", "run", "eval", "@", "configs/eval-stub.toml", "-m", model, "--no-rich", "-o", str(paths["out"]),
+        "--harness.repo-path", str(paths["repo"]), "--harness.archive-root", str(paths["archive"]), "--harness.home",
         str(paths["home"]),
     ]
     if base_url is not None:
@@ -120,9 +101,7 @@ def test_stub_rollout_scores_without_crash(tmp_path: Path, stub_upstream: str) -
     assert trace["info"]["reward_breakdown"]["reward_version"]
     assert list((paths["archive"] / "runs").iterdir()), "daydream archived nothing"
 
-
-@pytest.mark.skipif(
-    not os.environ.get("DAYDREAM_RL_LIVE_E2E"),
+@pytest.mark.skipif(not os.environ.get("DAYDREAM_RL_LIVE_E2E"),
     reason="set DAYDREAM_RL_LIVE_E2E=1, DAYDREAM_RL_LIVE_MODEL and DAYDREAM_RL_LIVE_BASE_URL to run",
 )
 def test_live_rollout(tmp_path: Path) -> None:

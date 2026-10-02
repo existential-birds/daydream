@@ -42,16 +42,12 @@ from tests.harness.trajectory import (
 async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
     """Real-path run_agent with a Write-heavy tool call: a 16 KB content payload
     in the tool arguments (like _run_tool_agent, one turn)."""
-    events: list[AgentEvent] = [
-        TextEvent(text="turn 0"),
-        ToolStartEvent(id="w1", name="Write",
-                       input={"file_path": "/tmp/f.txt", "content": content}),
+    events: list[AgentEvent] = [TextEvent(text="turn 0"),
+        ToolStartEvent(id="w1", name="Write", input={"file_path": "/tmp/f.txt", "content": content}),
         ToolResultEvent(id="w1", output="ok", is_error=False),
-        MetricsEvent(message_id="m0", prompt_tokens=100, completion_tokens=10,
-                     cached_tokens=None, cost_usd=None),
+        MetricsEvent(message_id="m0", prompt_tokens=100, completion_tokens=10, cached_tokens=None, cost_usd=None),
         TurnEndEvent(message_id="m0"),
-        CostEvent(cost_usd=0.5, input_tokens=600,
-                  output_tokens=66_737, cached_tokens=None),
+        CostEvent(cost_usd=0.5, input_tokens=600, output_tokens=66_737, cached_tokens=None),
         ResultEvent(structured_output=None, continuation=None),
     ]
     recorder = make_recorder(tmp_path)
@@ -62,9 +58,7 @@ async def _run_write_agent(tmp_path: Path, *, content: str) -> dict[str, Any]:
     return read_trajectory(recorder.path)
 
 
-async def _run_tool_agent(
-    tmp_path: Path, *, turns: int, tools_per_turn: int
-) -> dict[str, Any]:
+async def _run_tool_agent(tmp_path: Path, *, turns: int, tools_per_turn: int) -> dict[str, Any]:
     """Real-path run_agent: per turn a TextEvent, tools_per_turn tool pairs, a
     MetricsEvent (single-digit completion), and a TurnEndEvent; then a CostEvent
     carrying the authoritative session total and a ResultEvent."""
@@ -72,17 +66,13 @@ async def _run_tool_agent(
     for turn in range(turns):
         events.append(TextEvent(text=f"turn {turn}"))
         for j in range(tools_per_turn):
-            events.append(ToolStartEvent(
-                id=f"t{turn}-{j}", name="Bash", input={"command": "x"}
-            ))
+            events.append(ToolStartEvent(id=f"t{turn}-{j}", name="Bash", input={"command": "x"}))
             events.append(ToolResultEvent(id=f"t{turn}-{j}", output="ok", is_error=False))
         events.append(MetricsEvent(
-            message_id=f"m{turn}", prompt_tokens=100, completion_tokens=10,
-            cached_tokens=None, cost_usd=None,
+            message_id=f"m{turn}", prompt_tokens=100, completion_tokens=10, cached_tokens=None, cost_usd=None,
         ))
         events.append(TurnEndEvent(message_id=f"m{turn}"))
-    events.append(CostEvent(cost_usd=0.5, input_tokens=600,
-                            output_tokens=66_737, cached_tokens=None))
+    events.append(CostEvent(cost_usd=0.5, input_tokens=600, output_tokens=66_737, cached_tokens=None))
     events.append(ResultEvent(structured_output=None, continuation=None))
     recorder = make_recorder(tmp_path)
     async with recorder:
@@ -91,20 +81,16 @@ async def _run_tool_agent(
         )
     return read_trajectory(recorder.path)
 
-
-
 @pytest.mark.asyncio
 async def test_claude_shape_final_reflects_session_total(tmp_path: Path) -> None:
-    """Claude-shaped stream: per-message single-digit completion + authoritative
-    CostEvent session total -> final.total_completion_tokens == session total,
-    not the collapsed sum of per-message digits."""
+    """Claude-shaped stream: per-message single-digit completion + authoritative CostEvent session total ->
+    final.total_completion_tokens == session total, not the collapsed sum of per-message digits."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:
             observe_claude_shape(inv)
     traj = read_trajectory(recorder.path)
     assert traj["final_metrics"]["total_completion_tokens"] == 66_737
-
 
 @pytest.mark.asyncio
 async def test_claude_shape_step_sum_equals_final(tmp_path: Path) -> None:
@@ -120,7 +106,6 @@ async def test_claude_shape_step_sum_equals_final(tmp_path: Path) -> None:
     assert step_sum == 66_737
     assert final["total_completion_tokens"] == step_sum
 
-
 @pytest.mark.asyncio
 async def test_multi_turn_turns_each_own_step(tmp_path: Path) -> None:
     """run_agent forwards TurnEndEvent (fix B): a 24-tool-call, 3-turn agent
@@ -135,7 +120,6 @@ async def test_multi_turn_turns_each_own_step(tmp_path: Path) -> None:
                   and s["metrics"].get("completion_tokens") == 10]
     assert len(turn_steps) == 3   # exactly one per turn, not collapsed
 
-
 @pytest.mark.asyncio
 async def test_pi_shape_no_step_level_double_count(tmp_path: Path) -> None:
     """Pi-shaped stream (per-turn MetricsEvent w/ cost + restated final CostEvent)
@@ -149,14 +133,12 @@ async def test_pi_shape_no_step_level_double_count(tmp_path: Path) -> None:
                                          completion_tokens=10, cached_tokens=None,
                                          cost_usd=0.25))
                 inv.observe(TurnEndEvent(message_id=""))
-            inv.observe(CostEvent(cost_usd=0.75, input_tokens=300,
-                                  output_tokens=30, cached_tokens=None))
+            inv.observe(CostEvent(cost_usd=0.75, input_tokens=300, output_tokens=30, cached_tokens=None))
             inv.observe(ResultEvent(structured_output=None, continuation=None))
     traj = read_trajectory(recorder.path)
     final = traj["final_metrics"]
     step_sum = step_token_sum(traj, "completion_tokens")
-    step_cost = sum(s["metrics"].get("cost_usd") or 0 for s in traj["steps"]
-                    if s.get("metrics"))
+    step_cost = sum(s["metrics"].get("cost_usd") or 0 for s in traj["steps"] if s.get("metrics"))
     assert final["total_completion_tokens"] == 30
     assert step_sum == 30               # not 60
     assert final["total_cost_usd"] == pytest.approx(0.75)
@@ -171,13 +153,11 @@ def _tool_argument_floor(traj: dict[str, Any]) -> Any:
             total += len(json.dumps(tc["arguments"]))
     return total // 4
 
-
 @pytest.mark.asyncio
 async def test_tool_argument_invariant_holds_real_path(tmp_path: Path) -> None:
     """total_completion_tokens >= floor on a real-path Write-heavy run (passes post-fix)."""
     traj = await _run_write_agent(tmp_path, content="y" * 16_000)
     assert traj["final_metrics"]["total_completion_tokens"] >= _tool_argument_floor(traj)
-
 
 def test_tool_argument_invariant_fails_pre_fix_bundle() -> None:
     """The gate is non-trivial: a hand-built pre-fix bundle (collapsed total) FAILS it."""
@@ -188,13 +168,9 @@ def test_tool_argument_invariant_fails_pre_fix_bundle() -> None:
 
 def _pre_fix_bundle() -> dict[str, Any]:
     """Minimal ATIF-shaped dict with a collapsed pre-fix completion total."""
-    return {
-        "final_metrics": {"total_completion_tokens": 50},
-        "steps": [{
-            "source": "agent",
-            "tool_calls": [{
-                "tool_call_id": "w1",
-                "function_name": "Write",
+    return {"final_metrics": {"total_completion_tokens": 50},
+        "steps": [{"source": "agent",
+            "tool_calls": [{"tool_call_id": "w1", "function_name": "Write",
                 "arguments": {"file_path": "/tmp/f", "content": "z" * 16_000},
             }],
         }],
@@ -202,10 +178,9 @@ def _pre_fix_bundle() -> dict[str, Any]:
 
 @pytest.mark.asyncio
 async def test_metrics_no_agent_step_folds_to_minted_step(tmp_path: Path) -> None:
-    """Round-2 #747: a MetricsEvent arriving with no open Step and no existing
-    agent Step (self.steps contains only a user/context step) must fold onto a
-    minted agent Step so the recorder-level tally still sums to final
-    (Sigma steps == final), instead of silently dropping the metrics."""
+    """Round-2 #747: a MetricsEvent arriving with no open Step and no existing agent Step (self.steps contains only a
+    user/context step) must fold onto a minted agent Step so the recorder-level tally still sums to final (Sigma
+    steps == final), instead of silently dropping the metrics."""
     recorder = make_recorder(tmp_path)
     async with recorder:
         async with recorder.invocation(phase=DaydreamPhase.REVIEW) as inv:

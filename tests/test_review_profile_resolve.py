@@ -28,10 +28,7 @@ content = "{content}"
 source = "copied: a"''')
     return p
 
-
-def test_precedence_explicit_beats_env_beats_repo_beats_default(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_precedence_explicit_beats_env_beats_repo_beats_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     explicit = _write_profile(tmp_path, "explicit", "E")
     user = _write_profile(tmp_path, "user", "U")
@@ -41,7 +38,6 @@ def test_precedence_explicit_beats_env_beats_repo_beats_default(
     resolved = rp.resolve_profile(explicit_path=str(explicit), file_config=fc)
     assert resolved.profile.name == "explicit" and resolved.source_kind == "explicit"
 
-
 def test_env_beats_repo_and_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     user = _write_profile(tmp_path, "user", "U")
     repo = _write_profile(tmp_path, "repo", "R")
@@ -49,7 +45,6 @@ def test_env_beats_repo_and_default(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     fc = DaydreamFileConfig(review_profile=repo)
     resolved = rp.resolve_profile(file_config=fc)          # no explicit path
     assert resolved.profile.name == "user" and resolved.source_kind == "env"
-
 
 def test_repo_beats_default(tmp_path: Path) -> None:
     repo = _write_profile(tmp_path, "repo", "R")
@@ -60,7 +55,6 @@ def test_repo_beats_default(tmp_path: Path) -> None:
     resolved = rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert resolved.profile.name == "repo" and resolved.source_kind == "repo"
 
-
 def test_absolute_repo_path_cannot_escape(tmp_path: Path) -> None:
     # The untrusted repo's committed value points outside its own root (the
     # host file is read into the profile's strategy text if allowed to resolve).
@@ -69,18 +63,15 @@ def test_absolute_repo_path_cannot_escape(tmp_path: Path) -> None:
         rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert "escape" in str(e.value).lower()
 
-
 def test_default_when_nothing_specified() -> None:
     resolved = rp.resolve_profile()                        # no explicit/env/repo
     assert resolved.source_kind == "default" and resolved.profile.name
-
 
 def test_relative_repo_path_cannot_escape(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fc = DaydreamFileConfig(review_profile=Path("../evil.toml"))   # relative repo path
     with pytest.raises(rp.ProfileError) as e:
         rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert "escape" in str(e.value).lower()
-
 
 def test_invalid_explicit_fails_naming_source(monkeypatch: pytest.MonkeyPatch) -> None:
     bad = Path("/tmp/bad-profile.toml")
@@ -89,13 +80,11 @@ def test_invalid_explicit_fails_naming_source(monkeypatch: pytest.MonkeyPatch) -
         rp.resolve_profile(explicit_path=str(bad))
     assert "bad-profile.toml" in str(e.value)
 
-
 def test_runconfig_carries_resolved_profile_and_is_used(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     p = tmp_path / "prof.toml"
     p.write_text('schema_version = 1\nname = "r"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     cfg = RunConfig(target=str(tmp_path), review_profile_path=str(p))
     assert cfg.review_profile_path == str(p)     # path carried on RunConfig
-
 
 def test_resolve_from_runconfig_happens_once_at_composition_root() -> None:
     cfg = RunConfig(target="/tmp")
@@ -117,8 +106,7 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatc
     repo_root = Path(__file__).resolve().parents[1]
     # CLI: `daydream review --review-profile` must
     # resolver seams through a real `daydream ... --review-profile` invocation.
-    out = subprocess.run(
-        [sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],
+    out = subprocess.run([sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],
         capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
     )
     # A valid explicit profile resolves cleanly: the review of an empty diff runs

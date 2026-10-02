@@ -30,8 +30,7 @@ from tests.test_deep_orchestrator import (
 
 @pytest.mark.parametrize("remaining_verdict", ["unresolved", "wrong_target", "regressed"])
 async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig, remaining_verdict: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, remaining_verdict: str,
     no_ci_remote: NoCIRemote,
 ) -> None:
     """Remaining findings cannot strand a tested fix; new regressions still block."""
@@ -57,9 +56,7 @@ async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
         f"Path({str(test_log)!r}).write_text('passed')\n"
     )
     class PartialBackend(StubBackend):
-        async def execute(
-            self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,
-        ) -> AsyncIterator[AgentEvent]:
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
             if "post-fix fix-verifier agent" in prompt.lower():
                 ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
                 yield ResultEvent(structured_output={"verdicts": [
@@ -78,8 +75,7 @@ async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
     _silence(monkeypatch)
 
     rc = await run(make_config(
-        repo, assume="yes", output_mode="loop",
-        test_command=shlex.join([sys.executable, str(test_script)]),
+        repo, assume="yes", output_mode="loop", test_command=shlex.join([sys.executable, str(test_script)]),
         pr_number=no_ci_remote.pr_number, pr_repo=no_ci_remote.base_repository,
     ))
 
@@ -103,18 +99,13 @@ async def test_exhausted_fix_rounds_validate_and_publish_partial_fixes(
     assert outcomes["item:2"]["verdict"] == "resolved"
     assert json.loads((deep / "push-verdict.json").read_text())["status"] == "succeeded"
 
-
 @pytest.mark.parametrize("new_file_permissions", [0o600, 0o644])
 async def test_related_regression_real_runner_stabilizes_and_commits(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    make_config: MakeConfig,
-    new_file_permissions: int,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, new_file_permissions: int,
 ) -> None:
     """Real host-test/Git path retains A/B/T and restores C + user scratch."""
     repo = tmp_path / "footprint-run"
-    _seed_feature_branch(
-        repo,
+    _seed_feature_branch(repo,
         base={"api.py": "A = 1\n", "sibling.py": "B = 1\n", "other.py": "C = 1\n"},
         feature={"api.py": "A = 10\n"},
     )
@@ -128,14 +119,8 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     scratch_two.write_text("owner-two\n")
     deep = repo / ".daydream" / "deep"
     item = {
-        "id": 1,
-        "file": "api.py",
-        "line": 1,
-        "severity": "high",
-        "description": "keep sibling fix and regression test",
-        "evidence": "api.py:1",
-        "recommendation": "repair both values",
-        "lens": "python",
+        "id": 1, "file": "api.py", "line": 1, "severity": "high", "description": "keep sibling fix and regression test",
+        "evidence": "api.py:1", "recommendation": "repair both values", "lens": "python",
         "related_files": ["sibling.py", "tests/test_a.py"],
     }
     counter = tmp_path / "host-test-count"
@@ -146,13 +131,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
             self.fix_round = 0
             self.verify_round = 0
 
-        async def execute(
-            self,
-            cwd: Path,
-            prompt: str,
-            *args: Any,
-            **kwargs: Any,
-        ) -> AsyncIterator[AgentEvent]:
+        async def execute(self, cwd: Path, prompt: str, *args: Any, **kwargs: Any,) -> AsyncIterator[AgentEvent]:
             lowered = prompt.lower()
             if lowered.startswith(("fix this issue", "fix these")):
                 self.fix_round += 1
@@ -185,14 +164,12 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
                 assert kwargs.get("read_only") is True
                 assert (cwd / "tests/test_a.py").is_file()
                 assert (cwd / "other.py").read_text() == "C = 1\n"
-                first = (
-                    {"issue_id": 1, "verdict": "wrong_target", "path": "other.py", "reason": "retry original"}
+                first = ({"issue_id": 1, "verdict": "wrong_target", "path": "other.py", "reason": "retry original"}
                     if self.verify_round == 1
                     else {"issue_id": 1, "verdict": "resolved", "reason": "complete"}
                 )
                 ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
-                verdicts = [first] + [
-                    {"issue_id": issue_id, "verdict": "resolved", "reason": "complete"}
+                verdicts = [first] + [{"issue_id": issue_id, "verdict": "resolved", "reason": "complete"}
                     for issue_id in ids
                     if issue_id != 1
                 ]
@@ -209,26 +186,13 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
                 yield event
 
     backend = FootprintBackend(repo)
-    backend.parse_by_stack = {
-        "python": {
-            "severity": "high",
-            "confidence": "HIGH",
-            "issue": item,
-        }
-    }
+    backend.parse_by_stack = {"python": {"severity": "high", "confidence": "HIGH", "issue": item}}
     monkeypatch.setattr("daydream.runner.create_backend", lambda *_a, **_k: backend)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *_a, **_k: "2")
     _silence(monkeypatch, prompts=False)
 
-    rc = await run(
-        make_config(
-            repo,
-            assume="yes",
-            archive=True,
-            test_command=f"python tests/test_a.py {counter}",
-        )
-    )
+    rc = await run(make_config(repo, assume="yes", archive=True, test_command=f"python tests/test_a.py {counter}",))
     # The local bare remote deliberately has no GitHub identity. The retained
     # tree still stabilizes, commits, and pushes, but the new remote-CI phase
     # must fail closed with an explicit handoff rather than claim completion.
@@ -243,9 +207,7 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     assert scratch_one.stat().st_mode & 0o777 == 0o600
     assert scratch_two.read_text() == "owner-two\n"
     assert set(_git(repo, "show", "--pretty=", "--name-only", "HEAD").splitlines()) == {
-        "api.py",
-        "sibling.py",
-        "tests/test_a.py",
+        "api.py", "sibling.py", "tests/test_a.py",
     }
     assert _git(remote, "rev-parse", "refs/heads/feature") == _git(repo, "rev-parse", "HEAD")
     unavailable = json.loads((deep / "remote-ci-verdict.json").read_text())
@@ -256,19 +218,13 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     audit = json.loads((deep / "fix-footprint.json").read_text())
     assert any(event["action"] == "rejected_retarget" for event in audit["events"])
     authorization = {(event["path"], event["origin"]) for event in audit["events"] if event["action"] == "authorize"}
-    assert {
-        ("api.py", "reviewed"),
-        ("api.py", "primary"),
-        ("sibling.py", "related"),
-        ("tests/test_a.py", "related"),
+    assert {("api.py", "reviewed"), ("api.py", "primary"), ("sibling.py", "related"), ("tests/test_a.py", "related"),
     } <= authorization
     restored = {event["path"] for event in audit["events"] if event["action"] == "restore"}
     assert {"other.py", "scratch-one.bin", "scratch-two.txt"} <= restored
     assert not {"sibling.py", "tests/test_a.py"} & restored
     assert {event["path"] for event in audit["events"] if event["action"] == "stage"} == {
-        "api.py",
-        "sibling.py",
-        "tests/test_a.py",
+        "api.py", "sibling.py", "tests/test_a.py",
     }
     verdict = json.loads((deep / "test-verdict.json").read_text())
     assert len(verdict["attempts"]) == 3
@@ -281,10 +237,6 @@ async def test_related_regression_real_runner_stabilizes_and_commits(
     assert verdict["attempts"][-1]["output_tree_key"] == capture["tree_key"]
     archived = get_archive_dir() / "runs" / audit["session_id"]
     assert json.loads((archived / "deep/fix-footprint.json").read_text()) == audit
-    for artifact in (
-        "fix-outcomes.json",
-        "test-verdict.json",
-        "recommended-capture.json",
-    ):
+    for artifact in ("fix-outcomes.json", "test-verdict.json", "recommended-capture.json",):
         assert (archived / "deep" / artifact).read_bytes() == (deep / artifact).read_bytes()
     assert (archived / "recommended.patch").read_bytes() == (repo / ".daydream/recommended.patch").read_bytes()

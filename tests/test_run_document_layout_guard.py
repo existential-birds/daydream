@@ -35,30 +35,16 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 
 #: The in-scope callers. Each must import the layout surface (requirement 10).
 _IN_SCOPE_CONSUMERS = frozenset({
-    "daydream/archive/__init__.py",
-    "daydream/archive/hydrate.py",
-    "daydream/archive/license_enrich.py",
-    "daydream/archive/sanitize.py",
-    "daydream/eval/analyzer.py",
-    "daydream/artifact_visibility.py",
-    "daydream/phases.py",
-    "daydream/training/adjudication/materialize.py",
-    "daydream/training/adjudication/cli.py",
+    "daydream/archive/__init__.py", "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
+    "daydream/archive/sanitize.py", "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
+    "daydream/phases.py", "daydream/training/adjudication/materialize.py", "daydream/training/adjudication/cli.py",
     "daydream/runner.py",
 })
 
 #: Symbols that count as "consuming the layout surface".
 _LAYOUT_SYMBOLS = frozenset({
-    "RUNS_DIRNAME",
-    "RUN_DOCUMENT_NAME",
-    "SIBLINGS_DIRNAME",
-    "PARTIAL_SUFFIX",
-    "run_directory",
-    "run_document_path",
-    "siblings_directory",
-    "sibling_document_path",
-    "partial_document_path",
-    "default_trajectory_path",
+    "RUNS_DIRNAME", "RUN_DOCUMENT_NAME", "SIBLINGS_DIRNAME", "PARTIAL_SUFFIX", "run_directory", "run_document_path",
+    "siblings_directory", "sibling_document_path", "partial_document_path", "default_trajectory_path",
 })
 
 #: (file, literal kind) allowances. Every entry names why that file legitimately
@@ -78,15 +64,7 @@ _PERMITTED = {
     "rl/daydream_review/daydream_review/rundir.py": frozenset({"root-document", "runs-dir"}),
 }
 
-_PATH_CALLS = frozenset({
-    "Path",
-    "glob",
-    "rglob",
-    "joinpath",
-    "with_name",
-    "with_suffix",
-    "relative_to",
-})
+_PATH_CALLS = frozenset({"Path", "glob", "rglob", "joinpath", "with_name", "with_suffix", "relative_to"})
 _BARE_NAMES = frozenset({"trajectory.json", "trajectories", "runs"})
 #: A segment is a path segment when it is preceded by a separator (so
 #: `.../trajectory.json after finalization` still counts) or anchored at the
@@ -167,23 +145,19 @@ def _layout_literals(module: str, path: Path) -> list[tuple[str, int]]:
         found.append(("+".join(sorted(kinds)), node.lineno))
     return found
 
-
 def test_no_layout_literal_outside_the_owner_and_its_allowlist() -> None:
-    offenders = {
-        module: [hit for hit in _layout_literals(module, path) if not _permitted(module, hit[0])]
+    offenders = {module: [hit for hit in _layout_literals(module, path) if not _permitted(module, hit[0])]
         for module, path in _production_modules()
         if module != _OWNER
     }
     offenders = {module: hits for module, hits in offenders.items() if hits}
-    assert not offenders, (
-        "run-document layout literals outside "
+    assert not offenders, ("run-document layout literals outside "
         f"{_OWNER} (use daydream.trajectory's layout surface): {offenders}"
     )
 
 
 def _permitted(module: str, kinds: str) -> bool:
     return set(kinds.split("+")) <= _PERMITTED.get(module, frozenset())
-
 
 def test_every_allowlisted_file_still_carries_its_permitted_literal() -> None:
     """An allowance that no longer matches anything fails, so it cannot rot."""
@@ -194,7 +168,6 @@ def test_every_allowlisted_file_still_carries_its_permitted_literal() -> None:
             carried.update(kinds.split("+"))
         stale.extend(f"{module}:{kind}" for kind in sorted(permitted - carried))
     assert not stale, f"allowlist entries no longer match anything: {stale}"
-
 
 def test_in_scope_consumers_import_the_layout_surface() -> None:
     missing: list[str] = []

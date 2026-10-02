@@ -91,11 +91,8 @@ class FakeVendorServer:
             def _handle(self) -> None:
                 length = int(self.headers.get("Content-Length", "0"))
                 body = self.rfile.read(length) if length else b""
-                record = {
-                    "method": self.command,
-                    "path": self.path,
-                    "headers": {key.lower(): value for key, value in self.headers.items()},
-                    "body": body,
+                record = {"method": self.command, "path": self.path,
+                    "headers": {key.lower(): value for key, value in self.headers.items()}, "body": body,
                 }
                 with self.server._lock:
                     self.server.requests.append(record)
@@ -144,13 +141,11 @@ class FakeVendorServer:
         self._server.server_close()
         self._thread.join(timeout=2)
 
-    def respond(
-        self, method: str, path: str, responder: Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]
+    def respond(self, method: str, path: str, responder: Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]
     ) -> None:
         self.responders[(method, path)] = responder
 
-    def json_responder(
-        self, payload: Any, *, status: int = 200
+    def json_responder(self, payload: Any, *, status: int = 200
     ) -> Callable[[dict[str, Any]], tuple[int, dict[str, str], bytes]]:
         body = json.dumps(payload).encode("utf-8")
 
@@ -208,27 +203,15 @@ def fake_vendors(monkeypatch: pytest.MonkeyPatch) -> Iterator[tuple[FakeVendorSe
 
 
 def _receipt(
-    *,
-    session_id: str = "7f3e9a2c-1111-4222-8333-444455556666",
-    run_id: str = "bf50285e-72d2-4ce5-a9e6-bd913fecae15",
-    kind: str = "representative_real_run",
-    langsmith_project: str = "daydream-test",
+    *, session_id: str = "7f3e9a2c-1111-4222-8333-444455556666", run_id: str = "bf50285e-72d2-4ce5-a9e6-bd913fecae15",
+    kind: str = "representative_real_run", langsmith_project: str = "daydream-test",
     destinations: list[str] | None = None,
 ) -> dict[str, Any]:
-    return {
-        "schema_version": 1,
-        "contract_version": "94f432d",
-        "reviewed_commit": "023fc5b7ff8d44357aa41fccdf98db5a0455e396",
-        "acceptance_kind": kind,
-        "run_id": run_id,
-        "session_id": session_id,
-        "flow": "trace-field-mappings-test",
-        "capture_mode": "full",
-        "destinations": destinations or ["honeyhive", "langsmith"],
-        "langsmith_project": langsmith_project,
-        "started_at": "2026-09-07T00:00:00Z",
-        "ended_at": "2026-09-07T00:01:00Z",
-        "model_call_count": 0,
+    return {"schema_version": 1, "contract_version": "94f432d",
+        "reviewed_commit": "023fc5b7ff8d44357aa41fccdf98db5a0455e396", "acceptance_kind": kind, "run_id": run_id,
+        "session_id": session_id, "flow": "trace-field-mappings-test", "capture_mode": "full",
+        "destinations": destinations or ["honeyhive", "langsmith"], "langsmith_project": langsmith_project,
+        "started_at": "2026-09-07T00:00:00Z", "ended_at": "2026-09-07T00:01:00Z", "model_call_count": 0,
         "operational_cost_usd": 0,
     }
 
@@ -241,40 +224,19 @@ def _write_receipt(tmp_path: Path, **overrides: Any) -> Path:
 
 
 def _hh_event(event_id: str, session_id: str, *, event_type: str = "chain", **metadata: Any) -> dict[str, Any]:
-    return {
-        "id": event_id,
-        "session_id": session_id,
-        "event_name": "daydream.run",
-        "event_type": event_type,
-        "metadata": metadata,
-        "inputs": {},
-        "outputs": {},
-        "config": {},
-        "metrics": {},
-        "feedback": [],
+    return {"id": event_id, "session_id": session_id, "event_name": "daydream.run", "event_type": event_type,
+        "metadata": metadata, "inputs": {}, "outputs": {}, "config": {}, "metrics": {}, "feedback": [],
         "user_properties": {},
     }
 
 
-def _ls_run(
-    run_id: str,
-    *,
-    run_type: str = "chain",
-    status: str = "success",
-    trace_id: str = "trace-1",
-    parent_run_id: Any = None,
-    metadata: Mapping[str, Any] | None = None,
+def _ls_run(run_id: str, *, run_type: str = "chain", status: str = "success", trace_id: str = "trace-1",
+    parent_run_id: Any = None, metadata: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """A vendor-actual run record: association metadata lives at ``extra.metadata``."""
     run: dict[str, Any] = {
-        "id": run_id,
-        "name": "daydream.run",
-        "run_type": run_type,
-        "status": status,
-        "trace_id": trace_id,
-        "start_time": "2026-09-07T00:00:00Z",
-        "end_time": "2026-09-07T00:01:00Z",
-        "parent_run_id": parent_run_id,
+        "id": run_id, "name": "daydream.run", "run_type": run_type, "status": status, "trace_id": trace_id,
+        "start_time": "2026-09-07T00:00:00Z", "end_time": "2026-09-07T00:01:00Z", "parent_run_id": parent_run_id,
         "extra": {"metadata": dict(metadata or {})},
     }
     return run
@@ -282,11 +244,7 @@ def _ls_run(
 
 def _ls_session(project: str) -> dict[str, Any]:
     """A minimal vendor session record for the project-name resolution lookup."""
-    return {
-        "id": "9e11a2de-1111-4222-8333-444455556666",
-        "name": project,
-        "start_time": "2026-09-07T00:00:00Z",
-    }
+    return {"id": "9e11a2de-1111-4222-8333-444455556666", "name": project, "start_time": "2026-09-07T00:00:00Z"}
 
 
 def _sessions_ok(project: str) -> Callable[[Mapping[str, Any]], tuple[int, dict[str, str], bytes]]:
@@ -303,11 +261,7 @@ def _empty_runs() -> tuple[int, dict[str, str], bytes]:
     return 200, {"Content-Type": "application/json"}, b'{"runs": []}'
 
 
-def _run_verify(
-    receipt_path: Path,
-    result_path: Path,
-    *,
-    budget_s: float = 30.0,
+def _run_verify(receipt_path: Path, result_path: Path, *, budget_s: float = 30.0,
     matrix_path: Path = FIXTURES / "readback-matrix.json",
 ) -> int:
     value = _verifier.run_verify(receipt_path, result_path, budget_s=budget_s, matrix_path=matrix_path)
@@ -321,12 +275,7 @@ def _configure_verifier_env(monkeypatch: pytest.MonkeyPatch, *, base_url: str) -
     monkeypatch.setenv("LANGSMITH_API_KEY", _SECRET_KEY)
 
 
-def _verify_against(
-    fake_vendor: FakeVendorServer,
-    monkeypatch: pytest.MonkeyPatch,
-    receipt: Path,
-    tmp_path: Path,
-    *,
+def _verify_against(fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch, receipt: Path, tmp_path: Path, *,
     expect_zero: bool = True,
 ) -> Path:
     """Configure, run the verifier against ``fake_vendor``, and return the result path."""
@@ -338,7 +287,6 @@ def _verify_against(
 
 # HoneyHive verifier behavior
 
-
 def test_honeyhive_search_request_shape_and_pass(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -349,13 +297,10 @@ def test_honeyhive_search_request_shape_and_pass(
 
     def search(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         captured.append(dict(record))
-        body = {
-            "events": [
-                _hh_event("e1", session_id, **{"daydream.run.id": run_id}),
+        body = {"events": [_hh_event("e1", session_id, **{"daydream.run.id": run_id}),
                 _hh_event("e2", session_id, event_type="model", **{"daydream.run.id": run_id}),
                 _hh_event("e3", session_id, event_type="tool", **{"daydream.run.id": run_id}),
-            ],
-            "count": 3,
+            ], "count": 3,
         }
         return 200, {"Content-Type": "application/json"}, json.dumps(body).encode()
 
@@ -373,8 +318,7 @@ def test_honeyhive_search_request_shape_and_pass(
     assert sent["headers"]["authorization"] == f"Bearer {_SECRET_KEY}"
     payload = json.loads(sent["body"])
     assert payload == {
-        "filters": [{"field": "session_id", "operator": "is", "value": session_id, "type": "string"}],
-        "limit": 100,
+        "filters": [{"field": "session_id", "operator": "is", "value": session_id, "type": "string"}], "limit": 100,
         "page": 1,
     }
     result = json.loads(result_path.read_text())
@@ -384,7 +328,6 @@ def test_honeyhive_search_request_shape_and_pass(
     # Two stable complete snapshots are required: one full read + one repeat.
     assert len(captured) == 2
 
-
 def test_honeyhive_paginates_until_count_satisfied(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -392,9 +335,7 @@ def test_honeyhive_paginates_until_count_satisfied(
     session_id = json.loads(receipt.read_text())["session_id"]
     # Page limit is 100; a full page means "more available", a short page ends
     # pagination. 250 rows = 3 pages (100 + 100 + 50) and must reconcile.
-    pages: dict[int, list[str]] = {
-        1: [f"e{i:03d}" for i in range(100)],
-        2: [f"e{i:03d}" for i in range(100, 200)],
+    pages: dict[int, list[str]] = {1: [f"e{i:03d}" for i in range(100)], 2: [f"e{i:03d}" for i in range(100, 200)],
         3: [f"e{i:03d}" for i in range(200, 250)],
     }
 
@@ -414,38 +355,21 @@ def test_honeyhive_paginates_until_count_satisfied(
     # Two stable complete snapshots: each full read is 3 pages (100+100+50).
     assert len([r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]) == 6
 
-
-@pytest.mark.parametrize(
-    ("body_builder", "disposition"),
-    [
-        (
-            lambda sid: json.dumps(
-                {"events": [_hh_event("dup", sid), _hh_event("dup", sid)], "count": 2}
-            ).encode(),
+@pytest.mark.parametrize(("body_builder", "disposition"),
+    [(lambda sid: json.dumps({"events": [_hh_event("dup", sid), _hh_event("dup", sid)], "count": 2}).encode(),
             _verifier.DISPOSITION_DUPLICATE,
-        ),
-        (
-            lambda sid: json.dumps({"events": [_hh_event("e1", "not-the-session")], "count": 1}).encode(),
+        ), (lambda sid: json.dumps({"events": [_hh_event("e1", "not-the-session")], "count": 1}).encode(),
             _verifier.DISPOSITION_WRONG_SESSION,
-        ),
-        (lambda sid: b'{"events": [', _verifier.DISPOSITION_MALFORMED),
-        (
-            lambda sid: json.dumps(
-                {
-                    "events": [{"id": "e1", "session_id": "x", "blob": "z" * (5 * 1024 * 1024)}],
-                    "count": 1,
-                }
-            ).encode(),
-            _verifier.DISPOSITION_OVERSIZED,
+        ), (lambda sid: b'{"events": [', _verifier.DISPOSITION_MALFORMED),
+        (lambda sid: json.dumps(
+                {"events": [{"id": "e1", "session_id": "x", "blob": "z" * (5 * 1024 * 1024)}], "count": 1}
+            ).encode(), _verifier.DISPOSITION_OVERSIZED,
         ),
     ],
 )
 def test_honeyhive_rejects_invalid_readbacks(
-    tmp_path: Path,
-    fake_vendor: FakeVendorServer,
-    monkeypatch: pytest.MonkeyPatch,
-    body_builder: Callable[[str], bytes],
-    disposition: str,
+    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch,
+    body_builder: Callable[[str], bytes], disposition: str,
 ) -> None:
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
     session_id = json.loads(receipt.read_text())["session_id"]
@@ -457,7 +381,6 @@ def test_honeyhive_rejects_invalid_readbacks(
     result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == disposition
-
 
 @pytest.mark.parametrize("status", [401, 403, 404, 429, 500, 503])
 def test_honeyhive_status_errors_are_bounded(
@@ -480,7 +403,6 @@ def test_honeyhive_status_errors_are_bounded(
     # Bounded: the response body (with the secret) never reaches any output.
     assert _SECRET_KEY not in result_path.read_text()
 
-
 def test_honeyhive_redirect_is_rejected_without_following(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -495,7 +417,6 @@ def test_honeyhive_redirect_is_rejected_without_following(
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_REDIRECT
     assert not [r for r in fake_vendor.requests if r["path"] == "/elsewhere"]
-
 
 def test_receipt_validation_fails_before_any_client(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
@@ -513,7 +434,6 @@ def test_receipt_validation_fails_before_any_client(
 
 # LangSmith verifier behavior
 
-
 def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -526,23 +446,13 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     # Every run in the tree carries the stored identity (vendor-actual:
     # association properties at extra.metadata), including the child.
     root = _ls_run(
-        "root-1",
-        run_type="chain",
-        metadata={"daydream_run_id": run_id, "daydream.session.id": "daydream-session-1"},
+        "root-1", run_type="chain", metadata={"daydream_run_id": run_id, "daydream.session.id": "daydream-session-1"},
     )
     child = _ls_run(
-        "child-1",
-        run_type="llm",
-        parent_run_id="root-1",
-        trace_id="trace-1",
-        metadata={"daydream_run_id": run_id},
+        "child-1", run_type="llm", parent_run_id="root-1", trace_id="trace-1", metadata={"daydream_run_id": run_id},
     )
     tool = _ls_run(
-        "tool-1",
-        run_type="tool",
-        parent_run_id="root-1",
-        trace_id="trace-1",
-        metadata={"daydream_run_id": run_id},
+        "tool-1", run_type="tool", parent_run_id="root-1", trace_id="trace-1", metadata={"daydream_run_id": run_id},
     )
 
     def sessions(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
@@ -580,7 +490,6 @@ def test_langsmith_discovery_exact_filter_freeze_and_exact_id_reads(
     ls_section = result["destinations"]["langsmith"]
     assert ls_section["root_id"] == "root-1" and ls_section["trace_id"] == "trace-1"
 
-
 def test_langsmith_ambiguous_root_rejected(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -599,7 +508,6 @@ def test_langsmith_ambiguous_root_rejected(
     result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_AMBIGUOUS_ROOT
-
 
 def test_langsmith_unstable_tree_fails_closed(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
@@ -707,7 +615,6 @@ class _LoopbackPeer:
         except OSError:
             pass
 
-
 @pytest.mark.parametrize("trickle", [False, True])
 def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, trickle: bool) -> None:
     """0.12s budget: return before 0.35s, peer observes close within 1s, no later poll."""
@@ -752,7 +659,6 @@ def test_immutable_budget_truncates_slow_peers(tmp_path: Path, monkeypatch: pyte
 
 # Redaction
 
-
 def test_verifier_output_never_leaks_keys_endpoints_or_bodies(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -761,8 +667,7 @@ def test_verifier_output_never_leaks_keys_endpoints_or_bodies(
 
     def search(_record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         private = {"prompt": "private prompt", "response": "private response", "daydream.run.id": "run-1"}
-        events = [
-            _hh_event("e1", session_id, event_type="model", **private),
+        events = [_hh_event("e1", session_id, event_type="model", **private),
             _hh_event("e2", session_id, event_type="tool", **{"daydream.run.id": "run-1"}),
             _hh_event("e3", session_id, **{"daydream.run.id": "run-1"}),
         ]
@@ -791,8 +696,7 @@ def replay_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DAYDREAM_ACCEPTANCE_KIND", "sanitized_protocol_replay")
 
 
-def _public_fixture_repo(
-    tmp_path: Path, *, origin: str = "https://github.com/earendil-works/pi-coding-agent.git"
+def _public_fixture_repo(tmp_path: Path, *, origin: str = "https://github.com/earendil-works/pi-coding-agent.git"
 ) -> Path:
     repo = tmp_path / "public-repo"
     repo.mkdir(parents=True, exist_ok=True)
@@ -815,19 +719,10 @@ def _fake_pi_script(tmp_path: Path, *, marker: bool = True, fixture_path: Path |
     return script
 
 
-def _run_replay(
-    repo: Path,
-    fake_pi: Path,
-    receipt_path: Path,
-    *,
-    fixture_path: Path = REPLAY_FIXTURE,
-) -> int:
+def _run_replay(repo: Path, fake_pi: Path, receipt_path: Path, *, fixture_path: Path = REPLAY_FIXTURE,) -> int:
     """Invoke the replay tool with the canonical fixture manifest."""
     return cast(int, _replay.run_replay(
-        manifest_path=FIXTURES / "replay-manifest.json",
-        fixture_path=fixture_path,
-        repo_path=repo,
-        fake_pi=fake_pi,
+        manifest_path=FIXTURES / "replay-manifest.json", fixture_path=fixture_path, repo_path=repo, fake_pi=fake_pi,
         receipt_path=receipt_path,
     ))
 
@@ -841,10 +736,7 @@ def _replay_receipt(tmp_path: Path, *, message: str) -> tuple[Path, dict[str, An
     assert exit_code == 0, message
     return receipt_path, json.loads(receipt_path.read_text())
 
-
-def test_replay_gate_fixture_hash_mismatch_fails_before_send(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_replay_gate_fixture_hash_mismatch_fails_before_send(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
@@ -859,10 +751,7 @@ def test_replay_gate_fixture_hash_mismatch_fails_before_send(
     assert not receipt_path.exists()
     assert "gate=identity" in buffer.getvalue()
 
-
-def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
@@ -884,10 +773,7 @@ def test_replay_gate_dirty_private_or_wrong_origin_repo_fails(
     assert exit_code == 1
     assert "dirty" in buffer.getvalue()
 
-
-def test_replay_gate_real_pi_or_wrong_output_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_replay_gate_real_pi_or_wrong_output_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     replay_env: None,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
     receipt_path = tmp_path / "receipt.json"
@@ -902,7 +788,6 @@ def test_replay_gate_real_pi_or_wrong_output_fails(
     assert exit_code == 1
     assert not receipt_path.exists()
     assert "marker" in buffer.getvalue() or "replay" in buffer.getvalue()
-
 
 def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HH_API_URL", "http://127.0.0.1:9")
@@ -927,11 +812,8 @@ def test_replay_gate_wrong_destinations_or_missing_auth_fails(tmp_path: Path, mo
     assert exit_code == 1
     assert "HH_API_KEY" in buffer.getvalue()
 
-
 @pytest.mark.parametrize("marker", [False, True])
-def test_replay_fake_pi_marker_requirement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_replay_fake_pi_marker_requirement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
     replay_env: None,  # noqa - vulture: pytest fixture arg (side-effect env setup)
     marker: bool,  # noqa: PLR0913,V107 - pytest fixture arg (side-effect env setup)
 ) -> None:
@@ -953,20 +835,15 @@ def test_replay_fake_pi_marker_requirement(
 
 # Gate integration (reviewer card t_d50a1bbe): replay→verify chain + HH stability
 
-
 def test_replay_receipt_is_accepted_by_verifier_validator(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
 ) -> None:
     """The replay tool's receipt must validate under the verifier's schema.
 
-    The two operator scripts are one pipeline: the replay tool writes the
-    immutable receipt the verifier consumes. A receipt the verifier rejects
-    (missing the canonical ``destinations`` list) breaks that pipeline before
-    any network work.
-    """
-    _receipt_path, receipt = _replay_receipt(
-        tmp_path, message="replay must produce its receipt before validation"
-    )
+    The two operator scripts are one pipeline: the replay tool writes the immutable receipt the verifier consumes.
+    A receipt the verifier rejects (missing the canonical ``destinations`` list) breaks that pipeline before any
+    network work."""
+    _receipt_path, receipt = _replay_receipt(tmp_path, message="replay must produce its receipt before validation")
     # Must not raise: the replay receipt is the verifier's canonical input.
     _verifier.validate_receipt(receipt)
 
@@ -975,10 +852,8 @@ def test_honeyhive_requires_two_stable_complete_snapshots(
 ) -> None:
     """HoneyHive must reach two equal complete exact-session snapshots.
 
-    The card/plan gate is 'two stable complete post-shutdown snapshots' for
-    HoneyHive exactly as for LangSmith. A vendor whose second full read
-    disagrees must fail closed with READBACK_UNSTABLE.
-    """
+    The card/plan gate is 'two stable complete post-shutdown snapshots' for HoneyHive exactly as for LangSmith. A
+    vendor whose second full read disagrees must fail closed with READBACK_UNSTABLE."""
     receipt = _write_receipt(tmp_path, destinations=["honeyhive"])
     session_id = json.loads(receipt.read_text())["session_id"]
     calls = {"n": 0}
@@ -998,7 +873,6 @@ def test_honeyhive_requires_two_stable_complete_snapshots(
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
 
-
 def test_honeyhive_two_stable_complete_snapshots_pass(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1010,8 +884,7 @@ def test_honeyhive_two_stable_complete_snapshots_pass(
     def search(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
         page = json.loads(record["body"])["page"]
         if page == 1:
-            events = [
-                _hh_event("e1", session_id, **{"daydream.run.id": run_id}),
+            events = [_hh_event("e1", session_id, **{"daydream.run.id": run_id}),
                 _hh_event("e2", session_id, event_type="model", **{"daydream.run.id": run_id}),
                 _hh_event("e3", session_id, event_type="tool", **{"daydream.run.id": run_id}),
             ]
@@ -1026,63 +899,41 @@ def test_honeyhive_two_stable_complete_snapshots_pass(
     # First complete read + second complete read of the same single page.
     assert len([r for r in fake_vendor.requests if r["path"] == "/v1/events/search"]) == 2
 
-
 def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_model(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Vendor-actual replay rows: only the pinned FIRST generation is exact.
 
-    The sanitized fixture has two generations with distinct native/sealed
-    timings; the manifest pins the first's exact historical interval. A second
-    generation row must be self-consistent but never compared to the first's
-    pins, and a billed owner whose vendor storage lacks the response-model key
-    (HoneyHive stores the configured request model at config.model instead)
-    must not fail on absence — only a present wrong value fails.
-    """
+    The sanitized fixture has two generations with distinct native/sealed timings; the manifest pins the first's
+    exact historical interval. A second generation row must be self-consistent but never compared to the first's
+    pins, and a billed owner whose vendor storage lacks the response-model key (HoneyHive stores the configured
+    request model at config.model instead) must not fail on absence — only a present wrong value fails."""
     receipt = _write_receipt(tmp_path, destinations=[], kind="sanitized_protocol_replay")
     run_id = json.loads(receipt.read_text())["run_id"]
     # Vendor-actual: HH rows put identity+timing in metadata; the billed
     # attempt row carries usage but HH does not project gen_ai.response.model.
-    first = _hh_event(
-        "first",
-        "29cb884b-712b-4de4-b478-3652932ff5dc",
-        event_type="model",
-        **{
-            "daydream.run.id": run_id,
-            "daydream.generation.native_started_at_unix_ms": 1788690314289,
+    first = _hh_event("first", "29cb884b-712b-4de4-b478-3652932ff5dc", event_type="model",
+        **{"daydream.run.id": run_id, "daydream.generation.native_started_at_unix_ms": 1788690314289,
             "daydream.generation.native_started_at_unix_ns": 1788690314289000000,
             "daydream.generation.sealed_end_unix_ns": 1788690709621000000,
             "daydream.generation.duration_ns": 395332000000,
         },
     )
-    second = _hh_event(
-        "second",
-        "29cb884b-712b-4de4-b478-3652932ff5dc",
-        event_type="model",
-        **{
-            "daydream.run.id": run_id,
-            "daydream.generation.native_started_at_unix_ms": 1788690314500,
+    second = _hh_event("second", "29cb884b-712b-4de4-b478-3652932ff5dc", event_type="model",
+        **{"daydream.run.id": run_id, "daydream.generation.native_started_at_unix_ms": 1788690314500,
             "daydream.generation.native_started_at_unix_ns": 1788690314500000000,
             "daydream.generation.sealed_end_unix_ns": 1788690709624202000,
             "daydream.generation.duration_ns": 395124202000,
         },
     )
-    billed = _hh_event(
-        "billed",
-        "29cb884b-712b-4de4-b478-3652932ff5dc",
-        event_type="chain",
+    billed = _hh_event("billed", "29cb884b-712b-4de4-b478-3652932ff5dc", event_type="chain",
         **{"daydream.run.id": run_id, "gen_ai.usage.cost": 0.00402781},
     )
-    data = {
-        "honeyhive": {"rows": [billed, first, second]},
+    data = {"honeyhive": {"rows": [billed, first, second]},
         # One identity-bearing LS run so the reconcile's per-destination row
         # requirement is met without turning this into an LS-shape test.
-        "langsmith": {
-            "run_id": run_id,
-            "runs": [
-                _ls_run(
-                    "ls-run-1",
-                    run_type="chain",
+        "langsmith": {"run_id": run_id,
+            "runs": [_ls_run("ls-run-1", run_type="chain",
                     metadata={"daydream_run_id": run_id, "daydream.session.id": "dd-session-1"},
                 )
             ],
@@ -1093,23 +944,17 @@ def test_replay_reconcile_accepts_second_generation_distinct_timing_and_missing_
     assert rows == [], f"expected reconcile pass, got: {rows}"
 
     # A PRESENT wrong response model on the billed owner still fails.
-    bad = _hh_event(
-        "billed-bad",
-        "29cb884b-712b-4de4-b478-3652932ff5dc",
-        event_type="chain",
+    bad = _hh_event("billed-bad", "29cb884b-712b-4de4-b478-3652932ff5dc", event_type="chain",
         **{"daydream.run.id": run_id, "gen_ai.usage.cost": 0.00402781, "gen_ai.response.model": "some-other-model"},
     )
     data["honeyhive"] = {"rows": [bad, first, second]}
     rows = _verifier.compare_stored(data, matrix, acceptance_kind="sanitized_protocol_replay")
     assert any(r.get("field") == "honeyhive.rows[0].gen_ai.response.model" for r in rows)
 
-
 def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Zero discovered runs is an honest absence (vendor ingest window),
-    never reported as root ambiguity.
-    """
+    """Zero discovered runs is an honest absence (vendor ingest window), never reported as root ambiguity."""
     receipt = _write_receipt(tmp_path, destinations=["langsmith"])
     project = json.loads(receipt.read_text())["langsmith_project"]
 
@@ -1122,21 +967,16 @@ def test_langsmith_discovery_empty_result_is_not_found_not_ambiguous(
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_NOT_FOUND
 
-
 def test_replay_then_verify_end_to_end_on_fake_vendors(
     tmp_path: Path, fake_vendors: tuple[FakeVendorServer, FakeVendorServer]
 ) -> None:
     """Full operator chain: replay tool writes the receipt the verifier accepts.
 
-    The replay runs hermetically (fake vendors, loopback OTLP oracle, fake pi
-    executable); the verifier then consumes the replay's receipt against the
-    same fake vendor endpoints and must pass the stored contract for both
-    destinations without any manual receipt editing.
-    """
+    The replay runs hermetically (fake vendors, loopback OTLP oracle, fake pi executable); the verifier then
+    consumes the replay's receipt against the same fake vendor endpoints and must pass the stored contract for
+    both destinations without any manual receipt editing."""
     fake_hh, fake_ls = fake_vendors
-    receipt_path, receipt = _replay_receipt(
-        tmp_path, message="replay must pass all gates before the verifier runs"
-    )
+    receipt_path, receipt = _replay_receipt(tmp_path, message="replay must pass all gates before the verifier runs")
     run_id = receipt["run_id"]
     session_id = receipt["session_id"]
 
@@ -1144,41 +984,22 @@ def test_replay_then_verify_end_to_end_on_fake_vendors(
     # one HoneyHive session (stable across reads) and one LangSmith tree.
     hh_events = [_hh_event(f"ev-{i}", session_id) for i in range(2)]
     hh_payload = json.dumps({"events": hh_events, "count": len(hh_events)}).encode()
-    fake_hh.respond(
-        "POST",
-        "/v1/events/search",
-        lambda _r: (200, {"Content-Type": "application/json"}, hh_payload),
-    )
+    fake_hh.respond("POST", "/v1/events/search", lambda _r: (200, {"Content-Type": "application/json"}, hh_payload),)
     trace_id = "11111111-2222-4333-8444-555566667777"
-    ls_root = _ls_run(
-        "aaaaaaaa-1111-4222-8333-444455556666",
-        run_type="chain",
-        trace_id=trace_id,
-        parent_run_id=None,
+    ls_root = _ls_run("aaaaaaaa-1111-4222-8333-444455556666", run_type="chain", trace_id=trace_id, parent_run_id=None,
         metadata={"daydream_run_id": run_id},
     )
     ls_child = _ls_run(
-        "bbbbbbbb-1111-4222-8333-444455556666",
-        run_type="llm",
-        trace_id=trace_id,
-        parent_run_id=ls_root["id"],
+        "bbbbbbbb-1111-4222-8333-444455556666", run_type="llm", trace_id=trace_id, parent_run_id=ls_root["id"],
         metadata={"daydream_run_id": run_id},
     )
-    fake_ls.respond(
-        "GET",
-        "/api/v1/sessions",
-        lambda _r: (
-            200,
-            {"Content-Type": "application/json"},
+    fake_ls.respond("GET", "/api/v1/sessions",
+        lambda _r: (200, {"Content-Type": "application/json"},
             json.dumps([_ls_session(str(receipt["langsmith_project"]))]).encode(),
         ),
     )
-    fake_ls.respond(
-        "POST",
-        "/runs/query",
-        lambda _r: (
-            200,
-            {"Content-Type": "application/json"},
+    fake_ls.respond("POST", "/runs/query",
+        lambda _r: (200, {"Content-Type": "application/json"},
             json.dumps({"runs": [json.loads(json.dumps(ls_root)), json.loads(json.dumps(ls_child))]}).encode(),
         ),
     )
@@ -1199,11 +1020,9 @@ def test_replay_full_hermetic_run_writes_labeled_receipt(
 ) -> None:
     """The complete sanitized replay through real PiBackend/run_agent/trace_run.
 
-    Vendor destinations are fake loopback OTLP/HTTP endpoints; the local
-    generic OTLP destination is the tool's own loopback receiver; the pi
-    subprocess boundary is the fake executable. Receipt must be labeled
-    ``sanitized_protocol_replay`` with model calls 0 and operational cost 0.
-    """
+    Vendor destinations are fake loopback OTLP/HTTP endpoints; the local generic OTLP destination is the tool's
+    own loopback receiver; the pi subprocess boundary is the fake executable. Receipt must be labeled
+    ``sanitized_protocol_replay`` with model calls 0 and operational cost 0."""
     monkeypatch.setenv("LANGSMITH_PROJECT", "daydream-replay-test")
     fake_hh, fake_ls = fake_vendors
     _receipt_path, receipt = _replay_receipt(

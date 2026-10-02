@@ -76,10 +76,7 @@ def _reviewed_stacks(calls: list[dict[str, object]]) -> set[str]:
 
 def _stack_bytes(deep: Path, names: set[str]) -> dict[str, bytes]:
     """The current records bytes for ``names``, keyed by artifact basename."""
-    return {
-        f"stack-{name}-records.json": (deep / f"stack-{name}-records.json").read_bytes()
-        for name in names
-    }
+    return {f"stack-{name}-records.json": (deep / f"stack-{name}-records.json").read_bytes() for name in names}
 
 
 def _origin_stack_bytes(deep: Path, names: set[str]) -> dict[str, bytes]:
@@ -124,8 +121,7 @@ def _reused_stacks(deep: Path) -> set[str]:
     """The shard units this run's provenance recorded with a hit outcome."""
     record = _latest_provenance(deep)
     units = cast(dict[str, object], record.get("units") or {})
-    return {
-        unit.removeprefix("shard:")
+    return {unit.removeprefix("shard:")
         for unit, trace in units.items()
         if unit.startswith("shard:")
         and isinstance(trace, dict)
@@ -161,9 +157,7 @@ def _session_id_of(deep: Path) -> str:
 _MERGE_DISCRIMINATOR = "cross-stack merge agent"
 
 
-def _review_surface_prompts(
-    calls: list[dict[str, object]],
-) -> list[dict[str, object]]:
+def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, object]]:
     """Captured calls that performed deep review work (the paid review surface).
 
     Filters by the production prompt discriminators, so an unrelated fix or test
@@ -173,8 +167,7 @@ def _review_surface_prompts(
     surface: list[dict[str, object]] = []
     for call in calls:
         prompt = str(call.get("prompt", "")).lower()
-        if (
-            _PER_STACK_PROMPT.search(prompt)
+        if (_PER_STACK_PROMPT.search(prompt)
             or _ARBITER_DISCRIMINATOR in prompt
             or _INTENT_DISCRIMINATOR in prompt
             or _WONDER_DISCRIMINATOR in prompt
@@ -182,7 +175,6 @@ def _review_surface_prompts(
         ):
             surface.append(call)
     return surface
-
 
 async def test_identical_rerun_reuses_intent_and_wonder_units(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -208,11 +200,7 @@ async def test_identical_rerun_reuses_intent_and_wonder_units(
     assert units["intent"]["outcome"] == "hit"
     assert set(cast(dict[str, object], units["intent"]["grounding_status"])) == {"exploration"}
     assert units["alternatives"]["outcome"] == "hit"
-    assert set(cast(dict[str, object], units["alternatives"]["grounding_status"])) == {
-        "intent",
-        "exploration",
-    }
-
+    assert set(cast(dict[str, object], units["alternatives"]["grounding_status"])) == {"intent", "exploration"}
 
 async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -229,7 +217,6 @@ async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     assert await run(make_config(multi_stack_target)) == 0
     assert (store / "entries" / ("a" * 64)).is_dir(), "a fresh run must not wipe the store"
 
-
 async def test_exploration_provenance_is_recorded_in_the_store(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -242,7 +229,6 @@ async def test_exploration_provenance_is_recorded_in_the_store(
     assert records, "the run must record its reuse provenance inside the store"
     record = json.loads(records[0].read_text(encoding="utf-8"))
     assert record["units"]["exploration"]["outcome"] in {"reused", "regenerated"}
-
 
 async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_misses_only_its_shard(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -265,7 +251,6 @@ async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_misses_only_its_
     assert await run(run_config) == 0
     assert _count_review_prompts(stub.calls) == 1          # only the shard owning mod0.py recomputes
 
-
 async def test_reused_shard_leaves_no_stale_companion_artifact(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -281,7 +266,6 @@ async def test_reused_shard_leaves_no_stale_companion_artifact(
     assert _count_review_prompts(stub.calls) == 0
     assert (deep / "per-stack-failures.json").exists() == fresh_failures
     assert _records_bytes(multi_stack_target) == fresh_records, "reused records must be byte-identical"
-
 
 async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it(
     sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -304,8 +288,7 @@ async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it
         if scope is None or assigned is None:
             continue
         frontier = re.search(r"review targets\): ([^\n]+)\.", prompt)
-        scopes[scope.group(1)] = {
-            "assigned_files": assigned.group(1).split(", "),
+        scopes[scope.group(1)] = {"assigned_files": assigned.group(1).split(", "),
             "frontier_files": frontier.group(1).split(", ") if frontier else [],
         }
     assert (deep / f"stack-{STRUCTURE_STACK_NAME}-records.json").is_file()
@@ -315,8 +298,7 @@ async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it
     assert all("core.py" not in scopes[name]["assigned_files"] for name in namers), (
         "a frontier namer must not own the edited file, or its miss would not prove the frontier is keyed"
     )
-    owner = {
-        name
+    owner = {name
         for name, rec in scopes.items()
         if "core.py" in rec["assigned_files"] and name != STRUCTURE_STACK_NAME
     }
@@ -344,21 +326,16 @@ def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
     """How many captured calls carried the production arbiter prompt."""
     return _count_unit_prompts(calls, _ARBITER_DISCRIMINATOR)
 
-
 async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_per_group_when_one_is(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
     """MH1/MH8: one content key per arbiter unit; #732's per-group markers still resume
     a partially adjudicated run without re-running the groups already done."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_by_stack = _arbiter_stacks(
-        {"python": "high", "react": "high", "generic": "high"}
-    )
+    stub.parse_by_stack = _arbiter_stacks({"python": "high", "react": "high", "generic": "high"})
     stub.merge_echo_records = True
     config = make_config(
-        multi_stack_target,
-        latency_profile="balanced",
-        review_profile=independent_alternatives_profile(),
+        multi_stack_target, latency_profile="balanced", review_profile=independent_alternatives_profile(),
     )
     assert await run(config) == 0
     deep = multi_stack_target / ".daydream" / "deep"
@@ -374,14 +351,11 @@ async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_p
     units = cast(dict[str, dict[str, object]], _latest_provenance(deep)["units"])
     assert units["arbiter"]["outcome"] == "hit"
     assert set(cast(dict[str, object], units["arbiter"]["grounding_status"])) == {
-        "intent",
-        "alternatives",
-        "exploration",
+        "intent", "alternatives", "exploration",
     }
     # A partially completed earlier adjudication still resumes group-by-group:
     # the group markers are read from the fresh run's own artifacts, not from the store.
     assert sorted(p.name for p in deep.glob("arbiter-*-complete.marker"))
-
 
 async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_with_grounding(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -415,13 +389,11 @@ async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_w
     assert _count_merge_prompts(stub.calls) >= 1               # merged set consumes records
     provenance = json.loads(reuse_store.provenance_path(
         shard_many_python_target / ".daydream" / "review-cache", _session_id_of(deep)).read_text())
-    reused = [k for k, v in provenance["units"].items()
-              if k.startswith("shard:") and v["outcome"] == "hit"]
+    reused = [k for k, v in provenance["units"].items() if k.startswith("shard:") and v["outcome"] == "hit"]
     assert reused, "sibling shards must still reuse after the fix commit"
     for unit in reused:                                        # MH16, per reused unit
         assert provenance["units"][unit]["grounding"]["settled_decisions"]["moved"] is True
         assert provenance["units"][unit]["grounding_status"]["exploration"] == "regenerated"
-
 
 async def test_run_reports_which_units_were_reused_and_that_their_grounding_moved(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -441,7 +413,6 @@ async def test_run_reports_which_units_were_reused_and_that_their_grounding_move
     assert "hit" in summary[-1] and "shard:" in summary[-1]
     assert "grounding moved" in summary[-1], "MH16: a reused unit's moved grounding must be reported"
 
-
 async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_byte(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
@@ -459,7 +430,6 @@ async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_b
     assert {p.name: p.read_bytes() for p in deep.glob("stack-*-records.json")} == \
         {k: v for k, v in canonical.items() if k != "merged-items.json"}
     assert (deep / "merged-items.json").read_bytes() == canonical["merged-items.json"]
-
 
 async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -486,9 +456,7 @@ async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
     report_name = ".review-output.md"
     parent_fd = os.open(str(multi_stack_target), os.O_RDONLY)
     try:
-        assert stat.S_ISREG(os.stat(report_name, dir_fd=parent_fd).st_mode), (
-            "the public report still lands"
-        )
+        assert stat.S_ISREG(os.stat(report_name, dir_fd=parent_fd).st_mode), ("the public report still lands")
         report_fd = os.open(report_name, os.O_RDONLY, dir_fd=parent_fd)
         try:
             content = os.read(report_fd, 1 << 20).decode("utf-8")
@@ -497,7 +465,6 @@ async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
     finally:
         os.close(parent_fd)
     assert "## Coverage" not in content
-
 
 async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
@@ -515,9 +482,7 @@ async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_c
     entries_before = sorted(p.name for p in (store / "entries").iterdir())
     assert entries_before, "the warm run must have populated the store"
     stub.calls.clear()
-    assert await run(
-        make_config(multi_stack_target, review_profile=profile, review_cache_enabled=False)
-    ) == 0
+    assert await run(make_config(multi_stack_target, review_profile=profile, review_cache_enabled=False)) == 0
     assert _count_review_prompts(stub.calls) > 0, "a disabled run must do the work"
     assert _count_unit_prompts(stub.calls, "dependency-tracer") > 0, (
         "--no-review-cache must bypass the exploration pre-scan cache and recompute it"

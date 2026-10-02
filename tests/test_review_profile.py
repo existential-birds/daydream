@@ -10,7 +10,6 @@ from tests.test_review_profile_completeness import STAGE_KEYS
 def _profile(body: str = "", *, source: str = "<string>") -> rp.ReviewProfile:
     return rp.parse_profile(f'schema_version = 1\nname = "p"\n{body}', source=source)
 
-
 def test_review_deadline_is_profiled_and_validated() -> None:
     base = _profile()
     bounded = _profile("[pipeline]\nreview_wall_budget_s = 1200")
@@ -20,46 +19,23 @@ def test_review_deadline_is_profiled_and_validated() -> None:
     with pytest.raises(rp.ProfileError):
         _profile("[pipeline]\nreview_wall_budget_s = -1")
 
-
 def test_pipeline_keeps_existing_positional_constructor_order() -> None:
     pipeline = rp.Pipeline(False)
     assert pipeline.structural_enabled is False
     assert pipeline.review_wall_budget_s == 2700
 
-
 def test_stage_keys_cover_every_model_bearing_stage() -> None:
     # Every named stage from spec R2 must be present (subset of the #886 manifest keys).
-    assert {
-        "exploration.repository_survey",
-        "exploration.pattern_scan",
-        "exploration.dependency_trace",
-        "exploration.test_mapping",
-        "intent",
-        "alternatives",
-        "discovery.per_stack",
-        "discovery.structural",
-        "discovery.generic_fallback",
-        "arbitration",
-        "suppression",
-        "merge",
-        "supervision",
-        "verification",
+    assert {"exploration.repository_survey", "exploration.pattern_scan", "exploration.dependency_trace",
+        "exploration.test_mapping", "intent", "alternatives", "discovery.per_stack", "discovery.structural",
+        "discovery.generic_fallback", "arbitration", "suppression", "merge", "supervision", "verification",
     } <= set(STAGE_KEYS)
-
 
 def test_improve_audits_and_vetting_are_stages() -> None:
-    assert {
-        "improve.audit.correctness",
-        "improve.audit.security",
-        "improve.audit.performance",
-        "improve.audit.tests",
-        "improve.audit.tech-debt",
-        "improve.audit.dependencies",
-        "improve.audit.dx",
-        "improve.audit.docs",
+    assert {"improve.audit.correctness", "improve.audit.security", "improve.audit.performance", "improve.audit.tests",
+        "improve.audit.tech-debt", "improve.audit.dependencies", "improve.audit.dx", "improve.audit.docs",
         "improve.vetting",
     } <= set(STAGE_KEYS)
-
 
 def test_default_profile_carries_schema_version_name_and_every_stage() -> None:
     p = rp.build_default_profile()
@@ -85,7 +61,6 @@ source="copied: a"
 content="X"''')
     assert a.digest == b.digest           # order/whitespace/comment independent
 
-
 def test_digest_semantic_change_changes_digest() -> None:
     # A semantic change to a stage's strategy content changes the digest.
     base = _profile('''[strategies.intent]
@@ -95,7 +70,6 @@ source = "copied: a"''')
 content = "DIFFERENT"
 source = "copied: a"''')
     assert changed.digest != base.digest
-
 
 def test_omitted_defaults_and_explicit_defaults_hash_identically() -> None:
     implicit = _profile('''[strategies.intent]
@@ -114,12 +88,10 @@ def test_unknown_key_fails_closed_naming_source() -> None:
         _profile("bogus = 1", source="/tmp/profile.toml")
     assert "/tmp/profile.toml" in str(e.value) and "bogus" in str(e.value)
 
-
 def test_unsupported_schema_version_fails_closed() -> None:
     with pytest.raises(rp.ProfileError) as e:
         rp.parse_profile('schema_version = 99\nname = "p"', source="x")
     assert "schema_version" in str(e.value)
-
 
 def test_invalid_enum_fails_closed() -> None:
     with pytest.raises(rp.ProfileError):
@@ -137,10 +109,8 @@ def test_forbidden_host_fields_rejected() -> None:
             _profile(f'{field} = "x"', source="y")
         assert "host-owned" in str(e.value).lower() or field in str(e.value)
 
-
 def test_suppression_severity_classes_default_narrowed() -> None:
     assert rp.Suppression.severity_classes == ("low",)
-
 
 def test_review_profile_severity_levels_derive_from_severity_module() -> None:
     assert rp._SEVERITY_LEVELS == frozenset(severity.CANONICAL_LEVELS)

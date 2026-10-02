@@ -41,7 +41,6 @@ async def test_default_alternatives_share_structural_review_and_resume(
         assert "retained prior finding" in ctx.data["alts_path"].read_text()
         assert calls["reviews"][0]["include_alternatives"]
 
-
 @pytest.mark.parametrize("custom_alternatives,structural", [(True, True), (False, False)])
 async def test_custom_alternatives_and_structural_disabled_keep_independent_review(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
@@ -54,7 +53,6 @@ async def test_custom_alternatives_and_structural_disabled_keep_independent_revi
     assert len(calls["reviews"]) == 1
     assert ctx.data["alts_path"].read_text() == "[]"
 
-
 async def test_folded_structural_budget_failure_remains_incomplete(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
 ) -> None:
@@ -65,12 +63,9 @@ async def test_folded_structural_budget_failure_remains_incomplete(
     assert per_stack_failures_path(ctx.data["dd"]).exists()
     assert review_warnings(ctx.data["dd"]) == ("structure: budget exhausted: wall_budget_exceeded",)
 
-
-def _context(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
+def _context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
     *, start_at: str = "review", custom_structure: bool = False,
-    custom_alternatives: bool = False, structural: bool = True,
-    failures: dict[str, str] | None = None,
+    custom_alternatives: bool = False, structural: bool = True, failures: dict[str, str] | None = None,
 ) -> tuple[FlowContext, dict[str, list[Any]]]:
     profile = build_default_profile()
     strategies = dict(profile.strategies)
@@ -90,10 +85,8 @@ def _context(
         stacks.append(StackAssignment("structure", ["app.py"]))
     registry = Registry()
     registry.override_prompt("structural", build_structural_prompt)
-    ctx = FlowContext(
-        config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=registry,
-        review_profile=resolved,
-        data={"dd": dd, "stacks": stacks, "tier": "single", "single_stack_mode": False,
+    ctx = FlowContext(config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=registry,
+        review_profile=resolved, data={"dd": dd, "stacks": stacks, "tier": "single", "single_stack_mode": False,
               "intent_summary": "Preserve behavior", "intent_path": dd / "intent.md",
               "alts_path": dd / "alternatives.json", "diff_path": diff_path,
               "diff": diff_path.read_text(), "exploration_dir": None, "failed_stacks": {}},
@@ -113,11 +106,9 @@ def _context(
     monkeypatch.setattr("daydream.deep.review_steps.phase_per_stack_reviews", reviews)
     return ctx, calls
 
-
 @pytest.mark.parametrize("start_at", ["review", "per-stack"])
 async def test_custom_structural_builder_preserves_independent_alternatives(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any,
-    start_at: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: Any, make_work: Any, start_at: str,
 ) -> None:
     ctx, calls = _context(tmp_path, monkeypatch, make_config, make_work, start_at=start_at)
     ctx.registry.override_prompt("structural", lambda **_: "CUSTOM STRUCTURAL BUILDER")

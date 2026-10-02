@@ -26,10 +26,7 @@ _DEEP_FORK_A = _FIXTURE_DIR / "deep_mode_fork_a.json"
 _DEEP_FORK_B = _FIXTURE_DIR / "deep_mode_fork_b.json"
 _SINGLE_PHASE = _FIXTURE_DIR / "single_phase_claude.json"
 
-
-def test_single_trajectory_file_produces_renderer_output(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
+def test_single_trajectory_file_produces_renderer_output(capsys: pytest.CaptureFixture[str],) -> None:
     """A single .json trajectory file is fed straight through the renderer."""
     rc = summarize(_SINGLE_PHASE)
     assert rc == 0
@@ -52,10 +49,7 @@ def _write_deep_run_dir(tmp_path: Path, name: str) -> Path:
     shutil.copy(_DEEP_FORK_B, siblings / "fix-1.json")
     return run_dir
 
-
-def test_run_directory_with_parent_and_forks(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_run_directory_with_parent_and_forks(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A run dir with trajectory.json + 2 fork siblings aggregates all three."""
     run_dir = _write_deep_run_dir(tmp_path, "abcd1234-fixture")
 
@@ -69,20 +63,14 @@ def test_run_directory_with_parent_and_forks(
     fix_row = next(line for line in out.splitlines() if line.startswith("| Fix |"))
     assert "5,000" in fix_row
 
-
-def test_nonexistent_path_returns_nonzero(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_nonexistent_path_returns_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Missing path: clear stderr message + non-zero exit."""
     rc = summarize(tmp_path / "no-such-thing.json")
     assert rc != 0
     err = capsys.readouterr().err
     assert "does not exist" in err
 
-
-def test_directory_without_trajectories_returns_nonzero(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_directory_without_trajectories_returns_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """An empty directory with no trajectory files: clear stderr + non-zero exit."""
     empty = tmp_path / "empty-run"
     empty.mkdir()
@@ -91,10 +79,7 @@ def test_directory_without_trajectories_returns_nonzero(
     err = capsys.readouterr().err
     assert "no trajectory" in err.lower()
 
-
-def test_directory_with_only_unparseable_trajectories_falls_back(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
+def test_directory_with_only_unparseable_trajectories_falls_back(tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """All trajectories failed to parse → renderer fallback → non-zero exit."""
     run_dir = tmp_path / "broken-run"
@@ -107,10 +92,7 @@ def test_directory_with_only_unparseable_trajectories_falls_back(
     # The renderer fallback signals "no real summary produced" via non-zero.
     assert rc != 0
 
-
-def test_summarize_matches_render_run_info_block_directly(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_summarize_matches_render_run_info_block_directly(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """Summarize on a run dir matches calling render_run_info_block with the same paths."""
     run_dir = _write_deep_run_dir(tmp_path, "abcd1234-parity")
     siblings = run_dir / "trajectories"
@@ -119,19 +101,10 @@ def test_summarize_matches_render_run_info_block_directly(
     assert rc == 0
     summarize_out = capsys.readouterr().out.rstrip("\n")
 
-    expected = render_run_info_block(
-        [
-            run_dir / "trajectory.json",
-            siblings / "fix-0.json",
-            siblings / "fix-1.json",
-        ]
-    )
+    expected = render_run_info_block([run_dir / "trajectory.json", siblings / "fix-0.json", siblings / "fix-1.json"])
     assert summarize_out == expected
 
-
-def test_non_json_file_rejected(
-    tmp_path: Path, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_non_json_file_rejected(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     """A file with the wrong suffix isn't fed to the renderer."""
     bad = tmp_path / "trajectory.txt"
     bad.write_text(json.dumps({"schema_version": "ATIF-v1.6"}), encoding="utf-8")
@@ -163,46 +136,20 @@ def _write_custom_model_trajectory(tmp_path: Path) -> Path:
     ``model_name`` not present in built-in ``MODEL_PRICES`` — so the cost cell
     can only resolve to a dollar value when a user price override is loaded.
     """
-    traj = {
-        "schema_version": "ATIF-v1.6",
-        "session_id": "fixture-custom-model-summarize",
-        "agent": {
-            "name": "daydream",
-            "version": "0.14.0",
-            "model_name": _CUSTOM_MODEL,
-        },
-        "steps": [
-            {
-                "step_id": 1,
-                "timestamp": "2026-05-02T00:00:00.000000Z",
-                "source": "user",
-                "message": "review",
+    traj = {"schema_version": "ATIF-v1.6", "session_id": "fixture-custom-model-summarize",
+        "agent": {"name": "daydream", "version": "0.14.0", "model_name": _CUSTOM_MODEL},
+        "steps": [{"step_id": 1, "timestamp": "2026-05-02T00:00:00.000000Z", "source": "user", "message": "review",
                 "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
-            },
-            {
-                "step_id": 2,
-                "timestamp": "2026-05-02T00:00:01.000000Z",
-                "source": "agent",
-                "model_name": _CUSTOM_MODEL,
-                "message": "Reviewed.",
-                "tool_calls": [
-                    {"tool_call_id": "r1", "function_name": "Read", "arguments": {}}
-                ],
+            }, {"step_id": 2, "timestamp": "2026-05-02T00:00:01.000000Z", "source": "agent",
+                "model_name": _CUSTOM_MODEL, "message": "Reviewed.",
+                "tool_calls": [{"tool_call_id": "r1", "function_name": "Read", "arguments": {}}],
                 "observation": {"results": [{"source_call_id": "r1", "content": "ok"}]},
-                "metrics": {
-                    "prompt_tokens": _PROMPT_TOKENS,
-                    "completion_tokens": _COMPLETION_TOKENS,
-                    "cached_tokens": _CACHED_TOKENS,
-                    "cost_usd": None,
-                },
-                "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
+                "metrics": {"prompt_tokens": _PROMPT_TOKENS, "completion_tokens": _COMPLETION_TOKENS,
+                    "cached_tokens": _CACHED_TOKENS, "cost_usd": None,
+                }, "extra": {"daydream_phase": "review", "daydream_run_flow": "normal"},
             },
-        ],
-        "final_metrics": {
-            "total_prompt_tokens": _PROMPT_TOKENS,
-            "total_completion_tokens": _COMPLETION_TOKENS,
-            "total_cached_tokens": _CACHED_TOKENS,
-            "total_steps": 2,
+        ], "final_metrics": {"total_prompt_tokens": _PROMPT_TOKENS, "total_completion_tokens": _COMPLETION_TOKENS,
+            "total_cached_tokens": _CACHED_TOKENS, "total_steps": 2,
         },
     }
     traj_path = tmp_path / "trajectory.json"
@@ -221,19 +168,14 @@ def _write_prices_toml(tmp_path: Path) -> Path:
     )
     return prices_path
 
-
 def test_summarize_uses_user_price_override_for_unknown_model(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """POSITIVE: a prices.toml override makes the cost cell render a real $ value.
 
-    Drives the production ``summarize`` entrypoint with DAYDREAM_PRICES_FILE
-    pointing at a TOML that prices a model absent from built-in MODEL_PRICES.
-    Asserts on the rendered markdown only: the synthesized cost cell and the
-    absence of the unknown-model footnote.
-    """
+    Drives the production ``summarize`` entrypoint with DAYDREAM_PRICES_FILE pointing at a TOML that prices a
+    model absent from built-in MODEL_PRICES. Asserts on the rendered markdown only: the synthesized cost cell and
+    the absence of the unknown-model footnote."""
     traj = _write_custom_model_trajectory(tmp_path)
     prices_file = _write_prices_toml(tmp_path)
     monkeypatch.setenv("DAYDREAM_PRICES_FILE", str(prices_file))
@@ -250,18 +192,13 @@ def test_summarize_uses_user_price_override_for_unknown_model(
     # No footnote — the model WAS priced via the override.
     assert "not in the price table" not in out
 
-
 def test_summarize_unknown_model_no_prices_renders_dash_and_footnote(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """NEGATIVE: with no price override the cost cell is — and the footnote appears.
 
-    Same trajectory, but DAYDREAM_PRICES_FILE is unset, so the custom model is
-    unpriced: the cost cell degrades to ``—`` and the renderer emits the
-    'not in the price table' footnote naming the model.
-    """
+    Same trajectory, but DAYDREAM_PRICES_FILE is unset, so the custom model is unpriced: the cost cell degrades to
+    ``—`` and the renderer emits the 'not in the price table' footnote naming the model."""
     traj = _write_custom_model_trajectory(tmp_path)
     # Point at a nonexistent file: neutralizes both a stray env var AND the
     # ~/.daydream/prices.toml home-dir fallback, so no price table loads.
@@ -280,28 +217,18 @@ def test_summarize_unknown_model_no_prices_renders_dash_and_footnote(
 
 # --- Per-phase token cells reflect whole-invocation usage --------------------
 
-
-async def test_per_phase_cells_show_whole_invocation_tokens(
-    tmp_path: Path,
-    capsys: pytest.CaptureFixture[str],
+async def test_per_phase_cells_show_whole_invocation_tokens(tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     """A multi-turn phase renders the SUM of its turns, not the last snapshot.
 
-    Drives two phases through ``run_agent`` with a real recorder, each phase
-    reporting usage once per turn, then reads the rendered per-phase table.
-    """
+    Drives two phases through ``run_agent`` with a real recorder, each phase reporting usage once per turn, then
+    reads the rendered per-phase table."""
     def _multi_turn(turns: int, in_tok: int, out_tok: int) -> ScriptedBackend:
         turn: list[AgentEvent | BaseException] = []
         for i in range(turns):
-            turn += [
-                TextEvent(text=f"turn {i + 1}"),
-                MetricsEvent(
-                    message_id=f"m-{i}",
-                    prompt_tokens=in_tok,
-                    completion_tokens=out_tok,
-                    cached_tokens=0,
-                    cost_usd=None,
-                    model_name="claude-opus-5",
+            turn += [TextEvent(text=f"turn {i + 1}"),
+                MetricsEvent(message_id=f"m-{i}", prompt_tokens=in_tok, completion_tokens=out_tok, cached_tokens=0,
+                    cost_usd=None, model_name="claude-opus-5",
                 ),
             ]
         turn.append(ResultEvent(structured_output=None, continuation=None))
@@ -311,17 +238,9 @@ async def test_per_phase_cells_show_whole_invocation_tokens(
     recorder = make_recorder(tmp_path, agent_model_name="claude-opus-5")
     async with recorder:
         await run_agent(
-            _multi_turn(turns=4, in_tok=25_000, out_tok=1_000),
-            tmp_path,
-            "review",
-            phase=DaydreamPhase.REVIEW,
+            _multi_turn(turns=4, in_tok=25_000, out_tok=1_000), tmp_path, "review", phase=DaydreamPhase.REVIEW,
         )
-        await run_agent(
-            _multi_turn(turns=2, in_tok=10_000, out_tok=500),
-            tmp_path,
-            "fix",
-            phase=DaydreamPhase.FIX,
-        )
+        await run_agent(_multi_turn(turns=2, in_tok=10_000, out_tok=500), tmp_path, "fix", phase=DaydreamPhase.FIX,)
     assert run_dir.exists()
 
     rc = summarize(recorder.path)
