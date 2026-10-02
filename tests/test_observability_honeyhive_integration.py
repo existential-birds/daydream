@@ -23,7 +23,7 @@ from daydream.backends import (
     ToolStartEvent,
 )
 from daydream.observability.config import ObservabilityConfig
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import attributes, otlp_collector
@@ -146,10 +146,7 @@ async def test_honeyhive_generation_child_is_model_and_attempt_stays_chain(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A real Pi-style stream yields one model child per approved generation.
-
-    The structural attempt and the logical agent remain chain; only the sealed generation becomes a HoneyHive
-    model event, and the exactly-once historical end survives to the wire (issue #1156 AC-10/AC-18)."""
+    """Only the sealed Pi generation becomes a model event; agent/attempt remain chains."""
 
     ext_dir.write_module(_FLOW)
     install_backend(ScriptedBackend(events=[RequestEvent(_PROMPT, model_name="pi-model", provider_name="pi"),

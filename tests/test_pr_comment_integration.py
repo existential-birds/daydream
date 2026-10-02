@@ -1,32 +1,7 @@
-"""End-to-end PR-comment renderer integration test (Bugs A/B/C).
+"""Drive the real Claude backend, agent and recorder through the SDK boundary.
 
-This test is intentionally red: it drives the FULL daydream code path —
-real ``TrajectoryRecorder``, real ``daydream.agent.run_agent``, real
-``daydream.backends.claude.ClaudeBackend.execute`` — mocking only at the
-``ClaudeSDKClient`` boundary so we exercise the production isinstance
-dispatch in ``ClaudeBackend.execute`` and the production event-fold in
-``daydream.trajectory.Invocation._dispatch``.
-
-The three bugs the test is designed to expose:
-
-A. ``ClaudeBackend`` never reads ``AssistantMessage.model``. The trajectory's
-   per-step ``model_name`` ends up as the backend NAME (``"claude"``) the
-   runner stamped at recorder init, never the real SDK model id.
-
-B. ``ClaudeBackend`` looks for ``msg.usage`` on ``AssistantMessage``, but
-   the real SDK only carries ``usage`` on ``ResultMessage``. ``MetricsEvent``
-   is therefore never emitted per step. ``Step.metrics`` stays ``None``.
-
-C. ``Invocation._dispatch(CostEvent)`` only updates ``_final_totals`` and
-   never sets the open step's ``_metrics``. Even when the SDK sends a
-   ``ResultMessage`` with usage + cost, every per-step ``Step.metrics`` is
-   ``None`` and the renderer's per-phase rollup shows ``$0.00 / 0 tokens``.
-
-The renderer aggregates **per-step** metrics, so even though
-``FinalMetrics.total_cost_usd`` ends up correct, the user-facing comment
-silently understates cost and tokens. We assert against the rendered
-markdown to make the regression visible.
-"""
+Rendered comments must preserve SDK model identity and per-phase usage/cost.
+Per-step metrics matter: correct final totals alone cannot verify the renderer."""
 from __future__ import annotations
 
 import json
@@ -94,15 +69,7 @@ def _stream(text: str, cost: float, *, input_tokens: int, output_tokens: int, ca
     ]
 
 async def test_render_uses_real_sdk_model_id_not_backend_alias(tmp_path: Path, patch_sdk: Any) -> None:
-    """Bug A: rendered model line must surface the SDK model id.
-
-    The real ``AssistantMessage`` has a ``model`` field carrying the actual
-    SDK model id (e.g. ``claude-opus-4-5-20250901``). ``ClaudeBackend`` is
-    expected to thread that into the trajectory so the renderer's rollup
-    line reads ``- **Model:** claude-opus-4-5-20250901``. Today the
-    backend ignores ``msg.model`` entirely, so the renderer sees only the
-    recorder-stamped backend alias ``"claude"``.
-    """
+    """Carry AssistantMessage.model through to the rendered model label."""
     patch_sdk(_stream("reviewing the code", 0.42, input_tokens=1000, output_tokens=200, cache_read_input_tokens=800))
 
     recorder = _make_recorder(tmp_path)
@@ -125,13 +92,7 @@ async def test_render_uses_real_sdk_model_id_not_backend_alias(tmp_path: Path, p
     )
 
 async def test_render_shows_real_cost_and_tokens_from_sdk_usage(tmp_path: Path, patch_sdk: Any) -> None:
-    """Bugs B + C: rollup cost / tokens must reflect SDK usage data.
-
-    The renderer aggregates per-step ``Step.metrics``. With Bug B (no
-    MetricsEvent emitted from AssistantMessage) and Bug C (CostEvent never
-    populates the open step's _metrics), every Step.metrics is ``None`` →
-    aggregator skips → rollup reads ``$0.00`` / ``0 in / 0 out``.
-    """
+    """Per-step metrics must reach the renderer when usage arrives on ResultMessage."""
     review_messages = _stream("reviewing", 0.30, input_tokens=5000, output_tokens=600, cache_read_input_tokens=2000)
     fix_messages = _stream("fixing", 0.15, input_tokens=2500, output_tokens=400, cache_read_input_tokens=1000)
 
@@ -207,13 +168,7 @@ async def test_render_shows_real_cost_and_tokens_from_sdk_usage(tmp_path: Path, 
         )
 
 async def test_per_phase_rollup_distinguishes_phases(tmp_path: Path, patch_sdk: Any) -> None:
-    """Bug B/C end-to-end: the per-phase breakdown must show one row per phase.
-
-    Two separate ``run_agent()`` calls under different phases must produce
-    distinct rows in the per-phase breakdown table, each carrying the
-    metrics from their own ResultMessage usage. The rows existing isn't
-    enough — they must reflect the right Steps / Tools / Cost values.
-    """
+    """Separate calls must render distinct phase rows with their own usage and cost."""
     review_messages = _stream("reviewing", 0.20, input_tokens=4000, output_tokens=500, cache_read_input_tokens=1500)
     parse_messages = _stream("parsed", 0.05, input_tokens=1000, output_tokens=100, cache_read_input_tokens=500)
 

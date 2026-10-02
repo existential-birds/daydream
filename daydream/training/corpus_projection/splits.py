@@ -1,10 +1,4 @@
-"""Content-derived, frozen, disjoint split assignment (projection, D5).
-
-A record's split is a deterministic function of its content-derived record id
-and the pinned salt — no RNG, no state, no call-order dependence. The unit
-interval is sliced into ``holdout`` / ``validation`` / ``train`` in that
-order, so the three membership sets are disjoint by construction.
-"""
+"""Frozen split assignment from record id and pinned salt, without RNG or state."""
 
 import hashlib
 from typing import Literal
@@ -21,18 +15,10 @@ SPLIT_FILENAMES: dict[Split, str] = {
 
 
 def assign_split(record_id: str, *, holdout_rate: float, val_rate: float, salt: str) -> Split:
-    """Assign one record to a split from its record id (D5).
+    """Map sha256(salt <US> record_id) uniformly to [0, 1).
 
-    The bucket digest is ``sha256(salt <US> record_id)``; its leading 256 bits
-    are interpreted as a uniform ``u`` over ``[0, 1)``:
-
-    - ``u < holdout_rate`` → ``holdout``
-    - ``u < holdout_rate + val_rate`` → ``validation``
-    - otherwise → ``train``
-
-    Deterministic, content-derived, no RNG. Disjoint by construction: the
-    three predicates partition the unit interval. ``val_rate`` must be
-    non-negative and ``holdout_rate + val_rate <= 1``.
+    Partition at holdout_rate and holdout_rate + val_rate into holdout, validation,
+    and train. Rates must be nonnegative and their sum at most one.
     """
     if holdout_rate < 0.0 or val_rate < 0.0 or holdout_rate + val_rate > 1.0:
         raise ValueError(

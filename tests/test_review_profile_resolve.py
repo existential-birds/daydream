@@ -15,7 +15,7 @@ import pytest
 
 from daydream import review_profile as rp
 from daydream.config_file import DaydreamFileConfig
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.harness.git_helpers import commit, init_repo, write_and_stage
 
 
@@ -48,16 +48,13 @@ def test_env_beats_repo_and_default(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 
 def test_repo_beats_default(tmp_path: Path) -> None:
     repo = _write_profile(tmp_path, "repo", "R")
-    # A repo-committed path is confined beneath the repo root, so the repo root
-    # must be supplied (as the resolver does for a real target): an absolute path
-    # inside the repo resolves cleanly instead of being mistaken for an escape.
+    # Supply the repository root to admit confined absolute paths.
     fc = DaydreamFileConfig(review_profile=repo)
     resolved = rp.resolve_profile(file_config=fc, repo_root=tmp_path)
     assert resolved.profile.name == "repo" and resolved.source_kind == "repo"
 
 def test_absolute_repo_path_cannot_escape(tmp_path: Path) -> None:
-    # The untrusted repo's committed value points outside its own root (the
-    # host file is read into the profile's strategy text if allowed to resolve).
+    # An escaping repository value would expose host profile text to the model.
     fc = DaydreamFileConfig(review_profile=Path("/etc/host-marker.toml"))
     with pytest.raises(rp.ProfileError) as e:
         rp.resolve_profile(file_config=fc, repo_root=tmp_path)
@@ -93,9 +90,7 @@ def test_resolve_from_runconfig_happens_once_at_composition_root() -> None:
 
 def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 
-    # A real git target so the run gets past workspace open and actually
-    # reaches dispatch (the profile-resolution seam fires inside the deep
-    # flow's composition root, after open_workspace).
+    # A real Git target reaches profile resolution after workspace opening.
     init_repo(tmp_path)
     write_and_stage(tmp_path, "seed.txt", "x\n")
     commit(tmp_path, "init")
@@ -104,19 +99,15 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatc
     p.write_text('schema_version = 1\nname = "cli-p"\n[strategies.intent]\ncontent = "C"\nsource = "copied: a"')
     env = {**os.environ, "DAYDREAM_REVIEW_PROFILE": str(p)}
     repo_root = Path(__file__).resolve().parents[1]
-    # CLI: `daydream review --review-profile` must
-    # resolver seams through a real `daydream ... --review-profile` invocation.
+    # Exercise the profile flag through the real CLI.
     out = subprocess.run([sys.executable, "-m", "daydream", "--review", "--review-profile", str(p), str(tmp_path)],
         capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
     )
-    # A valid explicit profile resolves cleanly: the review of an empty diff runs
-    # to completion (exit 0) without a ProfileError.
+    # An empty diff with a valid explicit profile exits successfully.
     assert "ProfileError" not in out.stderr
     assert out.returncode == 0  # clean review of an empty diff: resolved + dispatched
 
-    # The flag is actually read (fail-closed): an invalid explicit profile
-    # aborts non-zero naming its source instead of silently falling through to
-    # a default, proving resolution is enforced on this real path.
+    # An invalid explicit profile fails at its source without falling back.
     bad = tmp_path / "bad.toml"
     bad.write_text('schema_version = 1\nname = "bad"\nunknown = 1')
     out_bad = subprocess.run(
@@ -124,11 +115,6 @@ def test_real_cli_entry_resolves_profile_and_inspects(tmp_path: Path, monkeypatc
         capture_output=True, text=True, env=env, cwd=repo_root, timeout=120,
     )
     assert out_bad.returncode != 0
-    # The failure must name its source (fail-closed: no silent fall-through to a
-    # default). Rich wraps the error panel at console width, and the pytest/xdist
-    # tmp path is long enough that the filename is split across a wrap with the
-    # panel border interleaved ("ba\u2551\u2551d.toml)"), so strip whitespace and
-    # box-drawing characters before searching — wrapping inserts no spaces, so
-    # the basename reassembles exactly.
+    # Rich can wrap a long path inside panel borders; remove rendering characters to recover its basename.
     cleaned = re.sub(r"[\s║═╔╗╚╝]", "", out_bad.stdout + out_bad.stderr)
     assert "bad.toml" in cleaned

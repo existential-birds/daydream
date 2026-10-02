@@ -9,17 +9,16 @@ from typing import Any
 import pytest
 
 from daydream import review_profile as rp, severity
+from daydream.deep.diagram_prompts import DIAGRAM_GROUNDING_INSTRUCTION
+from daydream.deep.diff import _diff_blocks_for_files, bound_deep_diff
 from daydream.deep.prompts import (
     ANTI_SLOP_RUBRIC_INSTRUCTION,
     CONFIG_FLOW_TRACE_INSTRUCTION,
     CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION,
-    DIAGRAM_GROUNDING_INSTRUCTION,
     DOC_REVIEW_NOTICE,
     TEST_QUALITY_RUBRIC_INSTRUCTION,
     TRUST_MODEL_INSTRUCTION,
     VERIFICATION_PROTOCOL_INSTRUCTION,
-    _diff_blocks_for_files,
-    bound_deep_diff,
     build_arbiter_prompt,
     build_diagram_repair_prompt,
     build_fix_verify_prompt,
@@ -82,14 +81,12 @@ def test_review_prompt_has_artifact_pointers_and_profile_strategy(builder: str, 
     assert "/beagle-" not in out and "$review-" not in out
 
 def test_per_stack_prompt_scope_lists_only_stack_files(tmp_path: Path) -> None:
-    """D-10: stack scope instruction lists only this stack's files."""
     out = _review_prompt("per_stack", tmp_path, files=["api.py", "lib/util.py"])
     assert "api.py" in out and "lib/util.py" in out
     assert "Do NOT review files from other stacks" in out
 
 @pytest.mark.parametrize("is_docs_only", [False, True])
 def test_generic_fallback_docs_notice(tmp_path: Path, is_docs_only: bool) -> None:
-    """D-20: is_docs_only=True prepends the doc-review notice."""
     overrides = {"is_docs_only": True, "files": ["README.md"]} if is_docs_only else {}
     out = _review_prompt("generic_fallback", tmp_path, **overrides)
     assert (DOC_REVIEW_NOTICE in out) is is_docs_only
@@ -159,7 +156,6 @@ def test_merge_prompt_requires_one_path_per_item(tmp_path: Path) -> None:
     assert "separate item per file" in out
 
 def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) -> None:
-    """Structural reviewer sees the whole change — no 'Focus ONLY on these files' clause."""
     prompt = _review_prompt("structural", tmp_path, files=["api/main.py", "ui/App.tsx"])
     assert "Focus ONLY on these files" not in prompt
     assert "Do NOT review files from other stacks" not in prompt
@@ -169,7 +165,6 @@ def test_build_structural_prompt_has_no_stack_scope_restriction(tmp_path: Path) 
     assert "Do not write review files" in prompt
 
 def test_build_structural_prompt_references_affected_files(tmp_path: Path) -> None:
-    """AC5: structural reviewer is pointed at affected_files.md instead of discarding the dir."""
     exploration_dir = tmp_path / "exploration"
     prompt = _review_prompt("structural", tmp_path, files=["main.py"], exploration_dir=exploration_dir)
     assert str(exploration_dir / "affected_files.md") in prompt
@@ -210,14 +205,12 @@ def _blk(path: str, body: str) -> str:
     )
 
 def test_bound_deep_diff_under_budget_is_byte_identical() -> None:
-    """Must-have #4: at/under cap → identical value, no marker, no truncation."""
     out, info = bound_deep_diff(_DIFF_TWO_FILES)
     assert out == _DIFF_TWO_FILES
     assert not info.truncated
     assert info.marker is None
 
 def test_bound_deep_diff_keeps_whole_blocks_up_to_budget() -> None:
-    """Must-have #2: over cap → only whole blocks retained; each byte-identical."""
     body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
     diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
     out, info = bound_deep_diff(diff)
@@ -247,10 +240,7 @@ def test_bound_deep_diff_oversize_single_block_kept_whole() -> None:
     assert info.dropped_paths == []  # nothing follows the kept-whole oversize block
 
 def test_bound_deep_diff_marker_is_parse_safe() -> None:
-    """Must-have #3 + spike: marker element is skipped by every block consumer."""
-    # Derive the block body from the budget (not a magic size) so the test stays
-    # valid if INLINE_DIFF_BUDGET_BYTES changes: three whole blocks, exactly two
-    # fit under the cap, so the marker-skip assertions exercise a dropped block.
+    # Size from the budget: two of three whole blocks fit, forcing a dropped block.
     body = INLINE_DIFF_BUDGET_BYTES // 5
     diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
     out, info = bound_deep_diff(diff)
@@ -278,13 +268,8 @@ def test_diff_blocks_for_files_selects_relevant_hunks() -> None:
     assert "<div>universe</div>" in both
 
 def test_diff_blocks_for_files_refuses_partial_inline_for_mixed_stack() -> None:
-    """A stack that mixes retained and dropped blocks falls back to the pointer.
-
-    ``bound_deep_diff`` keeps whole blocks up to the cap and names the dropped
-    ones in the truncation marker; ``_diff_blocks_for_files`` must refuse to
-    inline only the retained hunks of a stack whose other files' blocks were
-    dropped -- the caller then falls back to the diff_path pointer so the
-    reviewer never silently reviews a partial hunk set.
+    """Mixed retained/dropped stack blocks require the full diff pointer, avoiding
+    an inline review that silently omits that stack's dropped hunks.
     """
     body = INLINE_DIFF_BUDGET_BYTES // 5  # three whole blocks; exactly two fit under the cap
     diff = _blk("a.py", "x" * body) + _blk("b.py", "y" * body) + _blk("c.py", "z" * body)
@@ -305,10 +290,6 @@ def test_diff_blocks_for_files_refuses_partial_inline_for_mixed_stack() -> None:
     assert _diff_blocks_for_files(bounded, ["a.py", "never.py"]) is not None
 
 def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
-    """AC4 byte-bound fallback: when the relevant blocks exceed
-    ``INLINE_DIFF_BUDGET_BYTES``, the helper returns ``None`` so the caller
-    keeps the path pointer (the agent is told to Read diff.patch directly).
-    """
     # Synthesize a diff whose single matching block exceeds the budget.
     huge_line = "x" * (INLINE_DIFF_BUDGET_BYTES + 64)
     huge_diff = (
@@ -321,7 +302,6 @@ def test_diff_blocks_for_files_returns_none_above_byte_budget() -> None:
     assert _diff_blocks_for_files(huge_diff, ["api.py"]) is None
 
 def test_diff_blocks_for_files_returns_none_when_no_blocks_match() -> None:
-    """AC4 no-match fallback: files not in the diff → None (caller keeps pointer)."""
     out = _diff_blocks_for_files(_DIFF_TWO_FILES, ["nonexistent.py"])
     assert out is None
 
@@ -340,10 +320,7 @@ def test_generic_fallback_prompt_inlines_hunks_and_drops_read_instruction(tmp_pa
     assert str(p["diff_path"]) not in out
 
 def test_structural_prompt_keeps_diff_pointer_and_read_freedom(tmp_path: Path) -> None:
-    """AC4: structural prompt is NOT inlined — it keeps its diff pointer AND
-    its repo-wide Read/Grep/Bash freedom (the structural lens roams beyond
-    the diff by design). Fix B does not touch the structural / arbiter prompts.
-    """
+    """Structural review retains its diff pointer and repo-wide Read/Grep/Bash scope."""
     p = _paths(tmp_path)
     out = _review_prompt("structural", tmp_path, files=["api.py"])
     assert _default_strategy("discovery.structural") in out
@@ -362,13 +339,10 @@ def test_arbiter_prompt_contains_cwd_grounding(tmp_path: Path) -> None:
     assert CWD_GROUNDING_INSTRUCTION.format(cwd=tmp_path) in _arbiter_prompt(tmp_path)
 
 def test_arbiter_prompt_instructs_collapsing_duplicate_findings(tmp_path: Path) -> None:
-    """Issue #1103: the arbiter now receives structural/language twins, so the
-    host-owned instruction block must tell it what to do with a duplicate pair.
+    """Duplicate instructions reject one twin and retain the other's severity.
 
-    Selection alone is not enough -- the arbiter emits one verdict per input
-    finding, so collapsing a pair means rejecting one side and keeping the
-    other's severity. Without saying so, the pair comes back kept twice with
-    their original severities and nothing is adjudicated.
+    Selecting both records alone would allow two keep verdicts to preserve
+    the duplicate with unchanged severities.
     """
     out = _arbiter_prompt(tmp_path)
     assert "the same defect, keep exactly one" in out
@@ -412,12 +386,7 @@ def test_build_verification_prompt_includes_gate_zero_echo(tmp_path: Path) -> No
 # Issue #279 — Authoritative-intent rule gate in the deep prompt builders
 
 def _build_gated(name: str, tmp_path: Path, *, intent_authoritative: bool) -> str:
-    """Dispatch to the named builder with minimal valid kwargs.
-
-    Note the signature differences: ``arbiter`` has no ``output_path`` and needs
-    ``arbiter_input_path``; ``merge`` has no ``cwd``/``diff_path`` and needs
-    ``per_stack_records_paths`` and ``dedup_candidates_path``.
-    """
+    """Call each named builder with its distinct minimal required inputs."""
     if name.replace("-", "_") in _REVIEW_BUILDERS:
         return _review_prompt(name.replace("-", "_"), tmp_path, intent_authoritative=intent_authoritative)
     if name == "arbiter":
@@ -441,10 +410,8 @@ def test_authoritative_intent_rule_is_gated(name: str, tmp_path: Path) -> None:
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in _build_gated(name, tmp_path, intent_authoritative=True)
 
 def test_verification_prompt_has_no_schema_dump_or_write_instruction(tmp_path: Path) -> None:
-    """The verify prompt carries neither the schema dump nor a write instruction.
-
-    The schema reaches every backend via ``output_schema``, and the host writes
-    the verdicts file, so both blocks were pure duplication.
+    """The backend receives output_schema and the host persists verdicts; prompts
+    must not duplicate schema dumps or request agent-written verdict files.
     """
     items = [{"id": 1, "lens": "per-stack", "severity": "high", "file": "api.py",
          "line": 10, "description": "x", "rationale": "y"}
@@ -477,9 +444,7 @@ def test_verification_prompt_advertises_full_read_only_bash_allowlist(tmp_path: 
         items=items, cwd=tmp_path, output_path=tmp_path / "verdicts.json"
     )
 
-    # Full single-source render present. Pinned literally (not via the same
-    # render function that produced the prompt) so a render or tuple regression
-    # — e.g. dropping `git status` — fails rather than passing vacuously.
+    # Pin literal commands independently of the renderer to catch omissions.
     assert ("`ls`, `cat`, `git status`, `git log`, `git show`, `git blame`, `git diff`" in prompt)
     # The stale partial list is gone, no shell-grep step remains, and the
     # read-only clause an existing test pins survives.
@@ -499,7 +464,6 @@ def test_review_prompt_can_omit_alternatives(tmp_path: Path, builder: str) -> No
     assert _review_prompt(builder, tmp_path) == with_alts
 
 def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -> None:
-    """The authoritative-intent upgrade survives include_alternatives=False."""
     p = _paths(tmp_path)
     without = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"), stack_name="python",
         files=["api.py"], **p, intent_authoritative=True, include_alternatives=False,
@@ -510,7 +474,6 @@ def test_omitting_alternatives_keeps_authoritative_intent_rule(tmp_path: Path) -
     assert PR_DESCRIPTION_UNTRUSTED_FRAMING in without  # NEW #579
 
 def test_adjudication_builders_keep_alternatives_unconditionally(tmp_path: Path) -> None:
-    """Every adjudication prompt points at the shared alternatives artifact."""
     p = _paths(tmp_path)
     for prompt in _adjudication_prompts(tmp_path).values():
         assert str(p["alternatives_path"]) in prompt
@@ -528,11 +491,8 @@ def test_per_stack_prompt_includes_test_quality_rubric(tmp_path: Path) -> None:
     assert "`#[cfg]`" in out
 
 def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path) -> None:
-    """#308: the rubric must not over-apply to legitimate pure-function seams.
-
-    A unit test of a pure ``build_driver_request`` / driver-boundary propagation
-    helper is NOT an internal-field assertion; the rubric only flags a seam when
-    it bypasses the observable behavior the test claims to cover.
+    """Legitimate pure propagation tests pass; seams that bypass their claimed
+    observable behavior trigger the rubric.
     """
     out = _review_prompt("per_stack", tmp_path)
     assert "pure-function seams" in out
@@ -541,7 +501,6 @@ def test_per_stack_prompt_test_quality_rubric_layering_awareness(tmp_path: Path)
     assert "bypasses the observable behavior" in out
 
 def test_per_stack_prompt_test_quality_rubric_follows_strategy(tmp_path: Path) -> None:
-    """The test-quality rubric follows the per-stack review instructions."""
     out = _review_prompt("per_stack", tmp_path)
     assert out.index("test-quality rubric") > out.index(_default_strategy("discovery.per_stack"))
 
@@ -622,10 +581,6 @@ def test_review_instruction_ownership(
         assert not leaked, f"instruction anchors leaked into {builder}: {leaked}"
 
 def test_cross_file_additions_keep_existing_rubrics(tmp_path: Path) -> None:
-    """#310 additivity guard: the new blocks are separate -- the existing rubric
-    constants still appear unchanged in the builders that own them, so #311 lands
-    cleanly. The test-quality rubric is per-stack only; the anti-slop rubric runs
-    in both builders."""
     structural = _review_prompt("structural", tmp_path)
     per_stack = _review_prompt("per_stack", tmp_path)
     assert TEST_QUALITY_RUBRIC_INSTRUCTION in per_stack
@@ -649,7 +604,6 @@ def test_cross_file_instructions_contain_no_banned_words() -> None:
 # --- Issue #731: coverage-evidence grounding + frontier-read instruction ---
 
 def test_per_stack_prompt_instructs_frontier_read(tmp_path: Path) -> None:
-    """Issue #731: frontier files surface as cross-shard interface reads."""
     p = _paths(tmp_path)
     prompt = build_per_stack_prompt(strategy=_default_strategy("discovery.per_stack"),
         stack_name="python#0",
@@ -685,9 +639,7 @@ def test_exploration_pointer_distinguishes_exploration_from_assigned_sources(tmp
     assert "assigned source files" in out
     assert "MUST read in full all assigned source files" not in out
     assert "enclosing symbol or configuration section" in out
-    # The bounded-exploration rule is scoped to exploration artifacts ONLY: the
-    # sentence that bounds exploration reads must not also carry the assigned-
-    # source-files mandate.
+    # The exploration read bound must not include the assigned-source mandate.
     bounded = out[out.index("Read the pre-scan summary at"):]
     bounded = bounded[: bounded.index("\n")]
     assert "assigned source files" not in bounded
@@ -730,7 +682,6 @@ def _rubric_assigning_prompts(tmp_path: Path) -> list[str]:
     return [per_stack, structural, generic, alternative]
 
 def test_every_assigning_prompt_carries_severity_rubric(tmp_path: Path) -> None:
-    """R1.1: every prompt that assigns a severity embeds the host rubric."""
     for prompt in _rubric_assigning_prompts(tmp_path):
         assert severity.SEVERITY_RUBRIC in prompt
 
@@ -742,7 +693,6 @@ def test_rubric_is_high_definition_not_a_prohibition() -> None:
     assert "Informational" not in rubric
 
 def test_rubric_after_strategy_text(tmp_path: Path) -> None:
-    """R1.4: the host rubric lands after the profile strategy text."""
     for prompt, strategy_stage in (
         (0, "discovery.per_stack"), (1, "discovery.structural"), (2, "discovery.generic_fallback"),
     ):
@@ -778,7 +728,6 @@ def _adjudication_prompts(tmp_path: Path) -> dict[str, str]:
     "builder", ["build_arbiter_prompt", "build_suppression_prompt", "build_merge_prompt", "build_supervise_prompt"],
 )
 def test_adjudication_prompts_reference_severity_rubric(builder: str, tmp_path: Path) -> None:
-    """R1.3: each adjudication restatement prompt cites the shared severity rubric."""
     prompt = _adjudication_prompts(tmp_path)[builder]
     assert severity.SEVERITY_RUBRIC in prompt or "severity rubric" in prompt
 
@@ -786,7 +735,6 @@ def test_adjudication_prompts_reference_severity_rubric(builder: str, tmp_path: 
     "builder", ["build_arbiter_prompt", "build_suppression_prompt", "build_merge_prompt", "build_supervise_prompt"],
 )
 def test_adjudication_prompts_no_divergent_severity_fragment(builder: str, tmp_path: Path) -> None:
-    """R1.3: no adjudication prompt retains a bare "high | medium" restatement."""
     assert "high | medium" not in _adjudication_prompts(tmp_path)[builder]
 
 # Issue #1113 — grounded diagram prompts
@@ -902,7 +850,6 @@ def test_diagram_grounding_instruction_states_the_three_host_guarantees() -> Non
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
 def test_diagram_prompts_carry_the_grounding_instruction(builder: str, tmp_path: Path) -> None:
-    """Every diagram prompt embeds the source-validation contract."""
     prompts = {"sequence": _sequence_prompt(tmp_path), "flowchart": _flowchart_prompt(tmp_path),
         "repair": build_diagram_repair_prompt(
             kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
@@ -911,7 +858,6 @@ def test_diagram_prompts_carry_the_grounding_instruction(builder: str, tmp_path:
     assert DIAGRAM_GROUNDING_INSTRUCTION in prompts[builder]
 
 def test_diagram_grounding_instruction_not_delivered_to_review_prompts(tmp_path: Path) -> None:
-    """Delivery matrix: the diagram gate is scoped to the diagram phase only."""
     per_stack = build_per_stack_prompt(
         strategy=_default_strategy("discovery.per_stack"), stack_name="python", files=["api/handler.py"],
         **_paths(tmp_path),
@@ -920,7 +866,6 @@ def test_diagram_grounding_instruction_not_delivered_to_review_prompts(tmp_path:
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart"])
 def test_diagram_prompts_inline_a_small_diff(builder: str, tmp_path: Path) -> None:
-    """Under the byte budget the diff is inlined and the pointer is dropped."""
     diff = "diff --git a/api/handler.py b/api/handler.py\n@@ -1 +1 @@\n-old\n+new\n"
     build = _sequence_prompt if builder == "sequence" else _flowchart_prompt
     prompt = build(tmp_path, inline_diff=diff)
@@ -930,7 +875,6 @@ def test_diagram_prompts_inline_a_small_diff(builder: str, tmp_path: Path) -> No
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart"])
 def test_diagram_prompts_fall_back_to_the_diff_pointer(builder: str, tmp_path: Path) -> None:
-    """An oversized (or absent) inline diff degrades to the on-disk pointer."""
     oversized = "x" * (INLINE_DIFF_BUDGET_BYTES + 1)
     build = _sequence_prompt if builder == "sequence" else _flowchart_prompt
     for inline in (None, oversized):
@@ -991,7 +935,6 @@ def test_flowchart_prompt_has_no_candidate_roots(tmp_path: Path) -> None:
     assert "- (none)" in prompt
 
 def test_repair_prompt_lists_every_failure_with_its_reason_code() -> None:
-    """Spec section 4: each failing element is named with its reason code."""
     prompt = build_diagram_repair_prompt(
         kind="sequence", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
     )
@@ -1011,7 +954,6 @@ def test_repair_prompt_states_the_repair_contract() -> None:
     assert "ROOT_NOT_CANDIDATE` verdict" not in prompt
 
 def test_repair_prompt_repeats_the_candidate_list_for_a_root_repick() -> None:
-    """A flowchart repair carries the candidate list and the re-pick instruction."""
     prompt = build_diagram_repair_prompt(kind="flowchart", failures=_FAILURES,
         candidate_roots=[
             {"file": "core/resolve.py", "name": "resolve_identity", "line": 22, "end_line": 71, "branch_points": 4}
@@ -1024,7 +966,6 @@ def test_repair_prompt_repeats_the_candidate_list_for_a_root_repick() -> None:
 
 @pytest.mark.parametrize("builder", ["sequence", "flowchart", "repair"])
 def test_diagram_prompts_embed_the_output_schema(builder: str, tmp_path: Path) -> None:
-    """Every diagram prompt ends with the structured-output schema block."""
     prompts = {"sequence": _sequence_prompt(tmp_path), "flowchart": _flowchart_prompt(tmp_path),
         "repair": build_diagram_repair_prompt(
             kind="flowchart", failures=_FAILURES, candidate_roots=None, schema=_diagram_schema()
@@ -1053,7 +994,6 @@ def test_diagram_prompts_without_exploration_keep_the_content_boundary(builder: 
     assert "Pre-scan exploration" not in prompt
 
 def test_diagram_prompt_names_are_registered() -> None:
-    """Both prompt names resolve through the built-in registry (docs/extensions.md)."""
     reg = Registry()
     register_builtins(reg)
     assert "diagram_sequence" in reg.prompt_names()

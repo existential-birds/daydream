@@ -1,35 +1,9 @@
-"""File-backed cache + JSONL resume log for the labeler backfill loop.
+"""File-backed GitHub response cache and append-only session completion log.
 
-Backfilling labels for historical archive runs means making one or more
-``gh_api`` calls per session — PR state, files-changed, review comments,
-etc. The labeler orchestrator (Task 13) is restart-safe: if the process
-dies partway through a 10k-session sweep, it must resume without
-re-paying for completed work.
-
-This module provides two cooperating pieces:
-
-* :class:`BackfillCache` — a callable wrapping ``gh_api`` that memoizes
-  responses to JSON files under ``cache_dir``. GitHub state is only
-  immutable within a freshness window — replies can be edited and PRs
-  can merge — so a memoized entry older than ``CACHE_TTL_SECONDS`` is
-  refetched rather than served (M14): the reply-evidence digest is
-  recomputed from live data, so an edited reply appends a fresh
-  generation instead of being masked by a stale memoized response.
-* ``progress.jsonl`` — an append-only JSONL log of completed
-  ``session_id`` rows, written by :meth:`BackfillCache.mark_session_done`
-  and read back by :meth:`BackfillCache.completed_sessions`. Each row is
-  stamped with the labeler policy version in force at completion time, so
-  a policy bump wholesale-invalidates the resume markers (M15) and forces
-  a re-fetch rather than silently resuming stale labels. Markers also
-  age out past ``CACHE_TTL_SECONDS`` (on their ``completed_at``), so a
-  re-run outside the freshness window re-processes the session and can
-  observe a reply edit.
-
-The cache is intentionally process-local and lock-free: each cache key
-maps to one file, and the labeler runs single-process. Cache files are
-written via :func:`daydream.json_utils.atomic_write_json` so a crash
-mid-write leaves either the prior file or nothing — never a truncated
-read.
+Responses and completion markers expire after CACHE_TTL_SECONDS so reply edits
+and PR changes are re-observed. Markers also require the current labeler policy
+version; policy changes invalidate the whole resume set. Cache writes are atomic.
+This single-process cache is intentionally lock-free, with one file per key.
 """
 
 from __future__ import annotations
@@ -62,13 +36,7 @@ stale memoized response.
 
 
 def _slug_endpoint(repo: str, endpoint: str) -> str:
-    """Collapse an endpoint into a short filename-safe slug.
-
-    Replaces ``/`` with ``__`` and collapses any leading
-    ``repos__<owner>__<repo>__`` prefix so the resulting filename stays
-    a reasonable length even for nested endpoints like
-    ``repos/<owner>/<repo>/pulls/<n>/files``.
-    """
+    """Make an endpoint filename-safe, replacing / with __ and removing its repo prefix."""
     raw = endpoint.replace("/", "__")
     owner_repo_prefix = f"repos__{repo.replace('/', '__')}__"
     if raw.startswith(owner_repo_prefix):
@@ -88,14 +56,7 @@ def _cache_key(repo: str, endpoint: str, kwargs: dict[str, Any]) -> str:
 
 
 class BackfillCache:
-    """File-backed memoizer for ``gh_api`` + resume log for the labeler.
-
-    Attributes:
-        cache_dir: Directory where per-call JSON cache files and
-            ``progress.jsonl`` are written.
-        inner: The underlying ``gh_api(repo, endpoint, **kwargs)``
-            callable that is invoked on cache misses.
-    """
+    """Memoize inner gh_api calls and persist session completion under cache_dir."""
 
     def __init__(self, cache_dir: Path, inner: GHApiFn) -> None:
         self.cache_dir = cache_dir
@@ -107,14 +68,7 @@ class BackfillCache:
         return self.cache_dir / "progress.jsonl"
 
     def __call__(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
-        """Return the cached response for ``(repo, endpoint, **kwargs)``.
-
-        On a cache hit within the freshness window
-        (:data:`CACHE_TTL_SECONDS`), the JSON cache file is read and
-        returned. On a miss, a stale cache file, or a corrupt cache read,
-        ``inner`` is called and the result is written through to the cache
-        before being returned.
-        """
+        """Return a fresh cached response; fetch and atomically cache misses, stale, or corrupt entries."""
         digest = _cache_key(repo, endpoint, kwargs)
         owner, _, name = repo.partition("/")
         slug = _slug_endpoint(repo, endpoint)
@@ -143,12 +97,7 @@ class BackfillCache:
         return result
 
     def mark_session_done(self, session_id: str) -> None:
-        """Append a completion row for ``session_id`` to ``progress.jsonl``.
-
-        The row records the labeler policy version in force at completion
-        time (M15), so a later policy bump invalidates the marker wholesale.
-        Creates ``cache_dir`` if it does not already exist.
-        """
+        """Append the current policy and completion time to progress.jsonl, creating cache_dir."""
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         line = json.dumps(
             {
@@ -162,20 +111,10 @@ class BackfillCache:
             f.write(line + "\n")
 
     def completed_sessions(self) -> set[str]:
-        """Return sessions recorded in ``progress.jsonl`` for the current policy.
+        """Return sessions whose markers match the current policy and freshness window.
 
-        Only rows whose stored ``labeler_policy_version`` equals the *current*
-        :data:`~daydream.training.labeler_versions.LABELER_POLICY_VERSION`
-        (read at call time) count as done — a policy bump re-fetches every
-        previously completed session (M15 wholesale invalidation). Rows from
-        before the version field existed never match. A marker also ages out
-        once its ``completed_at`` is older than
-        :data:`CACHE_TTL_SECONDS`, so a re-run outside the freshness window
-        re-processes the session — letting an edited reply append a fresh
-        generation (M14) rather than being masked by a stale marker. Returns
-        an empty set if the log does not exist. Malformed lines are skipped
-        (the log is append-only and a partial last-line write is the only
-        realistic failure mode).
+        Read the policy at call time. Missing logs return an empty set; legacy,
+        stale, or malformed lines do not count, including partial append tails.
         """
         if not self.progress_path.exists():
             return set()

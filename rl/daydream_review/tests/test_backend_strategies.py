@@ -1,9 +1,4 @@
-"""Phase 4: the per-backend injection seam.
-
-Each test asserts the artifact a backend's CLI actually reads — the env var it
-resolves its base URL from, or the exact config file on disk — not that a
-provisioning method was called.
-"""
+"""Verify backend injection through the environment and files each CLI actually reads."""
 
 from __future__ import annotations
 
@@ -46,9 +41,7 @@ async def test_codex_strategy_writes_a_responses_provider_block() -> None:
     env = strategy.env(ENDPOINT, SECRET, fanout_concurrency=4)
     await strategy.provision(runtime, ENDPOINT, SECRET, MODEL)
 
-    # CODEX_HOME, not HOME: a live rollout with only HOME moved had codex resolve
-    # its config elsewhere, miss the provider block, and reach the provider
-    # directly — real tokens billed, zero calls captured in the trace.
+    # Set CODEX_HOME: moving HOME alone can miss the provider block and bypass interception.
     assert env == {"CODEX_HOME": "/rollout/.codex", "CODEX_INTERCEPT_KEY": SECRET, "DAYDREAM_FANOUT_CONCURRENCY": "4"}
     written = runtime.writes["/rollout/.codex/config.toml"]
     config = tomllib.loads(written.decode())
@@ -71,8 +64,7 @@ async def test_pi_strategy_installs_a_chat_completions_provider_extension() -> N
     # pi has its own fan-out variable; the generic one would be ignored.
     assert env["DAYDREAM_PI_FANOUT_CONCURRENCY"] == "9"
     assert "DAYDREAM_FANOUT_CONCURRENCY" not in env
-    # daydream only remaps PI_API_KEY for the built-in zai provider (pi.py:84),
-    # so the extension must read its own variable instead.
+    # The extension reads its own key; built-in PI_API_KEY remapping does not configure it.
     assert "PI_API_KEY" not in env
 
     source = runtime.writes[f"/rollout/.pi/extensions/{INTERCEPT_PROVIDER}/index.ts"].decode()
@@ -82,7 +74,6 @@ async def test_pi_strategy_installs_a_chat_completions_provider_extension() -> N
     assert provider["baseUrl"] == ENDPOINT
     assert provider["api"] == "openai-completions"
     assert provider["apiKey"] == "$VF_INTERCEPT_API_KEY"
-    # The policy model is declared per rollout, never hardcoded (SPEC C1).
     assert [model["id"] for model in provider["models"]] == [MODEL]
 
     assert any("pi install" in " ".join(argv) for argv in runtime.commands), (

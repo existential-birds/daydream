@@ -12,7 +12,7 @@ from pathlib import Path
 
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import reuse_store
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.test_reuse_key import _identity
 
 

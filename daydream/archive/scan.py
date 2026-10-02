@@ -1,21 +1,11 @@
-"""Fail-closed bundle secret scanner (issue #981 M9/M11/M13).
+"""Fail-closed secret scanning before bundle egress.
 
-Walks a serialized run directory and reports secret-shaped content before any
-egress path (Hub upload, ``--dump-artifacts``, sanitizer release) touches it.
-Safe-only reporting (M11): findings carry the file name, JSON key path or line
-number, category, and a short digest of the matched region — never the matched
-value or its surrounding content. Any scanner error is absorbed into a
-``scan_error`` finding so a broken scan can never return clean (fail-closed).
-
-Redaction rule shapes are imported from :mod:`daydream.trajectory` (reuse, not
-copy); URL shapes come from the same shared patterns used by live redaction.
-
-Rules are tiered by severity (issue #1170). A redactor needs recall — over-
-matching ``SORT_KEY = "created_at"`` costs one value in a log. A publication
-gate needs precision — over-matching costs the whole run. So the name-shape
-heuristics that carry no value constraint report as ``advisory`` and only the
-high-confidence value shapes are ``blocking``. Every rule still reports; the
-severity decides whether egress is refused.
+Findings contain only paths, locations, categories, and short digests, never
+matched values or excerpts. Per-file scanner errors become blocking findings.
+Patterns are shared with ``daydream.redaction`` and ``credential_patterns``.
+Value-constrained credential shapes block egress; name/template heuristics are
+advisory because names such as ``SORT_KEY`` alone do not identify credentials.
+Both tiers report findings; severity determines whether publication is refused.
 """
 
 import hashlib
@@ -31,12 +21,7 @@ from daydream.credential_patterns import (
     _TOKEN_ONLY_USERINFO_PATTERN,
     _URL_CREDENTIAL_PATTERN,
 )
-from daydream.trajectory import (
-    _API_KEY_PATTERN,
-    _ENV_VAR_PATTERN,
-    _JWT_PATTERN,
-    _PEM_KEY_PATTERN,
-)
+from daydream.redaction import _API_KEY_PATTERN, _ENV_VAR_PATTERN, _JWT_PATTERN, _PEM_KEY_PATTERN
 
 __all__ = ["SEVERITY_ADVISORY", "SEVERITY_BLOCKING", "Finding", "ScanResult", "scan_run_dir"]
 
@@ -45,13 +30,7 @@ SEVERITY_BLOCKING = "blocking"
 #: A rule whose match is only a name/template shape. Reported, never refused.
 SEVERITY_ADVISORY = "advisory"
 
-# (pattern, category) pairs applied in order to every scanned text. The
-# shared URL rules cover the same shapes as the live trajectory redactor.
-#
-# Blocking tier: every rule here constrains the matched *value*, so a hit is a
-# credential (a known token prefix, key armor, a literal ``user:pass@``, a
-# credential-bearing query param) rather than a name that merely sounds like
-# one.
+# Ordered value-constrained rules shared with live redaction.
 _BLOCKING_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (_URL_CREDENTIAL_PATTERN, "url_credential"),
     (_TOKEN_ONLY_USERINFO_PATTERN, "url_credential"),
@@ -61,10 +40,8 @@ _BLOCKING_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (_API_KEY_PATTERN, "api_key"),
     (_JWT_PATTERN, "jwt"),
 )
-# Advisory tier: pure name-shape heuristics. ``_ENV_VAR_PATTERN``'s value group
-# is ``[^\s\n\r;]+`` — any non-space token — so it matches ``SORT_KEY =
-# "created_at"``, ``AUTH=none`` and ``API_TOKEN=${API_TOKEN}``. Correct for
-# redaction, far too coarse to refuse a publication.
+# Name-only heuristics also match SORT_KEY="created_at" and API_TOKEN=${API_TOKEN};
+# useful for redaction, insufficient to refuse publication.
 _ADVISORY_RULES: tuple[tuple[re.Pattern[str], str], ...] = (
     (_ENV_VAR_PATTERN, "env_var"),
 )
@@ -73,14 +50,10 @@ _RULES: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
     + [(p, c, SEVERITY_ADVISORY) for p, c in _ADVISORY_RULES]
 )
 
-# A userinfo part that is entirely an interpolation slot (``{cfg.DB_USER}``,
-# ``{password}``, ``${PGPASSWORD}``) is a template, not a value. The optional
-# opener/closer absorbs the string literal the slot is written inside: the
-# userinfo character classes are greedy over quotes, so the first captured part
-# of ``f"{cfg.DB_USER}:{cfg.DB_PASSWORD}@..."`` is ``f"{cfg.DB_USER}``, not
-# ``{cfg.DB_USER}``. A quote is never a credential character (RFC 3986 userinfo
-# excludes it), and the prefix letters are only accepted when a quote follows,
-# so ``pw{n}`` stays blocking.
+# Entire {cfg.DB_USER}, {password}, or ${PGPASSWORD} slots are templates.
+# Userinfo captures greedily include string quotes/prefixes (e.g. f"{cfg.DB_USER}),
+# so absorb those too. Quotes are excluded by RFC 3986; prefix letters require
+# a following quote, keeping mixed literal values such as pw{n} blocking.
 _PLACEHOLDER_PART_PATTERN = re.compile(r"""(?:[A-Za-z]{0,2}["'`])?\$?\{[^{}]*\}["'`]?""")
 
 
@@ -92,9 +65,7 @@ class Finding:
     location: str
     category: str
     digest: str
-    #: ``SEVERITY_BLOCKING`` or ``SEVERITY_ADVISORY``. Defaults to blocking so
-    #: every construction site that predates the tiering — and ``scan_error``
-    #: in particular — stays fail-closed without naming the field.
+    #: Default to blocking, including scan errors and callers omitting severity.
     severity: str = SEVERITY_BLOCKING
 
 
@@ -105,11 +76,9 @@ class ScanResult:
 
     @property
     def blocking(self) -> bool:
-        """Whether egress must be refused.
+        """Refuse egress for blocking findings or ``clean=False`` without findings.
 
-        Fail-closed tie-break: a result that is not clean but carries no
-        findings blocks, so a caller that only knows ``clean=False`` (a
-        hand-built stub, a future producer) can never publish by omission.
+        The latter keeps incomplete results fail-closed.
         """
         if not self.clean and not self.findings:
             return True
@@ -139,12 +108,9 @@ def _digest(matched: str) -> str:
 
 
 def _userinfo_parts(pattern: re.Pattern[str], match: re.Match[str]) -> list[str] | None:
-    """Colon-separated userinfo parts a userinfo rule captured, else ``None``.
+    """Normalize each userinfo rule's capture into colon-separated parts.
 
-    Each rule captures the userinfo differently: ``_URL_CREDENTIAL_PATTERN``
-    has separate user/password groups, ``_TOKEN_ONLY_USERINFO_PATTERN`` only
-    captures the scheme, and ``_SCP_USERINFO_PATTERN``'s group 1 is the
-    *combined* ``user:pass@`` with no separate groups at all — hence the split.
+    URL rules capture separate fields or just the scheme; SCP captures ``user:pass@`` together.
     """
     if pattern is _URL_CREDENTIAL_PATTERN:
         return [match.group(2), match.group(3)]
@@ -156,14 +122,10 @@ def _userinfo_parts(pattern: re.Pattern[str], match: re.Match[str]) -> list[str]
 
 
 def _is_placeholder_userinfo(parts: list[str]) -> bool:
-    """Whether every userinfo part is wholly a ``{...}`` interpolation slot.
+    """Recognize userinfo made entirely of interpolation slots, including quoted literals.
 
-    ``f"postgresql://{cfg.DB_USER}:{cfg.DB_PASSWORD}@{cfg.DB_HOST}:..."`` has
-    the credential shape but carries no credential. The guard covers all three
-    userinfo rules, not just the scheme-bearing one: ``_URL_CREDENTIAL_PATTERN``
-    is a strict *subset* of ``_TOKEN_ONLY_USERINFO_PATTERN`` (both match
-    ``https://{a}:{b}@``), so guarding one and not the other leaves every
-    ``https://``-scheme template blocking through the wider rule.
+    All three overlapping userinfo rules must use this guard; otherwise the wider
+    token-only rule would still block templates accepted by the scheme-bearing rule.
     """
     return bool(parts) and all(_PLACEHOLDER_PART_PATTERN.fullmatch(part) for part in parts)
 
@@ -185,13 +147,9 @@ def _scan_text(text: str) -> Iterator[tuple[str, str, str, str]]:
 
 
 def _dedupe(findings: Iterable[Finding]) -> list[Finding]:
-    """Collapse identical findings, resolving to the strictest severity.
+    """Deduplicate by ``(path, location, category, digest)``, retaining insertion order.
 
-    Keyed on ``(path, location, category, digest)``. The URL-credential and
-    token-only rules both fire on every ``scheme://user:pass@`` with the same
-    matched string, so without an explicit blocking-wins tie-break a text's
-    severity would depend on rule iteration order. Insertion order is kept so
-    the finding list stays reproducible.
+    Blocking wins when overlapping rules produce the same finding at different severities.
     """
     resolved: dict[tuple[str, str, str, str], Finding] = {}
     for finding in findings:
@@ -255,13 +213,9 @@ def _scan_file(rel_path: str, text: str) -> list[Finding]:
 
 
 def _scan_multiline_pem(rel_path: str, text: str) -> Iterator[Finding]:
-    """Yield PEM findings the per-line pass structurally cannot see (#1170 D4).
+    """Find PEM armor spanning lines that the non-JSON per-line pass cannot match.
 
-    ``_PEM_KEY_PATTERN`` is ``re.DOTALL`` and spans BEGIN..END lines, but the
-    non-JSON pass above scans line by line, so real key armor in ``diff.patch``
-    was invisible while the same key inside a JSON string leaf was caught. The
-    location is the line the block starts on. A single-line block matches both
-    passes with the same span, and ``_dedupe`` collapses it.
+    Report the block's starting line; `_dedupe` collapses overlap with single-line matches.
     """
     for match in _PEM_KEY_PATTERN.finditer(text):
         matched = match.group(0)

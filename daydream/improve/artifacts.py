@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
+from daydream.trajectory import DaydreamPhase, get_current_recorder
 
 
 def improve_dir(
@@ -16,31 +19,32 @@ def improve_dir(
     return directory
 
 
-def recon_path(improve_dir_path: Path) -> Path:
-    """Return the repository-reconnaissance artifact path."""
-    return improve_dir_path / "recon.json"
+RECON_FILENAME = 'recon.json'
+COVERAGE_FILENAME = 'coverage.json'
+VETTED_FINDINGS_FILENAME = 'vetted-findings.json'
+REPORT_FILENAME = 'report.md'
+PLAN_WRITE_DIAGNOSTICS_FILENAME = 'plan-write-diagnostics.json'
+PUBLISHED_ISSUES_FILENAME = 'published-issues.json'
 
 
-def coverage_path(improve_dir_path: Path) -> Path:
-    """Return the partition/group coverage-ledger artifact path."""
-    return improve_dir_path / "coverage.json"
+def _artifact_provenance(*, phase: DaydreamPhase) -> dict[str, str]:
+    """Return host-authored identity tying an improve artifact to this run."""
+    recorder = get_current_recorder()
+    if recorder is None:
+        return {"session_id": "unrecorded", "phase": phase.value}
+    try:
+        trajectory_path = recorder.path.relative_to(recorder.target_dir).as_posix()
+    except ValueError:
+        trajectory_path = str(recorder.path)
+    return {
+        "session_id": recorder.session_id,
+        "phase": phase.value,
+        "trajectory_path": trajectory_path,
+    }
 
 
-def vetted_findings_path(improve_dir_path: Path) -> Path:
-    """Return the vetted-findings artifact path."""
-    return improve_dir_path / "vetted-findings.json"
-
-
-def report_path(improve_dir_path: Path) -> Path:
-    """Return the rendered improve report path."""
-    return improve_dir_path / "report.md"
-
-
-def plan_write_diagnostics_path(improve_dir_path: Path) -> Path:
-    """Return the sanitized plan-writer attempt diagnostics path."""
-    return improve_dir_path / "plan-write-diagnostics.json"
-
-
-def published_issues_path(improve_dir_path: Path) -> Path:
-    """Return the GitHub issue-publication disposition artifact path."""
-    return improve_dir_path / "published-issues.json"
+def write_artifact(path: Path, payload: dict[str, Any], *, phase: DaydreamPhase) -> dict[str, Any]:
+    """Persist one Improve JSON document with host-owned run/phase identity."""
+    document = {"artifact_provenance": _artifact_provenance(phase=phase), **payload}
+    path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+    return document

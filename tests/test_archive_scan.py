@@ -94,7 +94,6 @@ _TRUE_POSITIVES = (('token = "ghp_canaryfake123"', "api_key"), ('aws_key = "AKIA
 
 @pytest.mark.parametrize("text", _FALSE_POSITIVES)
 def test_ordinary_code_never_blocks_egress(text: str) -> None:
-    """Config-code and DSN-template shapes are advisory-or-clean, never blocking."""
     findings = scan._scan_file("sample.py", text)
     blocking = [f for f in findings if f.severity == scan.SEVERITY_BLOCKING]
     assert blocking == [], [(f.category, f.location) for f in blocking]
@@ -120,7 +119,6 @@ def test_overlapping_userinfo_rules_dedupe_to_strictest_severity() -> None:
     assert templated[0].severity == scan.SEVERITY_ADVISORY
 
 def test_dirty_result_without_findings_is_blocking() -> None:
-    """Fail-closed tie-break: ``clean=False`` blocks even with no findings."""
     assert scan.ScanResult(clean=False).blocking
     assert not scan.ScanResult().blocking
 

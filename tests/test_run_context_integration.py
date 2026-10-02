@@ -13,6 +13,7 @@ from daydream import runner
 from daydream.agent import console
 from daydream.backends import AgentEvent, ResultEvent
 from daydream.phases import phase_alternative_review
+from daydream.run_config import RunConfig
 from daydream.run_context import (
     InteractionPolicy,
     RunContext,
@@ -20,7 +21,6 @@ from daydream.run_context import (
     bind_run_context,
     current_run_context,
 )
-from daydream.runner import RunConfig
 from daydream.ui import prompt_user
 from daydream.workspace import WorkContext
 from tests.conftest import ExtDir

@@ -1,22 +1,20 @@
-"""Tests for verb-first dispatch and the default-``review`` shim.
+"""Pin verb-first routing and equivalent parsing of bare-target and explicit-review forms.
 
-``_first_verb`` is the pure routing primitive: it inspects the leading token
-and decides which verb owns the rest of argv. A bare path, a leading flag, or
-empty argv all fall through to the ``review`` golden path. ``_parse_args`` is
-the production RunConfig builder, so the bare-target and explicit-``review``
-forms are proven to parse identically.
+Empty argv and leading flags also select review.
 """
 
 import pytest
 
-from daydream.cli import _first_verb, _parse_args, _parse_improve_args
+from daydream.cli import _first_verb
+from daydream.commands.improve import _parse_improve_args
+from daydream.commands.review import _parse_args
 
 
 def test_first_verb_routing() -> None:
     assert _first_verb(["/some/path"]) == "review"  # bare path → review shim
     assert _first_verb(["--comment", "/p"]) == "review"  # leading flag → review
     assert _first_verb([]) == "review"
-    # "feedback" is not a verb anymore (M1): it falls through to the review shim.
+    # The legacy feedback token falls through to the review shim.
     assert _first_verb(["feedback", "42", "--bot", "x"]) == "review"
 
 @pytest.mark.parametrize("argv", [["/t"], ["review", "/t"]])

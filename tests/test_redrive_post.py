@@ -1,10 +1,6 @@
-"""Acceptance tests for scripts/redrive_post.py (canonical merged-items posting).
+"""Drive redrive_post's real CLI and canonical posting path with fake gh at the boundary.
 
-Drives the real CLI entrypoint (scripts.redrive_post.main) through real argument
-parsing, with the fake gh harness only at the external subprocess boundary. The
-delegation functions (post_review_to_pr_from_report / parsed_issues_from_items /
-classify / build_payload / _post) are NOT monkeypatched — the real shared
-canonical posting path must run end-to-end (spec M3).
+Report parsing, classification, payload construction, and posting delegation stay real.
 """
 
 from __future__ import annotations

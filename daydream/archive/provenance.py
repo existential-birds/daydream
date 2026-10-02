@@ -1,19 +1,7 @@
-"""Executable provenance capture for archived runs.
+"""Capture the Daydream executable separately from reviewed-repository provenance.
 
-Records the immutable Daydream executable that produced a run: version,
-install source, resolved commit, dirty state, and opt-in container digest.
-This lives in its own ``daydream.*`` namespace and is never conflated with
-the target-repository ``git.*`` / ``code_context.*`` blocks.
-
-Each fallible field is a best-effort capture with an explicit ``"unknown"``
-sentinel — a failure to resolve a field reports ``"unknown"`` rather than a
-raise or a fabricated value (mirroring ``git_context.capture_git_context``'s
-independent-fields pattern, degrading to ``"unknown"`` instead of ``None``).
-
-Exports:
-    ExecutableProvenance: Dataclass holding captured executable provenance.
-    capture_executable_provenance: Capture provenance from the installed
-        package dir + opt-in env.
+Each fallible field reports ``unknown`` rather than fabricating a value or
+aborting capture. Container identity is opt-in.
 """
 
 import json
@@ -28,18 +16,10 @@ from daydream.git_ops import GitError
 
 @dataclass
 class ExecutableProvenance:
-    """The immutable Daydream executable that produced an archived run.
+    """Executable version, install source, commit, dirty state, and optional image digest.
 
-    Attributes:
-        version: Package version (``daydream.__version__``).
-        install_source: ``editable`` (uv/editable install), ``git``
-            (VCS-derived direct_url), ``package`` (no direct_url), or
-            ``unknown`` when the distribution cannot be resolved.
-        commit: Full SHA of the package dir's git HEAD, or ``"unknown"``.
-        dirty: ``True``/``False`` when the package-dir git state resolves,
-            else ``"unknown"``.
-        container_digest: The opt-in ``DAYDREAM_IMAGE_DIGEST`` value, or
-            ``"unknown"``. Never auto-detected.
+    Install source is editable, git, package, or unknown. Unresolved commit or
+    dirty state is ``unknown``; image digest comes only from DAYDREAM_IMAGE_DIGEST.
     """
 
     version: str
@@ -86,13 +66,7 @@ def _resolve_install_source() -> str:
 
 
 def capture_executable_provenance() -> ExecutableProvenance:
-    """Capture the Daydream executable provenance.
-
-    Best-effort per field; never raises. The package dir is the directory
-    holding ``daydream/__file__``. Commit/dirty resolve from that dir's git
-    state (walking up to the enclosing checkout) or degrade to ``"unknown"``.
-    Container digest is opt-in via ``DAYDREAM_IMAGE_DIGEST``.
-    """
+    """Capture each field independently from the installed package and opt-in image environment."""
     pkg_dir = Path(daydream.__file__).parent
 
     try:

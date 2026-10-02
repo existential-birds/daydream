@@ -24,18 +24,24 @@ from daydream.extensions.loader import build_registry
 from daydream.flows.engine import FlowContext
 from daydream.git_ops import GitError, head_sha
 from daydream.improve import artifacts
-from daydream.improve.command_contract import validate_recon_commands
-from daydream.improve.orchestrator import (
+from daydream.improve.audit import (
     _apply_vet_verdicts,
-    _audit_repo,
+)
+from daydream.improve.audit_scope import (
     _restrict_diff_to_services,
     _services_for_files,
     _stacks_for_services,
     _stamp_finding,
+)
+from daydream.improve.command_contract import validate_recon_commands
+from daydream.improve.context import _audit_repo
+from daydream.improve.partition import Partition
+from daydream.improve.plan_index import (
+    PLAN_INDEX_FILENAME,
+)
+from daydream.improve.planning import (
     _step_write_plans,
 )
-from daydream.improve.partition import Partition
-from daydream.improve.plans import PLAN_INDEX_FILENAME
 from daydream.improve.prompts import (
     AUDIT_FINDINGS_SCHEMA,
     AUDIT_PLAYBOOK_SECTIONS,
@@ -47,7 +53,8 @@ from daydream.improve.prompts import (
     build_vet_prompt,
 )
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.services import Service, enumerate_services
 from daydream.workspace import AuditWorkspace, WorkContext, open_audit_workspace, open_workspace
 from tests.conftest import improve_fixture_test_command_anchor
@@ -89,12 +96,15 @@ def test_improve_dir_uses_active_artifact_route(tmp_path: Path, monkeypatch: pyt
     assert artifacts.improve_dir(tmp_path / "model-cwd", allow_standalone=True) == routed / "improve"
     assert (routed / "improve").is_dir()
 
+@pytest.fixture
+def stub(improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch) -> ImproveStubBackend:
+    return install_improve_stub(monkeypatch, improve_monorepo_target)
+
+
 def _load_improve_json(repo: Path, name: str) -> dict[str, Any]:
-    """Load a named improve artifact as decoded JSON."""
     return cast(dict[str, Any], json.loads(improve_artifact(repo, name).read_text(encoding="utf-8")))
 
 def _plan_write_diagnostics(repo: Path) -> dict[str, Any]:
-    """Load the plan-writer diagnostics artifact."""
     return _load_improve_json(repo, "plan-write-diagnostics.json")
 
 def _plan_write_dispositions(repo: Path) -> list[Any]:
@@ -123,7 +133,6 @@ async def test_unsupported_improve_backend_fails_atomic_preflight(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig, backend_name: str, selection: str, tmp_path: Path,
 ) -> None:
-    """Every backend precedence seam fails before any backend can execute."""
     execute_calls: list[str] = []
 
     async def _execute_canary(*args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
@@ -615,7 +624,7 @@ async def test_real_plan_phase_reanchor_reuses_ephemeral_source_owner(
     git(source, "remote", "set-head", "origin", "main")
     locations = private_root_locations(base=tmp_path / "private")
     owner = resolve_private_workspace_owner(source, locations=locations)
-    monkeypatch.setattr("daydream.artifact_visibility._default_private_base",
+    monkeypatch.setattr("daydream.artifacts.ownership._default_private_base",
         lambda: (_ for _ in ()).throw(AssertionError("unexpected default lookup")),
     )
     advanced: list[Path] = []
@@ -785,7 +794,6 @@ def _raise_enumeration_failure(*_args: Any, **_kwargs: Any) -> list[dict[str, An
     raise RuntimeError("unparseable repository manifest")
 
 def _no_open_issues(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Stub GitHub issue enumeration with an empty result."""
     monkeypatch.setattr("daydream.git_ops.gh_issue_list_strict", lambda *args, **kwargs: [])
 
 @pytest.mark.anyio
@@ -800,7 +808,6 @@ async def test_repo_scan_seeds_specialists_from_tracked_files(tmp_git_repo: Path
 
 @pytest.mark.anyio
 async def test_repo_scan_prompt_carries_no_diff_framing(tmp_git_repo: Path) -> None:
-    """A repo-scoped scan has no change set, so it must not be described as one."""
     stub = ImproveStubBackend(tmp_git_repo)
     ctx = await repo_scan(cast(Backend, stub), tmp_git_repo, max_files=500)
     prompt = stub.calls[0]["prompt"]
@@ -874,9 +881,8 @@ async def test_credentials_never_reach_improve_observables(
 
 @pytest.mark.anyio
 async def test_improve_recon_writes_artifacts_and_never_mutates_source(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     before = _git_status_porcelain(improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target)
     assert code == 0
@@ -902,20 +908,11 @@ async def test_improve_recon_writes_artifacts_and_never_mutates_source(
     assert _git_status_porcelain(improve_monorepo_target) == before
 
 def _pin_stack_availability(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Pin stack routing: an absent plugin registry means optimistic availability.
-
-    Without this the detected stacks -- and so the partition-group count --
-    depend on which Beagle plugins the developer happens to have installed.
-    """
+    """Use an absent registry so ambient Beagle plugins cannot alter stack availability or group count."""
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-config-absent"))
 
 def _append_improve_config(target: Path, body: str) -> DaydreamFileConfig:
-    """Append an ``[tool.daydream.improve]`` block, re-commit, and load it.
-
-    The CLI is what reads the repo's config file (``cli.py`` calls
-    ``load_file_config`` before building the RunConfig), so a runner-entry test
-    loads it the same way instead of hand-building the dataclass.
-    """
+    """Commit repo config and load it through the same parser used before CLI RunConfig construction."""
     pyproject = target / "pyproject.toml"
     pyproject.write_text(pyproject.read_text() + body)
     git(target, "add", "pyproject.toml")
@@ -926,7 +923,6 @@ def _append_improve_config(target: Path, body: str) -> DaydreamFileConfig:
 async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
     improve_scaled_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:
-    """One recon pass carries the audited roots, so it can return per-service commands."""
     _pin_stack_availability(monkeypatch, tmp_path)
     stub = install_improve_stub(monkeypatch, improve_scaled_monorepo_target, n_findings=0)
     code = await _run_improve(make_config, improve_scaled_monorepo_target)
@@ -943,7 +939,6 @@ async def test_recon_prompt_names_audited_subtrees_for_per_service_commands(
     # The exploration summary embedded below the recon header already opened with
     # the boundary; dedup must leave exactly one occurrence in the full prompt.
     assert prompt.count(UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY) == 1
-    # Roots only: the recon prompt never inlines an individual tracked file.
     assert "apps/svc00/api.py" not in prompt
     # Service roots are printed anchored at the audit snapshot (the model's
     # cwd), never as bare relative paths a model could resolve against the
@@ -966,7 +961,6 @@ async def test_audit_fans_out_per_partition_group_on_scaled_monorepo(
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
     assert len(audit_calls) == 3 * len(AUDIT_CATEGORIES)
     assert all("Relevant tracked files" not in call["prompt"] for call in audit_calls)
-    # Roots only: no prompt names an individual tracked file.
     assert all("apps/svc00/api.py" not in call["prompt"] for call in audit_calls)
     assert {group_scope(call["prompt"])[0] for call in audit_calls} == {"group-01", "group-02", "group-03",}
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
@@ -1049,9 +1043,8 @@ async def test_quick_tier_audits_whole_repo_in_one_group(
 
 @pytest.mark.anyio
 async def test_audit_dispatch_interval_preserves_isolation_when_all_failed(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.fail_categories = set(AUDIT_CATEGORIES)
     code = await _run_improve(make_config, improve_monorepo_target)
 
@@ -1111,7 +1104,6 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     assert code == 0
     report = improve_artifact(improve_scaled_monorepo_target, "report.md").read_text()
     section = _not_audited_section(report)
-    # Every ceiling-skipped partition is named with its root and reason.
     assert "**frontend**" in section and "group-ceiling" in section
     assert "`frontend/`" in section
     # residue's only retained group (group-01) failed its docs audit, so the
@@ -1122,7 +1114,6 @@ async def test_report_names_unaudited_partitions_and_failed_groups(
     assert "omitted: generic, python" in section
     assert "partially audited" not in section
     failed = report.split("### Failed audit assignments")[1].split("## ")[0]
-    # The failed assignment resolves to its group's roots, not just a key.
     assert "**docs / group-01**" in failed and "apps/svc00/" in failed
     coverage = _load_improve_json(improve_scaled_monorepo_target, "coverage.json")
     assert {entry["reason"] for entry in coverage["not_audited"]} == {"group-ceiling", "group-failed",}
@@ -1161,8 +1152,6 @@ async def test_top_offenders_name_directory_partitions_and_survive_artifacts(
     audit = _load_improve_json(improve_monorepo_target, "audit-findings.json")
     assert {finding["partition"] for finding in audit["findings"]} == {"billing", "web", "residue",}
     vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
-    # The same pattern in three disjoint partitions aggregates into one finding
-    # that names every location it was found in.
     assert len(vetted["findings"]) == 1
     assert set(vetted["findings"][0]["partitions"]) == {"billing", "web", "residue"}
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
@@ -1193,8 +1182,6 @@ async def test_vet_batches_are_bounded_and_parallel(
     vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
     members = [member for package in vetted["findings"] for member in package.get("members", [package])]
     titles = {finding["title"] for finding in members}
-    # Verdicts from every batch apply: the last batch's rejection is honored
-    # and the other 44 survive inside nine manageable work packages.
     assert len(members) == 44
     assert len(vetted["findings"]) == 9
     assert "Security finding 45" not in titles
@@ -1219,7 +1206,6 @@ async def test_vet_dispatch_interval_batch_failure_fails_closed_per_batch(
     vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
     members = [member for package in vetted["findings"] for member in package.get("members", [package])]
     titles = {finding["title"] for finding in members}
-    # Only the failed batch's five findings drop; the other two batches keep theirs.
     assert len(members) == 40
     assert len(vetted["findings"]) == 8
     assert "Security finding 41" not in titles
@@ -1247,9 +1233,8 @@ async def test_run_with_no_findings_writes_report_and_empty_plan_diagnostics(
 
 @pytest.mark.anyio
 async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_commands(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.all_recon_commands_invalid = True
     code = await _run_improve(make_config, improve_monorepo_target)
 
@@ -1263,7 +1248,6 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
         {"code": "RECON_APPLICABILITY_INVALID", "pointer": f"/commands/{index}/applicability/scope/kind",}
         for index in range(2)
     ]
-    # No rejected candidate's content survives into the persisted artifact.
     assert "verbatim_excerpt" not in recon_text
     assert "uv run pytest" not in recon_text
     report = improve_artifact(improve_monorepo_target, "report.md")
@@ -1289,13 +1273,6 @@ async def test_improve_continues_audit_and_planning_when_recon_has_no_valid_comm
 async def test_makefile_and_manifest_gate_plans_when_the_model_cites_nothing(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """The host enumerates Make/manifest commands the model is told to skip.
-
-    Recon is read-only, so it can never run a command to confirm one exists.
-    A repository whose only test gate lives in a Makefile or package.json --
-    written nowhere in prose for a model to cite -- must still hand the
-    executor a real verification command instead of the manual fallback.
-    """
     (improve_monorepo_target / "Makefile").write_text(
         "check: ## Run the full gate\n\tuv run pytest\n",
         encoding="utf-8",
@@ -1353,8 +1330,7 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig,
 ) -> None:
-    """A broken enumerator degrades to the model's commands, never silently."""
-    monkeypatch.setattr("daydream.improve.orchestrator.enumerate_repository_commands", _raise_enumeration_failure,)
+    monkeypatch.setattr("daydream.improve.recon.enumerate_repository_commands", _raise_enumeration_failure,)
     stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target)
     assert code == 0
@@ -1366,16 +1342,14 @@ async def test_host_enumeration_failure_is_visible_and_keeps_model_commands(
 
 @pytest.mark.anyio
 async def test_unrelated_recon_container_error_preserves_valid_commands(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.recon_languages_override = {"secret-model-prose": "must not persist"}
     code = await _run_improve(make_config, improve_monorepo_target)
 
     assert code == 0
     assert [call for call in stub.calls if call["marker"] == "audit"]
     recon_text = improve_artifact(improve_monorepo_target, "recon.json").read_text()
-    # The malformed `languages` value is replaced wholesale, never persisted.
     assert "secret-model-prose" not in recon_text
     recon = json.loads(recon_text)
     assert recon["languages"] == []
@@ -1388,10 +1362,9 @@ async def test_unrelated_recon_container_error_preserves_valid_commands(
 
 @pytest.mark.anyio
 async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    improve_monorepo_target: Path, stub: ImproveStubBackend, capsys: pytest.CaptureFixture[str],
     make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     secret = "OPENAI_API_KEY=sk-secret123456"
     model_prose = "private arbitrary model explanation"
     rejected_command = "uv run pytest --private-selection"
@@ -1427,10 +1400,9 @@ async def test_non_array_commands_preserve_diagnostics_and_continue_audit(
     ],
 )
 async def test_effort_and_focus_select_the_audited_categories_read_only(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, effort: str, focus: str | None,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, effort: str, focus: str | None,
     expected_categories: list[str], make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     await _run_improve(make_config, improve_monorepo_target, improve_effort=effort, improve_focus=focus)
     audited = _load_improve_json(improve_monorepo_target, "audit-findings.json")
     assert sorted(audited["categories_run"]) == expected_categories
@@ -1441,13 +1413,6 @@ async def test_effort_and_focus_select_the_audited_categories_read_only(
 async def test_repo_with_no_test_files_still_receives_a_plan(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A repository with zero tests must still be plannable.
-
-    The audit playbook tells the auditor that "if there is no one-command way
-    to know the codebase works, that is a prerequisite finding" — so the plan
-    writer has to be able to author the plan that fixes it, in a repository
-    with no existing test to point at as an exemplar.
-    """
     assert not list(improve_monorepo_target.rglob("test_*.py"))
     assert not list(improve_monorepo_target.rglob("*_test.py"))
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
@@ -1509,7 +1474,6 @@ async def test_capable_improve_stub_partial_failure_is_successful_and_safe(
     assert code == 0
     assert len(plan_files) == 1
     assert len(failed) == 1
-    # The failed member is represented by its aggregate package title.
     assert failed[0]["finding"]["title"] == "Production finding 01"
     assert failed[0]["errors"] == [{"code": "PROCESS_EXIT", "pointer": "/"}]
     assert "Plan blocked for Production finding 01: PROCESS_EXIT at /." in console_output
@@ -1657,17 +1621,15 @@ async def test_branch_focus_with_scope_excludes_out_of_scope_service_diff(
 
 @pytest.mark.anyio
 async def test_branch_focus_on_base_branch_reports_and_exits_cleanly(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target, improve_focus="branch")
     assert code == 1
 
 @pytest.mark.anyio
 async def test_failed_category_is_reported_not_silently_dropped(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.fail_categories = {"performance"}
     code = await _run_improve(make_config, improve_monorepo_target)
     assert code == 0
@@ -1677,9 +1639,8 @@ async def test_failed_category_is_reported_not_silently_dropped(
 
 @pytest.mark.anyio
 async def test_vet_rejects_unconfirmed_finding_with_reason_and_persists(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.vet_reject_titles = {"Phantom N+1"}
     await _run_improve(make_config, improve_monorepo_target)
     vetted = _load_improve_json(improve_monorepo_target, "vetted-findings.json")
@@ -1690,9 +1651,8 @@ async def test_vet_rejects_unconfirmed_finding_with_reason_and_persists(
 
 @pytest.mark.anyio
 async def test_previously_rejected_finding_is_not_revetted_or_rereported(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.vet_reject_titles = {"Phantom N+1"}
     config =make_config(improve_monorepo_target, flow_name="improve")
     await run(config)
@@ -1732,11 +1692,7 @@ _PLAN_FILE_BY_TITLE = {
 async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, slow_title: str, make_config: MakeConfig,
 ) -> None:
-    """Each plan lands as its writer completes, numbered by selection order.
-
-    Parametrizing which writer finishes last also proves the numbering: both
-    completion orders produce the same title-to-number mapping.
-    """
+    """Both completion orders must land plans incrementally with identical selection-based numbering."""
     backend = IncrementalPlanBackend(improve_monorepo_target, slow_title=slow_title,)
     install_capable_improve_backend(monkeypatch, backend)
 
@@ -1757,12 +1713,6 @@ async def test_finished_plan_is_on_disk_while_a_slower_writer_still_runs(
 async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_order(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Three writers, completion order rotated away from selection order.
-
-    The first-selected finding's writer returns last, so if numbers were
-    claimed as writers finished it would end up with the highest number. It
-    keeps 001 because numbers are reserved before any writer runs.
-    """
     backend = OutOfOrderPlanBackend(improve_monorepo_target, n_findings=3)
     backend.vet_reject_titles = {"Phantom N+1"}
     install_capable_improve_backend(monkeypatch, backend)
@@ -1778,7 +1728,6 @@ async def test_plan_numbers_track_selection_order_when_writers_finish_out_of_ord
     assert _index_numbers_by_fingerprint(index) == {fingerprint: rank + 1 for rank, fingerprint in enumerate(selected)}
     assert len(list(plans_dir.glob("[0-9][0-9][0-9]-*.md"))) == 3
     assert index.count("| TODO |") == 3
-    # The durable record is the sidecar; the README above is rendered from it.
     sidecar = json.loads((plans_dir / PLAN_INDEX_FILENAME).read_text(encoding="utf-8"))
     assert sidecar["schema_version"] == 1
     assert sidecar["artifact_type"] == "daydream.plan-index"
@@ -1949,9 +1898,8 @@ async def test_report_orders_by_leverage_without_non_actionable_direction_sectio
 
 @pytest.mark.anyio
 async def test_scope_slices_search_but_report_names_the_unaudited_rest(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target, improve_scope="apps/billing")
     assert code == 0
     audit_calls = [call for call in stub.calls if call["marker"] == "audit"]
@@ -1991,9 +1939,8 @@ async def test_scope_selects_a_requirements_only_python_service(
 
 @pytest.mark.anyio
 async def test_group_scope_expands_named_service_group_to_all_members(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target, improve_scope="core",
                      file_config=DaydreamFileConfig(improve_service_groups={"core": ["apps/billing", "apps/catalog"]}),
                  )
@@ -2004,28 +1951,23 @@ async def test_group_scope_expands_named_service_group_to_all_members(
     assert any("apps/billing" in p for p in audited_paths)
     assert any("apps/catalog" in p for p in audited_paths)
     report = improve_artifact(improve_monorepo_target, "report.md").read_text()
-    # the group covered every detected service, so the unaudited list is empty
     assert "No other detected service directories." in report
 
 async def _run_improve(make_config: MakeConfig, repo: Path, **overrides: Any) -> int:
-    """Run the improve flow against ``repo`` with the unattended-test defaults."""
     return await run(make_config(repo, flow_name="improve", **overrides))
 
 async def _run_publish(make_config: MakeConfig, repo: Path) -> int:
-    """Run the improve flow through the GitHub issue-publishing path."""
     return await _run_improve(
         make_config, repo, pr_repo="acme/widgets", file_config=DaydreamFileConfig(improve_github_publish_issues=True),
     )
 
 async def _run_plan_subverb(make_config: MakeConfig, repo: Path) -> int:
-    """Run the improve flow's plan subverb for the canonical request."""
     return await _run_improve(make_config, repo, improve_plan_description="add rate limiting")
 
 @pytest.mark.anyio
 async def test_plan_subverb_skips_audit_and_writes_single_plan(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     assert code == 0
     assert not improve_artifact(improve_monorepo_target, "audit-findings.json").exists()
@@ -2035,9 +1977,8 @@ async def test_plan_subverb_skips_audit_and_writes_single_plan(
 
 @pytest.mark.anyio
 async def test_plan_subverb_repairs_schema_invalid_plan_once(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.return_secret_invalid_enum_once = True
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
@@ -2073,10 +2014,9 @@ async def test_plan_subverb_repairs_schema_invalid_plan_once(
     ],
 )
 async def test_persistent_authoring_failure_blocks_after_one_repair(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, stub_attr: str, stub_value: bool | int,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, stub_attr: str, stub_value: bool | int,
     error_code: str, error_pointer: str | None, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, stub_attr, stub_value)
 
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
@@ -2101,9 +2041,8 @@ async def test_persistent_authoring_failure_blocks_after_one_repair(
 
 @pytest.mark.anyio
 async def test_plan_subverb_clamps_over_length_prose_without_repair(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     over_length_role = "Billing role " + "x" * 293
     assert len(over_length_role) == 306
     stub.plan_file_role_override = over_length_role
@@ -2120,9 +2059,8 @@ async def test_plan_subverb_clamps_over_length_prose_without_repair(
 
 @pytest.mark.anyio
 async def test_plan_subverb_accepts_placeholder_secret_syntax(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_problem_override = ("Callers must send X-Internal-Service-Secret: <internalSecret> in "
         "production and X-Internal-Service-Secret: test-secret in tests."
     )
@@ -2141,12 +2079,10 @@ async def test_plan_subverb_accepts_placeholder_secret_syntax(
 async def test_repository_secret_in_quoted_source_is_redacted_not_blocked(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A credential on a quoted source line must not reach the plan on disk.
+    """Redact raw excerpts after author-string processing.
 
-    The excerpt is spliced from raw repository bytes after the authored-string
-    redaction has already run. The secret shape is lowercase on purpose:
-    ``trajectory.redact_text`` does not match it, so this exercises the
-    improve-side redaction rather than pre-existing coverage.
+    The lowercase credential exercises Improve's redactor; the trajectory
+    redactor alone does not cover this shape.
     """
     source_path = improve_monorepo_target / "apps/billing/api.py"
     source_path.write_text(  # the stub quotes lines 1-2 of this file
@@ -2160,7 +2096,6 @@ async def test_repository_secret_in_quoted_source_is_redacted_not_blocked(
     code = await _run_improve(make_config, improve_monorepo_target)
     plans = list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
     assert code == 0
-    # A plan was written: the secret is redacted, not a reason to block.
     assert len(plans) == 1
     plan_text = plans[0].read_text(encoding="utf-8")
     assert "password = <redacted>" in plan_text
@@ -2197,9 +2132,8 @@ async def test_secret_value_never_reaches_any_artifact(
 
 @pytest.mark.anyio
 async def test_sloppy_but_salvageable_output_is_normalized_and_written(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_sloppy = True
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
@@ -2249,16 +2183,7 @@ async def test_n_selected_findings_produce_n_plans_first_attempt(
 async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:
-    """One finding, one plan -- no matter how many groups re-audit its code.
-
-    A partition whose files span stacks is bundled into one audit group per
-    stack, so the same code is audited more than once and returns the identical
-    finding each time. Pinning optimistic stack availability forces that
-    multi-group fan-out (the CI condition; ambient dev environments collapse to
-    a single generic group and never exercise it). The audit must collapse those
-    byte-identical findings by fingerprint, or every extra group mints a
-    duplicate plan and the plan numbers march past their true count.
-    """
+    """Pin stack availability so deduplication is exercised across multiple real audit groups."""
     _pin_stack_availability(monkeypatch, tmp_path)
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=3,)
     stub.vet_reject_titles = {"Phantom N+1"}
@@ -2283,7 +2208,6 @@ async def test_a_finding_audited_by_several_stack_groups_yields_one_plan(
 async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """The audit still runs when no external stack plugins are available."""
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=3,)
     stub.vet_reject_titles = {"Phantom N+1"}
     code = await _run_improve(make_config, improve_monorepo_target)
@@ -2305,9 +2229,8 @@ async def test_generalist_fallback_audits_and_plans_with_no_stack_skills(
 
 @pytest.mark.anyio
 async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_bad_recon_id_attempts = 1
     stub.plan_missing_path_attempts = 1
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
@@ -2333,14 +2256,9 @@ async def test_bad_recon_id_gets_named_feedback_and_retry_succeeds(
 
 @pytest.mark.anyio
 async def test_an_edited_file_left_unquoted_is_repaired_before_the_plan_lands(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """The drift STOP condition must never ship without text to compare.
-
-    A first attempt that edits a file it never quotes is rejected and named
-    back to the writer; the landed plan quotes every path drift lists.
-    """
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    """Reject and repair missing quotes before publishing an executable drift comparison."""
     stub.plan_unquoted_path_attempts = 1
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     plan_calls = [call for call in stub.calls if call["marker"] == "plan-writer"]
@@ -2369,9 +2287,8 @@ def _out_of_scope_section(plan_text: str) -> str:
 
 @pytest.mark.anyio
 async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     deleted = "apps/billing/legacy_loader.py"
     stub.plan_stop_condition_path = deleted
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
@@ -2395,15 +2312,8 @@ async def test_undeclared_stop_condition_path_lands_in_the_out_of_scope_section(
     ],
 )
 async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
-    failure_attr: str, improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    failure_attr: str, improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """A transient plan-writer failure is retried, not terminal, and the plan lands.
-
-    A transport crash or a ``StreamStalledError`` is the usual symptom of a flaky
-    endpoint. It is retryable, so ``run_agent`` re-arms a fresh subprocess and the
-    plan writer completes on the second attempt — one blip must never sink a finding.
-    """
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     setattr(stub, failure_attr, 1)
 
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
@@ -2416,15 +2326,9 @@ async def test_plan_writer_transient_failure_is_retried_and_the_plan_lands(
 
 @pytest.mark.anyio
 async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """``run_agent`` owns the budget for retryable errors; the writer adds none.
-
-    A persistently rate-limited plan writer must burn exactly one attempt budget
-    and then block the finding — re-entering ``run_agent`` would hand the same
-    dead endpoint a second full budget.
-    """
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
+    """The plan writer cannot restart run_agent's exhausted retry budget."""
     stub.plan_rate_limit_always = True
     stub.retry_attempts = 2
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
@@ -2437,9 +2341,8 @@ async def test_persistent_retryable_failure_does_not_restart_the_retry_budget(
 
 @pytest.mark.anyio
 async def test_two_consecutive_transport_crashes_block_the_finding(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_crash_attempts = 2
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     plans_dir = improve_monorepo_target / "daydream_plans"
@@ -2456,9 +2359,8 @@ async def test_two_consecutive_transport_crashes_block_the_finding(
 
 @pytest.mark.anyio
 async def test_improve_run_leaves_no_stray_audit_worktree(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    install_improve_stub(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target)
     assert code == 0
     # The independent snapshot never registers as a linked source worktree.
@@ -2467,9 +2369,8 @@ async def test_improve_run_leaves_no_stray_audit_worktree(
 
 @pytest.mark.anyio
 async def test_improve_model_calls_run_in_audit_worktree_not_target(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     before_status = _git_status_porcelain(improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target)
 
@@ -2486,14 +2387,12 @@ async def test_improve_model_calls_run_in_audit_worktree_not_target(
         assert not improve_monorepo_target.is_relative_to(call_cwd)
         assert "daydream-audit-" in str(call_cwd.parent)
     assert not next(iter(audit_cwds)).exists()
-    # The target tree is untouched (host artifacts under gitignored paths only).
     assert _git_status_porcelain(improve_monorepo_target) == before_status
 
 @pytest.mark.anyio
 async def test_improve_model_inputs_exclude_source_only_repository_canaries(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Real runner: host preprocessing reads only the tracked audit snapshot."""
     ignored_make_canary = "PRIVATE_IGNORED_MAKE_CANARY"
     untracked_package_canary = "PRIVATE_UNTRACKED_PACKAGE_CANARY"
     service_canary = "private-source-only-service-canary"
@@ -2606,7 +2505,6 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
     # is real, not vacuous; the target assertions below prove it was confined.
     assert stub.escape_attempts == len(stub.calls)
     assert stub.local_identities == [("Tester", "test@example.com")] * len(stub.calls)
-    # Every model turn ran in one standalone snapshot outside the source.
     audit_cwds = {str(call["cwd"]) for call in stub.calls}
     assert len(audit_cwds) == 1, audit_cwds
     audit_path = next(iter(audit_cwds))
@@ -2614,12 +2512,10 @@ async def test_improve_model_commit_is_confined_to_audit_worktree(
     assert audit_repo != improve_monorepo_target
     assert not audit_repo.is_relative_to(improve_monorepo_target)
     assert "daydream-audit-" in str(audit_repo.parent)
-    # Target HEAD, named refs, and staged index/diff are unchanged after the full run.
     assert git(improve_monorepo_target, "rev-parse", "HEAD") == before_head
     assert git(improve_monorepo_target, "show-ref") == before_refs
     assert _git_status_porcelain(improve_monorepo_target) == before_status
     assert source_config.read_bytes() == config_before
-    # The standalone repository is gone (the fake committed into it, yet it was removed).
     assert not audit_repo.exists()
     worktrees = git(improve_monorepo_target, "worktree", "list", "--porcelain")
     assert "daydream-audit-" not in worktrees
@@ -2651,9 +2547,8 @@ async def test_every_agent_call_in_every_mode_is_read_only(
 
 @pytest.mark.anyio
 async def test_trajectory_records_improve_flow_and_phases(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    install_improve_stub(monkeypatch, improve_monorepo_target)
 
     code = await _run_improve(make_config, improve_monorepo_target)
 
@@ -2704,7 +2599,6 @@ async def test_trajectory_records_improve_flow_and_phases(
 async def test_improve_timing_completeness_preserves_p09_audit_isolation(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_config: MakeConfig,
 ) -> None:
-    """One real run proves multi-audit/vet timing and source Git isolation."""
     repo = improve_monorepo_target
     _pin_stack_availability(monkeypatch, tmp_path)
     stub = install_improve_stub(monkeypatch, repo)
@@ -2822,8 +2716,6 @@ def test_stamp_finding_rejects_evidence_crossing_a_symlink(tmp_path: Path,) -> N
     assert stamped is None
 
 def test_stamp_finding_attributes_dot_slash_evidence_to_partition_and_service(tmp_path: Path,) -> None:
-    """``./``-prefixed evidence (legal since the grammar relaxed) must still be
-    attributed to its partition and service, not silently dropped."""
     (tmp_path / "frontend").mkdir()
     (tmp_path / "frontend" / "app.py").write_text("x = 1\n")
 
@@ -2927,9 +2819,6 @@ async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
     file_config: DaydreamFileConfig | None, expected_tiers: dict[str, tuple[str, str]], improve_monorepo_target: Path,
     monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Observed at the ``Backend.execute`` seam: each recorded turn carries the
-    model and reasoning effort the backend serving it was constructed with.
-    """
     calls = install_per_phase_improve_stubs(monkeypatch, improve_monorepo_target)
     code = await _run_improve(make_config, improve_monorepo_target, file_config=file_config)
     assert code == 0
@@ -2941,12 +2830,6 @@ async def test_improve_phases_resolve_their_own_model_and_reasoning_tier(
 async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A plan turn spending 200 tool calls completes and writes its plan.
-
-    The flow used to cap every phase at 50 calls / 1800 s; ten of 49 archived
-    audit turns recorded a real ``tool_call_budget_exceeded`` abort under it,
-    and a budget abort returns partial output the flow reads as complete.
-    """
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
     stub.plan_tool_calls_before_result = 200
     code = await _run_improve(make_config, improve_monorepo_target)
@@ -2962,14 +2845,8 @@ async def test_improve_runs_unbudgeted_so_a_long_turn_is_never_truncated(
 
 @pytest.mark.anyio
 async def test_long_step_instruction_reaches_the_plan_whole(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """A 2000-char step instruction renders in full, ending on its last word.
-
-    The old 1500-char prose clamp cut real plan instructions off mid-sentence,
-    handing the executor an order that stopped in the middle of a requirement.
-    """
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     instruction = ("In apps/billing/api.py, replace the body of service_name. "
         + "Keep every existing caller working. " * 45
         + "Do NOT modify any other file in this step."
@@ -2987,31 +2864,21 @@ async def test_long_step_instruction_reaches_the_plan_whole(
 
 @pytest.mark.anyio
 async def test_over_length_instruction_is_repaired_not_silently_truncated(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """Past the schema ceiling the host asks for a rewrite instead of cutting."""
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_instruction_override = "Replace service_name. " + "x" * 4000
     code = await _run_plan_subverb(make_config, improve_monorepo_target)
     assert code == 1
     diagnostics = _plan_write_diagnostics(improve_monorepo_target)
     errors = [error for attempt in diagnostics["attempts"] for error in attempt["errors"]]
     assert any(error["pointer"] == "/steps/0/changes/0/instruction" for error in errors), errors
-    # The plan writer was asked again rather than a mangled plan being written.
     assert stub.plan_writer_calls == 2
     assert not list((improve_monorepo_target / "daydream_plans").glob("[0-9][0-9][0-9]-*.md"))
 
 @pytest.mark.anyio
 async def test_empty_secret_named_assignments_do_not_eat_the_next_line(
-    improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    improve_monorepo_target: Path, stub: ImproveStubBackend, make_config: MakeConfig,
 ) -> None:
-    """Redaction must not delete plan content it mistakes for a secret value.
-
-    An instruction naming empty ``.env`` placeholders lost two of its five
-    lines: each empty ``*_SECRET=``/``*_TOKEN=`` consumed the following line as
-    its "value" and the replacement dropped the newline with it.
-    """
-    stub = install_improve_stub(monkeypatch, improve_monorepo_target)
     stub.plan_instruction_override = ("Create .env.dev.example at the repository root with exactly these "
         "five empty assignment lines, in this order and with no value after "
         "any equals sign:\n"
@@ -3048,19 +2915,14 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     text = plan_path.read_text(encoding="utf-8")
     head_sha = git(improve_monorepo_target, "rev-parse", "HEAD")
 
-    # Preconditions: the executor is told where it must be standing, with the
-    # full commit id and an exact expected result per command.
     assert "## Before you start" in text
     assert f"`git cat-file -e {head_sha}^{{commit}}`" in text
     assert "`git status --porcelain` — expected: no output at all." in text
     assert head_sha in text  # full sha, not only the 7-char Status stamp
-    # A moved HEAD is expected, not a stop: drift is scoped to this plan's own
-    # files, because plans are executed days or weeks after they are written.
     assert "You are expected to be running it later, from a HEAD" in text
     assert "that has moved on — that is normal and is not by itself a reason to" in text
     assert f"`git diff --name-only {head_sha} HEAD --" in text
     assert "Files outside this list do not matter." in text
-    # The branch comes off the executor's current HEAD, not the planned-at sha.
     assert "`git switch --create improve/" in text
     assert f"`git switch --create improve/batch-billing-contract {head_sha}`" not in text
     assert "branches from your current HEAD, which is what you want." in text
@@ -3071,20 +2933,16 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     assert "- **Cost of leaving it**:" in text
     assert "- **Intended outcome (does not describe the code today)**:" in text
 
-    # No judgement calls in host-owned wording.
     assert "unless a reviewer maintains the index" not in text
     assert "Do not skip a\n> step, reorder steps, or substitute your own judgement" in text
 
-    # Every command says where to run it.
     assert "| Purpose | Run from | Command | Expected on success |" in text
     assert "**Run from**: the repository root" in text
     assert "Run this now, before starting the next step." in text
 
-    # Ordering and section relationships are stated, not implied.
     assert "Do these in the order they are numbered." in text
     assert "write it once, not twice." in text
 
-    # Finishing is literal, and never `git add -A`.
     assert "## Finishing" in text
     assert "never `git add -A`" in text
     assert "git add apps/billing/api.py apps/billing/test_api.py" in text
@@ -3093,7 +2951,6 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
     # an executor must not be told to edit daydream_plans/README.md.
     assert "`TODO` to `DONE`" not in text
 
-    # The two previously unactionable STOP conditions now name the check.
     assert "Before editing a file, read the exact line range quoted for it in the Current state section" in text
     assert "two failures total for the same verification" in text
 
@@ -3101,11 +2958,6 @@ async def test_rendered_plan_gives_a_literal_executor_no_room_to_guess(
 async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A step the model left ungated must not render a dead end.
-
-    Five of six steps in a real replayed plan carried no command and rendered
-    only "No host-verified command is attached to this step."
-    """
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
     stub.plan_ungate_steps = True
     code = await _run_improve(make_config, improve_monorepo_target)
@@ -3122,7 +2974,6 @@ async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
     assert "(scope-integrity)" in text
     assert ("**Check**: from the repository root run `git status --porcelain`." in text)
     assert "No host-verified command is attached." not in text
-    # An ungated test case names the symbol to run and forbids guessing a runner.
     assert ("run only `test_service_name_preserves_contract` in "
         "`apps/billing/test_api.py` using this repository's own test runner"
         in text
@@ -3133,11 +2984,6 @@ async def test_ungated_step_and_scope_criterion_still_get_a_real_check(
 async def test_plan_writer_is_told_to_leave_the_executor_no_decisions(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """The anti-ambiguity contract and per-field guidance reach the writer.
-
-    Observed at the ``Backend.execute`` seam: the prompt text and the schema
-    the plan-writer call actually received.
-    """
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1)
     code = await _run_improve(make_config, improve_monorepo_target)
 
@@ -3192,7 +3038,6 @@ async def test_configured_headless_publish_selects_all_and_embeds_local_plans(
 async def test_disabled_publication_overwrites_stale_current_run_artifact(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A disabled run cannot leave an earlier run looking current."""
     artifact = improve_artifact(improve_monorepo_target, "published-issues.json",)
     artifact.parent.mkdir(parents=True, exist_ok=True)
     # This is a prior Daydream bundle, not an arbitrary unowned ``.daydream``
@@ -3246,7 +3091,6 @@ async def test_configured_publish_records_a_pathless_reconciled_plan(
 async def test_reused_plan_publishes_its_stored_package_and_member_identities(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """A skipped current finding publishes the complete stored plan identity."""
     stub = install_improve_stub(monkeypatch, improve_monorepo_target, n_findings=1,)
     first_code = await _run_improve(make_config, improve_monorepo_target)
     sidecar_path = (improve_monorepo_target / "daydream_plans" / PLAN_INDEX_FILENAME)
@@ -3292,7 +3136,6 @@ async def test_reused_plan_publishes_its_stored_package_and_member_identities(
 async def test_configured_publish_records_partial_plan_write_failure(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Every selected package remains accounted for when one writer fails."""
     backend = ProductionPathBackend(improve_monorepo_target, failed_title="Production finding 03",)
     install_capable_improve_backend(monkeypatch, backend)
     _no_open_issues(monkeypatch)
@@ -3348,7 +3191,6 @@ def test_audit_prompt_uses_category_strategy_no_skill() -> None:
     assert strategy in prompt                       # category playbook present
     assert "Apply this specialist skill" not in prompt
     assert "/beagle-" not in prompt and "beagle" not in prompt.lower()
-    # envelope preserved:
     assert "read-only improve audit specialist" in prompt
     assert "Hard Rule 4" in prompt and "Hard Rule 6" in prompt
 

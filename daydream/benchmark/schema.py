@@ -1,17 +1,6 @@
-"""Strict Pydantic schemas for the private benchmark workspace.
-
-This module owns the ``benchmark.yaml`` manifest and ``cases/*.yaml`` case
-schemas plus their invariants:
-
-* ``normalize_hostname`` and the manifest ``source``/``privacy`` blocks.
-* the ``pull_requests[]`` ledger and ``cases[]`` index.
-* the snapshot ``ready | unreplayable | imported`` union, the case/gold/provenance/
-  exclusion models, ``case_id`` / finding-id derivation, and the Daydream
-  self-marker rule.
-* the import models: ``ImportDocument`` and its ``EvidenceRecord``/``Candidate``
-  evidence + candidate records with stable ``github:<kind>:<id>`` source IDs.
-
-Every model uses ``extra="forbid"`` so an unknown field is a schema violation.
+"""Strict workspace, case, import, snapshot, and evidence schemas. Unknown fields are
+forbidden. Identity derivation, hostname normalization, provenance, exclusion, and
+self-marker checks belong here.
 """
 
 from __future__ import annotations
@@ -342,13 +331,8 @@ def _field_of(value: "Finding | dict[str, Any]", name: str) -> Any:
 
 
 def derive_finding_id(finding: "Finding | dict[str, Any]", *, case_id: str) -> str:
-    """sha256 over the case-scoped canonical (case_id, title, body, severity,
-    path, start/end) tuple.
-
-    Nulls are normalized to the empty string; ``finding_id`` must equal this
-    digest so a case's findings are content-addressable and dedupe-friendly.
-    ``case_id`` is required (keyword-only) so every caller binds findings to a
-    case.
+    """Hash case-scoped content/location, normalizing nulls to empty strings for stable
+    finding identity.
     """
     payload = "\x1f".join(
         [
@@ -420,13 +404,9 @@ class SnapshotUnreplayable(_SnapshotBase):
 
 
 class SnapshotImported(_SnapshotBase):
-    """An import-time snapshot holding only the PR-known base/head SHAs.
-
-    Issue 3 transitions ``imported -> ready|unreplayable`` once snapshot
-    bundles exist; at import the tree/bundle fields are unknowable, so they
-    are deliberately absent. Both ``original_base_sha`` and
-    ``requested_base_sha`` carry the PR base tip (the merge base is not yet
-    computed; it diverges on the ``imported -> ready`` transition).
+    """PR-known pins before snapshot freezing. Both base fields hold the PR tip; the
+    merge-base and bundle are determined only when freezing transitions this record to
+    ready or unreplayable.
     """
 
     status: Literal["imported"]
@@ -501,13 +481,9 @@ class _EvidenceAuthor(_StrictModel):
 
 
 class AuthoringAnchor(_StrictModel):
-    """The strict, versioned authoring-time anchor of one inline evidence record.
-
-    Derived once during case materialization from the authenticated mirror (the
-    authoring commit/path/line span as it existed when the comment was written),
-    never from GitHub's re-anchored fields. ``status == "derived"`` carries the
-    full data payload; every non-derived status is fail-closed with all four data
-    fields unset. Version 1 is the current shape.
+    """Versioned original comment location derived from the authenticated mirror. Derived
+    anchors carry commit/path/range; other statuses require all data fields unset.
+    GitHub re-anchored fields are never substituted.
     """
 
     version: Literal[1]
@@ -635,13 +611,9 @@ class _PrRef(_StrictModel):
 
 
 class PullRequestMeta(_StrictModel):
-    """The typed pull-request block shared by ``ImportDocument`` and ``CaseDocument``.
-
-    Required structural fields (number/url/title/state/base/head/timestamps/author)
-    fail closed when missing or malformed. The additive fields (``html_url``,
-    ``body``, ``title_sha256``/``body_sha256``, ``merged_at``/``closed_at``)
-    default empty/None so predate imports that lack them read as empty, while a
-    newly imported PR carries the full set (``extra="forbid"`` everywhere).
+    """Shared PR identity with strict required fields and backward-compatible additive
+    metadata. Legacy imports default optional body/hash/url/merge/close fields to empty
+    or None; unknown fields remain forbidden.
     """
 
     number: int
@@ -889,16 +861,9 @@ class Curation(_StrictModel):
 
 
 def _schema_ready(raw: dict[str, Any]) -> dict[str, Any]:
-    """A schema-valid copy of a raw case doc (persisted audit fields stripped).
-
-    Backfills a ``task_spec_sha256`` that a pre-existing ``ready`` curation
-    lacks (a legacy workspace persisted before the approval field existed): the
-    digest is re-rendered from *raw* — the same deterministic bytes the
-    ``harbor`` compile path derives — so a legacy-ready case validates through
-    :class:`CaseDocument` (R7/R8) instead of surfacing as corrupt. This is the
-    migration-equivalent point: it runs on every strict load (workspace
-    validate/status and migrate) and its backfill is what a subsequent compile
-    inventories, so no per-legacy-case rewrite is required.
+    """Strip audit fields and backfill missing legacy-ready task-spec hashes. Render from
+    raw case content using the same deterministic contract as compilation, so strict
+    readers can load legacy cases without rewriting them.
     """
     doc = dict(raw)
     curation = dict(raw.get("curation") or {})
@@ -1017,12 +982,8 @@ class TransitionError(Exception):
 
 
 class PreflightLedger(_StrictModel):
-    """The mode-0600 ``runtime/preflight.json`` repository-verification ledger.
-
-    Written by preflight only after it verifies exact repository identity +
-    read access succeeds (never on a failing :class:`PreflightError`).
-    ``matched`` is True when the freshly verified repository matched the
-    stored identity (or was just resolved).
+    """Private repository verification ledger written only after exact identity and read
+    access succeed.
     """
 
     schema_version: Literal[1] = 1
@@ -1072,12 +1033,8 @@ def derive_workspace_state(
     pull_requests: list[dict[str, Any]] | None = None,
     cases: list[dict[str, Any]] | None = None,
 ) -> str:
-    """Derive the workspace state from ledger + case index.
-
-    Priority per §5: ``collecting`` > ``curating`` > ``stale`` > ``ready`` >
-    ``empty``. A ``corrupt`` flag (schema/checksum/path/bundle) is surfaced by
-    the caller via ``classify_validation``; here we only reason over the
-    ledger/index.
+    """Prioritize collecting, curating, stale, ready, then empty from ledger and cases.
+    Callers classify corruption separately through classify_validation.
     """
     pull_requests = pull_requests or []
     cases = cases or []

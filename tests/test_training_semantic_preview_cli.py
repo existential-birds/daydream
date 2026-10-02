@@ -119,7 +119,6 @@ def test_fresh_semantic_preview_is_complete_and_readonly(
     assert all(r["profile"]["profile_name"] == "pr_review" and r["stack"] == "python" for r in records)
     assert _materialize(root, tmp_path / "repeat") == 0
     assert (out / "sessions.jsonl").read_bytes() == (tmp_path / "repeat" / "sessions.jsonl").read_bytes()
-    # The actual semantic harvester emits the same per-finding evidence.
     canonical = tmp_path / "canonical"
     shutil.copytree(root, canonical)
     upsert_run(canonical, make_manifest(session_id="semantic", archive_path=str(canonical / "runs" / "semantic"),

@@ -29,7 +29,7 @@ from daydream.backends import (
 )
 from daydream.backends.codex import CodexBackend, CodexError
 from daydream.observability.config import ObservabilityConfig
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.otlp import TraceCollector, attributes, kind_of as _kind, otlp_collector
@@ -457,10 +457,6 @@ async def test_runner_exact_allocation_bills_children_and_chain_matches_wire(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Complete children + late usage matching the terminal total: chain bills.
-
-    Ledger decision 5 at the wire boundary: owner generation_children, both children carry standard aliases +
-    usage + OK, and child token sums equal the attempt aggregate exactly."""
     backend = _ExactAllocationBackend()
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, backend
@@ -510,10 +506,6 @@ async def test_runner_late_missing_metrics_bill_chain_children_stay_custom(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Late/missing per-generation usage with a terminal total: chain bills only.
-
-    Children keep explicit non-billed custom generation evidence (no invented usage, no standard usage aliases)
-    while the attempt owns the bill."""
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _LateMissingMetricsBackend(),
     )
@@ -551,10 +543,7 @@ async def test_runner_contradictory_metrics_fail_closed_without_rewriting(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Child sum contradicting the terminal total: owner none, nothing billed.
-
-    Neither side is rewritten; the attempt carries no standard usage and the fixed contradiction diagnostic lands
-    in the trajectory lifecycle only."""
+    """Contradictory totals bill neither side and retain the fixed local diagnostic without rewriting."""
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _DuplicateMetricsBackend(),
     )
@@ -618,10 +607,6 @@ async def test_runner_residual_unallocated_total_folds_onto_chain(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Terminal total exceeding the per-message sum: attempt bills the whole.
-
-    The per-dimension take-max residual (issue #747) keeps the wire aggregate authoritative; no generation
-    evidence exists so the structural chain owns the complete bill."""
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _ResidualTotalBackend(),
     )
@@ -653,10 +638,7 @@ async def test_runner_tool_error_after_sealed_generation_keeps_allocation(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A later tool error never unseals or unbills the completed generation.
-
-    The tool span closes ERROR with the sanitized message, the sealed generation keeps its billing allocation with
-    historical end, and the run still completes successfully."""
+    """A later tool ERROR keeps sealed generation billing and historical timing intact."""
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _ToolErrorAfterSealBackend(),
     )
@@ -692,10 +674,7 @@ async def test_runner_pending_count_cap_drains_children_stay_unbilled(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """512-draft cap at the wire: owner structural, zero billed children.
-
-    Mirrors the T2 cap unit test through the real runner: all drafts drain ended, the fixed count-only cap
-    diagnostic is stored locally, and no child carries standard usage aliases."""
+    """At the 512-draft cap, end every draft, bill the attempt, and retain only a count diagnostic."""
     collector = await _run_lifecycle_flow(
         ext_dir, feature_branch_repo, make_config, install_backend, monkeypatch, _PendingCapBackend(),
     )
@@ -718,12 +697,9 @@ async def test_runner_resume_native_conversation_distinct_from_daydream_session(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Resume with a native conversation distinct from the Daydream session.
+    """Resume the backend’s native continuation while preserving the Daydream session.
 
-    The second invocation resumes the first's native continuation (the token the backend minted reaches the
-    resumed execute call) while every span's session identity — trajectory session id and traceloop association —
-    stays the one Daydream session. The native conversation id surfaces only on the resumed attempt via
-    gen_ai.conversation.id."""
+    Only the resumed attempt carries the native gen_ai.conversation.id."""
     backend = ScriptedBackend(
         script=[
             [

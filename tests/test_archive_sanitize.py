@@ -59,8 +59,6 @@ def test_resume_skips_completed_items(tmp_path: Path) -> None:
     assert len(audit_path.read_text().splitlines()) == 3  # only b re-processed
 
 def test_text_file_token_only_userinfo_and_query_credentials_are_sanitized(tmp_path: Path,) -> None:
-    """M16: extended text rules (token-only userinfo, query credentials) are
-    applied so the derivative passes the release scan instead of quarantining."""
     archive_dir = tmp_path / "archive"
     run_dir = archive_dir / "runs" / "s1"
     run_dir.mkdir(parents=True)
@@ -108,16 +106,10 @@ def test_derivative_stays_quarantined_until_scan_passes(tmp_path: Path, monkeypa
 def test_advisory_only_derivative_is_released(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """Issue #1170: an advisory-only release scan releases instead of quarantining.
+    """Release an advisory-only derivative using the real scanner and severity reducer.
 
-    The rule *table* is the seam, not ``scan_run_dir``: the real scanner walks
-    the real derivative, mints real ``Finding`` objects and resolves severity
-    through the real ``ScanResult.blocking`` property — only the rule that fires
-    is swapped for an advisory one. A rule table is needed because the
-    sanitizer's own transform now scrubs every shape the tiering can demote
-    (``env_var`` is redacted, the three userinfo shapes are substituted), so a
-    derivative that legitimately carries an advisory-only finding is by
-    construction unreachable through real content.
+    Swap only its rule: normal sanitization scrubs every built-in advisory shape,
+    so content alone cannot reach this release-gate outcome.
     """
     advisory_rule = (
         re.compile(r"\bFEATURE_FLAG_OVERRIDE_KEY\b"),
@@ -145,15 +137,6 @@ def test_advisory_only_derivative_is_released(
     assert "override_flag" not in out  # M11: never a matched value
 
 def test_json_leaf_userinfo_shapes_are_sanitized_not_quarantined(tmp_path: Path) -> None:
-    """Issue #1170 F5: the JSON branch applies the scan-local substitutions.
-
-    A trajectory tool observation is a JSON string leaf, and JSON leaves used to
-    run only through ``_sanitize_json_value`` + ``redact_value`` — neither of
-    which carries the three scanner-local rewrites. A bundle whose
-    ``trajectory.json`` holds a token-only userinfo remote, the issue's f-string
-    DSN template, or a credential-bearing query param was therefore quarantined
-    on every pass, deterministically, because ``_mark_done`` was never reached.
-    """
     archive_dir = tmp_path / "archive"
     run_dir = archive_dir / "runs" / "s1"
     run_dir.mkdir(parents=True)

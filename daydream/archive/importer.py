@@ -1,13 +1,8 @@
-"""Pure core for importing surviving local archive/backup label observations.
+"""Deterministic linkage, deduplication, and accounting for imported observations.
 
-The importer's logic is deterministic and wall-clock-free; the CLI shell owns
-all I/O beyond the read-only SQLite connects performed by the inventory. This
-module currently provides identity linkage (M2): every imported session is
-resolved to a Hub session — via the hydrated staging index join on
-``session_id`` + derivative content digest, falling back to
-``repo_slug`` + ``base_sha`` + ``head_sha`` — and every unresolvable session
-lands in a reason-coded bucket. Nothing is silently dropped (M2): the result
-always accounts for every record.
+Match hydrated sessions by identity plus content digest, with repo/base/head
+fallback. Every record survives or receives a reason code; unresolved evidence
+is never silently dropped. Inventory SQLite access is read-only.
 """
 
 from __future__ import annotations
@@ -50,10 +45,8 @@ __all__ = [
     "run_pure_import",
 ]
 
-# The fixed six-bucket import accounting registry (M7): every surviving
-# imported observation row lands in exactly one of these stable reason codes;
-# byte-identical duplicates dropped by the dedupe are not bucket-accounted, so
-# ``sum(accounting) + deduped_count`` equals the full source row inventory count.
+# Every surviving observation gets one stable reason; accounted plus deduped equals the
+# full source inventory.
 IMPORT_REASON_CODES = (
     REASON_CODE_IMPORT_UNMATCHED_SESSION,
     REASON_CODE_IMPORT_IDENTITY_CONFLICT,
@@ -74,13 +67,8 @@ REDACTED_PATH = "[REDACTED_PATH]"
 # startswith("/") check in :func:`_redact_path_string`.
 _EMBEDDED_ABSOLUTE_PATH_RE = re.compile(r"(?<![:/\w])(/[\w.-]+(?:/[\w.-]+)+)")
 
-# Writer columns consumed by append_label_observation (the
-# labeler_policy_version axis is carried verbatim so a policy bump or the
-# legacy sentinel survives the merge); every other key on an import row
-# (payload_digest, remote_url, ...) is importer metadata, not payload.
-# ``legacy`` is derived separately in ``_planned_append``. Derived from the
-# canonical ``label_observations`` declaration so a new column cannot silently
-# drop out of an import. The writer takes keyword arguments, so order is free.
+# Derive writer fields from the schema; preserve policy provenance and compute legacy
+# separately. Importer metadata is excluded.
 _WRITER_FIELDS: tuple[str, ...] = tuple(
     name
     for name in LABEL_OBSERVATION_NAMES
@@ -92,9 +80,7 @@ _REASON_CONFLICT = "derivative_digest_conflict"
 _REASON_RUN_LEVEL_ONLY = "no_projected_findings"
 _REASON_AMBIGUOUS = "ambiguous_finding_mapping"
 
-# The writer's versioned auto-dedup tuple (daydream/archive/index.py): the
-# evidence identity key. A policy-version bump, reward-version bump, or
-# edited-reply digest change appends a new generation instead of deduping.
+# Keep this evidence identity aligned with the canonical writer auto-dedup tuple.
 _TUPLE_FIELDS = (
     "evidence_sha",
     "labeler_policy_version",
@@ -106,18 +92,11 @@ _TUPLE_FIELDS = (
 
 
 def canonical_payload_digest(row: dict[str, Any], *, include_observed_at: bool) -> str:
-    """Content digest over the canonical-JSON observation payload.
+    """Hash the canonical observation payload, optionally including transaction time.
 
-    The bitemporal ``observed_at`` stamp is excluded for auto rows — identical
-    evidence captured by two overlapping backups at different capture times
-    must dedupe regardless of ``observed_at`` (the SQLite PK
-    ``(session_id, observed_at)`` in the target handles identical-timestamp
-    overlap). The collapsed ``valid_at`` stamp is excluded alongside it: the
-    writer folds ``valid_at=None`` onto ``observed_at`` (index.py), so two
-    captures of identical auto evidence carry byte-different ``valid_at``
-    values that must not split the dedupe into a content conflict. Human rows
-    include both stamps: they are never auto-deduped by the writer, so only
-    byte-identical human rows collapse.
+    Auto dedupe omits both ``observed_at`` and a ``valid_at`` collapsed onto it:
+    identical evidence captured at different times is one generation. Human
+    rows include both stamps and collapse only when byte-identical.
     """
     excluded = set()
     if not include_observed_at:
@@ -135,13 +114,7 @@ def _redact_path_string(value: str) -> str:
 
 
 def _redact_json_blob(value: Any, *, field: str, session_id: str) -> Any:
-    """Redact one ``rubric_json``/``reward_json`` payload (URL creds, secrets,
-    absolute local paths).
-
-    Raises:
-        ValueError: When a JSON-encoded string blob is malformed — never
-            silently substituted (fail-closed, names the row + field).
-    """
+    """Redact a JSON payload; malformed encoded JSON raises with its row and field identity."""
     if value is None:
         return None
     if isinstance(value, str):
@@ -176,43 +149,19 @@ def _redact_json_blob(value: Any, *, field: str, session_id: str) -> Any:
 
 
 def redact_metadata_value(value: Any) -> Any:
-    """Redact one credential-bearing metadata field (URL userinfo, absolute paths).
-
-    Applies the same ``sanitize`` + ``redact_value`` chain
-    :func:`redact_imported_metadata` uses per row field, so a persisted runs
-    row's ``remote_url``/``source_path`` carry the same fail-closed scrubbing
-    the observation rows do. Non-string values pass through unchanged.
-    """
+    """Scrub URL credentials and absolute paths through the shared sanitizers; retain non-strings."""
     if isinstance(value, str):
         return redact_value(_redact_path_string(_sanitize_url_string(value)))
     return value
 
 
 def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> dict[str, Any]:
-    """Redact pre-publication metadata and fail closed on uncleanable rows (M9, AC6).
+    """Scrub imported rows, write the payload, and apply the publication scan.
 
-    Every row's ``remote_url`` and ``source_path`` are rewritten through the
-    sanitize module's URL authority plus absolute-path redaction, and the
-    ``rubric_json``/``reward_json`` blobs are walked string-leaf by string-leaf
-    through ``sanitize._sanitize_url_string`` + ``redact_value`` (reuse, not
-    reimplementation). The redacted payload is then serialized to
-    ``scan_dir/payload.json`` and re-scanned with the fail-closed
-    :func:`daydream.archive.scan.scan_run_dir`.
-
-    Returns:
-        ``{"payload": [...], "blocked": bool, "scan_summary": str,
-        "blocked_reasons": [...]}``. ``blocked`` is ``True`` only when the
-        post-redaction scan carries a *blocking* finding — the payload cannot
-        be published; the offending rows are kept in ``payload`` (never dropped
-        silently) and ``blocked_reasons`` carries the stable
-        ``import_unredactable_metadata`` reason code. An advisory-only scan
-        publishes, with the value-free ``scan_summary`` still reported (#1170).
-        Redaction runs before ``publish_annotation_state`` (which re-scans and
-        hard-fails on dirty).
-
-    Raises:
-        ValueError: When a ``rubric_json``/``reward_json`` blob is malformed
-            JSON — redaction errors propagate, never placeholder-substituted.
+    Blocking findings retain the offending rows but set ``blocked`` and the
+    ``import_unredactable_metadata`` reason. Advisory findings remain visible
+    in the value-free summary and allow publication. Malformed JSON blobs
+    raise; no placeholder evidence is substituted. Publication scans again.
     """
     payload: list[dict[str, Any]] = []
     for row in rows:
@@ -234,11 +183,8 @@ def redact_imported_metadata(rows: list[dict[str, Any]], *, scan_dir: Path) -> d
         json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8"
     )
     scan = scan_run_dir(scan_dir)
-    # Only a blocking finding withholds publication. An advisory finding is a
-    # name/template shape, not a credential (#1170) — and this payload is built
-    # from free-text ``rubric_json``/``reward_json``/``notes``, exactly the
-    # content that carries the ``env_var`` name shape. The value-free summary
-    # is returned either way, so an advisory finding is visible, not silent.
+    # Report advisory findings without exposing values; only blocking findings withhold
+    # publication.
     blocked = scan.blocking
     return {
         "payload": payload,
@@ -268,10 +214,8 @@ def _planned_append(row: dict[str, Any]) -> dict[str, Any]:
                 ) from exc
         plan[field] = value
     plan["has_posterior"] = bool(plan["has_posterior"])
-    # Legacy marker: carried verbatim when the source row has one; rows from a
-    # legacy schema (missing the column) stamp "legacy" exactly when the policy
-    # axis is the "legacy" sentinel, so the writer persists the canonical
-    # NULL-policy + legacy representation the corpus gold gate excludes.
+    # Preserve source legacy markers; missing policy provenance must remain ineligible
+    # for gold.
     legacy = row.get("legacy")
     if legacy is None:
         legacy = "legacy" if row.get("labeler_policy_version") == STALE_LEGACY else "auto"
@@ -286,41 +230,16 @@ def merge_imported_observations(
     observations_path: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Append deduped, identity-linked import rows through the archive writer.
+    """Validate and append linked rows through the canonical archive writer.
 
-    Every row goes through :func:`append_label_observation` — the single
-    canonical writer — so the versioned auto-dedup tuple, the human-never-dedup
-    rule, and the precedence projection that refreshes the denormalized
-    ``runs.outcome_labels`` cache all apply unchanged. The importer only ever
-    appends: it never overwrites or deletes a newer existing observation (M3),
-    and winners are decided by the writer's projection, not by the import
-    order.
+    Inputs already name their destination session. Optional file rows join the
+    same plan, sorted by session, observation time, and source. Before writing,
+    reject inventory-digest drift, malformed list JSON, and invalid/naive
+    timestamps. The writer then enforces session existence, auto dedupe, and
+    human precedence; existing observations are never replaced or deleted.
 
-    Args:
-        archive_dir: Target archive root (the Hub-side index being merged into).
-        linked_imports: Deduped inventory rows with ``session_id`` already
-            remapped to the linked Hub session id. Rows may carry a
-            ``payload_digest`` recorded at inventory time.
-        observations_path: Optional JSON file of additional import rows (same
-            shape), loaded and appended to ``linked_imports``.
-        dry_run: When ``True``, return the planned append set without writing
-            any state (S2).
-
-    Returns:
-        ``{"dry_run": bool, "planned": [...], "appended": int, "deduped": int}``
-        where ``planned`` holds one writer-kwarg dict per import row in
-        deterministic ``(session_id, observed_at, source)`` order and
-        ``appended``/``deduped`` count writer outcomes (both 0 on dry run).
-
-    Raises:
-        ValueError: Fail-closed, before any write, when a row's recomputed
-            canonical payload digest disagrees with its inventory-time
-            ``payload_digest`` (evidence drifted between inventory and merge),
-            when a row's JSON list columns are malformed, when a row's
-            ``observed_at``/``valid_at`` is not a parseable aware ISO-8601
-            timestamp (checked by the pre-write gate, not per-row mid-merge),
-            or when the writer rejects the row (unknown session) —
-            each error names the offending row. Never silently defaulted.
+    Return the plan and appended/deduped counts. Dry runs perform validation
+    without writes and return zero counts.
     """
     imports = list(linked_imports)
     if observations_path is not None and observations_path.is_file():
@@ -333,9 +252,7 @@ def merge_imported_observations(
 
     imports.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), str(r["source"])))
 
-    # Fail-closed drift gate before any write: recompute the same canonical
-    # payload digest the inventory recorded and reject any drifted row
-    # (mirrors run_canonical_harvest's AnnotationDriftError path).
+    # Validate all recorded inventory digests before writing any row.
     for row in imports:
         if "payload_digest" not in row:
             continue
@@ -351,11 +268,8 @@ def merge_imported_observations(
                 f"re-inventory the source before merging"
             )
 
-    # Fail-closed timestamp gate before any write (S2/M9): ``observed_at`` and
-    # ``valid_at`` must be parseable aware ISO-8601, exactly as the writer
-    # enforces per row — hoisted here so a malformed stamp aborts the whole
-    # merge up front instead of surfacing mid-append after run seeds or a
-    # prefix of rows were already committed.
+    # Validate every timestamp before writing, preventing malformed later rows from
+    # leaving a partial merge.
     for row in imports:
         for field in ("observed_at", "valid_at"):
             value = row.get(field)
@@ -397,30 +311,12 @@ def _dedup_tuple(row: dict[str, Any]) -> tuple[Any, ...]:
 
 
 def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, Any]:
-    """Merge inventory rows across overlapping backups, deduping by content.
+    """Merge overlapping inventories without collapsing distinct evidence generations.
 
-    Args:
-        inventories: One list of ``label_observations`` rows per backup root,
-            each row carrying the table's columns (including ``source``).
-
-    Returns:
-        ``{"rows": [...], "deduped_count": int, "content_conflict": [...]}``
-        where ``rows`` is the deterministic merged row set and
-        ``content_conflict`` holds rows whose dedup tuple matched across
-        inventories but whose immutable payload digests disagreed — ambiguous
-        evidence, reported rather than silently resolved. ``deduped_count``
-        counts dropped duplicate rows (the conflict bucket keeps its rows, so
-        bucket rows + surviving rows always account for every input row).
-
-    Dedupe key: the writer's versioned auto-dedup tuple plus the canonical
-    payload digest. Identical evidence with identical payload dedupes
-    regardless of ``observed_at``; the surviving row keeps the earliest
-    ``observed_at``. Distinct evidence generations are never collapsed —
-    every generation survives (M3, never keep-latest).
-
-    Deterministic: the merged rows are sorted by ``session_id`` then
-    ``observed_at`` (then payload digest), so inventory input order cannot
-    affect the output — byte-identical re-import by construction (M4/AC1).
+    Use the writer's auto evidence tuple plus canonical payload digest; retain
+    the earliest observation time for duplicates. Equal evidence keys with
+    conflicting payloads enter ``content_conflict``. Return sorted surviving
+    ``rows``, ``deduped_count``, and conflicts, accounting for every input row.
     """
     # Group every input row by dedup tuple, carrying its payload digest.
     groups: dict[tuple[Any, ...], list[tuple[dict[str, Any], str]]] = {}
@@ -430,10 +326,8 @@ def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, An
             digest = canonical_payload_digest(row, include_observed_at=human)
             key = _dedup_tuple(row)
             if human:
-                # Human rows are never auto-deduped by the writer: only
-                # byte-identical rows (including observed_at) collapse, and
-                # distinct stamps are legitimate generations — never
-                # content conflicts.
+                # Human generations dedupe only when content and observation time are
+                # identical.
                 key = (*key, digest)
             groups.setdefault(key, []).append((row, digest))
 
@@ -464,40 +358,16 @@ def link_session_identity(
     repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
     unmatched_identity_less: bool = False,
 ) -> dict[str, dict[str, Any]]:
-    """Resolve each imported record to a Hub session identity.
+    """Link records to hydrated sessions by identity/digest, then repo/base/head.
 
-    Args:
-        records: Inventory rows, each carrying ``session_id``, an optional
-            ``derivative_digest``, and the optional fallback fields
-            ``repo_slug`` / ``base_sha`` / ``head_sha``.
-        hydrated_index: ``{session_id: {"derivative_digest": ..., "record_id": ...}}``
-            — the hydrate import-ledger join shape.
-        repo_slug_sha_lookup: ``{(repo_slug, base_sha, head_sha): hub_session_id}``
-            (a dict with ``"hub_session_id"`` is also accepted).
-        unmatched_identity_less: When ``True`` (the import CLI's wiring over
-            local-only archive roots with an empty hydrated index), an
-            identity-less record — one absent from ``hydrated_index`` and
-            missing the fallback session fields — routes to ``unmatched``
-            instead of raising, so a single repo-less local run cannot abort
-            a whole-archive import.
+    ``hydrated_index`` maps session ids to derivative digests and record ids;
+    ``repo_slug_sha_lookup`` maps triples to a Hub session id (or a mapping
+    containing ``hub_session_id``). Return ``linked`` matches with their method,
+    plus reason-coded ``unmatched`` and ``identity_conflict`` mappings.
 
-    Returns:
-        ``{"linked": {sid: {"hub_session_id", "matched_by"}},
-        "unmatched": {sid: reason}, "identity_conflict": {sid: reason}}``.
-
-    Primary rule: ``session_id`` present in ``hydrated_index`` with a matching
-    derivative content digest links ``by session_id``. Fallback rule: the
-    session_id is absent (or the digest conflicts) and the record carries
-    ``repo_slug`` + ``base_sha`` + ``head_sha`` matching the lookup, links
-    ``by repo_slug_sha``. A session matching with a conflicting digest routes
-    to ``identity_conflict``; a session matching neither routes to
-    ``unmatched`` — both with distinct reason strings, never silently skipped.
-
-    Raises:
-        ValueError: When a record is unresolvable via the primary rule and is
-            missing the session fields required for the fallback — no
-            placeholder linkage is produced. (Suppressed in favor of
-            ``unmatched`` only when ``unmatched_identity_less`` is ``True``.)
+    A digest conflict may still resolve through the repo/SHA fallback. Missing
+    fallback identity raises unless ``unmatched_identity_less`` requests an
+    unmatched record, allowing repo-less local runs to remain in the inventory.
     """
     linked: dict[str, dict[str, str]] = {}
     unmatched: dict[str, str] = {}
@@ -553,38 +423,13 @@ def classify_run_level(
     *,
     projector_findings: dict[str, list[dict[str, Any]]],
 ) -> dict[str, Any]:
-    """Partition session-scoped rows into run-level vs per-finding evidence (M5, AC2).
+    """Partition observations into per-finding, run-level-only, or ambiguous evidence.
 
-    Args:
-        records: Merged inventory rows. A row without a truthy ``record_id``
-            is a run-level (session-scoped) label; a row carrying one is
-            already per-finding evidence.
-        projector_findings: ``{session_id: [finding, ...]}`` mirroring the
-            ``corpus_projection.projector.project_findings`` enumeration — the single
-            authority for the non-decisive set. Each finding dict must carry
-            ``record_id`` and ``evidence_sha``.
-
-    Returns:
-        ``{"per_finding": {sid: [obs, ...]}, "run_level_only":
-        {sid: reason}, "ambiguous_run_mapping": {sid: reason}}`` — a
-        deterministic partition accounting for every input row (M7).
-
-    Behavior:
-        A run-level label is emitted as **run-level evidence only** — never
-        copied onto every finding of the run (AC2). A row with no projected
-        findings for its session is run-level-only. A row whose session has
-        multiple candidate findings with no unique decisive match on identity
-        + evidence digest routes to ``ambiguous_run_mapping`` — feeding the
-        per-finding adjudication queue, not a fan-out. Only a row whose
-        ``evidence_sha`` matches exactly one projected finding lands in
-        ``per_finding`` (the sole path into the ``_is_admitted_outcome_gold``
-        adjudication semantics).
-
-    Raises:
-        ValueError: When a row's ``labels`` field is malformed JSON (naming
-            the session_id), or when a referenced ``projector_findings``
-            entry is missing ``record_id``/``evidence_sha`` — never silently
-            substituted.
+    ``projector_findings`` supplies each session's canonical ``record_id`` and
+    ``evidence_sha`` pairs. Run labels never fan out across findings: only a
+    unique decisive identity/evidence match becomes per-finding gold evidence.
+    Missing projections remain run-level-only; non-unique matches enter the
+    adjudication queue. Malformed labels or projection identities raise.
     """
     per_finding: dict[str, list[dict[str, Any]]] = {}
     run_level_only: dict[str, str] = {}
@@ -630,9 +475,7 @@ def classify_run_level(
             # Decisive identity+evidence-digest match on exactly one finding.
             per_finding.setdefault(session_id, []).append(record)
         else:
-            # No match, or the digest matches more than one finding: the
-            # run<->finding mapping is ambiguous — adjudication queue, not a
-            # fan-out.
+            # Ambiguous finding attribution goes to adjudication and never fans out.
             ambiguous[session_id] = _REASON_AMBIGUOUS
 
     return {
@@ -649,12 +492,7 @@ def _row_reason_codes(
     link_result: dict[str, Any],
     run_level_result: dict[str, Any],
 ) -> list[tuple[dict[str, Any], str]]:
-    """Classify every row into exactly one import reason code (M7).
-
-    Precedence: dedupe/identity conflicts first (the row never got a home),
-    then the version gate, then the run-level routing. Raises ``ValueError``
-    naming any row that cannot be classified — never an implicit drop.
-    """
+    """Classify every row: conflicts, then version eligibility, then run-level routing; reject gaps."""
     conflict_ids = {id(row) for row in content_conflict}
     per_finding_ids = {
         id(row)
@@ -699,24 +537,9 @@ def accounting(
     link_result: dict[str, Any],
     run_level_result: dict[str, Any],
 ) -> dict[str, int]:
-    """Map every merged inventory row to exactly one import reason code (M7).
+    """Count surviving and conflicting rows by import reason code.
 
-    Args:
-        merged_rows: The surviving deduped rows (from
-            :func:`dedupe_observations`), each carrying ``session_id``.
-        content_conflict: Rows routed to the dedupe content-conflict bucket —
-            their evidence identity is ambiguous, so they account as
-            ``import_identity_conflict``.
-        link_result: The :func:`link_session_identity` result.
-        run_level_result: The :func:`classify_run_level` result.
-
-    Returns:
-        ``{reason_code: row_count}`` over :data:`IMPORT_REASON_CODES` whose
-        values sum to ``len(merged_rows) + len(content_conflict)``.
-
-    Raises:
-        ValueError: When a row cannot be classified into a named bucket —
-            never an implicit drop.
+    The total must equal their combined input count; unclassifiable rows raise.
     """
     counts = {code: 0 for code in IMPORT_REASON_CODES}
     for _row, code in _row_reason_codes(
@@ -737,24 +560,10 @@ def run_pure_import(
     projector_findings: dict[str, list[dict[str, Any]]],
     unmatched_identity_less: bool = False,
 ) -> dict[str, Any]:
-    """Compose the pure import pipeline: dedupe -> link -> run-level -> accounting.
+    """Compose dedupe, identity linkage, finding classification, accounting, and ledger.
 
-    Args:
-        inventories: One list of ``label_observations`` rows per backup root.
-        hydrated_index: See :func:`link_session_identity`.
-        repo_slug_sha_lookup: See :func:`link_session_identity`.
-        projector_findings: See :func:`classify_run_level`.
-        unmatched_identity_less: Threaded to :func:`link_session_identity`;
-            see its annotation.
-
-    Returns:
-        ``{"rows", "deduped_count", "content_conflict", "link",
-        "run_level", "accounting", "ledger"}`` — the deterministic pipeline
-        result, where ``accounting`` sums to the surviving rows (``rows`` +
-        ``content_conflict``) and ``sum(accounting) + deduped_count`` equals
-        the full source row inventory count (deduped rows are dropped as
-        byte-identical duplicates, never bucket-accounted); ``ledger`` is the
-        :func:`build_import_ledger` shape.
+    Accounting covers surviving and conflicting rows; adding deduped_count
+    must recover the full inventory size. Input ordering does not affect output.
     """
     merged = dedupe_observations(inventories)
     link_result = link_session_identity(
@@ -785,18 +594,7 @@ def run_pure_import(
 
 
 def build_import_ledger(result: dict[str, Any]) -> dict[str, Any]:
-    """Shape the import result into the hydrate import-ledger format (KD5).
-
-    Mirrors ``daydream/archive/hydrate.py``'s ledger shape — a fixed schema
-    version plus ``{session_id, reason_code, ...}`` entries — so existing
-    ledger consumers see one format. Every source row appears exactly once;
-    the accounting sum is re-verified here and any mismatch raises (M7:
-    no silent drops).
-
-    Raises:
-        ValueError: When the bucket sum does not equal the accounted
-            observation count.
-    """
+    """Build the versioned hydration-compatible ledger and verify complete row accounting."""
     accounting = result["accounting"]
     observations = sorted(
         (
@@ -830,13 +628,9 @@ def build_import_ledger(result: dict[str, Any]) -> dict[str, Any]:
 
 
 def gold_eligible(observation: dict[str, Any]) -> bool:
-    """Version gate for gold eligibility (M6, KD3).
+    """Admit gold only when labeler, policy, and classifier versions are allowlisted.
 
-    Returns True iff every version axis on the observation — labeler
-    (rubric), policy, and classifier versions — is in the known-versions
-    allowlist. A missing/``None`` version field, or the ``"legacy"`` sentinel
-    stamp, makes the row non-gold (safe default: unknown provenance is never
-    decisive). Such rows still import as evidence.
+    Missing or legacy provenance remains importable evidence but cannot be decisive.
     """
     for field in ("labeler_version", "labeler_policy_version", "reply_classifier_version"):
         value = observation.get(field)

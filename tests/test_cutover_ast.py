@@ -1,19 +1,7 @@
-"""CUT-08 AST sweep: verify the legacy _log_debug system is fully removed.
+"""Reject legacy logging names, .debug_log attributes, imports, and string prefixes.
 
-Walks the AST of every .py file under daydream/ and tests/ and rejects:
-
-1. Name nodes referencing forbidden symbols (catches direct calls and
-   references)
-2. Attribute nodes accessing .debug_log (catches attribute lookups even
-   on aliased objects)
-3. ImportFrom nodes importing forbidden names (catches the canonical
-   Pitfall 13 lazy import in codex.py:_raw_log that grep alone misses)
-4. String-literal Constant nodes containing forbidden log prefixes
-   (catches accidental re-introduction of the bracketed log prefixes,
-   such as a raw print that uses the old format).
-
-Excludes this test file from collection because its own forbidden-literal
-constants are intentional test data, not a legacy logging reference.
+AST inspection catches aliases and lazy imports that text searches miss.
+This file is excluded because its forbidden-literal fixtures are intentional.
 """
 
 from __future__ import annotations

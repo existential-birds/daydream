@@ -1,8 +1,8 @@
 """Task-1 tests: fail-closed validation matrix (M2) for ``calibrate-reward``.
 
 ``fixture_corpus`` builds a minimal synthetic projected-corpus bundle in ``tmp_path``;
-corruption variants are injected through ``CalibrationConfig.corruptions`` so
-every gate is exercised against otherwise-identical inputs.
+corruption variants are written to bundle files so every gate is exercised
+through the same input boundary as the CLI.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from typing import Any
 import pytest
 
 from daydream.training.calibration import (
-    _CORRUPTION_FLAGS,
     CalibrationConfig,
     CalibrationError,
     run_calibration,
@@ -38,9 +37,18 @@ LABEL_STAMPS = {"labeler_policy_version": "980-policy-r1", "reply_classifier_ver
 #: Synthetic fresh corpora use current semantics; committed fixture remains frozen.
 REWARD_VERSION = _PRODUCTION_REWARD_VERSION
 
-# Corruption flags the fixture understands; these are test seams, never CLI surface.
-CORRUPTION_FLAGS = _CORRUPTION_FLAGS
-
+CORRUPTION_FLAGS = frozenset(
+    {
+        "schema_version",
+        "posterior",
+        "label-version",
+        "c5-repo",
+        "license",
+        "digest",
+        "split-overlap",
+        "drop-session",
+    }
+)
 
 def _record(i: int) -> dict[str, Any]:
     return {
@@ -60,8 +68,7 @@ def _build_fixture(tmp_path: Path) -> Path:
     corpus_dir = tmp_path / "corpus"
     corpus_dir.mkdir()
     records = [_record(i) for i in range(4)]
-    corpus_bytes = ("\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n").encode()
-    (corpus_dir / "corpus.jsonl").write_bytes(corpus_bytes)
+    _write_corpus(corpus_dir, records)
     (corpus_dir / "lineage.json").write_text(json.dumps({
                 "schema_version": "lineage", "salt": SALT, "holdout_rate": 0.1, "val_rate": 0.1, "as_of": AS_OF,
                 "valid_at": VALID_AT, "content_digests": {},
@@ -69,7 +76,6 @@ def _build_fixture(tmp_path: Path) -> Path:
         )
         + "\n"
     )
-    (corpus_dir / "SHA256SUMS").write_text(f"{hashlib.sha256(corpus_bytes).hexdigest()}  corpus.jsonl\n")
     gold = {f"rec-{i:04d}": {"accepted": i % 2 == 0} for i in range(4)}
     (tmp_path / "gold.json").write_text(json.dumps(gold, sort_keys=True) + "\n")
     # w_fp is partially but not perfectly separable so bootstrap CIs are non-degenerate.
@@ -96,13 +102,45 @@ def fixture_corpus(tmp_path: Path) -> Path:
     return _build_fixture(tmp_path)
 
 
+def _write_corpus(corpus_dir: Path, records: list[dict[str, Any]], *, update_digest: bool = True) -> None:
+    payload = ("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n").encode()
+    (corpus_dir / "corpus.jsonl").write_bytes(payload)
+    if update_digest:
+        (corpus_dir / "SHA256SUMS").write_text(f"{hashlib.sha256(payload).hexdigest()}  corpus.jsonl\n")
+
+
+def _corrupt_fixture(corpus_dir: Path, flags: frozenset[str]) -> None:
+    if not flags:
+        return
+    records = [json.loads(line) for line in (corpus_dir / "corpus.jsonl").read_text().splitlines()]
+    first = records[0]
+    if "schema_version" in flags:
+        first["schema_version"] = "1"
+    if "posterior" in flags:
+        first["lineage"]["valid_at"] = "2026-06-01T00:00:00+00:00"
+    if "label-version" in flags:
+        del first["lineage"]["labeler_policy_version"]
+    if "c5-repo" in flags:
+        first["repo_slug"] = "getsentry/sentry"
+    if "license" in flags:
+        first["lineage"]["license_decision"] = "unknown"
+    if "split-overlap" in flags:
+        records.append(json.loads(json.dumps(records[-1])))
+    if "drop-session" in flags:
+        del first["session_id"]
+    if "digest" in flags:
+        records = [{**records[0], "session_id": "sess-tampered"}]
+    _write_corpus(corpus_dir, records, update_digest="digest" not in flags)
+
+
 def _config(fixture_dir: Path, tmp_path: Path, **overrides: object) -> CalibrationConfig:
     corrupt = frozenset(k for k, v in overrides.items() if k in CORRUPTION_FLAGS and v)
     base: dict[str, Any] = dict(corpus_dir=fixture_dir / "corpus", gold_labels=fixture_dir / "gold.json",
         breakdowns=fixture_dir / "breakdowns.json", out_dir=tmp_path / "out", run_id="cal-test-1", seed=7,
-        candidates={"w_fp": [0.1, 0.3]}, corruptions=corrupt,
+        candidates={"w_fp": [0.1, 0.3]},
     )
     base.update({k: v for k, v in overrides.items() if k not in CORRUPTION_FLAGS})
+    _corrupt_fixture(base["corpus_dir"], corrupt)
     return CalibrationConfig(**base)
 
 @pytest.mark.parametrize("corrupt,expected",
@@ -167,9 +205,7 @@ def test_stored_split_mismatch_fails_closed(tmp_path: Path) -> None:
         salt=str(lineage["salt"]),
     )
     records[0]["lineage"]["split"] = "validation" if derived != "validation" else "holdout"
-    payload = "\n".join(json.dumps(r, sort_keys=True) for r in records) + "\n"
-    (corpus_dir / "corpus.jsonl").write_text(payload)
-    (corpus_dir / "SHA256SUMS").write_text(f"{hashlib.sha256(payload.encode()).hexdigest()}  corpus.jsonl\n")
+    _write_corpus(corpus_dir, records)
     with pytest.raises(CalibrationError, match="stored split.*does not match"):
         run_calibration(_config(root, tmp_path))
 
@@ -379,8 +415,6 @@ def test_mixed_or_unknown_reward_versions_are_refused(fixture_corpus: Path, tmp_
     corpus = fixture_corpus / "corpus" / "corpus.jsonl"
     records = [json.loads(line) for line in corpus.read_text().splitlines()]
     records[0]["reward_version"] = version
-    payload = ("\n".join(json.dumps(record, sort_keys=True) for record in records) + "\n").encode()
-    corpus.write_bytes(payload)
-    (corpus.parent / "SHA256SUMS").write_text(f"{hashlib.sha256(payload).hexdigest()}  corpus.jsonl\n")
+    _write_corpus(corpus.parent, records)
     with pytest.raises(CalibrationError, match=error):
         run_calibration(_config(fixture_corpus, tmp_path))

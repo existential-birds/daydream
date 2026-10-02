@@ -1,10 +1,6 @@
-"""Project-owned data identifiers carry neutral names after #1093.
+"""Project-owned identifiers use canonical names without corpus-generation suffixes.
 
-The v1/v2 suffixes named corpus *generations* the project invented; with no
-production training run ever completed, every generation prefix is removed and
-each identifier keeps one canonical name. External tool-protocol strings
-(e.g. ``claude-pretooluse`` naming Anthropic's hook API) are not project-owned
-and are not covered here.
+External protocol names, such as Anthropic's claude-pretooluse, are outside this rule.
 """
 
 import importlib

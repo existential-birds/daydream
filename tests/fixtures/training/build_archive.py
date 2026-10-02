@@ -1,8 +1,5 @@
-"""SPEC §9 fixture matrix for daydream.training tests.
-
-The matrix is exported as ``FIXTURE_SESSIONS`` so test modules can
-reference the expected session IDs / repos / labels without hard-coding
-them in two places.
+"""Shared training fixture sessions, exported as FIXTURE_SESSIONS for consistent IDs, repositories, and
+labels.
 """
 
 from __future__ import annotations
@@ -12,14 +9,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class FixtureSession:
-    """One row of the §9 fixture matrix.
-
-    Attributes:
-        session_id: Unique identifier for this fixture session.
-        repo_slug: GitHub-style ``org/repo`` slug.
-        skill: Beagle review skill invocation string.
-        outcome_labels: Tuple of outcome tags applied to the session.
-    """
+    """One training fixture session with repository, review skill, and outcome labels."""
 
     session_id: str
     repo_slug: str

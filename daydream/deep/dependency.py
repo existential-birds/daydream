@@ -1,10 +1,7 @@
-"""Lightweight tree-sitter import graph for dependency-aware sharding (#731).
+"""Changed-file import graphs and deterministic undirected groups for sharding.
 
-Turns a language stack's changed files into an undirected import graph so the
-sharder can co-locate files that reference each other and surface a bounded
-cross-shard frontier. Everything here is fail-open: a parse error, unknown
-grammar, or timeout must never raise -- the caller falls back to deterministic
-sorted-singleton packing, so no file is ever dropped.
+Parsing/grammar failures and timeouts leave files available for singleton
+packing. Callers also guard unsafe tree-sitter installations.
 """
 
 from __future__ import annotations
@@ -14,10 +11,10 @@ from pathlib import Path, PurePosixPath
 
 from daydream.tree_sitter_index import (
     LANGUAGES,
-    _query_for_language,
     extract_imports,
     get_parser,
 )
+from daydream.tree_sitter_index.runtime import _query_for_language
 
 # Extension -> tree-sitter language id for the sharding dependency graph,
 # derived from the canonical registry so the two can never drift. ``.js`` is
@@ -32,15 +29,11 @@ _GRAPH_BUILD_WALL_BUDGET_S = 5.0
 
 
 def _resolve_import(import_str: str, file: str) -> list[str]:
-    """Best-effort map an import string to candidate repo-relative changed paths.
+    """Map imports to candidate repository paths for Python, TypeScript, Go, and Rust.
 
-    Python dotted names (``import a.b`` -> ``a/b.py`` plus the package
-    ``a/b/__init__.py``); relative ``.``/``..`` prefixes resolve against the
-    importing file's own directory (``from .x import y`` in ``pkg/a.py`` ->
-    ``pkg/x.py``); TypeScript ``./x``/``../x`` specifiers resolve to sibling
-    ``.ts``/``.tsx``/``.jsx`` files; Go ``import "pkg/x"`` and Rust ``use x::y``
-    resolve to ``.go``/``.rs`` files. Returns an empty list when nothing
-    resolvable (fail-open).
+    Python relative dots resolve from the importer; dotted names include package
+    __init__.py candidates. TypeScript includes sibling files/index modules; Rust
+    uses its first non-prefix module. Unresolvable imports return no candidates.
     """
     suffix = PurePosixPath(file).suffix.lower()
     text = import_str.strip()
@@ -68,39 +61,32 @@ def _resolve_import(import_str: str, file: str) -> list[str]:
         if up:
             dir_parts = dir_parts[:-up]
         base_rel = "/".join(dir_parts)
-    if suffix == ".py":
-        stems = ["/".join(parts)]
-        suffixes: tuple[str, ...] = (".py", "/__init__.py")
-    elif suffix in (".ts", ".tsx", ".jsx"):
-        stems = ["/".join(parts)]
-        suffixes = (".ts", ".tsx", ".jsx", "/index.ts", "/index.tsx", "/index.jsx")
-    elif suffix == ".go":
-        stems = ["/".join(parts)]
-        suffixes = (".go",)
-    elif suffix == ".rs":
+    suffixes = {
+        ".py": (".py", "/__init__.py"),
+        ".ts": (".ts", ".tsx", ".jsx", "/index.ts", "/index.tsx", "/index.jsx"),
+        ".go": (".go",),
+        ".rs": (".rs", "/mod.rs"),
+    }.get(".ts" if suffix in (".tsx", ".jsx") else suffix)
+    if suffixes is None:
+        return []
+    if suffix == ".rs":
         while parts and parts[0] in ("crate", "self", "super"):
             parts.pop(0)
         if not parts:
             return []
-        # The first path segment names the module file (``b.rs``/``b/mod.rs``).
-        stems = ["/".join(parts[:1])]
-        suffixes = (".rs", "/mod.rs")
-    else:
-        return []
-    candidates = [stem + sfx for stem in stems for sfx in suffixes]
+        parts = parts[:1]
+    stem = "/".join(parts)
+    candidates = [stem + sfx for sfx in suffixes]
     return [(base_rel + "/" + c) if base_rel else c for c in candidates]
 
 
 def build_import_graph(
     changed_files: list[str], repo_root: Path
 ) -> dict[str, set[str]]:
-    """Parse each changed file and return ``{file: set_of_changed_files_it_imports}``.
+    """Return directed imports between changed files within a five-second wall budget.
 
-    Uses the installed tree-sitter grammars (already pinned as deps). A file
-    that fails to parse, has no grammar, or whose imports don't resolve to a
-    changed file simply gets an empty edge set -- never raises. The whole build
-    is wall-time-bounded (~5s) and on timeout returns the partial edges built so
-    far (the caller falls back to sorted-singleton packing for the rest).
+    Unknown grammars and unreadable files contribute no edges. Timeout returns the
+    partial graph; callers retain remaining files as singleton groups.
     """
     changed = set(changed_files)
     graph: dict[str, set[str]] = {}
@@ -134,13 +120,9 @@ def build_import_graph(
 
 
 def co_locate_groups(files: list[str], edges: dict[str, set[str]]) -> list[list[str]]:
-    """Connected components of the undirected graph restricted to ``files``.
+    """Return sorted connected components over files and the undirected edge closure.
 
-    ``edges`` maps a file to the set of files it imports. The undirected closure
-    is computed over ``files`` only. Each component is returned sorted; the
-    components are returned in the sorted order of their smallest file. A file
-    with no edges is a singleton. Raises on nothing -- pure over already-computed
-    edges.
+    Unconnected files are singletons; components sort by their smallest path.
     """
     wanted = set(files)
     adjacency: dict[str, set[str]] = {f: set() for f in files}

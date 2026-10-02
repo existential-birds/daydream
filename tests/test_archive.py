@@ -54,8 +54,8 @@ from daydream.artifact_visibility import (
     DestinationDelivery,
     OutputLabel,
     RoutedDestination,
-    _manifest,
 )
+from daydream.artifacts.filesystem import manifest_tree
 from daydream.backends import MetricsEvent, ResultEvent, TextEvent
 from daydream.remote_ci import (
     CIObservation,
@@ -69,13 +69,14 @@ from daydream.remote_ci import (
     evaluate_remote_ci,
     write_remote_ci_verdict,
 )
+from daydream.run_config import RunConfig
 from daydream.run_snapshot import (
     ArchiveRunSnapshot,
     ManifestRunIdentity,
     RunPhaseCapabilities,
     RunProfileIdentity,
 )
-from daydream.runner import RunConfig, run
+from daydream.runner import run
 from daydream.trajectory import (
     DaydreamPhase,
     DaydreamRunFlow,
@@ -103,12 +104,9 @@ _DEFAULT_FINAL_METRICS: dict[str, Any] = {
 def _write_snapshot(recorder: Any, *, status: str = "complete", phase_events: list[dict[str, Any]] | None = None,
     final_metrics: dict[str, Any] | None = None, lifecycle: tuple[str, str] | None = None,
 ) -> RunWriteSnapshot:
-    """Freeze one root trajectory document the way the recorder's writer does.
+    """Freeze the recorder's root with optional metric and lifecycle overrides.
 
-    ``lifecycle`` stamps the run-span keys the timing reducer needs (and pins the
-    snapshot cutoff to the end stamp, which ``compute_timing_summary`` requires
-    for a complete write); ``final_metrics`` overrides the whole-run totals the
-    manifest projects.
+    A supplied lifecycle also pins the cutoff to its end, making complete timing valid.
     """
     path = Path(recorder.path)
     payload: dict[str, Any] = {}
@@ -176,15 +174,10 @@ def _strict_archive(*, target: Path, session_id: str, config: Any, write_snapsho
     destinations: tuple[RoutedDestination, ...] = (), work: Any = None, upload: bool = False,
     dump_path: Path | None = None,
 ) -> None:
-    """Archive one frozen run tree through the production strict finalizer.
-
-    ``target`` is the frozen artifact root, so it must not contain the archive
-    directory itself — ``finalize_archive_run`` re-attests the tree after every
-    stage and a write inside it would (correctly) be read as tampering.
-    """
+    """Finalize a frozen run; target must exclude the archive directory, as in `_frozen_target`."""
     finalize_archive_run(run=_archive_snapshot(write_snapshot, run_flow=run_flow, identity=identity),
         artifacts=ArtifactTreeSnapshot(
-            session_id=session_id, workspace_key="workspace", root=target, manifest=_manifest(target),
+            session_id=session_id, workspace_key="workspace", root=target, manifest=manifest_tree(target),
             destinations=destinations,
         ),
         artifact_provenance=ArtifactEvidenceProvenance(
@@ -232,14 +225,12 @@ def _archive_snapshot(trajectories: RunWriteSnapshot, *, run_flow: DaydreamRunFl
     )
 
 def _run_git_init_with_credential_origin(repo: Path, origin_url: str) -> None:
-    """git init + one commit + credential-bearing origin remote."""
     _git(repo, "init")
     _configure_identity(repo)
     _git(repo, "commit", "--allow-empty", "-m", "init")
     _git(repo, "remote", "add", "origin", origin_url)
 
 def test_capture_git_context_stores_credential_free_remote(tmp_path: Path) -> None:
-    # Real git repo whose origin carries credentials (M3, real-path test).
     repo = tmp_path / "repo"
     repo.mkdir()
     _run_git_init_with_credential_origin(repo, "https://user:ghp_canaryfake123@github.com/o/r.git")
@@ -267,7 +258,6 @@ def test_capture_git_context_no_repo(tmp_path: Path) -> None:
     assert ctx.changed_files == []
 
 def test_capture_git_context_populates_base_sha_and_changed_files(tmp_path: Path,) -> None:
-    """Real repo with a feature branch surfaces merge-base SHA + diff paths."""
     _git(tmp_path, "init", "-b", "main")
     _configure_identity(tmp_path)
     (tmp_path / "a.py").write_text("print('a')\n")
@@ -315,7 +305,6 @@ def test_build_manifest_basic(tmp_path: Path) -> None:
     assert m.head_sha == "a" * 40
 
 def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> None:
-    """Resolved profile provenance is preserved in the manifest projection."""
     profile = RunProfileIdentity(schema_version=7, name="focused", source_kind="explicit", digest="e2e-profile-digest",)
     manifest = _build(tmp_path, identity=_manifest_identity(profile=profile),).to_dict()
     assert {key: manifest[key]
@@ -325,7 +314,6 @@ def test_build_manifest_serializes_resolved_profile_identity(tmp_path: Path) -> 
     }
 
 def test_build_manifest_omits_unresolved_profile_identity(tmp_path: Path) -> None:
-    """A direct legacy caller with no resolved profile keeps all four keys absent."""
     manifest = _build(tmp_path).to_dict()
     assert {"profile_schema_version", "profile_name", "profile_source_kind", "profile_digest",}.isdisjoint(manifest)
 
@@ -340,14 +328,6 @@ def test_build_manifest_omits_fix_metadata_for_diagram_flow(tmp_path: Path) -> N
     assert m.fix_quality_gate is None
 
 def test_fix_cycle_classification_covers_every_run_flow() -> None:
-    """Every ``DaydreamRunFlow`` member is explicitly classified: TTT
-    (review/comment) is mode-gated never to reach the fix cycle, PR (feedback)
-    runs its own fix-items phase (fix yes, test no), and every other label is
-    classified by its registered pipeline (issue #648). DIAGRAM (issue #1113)
-    is classified by its own two-step registered pipeline, which runs neither
-    fix nor test. A future enum member fails this exhaustiveness check instead
-    of silently changing which backend fields the manifest emits.
-    """
     mode_gated_labels = {DaydreamRunFlow.TTT}
     fix_only_labels = {DaydreamRunFlow.PR}
     fix_cycle_builtins = {DaydreamRunFlow.NORMAL, DaydreamRunFlow.DEEP,}
@@ -358,7 +338,6 @@ def test_fix_cycle_classification_covers_every_run_flow() -> None:
     )
 
 def _assert_archive_omits_fix_test_backend(archive_dir: Path, flow: str) -> None:
-    """Issue #648 observable outcomes: manifest + SQLite carry no fix/test backend."""
     manifests = list((archive_dir / "runs").glob("*/manifest.json"))
     assert len(manifests) == 1, f"expected exactly one archived run, found {len(manifests)}"
     manifest = json.loads(manifests[0].read_text(encoding="utf-8"))
@@ -373,13 +352,6 @@ def _assert_archive_omits_fix_test_backend(archive_dir: Path, flow: str) -> None
 async def test_improve_archive_real_path_omits_fix_test_backend(
     improve_monorepo_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    """Issue #648 real-path: an improve run archives no fix/test backend.
-
-    Enters from the production entrypoint (``runner.run``) with a real temp git
-    worktree, real recorder, and real event loop; only the network backend is
-    mocked via the ``create_backend`` seam. The archived manifest drops
-    ``fix_backend``/``test_backend`` and the SQLite runs row stores NULL.
-    """
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
     install_improve_stub(monkeypatch, improve_monorepo_target)
     rc = await run(make_config(improve_monorepo_target, flow_name="improve", archive=True, run_eval=False,))
@@ -475,7 +447,6 @@ def test_build_manifest_without_evaluation(tmp_path: Path) -> None:
     assert m.verbosity is None
 
 def test_build_manifest_wall_clock_without_evaluation(tmp_path: Path) -> None:
-    """The snapshot's own run span fills wall-clock even when --eval did not run."""
     m = _build(tmp_path,
         write_snapshot=_manifest_write_snapshot(
             extra={"run_started_at": "2026-01-01T00:00:00Z", "run_ended_at": "2026-01-01T00:00:12.300000Z",},
@@ -587,7 +558,6 @@ def test_query_runs_with_where(tmp_path: Path) -> None:
     assert ids == {"s1", "s3"}
 
 def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
-    """erosion/verbosity round-trip through upsert_run -> query_runs, filterable and sortable."""
     upsert_run(tmp_path, make_manifest(session_id="s-q1", erosion=0.34, verbosity=0.19))
     upsert_run(tmp_path, make_manifest(session_id="s-q2", archive_path="/tmp/s-q2"))
     upsert_run(tmp_path, make_manifest(session_id="s-q3", erosion=0.51, verbosity=0.07, archive_path="/tmp/s-q3"),)
@@ -596,7 +566,6 @@ def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
     assert row["erosion"] == pytest.approx(0.34)
     assert row["verbosity"] == pytest.approx(0.19)
 
-    # The query layer's WHERE binds against the new columns.
     scored = query_runs(tmp_path, where="erosion IS NOT NULL")
     assert {r["session_id"] for r in scored} == {"s-q1", "s-q3"}
 
@@ -618,7 +587,6 @@ def test_upsert_run_persists_erosion_verbosity(tmp_path: Path) -> None:
     ],
 )
 def test_runs_columns_migrate_existing_db(tmp_path: Path, fields: dict[str, Any], old_version: int,) -> None:
-    """Each additive migration preserves legacy rows and accepts new values."""
     legacy_ddl = "\n".join(
         line for line in _CREATE_TABLE.splitlines()
         if not any(line.strip().startswith(f"{field} ") for field in fields)
@@ -654,12 +622,6 @@ def test_runs_columns_migrate_existing_db(tmp_path: Path, fields: dict[str, Any]
         assert actual == (pytest.approx(expected) if isinstance(expected, float) else expected)
 
 def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path,) -> None:
-    """#1106: the location-accuracy and escaped-duplication axes reach the manifest.
-
-    The eval pass computes a location verdict per shipped finding and a
-    shipped-set duplication scan; both headline scalars must be projected so a
-    change to line resolution or the hunk index is measurable across runs.
-    """
     m = _build(tmp_path,
         evaluation={"location": {"hunk_source": "hunk-index.json", "scored_items": 4, "in_hunk_rate": 0.75,
                 "tiers": {"in_hunk": 3, "within_tolerance": 1, "beyond_tolerance": 0, "file_absent": 0,},
@@ -677,13 +639,6 @@ def test_build_manifest_projects_location_and_duplication_metrics(tmp_path: Path
     assert d["metrics"]["shipped_duplicate_pairs"] == 2
 
 def test_build_manifest_location_duplication_metrics_none_when_blocks_absent(tmp_path: Path,) -> None:
-    """#1106: an evaluation.json predating the axes yields None, never 0.
-
-    Every already-archived run carries a `findings` block without
-    `shipped_duplication` and no `location` block at all. The projection must
-    chain defensively and leave both metrics undefined rather than reporting a
-    perfect in-hunk rate or zero escaped duplicates.
-    """
     m = _build(tmp_path,
         evaluation={"timing": {"total_wall_clock_seconds": 42.5}, "findings": {"total": 7},
             "grounding": {"grounding_rate": 0.85},
@@ -698,13 +653,7 @@ def test_build_manifest_location_duplication_metrics_none_when_blocks_absent(tmp
     assert d["metrics"]["shipped_duplicate_pairs"] is None
 
 def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> None:
-    """#1106: `in_hunk_rate: None` (no scorable finding) stays undefined end to end.
-
-    The analyzer emits None — not 0.0 — when `scored_items == 0`, because a run
-    that located nothing has no accuracy, and the reward pipeline renormalizes
-    over PRESENT axes. Coercion to 0.0 anywhere in the projection would feed it
-    an imputed worst score.
-    """
+    """Undefined location accuracy stays NULL so reward reduction can omit the absent axis."""
     m = _build(tmp_path,
         evaluation={"location": {"hunk_source": "none", "scored_items": 0, "in_hunk_rate": None,},
             "findings": {"total": 0, "shipped_duplication": {"near_duplicate_pairs": 0},},
@@ -720,13 +669,11 @@ def test_null_in_hunk_rate_survives_manifest_and_db_as_null(tmp_path: Path) -> N
     assert row["shipped_duplicate_pairs"] == 0  # a real zero is still a zero
 
 def test_upsert_run_persists_location_and_duplication_metrics(tmp_path: Path) -> None:
-    """#1106: both new metrics round-trip through upsert_run -> query_runs."""
     row = _stored_manifest_row(tmp_path, "s-loc", location_in_hunk_rate=0.6, shipped_duplicate_pairs=3)
     assert row["location_in_hunk_rate"] == pytest.approx(0.6)
     assert row["shipped_duplicate_pairs"] == 3
 
 def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
-    """Issue #646: per-stack review identity round-trips through the index."""
     row = _stored_manifest_row(
         tmp_path, "s-psr", per_stack_review_backend="codex", per_stack_review_model="gpt-psr", review_backend="claude",
     )
@@ -735,7 +682,6 @@ def test_upsert_run_persists_per_stack_review_identity(tmp_path: Path) -> None:
     assert row["review_backend"] == "claude"
 
 def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
-    """Issue #315: the fix-phase quality-gate verdict round-trips on the manifest."""
     gate = {"enabled": True, "erosion_delta_threshold": 0.05, "verbosity_delta_threshold": 0.05,
         "rounds": [{"round": 1,
                 "per_file": {"api.py": {
@@ -753,13 +699,11 @@ def test_build_manifest_carries_fix_quality_gate(tmp_path: Path) -> None:
     assert d["fix_quality_gate"]["rounds"][0]["per_file"]["api.py"]["flagged"] is True
 
 def test_manifest_fix_quality_gate_none_when_absent(tmp_path: Path) -> None:
-    """No gate artifact => the manifest field stays null (additive, never invented)."""
     m = _build(tmp_path)
     assert m.fix_quality_gate is None
     assert m.to_dict()["fix_quality_gate"] is None
 
 def test_upsert_run_persists_fix_quality_gate(tmp_path: Path) -> None:
-    """Issue #315: fix_quality_gate JSON round-trips through upsert_run -> query_runs."""
     gate = {"enabled": True, "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],}
     row = _stored_manifest_row(tmp_path, "s-gate", fix_quality_gate=gate)
     assert json.loads(row["fix_quality_gate"]) == gate
@@ -769,11 +713,6 @@ def test_upsert_run_persists_recommended_patch_capture(tmp_path: Path) -> None:
     assert row["recommended_patch_capture"] == "post_test"
 
 def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path) -> None:
-    """#329: only an artifact bound to the current session is read.
-
-    A gate verdict left behind by another session (e.g. a prior deep run on the
-    same target repo) must not be attributed to the current run's manifest.
-    """
     gate = {
         "enabled": True, "session_id": "sess-42", "rounds": [{"round": 1, "per_file": {"api.py": {"flagged": True}}}],
     }
@@ -785,7 +724,6 @@ def test_read_fix_quality_gate_requires_matching_session(tmp_path: Path) -> None
     assert _read_fix_quality_gate(tmp_path, None) is None
 
 def test_read_fix_quality_gate_unbound_artifact_is_none(tmp_path: Path) -> None:
-    """#329: an artifact with no session_id key cannot be attributed to this run."""
     gate_p = tmp_path / ".daydream" / "deep" / "fix-quality-gate.json"
     gate_p.parent.mkdir(parents=True)
     gate_p.write_text(json.dumps({"enabled": True, "rounds": [{"round": 1, "per_file": {}}]}))
@@ -816,10 +754,7 @@ def test_manifest_recommended_patch_capture_passes_through(tmp_path: Path) -> No
     assert m.to_dict()["recommended_patch_capture"] == "post_test"
 
 def test_feedback_run_leaves_recommended_patch_capture_none() -> None:
-    """PR/feedback runs never produce a pre-test fix-phase capture, so an
-    absent sidecar must leave ``recommended_patch_capture`` ``None`` rather
-    than defaulting to ``"pre_test"`` (feedback's ``_step_fix_items`` never
-    writes ``recommended.patch``)."""
+    """Feedback never writes recommended.patch, so absence cannot imply a pre-test capture."""
     m = _build(tmp_path=Path("/tmp"), run_flow=DaydreamRunFlow.PR)
     assert m.recommended_patch_capture is None
     assert "recommended_patch_capture" not in m.to_dict()
@@ -879,7 +814,7 @@ def _assemble_bundle(
     snapshot = write_snapshot if write_snapshot is not None else _write_snapshot(recorder)
     _copy_snapshot_bundle(run=_archive_snapshot(snapshot, run_flow=recorder.run_flow),
         artifacts=ArtifactTreeSnapshot(
-            session_id=recorder.session_id, workspace_key="workspace", root=target, manifest=_manifest(target),
+            session_id=recorder.session_id, workspace_key="workspace", root=target, manifest=manifest_tree(target),
             destinations=destinations,
         ),
         artifact_provenance=ArtifactEvidenceProvenance(
@@ -888,7 +823,6 @@ def _assemble_bundle(
     )
 
 def test_bundle_projects_only_frozen_snapshot_trajectory_bytes(tmp_path: Path,) -> None:
-    """``trajectory.json`` carries the frozen bytes, never the live tree's copy."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     live = target / ".daydream" / "runs" / recorder.session_id / "trajectory.json"
     live.write_text('{"session_id":"abcd1234-0000-0000-0000-000000000000","marker":"MUTATED_LIVE"}')
@@ -902,7 +836,6 @@ def test_bundle_projects_only_frozen_snapshot_trajectory_bytes(tmp_path: Path,) 
     assert (run_dir / "trajectory.json").read_bytes() == frozen
 
 def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Path,) -> None:
-    """A fork document whose session is not this run's is refused, not archived."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     root = _write_snapshot(recorder).documents[0]
     foreign = json.dumps({"session_id": "other-session", "trajectory_id": "fork-1"}).encode()
@@ -920,7 +853,6 @@ def test_bundle_rejects_a_sibling_document_bound_to_another_session(tmp_path: Pa
     ],
 )
 def test_bundle_file_path(tmp_path: Path, relative_path: str, expected: str) -> None:
-    """Verify bundle copying preserves parameterized file contents and paths."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _assemble_bundle(target, run_dir, recorder)
     assert (run_dir / relative_path).read_text() == expected
@@ -946,7 +878,6 @@ def test_bundle_diagram_flow_excludes_stale_review_artifacts(tmp_path: Path,) ->
     assert not (run_dir / "recommended.patch").exists()
 
 def test_bundle_sub_trajectories_projected(tmp_path: Path) -> None:
-    """Sibling fork documents are projected under ``trajectories/`` by name."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     fork_path = target / ".daydream" / "runs" / recorder.session_id / "trajectories" / "deep-python.json"
     root = _write_snapshot(recorder).documents[0]
@@ -975,12 +906,7 @@ def test_bundle_skips_missing(tmp_path: Path) -> None:
     assert not (run_dir / "diff.patch").exists()
 
 def test_bundle_archives_findings_artifact(tmp_path: Path) -> None:
-    """findings.json is relocated from its registered route into the bundle.
-
-    The archive never reconstructs the operator's requested path: it reads the
-    route's frozen path relative to the live root and resolves it inside the
-    frozen tree, so harvest's per-finding join has a fingerprint source.
-    """
+    """Resolve the registered frozen findings route, preserving corpus join fingerprints."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     route = _findings_route(target)
     assert route.frozen_path is not None
@@ -992,7 +918,6 @@ def test_bundle_archives_findings_artifact(tmp_path: Path) -> None:
     assert json.loads(archived.read_text())["findings"][0]["fingerprint"] == "abc"
 
 def test_bundle_findings_artifact_skipped_without_route(tmp_path: Path,) -> None:
-    """No registered findings destination means no findings.json is archived."""
     target, run_dir, recorder = _setup_bundle(tmp_path)
     _assemble_bundle(target, run_dir, recorder)
     assert not (run_dir / "findings.json").exists()
@@ -1022,7 +947,6 @@ def test_dump_artifacts_sanitizes_credential_bearing_bundle(
     assert "ghp_canaryfake123" not in captured.out + captured.err
 
 def test_dump_artifacts_copies_clean_bundle(tmp_path: Path, archive_dir: Path) -> None:
-    """The clean path is unchanged: a scan-clean bundle is copied wholesale."""
     session_id = "abcd1234-0000-0000-0000-000000000000"
     dest = tmp_path / "dump"
     dest.mkdir()
@@ -1058,7 +982,6 @@ def test_finalize_archive_run_round_trip(tmp_path: Path, archive_dir: Path) -> N
     assert len(rows) == 1
     assert rows[0]["session_id"] == session_id
 
-# index: label_observations (Task 12)
 
 def _seed_one_run(archive_dir: Path, session_id: str) -> None:
     upsert_run(archive_dir,
@@ -1117,11 +1040,9 @@ def _seed_legacy_label_row(archive_dir: Path, session_id: str, ddl: str, observe
         conn.close()
 
 def test_label_observations_source_column_migrates(tmp_path: Path) -> None:
-    # Build schema, then replace the table with the OLD DDL (no `source`) + a legacy row.
     upsert_run(tmp_path, make_manifest(session_id="s-mig"))
     _seed_legacy_label_row(tmp_path, "s-mig", _OLD_LABEL_OBSERVATIONS_DDL, "2026-01-01T00:00:00+00:00")
     assert "source" not in _label_obs_columns(tmp_path)  # precondition: legacy shape
-    # The production connection path must ALTER-ADD `source`.
     upsert_run(tmp_path, make_manifest(session_id="s-mig2"))
     cols = _label_obs_columns(tmp_path)
     assert "source" in cols
@@ -1134,7 +1055,6 @@ def test_human_label_wins_over_newer_auto_in_projection(tmp_path: Path) -> None:
                              labeler_version="auto-v1", evidence_sha="sha1", source="auto")
     append_label_observation(tmp_path, "s-prec", labels=["accepted"], pr_state=None,
                              labeler_version="human", evidence_sha=None, source="human")
-    # A NEWER auto observation must NOT dethrone the human label:
     append_label_observation(tmp_path, "s-prec", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v2", evidence_sha="sha2", source="auto")
     prec_obs = latest_label_observation(tmp_path, "s-prec")
@@ -1147,7 +1067,6 @@ def test_append_cache_reflects_winning_human_label(tmp_path: Path) -> None:
                              labeler_version="auto-v1", evidence_sha="sha1", source="auto")
     append_label_observation(tmp_path, "s-cache", labels=["accepted"], pr_state=None,
                              labeler_version="human", evidence_sha=None, source="human")
-    # A later auto append must leave the denormalized runs cache on the human label:
     append_label_observation(tmp_path, "s-cache", labels=["rejected"], pr_state="closed",
                              labeler_version="auto-v2", evidence_sha="sha2", source="auto")
     row = query_runs(tmp_path, "session_id = ?", ("s-cache",))[0]
@@ -1180,13 +1099,7 @@ def test_auto_append_dedups_on_unchanged_evidence(tmp_path: Path) -> None:
     assert len(label_observation_history(tmp_path, "s-dedup")) == 3
 
 def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> None:
-    """A re-score that moves a row out of the posterior population must append.
-
-    ``has_posterior`` is no longer a function of the label: a ``local_branch``
-    outcome carries a label but is not maintainer-PR evidence. If the
-    idempotency key ignored it, a re-harvest that demotes such a row would
-    silently no-op and leave the stale population flag in place.
-    """
+    """Posterior membership is an independent generation-identity axis."""
     upsert_run(tmp_path, make_manifest(session_id="s-pop"))
     first = append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
                                      labeler_version="rv1", evidence_sha="shaA",
@@ -1198,7 +1111,6 @@ def test_auto_append_appends_when_only_has_posterior_changes(tmp_path: Path) -> 
     assert len(label_observation_history(tmp_path, "s-pop")) == 2
     latest = latest_label_observation(tmp_path, "s-pop")
     assert latest is not None and latest["has_posterior"] == 0
-    # Still idempotent once the demotion has landed.
     assert append_label_observation(tmp_path, "s-pop", labels=["accepted"], pr_state=None,
                                     labeler_version="rv1", evidence_sha="shaA",
                                     reward_version="rv1", has_posterior=False,
@@ -1247,7 +1159,6 @@ def test_append_label_observation_writes_history_row(tmp_path: Path) -> None:
     assert hist[0]["pr_state"] == "merged"
 
 def test_append_label_observation_writes_through_to_runs_cache(tmp_path: Path) -> None:
-    """The denormalized runs.outcome_labels cache is refreshed on append."""
     _seed_one_run(tmp_path, "sess-2")
     append_label_observation(
         tmp_path, "sess-2", labels=["contested"], pr_state="merged", labeler_version="2026.05.22", evidence_sha=None,
@@ -1275,8 +1186,7 @@ def test_multiple_observations_preserve_history(tmp_path: Path) -> None:
     assert json.loads(rows[0]["outcome_labels"]) == ["accepted"]
 
 def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
-    """Snapshot pinning: latest_label_observation(..., as_of=ts) returns the
-    latest observation whose observed_at <= as_of."""
+    """The snapshot cutoff includes its exact boundary observation."""
     _seed_one_run(tmp_path, "sess-4")
     append_label_observation(
         tmp_path, "sess-4", labels=["unknown"], pr_state="open", labeler_version="v1", evidence_sha=None,
@@ -1293,9 +1203,7 @@ def test_latest_label_observation_filtered_by_as_of(tmp_path: Path) -> None:
 
 def test_same_microsecond_collision_keeps_clean_iso_timestamps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Two appends frozen to the same microsecond must both persist with parseable
-    ISO 8601 observed_at values, and an exact-boundary as_of must include the
-    boundary row (the contract the ~uuid suffix used to break)."""
+    """Timestamp collisions must preserve ISO parseability and inclusive cutoff comparisons."""
     frozen = datetime(2026, 5, 29, 12, 0, 0, tzinfo=timezone.utc)
 
     class _FrozenDatetime(datetime):
@@ -1330,7 +1238,6 @@ def test_same_microsecond_collision_keeps_clean_iso_timestamps(tmp_path: Path, m
     assert json.loads(pinned["labels"]) == ["unknown"]  # boundary row included
 
 def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path: Path,) -> None:
-    """reviewer_logins + has_posterior persist on the observation row and mirror onto runs."""
     _seed_one_run(tmp_path, "s1")
     append_label_observation(
         tmp_path, "s1", labels=["rejected"], pr_state="closed", labeler_version="2026.05.28-1", evidence_sha="h",
@@ -1344,10 +1251,7 @@ def test_append_label_observation_persists_reviewer_and_posterior_flag(tmp_path:
     assert runs_row["has_posterior"] == 1  # SQL consumers split populations without parsing reward_json
 
 def test_existing_db_migrates_to_posterior_columns(tmp_path: Path) -> None:
-    """A pre-v4 index.db (runs + label_observations lacking the posterior columns)
-    is migrated/recreated on the next connection: runs gains has_posterior via
-    ALTER, the stale label_observations is dropped+recreated with both new
-    columns, and PRAGMA user_version reaches SCHEMA_VERSION (8)."""
+    """Pre-v4 bootstrap adds run columns and recreates incompatible observation tables with a warning."""
     db_path = tmp_path / "index.db"
     conn = sqlite3.connect(str(db_path))
     # Pre-v4 runs schema (DDL minus has_posterior); label_observations lacks posterior cols.
@@ -1398,13 +1302,7 @@ T2 = "2026-02-01T00:00:00+00:00"
 T3 = "2026-03-01T00:00:00+00:00"
 
 def _seed_reviewed_outcomes(archive_dir: Path) -> None:
-    """Seed three prior runs (one reviewed outcome each) plus a current run.
-
-    - s_a: reviewers=[alice], rejected (penalty 1.0) @ T1
-    - s_b: reviewers=[bob],   accepted (penalty 0.0) @ T2
-    - s_c: reviewers=[alice, carol], contested (penalty 0.5) @ T3
-    - cur: the current session (excluded from its own prior pool)
-    """
+    """Seed rejected, accepted, and contested reviewer histories plus an unlabelled current run."""
     for sid in ("s_a", "s_b", "s_c", "cur"):
         _seed_one_run(archive_dir, sid)
     append_label_observation(
@@ -1426,10 +1324,8 @@ def test_reviewer_set_penalty_prior_pools_shared_reviewer_runs_strict_cutoff(tmp
     _seed_reviewed_outcomes(tmp_path)
     prior, n = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
     assert prior == pytest.approx(1.0) and n == 1
-    # widen the set to {alice,bob}: pool now includes s_a(1.0) + s_b(0.0) -> mean 0.5, n=2
     prior2, n2 = reviewer_set_penalty_prior(tmp_path, ["alice", "bob"], before_valid_at=T3, exclude_session="cur")
     assert prior2 == pytest.approx(0.5) and n2 == 2
-    # empty reviewer set -> no pool
     assert reviewer_set_penalty_prior(tmp_path, [], before_valid_at=T3, exclude_session="cur") == (None, 0)
 
 def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path: Path) -> None:
@@ -1451,30 +1347,25 @@ def test_reviewer_set_penalty_prior_scoped_to_repo(tmp_path: Path) -> None:
         valid_at=T2, reviewer_logins=["alice"], has_posterior=True,
     )
 
-    # Without repo scoping both alice rows are pooled: mean(1.0, 0.0) = 0.5, n=2
     prior_all, n_all = reviewer_set_penalty_prior(tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur")
     assert prior_all == pytest.approx(0.5) and n_all == 2
 
-    # Scoped to org/repo-A: only s_a(rejected,1.0) qualifies
     prior_a, n_a = reviewer_set_penalty_prior(
         tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur", repo_slug="org/repo-A",
     )
     assert prior_a == pytest.approx(1.0) and n_a == 1
 
-    # Scoped to org/repo-B: only s_b(accepted,0.0) qualifies
     prior_b, n_b = reviewer_set_penalty_prior(
         tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur", repo_slug="org/repo-B",
     )
     assert prior_b == pytest.approx(0.0) and n_b == 1
 
-    # Scoped to an unknown repo: empty pool
     prior_x, n_x = reviewer_set_penalty_prior(
         tmp_path, ["alice"], before_valid_at=T3, exclude_session="cur", repo_slug="org/other",
     )
     assert (prior_x, n_x) == (None, 0)
 
 def test_manifest_includes_source_path() -> None:
-    """source_path appears in manifest dict under git section."""
     m = Manifest(
         session_id="test-session", source_path="/home/user/code/myrepo", remote_url="git@github.com:org/repo.git",
         repo_slug="org/repo",
@@ -1483,7 +1374,6 @@ def test_manifest_includes_source_path() -> None:
     assert d["git"]["source_path"] == "/home/user/code/myrepo"
 
 def test_source_path_indexed_in_sqlite(tmp_path: Path) -> None:
-    """source_path round-trips through upsert_run → query_runs."""
     idx_dir = tmp_path / "idx"
     idx_dir.mkdir()
     m = Manifest(session_id="sp-test", archived_at="2026-01-01T00:00:00Z", run_flow="normal", backend="claude",
@@ -1494,14 +1384,11 @@ def test_source_path_indexed_in_sqlite(tmp_path: Path) -> None:
     assert rows[0]["source_path"] == "/original/repo/path"
 
 def test_source_path_defaults_to_none() -> None:
-    """Old manifests without source_path still work."""
     m = Manifest(session_id="old")
     assert m.source_path is None
     assert m.to_dict()["git"]["source_path"] is None
 
 def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
-    """The legacy update_labels() now writes through append_label_observation
-    so existing callers continue to work without source changes."""
     _seed_one_run(tmp_path, "sess-5")
     assert update_labels(tmp_path, "sess-5", ["accepted"]) is True
     hist = label_observation_history(tmp_path, "sess-5")
@@ -1515,9 +1402,7 @@ def test_update_labels_is_backward_compat_thin_wrapper(tmp_path: Path) -> None:
 def test_canonical_utc_iso_converts_and_rejects() -> None:
     assert canonical_utc_iso("2026-02-01T00:00:00Z") == "2026-02-01T00:00:00+00:00"
     assert canonical_utc_iso("2026-02-01T00:00:00+00:00") == "2026-02-01T00:00:00+00:00"
-    # A foreign offset is an unambiguous instant — converted, not rejected.
     assert canonical_utc_iso("2026-02-01T05:30:00+05:30") == "2026-02-01T00:00:00+00:00"
-    # Sub-second precision survives canonically (six digits or absent).
     assert canonical_utc_iso("2026-02-01T00:00:00.500000Z") == "2026-02-01T00:00:00.500000+00:00"
     with pytest.raises(ValueError, match="naive"):
         canonical_utc_iso("2026-02-01T00:00:00")
@@ -1535,8 +1420,6 @@ def test_normalize_as_of_is_strict_utc_only() -> None:
         normalize_as_of("yesterday")
 
 def test_append_label_observation_canonicalizes_valid_at_spelling(tmp_path: Path,) -> None:
-    """The write chokepoint converges every caller (GitHub 'Z' merge timestamps
-    included) on the '+00:00' isoformat spelling."""
     _seed_one_run(tmp_path, "sess-z")
     append_label_observation(
         tmp_path, "sess-z", labels=["accepted"], pr_state="merged", labeler_version="v1", evidence_sha=None,
@@ -1555,13 +1438,8 @@ def test_append_label_observation_rejects_naive_valid_at(tmp_path: Path) -> None
         )
 
 def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path) -> None:
-    """A 'Z'-spelled before_valid_at bound is canonicalized before the lexical
-    SQL cutoff, so it can never mis-order against the '+00:00' stored column.
-
-    Chronology: the pooled row's valid_at is 0.5s AFTER the bound instant, so
-    the strict `valid_at < bound` must exclude it. Raw lexical comparison of
-    the mixed spellings ("...00.500000+00:00" < "...00Z") would wrongly
-    include it.
+    """A row half a second after the Z-spelled cutoff must be excluded despite misleading
+    raw lexical order.
     """
     _seed_one_run(tmp_path, "s_late")
     _seed_one_run(tmp_path, "cur")
@@ -1580,9 +1458,7 @@ def test_reviewer_prior_bound_spelling_cannot_misorder(tmp_path: Path) -> None:
     assert prior2 == pytest.approx(1.0) and n2 == 1
 
 def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
-    """A pre-convergence 'Z'-spelled row survives reconnection unchanged: the
-    index never deletes or rewrites history at bootstrap (a destructive
-    migration in a library code path would silently eat other users' data)."""
+    """Bootstrap cannot rewrite historical observations merely to canonicalize timestamp spelling."""
     _seed_one_run(tmp_path, "sess-legacy")
     conn = sqlite3.connect(str(tmp_path / "index.db"))
     conn.execute("INSERT INTO label_observations "
@@ -1596,7 +1472,6 @@ def test_legacy_z_valid_at_rows_are_left_untouched(tmp_path: Path) -> None:
     assert [r["valid_at"] for r in hist] == ["2026-01-01T00:00:00Z"]
 
 async def test_build_manifest_totals_include_fork_trajectories(tmp_path: Path) -> None:
-    """Manifest totals are whole-run: the fork's tokens/cost are folded in."""
     snapshots: list[RunWriteSnapshot] = []
     recorder = TrajectoryRecorder(
         path=tmp_path / ".daydream" / "runs" / "sess-fold" / "trajectory.json", run_flow=DaydreamRunFlow.NORMAL,
@@ -1650,11 +1525,6 @@ def test_manifest_splits_status_from_pipeline() -> None:
     assert "commit" not in d["git"]
 
 def test_legacy_manifest_reads_new_fields_as_unknown(tmp_path: Path) -> None:
-    # A pre-#762 Manifest carries no archive_status/pipeline_status/phase_states/
-    # daydream keys. Indexing it and reading it back through the production
-    # query_runs path surfaces the new fields as explicit schema-default
-    # sentinels (pipeline_status "unknown"), never a KeyError and never a
-    # fabricated value.
     upsert_run(tmp_path, Manifest())
     row = query_runs(tmp_path)[0]
     assert row["pipeline_status"] == "unknown"
@@ -1931,7 +1801,6 @@ def test_remote_advisory_failure_is_detail_not_hard_failure(tmp_path: Path) -> N
 def test_archive_required_success_with_pending_advisory_is_succeeded(
     tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    """A real archived verdict preserves the evaluator's nonblocking advisory."""
     target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="advisory-pending-session")
     config = make_config(target, archive=True, pr_repo="example/project", pr_number=42)
@@ -1973,7 +1842,6 @@ def test_archive_required_success_with_pending_advisory_is_succeeded(
     assert copied["advisory_observations"][0]["state"] == "pending"
 
 def test_archive_no_policy_pending_observation_cannot_be_passed(tmp_path: Path) -> None:
-    """Without formal required policy, all observed CI must finish first."""
     advisory = CIObservation(source="check_run", context="Build", app_id=10, state="pending", raw_state="in_progress",
         url="https://github.com/example/project/actions/runs/8", diagnostic=None,
     )
@@ -2160,11 +2028,9 @@ def test_archive_run_persists_registry_gated_push_and_remote_states(
 def test_frozen_mapping_push_and_remote_phase_starts_are_partial_without_artifacts(
     tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    """Archived mapping rows, rather than live recorder state, drive phase starts.
-
-    The strict finalizer is handed no recorder at all — the live recorder built
-    here records no phase event, and the archived states come only from the
-    frozen snapshot's mapping rows."""
+    """Only frozen event mappings drive these phase states; the live recorder has no
+    events.
+    """
     target = _frozen_target(tmp_path)
     recorder = make_recorder(target, run_flow=DaydreamRunFlow.NORMAL)
     phase_events = [_phase_start_event(phase.value, recorder.session_id, timestamp="2026-09-06T12:00:00Z")
@@ -2360,7 +2226,6 @@ def test_archive_retains_malformed_frozen_merge_evidence_as_unknown(
 
 def test_archive_rejects_frozen_root_from_another_session(tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    """A root document carrying another run's session is refused closed."""
     target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="current-session")
     payload = {"session_id": "other-session", "trajectory_id": recorder.session_id, "steps": [], "extra": {},
@@ -2383,10 +2248,7 @@ def test_archive_rejects_frozen_root_from_another_session(tmp_path: Path, archiv
 def test_archive_rejects_a_sibling_document_from_another_session(
     tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    """A valid root cannot smuggle a fork document bound to another session.
-
-    The root passes provenance validation, so the refusal has to come from the
-    bundle projection — and it must leave no partially assembled archive."""
+    """The root is valid: bundle projection must reject the foreign fork without publishing a partial archive."""
     target = _frozen_target(tmp_path)
     recorder = _MockRecorder(session_id="current-session")
     root = _write_snapshot(recorder).documents[0]
@@ -2580,7 +2442,6 @@ def test_schema_additive_columns_and_migration(tmp_path: Path) -> None:
     conn.execute("CREATE TABLE runs (session_id TEXT PRIMARY KEY, status TEXT NOT NULL DEFAULT 'complete')")
     conn.commit()
     conn.close()
-    # _migrate_schema adds the new columns idempotently to an existing table
     _schema._migrate_schema(sqlite3.connect(db))
     cols = {r[1] for r in sqlite3.connect(db).execute("PRAGMA table_info(runs)").fetchall()}
     assert "archive_status" in cols and "pipeline_status" in cols and "phase_states" in cols
@@ -2600,7 +2461,6 @@ def test_upsert_run_persists_pipeline_fields(tmp_path: Path) -> None:
     assert row["daydream_version"] == "0.27.0"
     assert row["daydream_dirty"] == 0
 
-# Task 7: versioned reply-label columns, digest-keyed dedup, legacy marking
 
 _LEGACY_ROW_OBSERVED_AT_SNAPSHOT = "2026-03-04T05:06:07+00:00"
 
@@ -2639,7 +2499,6 @@ def test_append_label_observation_persists_versions_and_digest(tmp_path: Path) -
     assert row["labeler_policy_version"] == "980-policy"
 
 def test_dedup_includes_policy_version_and_digest(tmp_path: Path) -> None:
-    """Unchanged evidence + bumped policy version ⇒ new generation, not dedup (M14/M22)."""
     _seed_one_run(tmp_path, "sess-1")
     kw: dict[str, Any] = dict(labels=["contested"], pr_state="open", labeler_version="980-policy",
               evidence_sha="abc", reply_classifier_version="980-r1", reply_evidence_digest="d" * 64)
@@ -2651,7 +2510,6 @@ def test_dedup_includes_policy_version_and_digest(tmp_path: Path) -> None:
     assert append_label_observation(tmp_path, "sess-1", **kw3) is True       # edited reply → append
 
 def test_human_rows_keep_precedence_over_newer_auto(tmp_path: Path) -> None:
-    """Human observation wins in the runs cache even after a newer auto append (M14/M22)."""
     _seed_one_run(tmp_path, "sess-1")
     append_label_observation(tmp_path, "sess-1", labels=["contested"], pr_state="open",
                              labeler_version="980-policy", evidence_sha="abc",
@@ -2667,22 +2525,17 @@ def test_human_rows_keep_precedence_over_newer_auto(tmp_path: Path) -> None:
     assert obs is not None and obs["source"] == "human" and obs["labels"] == '["rejected"]'
 
 def test_migration_marks_legacy_rows(tmp_path: Path) -> None:
-    """Pre-existing auto rows are marked legacy='legacy' and never mutated otherwise (M17/M22)."""
     _seed_one_run(tmp_path, "sess-legacy")
     _seed_legacy_label_row(tmp_path, "sess-legacy", _PRE_REPLY_LABEL_DDL, _LEGACY_ROW_OBSERVED_AT_SNAPSHOT)
-    # The production connection path must ALTER-ADD the new columns and stamp history.
     upsert_run(tmp_path, make_manifest(session_id="sess-legacy-2"))
     rows = label_observation_history(tmp_path, "sess-legacy")
     assert rows
     assert all(r["legacy"] == "legacy" for r in rows if r["labeler_policy_version"] is None)
-    # original labels/observed_at untouched:
     assert rows[0]["observed_at"] == _LEGACY_ROW_OBSERVED_AT_SNAPSHOT
     assert rows[0]["labels"] == '["accepted"]'
 
 def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
-    """An explicit ``observed_at`` is preserved bitemporally (M3 of the
-    local-observations import): the stored row carries the original data
-    timestamp verbatim (canonicalized to UTC), not the wall clock."""
+    """Imported observation time must survive instead of being replaced by the append wall clock."""
     _seed_one_run(tmp_path, "sess-obs")
     original = "2025-06-01T12:00:00+00:00"
     appended = append_label_observation(tmp_path, "sess-obs", labels=["accepted"], pr_state="merged",
@@ -2694,7 +2547,6 @@ def test_append_label_observation_preserves_observed_at(tmp_path: Path) -> None:
     assert row["observed_at"] == "2025-06-01T12:00:00+00:00"
 
 def test_append_label_observation_observed_at_none_uses_wall_clock(tmp_path: Path,) -> None:
-    """Default (``observed_at=None``) keeps the existing now() behavior."""
     _seed_one_run(tmp_path, "sess-now")
     appended = append_label_observation(tmp_path, "sess-now", labels=["accepted"], pr_state="merged",
         labeler_version="1055-human-r1", evidence_sha=None, source="human")
@@ -2704,7 +2556,6 @@ def test_append_label_observation_observed_at_none_uses_wall_clock(tmp_path: Pat
     assert row["observed_at"].startswith("2")
 
 def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) -> None:
-    """A non-ISO-8601 ``observed_at`` fails closed before any write."""
     _seed_one_run(tmp_path, "sess-bad")
     with pytest.raises(ValueError, match="observed_at"):
         append_label_observation(tmp_path, "sess-bad", labels=["accepted"], pr_state="merged",
@@ -2715,10 +2566,7 @@ def test_append_label_observation_rejects_non_iso_observed_at(tmp_path: Path) ->
 def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     tmp_path: Path, archive_dir: Path, make_config: MakeConfig,
 ) -> None:
-    """#1113 (D21/D22): a diagram-only run deliberately leaves the previous deep
-    review's ``.daydream/deep/`` artifacts on disk, so its own flow label must
-    answer "runs no merge/fix/test" — otherwise it archives that run's
-    ``merged-items.json`` as its own pipeline state."""
+    """Diagram runs retain old deep files on disk; flow capabilities must prevent their attribution."""
     target = _frozen_target(tmp_path)
     _write_deep(target, "merged-items.json", {"items": []})
     _write_deep(target, "per-stack-failures.json", {"__merge__": {"message": "x"}})
@@ -2742,16 +2590,13 @@ def test_diagram_flow_does_not_inherit_a_prior_deep_run_pipeline_state(
     assert m["status"] == "complete"
     assert m["archive_status"] == "complete"
     assert m["pipeline_status"] == "unknown"
-    # None of the deep phases are claimed, so no stale artifact is adopted.
     assert m["phase_states"]["merge"] == {"ran": False, "status": "absent"}
     assert m["phase_states"]["fix"] == {"ran": False, "status": "absent"}
     assert m["phase_states"]["test"] == {"ran": False, "status": "absent"}
     assert m["phase_states"]["push"] == {"ran": False, "status": "absent"}
     assert m["phase_states"]["remote_ci"] == {"ran": False, "status": "absent",}
-    # A two-step flow runs neither fix nor test, so neither backend is labeled.
     assert "fix_backend" not in m["run"]
     assert "test_backend" not in m["run"]
-    # No per-stack fan-out either: the diagram flow has no per-stack reviewers.
     assert "per_stack_review_backend" not in m["run"]
 
 def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
@@ -2777,7 +2622,6 @@ def test_diagram_flow_does_not_evaluate_stale_review_artifacts(
     assert manifest["metrics"]["total_findings"] is None
 
 def test_snapshot_manifest_pr_metadata_is_immutable_after_live_inputs_mutate(tmp_path: Path,) -> None:
-    """The production manifest identity comes only from validated root bytes."""
     session_id = "frozen-pr-session"
     snapshot = _manifest_write_snapshot(session_id=session_id, extra={"pr_number": 7, "pr_repo": "Owner/Repo"},)
     payload = json.loads(snapshot.documents[0].json_bytes)
@@ -2834,7 +2678,7 @@ def _finalizer_arguments(tmp_path: Path, session_id: str, *, config: RunConfig, 
     snapshot = _manifest_write_snapshot(session_id=session_id, final_metrics={}, path=path)
     path.write_bytes(snapshot.documents[0].json_bytes)
     return dict(run=_archive_snapshot(snapshot),
-        artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, _manifest(frozen), ()),
+        artifacts=ArtifactTreeSnapshot(session_id, "workspace", frozen, manifest_tree(frozen), ()),
         artifact_provenance=ArtifactEvidenceProvenance("workspace", session_id, tmp_path / "source", tmp_path / "live",
         ), config=config, work=None, upload=upload,
     )
@@ -2890,13 +2734,8 @@ def test_strict_archive_rejects_frozen_receipt_changed_by_evaluator(
 
 def test_strict_archive_upload_refusal_removes_incomplete_local_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A refused upload withholds the Hub copy and keeps the local archive.
-
-    Issue #981 requires refusing the upload "while preserving the local run",
-    and ``upload_run_bundle`` documents that it never raises so the archive
-    callback cannot fail the run. The refusal already happened inside the
-    callee, before anything reached the Hub, so failing finalization here would
-    discard a completed review without containing anything extra.
+    """Upload refusal contains Hub exposure while preserving the completed local archive
+    and index.
     """
     session_id = "strict-upload"
     arguments = _finalizer_arguments(
@@ -2922,7 +2761,6 @@ def test_strict_archive_upload_refusal_removes_incomplete_local_success(tmp_path
 def test_strict_archive_upload_refuses_frozen_tree_mutated_before_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A frozen tree mutated after finalization starts is caught before the external upload."""
     session_id = "strict-upload-mutated"
     arguments = _finalizer_arguments(
         tmp_path, session_id, config=RunConfig(target=str(tmp_path), run_eval=False, archive=True), upload=True,

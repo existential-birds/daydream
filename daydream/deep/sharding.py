@@ -1,14 +1,7 @@
-"""Deterministic deep-review stack sharding (issue #731).
+"""Deterministic language-stack shards named <stack>#<index>.
 
-A shard is a :class:`~daydream.deep.detection.StackAssignment` carrying a
-synthetic ``stack_name`` (``python#0``, ``python#1``) so it rides the existing
-``stack_name``-keyed pipeline (artifact paths, sorted parse/merge ordering, the
-capacity limiter) unchanged. ``shard_stacks`` is pure and deterministic: the
-same inputs yield the same shard names and assignments.
-
-Only *non-structural* stacks are shardable; the ``structure`` meta-stack is
-passed through unchanged (same object). The structural stack carries the union
-of all changed files and must never be split or counted against the fan-out cap.
+The structure meta-stack retains its original object and all changed files;
+it is neither split nor counted against the fan-out cap.
 """
 
 from __future__ import annotations
@@ -16,23 +9,17 @@ from __future__ import annotations
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep.dependency import co_locate_groups
 from daydream.deep.detection import StackAssignment
-from daydream.deep.prompts import _DIFF_BLOCK_SPLIT, _diff_block_path
+from daydream.deep.diff import iter_diff_blocks
 
 
 def _file_change_bytes(diff: str) -> dict[str, int]:
-    """Map every changed file to its changed-byte size (single diff parse).
+    """Map changed paths to UTF-8 block sizes; the first block wins.
 
-    Splits ``diff`` into ``diff --git`` blocks exactly once and records
-    ``len(block.encode("utf-8"))`` under the block's post-state path (first
-    matching block wins). A file absent from the map sizes as 1 byte (still
-    assigned, never dropped). Mirrors the shared ``_diff_block_path`` /
-    ``_DIFF_BLOCK_SPLIT`` parse used by ``prompts._diff_blocks_for_files``.
+    Files absent from the map still receive a one-byte shard weight.
     """
     sizes: dict[str, int] = {}
-    for block in _DIFF_BLOCK_SPLIT.split(diff):
-        path = _diff_block_path(block)
-        if path is not None:
-            sizes.setdefault(path, len(block.encode("utf-8")))
+    for path, block in iter_diff_blocks(diff):
+        sizes.setdefault(path, len(block.encode("utf-8")))
     return sizes
 
 
@@ -43,11 +30,9 @@ def _pack_shards(
     max_bytes: int,
     blocks: list[list[str]],
 ) -> list[StackAssignment]:
-    """Pack ``blocks`` (whole components or singleton files) into bounded shards.
+    """Pack components within file/byte bounds, splitting oversized components into files.
 
-    Files-per-shard never exceeds ``max_files`` nor the byte budget; a block
-    larger than the bound splits deterministically into consecutive shards (a
-    single oversized file forms its own shard -- never split a file).
+    Never split a file: one oversized file may exceed the byte bound.
     """
     shards: list[StackAssignment] = []
     current: list[str] = []
@@ -92,12 +77,9 @@ def _pack_shards(
 def _assign_frontiers(
     shards: list[StackAssignment], edges: dict[str, set[str]], frontier_max: int
 ) -> None:
-    """Populate each shard's bounded cross-shard frontier in place.
+    """Assign sorted undirected import neighbors outside each shard, capped at frontier_max.
 
-    ``frontier_files`` of a shard = the (sorted) set of files in *other* shards
-    of the same language sharing an undirected import edge with this shard's
-    files, capped at ``frontier_max``. Frontier files are never added to primary
-    ``files`` (union of primary sets stays the changed set).
+    Frontier context never enters the primary file set.
     """
     adjacency: dict[str, set[str]] = {}
     for src, deps in edges.items():
@@ -125,24 +107,15 @@ def shard_stacks(
     frontier_max: int,
     graph: dict[str, set[str]] | None = None,
 ) -> list[StackAssignment]:
-    """Split oversized per-language stacks into bounded shards.
+    """Split oversized language stacks deterministically without dropping or duplicating files.
 
-    Pure and deterministic. Non-structural stacks whose file count or total
-    changed-byte size exceeds the bounds are split into consecutive
-    ``<name>#<i>`` shards; the union of all shard file sets equals the source
-    stack's set with no duplicates. When ``graph`` is provided and non-empty,
-    files are co-located by undirected import connected component (whole
-    components stay together when the shard has room) and cross-shard shared
-    files surface as a bounded frontier. Stacks at/under every bound are
-    returned unsplit with their original ``stack_name``; the structural
-    meta-stack is passed through unchanged. Total tasks never exceed
-    ``fanout_cap`` whenever the unsplit stacks alone fit under it: when the
-    total exceeds the cap, the largest sharded stacks are returned unsplit
-    (each un-split removes ``len(shards) - 1`` tasks) until it fits. A stack
-    that packs into a single shard -- one oversized file is never split -- is
-    unsplit-equivalent and keeps its original name. When the unsplit
-    non-structural stacks alone outnumber ``fanout_cap``, the total necessarily
-    exceeds it (files are never dropped or merged).
+    Keep fitting import components together; otherwise pack sorted singletons.
+    Frontiers provide bounded cross-shard context. Stacks within both bounds, or
+    packing into one shard, keep their original names. Structure passes through.
+
+    Reduce fan-out by restoring the largest shard groups to unsplit stacks, even
+    if those exceed file/byte bounds. If distinct non-structural stacks alone exceed
+    fanout_cap, retain them all: the cap cannot discard or merge stacks.
     """
     sizes = _file_change_bytes(diff)
     structural: list[StackAssignment] = []
@@ -164,9 +137,7 @@ def shard_stacks(
             blocks = [[f] for f in sorted(stack.files)]
         shards = _pack_shards(stack, sizes, max_files, max_bytes, blocks)
         if len(shards) == 1:
-            # One oversized file forms its own shard ("never split a file");
-            # that shard is unsplit-equivalent, so keep the stack unsplit under
-            # its original name -- it can never reduce the fan-out excess.
+            # Single-shard packs keep their original identity and cannot reduce fan-out.
             unsharded.append(stack)
             continue
         _assign_frontiers(shards, edges, frontier_max)
@@ -174,10 +145,7 @@ def shard_stacks(
 
     total = len(unsharded) + sum(len(shards) for _, shards in sharded)
     if total > fanout_cap and sharded:
-        # ``sharded`` holds only multi-shard packs (single-shard packs stay in
-        # ``unsharded`` above), so every un-split removes >= 1 task and the
-        # total provably fits the cap unless the unsplit stacks alone outnumber
-        # it -- in which case no shard exists to un-split.
+        # Each restored multi-shard stack removes at least one task; distinct stacks remain the floor.
         excess = total - fanout_cap
         for stack, shards in sorted(sharded, key=lambda t: (-len(t[1]), t[0].stack_name)):
             if excess <= 0:

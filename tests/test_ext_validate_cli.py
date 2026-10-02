@@ -1,10 +1,6 @@
-"""Real-path tests for ``daydream ext validate``.
+"""Exercise ext validate via cli.main/sys.argv and an ext_dir package.
 
-These drive ``cli.main`` through ``sys.argv`` (the production entrypoint,
-matching ``tests/test_cli_corpus_namespace.py``) and assert the exit code
-plus the user-visible stdout. The extension module comes from the ``ext_dir``
-fixture (``$DAYDREAM_EXT_DIR`` seam), so the loader, version gate, and
-registry resolve-check all run for real.
+The real loader, API gate, and registry checks determine stdout and exit status.
 """
 import re
 

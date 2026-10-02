@@ -174,13 +174,9 @@ def _bounded_probe_error(result: subprocess.CompletedProcess[str]) -> str:
 
 
 def docker_network_policy_capability() -> DockerNetworkPolicyCapability:
-    """Return whether Harbor's real Docker allowlist backend works now.
-
-    Harbor 0.22 fixes daemon-kernel capability detection, but a config-bit
-    check alone is not sufficient for Daydream's paid-run preflight.  Build
-    the exact content-addressed sidecar Harbor will use and load its complete
-    nftables ruleset.  Any import, build, Docker, timeout, or ruleset failure
-    is reported as unsupported; there is no public-networking fallback.
+    """Probe Harbor actual Docker sidecar and complete nftables ruleset. Any
+    import/build/Docker/timeout/ruleset failure means unsupported; a config flag alone
+    cannot authorize paid runs or public networking.
     """
     image_name: str | None = None
     try:
@@ -305,12 +301,9 @@ def _validate_compiled_local(root: Path) -> Path:
 
 
 def validate_compiled(root: Path | None) -> int:
-    """Validate local authoring/compiled state, all Harbor models, and the custom agent.
-
-    Runs the authoring preflight, the compiled-local inventory/leakage scan, the
-    same-interpreter Harbor resolution, the Harbor Task/JobConfig model checks, and
-    the custom-agent import preflight (``daydream.benchmark.harbor.agent`` must
-    import in this interpreter)."""
+    """Validate authoring/inventory/privacy, same-interpreter Harbor models, and
+    custom-agent importability.
+    """
     if root is None:
         resolve_harbor()
         raise PackageError("compiled workspace path is required")
@@ -451,13 +444,8 @@ def _strip_wheel_block(text: str, *, wheel: bool) -> str:
 
 
 def render_environment_dockerfile(*, base_image: str, daydream_version: str, wheel: bool = False) -> bytes:
-    """Render and validate the isolated agent environment image.
-
-    *wheel* selects whether the image installs the packaged Daydream wheel:
-    True keeps the ``COPY``/install block (with the wheel copied into
-    ``environment/`` by the compile path), False strips it so a wheel-less
-    compile cannot emit a self-referential ``COPY`` of a wheel that is never
-    written into the environment.
+    """Render the isolated image; include wheel COPY/install only when a wheel will be
+    packaged.
     """
     text = _render_and_check(
         "environment/Dockerfile",
@@ -483,13 +471,8 @@ def _render_and_check(
     error_label: str,
     transform: Callable[[str], str] | None = None,
 ) -> str:
-    """Read a Dockerfile template, substitute placeholders, then guard output.
-
-    Every rendered Dockerfile surface goes through this one render+validate
-    seam so their required/forbidden guard sets stay consistent: read the
-    packaged template, apply the *replaces*, run the optional *transform*
-    (e.g. wheel-block stripping), then assert the *required* and *forbidden*
-    tokens are present/absent, raising ``PackageError`` on violation.
+    """Render one Dockerfile and enforce its required/forbidden tokens, raising
+    PackageError on violations.
     """
     text = template_text(rel)
     for marker, value in replaces.items():
@@ -506,14 +489,9 @@ def _render_and_check(
 
 
 def _normalized_allowed_hosts(hosts: list[str] | None, label: str) -> list[str]:
-    """Normalize and sort an allowlist, failing closed on empty/invalid input.
-
-    Each host goes through ``schema.normalize_hostname`` (drops a
-    ``<scheme>://`` prefix, ``user:pass@`` credentials, a ``:port`` suffix, and
-    a trailing ``/path``; rejects wildcards, whitespace, empties, and dot-less
-    segments). The normalized list is sorted so the rendered TOML bytes stay
-    deterministic; a missing/empty list or a single bad host is a hard
-    ``PackageError`` -- there is no silent fallback host.
+    """Normalize and sort concrete hosts for deterministic policy bytes. Empty/invalid
+    lists fail closed; normalize_hostname removes URL decorations and rejects wildcards,
+    whitespace, empty hosts, and dot-less names.
     """
     if not hosts:
         raise PackageError(f"task network policy requires a non-empty {label} host list")
@@ -532,20 +510,10 @@ def render_task_toml(
     reviewer_hosts: list[str] | None = None,
     judge_hosts: list[str] | None = None,
 ) -> bytes:
-    """Render the Harbor schema-1.4 task configuration with an explicit network policy.
-
-    ``reviewer_hosts`` populate ``[agent].allowed_hosts`` (the boundary the
-    reviewing agent may reach) and ``judge_hosts`` populate the verifier's
-    separate ``[verifier.environment].allowed_hosts`` boundary -- the two
-    policies stay independent. Both lists are normalized and sorted before
-    rendering, and compilation fails closed (``PackageError``) on a missing,
-    empty, or invalid list rather than silently defaulting to a host.
-
-    The ``[environment.env]`` block comes from ``env_policy.TASK.injected``:
-    it threads the opaque per-case task key and the deterministic ``base``/``head``
-    ref names into the agent container (Harbor natively injects
-    ``[environment].env`` into the environment). No judge/credential/archive
-    configuration is ever rendered onto the agent surface.
+    """Render separate reviewer and verifier egress allowlists into Harbor schema 1.4.
+    Normalize/sort both lists and reject missing or invalid hosts. Inject only TASK
+    policy environment values (opaque key and base/head refs); judge, credential, and
+    archive configuration never enters the agent surface.
     """
     reviewer = _normalized_allowed_hosts(reviewer_hosts, "reviewer")
     judge = _normalized_allowed_hosts(judge_hosts, "judge")

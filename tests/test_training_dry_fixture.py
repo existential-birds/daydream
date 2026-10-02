@@ -1,5 +1,4 @@
-"""The committed projection fixture must pass the canonical loader gates and
-drive the training dry run (issue #1093, task 9)."""
+"""The committed projection fixture must pass loader gates and the canonical training dry run."""
 
 import json
 from pathlib import Path

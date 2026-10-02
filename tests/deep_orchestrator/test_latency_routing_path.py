@@ -56,13 +56,7 @@ _FORENSIC_BASELINE_ARBITER_INPUT: list[dict[str, object]] = [{
 
 
 def _medium_arbitration_profile() -> ResolvedProfile:
-    """The independent-alternatives profile with the arbiter floor at medium.
-
-    The default floor is ``high``, which would select only the one high-severity
-    record and make this a single-group (unsharded) run. Lowering the floor to
-    ``medium`` puts three distinct records into the selection so the fan-out has
-    more than one group to shard over.
-    """
+    """Lower the arbiter floor to medium so three selected groups exercise sharding."""
     base = independent_alternatives_profile()
     pipeline = replace(
         base.profile.pipeline, arbitration=replace(base.profile.pipeline.arbitration, min_severity="medium"),
@@ -76,15 +70,7 @@ async def _run_profile(
     parse_severity: str | None = None, parse_by_stack: dict[str, dict[str, Any]] | None = None,
     merge_echo_records: bool = False,
 ) -> tuple[StubBackend, Path]:
-    """Run the stub pipeline for one latency profile; return its stub and deep dir.
-
-    Shared preamble: silence, install the stub, apply the optional stub knobs,
-    mute side effects, and run with the independent-alternatives profile unless
-    *review_profile* overrides it. Callers keep only the flags that distinguish
-    their scenario plus their own assertions. *merge_echo_records* makes the
-    merge agent echo the on-disk per-stack records so arbitration verdicts are
-    observable in the shipped merged items.
-    """
+    """Run a configured stub profile; optionally echo records to expose adjudication results."""
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, target)
     stub.parse_severity = parse_severity
@@ -160,13 +146,7 @@ async def test_forensic_reproduces_todays_wonder_and_arbiter_artifacts(
 async def test_single_group_sharding_profile_matches_forensic_arbiter_artifacts(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """A sharding profile with one co-located group still runs today's single xhigh call.
-
-    All selected records sit at ``api.py:1``, so ``partition_arbiter_targets``
-    returns one group and ``arbiter_plan`` takes the unsharded path. The arbiter
-    artifacts must therefore equal the forensic baseline's exactly, not merely
-    "also exist".
-    """
+    """Co-located targets take one xhigh call and produce artifacts identical to forensic."""
     _, deep = await _run_profile(
         monkeypatch, make_config, mute_side_effects, multi_stack_target, latency_profile="balanced",
         parse_severity="high",

@@ -1,6 +1,7 @@
 """Real-process tests for the bounded host-side test runner."""
 
 import asyncio
+import json
 import os
 import sys
 import time
@@ -19,6 +20,7 @@ from daydream.test_execution import (
     canonical_test_command,
     load_test_recipe,
     persist_test_recipe,
+    recipe_to_payload,
     resolve_package,
     resolve_test_command_fact,
     resolve_test_recipe,
@@ -65,31 +67,18 @@ def test_runner_nonzero_exit_sets_passed_false(tmp_path: Path) -> None:
     assert res.passed is False
     assert "boom" in res.merged_output
 
-def test_canonical_command_from_cli_overrides_config() -> None:
-
-    cfg = SimpleNamespace(test_command="pytest -x")  # config value
-    run = SimpleNamespace(test_command="/cli/cmd")  # CLI wins
-    assert canonical_test_command(cfg, run) == ["/cli/cmd"]
-
-def test_canonical_command_from_config_when_cli_unset() -> None:
-
-    cfg = SimpleNamespace(test_command="uv run pytest -n auto")
-    run = SimpleNamespace(test_command=None)
-    assert canonical_test_command(cfg, run) == ["uv", "run", "pytest", "-n", "auto"]
-
-def test_command_fact_records_cli_provenance_over_config() -> None:
-    cfg = SimpleNamespace(test_command="pytest -x")
-    run = SimpleNamespace(test_command="/cli/cmd")
+@pytest.mark.parametrize(("config", "cli", "expected", "source"), [
+    ("pytest -x", "/cli/cmd", ["/cli/cmd"], "cli"),
+    ("uv run pytest -n auto", None, ["uv", "run", "pytest", "-n", "auto"], "config"),
+])
+def test_command_and_provenance_share_cli_over_config_precedence(
+    config: str, cli: str | None, expected: list[str], source: str,
+) -> None:
+    cfg, run = SimpleNamespace(test_command=config), SimpleNamespace(test_command=cli)
+    assert canonical_test_command(cfg, run) == expected
     fact = resolve_test_command_fact(cfg, run)
-    assert fact.value == ("/cli/cmd",)
-    assert fact.source == "cli"
-
-def test_command_fact_records_config_provenance_when_cli_unset() -> None:
-    fact = resolve_test_command_fact(
-        SimpleNamespace(test_command="uv run pytest -n auto"), SimpleNamespace(test_command=None),
-    )
-    assert fact.value == ("uv", "run", "pytest", "-n", "auto")
-    assert fact.source == "config"
+    assert fact.value == tuple(expected)
+    assert fact.source == source
 
 @pytest.mark.parametrize("config", [None, "", "'unbalanced"])
 def test_command_fact_is_unresolved_and_never_guessed(config: str | None) -> None:
@@ -142,8 +131,7 @@ def test_runner_timeout_kills_process_group_and_reports_timed_out(tmp_path: Path
     assert _pid_alive(pid) is False
 
 async def test_runner_records_duration_and_phase(tmp_path: Path) -> None:
-    """Issue #726 task 12: with a trajectory recorder active, the host runner emits phase events distinguishable as
-    ``test-execution``, carrying a ``duration_ms`` and a ``stop_reason`` in {completed, timed_out}."""
+    """Record test-execution duration_ms and a completed/timed_out reason."""
 
     rec = make_recorder(tmp_path)
     async with rec:
@@ -172,16 +160,13 @@ async def test_runner_records_timed_out_stop_reason(tmp_path: Path) -> None:
     assert events[0]["metadata"]["stop_reason"] == "timed_out"
 
 def test_runner_fails_closed_when_env_value_survives_scrub(tmp_path: Path) -> None:
-    """An env value the replacement marker itself carries (a substring of "[REDACTED_ENV_VAR]") can never be scrubbed
-    clean by replace(); the fail-closed gate -- keyed off the pre-replacement buffer -- degrades the whole field
-    rather than emit a buffer that still shows the secret."""
+    """If a secret survives inside the replacement marker, discard the field based on pre-scrub matches."""
     res = _run([sys.executable, "-c", "print('REDACTED', flush=True)"], tmp_path, env={"STUCK": "REDACTED"},)
     assert res.passed is True
     assert res.merged_output == "[REDACTION_FAILED]"
 
 def test_runner_scrubs_inherited_env_when_env_omitted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Production call sites pass no env, so the subprocess inherits the parent environment; the scrub must cover
-    exactly those inherited values (the only env values that can appear in the merged output)."""
+    """An omitted env uses the inherited environment for both execution and output scrubbing."""
     secret = "ENV-SECRET-8f3a"
     monkeypatch.setenv("DAYDREAM_TEST_SECRET", secret)
 
@@ -231,10 +216,7 @@ def _recipe(tmp_path: Path, *, cli: str | None = None, config: str | None = None
     )
 
 def test_required_suites_fall_back_to_the_file_config_and_yield_to_an_explicit_source(tmp_path: Path,) -> None:
-    """The recipe declares the file config's suites; an explicit source outranks it.
-
-    ``RunConfig.test_required_suites`` has no producer today, so the file-config fallback is the live path. Both
-    halves are pinned here so the precedence slot cannot silently change which suites a run declares."""
+    """Required suites fall back to file config; an explicit source takes precedence."""
     config = SimpleNamespace(test_command="uv run pytest", test_required_suites=["python", "rl"])
 
     recipe = resolve_test_recipe(config, SimpleNamespace(test_command=None), repo_root=tmp_path)
@@ -300,10 +282,15 @@ def test_result_serialises_completion_timeout_and_truncation_explicitly(tmp_path
     payload = asdict(_run([sys.executable, "-c", "pass"], tmp_path))
     assert set(payload) >= {"exit_status", "timed_out", "completed", "output_truncated", "incomplete"}
 
-def test_recipe_round_trips_through_its_persisted_payload(tmp_path: Path) -> None:
+@pytest.mark.parametrize("cli", [None, "uv run pytest"])
+@pytest.mark.parametrize("lockfile", [None, "uv.lock", "requirements.txt"])
+def test_recipe_round_trips_through_its_persisted_payload(
+    tmp_path: Path, cli: str | None, lockfile: str | None,
+) -> None:
     (tmp_path / "pyproject.toml").write_text("[project]\nname = 'x'\n")
-    (tmp_path / "uv.lock").write_text("version = 1\n")
-    recipe = _recipe(tmp_path, cli="uv run pytest")
+    if lockfile is not None:
+        (tmp_path / lockfile).write_text("version = 1\n")
+    recipe = _recipe(tmp_path, cli=cli)
     deep = tmp_path / ".daydream" / "deep"
     deep.mkdir(parents=True)
 
@@ -314,6 +301,9 @@ def test_recipe_round_trips_through_its_persisted_payload(tmp_path: Path) -> Non
     assert loaded.command.value == recipe.command.value
     assert loaded.package.cwd_relative == recipe.package.cwd_relative
     assert loaded.package.config_digest == recipe.package.config_digest
+    assert loaded == recipe
+    payload = recipe_to_payload(recipe)
+    assert json.loads(json.dumps(payload)) == payload
 
 @pytest.mark.parametrize("writer",
     [lambda d: None, lambda d: (d / "test-recipe.json").write_text("{not json"),
@@ -332,6 +322,8 @@ def test_execution_identity_carries_every_reuse_component() -> None:
 
     assert identity.reusable is True
     assert identity.payload()["config_digest"] == "d" * 64
+    assert identity.payload()["argv"] == list(identity.argv)
+    assert identity.payload()["absent_components"] == list(identity.absent_components)
 
 @pytest.mark.parametrize("outcome", ["failed", "timed-out", "truncated"])
 def test_only_a_passed_host_outcome_is_reusable(outcome: str) -> None:

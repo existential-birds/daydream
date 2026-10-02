@@ -67,7 +67,6 @@ def test_raise_for_exit_kwarg_shape_is_per_adapter() -> None:
                 1, error_type=_Recorder, category="PROCESS_EXIT", build_message=build_message, retryable=retryable,
             )
         built.append(exc_info.value.kwargs)
-    # codex/osprey pass no retryable= kwarg; pi's is forwarded verbatim.
     assert built == [{"category": "PROCESS_EXIT"}, {"category": "PROCESS_EXIT", "retryable": True}]
 
 async def test_teardown_is_idempotent_and_drops_the_transport(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -96,8 +95,7 @@ def test_process_exit_message_reports_the_count_it_prints() -> None:
         "(no non-JSON output captured — pi may have crashed before writing to stdout)"
     )
 
-# Shared parser contracts (the helpers the pi env facades delegate to) plus
-# the delegating facades themselves. The parsers have no other direct test.
+# Parser and facade coverage.
 
 @pytest.mark.parametrize(
     ("raw", "expected", "warning"),
@@ -157,15 +155,14 @@ def test_pi_facades_delegate_to_the_shared_parsers(
     if env_value not in (None, "5"):
         assert f"DAYDREAM_PI_RETRY_ATTEMPTS={env_value!r}" in caplog.text   # the warning still names the knob
 
-# Per-adapter lifecycle (requirement 13): drive the real backends through the
-# transport seam (only the OS fork is replaced) and pin the observable outcome.
+# Real drivers with only OS process spawning replaced.
 
 async def _drive(
     backend: Any, stdout_lines: list[str], *, exit_code: int = 0, stderr_lines: list[str] | None = None,
 ) -> tuple[list[Any], FakeCliProcess]:
-    """Drive *backend* with a fake child; return the emitted events and the child. stdout_lines are raw lines (the
-    adapters decode/parse them); osprey callers pass JSON-encoded events in stdout_lines and its diagnostics in
-    stderr_lines, because osprey is the only adapter on StderrPolicy.DRAIN_TASK."""
+    """Return events and the fake child. Osprey receives JSONL stdout separately from diagnostic stderr;
+    Codex/Pi merge their streams.
+    """
     proc = FakeCliProcess(stdout_lines, exit_code=exit_code, stderr_lines=stderr_lines)
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
         events = [event async for event in backend.execute(Path("/tmp"), "p")]
@@ -179,7 +176,6 @@ def _assert_clean_lifecycle(backend: Any, proc: FakeCliProcess) -> None:
     assert backend._transports == [], "the shared teardown must drop the transport from the backend list"
 
 def _osprey_stream() -> list[str]:
-    """The minimal valid session, as the raw JSON lines ``_drive`` feeds osprey."""
     return [json.dumps(event) for event in osprey_session()]
 
 async def test_codex_process_exit_message_anchor_and_count() -> None:
@@ -237,9 +233,8 @@ async def test_osprey_clean_exit_lifecycle() -> None:
     _events, proc = await _drive(backend, _osprey_stream())
     _assert_clean_lifecycle(backend, proc)
 
-# Structural guard: the reap / raise / teardown sequence lives once, in the
-# owner module. The detectors are liveness-proven (each is asserted to fire on
-# a synthetic offender) so an empty scan can never pass because it is broken.
+# The finalization sequence belongs in one module. Synthetic offenders prove each structural
+# detector works, so a broken scan cannot pass empty.
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _BACKENDS_DIR = _REPO_ROOT / "daydream" / "backends"
@@ -247,7 +242,6 @@ _OWNER = "daydream/backends/_transport.py"
 _OWNER_SURFACE = frozenset({"reap", "raise_for_exit", "teardown"})
 
 def _is_transport_exit_error(node: ast.expr | None) -> bool:
-    """True when *node* names ``TransportExitError``, however it is referenced."""
     if isinstance(node, ast.Name):
         return node.id == "TransportExitError"
     if isinstance(node, ast.Attribute):
@@ -257,7 +251,6 @@ def _is_transport_exit_error(node: ast.expr | None) -> bool:
     return False
 
 def _names_cli_transport(annotation: ast.expr | None) -> bool:
-    """True when *annotation* is ``CliTransport``, possibly inside a union."""
     if isinstance(annotation, ast.Name):
         return annotation.id == "CliTransport"
     if isinstance(annotation, ast.Attribute):

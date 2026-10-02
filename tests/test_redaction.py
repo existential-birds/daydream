@@ -1,10 +1,4 @@
-"""REDA-01..06 unit tests for ``daydream.trajectory.Redactor``.
-
-Pattern: positive case (secret present, asserts replacement token in
-output and raw value absent), negative case (clean input, asserts no
-``[REDACTED_*]`` tokens appear). Plus REDA-04 surface coverage and
-REDA-05 fail-safe.
-"""
+"""Redaction positives, clean-input negatives, field coverage, and fail-closed behavior."""
 
 from __future__ import annotations
 
@@ -14,10 +8,10 @@ import time
 
 import pytest
 
-from daydream import trajectory as traj_mod
+from daydream import redaction as redaction_mod
 from daydream.atif import ContentPart, Observation, ObservationResult, Step, ToolCall
 from daydream.atif.models.content import ImageSource
-from daydream.trajectory import Redactor, now_iso, redact_structured_text, redact_value
+from daydream.trajectory import Redactor, now_iso, redact_structured_text, redact_value, redactor as redactor_mod
 
 
 def _user_step(message: str) -> Step:
@@ -58,7 +52,6 @@ def test_redactor_scrubs_single_token_secret(text: str, raw_secret: str, marker:
 
 
 def test_redactor_preserves_short_eyj_non_jwt() -> None:
-    """TEST-03 negative: short eyJ-prefixed strings without JWT dot structure pass through."""
     out = Redactor().redact_step(_user_step("eyJhbG is a prefix"))
     assert isinstance(out.message, str)
     assert "[REDACTED_JWT]" not in out.message
@@ -66,7 +59,6 @@ def test_redactor_preserves_short_eyj_non_jwt() -> None:
 
 
 def test_redactor_applies_to_step_message_surface() -> None:
-    """TEST-03 surface: secrets in Step.message are redacted (explicit surface test)."""
     step = _agent_step(message="key is ghp_ABCDEF1234567890abcdef1234567890abcdef")
     out = Redactor().redact_step(step)
     assert isinstance(out.message, str)
@@ -117,7 +109,6 @@ def test_redactor_scrubs_env_var(text: str, raw_value: str, expected_fragment: s
 
 
 def test_redactor_preserves_non_secret_env_vars() -> None:
-    """REDA-03 negative: DEBUG=true and APP_NAME=foo pass through unredacted."""
     out = Redactor().redact_step(_user_step("DEBUG=true\nAPP_NAME=myproject"))
     assert isinstance(out.message, str)
     assert "DEBUG=true" in out.message
@@ -128,14 +119,12 @@ def test_redactor_preserves_non_secret_env_vars() -> None:
     [pytest.param("./src/app.py", id="relative-path"), pytest.param("https://github.com/user/repo", id="url")],
 )
 def test_redactor_preserves_clean_strings(clean_text: str) -> None:
-    """Leave non-secret prose, commands, URLs, and identifiers unchanged."""
     out = Redactor().redact_step(_user_step(clean_text))
     assert isinstance(out.message, str)
     assert out.message == clean_text
 
 
 def test_redactor_applies_to_reasoning_content() -> None:
-    """REDA-04: secrets inside Step.reasoning_content are redacted."""
     step = _agent_step(reasoning_content="thought: sk-test-secret123abc")
     out = Redactor().redact_step(step)
     assert out.reasoning_content is not None
@@ -143,7 +132,6 @@ def test_redactor_applies_to_reasoning_content() -> None:
     assert "[REDACTED_API_KEY]" in out.reasoning_content
 
 def test_redactor_applies_to_tool_call_arguments() -> None:
-    """REDA-04: secrets inside ToolCall.arguments values are redacted."""
     call = ToolCall(tool_call_id="t1", function_name="Bash", arguments={"command": "echo sk-test-secret123abc"},)
     step = _agent_step(tool_calls=[call])
     out = Redactor().redact_step(step)
@@ -153,7 +141,6 @@ def test_redactor_applies_to_tool_call_arguments() -> None:
     assert "[REDACTED_API_KEY]" in args_str
 
 def test_redactor_applies_to_observation_content() -> None:
-    """REDA-04: secrets inside ObservationResult.content are redacted."""
     obs = Observation(results=[ObservationResult(source_call_id="t1", content="leaked /Users/ka/.ssh/id_rsa")],)
     step = _agent_step(observation=obs)
     out = Redactor().redact_step(step)
@@ -165,16 +152,14 @@ def test_redactor_applies_to_observation_content() -> None:
 
 
 def test_redactor_failure_mode_replaces_with_redaction_failed(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """REDA-05: when an internal regex raises, the field becomes [REDACTION_FAILED] — never raw."""
-
     class _BoomPattern:
         def sub(self, *_args: object, **_kwargs: object) -> str:
             raise RuntimeError("boom")
 
     # Replace the first rule so redact_structured_text raises on the first call.
-    original_rules = traj_mod._REDACTION_RULES
+    original_rules = redaction_mod._REDACTION_RULES
     boom_rules = ((_BoomPattern(), "[REDACTED_API_KEY]"), *original_rules[1:])
-    monkeypatch.setattr(traj_mod, "_REDACTION_RULES", boom_rules)
+    monkeypatch.setattr(redaction_mod, "_REDACTION_RULES", boom_rules)
 
     out = Redactor().redact_step(_user_step("OPENAI_API_KEY=sk-leakthis123"))
     assert isinstance(out.message, str)
@@ -183,19 +168,6 @@ def test_redactor_failure_mode_replaces_with_redaction_failed(monkeypatch: pytes
 
 
 def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
-    """CR-01 regression: non-string nested values must round-trip through json, not stay as JSON string.
-
-    The Edit tool's `arguments` is `{"old_string": "...", "new_string": "..."}`,
-    which is a dict whose values are strings — the string branch handles those.
-    But MultiEdit's `arguments` is `{"edits": [{...}, {...}]}` where the value
-    is a list of dicts, and MCP tool envelopes can have arbitrary nested
-    structure. Those must round-trip through json.dumps + redact + json.loads
-    so ToolCall.arguments keeps its declared dict[str, Any] shape.
-
-    Pre-fix bug: the inverted ternary stored the redacted JSON-encoded string
-    (rather than the parsed Python structure) whenever redaction changed any
-    text — corrupting every MultiEdit / nested MCP arguments value.
-    """
     # Path triggers redaction so we exercise the redaction-changed-the-text branch (the bug only fires then).
     nested_value = [{"path": "/Users/alice/repo/file.py", "edit_type": "replace"},
         {"path": "/Users/alice/repo/other.py", "edit_type": "delete"},
@@ -212,7 +184,6 @@ def test_redact_arguments_preserves_dict_structure_for_nested_values() -> None:
     assert "[REDACTED_USER]" in serialized_back
 
 def test_redact_arguments_passthrough_when_no_secret() -> None:
-    """Non-string values without secrets must round-trip cleanly to the same Python structure."""
     arguments = {"count": 42, "flags": ["a", "b"], "config": {"x": 1, "y": [1, 2, 3]}}
     out = Redactor()._redact_arguments(arguments)
     assert out["count"] == 42
@@ -220,12 +191,10 @@ def test_redact_arguments_passthrough_when_no_secret() -> None:
     assert out["config"] == {"x": 1, "y": [1, 2, 3]}
 
 def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """When the recursive native walk raises, that key falls back to [REDACTION_FAILED]."""
-
     def _boom(value: object, sensitive: bool = False) -> object:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(traj_mod, "redact_value", _boom, raising=True)
+    monkeypatch.setattr(redactor_mod, "redact_value", _boom, raising=True)
     out = Redactor()._redact_arguments({"edits": [{"x": 1}]})
     assert out["edits"] == "[REDACTION_FAILED]"
 
@@ -234,12 +203,7 @@ def test_redact_arguments_recursive_failure_falls_back_to_redaction_failed(monke
     ["MONKEY_PATCH=enabled", "KEYBOARD_LAYOUT=qwerty", "AUTHOR=alice", "TOKENIZED=foo", "KEYSTORE=path/to/store"],
 )
 def test_env_var_pattern_does_not_match_substring_lookalikes(non_secret: str) -> None:
-    """WR-03 regression: env-var redaction is segment-aware, not substring-based.
-
-    The original pattern matched any var name containing KEY/SECRET/TOKEN/AUTH
-    as a substring. The fix requires the secret keyword to appear as a full
-    underscore-separated segment.
-    """
+    """Credential names require complete underscore-delimited segments, not substrings."""
     out = Redactor().redact_step(_user_step(non_secret))
     assert isinstance(out.message, str)
     assert "[REDACTED_ENV_VAR]" not in out.message
@@ -253,7 +217,6 @@ def test_env_var_pattern_does_not_match_substring_lookalikes(non_secret: str) ->
     ],
 )
 def test_env_var_pattern_redacts_legitimate_secret_segments(secret: tuple[str, str],) -> None:
-    """WR-03 regression: real secret env vars still redact correctly."""
     line, raw_value = secret
     out = Redactor().redact_step(_user_step(line))
     assert isinstance(out.message, str)
@@ -262,14 +225,6 @@ def test_env_var_pattern_redacts_legitimate_secret_segments(secret: tuple[str, s
 
 
 def test_redactor_failure_mode_wipes_all_text_bearing_fields(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """WR-04 regression: top-level fallback wipes message, reasoning_content, tool_calls, observation.
-
-    Triggers the outer ``except`` by patching ``Redactor._redact_optional_text``
-    to raise. Without the fix, only ``message`` is wiped and the remaining
-    text-bearing fields pass through unredacted — secrets in
-    ``reasoning_content`` / ``tool_calls.arguments`` / ``observation.results``
-    leak.
-    """
     def _boom(self: object, value: object) -> str:
         raise RuntimeError("simulated regex failure deep in pipeline")
 
@@ -296,8 +251,6 @@ def test_redactor_failure_mode_wipes_all_text_bearing_fields(monkeypatch: pytest
 
 
 def test_redactor_scrubs_text_content_parts() -> None:
-    """Text parts in a multimodal message must be redacted; image parts left intact."""
-
     parts = [ContentPart(type="text", text="key=sk-test-secret123abc"),
         ContentPart(type="image", source=ImageSource(media_type="image/png", path="screenshot.png"),),
         ContentPart(type="text", text="clean text"),
@@ -374,7 +327,6 @@ def test_redactor_scrubs_private_key_in_env_assignment(pem: str, body: str) -> N
     assert out.message == "DAYDREAM_APP_PRIVATE_KEY=[REDACTED_ENV_VAR]"
 
 def test_redactor_preserves_certificate_block() -> None:
-    """BEGIN CERTIFICATE blocks are public material — not redacted."""
     cert = ("-----BEGIN CERTIFICATE-----\n" "MIIDdzCCAl+gAwIBAgIEAgAAuTANBgkq\n" "-----END CERTIFICATE-----")
     out = Redactor().redact_step(_user_step(f"cert: {cert}"))
     assert isinstance(out.message, str)
@@ -382,8 +334,6 @@ def test_redactor_preserves_certificate_block() -> None:
     assert "BEGIN CERTIFICATE" in out.message
 
 def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> None:
-    """redact_value redacts string leaves AND string dict keys recursively, in
-    fresh containers, and never mutates its argument."""
     sentinel = "ghp_" + "x" * 16
     payload = {"token": sentinel, sentinel: "key-secret", "nested": {"path": f"/Users/{sentinel}"},
         "items": [sentinel, 42, None], "flag": True, 1: "non-string-key",
@@ -403,8 +353,6 @@ def test_redact_value_recurses_redacts_keys_and_values_without_mutating() -> Non
     "apiKey", "client-secret", "Access_Token", "dbPassword", "AUTHORIZATION", "awsSecretAccessKey",
 ])
 def test_redactor_scrubs_sensitive_keys_recursively(sensitive_key: str) -> None:
-    """Sensitive-key values are replaced with [REDACTED_CREDENTIAL] at nested depth;
-    clean siblings survive."""
     sentinel = "opaque-test-only-sentinel"
     call = ToolCall(tool_call_id="t1", function_name="Bash",
         arguments={sensitive_key: {"nested": {"token": sentinel}}, "displayName": "visible"},
@@ -419,7 +367,6 @@ def test_redactor_scrubs_sensitive_keys_recursively(sensitive_key: str) -> None:
 
 @pytest.mark.parametrize("non_secret_key", ["tokenizer", "passwordless", "monkeyPatch", "keyStore", "max_tokens"])
 def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -> None:
-    """WR-03 guard: keys that merely contain a secret term as a substring are untouched."""
     call = ToolCall(tool_call_id="t1", function_name="Bash", arguments={non_secret_key: "opaque-test-only-sentinel"},)
     out = Redactor().redact_step(_agent_step(tool_calls=[call]))
     assert out.tool_calls is not None
@@ -433,7 +380,6 @@ def test_redactor_preserves_non_sensitive_structured_keys(non_secret_key: str) -
     "apiKey: opaque-test-only-sentinel", "client-secret = opaque-test-only-sentinel",
 ])
 def test_redactor_scrubs_sensitive_key_value_text_formats(text: str) -> None:
-    """The same leak is caught in JSON, Python-repr, YAML-like, and assignment text."""
     out = Redactor().redact_step(_user_step(text))
     assert isinstance(out.message, str)
     assert "opaque-test-only-sentinel" not in out.message
@@ -460,8 +406,6 @@ def test_redactor_scrubs_authorization_header_values(header: str, value: str, sc
 
 
 def test_redactor_scrubs_mid_line_authorization_header() -> None:
-    """A header embedded mid-line (curl -H, tool output) redacts the whole token,
-    not just the Bearer scheme word."""
     text = 'curl -H "Authorization: Bearer opaque-token-xyz" https://api'
     out = Redactor().redact_step(_user_step(text))
     assert isinstance(out.message, str)
@@ -510,14 +454,10 @@ def test_redactor_preserves_prose_with_sensitive_word_colon(text: str) -> None:
     assert "[REDACTED_CREDENTIAL]" not in out
 
 def test_redactor_keeps_comma_in_bare_yaml_pair() -> None:
-    """'token: abc, other: 1' keeps its comma: the bare value stops at the
-    separator instead of swallowing it and merging the next pair."""
     out = redact_structured_text("token: abc, other: 1")
     assert out == 'token: "[REDACTED_CREDENTIAL]", other: 1'
 
 def test_redactor_scrubs_scheme_pair_under_sensitive_key() -> None:
-    """A bare 'Bearer|Basic|Token <opaque>' pair under a sensitive key redacts
-    the opaque token, not just the scheme word."""
     out = redact_structured_text("token: Bearer opaque-token-xyz")
     assert "opaque-token-xyz" not in out
     assert "token: Bearer [REDACTED_CREDENTIAL]" in out
@@ -533,8 +473,6 @@ def test_redactor_linear_scan_nested_pair_in_bare_value() -> None:
     assert out.startswith("note:")
 
 def test_redactor_linear_scan_nested_pair_in_quoted_value() -> None:
-    """The same nested pair inside a quoted value is redacted while the outer
-    key stays untouched."""
     out = redact_structured_text('note: "apiKey: sk-opaque123"')
     assert "sk-opaque123" not in out
     assert "[REDACTED" in out
@@ -571,13 +509,9 @@ def test_redactor_linear_scan_separatorless_large_text_unchanged() -> None:
     assert out == text
 
 def test_redactor_sensitive_suffix_scan_is_linear() -> None:
-    """The sensitive-suffix discovery must not blow up quadratically on a
-    long non-sensitive key run that ends with a separator + sensitive pair.
-    Before the fix the per-position ``_is_sensitive_key(text[s2:])`` calls
-    made 100K chars take ~77s; 5s is a generous deterministic ceiling, not
-    a tight bound (mirrors ``test_large_diagnostic_formatting_completes_quickly``).
-    The value is one only the structured pass redacts, so the marker proves
-    the pair after the long run was still found and redacted."""
+    """Bound a long nonsensitive run while still redacting its trailing sensitive pair.
+
+    The 5s ceiling is generous; the credential marker proves the structured pass ran."""
 
     text = "a" * 200_000 + "=x token=opaque-test-only-sentinel"
     start = time.perf_counter()
@@ -590,12 +524,7 @@ def test_redactor_sensitive_suffix_scan_is_linear() -> None:
     assert "=x " in out
 
 def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
-    """Separator-heavy key runs must not re-enable the O(n^2) suffix scan.
-
-    Before the fix, each '_' position inside the run walked the remainder of
-    the run (the length bound cannot fire on separators), so 100K separators
-    took ~180s. 10s is a generous deterministic ceiling, not a tight bound.
-    """
+    """A 100K-separator run must remain linear under a generous 10s ceiling."""
 
     seps = "_" * 100_000
 
@@ -636,10 +565,6 @@ def test_redactor_separator_heavy_suffix_scan_is_linear() -> None:
     "nullpasswd:\n  nested: opaque-test-only-sentinel\n",
 ])
 def test_redactor_scrubs_sensitive_suffix_in_non_sensitive_key(text: str) -> None:
-    """A SENSITIVE suffix embedded in a non-sensitive key run is still
-    redacted at its own anchor: `defauthorization` contains `authorization`,
-    `nullpasswd` contains `passwd`, `fooapi_key` contains `api_key`. The
-    non-sensitive prefix is preserved verbatim (issue #1236 Task 2b Gap 2)."""
     out = redact_structured_text(text)
     assert "opaque-test-only-sentinel" not in out
     assert "[REDACTED_CREDENTIAL]" in out

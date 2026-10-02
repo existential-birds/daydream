@@ -1,23 +1,8 @@
-"""Hardcoded price table for cost synthesis.
+"""Static reviewed prices for synthesizing cost when backend USD usage is absent.
 
-Provide a static, code-reviewed price table covering the models daydream runs
-through the Codex, Pi, and direct API backends. Used by the enriched PR comment
-renderer to synthesize cost from token counts when a backend (notably Codex)
-does not surface USD cost directly. Anthropic-backed runs use cost values
-already supplied by the Claude SDK and do not pass through this module.
-
-Lookup is exact-match, so aliases (e.g. bare `gpt-5.6`) need their own entry,
-and archived usage is resolved by its recorded timestamp. Entries are never
-removed: archived trajectories still reference retired model ids.
-
-Exports:
-    ModelPrice: dataclass holding input/cached_input/output USD per 1M tokens.
-    MODEL_PRICES: dict[str, ModelPrice] - the built-in price table.
-    load_user_prices: parse user-supplied price overrides from a TOML file.
-    resolve_prices: merge user overrides over the built-in price table.
-    compute_cost: function returning USD cost or None for unknown models.
-    compute_cost_from_totals: compute_cost variant taking total (not uncached) input tokens.
-"""
+Lookup uses exact model ids and archived timestamps. Keep retired ids for old
+trajectories. User overrides replace built-in policies per model; Claude SDK
+costs bypass this table."""
 
 from __future__ import annotations
 
@@ -37,13 +22,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """USD price per 1M tokens for a single model.
-
-    Attributes:
-        input: USD per 1M uncached input tokens.
-        cached_input: USD per 1M cached input tokens.
-        output: USD per 1M output tokens.
-    """
+    """USD per million uncached-input, cached-input, and output tokens."""
 
     input: float
     cached_input: float
@@ -125,12 +104,10 @@ _BUILTIN_POLICIES: dict[str, PricingPolicy] = {
 }
 
 def _coerce_price(model: str, table: Any) -> ModelPrice | None:
-    """Coerce one ``[prices."<model>"]`` table into a ModelPrice, or None.
+    """Validate a model table; log and skip invalid entries.
 
-    Requires ``input`` and ``output`` (numeric, >= 0). ``cached_input`` is
-    optional and defaults to ``input``. Any missing, non-numeric, or negative
-    required field is logged and yields None so the caller skips the model.
-    """
+    input/output are required finite nonnegative numbers; cached_input defaults to
+    input. Booleans are not prices."""
     if not isinstance(table, dict):
         logger.warning("daydream prices: entry %r is not a table — skipping", model)
         return None
@@ -169,19 +146,10 @@ def _coerce_price(model: str, table: Any) -> ModelPrice | None:
 
 
 def load_user_prices(path: Path | None = None) -> dict[str, ModelPrice]:
-    """Load user-supplied price overrides from a TOML file.
+    """Load model overrides from explicit path, environment, or ~/.daydream/prices.toml.
 
-    Resolves the file from, in order: the explicit ``path`` argument, the
-    ``$DAYDREAM_PRICES_FILE`` environment variable, then
-    ``~/.daydream/prices.toml``. Parses ``[prices."<model>"]`` tables. Each
-    entry requires numeric, non-negative ``input`` and ``output``;
-    ``cached_input`` is optional and defaults to ``input``. Invalid entries are
-    logged and skipped; an absent file or malformed TOML yields ``{}``.
-
-    Raises:
-        Never. All error conditions are logged and yield ``{}`` or skip the
-        offending entry.
-    """
+    Invalid entries are logged and skipped; absent/malformed TOML yields {}.
+    Required input/output and optional cached_input use the same validation."""
     if path is None:
         env_path = os.environ.get("DAYDREAM_PRICES_FILE")
         if env_path:
@@ -209,11 +177,7 @@ def load_user_prices(path: Path | None = None) -> dict[str, ModelPrice]:
 
 
 def resolve_prices(overrides: dict[str, ModelPrice] | None = None) -> dict[str, ModelPrice]:
-    """Merge user overrides over the built-in price table.
-
-    Returns:
-        A new dict of built-in prices with ``overrides`` applied per-model.
-    """
+    """Merge overrides into a fresh table, retaining policies only for non-overridden models."""
     override_models = set(overrides or {})
     return _ResolvedPrices(
         {**MODEL_PRICES, **(overrides or {})},
@@ -231,19 +195,10 @@ def compute_cost(
     total_input_tokens: int | None = None,
     effective_date: date | None = None,
 ) -> float | None:
-    """Compute USD cost for a model invocation, or None for unknown models.
+    """Price uncached input, cached input, and output; unknown models return None.
 
-    Args:
-        model: Model identifier (e.g. "gpt-5.5"). Must match a key in the
-            active price table.
-        cached_input_tokens: Count of cached input tokens (priced separately).
-        prices: Optional price table to look up in. When None, the built-in
-            ``MODEL_PRICES`` is used (back-compatible with existing callers).
-        total_input_tokens: Total request input used for context-sensitive
-            policies; defaults to uncached plus cached input.
-        effective_date: Usage date for effective-date-aware policies; omitted
-            dates preserve the table's standard-rate behavior.
-    """
+    Context policy uses total_input_tokens or their summed input counts. Omitted
+    usage dates retain standard-rate behavior; an explicit table controls lookup."""
     table = MODEL_PRICES if prices is None else prices
     price = table.get(model)
     if price is None:
@@ -271,23 +226,7 @@ def compute_cost_from_totals(
     prices: dict[str, ModelPrice] | None = None,
     effective_date: date | None = None,
 ) -> float | None:
-    """Compute USD cost from total input tokens, or None for unknown models.
-
-    Backends report ``cached_input_tokens`` as a subset of the total input
-    count, while :func:`compute_cost` prices *uncached* input. This variant
-    derives the uncached count (clamped at zero) and delegates, so callers
-    never repeat that subtraction.
-
-    Args:
-        model: Model identifier (e.g. "gpt-5.5"). Must match a key in the
-            active price table.
-        total_input_tokens: Total input tokens including cached ones.
-        cached_input_tokens: Count of cached input tokens (priced separately).
-        output_tokens: Count of output tokens.
-        prices: Optional price table to look up in. When None, the built-in
-            ``MODEL_PRICES`` is used.
-        effective_date: Usage date for effective-date-aware policies.
-    """
+    """Subtract cached tokens from total input, clamp uncached at zero, then price the usage."""
     uncached_input = max(total_input_tokens - cached_input_tokens, 0)
     return compute_cost(
         model,

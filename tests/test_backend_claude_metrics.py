@@ -1,15 +1,5 @@
-"""Tests for Claude backend token extraction and MetricsEvent emission (EVNT-04..06).
-
-Covers Phase 2 / Plan 02-03:
-  * EVNT-04: dropped-token bug fix in `daydream/backends/claude.py` lines 120-128
-  * EVNT-05: CostEvent now carries `cached_tokens` from `cache_read_input_tokens`
-  * EVNT-06: MetricsEvent emitted per AssistantMessage with EVNT-02 verbatim
-    field names (`prompt_tokens` / `completion_tokens`); the SDK boundary
-    keys (`input_tokens` / `output_tokens`) are renamed at emission time.
-
-Reuses the shared mock-block dataclasses in tests/harness/claude_sdk.py;
-the shared MockAssistantMessage / MockResultMessage carry the ``usage`` and
-``message_id`` fields needed by Phase 2.
+"""Verify Claude usage-field translation, cache token accounting, and per-message MetricsEvent emission
+using the shared SDK fixtures.
 """
 
 from __future__ import annotations
@@ -35,7 +25,6 @@ from tests.harness.claude_sdk import (
 
 
 async def _collect_events(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) -> list[Any]:
-    """Drive ClaudeBackend.execute with a canned message sequence; return events."""
     patch_claude_sdk(monkeypatch, scripted_client(messages))
     backend = ClaudeBackend(model="opus")
     events: list[Any] = []
@@ -44,7 +33,6 @@ async def _collect_events(monkeypatch: pytest.MonkeyPatch, messages: list[Any]) 
     return events
 
 async def test_dropped_token_bug_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ResultMessage with usage produces CostEvent with non-None tokens (EVNT-04, EVNT-05)."""
     events = await _collect_events(
         monkeypatch,
         [
@@ -65,7 +53,6 @@ async def test_dropped_token_bug_fixed(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cost.cost_usd == 0.001
 
 async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AssistantMessage with usage produces a MetricsEvent with EVNT-02 field names (EVNT-06)."""
     events = await _collect_events(
         monkeypatch,
         [
@@ -103,10 +90,8 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.M
                 "cache_creation_input_tokens": 15000,
             }, 15050, 0, id="cache-write",
         ),
-        # Read-and-write turn: the buckets are not mutually exclusive. One
-        # breakpoint is read (18000) while another is written (12000); both fold
-        # into the total (40 + 18000 + 12000 = 30040), but cached_tokens
-        # reflects only the read hit.
+        # Cache reads and writes both contribute to input totals, but cached_tokens counts only
+        # reads.
         pytest.param(
             {
                 "input_tokens": 40, "output_tokens": 100, "cache_read_input_tokens": 18000,
@@ -118,7 +103,6 @@ async def test_metrics_event_emitted_per_assistant_message(monkeypatch: pytest.M
 async def test_prompt_tokens_include_cache_read_and_creation(
     monkeypatch: pytest.MonkeyPatch, usage: dict[str, int], expected_prompt_tokens: int, expected_cached_tokens: int,
 ) -> None:
-    """prompt_tokens folds input + cache_read + cache_creation into the true total input."""
     events = await _collect_events(
         monkeypatch,
         [
@@ -135,7 +119,6 @@ async def test_prompt_tokens_include_cache_read_and_creation(
     assert cost.cached_tokens == expected_cached_tokens
 
 async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """AssistantMessage.usage None => no MetricsEvent emitted, but TextEvent still flows."""
     events = await _collect_events(
         monkeypatch,
         [
@@ -145,7 +128,6 @@ async def test_no_metrics_event_when_usage_is_none(monkeypatch: pytest.MonkeyPat
     )
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 0
-    # TextEvent flow continues normally
     text_events = [e for e in events if isinstance(e, TextEvent)]
     assert len(text_events) == 1
     assert text_events[0].text == "ok"
@@ -164,13 +146,11 @@ async def test_partial_usage_data(monkeypatch: pytest.MonkeyPatch) -> None:
     # No MetricsEvent because EVNT-02 requires both prompt_tokens and completion_tokens.
     metrics = [e for e in events if isinstance(e, MetricsEvent)]
     assert len(metrics) == 0
-    # CostEvent still emitted with output_tokens=None (CostEvent fields are Optional).
     cost = [e for e in events if isinstance(e, CostEvent)][0]
     assert cost.input_tokens == 100
     assert cost.output_tokens is None
 
 async def test_cost_event_emitted_on_usage_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """ResultMessage with usage but total_cost_usd=None still emits CostEvent."""
     events = await _collect_events(
         monkeypatch,
         [

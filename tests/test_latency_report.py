@@ -54,14 +54,8 @@ def test_main_emits_the_report_from_a_clean_checkout(capsys: pytest.CaptureFixtu
     assert payload["profiles"]["fast"]["runs"] == 1
 
 def test_arbiter_phase_latency_reads_the_deep_bucket_real_runs_write() -> None:
-    """MH13: real runs key the arbiter wall-clock under ``deep``, never ``arbiter``.
-
-    Every arbiter call runs inside ``phase_scope(DaydreamPhase.DEEP,
-    stage="arbiter")`` and ``compute_timing_summary`` keys ``phase_timings`` by
-    the phase value alone, so the report must read the deep bucket instead of
-    silently reporting an absent one as 0.0. The legacy ``arbiter`` bucket stays
-    honoured so hand-authored corpora keep reporting their own number.
-    """
+    """Arbiter calls use the deep phase bucket; preserve the legacy arbiter
+    bucket for hand-authored corpora."""
     real = {"timing": {
             "phase_timings": {"alternatives": {"wall_clock_seconds": 20.0}, "deep": {"wall_clock_seconds": 90.0}}
         }
@@ -89,14 +83,8 @@ def test_selection_corpus_cases_carry_every_artifact_the_predicate_reads() -> No
         assert case["golden_high_severity"], f"{case['name']} declares no high-severity anchor"
 
 def test_report_separates_cold_and_warm_samples_and_names_its_corpus(tmp_path: Path) -> None:
-    """MH14: a cold run and a warm loop are reported separately, against the target.
-
-    The sample group is a property of the case, not of the profile: two cases that
-    declare ``sample_group`` are aggregated apart so a warm rerun's lower wall
-    clock cannot be averaged into the cold baseline. The header names the corpus,
-    the sample size actually observed per group, and the stated target, so the
-    report is self-describing without the docs.
-    """
+    """Group samples by case so warm reruns cannot lower a cold baseline.
+    Keep corpus, observed sample size and stated target in the report."""
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"corpus": "review-runtime-sample",
         "cases": [{"name": "c1", "sample_group": "cold", "profiles": {"per_stack_review": [600, 620, 700]}},
@@ -150,13 +138,7 @@ def test_selection_report_reports_unreadable_case_instead_of_dropping_it(tmp_pat
     assert isinstance(block["flip_allowed"], bool)
 
 def test_selection_report_does_not_count_lens_exemptions_as_skips(tmp_path: Path) -> None:
-    """A lens exemption is never reported as a skip the mode chose to make.
-
-    ``verify_all`` never selection-skips a non-exempt item, so its ``skipped``
-    figure must stay zero even when the corpus carries a structural item (which
-    the selective rule exempts rather than skips), and the selective arm's own
-    skip count must not grow by the exempt count.
-    """
+    """Structural lens exemptions must not inflate selection skips in either mode."""
     case = {"name": "case", "profile": "forensic", "golden_high_severity": [["api.py", 5]]}
     base_root = tmp_path / "base"
     exempt_root = tmp_path / "exempt"

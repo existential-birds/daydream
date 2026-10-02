@@ -64,7 +64,6 @@ def test_init_manifest_is_valid_and_immutable_fields(tmp_path: Path) -> None:
     assert loaded.source.hostname == "github.com"
     assert loaded.source.repository == "OWNER/REPO"
     assert loaded.source.repository_id is None and loaded.source.visibility == "unresolved"
-    # reviewer host normalized to lowercase
     assert loaded.privacy.reviewer_allowed_hosts == ["api.anthropic.com"]
     assert loaded.privacy.reviewer_allowed_hosts and loaded.privacy.judge_allowed_hosts
 
@@ -134,17 +133,10 @@ def _assert_corrupt_workspace(root: Path) -> None:
 
 
 def _write_case_docs(root: Path, curation_state: str) -> Any:
-    """Write a fully-valid ledger + import + bundle + case doc into ``root``.
+    """Add a valid ledger, import, case, and real bundle to an initialized workspace.
 
-    The workspace at ``root`` must already be ``init_workspace``-created. The
-    artifacts written here are all schema-valid: a resolved manifest, a
-    ``fetched`` ledger entry referencing a real import file + sha256, a REAL
-    deterministic git bundle (built from a seeded local origin whose frozen
-    head tree contains ``feature.py``) whose sha256 matches the case doc's
-    ``snapshot.bundle_sha256`` and whose tree IDs + canonical diff digest are
-    recorded from that origin, and a ``CaseDocument`` whose ``pull_request``/
-    ``snapshot``/``source``/``curation`` model-validate without any
-    ``_schema_ready`` strip. ``curation_state`` is ``"ready"`` or ``"draft"``.
+    Original SHAs, tree IDs, and digests all describe the same local Git origin;
+    case documents validate directly without compatibility preprocessing.
     """
 
     raw = yaml.safe_load((root / "benchmark.yaml").read_text())
@@ -234,13 +226,9 @@ def _write_case_docs(root: Path, curation_state: str) -> Any:
 
 
 def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: Any=True) -> Any:
-    """Build a fully-valid workspace whose single indexed case is curated.
+    """Initialize a valid one-case workspace with real Git content and requested curation state.
 
-    Reuses ``init_workspace`` for the base layout, resolves the source
-    identity (unless ``resolved=False``), and adds a real fetched ledger
-    entry + import + bundle + schema-valid case doc so ``validate_workspace``
-    / ``workspace_status`` exercise the case-driven readiness path on
-    documents that model-validate directly.
+    Optionally leave source identity unresolved to test readiness independently.
     """
 
     root = tmp_path / "ws"
@@ -257,21 +245,12 @@ def _write_curated_workspace(tmp_path: Path, curation_state: Any, *, resolved: A
 
 
 def test_validate_ready_workspace_returns_0(tmp_path: Path) -> None:
-    # A resolved, fully-curated workspace must be able to reach the documented
-    # exit 0 ("ready") — it was previously unreachable because derive_workspace_state
-    # was fed cases=[].
     root = _write_curated_workspace(tmp_path, "ready")
     code, label = validate_workspace(root)
     assert code == 0
     assert label == "ready"
 
 def test_validate_restamped_tampered_bundle_fails(tmp_path: Path) -> None:
-    """Acceptance (b): a checksum-restamped tampered bundle fails validate.
-
-    The recorded ``bundle_sha256`` is re-stamped to match the tampered bytes,
-    so the checksum gate alone would accept it; the authoritative offline-clone
-    fidelity check must flag the corruption."""
-
     root = _write_curated_workspace(tmp_path, "ready")
     bundle = next((root / "snapshots").glob("*.bundle"))
     tampered = bundle.read_bytes() + b"INJECTED"          # content changed
@@ -282,19 +261,13 @@ def test_validate_restamped_tampered_bundle_fails(tmp_path: Path) -> None:
     case_yaml.write_text(yaml.safe_dump(raw, sort_keys=False))
     _assert_corrupt_workspace(root)        # checksum alone no longer suffices
 
-    # A genuine real-bundle ready workspace still passes as ready.
     root2 = _write_curated_workspace(tmp_path, "ready")
     code2, label2 = validate_workspace(root2)
     assert code2 == 0 and label2 == "ready"
 
 def test_validate_missing_cache_dir_maps_to_corrupt(tmp_path: Path) -> None:
-    """A ready workspace whose ``cache/`` scratch dir is absent maps to exit 1.
-
-    ``validate_offline_clone``'s mkdtemp raises FileNotFoundError when
-    ``root/cache`` is gone; it must surface as corruption (exit 1 + label) per
-    the no-raw-traceback contract — like the sibling freeze path's ``OSError``
-    catch — never a bare traceback. ``workspace_status`` raises
-    :class:`WorkspaceCorrupt` for the same state.
+    """Missing scratch storage becomes a labeled corrupt result; status raises
+    WorkspaceCorrupt.
     """
 
     root = _write_curated_workspace(tmp_path, "ready")
@@ -311,7 +284,6 @@ def test_validate_curating_workspace_returns_2(tmp_path: Path) -> None:
     assert "incomplete" in label
 
 def test_validate_unresolved_but_ready_case_still_returns_2(tmp_path: Path) -> None:
-    # Readiness of the cases does not trump an unresolved repository identity.
     root = _write_curated_workspace(tmp_path, "ready", resolved=False)
     code, label = validate_workspace(root)
     assert code == 2
@@ -368,12 +340,10 @@ def test_ready_bundle_checksum_mismatch_is_validate_corruption(tmp_path: Path) -
     (ws / case["snapshot"]["bundle_file"]).write_bytes(b"tampered")
     code2, label = validate_workspace(ws)
     assert code2 == 1 and "corrupt" in label
-    # Case state on disk is unchanged.
     case_after = load_yaml_strict(next((ws / "cases").glob("*.yaml")))
     assert case_after["snapshot"]["status"] == "ready"
 
 def test_status_reports_snapshot_state_per_case(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """``status`` surfaces each case's snapshot state + frozen head prefix."""
     ws = tmp_path / "ws"
     init_workspace(ws, "o/r", ["api.anthropic.com"], ["api.anthropic.com"])
     _write_case_docs(ws, "ready")   # one ready case (from Task 11's helper)
@@ -436,8 +406,6 @@ def test_status_and_validate_surface_typed_unreplayable_reason(tmp_path: Path, c
     assert "private path omitted" not in validate_out
 
 def test_validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_path: Path) -> None:
-    """A marker cannot hide commit-linkage tampering in a live authoring mirror."""
-
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
     case_path = next((root / "cases").glob("*.yaml"))
@@ -453,8 +421,6 @@ def test_validate_rechecks_marked_snapshot_source_when_mirror_is_present(tmp_pat
 def test_validate_partial_mirror_reports_restore_guidance_without_mutation(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """The real CLI names the retained mirror and leaves its repair to the user."""
-
     parent = tmp_path / "parent with spaces"
     parent.mkdir()
     root = _write_curated_workspace(parent, "ready")
@@ -474,8 +440,6 @@ def test_validate_partial_mirror_reports_restore_guidance_without_mutation(
     assert sentinel.read_text() == "operator recovery marker\n"
 
 def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path: Path) -> None:
-    """The marker plus offline bundle remains sufficient after cache cleanup."""
-
     root = _write_curated_workspace(tmp_path, "ready")
     assert validate_workspace(root) == (0, "ready")
     shutil.rmtree(root / "cache" / "repository.git")
@@ -483,8 +447,6 @@ def test_validate_keeps_verified_snapshot_portable_after_mirror_cleanup(tmp_path
 
 @pytest.mark.parametrize("tamper", ["base", "source", "source_file", "inventory"])
 def test_portable_validation_binds_case_to_checksummed_import(tmp_path: Path, tamper: str) -> None:
-    """A cleaned workspace still binds copied case metadata to its import."""
-
     root = _write_curated_workspace(tmp_path, "ready")
     shutil.rmtree(root / "cache" / "repository.git")
     case_path = next((root / "cases").glob("*.yaml"))
@@ -505,8 +467,6 @@ def test_portable_validation_binds_case_to_checksummed_import(tmp_path: Path, ta
     assert "import provenance" in label
 
 def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Path) -> None:
-    """The existing curation gate rejects typed drift before Harbor staging."""
-
     root = _write_curated_workspace(tmp_path, "ready")
     case_id = _make_case_base_drift(root)
     harbor = root / "harbor"
@@ -521,7 +481,6 @@ def test_base_drift_case_is_rejected_before_compile_stage_mutation(tmp_path: Pat
     assert not (root / "cache" / "harbor-build-stage").exists()
 
 def test_curated_fixture_writes_schema_valid_case(tmp_path: Path) -> None:
-    """The curated-workspace fixture itself writes only schema-valid documents."""
     root = _write_curated_workspace(tmp_path, "ready")   # rewritten in this task; same module
     raw = load_yaml_strict(next((root / "cases").glob("*.yaml")))
     CaseDocument.model_validate(raw)                      # must validate WITHOUT _schema_ready (no gold_mode)
@@ -611,13 +570,11 @@ def _drop_ledger_entry(tmp_path: Path) -> None:
 
 def test_case_pr_number_mismatch_manifest_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
-    # manifest cases[] pr_number disagrees with the case doc's pull_request.number
     _mutate_manifest_case(tmp_path, pr_number=999)
     _assert_corrupt_workspace(root)
 
 def test_case_file_not_exact_index_path_is_corruption(tmp_path: Path) -> None:
     root = _write_curated_workspace(tmp_path, "ready")
-    # manifest case_file is not exactly cases/<case_id>.yaml
     _mutate_manifest_case(tmp_path, case_file="cases/other.yaml")
     _assert_corrupt_workspace(root)
 
@@ -666,7 +623,6 @@ def test_status_surfaces_failed_refresh_with_good_linkage(tmp_path: Path, fake_g
     _seed_preflight(ws, fake_gh)
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
     _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
-    # now make the REFRESH fetch fail (PR already fetched: last import is intact)
     fake_gh.set_response("GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"})
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
     assert rc != 0

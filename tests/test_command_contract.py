@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 from jsonschema import Draft202012Validator
 
-from daydream.improve import orchestrator as orch
+from daydream.improve import recon as orch
 from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA,
@@ -28,7 +28,8 @@ from daydream.improve.command_contract import (
     validate_applicability,
 )
 from daydream.repository_paths import canonicalize_working_directory
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.conftest import improve_fixture_service, improve_fixture_test_command_anchor
 from tests.harness.improve_backend import (
     AuditAbsoluteWorkingDirectoryBackend,
@@ -282,7 +283,7 @@ async def test_host_enumeration_dedups_absolute_model_wd(
     # collapses the absolute model wd against the relative host wd.
     service = improve_fixture_service(improve_monorepo_target / "apps")
     rel = f"apps/{service}"
-    monkeypatch.setattr("daydream.improve.orchestrator.enumerate_repository_commands",
+    monkeypatch.setattr("daydream.improve.recon.enumerate_repository_commands",
         lambda repo, *, directories=(".",), reserved_ids=(): [{
                 "id": "make-check", "purpose": "Run the repository test suite", "command": "uv run pytest",
                 "working_directory": rel,

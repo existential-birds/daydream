@@ -16,10 +16,10 @@ from daydream import remote_ci
 from daydream.atif import Step, validate as atif_validate
 from daydream.backends import (
     AgentEvent,
-    ResultEvent,
     TextEvent,
 )
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.trajectory import (
     DaydreamPhase,
     PhaseEvent,
@@ -36,7 +36,7 @@ from tests.harness.phase_backend import PhaseDispatchBackend
 from tests.harness.remote_ci import NoCIRemote
 from tests.harness.review_profile import independent_alternatives_profile, independent_exploration_profile
 from tests.harness.stub_backend import StubBackend
-from tests.harness.trajectory import make_recorder, read_trajectory
+from tests.harness.trajectory import make_recorder, observe_text_and_result, read_trajectory
 from tests.test_deep_orchestrator import _install_stub_backend, _merge_item, _pin_findings_pr, _silence
 
 
@@ -188,8 +188,7 @@ async def test_phase_events_serialize_into_trajectory_extra(tmp_path: Path) -> N
             pass
         # Need at least one step so _write doesn't skip.
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="x"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "x")
     traj = read_trajectory(rec.path)
     assert atif_validate(traj, validate_images=False) is True
     events = traj["extra"]["phase_events"]
@@ -202,8 +201,7 @@ async def test_no_phase_events_omits_key(tmp_path: Path) -> None:
     rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="x"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "x")
     traj = read_trajectory(rec.path)
     assert "phase_events" not in traj["extra"]
 
@@ -258,8 +256,7 @@ async def test_phase_scope_id_pairs_concurrent_same_phase(tmp_path: Path) -> Non
             await anyio.sleep(0)
             release["first"].set()
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="seed"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "seed")
 
     events = [event for event in read_trajectory(rec.path)["extra"]["phase_events"] if event["phase"] == "deep"]
     assert [event["event"] for event in events] == ["phase_start", "phase_start", "phase_end", "phase_end"]
@@ -286,8 +283,7 @@ async def test_phase_scope_id_rejects_second_or_post_close_decision(tmp_path: Pa
         with pytest.raises(RuntimeError, match="closed"):
             handle.finish(trajectory_module.LifecycleStatus.FAILED)
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="seed"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "seed")
 
     terminal = read_trajectory(rec.path)["extra"]["phase_events"][1]
     assert terminal["status"] == "partial"
@@ -303,8 +299,7 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
             assert inv.started_at != ""
             assert inv.ended_at == ""  # not set until exit
-            inv.observe(TextEvent(text="hi"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "hi")
         assert inv.ended_at != ""
     traj = read_trajectory(rec.path)
     subs = traj["extra"]["subtrajectories"]
@@ -315,11 +310,7 @@ async def test_invocation_records_started_at_ended_at(tmp_path: Path) -> None:
     assert subs[0]["step_ids"] == [1]
 
 async def test_invocation_ended_at_not_before_final_step(tmp_path: Path) -> None:
-    """ended_at is stamped after finish() flushes the still-open final step.
-
-    A lone TextEvent leaves the step open, so finish() materializes it during __aexit__ with a fresh timestamp.
-    ended_at must be stamped after that flush, otherwise it predates its own last step and underreports timing
-    (#203)."""
+    """Stamp ended_at after finish materializes the last still-open text step."""
     rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
@@ -334,8 +325,7 @@ async def test_no_invocations_omits_subtrajectories_key(tmp_path: Path) -> None:
     """Zero invocations → extra has no subtrajectories key, even with steps present."""
     rec = make_recorder(tmp_path)
     async with rec:
-        # Seed a step so _write does not take its empty-steps early return,
-        # but open NO invocation — so _register_subtrajectory never fires.
+        # Avoid empty-write skipping while deliberately recording no invocation.
         rec._extend_steps([Step(step_id=1, source="user", message="seed")])
     assert rec.path.exists()
     data = read_trajectory(rec.path)
@@ -346,11 +336,9 @@ async def test_subtrajectory_step_ids_track_multiple_invocations(tmp_path: Path,
     rec = make_recorder(tmp_path)
     async with rec:
         async with rec.invocation(phase=DaydreamPhase.REVIEW) as inv:
-            inv.observe(TextEvent(text="a"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "a")
         async with rec.invocation(phase=DaydreamPhase.PARSE) as inv:
-            inv.observe(TextEvent(text="b"))
-            inv.observe(ResultEvent(structured_output=None, continuation=None))
+            observe_text_and_result(inv, "b")
     traj = read_trajectory(rec.path)
     subs = traj["extra"]["subtrajectories"]
     assert len(subs) == 2
@@ -362,13 +350,11 @@ async def test_fork_subtrajectory_entries_have_timestamps(tmp_path: Path) -> Non
 
     rec = make_recorder(tmp_path)
     async with rec:
-        # Seed a parent step so _write does not take its empty-steps early
-        # return; in a real run the parent always has prior-phase steps.
+        # Retain the parent's document while exercising child timing.
         rec._extend_steps([Step(step_id=1, source="user", message="seed")])
         async with maybe_fork(rec, "fix-src-foo-py") as child:
             async with child.invocation(phase=DaydreamPhase.FIX) as inv:
-                inv.observe(TextEvent(text="fixing foo"))
-                inv.observe(ResultEvent(structured_output=None, continuation=None))
+                observe_text_and_result(inv, "fixing foo")
     traj = read_trajectory(rec.path)
     subs = traj["extra"].get("subtrajectories", [])
     assert len(subs) == 1, f"expected 1 fork subtrajectory, got {len(subs)}: {subs}"
@@ -537,11 +523,7 @@ async def test_real_fix_fallback_records_multiple_invocations_in_one_fork(
     backend.fail_batched_fix_file = "api.py"
     backend.fix_edit_line = "\n"
 
-    # Preserve the work watchdog in addition to the separately bounded remote-CI
-    # wait. The outer bound must scale with the no-CI harness discovery window:
-    # the run cannot conclude CI verification inside a fixed 30s when the
-    # harness margins widen (same precedent as test_deep_orchestrator.py's
-    # budget test).
+    # Allow discovery/operation time beyond the independently bounded CI wait.
     with anyio.fail_after(30 + remote_ci.DEFAULT_LIMITS.completion_seconds):
         exit_code = await run(make_config(
                 target, archive=True, assume="yes", cleanup=False, output_mode="loop", run_eval=True,
@@ -732,8 +714,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
         assume="yes",  # accept the fix gate so the fix/test cycle runs
     )
 
-    # Phase events: the deep-shallow spine's review and the fix's test must
-    # appear (the parse-<stack> stage was removed with issue #745).
+    # The shallow review and fix test phases must both appear.
     events = data["extra"].get("phase_events", [])
     event_phases = [e["phase"] for e in events]
     assert "test" in event_phases, f"test phase event missing; got {event_phases!r}"
@@ -749,12 +730,7 @@ async def test_shallow_run_emits_phase_events_and_subtrajectories(
 async def test_deep_run_emits_phase_events_and_manifest_timings(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
-    """Real-path: deep run writes trajectory with DEEP review phase_events + phase_timings.
-
-    Drives ``runner.run`` → ``_run_loop_deep`` → ``run_deep`` (the production default deep pipeline) with the stub
-    backend from ``test_deep_orchestrator``. The orchestrator wraps the per-stack review fan-out in
-    ``phase_scope(DaydreamPhase.DEEP, stage="review")``, so the trajectory's ``extra["phase_events"]`` must carry
-    the deep review boundary. Asserts the on-disk trajectory JSON + manifest."""
+    """A real deep run records review boundaries in trajectory JSON and manifest timings."""
 
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
@@ -785,8 +761,7 @@ async def test_deep_run_emits_phase_events_and_manifest_timings(
     phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None
     assert "deep" in phase_timings, f"deep missing from manifest phase_timings: {phase_timings!r}"
-    # Declined gate still records the phases reached before fix/test/verify. The
-    # parse-<stack> stage was removed (issue #745), so it is not expected here.
+    # A declined gate retains earlier phase timing.
     assert "intent" in phase_timings
     assert "alternatives" not in phase_timings  # Folded into the structural review.
 
@@ -821,11 +796,7 @@ async def test_deep_run_accept_gate_wraps_fix_test_verify(
 async def test_parallel_fix_registers_subtrajectories(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
-    """Real-path: parallel fix phase registers per-file subtrajectory entries.
-
-    Drives ``runner.run`` through the deep pipeline with the stub backend, producing >=2 file findings that
-    exercise ``phase_fix_parallel`` and the ``recorder.fork()`` path. Asserts multiple ``fix`` entries appear in
-    ``extra["subtrajectories"]``."""
+    """A real multi-file fix run records multiple forked fix trajectories."""
 
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
@@ -850,11 +821,7 @@ async def test_parallel_fix_registers_subtrajectories(
 async def test_review_flow_emits_phase_events_and_manifest_timings(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Any,
 ) -> None:
-    """Review-only mode records review-spine timings and stops before fix/test.
-
-    ``--review`` (a mode of the single deep flow, #330) runs the review spine — intent and per-stack review — and
-    stops at ``findings-out``, so the fix cycle's fix/test/verify must never run (and must not appear in the
-    recorded phase events or manifest timings)."""
+    """Review-only runs record review timing and stop before fix/test/verify events."""
 
     _silence(monkeypatch)
     mute_side_effects()
@@ -881,8 +848,7 @@ async def test_review_flow_emits_phase_events_and_manifest_timings(
             f"review mode ran the fix cycle phase {phase!r}; got: {sorted(event_phases)!r}"
         )
 
-    # Manifest: phase_timings must be non-null (was null before the fix) and
-    # carry the wrapped review phases.
+    # The manifest retains the wrapped review phases.
     phase_timings = _read_phase_timings(tmp_path)
     assert phase_timings is not None, "review flow phase_timings must not be null"
     for phase in ("intent", "deep"):

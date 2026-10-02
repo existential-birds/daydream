@@ -251,12 +251,7 @@ def test_partial_failure_continues_to_other_runs(tmp_path: Path) -> None:
     assert report.job_dirs_deleted == 1                 # successful run's dir removed
 
 def test_partial_failure_persists_removed_flags(tmp_path: Path) -> None:
-    """A partially-removed run keeps its successfully-removed ``removed`` true.
-
-    Without the fix, a run where one image removal succeeds and another fails
-    never writes the ledger, so the successful removal flag is lost and the
-    next pass re-attempts (and re-fails) an already-removed image.
-    """
+    """Persist successful image removals even when another removal prevents job cleanup."""
     ws = _seed_clean_ws(tmp_path)
     run_id = "00000000-0000-0000-0000-0000000000d2"
     job = ws / "harbor" / "jobs" / run_id

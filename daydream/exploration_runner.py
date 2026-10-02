@@ -1,12 +1,8 @@
-"""Exploration orchestrator.
+"""Diff-scoped pre-scan and repository-wide convention discovery.
 
-Provides two exploration entries:
-
-- ``pre_scan`` is diff-scoped. Modest default changes use static mapping and
-  bounded guideline capture; other changes add tiered model specialists.
-- ``repo_scan`` is repo-scoped and diff-less. It samples tracked files and runs
-  only the repo-survey specialist to discover repository conventions.
-"""
+Modest default changes use static mapping and bounded guidelines; other
+diffs add tiered specialists. Repository scans sample tracked files and
+run only the survey specialist."""
 
 from __future__ import annotations
 
@@ -51,7 +47,8 @@ from daydream.trajectory import (
     get_current_recorder,
     maybe_fork,
 )
-from daydream.tree_sitter_index import _parse_diff_name_status, detect_affected_files
+from daydream.tree_sitter_index import detect_affected_files
+from daydream.tree_sitter_index.imports import _parse_diff_name_status
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -128,12 +125,7 @@ def count_changed_files(diff_text: str) -> int:
 
 
 def select_tier(file_count: int) -> Tier:
-    """Pick an exploration tier based on the number of changed files.
-
-    - 0 or 1 files -> ``"skip"`` (no exploration)
-    - 2 or 3 files -> ``"single"`` (dependency-tracer only)
-    - 4+ files     -> ``"parallel"`` (all three specialists)
-    """
+    """Skip 0–1 changed files; trace dependencies for 2–3; run all specialists for 4+."""
     if file_count <= 1:
         return "skip"
     if file_count <= 3:
@@ -250,29 +242,12 @@ async def pre_scan(
     *,
     run_context: RunContext | None = None,
 ) -> ExplorationContext:
-    """Run the pre-scan exploration pipeline for a diff.
+    """Merge static affected-file mapping with optional tiered specialist results.
 
-    Steps:
-        1. Build a static affected-files list from ``detect_affected_files``.
-        2. Count unique files in the diff and pick a tier.
-        3. For ``"skip"`` -- return the static context, no backend call.
-        4. Modest default changes return static mapping plus guideline excerpts.
-        5. Otherwise, for ``"single"`` / ``"parallel"`` -- launch parallel
-           ``backend.execute()`` calls (one per specialist), parse results,
-           merge with the static context.
-
-    Args:
-        repo_root: Repository root used by ``detect_affected_files``.
-        diff_text: Raw git diff string used for static mapping and bounded
-            specialist context (complete when small, advisory excerpts otherwise).
-        diff_ref: Git ref or range (e.g. ``"main...HEAD"``) passed to specialist
-            prompts so they can run ``git diff <ref> -- <file>`` per file.
-        strategies: Optional mapping of the four exploration strategy contents
-            (``exploration.pattern_scan`` / ``exploration.dependency_trace`` /
-            ``exploration.test_mapping`` / ``exploration.repository_survey``).
-            When ``None`` (the default), the packaged default-profile contents
-            are used, so non-profile callers stay operable.
-    """
+    Skip-tier and modest default changes avoid model discovery. Specialists get
+    complete small diffs or bounded advisory excerpts plus diff_ref for per-file
+    Git reads. strategies overrides the four exploration strategies; None uses
+    packaged defaults so callers need no resolved profile."""
     run_context = resolve_run_context(run_context)
     defaults = _rp.build_default_profile().strategies
     if strategies is None:
@@ -447,13 +422,8 @@ async def pre_scan(
 
 
 def _sample_paths(paths: list[str], limit: int) -> list[str]:
-    """Take up to ``limit`` paths spread evenly across a sorted path list.
-
-    Head-truncating `git ls-files` on a large repo yields only the alphabetical
-    head -- dotfile directories such as `.agents/` and `.claude/` -- so the
-    survey never sees the source tree. An even stride keeps every top-level area
-    represented while staying deterministic.
-    """
+    """Sample an even stride through sorted paths to include source trees that
+    alphabetical head truncation would hide behind dotfile directories."""
     if limit <= 0 or not paths:
         return []
     if len(paths) <= limit:
@@ -471,17 +441,10 @@ async def repo_scan(
     strategies: dict[str, str] | None = None,
     run_context: RunContext | None = None,
 ) -> ExplorationContext:
-    """Discover repository conventions from a bounded tracked-file sample.
+    """Discover conventions and guidelines from a bounded tracked-file sample.
 
-    Returns conventions and guidelines only. The tracked-file sample seeds the
-    survey prompt but is not returned: a repo-scoped run has no affected files,
-    and emitting one would mislabel the whole repository as change-relevant.
-
-    Args:
-        strategies: Optional mapping containing the
-            ``exploration.repository_survey`` strategy content. When ``None``
-            (the default), the packaged default-profile content is used.
-    """
+    Do not return sampled files as affected files: a repository scan has no diff.
+    strategies may override repository_survey; None uses its packaged default."""
     run_context = resolve_run_context(run_context)
     if strategies is None:
         strategies = {

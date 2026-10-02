@@ -10,7 +10,7 @@ import pytest
 from daydream.deep.orchestrator import DIAGRAM_STEPS, STEPS
 from daydream.extensions import LoopGroup, Registry, build_registry
 from daydream.flows.engine import FlowContext
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
 
 _DEEP_FIELDS = (("exploration", "exploration", None), ("intent", "intent", None),

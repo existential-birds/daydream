@@ -1,45 +1,20 @@
-"""UI-independent golden-review curation service for private benchmark workspaces.
+"""Golden-review curation over private, frozen benchmark workspaces.
 
-This module is the issue-#5 browser/terminal seam: the fixed operation set a
-curator (or the future interactive client) drives every gold-curation action
-through. Every mutating operation (``accept_candidate``, ``add_finding``,
-``add_findings``, ``add_edited_findings``, ``replace_findings``, ``exclude_evidence``, ``mark_ready``,
-``attest_clean``, ``exclude_case``, ``reinclude_case``, ``apply_gold_fragment``)
-runs its complete read -> validate -> mutate -> commit sequence under the
-workspace lock:
+Mutations acquire the workspace lock, recover interrupted transactions, then read
+the latest case. The service derives ids, provenance, gold status, and transitions;
+full schema, location, duplicate, cap, historical-match, and exclusion validation
+precedes transactional staging. Read-only views take no lock and never write.
 
-1. acquires the blocking :class:`storage.WorkspaceLock` (process-reentrant per
-   root), so concurrent curators/processes serialize and can never silently
-   lose an update,
-2. heals any prior interrupted journal via :func:`storage.recover_startup`
-   under the lock, so a crashed earlier process's leftover ``committing``
-   journal is rolled back before a new write,
-3. loads the target case YAML strictly **after** acquiring the lock — never a
-   stale pre-lock view,
-4. derives ``finding_id`` / ``provenance.kind`` / ``gold_status`` /
-   ``gold_mode`` / ``state`` — never caller-supplied — and enforces state
-   transitions via :meth:`schema.validate_case_transition`,
-5. re-validates the whole resulting :class:`schema.CaseDocument` plus
-   validation (location-vs-head from a disposable clone of the frozen bundle,
-   >50 gold cap, duplicate canonical finding, historical byte-match,
-   exclusion/re-inclusion contract),
-6. stages the rewritten case through the existing
-   :class:`storage.Transaction` journal, or raises :class:`CurationError`
-   naming the violated invariant **before** opening the Transaction.
-
-Read-only paths (``list_cases``, ``get_case``, ``validate_case``, the pager)
-take no lock and never mutate, so status/pager stay safe to run concurrently
-with a writer and no nested-lock deadlock is possible.
-
-The service imports no Rich/input/editor/HTTP code; it depends only on the
-fixed schema, the mode-safe storage/journal layer, a disposable frozen-bundle
-clone, and ``git_ops``."""
+Frozen-bundle clones provide Git evidence independently of the shared mirror.
+The service owns no terminal, browser, editor, or network interaction.
+"""
 
 from __future__ import annotations
 
 import shutil
 import tempfile
 import threading
+from collections.abc import Iterable
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -52,6 +27,7 @@ from daydream import git_ops
 from daydream.benchmark import schema, storage
 from daydream.benchmark.schema import _schema_ready
 from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
+from daydream.git_ops import process as git_process
 
 
 class CurationError(Exception):
@@ -63,33 +39,17 @@ class CurationError(Exception):
 
 
 class StaleStateError(CurationError):
-    """A curation operation ran against a stale attestation state.
-
-    Raised when a mutation's precondition no longer holds against the freshly
-    read on-disk state (e.g. a :func:`mark_ready` head SHA that no longer
-    matches the snapshot) — the caller's view is stale and nothing was
-    written.
-    """
+    """A mutation precondition no longer matches locked on-disk state; nothing was written."""
 
 
-# Process-wide reuse cache for disposable frozen-bundle clones. Every located
-# finding and every list_cases/validate_case/pager call used to open a fresh
-# ``git clone --no-checkout`` of the same bundle (O(cases x findings) clone
-# fan-out per operation); the cache collapses that to at most one clone per
-# distinct bundle file per process. Keyed on the resolved bundle path + stat
-# signature (mtime_ns, size), so a rewritten or re-targeted ``bundle_file``
-# misses and is re-cloned. Clones live under ``root/cache`` (scratch, never
-# part of the authoring index) for the process lifetime.
+# Process-lifetime clones live under root/cache, outside the authoring index.
+# Resolved path plus mtime/size invalidates reuse after bundle replacement.
 _CLONE_CACHE: dict[tuple[str, int, int], Path] = {}
 _CLONE_CACHE_LOCK = threading.Lock()
 
 
 def _clone_cache_key(bundle_path: Path) -> tuple[str, int, int] | None:
-    """The reuse-cache key for a bundle, or None when the file vanished.
-
-    ``(resolved path, mtime_ns, size)``: any rewrite of the bundle changes the
-    signature, so a cached clone is never served for changed bytes.
-    """
+    """Resolved bundle path, mtime_ns, and size; return None if the file vanished."""
     try:
         st = bundle_path.stat()
     except OSError:
@@ -99,20 +59,12 @@ def _clone_cache_key(bundle_path: Path) -> tuple[str, int, int] | None:
 
 @contextmanager
 def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
-    """A mirror-independent clone of the case's frozen bundle, reused per process.
+    """Read Git evidence from a cached frozen-bundle clone, independent of the mirror.
 
-    Clones ``snapshot.bundle_file`` (resolved via
-    :func:`storage.resolve_authoring_path`) with ``--no-local --no-checkout``
-    into a scratch dir under ``root/cache`` kept for the process lifetime, so
-    every curation git read is served from the frozen bundle itself — the shared
-    bare mirror can be deleted without making a case uncuratable. One clone per
-    distinct bundle file is reused (keyed on the resolved path + stat
-    signature, see :func:`_clone_cache_key`), so a case with N located findings
-    costs one clone instead of N, and repeated ``list_cases``/``validate_case``
-    calls reuse it instead of re-cloning per call. The clone exposes the two
-    synthetic refs ``refs/remotes/origin/base`` and ``refs/remotes/origin/head``.
-    Raises :class:`CurationError` when the snapshot carries no bundle or the
-    bundle cannot be cloned.
+    Resolve the authoring path, clone with --no-local --no-checkout under root/cache,
+    and reuse by resolved path plus stat signature for the process lifetime. The
+    bundle exposes origin/base and origin/head refs. Missing or unclonable bundles
+    raise CurationError.
     """
     bundle_rel = snapshot_doc.get("bundle_file")
     if not bundle_rel:
@@ -139,7 +91,7 @@ def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
     cache.mkdir(parents=True, exist_ok=True)
     clone_dir = Path(tempfile.mkdtemp(prefix="curate-bundle-", dir=str(cache)))
     try:
-        proc = git_ops._run_git(
+        proc = git_process._run_git(
             cache,
             ["clone", "--no-local", "--no-checkout", str(bundle_path), str(clone_dir)],
             retries=0,
@@ -160,20 +112,13 @@ def _bundle_clone(root: Path, snapshot_doc: dict[str, Any]) -> Iterator[Path]:
 
 
 def _head_file_line_count(root: Path, snapshot_doc: dict[str, Any], path: str) -> int:
-    """The line count of *path* in the frozen head tree (disposable bundle clone).
+    """Count lines at refs/remotes/origin/head in the frozen-bundle clone.
 
-    Runs ``git cat-file blob refs/remotes/origin/head:<path>`` with cwd in a
-    disposable ``--no-local --no-checkout`` clone of the case's frozen bundle
-    under ``root/cache`` (removed on exit) — never the shared bare mirror. The
-    bundle's synthetic head commit is addressed via ``refs/remotes/origin/head``
-    because the original head SHA is NOT addressable inside the bundle. Raises
-    :class:`CurationError` when the bundle clone cannot serve the path (the
-    case cannot be a verified ``ready`` snapshot without a bundle that carried
-    its head tree). A present file returns ``len(content.splitlines())``; an
-    empty file has line count 0.
+    The original head SHA is not addressable in this bundle. Missing paths or Git
+    failures raise CurationError; an existing empty file has zero lines.
     """
     with _bundle_clone(root, snapshot_doc) as clone:
-        proc = git_ops._run_git(
+        proc = git_process._run_git(
             clone, ["cat-file", "blob", f"refs/remotes/origin/head:{path}"], retries=0
         )
         if proc.returncode != 0:
@@ -198,16 +143,10 @@ def _load_case(root: Path, case_id: str) -> dict[str, Any]:
 def _with_case_lock(
     root: Path, case_id: str, op: str, mutate: Callable[[dict[str, Any]], None]
 ) -> None:
-    """Run one curation mutation's whole read-validate-mutate-commit under the lock.
+    """Lock, recover interrupted transactions, then load and mutate the latest case.
 
-    Acquires the blocking :class:`storage.WorkspaceLock`, heals any prior
-    interrupted journal via :func:`storage.recover_startup` (so a crashed
-    earlier process's leftover ``committing`` journal is rolled back before a
-    new write), loads the case **after** acquiring the lock (never a stale
-    pre-lock view), runs ``mutate(raw)``, then stages the atomic rewrite
-    through :class:`storage.Transaction`. ``mutate`` is called only with the
-    lock held; its ``CurationError`` propagates and leaves the disk
-    byte-unchanged.
+    Validate and stage only after mutate succeeds. CurationError propagates without
+    changing case bytes; the mutation callback always runs under the lock.
     """
     with storage.WorkspaceLock(root):
         storage.recover_startup(root)
@@ -217,22 +156,16 @@ def _with_case_lock(
 
 
 def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) -> tuple[int, int]:
-    """Change stats (files, lines) for a case snapshot's ``base..head`` diff.
+    """Sum base-to-head numstat files and lines from the frozen bundle.
 
-    Only a snapshot whose ``status == "ready"`` is queried: runs ``git diff
-    --numstat refs/remotes/origin/base refs/remotes/origin/head`` in a
-    disposable ``--no-local --no-checkout`` clone of the case's frozen bundle
-    (the synthetic base commit's tree is the true merge-base tree, so this is
-    the correct merge-base diff base) and sums the per-file added/deleted
-    counts. Returns ``(0, 0)`` for any non-ready snapshot. Raises
-    :class:`CurationError` naming the case when the bundle clone read fails for
-    a ready snapshot — counts are never fabricated.
+    Its synthetic base tree is the true merge base. Non-ready snapshots return
+    (0, 0); unreadable ready snapshots raise instead of fabricating counts.
     """
     if snapshot_doc.get("status") != "ready":
         return 0, 0
     try:
         with _bundle_clone(root, snapshot_doc) as clone:
-            proc = git_ops._run_git(
+            proc = git_process._run_git(
                 clone,
                 ["diff", "--numstat", "refs/remotes/origin/base", "refs/remotes/origin/head"],
                 retries=0,
@@ -256,13 +189,10 @@ def _changed_file_stats(root: Path, case_id: str, snapshot_doc: dict[str, Any]) 
 
 
 def list_cases(root: Path) -> list[dict[str, Any]]:
-    """Read-only index of the workspace's cases with derived curation state.
+    """Read case state with evidence and frozen-diff counts.
 
-    Each row adds ``evidence_count``, ``changed_files``, and ``changed_lines``
-    to the existing case_id/pr_number/state/gold_mode/gold_count/snapshot_status/
-    head_prefix keys. ``evidence_count`` counts the case's full import evidence
-    set (all kinds), falling back to the candidate count only when the import
-    file is unreadable/missing so the resumable index never crashes.
+    Count all import evidence, falling back to candidate count only for a missing
+    or unreadable import so the resumable index remains usable.
     """
     manifest = load_yaml_strict(Path(root) / "benchmark.yaml")
     out: list[dict[str, Any]] = []
@@ -284,12 +214,8 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
         try:
             evidence_count = len(_evidence_list(root, doc))
         except WorkspaceCorrupt:
-            # a missing/unreadable import file must not crash the resumable
-            # index: fall back to the candidate count. Present-but-malformed
-            # content (a non-list ``evidence``/``candidates`` value, a record
-            # without a source_id) propagates as TypeError/KeyError instead of
-            # being masked, matching get_case/validate_case — never fall back
-            # for any other reason.
+            # Only absent/unreadable imports fall back. Malformed loaded content
+            # still raises TypeError/KeyError, as get_case and validate_case do.
             evidence_count = len(doc.get("candidates") or [])
         out.append({
             "case_id": case_id,
@@ -309,14 +235,10 @@ def list_cases(root: Path) -> list[dict[str, Any]]:
 def _evidence_list(
     root: Path, raw: dict[str, Any]
 ) -> list[dict[str, Any]]:
-    """Load the import evidence once and return the ordered full record list.
+    """Load all evidence in persisted order and attach candidate indices by source ID.
 
-    Returns every evidence record in persisted file order (all kinds — review,
-    inline_comment, thread_comment, issue_comment), each augmented with
-    ``candidate_index`` = index into ``raw["candidates"]`` by matching
-    ``source_id``, or ``None`` when the record is not a candidate. A case that
-    references an import file that is missing/unreadable raises the storage
-    error — no list is fabricated.
+    Non-candidates get None. Missing or unreadable referenced imports propagate
+    storage errors; no substitute list is fabricated.
     """
     source = raw.get("source") or {}
     import_file = source.get("import_file")
@@ -336,62 +258,40 @@ def _evidence_list(
 
 
 def get_case(root: Path, case_id: str) -> dict[str, Any]:
-    """Read-only view of one case document and its per-candidate evidence.
+    """Load one read-only case view with full evidence and candidate provenance.
 
-    Returns the raw case dict where each candidate gains an in-memory (never
-    persisted) ``evidence`` sub-dict ``{kind, author, commit_id,
-    authoring_commit_id, not_exact_reason, resolved, outdated}`` joined by
-    ``source_id`` from the import file the case doc references; a candidate
-    whose ``source_id`` matches no evidence record has no ``evidence`` key
-    (absent, not ``None``). Additionally the case gains an in-memory
-    ``evidence`` list of every import evidence record (all kinds), each
-    augmented with a ``candidate_index``. A missing/unreadable import
-    file for a case that references it propagates the storage error.
-
-    Additionally the case gains an in-memory (never persisted)
-    ``prioritized_evidence`` projection — the ranked actionability view
-    derived from the persisted ``prioritization`` facts plus current curation
-    state (:func:`prioritized_evidence`); the canonical ``evidence`` order is
-    untouched.
+    Join candidates by source id; absent evidence leaves the candidate key absent.
+    Attach the canonical evidence order and its separate prioritized projection only
+    in memory. Missing or unreadable referenced imports propagate storage errors.
     """
     raw = _load_case(root, case_id)
-    projection = _evidence_projection(root, raw)
+    records = _evidence_list(root, raw)
+    projection = _evidence_projection(records, raw)
     if projection:
         for cand in raw.get("candidates") or []:
             src = cand.get("source_id")
             if src in projection:
                 cand["evidence"] = projection[src]
-    raw["evidence"] = _evidence_list(root, raw)
+    raw["evidence"] = records
     raw["prioritized_evidence"] = prioritized_evidence(raw)
     return raw
 
 
 def _evidence_projection(
-    root: Path, raw: dict[str, Any]
+    records: list[dict[str, Any]], raw: dict[str, Any]
 ) -> dict[str, dict[str, Any]]:
-    """Read the import evidence once and join records by ``source_id``.
+    """Project already-loaded records by source id for the candidate view.
 
-    Maps each evidence record's source_id to a read-only projection sub-dict
-    (never persisted): the observed ``commit_id`` stays explanatory, the strict
-    authoring commit comes from the record's ``authoring_anchor.commit_id``
-    (None on a fail-closed/missing anchor — never the re-anchored id), and the
-    candidate's ``not_exact_reason`` rides verbatim from the fixed closed set
-    (None for an exact-acceptable candidate). A case that references an import
-    file that is missing/unreadable raises the storage error — no projection
-    is fabricated.
+    Observed commit ids remain explanatory. Authoring commit ids come only from strict
+    anchors, and the candidate's closed-set ``not_exact_reason`` is copied unchanged.
     """
-    source = raw.get("source") or {}
-    import_file = source.get("import_file")
-    if not import_file:
-        return {}
-    import_data = storage.load_json_strict(Path(root) / import_file)
     candidate_reasons = {
         c.get("source_id"): c.get("not_exact_reason")
         for c in (raw.get("candidates") or [])
         if c.get("source_id")
     }
     projection: dict[str, dict[str, Any]] = {}
-    for ev in import_data.get("evidence") or []:
+    for ev in records:
         author = ev.get("author") or {}
         anchor = ev.get("authoring_anchor")
         anchor_commit = anchor.get("commit_id") if isinstance(anchor, dict) else None
@@ -453,13 +353,9 @@ _DELTA_SIGNAL_CODES = {
 
 
 def _reply_parent_index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """Index inline review comments by every id a ``reply_to_id`` can cite.
+    """Index inline comments by REST database ID and GraphQL node ID.
 
-    REST reply links are stringified parent database ids; GraphQL ``replyTo``
-    links are parent node ids. Only inline comments are indexed — reviews and
-    issue comments are never reply targets and never carry a thread id, so
-    they stay unreachable from any reply (they must not share the reply map's
-    thread-less bucket).
+    Reviews and issue comments cannot be reply parents or share a threadless bucket.
     """
     index: dict[str, dict[str, Any]] = {}
     for rec in records:
@@ -476,14 +372,10 @@ def _reply_parent_index(records: list[dict[str, Any]]) -> dict[str, dict[str, An
 
 
 def _thread_key(record: dict[str, Any], parents: dict[str, dict[str, Any]]) -> str | None:
-    """The canonical identity of the thread one evidence record belongs to.
+    """Use GraphQL thread identity, or the top of the REST reply chain.
 
-    Threaded records key by their GraphQL thread id. Thread-less records have
-    no thread id, so their identity is the top of the REST reply chain they
-    hang off (a threaded comment up the chain donates its thread id, mirroring
-    the grouping the overlay would have provided); a thread-less record that
-    is no reply chain member keys by itself and is unreachable from any reply
-    — never a shared ``None`` bucket.
+    A threaded ancestor donates its thread ID. Unrelated threadless records key
+    by themselves, so no shared None bucket can join them.
     """
     seen: set[Any] = set()
     cur = record
@@ -502,23 +394,11 @@ def _thread_key(record: dict[str, Any], parents: dict[str, dict[str, Any]]) -> s
 
 
 def collect_signals(record: dict[str, Any], view_context: dict[str, Any]) -> frozenset[str]:
-    """The advisory actionability signals one evidence record carries.
+    """Return distinct resolved, outdated, anchor-delta, and later-PR-author-reply signals.
 
-    Returns at most the four distinct signal types: ``resolved`` / ``outdated``
-    from the record itself, an anchor-delta signal code from the persisted
-    prioritization facts, and ``pr-author-reply`` when some same-thread later
-    reply was authored by the PR author (strictly later ``created_at``; reply
-    text is never read). Two occurrences of one type still count once — the
-    result is a set.
-
-    *view_context* carries ``pr_author_login`` (str | None), ``records`` (the
-    full evidence list, for reply-chain scanning), ``facts`` (the persisted
-    ``prioritization`` block or None) and ``latest_pr_author_reply`` (a
-    precomputed thread -> latest same-thread PR-author reply ``created_at``
-    map, built once by :func:`prioritized_evidence` so each record answers the
-    strictly-later question in O(1) instead of a per-record full-list scan;
-    when the key is absent the scan runs inline as a fallback for direct
-    callers).
+    Reply evidence uses author, thread, and strictly later timestamps, never text.
+    view_context supplies records, PR author, persisted facts, and optionally a
+    precomputed latest reply per thread; direct callers fall back to scanning.
     """
     signals: set[str] = set()
     if record.get("resolved"):
@@ -572,14 +452,11 @@ def classify_evidence(
     commit_relation: str,
     anchor_delta: str,
 ) -> tuple[str, str, list[str]]:
-    """Pure first-match-wins band/disposition/reasons classifier.
+    """Classify first-match: decided, context, withdrawn, then signal counts.
 
-    Precedence: decided (curation refs) → context (non-candidate) → withdrawn
-    (dismissed) → two-or-more signals (likely_actioned) → one signal
-    (possibly_actioned) → needs_judgment (non-ancestor commit, unavailable
-    commit, unavailable anchor delta, or missing facts) → review_first.
-    Exact-acceptance blockers never alter the band. Reasons carry the codes
-    that justified the band, emitted in :data:`REASON_CODES` order.
+    Two signals imply likely_actioned; one implies possibly_actioned. Missing or
+    unavailable facts then imply needs_judgment, otherwise review_first. Exactness
+    blockers do not affect rank; reasons retain REASON_CODES order.
     """
 
     def ordered(codes: list[str]) -> list[str]:
@@ -612,28 +489,15 @@ def classify_evidence(
 
 
 def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
-    """Derive the read-only ``prioritized_evidence`` view of one case doc.
+    """Project loaded evidence into entries and by_source without Git, network, or writes.
 
-    Consumes the raw case dict *after* its in-memory ``evidence`` list has
-    been attached (the already-loaded import records) plus the persisted
-    ``prioritization`` facts and current curation state. Mirror-scoped: no
-    git, no network. Returns ``{"entries": [...], "by_source": {...}}`` where
-    each entry carries ``source_id``, ``position`` (canonical index),
-    ``band``, ``reasons``, ``not_exact_reason`` (verbatim or None),
-    ``disposition``, ``thread_id`` and ``same_thread_ids`` (other evidence
-    sharing the same non-None thread). Final order: band rank, canonical
-    position, then ``source_id``. Absent/None facts fail open — a candidate
-    without record-level signals classifies via the facts-missing path
-    (``needs_judgment``) while signalled candidates still rank by signal
-    count, non-candidates stay ``context`` and decided sources stay
-    ``decided``. Never persisted.
+    Sort by band rank, canonical position, then source ID. Each entry retains
+    exactness, disposition, and same-thread peers. Missing facts leave signalled,
+    context, and decided records in those bands; other candidates need judgment.
     """
     records = raw.get("evidence") or []
     facts = raw.get("prioritization") or None
     curation = raw.get("curation") or {}
-    candidate_ids = {
-        c.get("source_id") for c in (raw.get("candidates") or []) if c.get("source_id")
-    }
     not_exact = {
         c.get("source_id"): c.get("not_exact_reason")
         for c in (raw.get("candidates") or [])
@@ -651,13 +515,8 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
     latest_pr_author_reply: dict[Any, str] = {}
     reply_parents = _reply_parent_index(records)
     if pr_login and records:
-        # One O(N) pass: the latest same-thread reply authored by the PR
-        # author per thread, so each collect_signals call answers the
-        # strictly-later question in O(1) instead of re-scanning the full
-        # evidence list per record (an O(N^2) cost on every get_case, several
-        # per TUI keystroke). Thread identity is the GraphQL thread id when
-        # present, else the REST reply chain top (:func:`_thread_key`) — never
-        # one shared bucket for every thread-less record.
+        # Index once for constant-time later-reply checks. Without a GraphQL
+        # thread ID, _thread_key separates REST chains by their root.
         for other in records:
             if not other.get("reply_to_id"):
                 continue
@@ -685,7 +544,7 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
     by_source: dict[str, dict[str, Any]] = {}
     for position, rec in enumerate(records):
         sid = rec.get("source_id")
-        group = "candidates" if sid in candidate_ids else "non_candidates"
+        group = "candidates" if sid in not_exact else "non_candidates"
         fentry = ((facts or {}).get(group) or {}).get(sid)
         facts_present = fentry is not None
         refs: set[str] = set()
@@ -696,7 +555,7 @@ def prioritized_evidence(raw: dict[str, Any]) -> dict[str, Any]:
         signals = collect_signals(rec, view_context)
         band, disposition, reasons = classify_evidence(
             refs=refs,
-            is_candidate=sid in candidate_ids,
+            is_candidate=sid in not_exact,
             dismissed=bool(rec.get("dismissed")),
             signals=signals,
             facts_present=facts_present,
@@ -732,13 +591,7 @@ MAX_GOLD_FINDINGS = 50
 
 
 def _curation_model(curation: dict[str, Any]) -> schema.Curation:
-    """Build the fixed Curation model from a raw dict.
-
-    The persisted ``gold_mode`` audit field is not schema field, so it is
-    dropped here (it is recomputed by ``derive_gold_mode`` when read); the
-    ``task_spec_approved_at`` audit timestamp is stripped the same way (it
-    never reaches the model, the compiled digest, or the recompile gate).
-    """
+    """Parse curation without derived gold_mode or the task-spec approval audit timestamp."""
     return schema.Curation(
         **{k: v for k, v in curation.items() if k not in ("gold_mode", "task_spec_approved_at")}
     )
@@ -751,11 +604,7 @@ def _snapshot_head(raw: dict[str, Any]) -> str | None:
 
 
 def _projection_matches(candidate: dict[str, Any], finding: dict[str, Any]) -> bool:
-    """True when a finding is byte-identical to one candidate projection.
-
-    Compares the canonical content projection (title/body/location) — the
-    severity is always ``None`` on a candidate projection.
-    """
+    """Compare canonical title, body, and location; candidate severity is always None."""
     return (
         candidate.get("title") == finding.get("title")
         and candidate.get("body") == finding.get("body")
@@ -764,11 +613,7 @@ def _projection_matches(candidate: dict[str, Any], finding: dict[str, Any]) -> b
 
 
 def _derive_content(raw: dict[str, Any]) -> None:
-    """Derive (and persist) ``gold_status`` + ``gold_mode`` from parsed findings.
-
-    Never caller-supplied — derived always from the resulting findings, so an
-    ``--apply-gold`` fragment (or a caller) cannot forge them.
-    """
+    """Derive stored gold status and mode from findings, ignoring caller claims."""
     curation = raw["curation"]
     model = _curation_model(curation)
     curation["gold_status"] = schema.derive_gold_status(model)
@@ -776,12 +621,7 @@ def _derive_content(raw: dict[str, Any]) -> None:
 
 
 def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any]) -> None:
-    """Location-vs-head: path present in the frozen head tree, ordered lines.
-
-    The frozen head tree is read from a disposable clone of the case's frozen
-    bundle (``refs/remotes/origin/head``), never the shared bare mirror — so a
-    deleted mirror cannot make a case uncuratable.
-    """
+    """Validate the finding range against the frozen bundle head, independently of the mirror."""
     location = finding.get("location")
     if location is None:
         return
@@ -805,12 +645,7 @@ def _validate_location(root: Path, raw: dict[str, Any], finding: dict[str, Any])
 
 
 def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
-    """Revalidate an in-memory case doc through curation rules + the full schema.
-
-    Raises :class:`CurationError` naming the first violated curation rule; the
-    fixed-schema :class:`ValidationError` (a contract failure) propagates
-    unchanged. Never writes.
-    """
+    """Validate service rules before the full schema; preserve CurationError versus ValidationError."""
     curation = raw.get("curation") or {}
     findings = curation.get("findings") or []
 
@@ -846,25 +681,14 @@ def _validate_raw(root: Path, case_id: str, raw: dict[str, Any]) -> None:
 
 
 def validate_case(root: Path, case_id: str) -> None:
-    """Re-validate one case through the fixed schema plus curation-service rules.
-
-    Returns ``None`` on success; raises :class:`CurationError` on the first
-    curation-rule violation and lets the fixed-schema
-    :class:`ValidationError` propagate as a contract failure. Never writes.
-    """
+    """Read and validate one case without writing; propagate service and schema errors unchanged."""
     raw = _load_case(root, case_id)
     _validate_raw(root, case_id, raw)
     return None
 
 
 def _stage_case(root: Path, case_id: str, raw: dict[str, Any], *, op: str) -> None:
-    """Validate in-memory then atomically rewrite the single case YAML.
-
-    The full validity check (curation rules + :class:`schema.CaseDocument`) runs
-    **before** the :class:`storage.Transaction` opens, so a rejected mutation
-    leaves the on-disk case byte-unchanged. No manifest is staged — curation
-    state lives only in the case YAML.
-    """
+    """Validate the entire case before opening its atomic YAML rewrite; never stage the manifest."""
     _validate_raw(root, case_id, raw)
     with storage.Transaction(root, op_id=f"curate-{case_id}", kind=f"curation:{op}") as tx:
         tx.stage(
@@ -875,12 +699,7 @@ def _stage_case(root: Path, case_id: str, raw: dict[str, Any], *, op: str) -> No
 
 
 def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
-    """Accept one exact-exceptable candidate as a byte-identical ``historical`` finding.
-
-    The finding's title/body/severity/location are taken straight from the
-    candidate projection, ``provenance.kind`` is ``historical`` (the only path
-    that produces it), and ``finding_id`` is derived from the content.
-    """
+    """Accept an exact candidate with unchanged content, derived ID, and historical provenance."""
 
     def mutate(raw: dict[str, Any]) -> None:
         candidate = next(
@@ -894,15 +713,8 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
 
         curation = raw.setdefault("curation", {})
         _reopen_for_mutation(curation)
-        finding = {
-            "title": candidate["title"],
-            "body": candidate["body"],
-            "severity": candidate.get("severity"),
-            "location": candidate.get("location"),
-            "provenance": {"kind": "historical", "source_ids": [source_id]},
-        }
-        finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-        raw.setdefault("curation", {}).setdefault("findings", []).append(finding)
+        finding = _build_finding(case_id, {**candidate, "source_ids": [source_id]}, kind="historical")
+        curation.setdefault("findings", []).append(finding)
         _derive_content(raw)
 
     _with_case_lock(root, case_id, "accept", mutate)
@@ -911,32 +723,27 @@ def accept_candidate(root: Path, case_id: str, source_id: str) -> None:
 def _derive_provenance_kind(
     source_ids: list[str], *, authored: bool = False
 ) -> str:
-    """Derive the provenance kind from source IDs + authoring intent.
-
-    ``historical`` is produced ONLY by :func:`accept_candidate` and never here:
-    additions/replacements are ``authored`` (no source, or explicit authoring)
-    or ``edited`` (rewrites of one or more sources).
-    """
-    if authored:
-        return "authored"
-    if not source_ids:
-        return "authored"
-    return "edited"
+    """Explicit authoring or no sources means authored; source rewrites mean edited, never historical."""
+    return "authored" if authored or not source_ids else "edited"
 
 
 def _evidence_source_ids(root: Path, raw: dict[str, Any]) -> set[str]:
     """The source_ids of every import evidence record the case references."""
-    return set(_evidence_projection(root, raw))
+    return set(_evidence_projection(_evidence_list(root, raw), raw))
 
 
 def _check_evidence_sources(
-    root: Path, raw: dict[str, Any], source_ids: list[str], case_id: str
+    root: Path, raw: dict[str, Any], source_ids: Iterable[str], case_id: str
 ) -> None:
-    """Reject a caller-supplied source reference that no import evidence backs."""
-    if not source_ids:
-        return
-    evidence_ids = _evidence_source_ids(root, raw)
+    """Validate references in input order, loading their import projection only once.
+
+    Empty source streams require no import read. Laziness preserves an atom's
+    missing-source error before inspecting later atoms.
+    """
+    evidence_ids = None
     for src in source_ids:
+        if evidence_ids is None:
+            evidence_ids = _evidence_source_ids(root, raw)
         if src not in evidence_ids:
             raise CurationError(f"source {src} is not evidence of case {case_id}")
 
@@ -945,24 +752,24 @@ def _append_atoms_to_case(
     root: Path, raw: dict[str, Any], case_id: str, atoms: list[dict[str, Any]],
     *, authored: bool, require_sources: bool,
 ) -> None:
-    """Shared mutate body of the three atomic-add siblings.
+    """Validate all sources, reopen curation, and add the derived batch atomically.
 
-    Validates every atom's sources up front (all-or-nothing), reopens the case
-    for mutation, appends each atom via :func:`_build_replacement` (the single
-    finding builder, never duplicated inline), and re-derives gold status.
-    With *require_sources* an atom carrying no ``source_ids`` is rejected
-    naming its index — it would otherwise silently derive ``authored``.
+    Edited atoms require sources; report an empty source list by atom index before any
+    finding is appended. Re-derive gold status after constructing the complete batch.
     """
-    for i, atom in enumerate(atoms):
-        source_ids = list(atom.get("source_ids") or [])
-        if require_sources and not source_ids:
-            raise CurationError(f"edited-finding atom {i} carries no source_ids")
-        _check_evidence_sources(root, raw, source_ids, case_id)
+    def sources() -> Iterator[str]:
+        for i, atom in enumerate(atoms):
+            source_ids = list(atom.get("source_ids") or [])
+            if require_sources and not source_ids:
+                raise CurationError(f"edited-finding atom {i} carries no source_ids")
+            yield from source_ids
+
+    _check_evidence_sources(root, raw, sources(), case_id)
     curation = raw.setdefault("curation", {})
     _reopen_for_mutation(curation)
     for atom in atoms:
         curation.setdefault("findings", []).append(
-            _build_replacement(case_id, atom, authored=authored)
+            _build_finding(case_id, atom, authored=authored)
         )
     _derive_content(raw)
 
@@ -987,14 +794,7 @@ def add_finding(
 def add_findings(
     root: Path, case_id: str, *, findings: list[dict[str, Any]]
 ) -> None:
-    """Atomically add a batch of authored findings in one transaction.
-
-    Unlike a loop of :func:`add_finding` calls, a mid-batch invariant violation
-    stages **nothing** — the whole batch validates (evidence sources checked
-    up front), derives, and stages together, so the TUI's multi-atom ``[n]``
-    add stays all-or-nothing and never leaves earlier atoms persisted on a
-    failure.
-    """
+    """Add a batch as authored findings; validate every source and the complete result before staging."""
 
     def mutate(raw: dict[str, Any]) -> None:
         _append_atoms_to_case(
@@ -1007,18 +807,10 @@ def add_findings(
 def add_edited_findings(
     root: Path, case_id: str, *, atoms: list[dict[str, Any]]
 ) -> None:
-    """Atomically add re-written (edited) findings in one transaction.
+    """Add an atomic split/merge batch with derived IDs and edited provenance.
 
-    The split/merge/author-from-evidence engine: N atoms sharing one source
-    split it into N findings, one atom carrying M sources merges them into
-    one finding. Every atom must carry a non-empty ``source_ids`` list whose
-    members are import evidence of the case — an empty list is rejected with a
-    :class:`CurationError` naming the atom index (it would otherwise silently
-    derive ``authored``) — so the resulting findings are always ``edited``,
-    never ``historical`` and never ``authored``. Finding IDs are derived, never
-    caller-supplied. Like :func:`add_findings`, the whole batch validates
-    (sources checked up front), derives, and stages together: a mid-batch
-    invariant violation stages nothing.
+    Every atom needs nonempty source_ids backed by import evidence. Reject an
+    empty list by atom index; any invalid source or result leaves the case unchanged.
     """
 
     def mutate(raw: dict[str, Any]) -> None:
@@ -1029,15 +821,14 @@ def add_edited_findings(
     _with_case_lock(root, case_id, "add-edited", mutate)
 
 
-def _build_replacement(
+def _build_finding(
     case_id: str, replacement: dict[str, Any],
-    *, authored: bool = False,
+    *, authored: bool = False, kind: str | None = None,
 ) -> dict[str, Any]:
-    """Build one finding from a replacement atom; provenance kind driven by *authored*.
+    """Construct trusted finding fields, provenance, and a content-derived finding id.
 
-    The single finding builder shared by the atomic-adds (via
-    :func:`_append_atoms_to_case`) and replacement paths; callers validate
-    sources up front, so this is a pure dict construction.
+    Callers validate source ids first. Ignore any ids or provenance supplied on the atom;
+    only accepted candidates and byte-matching reviewed fragments choose historical kind.
     """
     source_ids = list(replacement.get("source_ids") or [])
     finding = {
@@ -1046,7 +837,7 @@ def _build_replacement(
         "severity": replacement.get("severity"),
         "location": replacement.get("location"),
         "provenance": {
-            "kind": _derive_provenance_kind(source_ids, authored=authored),
+            "kind": kind if kind is not None else _derive_provenance_kind(source_ids, authored=authored),
             "source_ids": source_ids,
         },
     }
@@ -1057,12 +848,7 @@ def _build_replacement(
 def replace_findings(
     root: Path, case_id: str, finding_id: str, *, replacements: list[dict[str, Any]]
 ) -> None:
-    """Replace one finding with an atomic set of re-written (edited) findings.
-
-    Supports split (N replacements expand one finding) and merge (each
-    replacement concatenates its own sources); the replacements are the atomic
-    toehold set and are revalidated with the whole case.
-    """
+    """Replace one finding with an atomic split/merge batch, validating the resulting whole case."""
 
     def mutate(raw: dict[str, Any]) -> None:
         curation = raw.setdefault("curation", {})
@@ -1074,9 +860,9 @@ def replace_findings(
         )
         if index is None:
             raise CurationError(f"no finding {finding_id}")
-        for r in replacements:
-            _check_evidence_sources(root, raw, list(r.get("source_ids") or []), case_id)
-        built = [_build_replacement(case_id, r) for r in replacements]
+        sources = (source for atom in replacements for source in list(atom.get("source_ids") or []))
+        _check_evidence_sources(root, raw, sources, case_id)
+        built = [_build_finding(case_id, r) for r in replacements]
         new_findings = list(findings[:index]) + built + list(findings[index + 1:])
         curation["findings"] = new_findings
         _derive_content(raw)
@@ -1085,16 +871,7 @@ def replace_findings(
 
 
 def _set_clean(curation: dict[str, Any]) -> None:
-    """Attest one case's gold set as reviewed-clean (deterministic derivation).
-
-    Sets clean-attested and the clean gold status + mode, and clears any
-    snapshot attestation (a clean-attested case is never ready-attested by this
-    path). The state must already be reopened for mutation (:func:`_reopen_for_mutation`
-    clears a ready/stale case's snapshot attestation); ``_set_clean`` re-clears it
-    so the audit fields stay internally consistent. Shared by :func:`attest_clean`
-    and the :func:`apply_gold_fragment` clean branch so the clean-attestation
-    triple lives in one place.
-    """
+    """Set clean attestation and derived clean status while clearing snapshot attestation."""
     curation["snapshot_attested"] = False
     curation["clean_attested"] = True
     curation["gold_status"] = "clean"
@@ -1104,11 +881,7 @@ def _set_clean(curation: dict[str, Any]) -> None:
 def _append_evidence_exclusion(
     curation: dict[str, Any], source_id: str, reason: str, note: str | None
 ) -> None:
-    """Append (or replace) one evidence-exclusion row (last-wins per source).
-
-    Shared by :func:`exclude_evidence` and :func:`apply_gold_fragment` so the
-    single-row insertion stays in one place.
-    """
+    """Replace any prior exclusion for the source, then append the new row."""
     exclusions = [
         e for e in curation.get("exclusions") or [] if e.get("source_id") != source_id
     ]
@@ -1119,11 +892,9 @@ def _append_evidence_exclusion(
 def exclude_evidence(
     root: Path, case_id: str, source_id: str, *, reason: str, note: str | None = None
 ) -> None:
-    """Exclude one evidence source from gold with the fixed reason/note contract.
+    """Exclude one source, replacing any previous row.
 
-    Idempotent last-wins: re-excluding an already-excluded source replaces the
-    existing row (a single entry per source). ``reason == "other"`` requires a
-    non-blank note; a stray note on any other reason is rejected.
+    Only reason=other accepts a note, and then a nonblank note is required.
     """
 
     exclude_evidence_batch(root, case_id, [source_id], reason=reason, note=note)
@@ -1132,20 +903,11 @@ def exclude_evidence(
 def exclude_evidence_batch(
     root: Path, case_id: str, source_ids: list[str], *, reason: str, note: str | None = None
 ) -> None:
-    """Exclude several evidence sources from gold in one atomic transaction.
-
-    The batch sibling of :func:`exclude_evidence`: validates the reason/note
-    contract and every source up front (all-or-nothing), then appends the whole
-    selection under one lock+transaction, so a mid-selection service failure
-    stages nothing and cannot leave earlier sources committed. Matches the
-    atomic ``add_findings``/``add_edited_findings`` mutation family the TUI
-    uses for its multi-method actions.
-    """
+    """Validate reason, note, and all sources before atomically appending the exclusion batch."""
 
     def mutate(raw: dict[str, Any]) -> None:
         _validate_evidence_exclusion_contract(reason, note)
-        for source_id in source_ids:
-            _check_evidence_sources(root, raw, [source_id], case_id)
+        _check_evidence_sources(root, raw, source_ids, case_id)
         curation = raw.setdefault("curation", {})
         _reopen_for_mutation(curation)
         for source_id in source_ids:
@@ -1155,12 +917,7 @@ def exclude_evidence_batch(
 
 
 def _validate_transition(frm: str | None, to: str) -> None:
-    """Enforce one case state transition, exposing :class:`CurationError`.
-
-    The schema helper raises :class:`schema.TransitionError`, but the service
-    contract promises :class:`CurationError`; translate the message so library
-    and CLI callers see a single exception family.
-    """
+    """Translate schema transition errors into the curation service exception family."""
     try:
         schema.validate_case_transition(cast("str", frm), to)
     except schema.TransitionError as exc:
@@ -1168,28 +925,13 @@ def _validate_transition(frm: str | None, to: str) -> None:
 
 
 def _invalidate_task_spec_approval(curation: dict[str, Any]) -> None:
-    """Clear a persisted task-spec approval (approved digest + audit stamp).
-
-    ``mark_ready`` persists the pair together and every gold/provenance/
-    evidence mutation (or a ready demotion, case (re)import, or case
-    exclusion) that makes a previously-approved spec no longer reflect the
-    case must clear both together so they can never diverge. Shared by
-    :func:`_demote_ready`, the stale branch of :func:`_reopen_for_mutation`,
-    :func:`_apply_case_exclusion`, and the re-import path in ``github_import``
-    — the exact four call sites that previously inlined the identical
-    two-pop pair.
-    """
+    """Clear the approved digest and its audit timestamp together whenever case content invalidates them."""
     curation.pop("task_spec_sha256", None)
     curation.pop("task_spec_approved_at", None)
 
 
 def _demote_ready(curation: dict[str, Any]) -> str | None:
-    """Demote a ``ready`` case to ``draft``, clearing attestation.
-
-    Returns the resulting state (``draft`` after a demotion, else the current
-    state untouched) so callers that route onward to another terminal state
-    (case-exclude, apply-gold) can drive the next transition.
-    """
+    """Move ready to draft and clear attestation/approval; return the resulting state."""
     state = curation.get("state")
     if state == "ready":
         _validate_transition("ready", "draft")
@@ -1201,13 +943,9 @@ def _demote_ready(curation: dict[str, Any]) -> str | None:
 
 
 def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
-    """Apply the plan §7 state discipline to every gold/provenance/evidence mutation.
+    """Demote ready to draft; leave stale stale but clear its attestation/approval.
 
-    - a ``ready`` case first goes ``ready -> draft`` (clearing attestation);
-    - a ``stale`` case stays ``stale`` but clears attestation;
-    - a ``draft`` is already draft;
-    - an ``excluded``/``unreplayable`` case rejects gold mutations (only
-      re/include or case-exclude paths apply there).
+    Draft remains writable. Excluded and unreplayable cases reject gold mutations.
     """
     state = curation.get("state")
     if state == "ready":
@@ -1223,18 +961,11 @@ def _reopen_for_mutation(curation: dict[str, Any]) -> dict[str, Any]:
 
 
 def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str | None = None) -> None:
-    """The final-attest operation: the one path that sets a case ready + attested.
+    """Attest the exact frozen head and approved task-spec digest, then mark ready.
 
-    SHA-specific confirmation: *head_sha* must equal the snapshot's original
-    head SHA, and the current state must move to ``ready`` (draft -> ready or
-    stale -> ready). Sets ``snapshot_attested=True`` and ``state=ready`` after
-    the full case revalidates. Records the human-approved Task.md digest
-    (*task_spec_sha256*); when *task_spec_sha256* is omitted the digest is
-    derived under the workspace lock from the exact case state that is about
-    to be persisted, so the approved digest can never go stale and abort a
-    later whole-workspace compile. Also records a persisted-but-stripped
-    ``task_spec_approved_at`` audit timestamp -- there is no approval without
-    a digest (R7).
+    Require a valid ready transition and nonempty or clean-attested gold. When the
+    digest is omitted, derive it under the lock from the state being persisted.
+    Store the approval timestamp with the digest; validate the whole case before commit.
     """
 
     def mutate(raw: dict[str, Any]) -> None:
@@ -1269,12 +1000,7 @@ def mark_ready(root: Path, case_id: str, *, head_sha: str, task_spec_sha256: str
 
 
 def attest_clean(root: Path, case_id: str) -> None:
-    """Attest a case reviewed-clean (only when its gold set is empty).
-
-    Sets ``clean_attested=True`` and the clean gold status; never sets
-    ``snapshot_attested`` and never marks ready — the final-attest operation
-    remains required.
-    """
+    """Attest an empty gold set as clean; reopen mutable state without marking the snapshot ready."""
 
     def mutate(raw: dict[str, Any]) -> None:
         curation = raw.setdefault("curation", {})
@@ -1282,10 +1008,7 @@ def attest_clean(root: Path, case_id: str) -> None:
             raise CurationError(
                 f"case {case_id} has gold findings; clean attestation requires an empty gold set"
             )
-        # Route through the mutation discipline: a ready/stale case reopens to
-        # draft (clearing snapshot attestation) instead of lingering as
-        # ready-but-unattested, which the revalidation guard forbids. A draft case
-        # stays draft -- the final-attest op remains required.
+        # Reopen as draft; clean attestation cannot replace final snapshot approval.
         _reopen_for_mutation(curation)
         _set_clean(curation)
 
@@ -1295,13 +1018,7 @@ def attest_clean(root: Path, case_id: str) -> None:
 def _apply_case_exclusion(
     curation: dict[str, Any], *, reason: str, note: str | None
 ) -> None:
-    """Route any case to ``excluded`` under the case reason/note contract.
-
-    Demotes a ``ready`` case (``ready -> draft``, clearing attestation) then
-    routes the resulting state to ``excluded``. Shared by both
-    :func:`exclude_case` and :func:`apply_gold_fragment` so the transition
-    block lives in one place.
-    """
+    """Validate the exclusion contract, demote ready if needed, then transition to excluded."""
     _validate_case_exclusion_contract(reason, note)
     state = _demote_ready(curation)
     _validate_transition(state, "excluded")
@@ -1315,13 +1032,7 @@ def _apply_case_exclusion(
 def exclude_case(
     root: Path, case_id: str, reason: str, *, note: str | None = None
 ) -> None:
-    """Exclude an entire case from the dataset with the case reason/note contract.
-
-    Routes through the fixed transition table: from ``draft``/``stale``/
-    ``unreplayable`` directly to ``excluded``; from ``ready`` via the
-    ``ready -> draft -> excluded`` double edge (clearing attestation on the
-    ``ready -> draft`` step).
-    """
+    """Exclude a case through valid transitions; ready passes through draft and loses attestation."""
 
     def mutate(raw: dict[str, Any]) -> None:
         curation = raw.setdefault("curation", {})
@@ -1356,11 +1067,10 @@ def _fragment_provenance(
     *,
     case_id: str,
 ) -> tuple[str, list[str]]:
-    """Derive provenance kind from a fragment finding's source IDs + match.
+    """Derive historical only for one source whose candidate content matches exactly.
 
-    ``historical`` only when exactly one source whose projection byte-matches
-    the finding; else ``edited`` (>=1 source) or ``authored`` (no source). The
-    fragment's own kind is never trusted.
+    Other source-backed findings are edited; source-free findings are authored.
+    Ignore the fragment's claimed provenance kind.
     """
     _check_evidence_sources(root, raw, source_ids, case_id)
     if len(source_ids) == 1:
@@ -1374,14 +1084,10 @@ def _fragment_provenance(
 
 
 def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> None:
-    """Apply a reviewed gold YAML fragment through the service derivation path.
+    """Derive and validate a reviewed gold fragment, ignoring forged IDs and status.
 
-    Strips the caller-supplied ``finding_id`` / ``provenance`` / ``state`` /
-    ``gold_status`` / ``gold_mode`` from every finding before derivation, so a
-    forged value in any of them is discarded and recomputed. Reuses the
-    exclusion and case-exclusion reason/note contracts. Always leaves a
-    ready-snapshot case ``draft`` and never sets ``snapshot_attested`` — it
-    can never produce ready gold.
+    Apply the shared evidence/case exclusion contracts. A ready snapshot becomes
+    draft with snapshot attestation cleared; fragments cannot produce ready gold.
     """
 
     def mutate(raw: dict[str, Any]) -> None:
@@ -1390,18 +1096,10 @@ def apply_gold_fragment(root: Path, case_id: str, fragment: dict[str, Any]) -> N
 
         findings: list[dict[str, Any]] = []
         for frag in fragment.get("findings") or []:
-            finding = {
-                "title": frag["title"],
-                "body": frag["body"],
-                "severity": frag.get("severity"),
-                "location": frag.get("location"),
-            }
-            kind, source_ids = _fragment_provenance(
-                root, raw, finding, list(frag.get("source_ids") or []), case_id=case_id
+            kind, _ = _fragment_provenance(
+                root, raw, frag, list(frag.get("source_ids") or []), case_id=case_id,
             )
-            finding["provenance"] = {"kind": kind, "source_ids": source_ids}
-            finding["finding_id"] = schema.derive_finding_id(finding, case_id=case_id)
-            findings.append(finding)
+            findings.append(_build_finding(case_id, frag, kind=kind))
         curation["findings"] = findings
 
         for exc in fragment.get("exclusions") or []:

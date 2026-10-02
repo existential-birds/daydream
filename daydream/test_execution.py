@@ -1,14 +1,7 @@
-"""Bounded host-side test runner.
+"""Resolve test recipes and execute bounded host-side test commands.
 
-Executes shell test commands as real subprocesses (issue #726): streaming +
-redacting merged output, wall-budget timeout that kills the whole process
-group via the existing ``backends/_subprocess.terminate_process``, returning a
-typed :class:`TestExecutionResult` whose ``passed`` is derived only from exit
-status. "Green" means the subprocess exited 0 — nothing else.
-
-The merged output buffer and the post-exit pipe drain are both capped, so a
-suite that floods output or leaves a grandchild holding the pipe write ends
-cannot balloon the host process or hang the run.
+Passing requires exit status zero without timeout. Output and post-exit
+pipe drains are capped; timeouts kill the entire process group.
 """
 
 import asyncio
@@ -23,12 +16,13 @@ from pathlib import Path
 from typing import Any, Literal, cast
 
 from daydream.backends._subprocess import terminate_process
-from daydream.json_utils import atomic_write_json
+from daydream.json_utils import atomic_write_json, dataclass_payload, read_json_object
+from daydream.redaction import redact_structured_text
 from daydream.repository_paths import (
     canonicalize_working_directory,
     path_is_confined,
 )
-from daydream.trajectory import DaydreamPhase, host_phase_scope, redact_structured_text
+from daydream.trajectory import DaydreamPhase, host_phase_scope
 
 _REDACTED_ENV_VAR = "[REDACTED_ENV_VAR]"
 
@@ -57,31 +51,13 @@ FactSource = Literal["cli", "config", "admitted", "derived", "unresolved"]
 
 
 class MissingTestCommandError(RuntimeError):
-    """Raised when no canonical test command is configured.
-
-    Issue #726: a "green" daydream run must mean the target repo's test
-    command really exited 0 as a host-side subprocess — the agent never
-    guesses the command. When neither the CLI flag nor a config file declares
-    one, :func:`canonical_test_command` raises this rather than return an
-    empty or unknown command. A configured value that cannot be parsed as
-    shell argv (an unbalanced/unterminated quote fails ``shlex.split``) is the
-    same config-error class: it is wrapped into this exception instead of
-    letting ``ValueError`` escape at the call sites. Production call sites
-    currently catch it in :func:`daydream.phases._canonical_test_cmd` and fall
-    back to the warned, deprecated agent-run path during the #726 transition;
-    the exception still fails closed anywhere it is let through.
-    """
+    """No configured test command, or its shell-word syntax is invalid."""
 
 
 def _select_raw_test_command(
     config: object, run_config: object
 ) -> tuple[str | None, Literal["cli", "config"]]:
-    """Apply CLI-over-config precedence, returning the raw value and its origin.
-
-    The selection is the existing ``or`` chain: a truthy CLI value wins, else
-    the config-file value (``None``/empty included). Whether the selected value
-    is usable is the caller's concern — see :func:`canonical_test_command`.
-    """
+    """Select a truthy CLI command before the config value; parsing happens separately."""
     cli_value = getattr(run_config, "test_command", None)
     if cli_value:
         return cli_value, "cli"
@@ -90,12 +66,7 @@ def _select_raw_test_command(
 
 @dataclass(frozen=True)
 class ResolvedFact:
-    """One resolved run fact together with where it came from.
-
-    ``value`` is ``None`` exactly when the fact could not be resolved, and
-    ``source == "unresolved"`` names that absence (Pattern C: a named miss,
-    never a placeholder). ``resolved`` is the single predicate callers gate on.
-    """
+    """A resolved value and provenance, or None with source="unresolved"."""
 
     value: str | tuple[str, ...] | None
     source: FactSource
@@ -106,19 +77,11 @@ class ResolvedFact:
         return self.value is not None and self.source != "unresolved"
 
 
-def canonical_test_command(config: object, run_config: object) -> list[str]:
-    """Resolve the canonical test command as shell-word-split argv.
-
-    Precedence (highest first): the CLI ``--test-command`` flag
-    (``run_config.test_command``), then the config-file ``test_command`` key
-    (``.daydream.toml`` root keys override ``[tool.daydream]`` in
-    ``pyproject.toml`` — that merge already happened in
-    :func:`daydream.config_file.load_file_config`). When neither is set,
-    raise :class:`MissingTestCommandError` naming the key, the precedence
-    sources checked, and exactly what to set — never fall back to an empty or
-    unknown command.
-    """
-    raw, _ = _select_raw_test_command(config, run_config)
+def _parse_test_command(
+    config: object, run_config: object
+) -> tuple[tuple[str, ...], Literal["cli", "config"]]:
+    """Parse CLI-over-config argv, with actionable errors for missing or invalid commands."""
+    raw, source = _select_raw_test_command(config, run_config)
     if not raw or not raw.strip():
         raise MissingTestCommandError(
             "No canonical test command is configured; refusing to run tests "
@@ -129,11 +92,8 @@ def canonical_test_command(config: object, run_config: object) -> list[str]:
             "Example: daydream --test-command 'uv run pytest -n auto' /path/to/project"
         )
     try:
-        return shlex.split(raw)
+        return tuple(shlex.split(raw)), source
     except ValueError as exc:
-        # Unbalanced/unterminated quotes: ``shlex.split`` cannot build an argv.
-        # Same config-error class as a missing command — the call sites fail
-        # soft (warn + fall back) instead of crashing the run (issue #726).
         raise MissingTestCommandError(
             "The configured test_command could not be parsed as shell argv "
             f"(unbalanced or unterminated quote): {raw!r}. Set --test-command "
@@ -141,33 +101,22 @@ def canonical_test_command(config: object, run_config: object) -> list[str]:
         ) from exc
 
 
-def resolve_test_command_fact(config: object, run_config: object) -> ResolvedFact:
-    """Resolve the test command into a provenance-bearing :class:`ResolvedFact`.
+def canonical_test_command(config: object, run_config: object) -> list[str]:
+    """Split CLI-over-config test argv; missing or invalid commands raise MissingTestCommandError."""
+    return list(_parse_test_command(config, run_config)[0])
 
-    Non-raising counterpart of :func:`canonical_test_command`: it applies the
-    same CLI-over-config precedence but a missing, empty/whitespace, or
-    ``shlex``-unparseable value yields the unresolved fact instead of an
-    exception. The unresolved fact is the named miss — there is no guessed or
-    placeholder command.
-    """
-    raw, source = _select_raw_test_command(config, run_config)
-    if not raw or not raw.strip():
-        return ResolvedFact(value=None, source="unresolved")
+
+def resolve_test_command_fact(config: object, run_config: object) -> ResolvedFact:
+    """Resolve command argv and provenance; missing or invalid input returns an unresolved fact."""
     try:
-        return ResolvedFact(value=tuple(shlex.split(raw)), source=source)
-    except ValueError:
+        argv, source = _parse_test_command(config, run_config)
+        return ResolvedFact(value=argv, source=source)
+    except MissingTestCommandError:
         return ResolvedFact(value=None, source="unresolved")
 
 
 class RecipeConfinementError(ValueError):
-    """Raised when a package directory resolves outside the worktree.
-
-    A package cwd is a security boundary: the host test runner will execute in
-    it, so a start path that escapes the worktree (``..`` traversal, an
-    absolute path elsewhere) is rejected rather than silently clamped to the
-    root. Confinement is decided by :func:`path_is_confined`, the single
-    primitive that also settles symlinked components.
-    """
+    """The resolved package cwd escapes the worktree, including through symlinks."""
 
 
 #: The closed set of package manifests that make a directory a package root.
@@ -189,16 +138,11 @@ _RUNNER_LOCKFILES: tuple[tuple[str, str], ...] = (
 
 @dataclass(frozen=True)
 class PackageResolution:
-    """Resolved facts about the package a test command will run within.
+    """Package identity for a repo-relative cwd ("." at the root).
 
-    ``cwd_relative`` is the repo-relative posix directory (``"."`` for the
-    worktree root) the command runs in. ``runner`` names the package manager
-    discovered from the closed lockfile set, or ``None`` when none is declared.
-    ``interpreter`` is the declared Python version (``.python-version`` first,
-    then the manifest's ``requires-python``), or ``None``. ``config_digest``
-    digests the package's existing config inputs; any input that exists but
-    cannot be read makes the digest ``None`` and names it in
-    ``absent_components`` (Pattern C: a named miss, never a placeholder).
+    The first declared lockfile selects the runner; .python-version precedes
+    requires-python. Unreadable config inputs produce a None digest and named
+    absent_components, never a placeholder.
     """
 
     cwd_relative: str
@@ -209,11 +153,7 @@ class PackageResolution:
 
 
 def _nearest_package_dir(repo_root: Path, cwd_relative: str) -> Path:
-    """Walk up from ``cwd_relative`` to the nearest manifest-bearing directory.
-
-    The walk is bounded by the worktree root: an ancestor above the root is
-    never inspected, so the root remains the floor and maps to the root itself.
-    """
+    """Find the nearest manifest-bearing ancestor, bounded by the worktree root."""
     current = repo_root if cwd_relative == "." else repo_root / cwd_relative
     while True:
         if any((current / name).exists() for name in _PACKAGE_MANIFESTS):
@@ -253,12 +193,10 @@ def _resolve_interpreter(package_dir: Path) -> str | None:
 
 
 def _config_input_names(package_dir: Path, runner: str | None) -> tuple[str, ...]:
-    """Name the package's existing config inputs in a deterministic order.
+    """Return sorted present manifests, selected runner lockfile and Python pin.
 
-    The set is closed: the present manifests, the resolved runner lockfile,
-    and ``.python-version`` when it exists. Inputs are keyed by existence (not
-    file-ness) so a malformed directory-shaped input still becomes an absent
-    component rather than silently vanishing from the identity.
+    Existence, not file type, determines membership: malformed directory inputs
+    must become named digest misses rather than silently disappearing.
     """
     names = [name for name in _PACKAGE_MANIFESTS if (package_dir / name).exists()]
     if runner is not None:
@@ -274,13 +212,9 @@ def _config_input_names(package_dir: Path, runner: str | None) -> tuple[str, ...
 def _config_digest(
     package_dir: Path, names: tuple[str, ...]
 ) -> tuple[str | None, tuple[str, ...]]:
-    """Digest the named config inputs, or return a named miss.
+    """Hash each name + NUL + bytes into a canonical map digest.
 
-    The discipline follows ``blob_map_digest`` (``deep/reuse_key.py``): each
-    input contributes ``sha256(name + b"\\0" + bytes)`` to a canonical map, and
-    any unreadable input makes the whole digest ``None`` with the input named
-    in ``absent_components``. There is no placeholder digest and no empty-string
-    fallback.
+    An unreadable input returns None and its name. An empty map is a real identity.
     """
     entries: dict[str, str] = {}
     for name in names:
@@ -291,23 +225,15 @@ def _config_digest(
         entries[name] = hashlib.sha256(
             name.encode("utf-8") + b"\0" + payload
         ).hexdigest()
-    if not entries:
-        # No config inputs at all is a real value, not a miss.
-        return hashlib.sha256(b"{}").hexdigest(), ()
     canonical = json.dumps(entries, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest(), ()
 
 
 def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
-    """Resolve the package a test command runs within, bounded by the worktree.
+    """Resolve package metadata from the nearest manifest ancestor of the command cwd.
 
-    ``start`` is the directory the command was anchored to (the worktree root
-    for the repo-root case). The nearest manifest-bearing directory at or above
-    it names the package; the worktree root maps to ``cwd_relative == "."``.
-    The resolved cwd is confinement-checked with :func:`path_is_confined` and
-    rejected with :class:`RecipeConfinementError` when it escapes — never
-    silently clamped. Runner, interpreter, and config-input identity are read
-    from the package directory.
+    The cwd remains repo-relative and confinement-checked; outward paths raise
+    RecipeConfinementError. Metadata lookup never walks above repo_root.
     """
     start_abs = start if start.is_absolute() else repo_root / start
     relative = os.path.relpath(str(start_abs), str(repo_root))
@@ -334,12 +260,9 @@ def resolve_package(repo_root: Path, start: Path) -> PackageResolution:
 
 @dataclass
 class TestExecutionResult:
-    """Outcome of one host-side test-command run.
+    """Host test outcome: completed excludes timeouts; incomplete includes timeout or capped output.
 
-    ``completed`` records that the process reached its own exit (a timeout is
-    the one thing that makes it ``False``), and ``incomplete`` records that the
-    retained evidence is missing something (a timeout or a capped output
-    buffer). Neither flag changes ``passed``.
+    These evidence flags do not change passed.
     """
 
     # Not a pytest test class despite the name prefix.
@@ -360,16 +283,10 @@ class TestExecutionResult:
 
 @dataclass(frozen=True)
 class TestExecutionIdentity:
-    """The full typed identity of one test execution, outcome included.
+    """Complete execution identity for pure evidence-reuse comparison.
 
-    Every component the evidence-reuse predicate compares lives here, so the
-    predicate itself stays pure and can be tested without constructing a
-    ``TestAttemptEvidence``. ``reusable`` is the single authorization
-    predicate: only a host execution that actually passed may ever stand in
-    for a fresh validation. An agent-reported verdict is prose, and a timed-out
-    or output-truncated run did not produce authoritative evidence, so all are
-    ``False``. ``payload`` is the strict-JSON projection persisted with the
-    test verdict (tuple fields become lists).
+    Only passed host runs authorize reuse. Agent verdicts, timeouts, and
+    truncated runs are non-authoritative; payload() persists all fields.
     """
 
     # Not a pytest test class despite the name prefix.
@@ -396,30 +313,12 @@ class TestExecutionIdentity:
 
     def payload(self) -> dict[str, Any]:
         """Return the strict-JSON projection of every identity component."""
-        return {
-            "session_id": self.session_id,
-            "argv": list(self.argv),
-            "cwd_relative": self.cwd_relative,
-            "runner": self.runner,
-            "interpreter": self.interpreter,
-            "config_digest": self.config_digest,
-            "absent_components": list(self.absent_components),
-            "input_tree_key": self.input_tree_key,
-            "output_tree_key": self.output_tree_key,
-            "head_sha": self.head_sha,
-            "branch": self.branch,
-            "kind": self.kind,
-            "outcome": self.outcome,
-        }
+        return dataclass_payload(self)
 
 
 @dataclass(frozen=True)
 class RecipeCandidate:
-    """A manifest-derived suggestion, never the authoritative command.
-
-    Produced only from the closed runner set (:data:`_RUNNER_LOCKFILES`); no
-    arbitrary repository text ever becomes a candidate (spec MH4).
-    """
+    """A suggestion from the closed manifest runner set, never an authoritative command."""
 
     argv: tuple[str, ...]
     provenance: Literal["manifest"]
@@ -427,11 +326,7 @@ class RecipeCandidate:
 
 @dataclass(frozen=True)
 class TestRecipe:
-    """One resolved test recipe: everything a run needs to run tests.
-
-    Every fact is resolved exactly once in the deep preamble and then consumed
-    from this single value — no consumer re-derives the command or the package.
-    """
+    """Command, package and suite facts resolved once for all consumers in a run."""
 
     command: ResolvedFact
     package: PackageResolution
@@ -443,12 +338,7 @@ class TestRecipe:
 
 
 def _manifest_candidate(runner: str | None) -> RecipeCandidate | None:
-    """Map a resolved runner to the closed manifest candidate, or ``None``.
-
-    The mapping is total over :data:`_RUNNER_LOCKFILES`: ``uv``/``poetry``/
-    ``pipenv`` run pytest through the runner; ``pip`` runs a bare ``pytest``.
-    An unresolved runner produces no candidate at all.
-    """
+    """Suggest pytest through a recognized runner, or bare pytest for pip."""
     if runner in {"uv", "poetry", "pipenv"}:
         return RecipeCandidate(argv=(runner, "run", "pytest"), provenance="manifest")
     if runner == "pip":
@@ -463,13 +353,9 @@ def resolve_test_recipe(
     repo_root: Path,
     cwd: Path | None = None,
 ) -> TestRecipe:
-    """Resolve the run's single test recipe, each fact exactly once.
+    """Resolve CLI-over-config command and suites, confined package and manifest suggestion.
 
-    The command fact applies CLI-over-config precedence; the package is
-    resolved from ``cwd`` (defaulting to the worktree root) and confined to
-    ``repo_root``; the candidate comes only from the closed manifest set. An
-    unresolved command never runs anything — the candidate is a suggestion
-    only (spec MH4).
+    An unresolved command cannot run; a candidate is only a suggestion.
     """
     command = resolve_test_command_fact(config, run_config)
     package = resolve_package(repo_root, cwd if cwd is not None else repo_root)
@@ -486,97 +372,57 @@ def resolve_test_recipe(
     )
 
 
-def _tuple_of_str(value: object) -> tuple[str, ...] | None:
-    """Return *value* as a tuple of strings, or ``None`` when it is not one."""
+def _string_tuple(value: object) -> tuple[str, ...]:
+    """Require a JSON array containing only strings."""
     if isinstance(value, list) and all(isinstance(entry, str) for entry in value):
         return tuple(value)
-    return None
+    raise ValueError("expected an array of strings")
 
 
 def recipe_to_payload(recipe: TestRecipe) -> dict[str, Any]:
-    """Serialise a recipe to its persisted, JSON-safe payload.
-
-    Every fact the recipe carries is emitted, so :func:`load_test_recipe`
-    reconstructs the same typed value a resumed run resolves.
-    """
-    command_value = recipe.command.value
-    candidate_payload: dict[str, Any] | None = None
-    if recipe.candidate is not None:
-        candidate_payload = {
-            "argv": list(recipe.candidate.argv),
-            "provenance": recipe.candidate.provenance,
-        }
-    return {
-        "format_version": RECIPE_FORMAT,
-        "command": {
-            "value": list(command_value) if isinstance(command_value, tuple) else command_value,
-            "source": recipe.command.source,
-        },
-        "package": {
-            "cwd_relative": recipe.package.cwd_relative,
-            "runner": recipe.package.runner,
-            "interpreter": recipe.package.interpreter,
-            "config_digest": recipe.package.config_digest,
-            "absent_components": list(recipe.package.absent_components),
-        },
-        "declared": list(recipe.declared),
-        "candidate": candidate_payload,
-    }
+    """Persist every recipe field as a JSON-safe value, including its format version."""
+    return {"format_version": RECIPE_FORMAT, **dataclass_payload(recipe)}
 
 
 def _recipe_from_payload(payload: dict[str, Any]) -> TestRecipe | None:
-    """Rebuild a recipe from its payload, or ``None`` when it is malformed.
-
-    The persisted artifact is untrusted input (Pattern B): every field is
-    validated before it becomes a typed value, and any missing, mistyped, or
-    out-of-domain field is a named absence, never a partially-built recipe.
-    """
+    """Validate all untrusted fields; malformed payloads yield None, never a partial recipe."""
     try:
         command_payload = payload["command"]
         package_payload = payload["package"]
         if not all(isinstance(part, dict) for part in (command_payload, package_payload)):
             return None
         command_source = command_payload["source"]
-        command_values = _tuple_of_str(command_payload["value"])
+        command_values = command_payload["value"]
         if command_source == "unresolved":
             command = ResolvedFact(value=None, source="unresolved")
-        elif command_source in ("cli", "config", "admitted", "derived") and command_values is not None:
-            command = ResolvedFact(value=command_values, source=cast(FactSource, command_source))
+        elif command_source in ("cli", "config", "admitted", "derived"):
+            command = ResolvedFact(value=_string_tuple(command_values), source=cast(FactSource, command_source))
         else:
             return None
 
-        runner = package_payload["runner"]
-        interpreter = package_payload["interpreter"]
-        config_digest = package_payload["config_digest"]
-        if (runner is not None and not isinstance(runner, str)) or (
-            interpreter is not None and not isinstance(interpreter, str)
-        ) or (config_digest is not None and not isinstance(config_digest, str)):
+        optional_strings = {
+            name: package_payload[name] for name in ("runner", "interpreter", "config_digest")
+        }
+        if any(value is not None and not isinstance(value, str) for value in optional_strings.values()):
             return None
         cwd_relative = package_payload["cwd_relative"]
         if not isinstance(cwd_relative, str):
             return None
-        absent_components = _tuple_of_str(package_payload["absent_components"])
-        if absent_components is None:
-            return None
         package = PackageResolution(
             cwd_relative=cwd_relative,
-            runner=runner,
-            interpreter=interpreter,
-            config_digest=config_digest,
-            absent_components=absent_components,
+            absent_components=_string_tuple(package_payload["absent_components"]),
+            **optional_strings,
         )
 
-        declared = _tuple_of_str(payload["declared"])
-        if declared is None:
-            return None
+        declared = _string_tuple(payload["declared"])
 
         candidate: RecipeCandidate | None = None
         candidate_payload = payload.get("candidate")
         if candidate_payload is not None:
             if not isinstance(candidate_payload, dict):
                 return None
-            candidate_argv = _tuple_of_str(candidate_payload["argv"])
-            if candidate_argv is None or candidate_payload["provenance"] != "manifest":
+            candidate_argv = _string_tuple(candidate_payload["argv"])
+            if candidate_payload["provenance"] != "manifest":
                 return None
             candidate = RecipeCandidate(argv=candidate_argv, provenance="manifest")
     except (KeyError, TypeError, ValueError):
@@ -597,35 +443,18 @@ def persist_test_recipe(deep_dir: Path, recipe: TestRecipe) -> Path:
 
 
 def load_test_recipe(deep_dir: Path) -> TestRecipe | None:
-    """Read the persisted recipe, fail-open (Pattern B).
-
-    A missing file, an unreadable file, malformed JSON, or a payload whose
-    ``format_version`` is not :data:`RECIPE_FORMAT` all return ``None`` and
-    never raise; a stale-format recipe must not be read as the current one.
-    """
-    try:
-        payload = json.loads((deep_dir / TEST_RECIPE_FILENAME).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(payload, dict) or payload.get("format_version") != RECIPE_FORMAT:
+    """Load a current-format recipe; absent, unreadable, malformed or stale files return None."""
+    payload = read_json_object(deep_dir / TEST_RECIPE_FILENAME)
+    if payload.get("format_version") != RECIPE_FORMAT:
         return None
     return _recipe_from_payload(payload)
 
 
 def _redact_merged(output: str, env: dict[str, str] | None) -> str:
-    """Scrub secret-shaped content and the literal env values from the buffer.
+    """Scrub structured secrets and literal environment values of at least eight characters.
 
-    The env vars handed to the test command are treated as sensitive: their
-    values are redacted wherever they appear in the merged output, in addition
-    to the structured pattern-based scrub. Only secret-shaped values (at least
-    ``_MIN_REDACTED_ENV_VALUE_LENGTH`` characters) are scrubbed: inherited
-    trivial values like ``SHLVL=1`` or ``CI=true`` collide with ordinary output
-    and are deliberately left alone. The fail-closed gate keys off the
-    PRE-replacement buffer: the replace loop removes every occurrence, so a
-    membership test run after it could never observe a survivor. A value that
-    was present before replacement and still survives after it (the blanket
-    replace cannot clear a value the replacement marker itself carries, e.g.
-    ``REDACTED``) degrades the whole field to ``[REDACTION_FAILED]``.
+    Short values collide with ordinary output. Record matches before replacement;
+    if any survives (including within the marker), discard the entire field.
     """
     redacted = redact_structured_text(output)
     env_values = [
@@ -651,22 +480,11 @@ async def run_test_command(
     wall_budget_s: float,
     env: dict[str, str] | None = None,
 ) -> TestExecutionResult:
-    """Run *cmd* as a real subprocess with a wall-budget group kill.
+    """Run argv with concurrent, capped stdout/stderr capture and a wall-budget group kill.
 
-    Spawns with ``start_new_session=True`` so the budget timeout can terminate
-    the whole process group (reusing the shielded ``terminate_process``).
-    Both pipes are streamed concurrently into one merged buffer; the merged
-    output is redacted before it lands in the result. Spawn errors propagate —
-    never a bogus default result.
-
-    With no ``env`` given, the subprocess inherits the parent environment and
-    the scrub covers exactly those inherited values (the only env values that
-    can appear in the merged output); with ``env`` given, the scrub covers
-    exactly that dict.
-
-    With an active trajectory recorder, the run is bracketed by
-    ``test-execution`` phase events carrying ``duration_ms`` and a
-    ``stop_reason`` of ``completed`` / ``timed_out`` / ``failed`` (issue #726).
+    Redact the effective environment before retaining output. Bound pipe drain
+    after exit, including pipes held by surviving descendants. Spawn errors
+    propagate; trajectory records completion, timeout or failure.
     """
     effective_env = env if env is not None else dict(os.environ)
     async with host_phase_scope(DaydreamPhase.TEST_EXECUTION) as phase:
@@ -690,21 +508,13 @@ async def run_test_command(
             while True:
                 data = await stream.read(64 * 1024)
                 text = decoder.decode(data, final=not data)
-                if not text:
-                    if not data:
-                        return
-                    continue
-                if buffered >= _MERGED_OUTPUT_LIMIT_CHARS:
-                    truncated = True
-                    if not data:
-                        return
-                    continue
                 remaining = _MERGED_OUTPUT_LIMIT_CHARS - buffered
                 if len(text) > remaining:
-                    text = text[:remaining]
                     truncated = True
-                buffered += len(text)
-                chunks.append(text)
+                chunk = text[:remaining]
+                if chunk:
+                    chunks.append(chunk)
+                    buffered += len(chunk)
                 if not data:
                     return
 

@@ -1,24 +1,9 @@
-"""Posterior-signal extractors for the labeler.
+"""Posterior signals from archived recommendations and injected Git/GitHub fetchers.
 
-Each signal is a pure function over ``(manifest_row, fetcher)`` — no LLM,
-no I/O beyond the fetcher callables the caller injects. This module
-exposes four signals that the labeling pipeline composes into outcome
-labels:
-
-* :func:`pr_merge_signal` — was the originating PR merged?
-* :func:`fix_applied_signal` — did the recommended diff land in the
-  upstream default branch within a configurable window? Implements the
-  layered cascade documented in ``docs/signals/fix-applied.md``.
-* :func:`comment_resolution_signal` — aggregate over daydream review
-  comment threads (context only, not an outcome label).
-* :func:`local_commit_applied_signal` — for PR-less runs (see
-  ``docs/signals/no-pr.md``), did a later local commit on the same
-  branch carry the recommended diff content?
-
-Each signal returns a frozen dataclass so callers can hash / compare
-results across re-labels. Fetchers are passed as keyword-only callables
-to keep the functions testable without monkeypatching subprocess /
-HTTP calls.
+PR merge and reply counts provide context; per-finding qualifying replies
+provide semantic outcomes. Applied-change signals inspect recommended hunks
+on upstream or local commits. Results are frozen dataclasses; fetcher errors
+propagate unless a signal explicitly defines an unavailable-data result.
 """
 
 from __future__ import annotations
@@ -37,7 +22,6 @@ from daydream.training.labeler_versions import reply_evidence_digest
 from daydream.training.reply_classifier import (
     _user_str,
     classify_reply,
-    is_qualifying_author,
     qualification_reason,
 )
 
@@ -47,18 +31,9 @@ _DAYDREAM_FOOTER_PREFIX = "<sub>🧙 Posted by [daydream v"
 
 
 def _is_daydream_comment(comment: dict[str, Any]) -> bool:
-    """Return True when ``comment`` was authored by daydream.
+    """Recognize any Daydream release by its version-stable footer prefix.
 
-    Daydream posts review comments as a normal authenticated user, so
-    authorship is identified by the :data:`DAYDREAM_FOOTER` badge in the
-    comment body rather than a ``*[bot]`` login.
-
-    The match is made against the version-stable prefix of the footer
-    (``_DAYDREAM_FOOTER_PREFIX``) rather than the full version-pinned
-    :data:`DAYDREAM_FOOTER` constant, so that comments posted by any release
-    of daydream are correctly identified even when their embedded version
-    string differs from the currently-installed package.
-    """
+    Reviews use ordinary user accounts, so a bot-shaped login is insufficient."""
     return _DAYDREAM_FOOTER_PREFIX in (comment.get("body") or "")
 
 
@@ -67,17 +42,8 @@ def _is_daydream_comment(comment: dict[str, Any]) -> bool:
 
 @dataclass(frozen=True)
 class PRMergeSignal:
-    """Whether the originating PR was merged.
-
-    Attributes:
-        merged: ``True`` if the PR is marked merged on GitHub.
-        merged_at: ISO-8601 timestamp of merge, or ``None``.
-        author_login: GitHub login of the PR author, or ``None`` when the
-            pull payload does not expose one (or the row has no PR). The
-            M6 gate uses it to count a PR-author reply as qualifying even
-            when their ``author_association`` is not
-            OWNER/MEMBER/COLLABORATOR (fork PRs, first-time contributors).
-    """
+    """PR merge/state context. author_login lets fork authors qualify even when
+    their GitHub association is not OWNER, MEMBER, or COLLABORATOR."""
 
     merged: bool
     merged_at: str | None
@@ -88,19 +54,10 @@ class PRMergeSignal:
 
 @dataclass(frozen=True)
 class FixAppliedSignal:
-    """Result of the fix-applied layered cascade.
+    """Recommended hunks found at the end of an oldest-to-newest commit window.
 
-    Attributes:
-        verdict: ``"applied"`` if ≥50% of recommended hunks landed in the
-            upstream default branch within the window; ``"not_applied"``
-            if the window was non-empty but no hunks landed; ``"unknown"``
-            if no window commits exist.
-        hunks_applied: Count of hunks whose added lines appear verbatim
-            in the post-window file content.
-        hunks_total: Total hunks parsed from ``recommended.patch`` (daydream's
-            proposed diff); ``diff.patch`` is the legacy-only fallback.
-        window_commits: Ordered commit SHAs considered (oldest → newest).
-    """
+    Applied means at least half landed; an empty window is unknown. Hunk counts
+    include the legacy diff.patch fallback only for recommendation-unaware archives."""
 
     verdict: Literal["applied", "not_applied", "unknown"]
     hunks_applied: int
@@ -154,60 +111,27 @@ def _reply_evidence(
     return evidence
 
 
-def _disposition_for_replies(
-    replies: list[dict[str, Any]],
-    pr_author_logins: frozenset[str],
-    review_author_logins: frozenset[str],
-) -> PerFindingDisposition:
-    """Map replies to a disposition via the versioned classifier (M1/M4/M6).
-
-    Deleted/inaccessible comments never reach here (``missing`` is decided
-    by the join, so a deleted comment can never map to ``rejected``).
-
-    Only replies whose author qualifies under the M6 gate
-    (:func:`is_qualifying_author`) may cast a decisive vote — the same gate
-    whose persisted evidence ``reason`` is :func:`qualification_reason`. A reply
-    whose own evidence says ``excluded:non-qualifying`` must not decide the
-    finding, or harvest's ``_decisive_evidence_valid_at`` would drop its
-    timestamp as excluded while the disposition kept its vote (M6).
-    """
-    saw_qualifying = False
-    votes: set[PerFindingDisposition] = set()
-    for reply in replies:
-        if not isinstance(reply, dict):
-            continue
-        if not is_qualifying_author(reply, pr_author_logins, review_author_logins):
-            continue
-        saw_qualifying = True
-        label = classify_reply(reply)
-        if label in ("accepted", "rejected"):
-            votes.add(cast(PerFindingDisposition, label))
-    if not saw_qualifying:
-        return "unanswered"
+def _disposition_from_evidence(evidence: list[dict[str, Any]]) -> PerFindingDisposition:
+    """Count only qualifying votes, using the same classification we persist."""
+    labels = {
+        entry["classifier_label"] for entry in evidence
+        if not entry["reason"].startswith("excluded:")
+    }
+    votes = labels & {"accepted", "rejected"}
     if len(votes) == 1:
-        return votes.pop()
-    return "ambiguous"
+        return cast(PerFindingDisposition, votes.pop())
+    return "ambiguous" if labels else "unanswered"
 
 
 @dataclass(frozen=True)
 class PerFindingResolution:
-    """Semantic disposition for one recorded finding, joined by fingerprint.
+    """One fingerprint's disposition and digest-pinned reply evidence.
 
-    Attributes:
-        fingerprint: The 64-hex finding fingerprint recorded at review time.
-        comment_id: GitHub review-comment ID carrying the finding marker,
-            or ``None`` when no surviving comment carries the fingerprint
-            (deleted, edited away, or never posted).
-        disposition: ``accepted``/``rejected``/``ambiguous`` from the
-            classifier over qualifying replies, ``unanswered`` when no
-            qualifying reply exists, ``missing`` when the fingerprint has
-            no surviving comment.
-        evidence: One entry per reply — ``reply_id``, ``author``,
-            ``author_association``, ``created_at``, ``body_sha256`` and a
-            ``reason`` recording why the author qualified or was excluded.
-            Full reply objects are persisted, never reduced to a count (M3).
-        evidence_digest: Stable digest over the evidence (M14 dedup input).
-    """
+    A missing comment has comment_id=None and disposition=missing. Surviving
+    threads become accepted/rejected from agreeing qualifying votes, ambiguous
+    from conflicting or nondirectional votes, or unanswered without qualifying
+    authors. Evidence retains every reply's identity, timestamp, body hash,
+    qualification reason, and classifier label, including excluded replies."""
 
     fingerprint: str
     comment_id: int | None
@@ -282,13 +206,9 @@ class _Hunk:
 
 
 def _parse_diff_hunks(patch_text: str) -> list[_Hunk]:
-    """Parse a unified-diff text into a flat list of hunks.
+    """Group the shared diff parser's added lines by file and owning hunk.
 
-    Thin adapter over the shared :func:`daydream.hunk_index.parse_hunks`
-    parser: each file's added lines are grouped back into their owning hunk
-    (in new-line order), so every ``@@`` block with additions becomes one
-    :class:`_Hunk` carrying its added lines without the leading ``+``.
-    """
+    Preserve new-line order and omit hunks without additions."""
     hunks: list[_Hunk] = []
     for path, meta in parse_hunks(patch_text).items():
         grouped: dict[int, list[str]] = {}
@@ -335,16 +255,7 @@ def _count_present_hunks(
 
 
 def _archive_is_recommended_patch_aware(archive_path: Path) -> bool:
-    """Return True if *archive_path*'s manifest was written by recommended.patch-aware daydream.
-
-    Reads the archived ``manifest.json`` provenance flag
-    ``recommended_patch_supported``. When set, a missing ``recommended.patch``
-    means the run made no recommendation (review-only, all-declined, reverted,
-    or wash) — not a legacy archive — so callers must NOT fall back to
-    ``diff.patch`` (the PR-under-review diff). A missing or unparseable manifest
-    is treated as legacy, preserving the backward-compatible ``diff.patch``
-    fallback for archives created before ``recommended.patch`` existed.
-    """
+    """Read the manifest's recommendation-support flag; unreadable means legacy."""
     try:
         data = json.loads((archive_path / "manifest.json").read_text())
     except (OSError, ValueError):
@@ -353,35 +264,12 @@ def _archive_is_recommended_patch_aware(archive_path: Path) -> bool:
 
 
 def _read_recommended_patch(archive_path: Path) -> str:
-    """Read daydream's recommended-change patch for a run.
+    """Read recommended.patch, falling back to diff.patch only for legacy archives.
 
-    Prefers ``recommended.patch`` — daydream's proposed diff, captured post-fix
-    — so the applied-signal cascades score the RECOMMENDED changes rather than
-    the PR-under-review diff. When ``recommended.patch`` is absent the behaviour
-    depends on archive provenance (``manifest.json`` →
-    ``recommended_patch_supported``):
-
-    * **New-format archive** (flag set): absence means daydream made no
-      recommendation (review-only, all-declined, reverted, or wash). Returns
-      ``""`` so the cascade scores no hunks — it must NOT fall back to
-      ``diff.patch``, which is the PR-under-review diff and would mislabel such
-      runs as "applied".
-    * **Legacy archive** (flag absent / no manifest): falls back to
-      ``diff.patch`` for backward compatibility with archives created before
-      ``recommended.patch`` existed.
-
-    Args:
-        archive_path: The archived run directory (bronze bundle root).
-
-    Returns:
-        The unified-diff text to parse into recommended hunks (``""`` for a
-        new-format run that made no recommendation).
-
-    Raises:
-        OSError: For a legacy archive (no ``recommended.patch``) when
-            ``diff.patch`` cannot be read. New-format archives with no
-            ``recommended.patch`` return ``""`` rather than raising.
-    """
+    With recommended_patch_supported=True, a missing recommendation means the
+    run proposed no change (review-only, declined, reverted, or wash); return an
+    empty patch. A missing/unreadable manifest is legacy. Legacy diff read
+    errors propagate."""
     recommended = archive_path / "recommended.patch"
     if recommended.is_file():
         return recommended.read_text()
@@ -398,17 +286,9 @@ def pr_merge_signal(
     *,
     gh_api: Callable[..., Any],
 ) -> PRMergeSignal:
-    """Return whether the row's originating PR was merged.
+    """Fetch merge/state context; absent PR identity returns an unmerged signal.
 
-    Args:
-        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
-        gh_api: Callable invoked as ``gh_api(repo, endpoint)`` returning
-            the parsed JSON body. Exceptions propagate to the caller.
-
-    Returns:
-        :class:`PRMergeSignal`. When ``pr_repo`` or ``pr_number`` is
-        ``None`` the signal is ``(False, None)`` without any API call.
-    """
+    Fetcher errors propagate and no request is made without both identity fields."""
     repo = row.get("pr_repo")
     number = row.get("pr_number")
     if repo is None or number is None:
@@ -439,53 +319,14 @@ def fix_applied_signal(
     commits_in_window_fetcher: Callable[[Path, str, str], list[str]],
     file_at_fetcher: Callable[[Path, str, str], str],
 ) -> FixAppliedSignal:
-    """Run the layered cascade for "did the recommended fix land upstream?".
+    """Check whether at least half the recommended hunks landed upstream.
 
-    Cascade (see ``/tmp/research-fix-applied.md``):
-
-    1. Compute the commit window via ``commits_in_window_fetcher``. The
-       ``head..base`` range already bounds the walk; no date filter is
-       needed (see #167). If empty → ``verdict="unknown"``.
-    2. Compute the file overlap between ``changed_files`` and the files
-       actually touched by ``diff_fetcher``. If empty → ``not_applied``
-       with ``hunks_applied=0`` and ``hunks_total = parsed hunks``.
-    3. Parse the recommended-change patch (``archive_path/recommended.patch``,
-       falling back to ``diff.patch`` for pre-recommended.patch archives) into
-       hunks. For each hunk on a
-       file in the overlap, read ``file_at_fetcher(repo, file, window[-1])``
-       and check whether every added line appears verbatim.
-    4. Verdict: ``applied`` if ``hunks_applied / hunks_total >= 0.5``;
-       otherwise ``not_applied``.
-
-    Args:
-        row: Manifest row with ``head_sha``, ``base_branch``, ``archive_path``.
-        changed_files: Files the agent originally recommended changing.
-        repo_clone: Path to a local clone of the target repo.
-        diff_fetcher: Returns files touched between ``base`` and ``head``.
-        commits_in_window_fetcher: Returns ordered commit SHAs in the
-            review window. Called as ``(repo_clone, head_sha,
-            base_branch)``.
-        file_at_fetcher: Returns file content at a given SHA.
-
-    Returns:
-        :class:`FixAppliedSignal` with ``verdict="unknown"`` when the
-        commit window is empty, ``"not_applied"`` when no recommended
-        files were touched or fewer than half of the parsed hunks
-        appear post-window, and ``"applied"`` otherwise.
-        ``hunks_applied``, ``hunks_total``, and ``window_commits`` are
-        always populated.
-
-    Raises:
-        KeyError: If ``row`` is missing ``head_sha``, ``base_branch``,
-            or ``archive_path``.
-        OSError: For a legacy archive (no ``recommended.patch``) when
-            ``diff.patch`` cannot be read from ``archive_path``. New-format
-            archives with no ``recommended.patch`` yield an empty patch rather
-            than raising (see :func:`_read_recommended_patch`).
-        Exception: Any exception raised by ``diff_fetcher``,
-            ``commits_in_window_fetcher``, or ``file_at_fetcher`` is
-            propagated unchanged.
-    """
+    Read the recommended patch, then fetch oldest-to-newest commits in head..base.
+    An empty window is unknown. Otherwise inspect the last commit, restricting
+    reads to the intersection of changed_files and the fetched diff paths. With
+    no overlap or fewer than half the hunks present, return not_applied.
+    Every added line in a hunk must appear verbatim. Missing row keys, patch
+    read errors, and fetcher failures propagate; counts always describe the patch."""
     head_sha = row["head_sha"]
     base_branch = row["base_branch"]
     archive_path = Path(row["archive_path"])
@@ -495,34 +336,16 @@ def fix_applied_signal(
     hunks_total = len(hunks)
 
     window = commits_in_window_fetcher(repo_clone, head_sha, base_branch)
-    if not window:
-        return FixAppliedSignal(
-            verdict="unknown",
-            hunks_applied=0,
-            hunks_total=hunks_total,
-            window_commits=[],
-        )
-
-    touched = diff_fetcher(repo_clone, head_sha, base_branch)
-    overlap = set(changed_files) & set(touched)
-    if not overlap:
-        return FixAppliedSignal(
-            verdict="not_applied",
-            hunks_applied=0,
-            hunks_total=hunks_total,
-            window_commits=list(window),
-        )
-
-    post_sha = window[-1]
-    hunks_applied = _count_present_hunks(
-        repo_clone, hunks, post_sha, file_at_fetcher, only_files=overlap
-    )
-
-    if hunks_total > 0 and (hunks_applied / hunks_total) >= 0.5:
-        verdict: Literal["applied", "not_applied", "unknown"] = "applied"
-    else:
-        verdict = "not_applied"
-
+    hunks_applied = 0
+    verdict: Literal["applied", "not_applied", "unknown"] = "unknown"
+    if window:
+        touched = diff_fetcher(repo_clone, head_sha, base_branch)
+        overlap = set(changed_files) & set(touched)
+        if overlap:
+            hunks_applied = _count_present_hunks(
+                repo_clone, hunks, window[-1], file_at_fetcher, only_files=overlap
+            )
+        verdict = "applied" if hunks_total > 0 and hunks_applied / hunks_total >= 0.5 else "not_applied"
     return FixAppliedSignal(
         verdict=verdict,
         hunks_applied=hunks_applied,
@@ -533,29 +356,12 @@ def fix_applied_signal(
 
 @dataclass(frozen=True)
 class PRCommentThreads:
-    """Indexed view of a PR's review comments shared by the resolution signals.
+    """One shared PR-comment index for aggregate and per-finding signals.
 
-    Centralises the ``/comments`` fetch and daydream-thread indexing so the
-    aggregate (:func:`comment_resolution_signal`) and per-finding
-    (:func:`per_finding_resolution_signal`) signals do not refetch or
-    re-index the same row's comments. Built by
-    :func:`index_pr_review_comments`.
-
-    Attributes:
-        top_level_daydream_ids: IDs of footer-marked daydream comments with
-            no parent (the "issue" comments), scoped to the session's
-            fingerprints when one was supplied at index time.
-        replied_ids: Subset of ``top_level_daydream_ids`` that received at
-            least one reply.
-        comment_id_by_fingerprint: First comment ID carrying each finding
-            marker, keyed by 64-hex fingerprint.
-        replies_by_comment: Full reply comment dicts keyed by the parent
-            top-level comment ID. Replies are preserved as complete
-            objects (author, association, body, timestamps) — never
-            reduced to counts — so downstream classifiers can read the
-            reply text. Empty for other-run threads when a session
-            fingerprint scope was supplied.
-    """
+    IDs cover footer-marked top-level comments; an optional fingerprint scope
+    excludes other runs' threads. Each fingerprint keeps its first comment id.
+    replies_by_comment retains full reply objects for semantic classification;
+    replied_ids is the subset with replies."""
 
     top_level_daydream_ids: set[int]
     replied_ids: set[int]
@@ -569,28 +375,11 @@ def index_pr_review_comments(
     gh_api: Callable[..., Any],
     session_fingerprints: list[str] | None = None,
 ) -> PRCommentThreads | None:
-    """Fetch and index a PR's review comments for the resolution signals.
+    """Fetch review comments once and index Daydream threads and their replies.
 
-    Single source of truth for the ``repos/{repo}/pulls/{n}/comments`` fetch
-    and daydream-thread indexing shared by :func:`comment_resolution_signal`
-    and :func:`per_finding_resolution_signal`, so the two signals invoked
-    back-to-back on the same row hit the endpoint once (the caller computes
-    this and passes it as ``threads=`` to both).
-
-    Args:
-        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
-        gh_api: Callable returning the parsed comment list. Exceptions
-            propagate to the caller.
-        session_fingerprints: When supplied, only top-level daydream
-            comments carrying at least one marker for one of these
-            fingerprints are indexed; other runs' threads stay out of
-            the evidence (they remain PR context, not this run's
-            outcome). ``None`` keeps the legacy all-threads behavior.
-
-    Returns:
-        :class:`PRCommentThreads`, or ``None`` when the row has no
-        associated PR (no fetch performed).
-    """
+    A supplied fingerprint list restricts top-level comments to matching markers;
+    None indexes all Daydream threads. Missing PR identity returns None without
+    fetching. Fetcher errors propagate. Pass the result to both resolution signals."""
     repo = row.get("pr_repo")
     number = row.get("pr_number")
     if repo is None or number is None:
@@ -638,34 +427,11 @@ def comment_resolution_signal(
     gh_api: Callable[..., Any],
     threads: PRCommentThreads | None = None,
 ) -> CommentResolutionSignal:
-    """Return an aggregate over daydream review-comment threads.
+    """Count Daydream threads with any reply, preserving the index's fingerprint scope.
 
-    Top-level review comments authored by daydream (identified by the
-    :data:`DAYDREAM_FOOTER` badge in the comment body) are treated as
-    issues; any reply (regardless of author or body) marks the issue
-    resolved. This is a context-reporting aggregate only — reply presence
-    is not evidence of acceptance or rejection.
-
-    When the supplied (or fetched) threads were built with a session
-    fingerprint scope, the counts derive from that scope only: other
-    runs' threads on the same PR never inflate this run's evidence (M8).
-
-    Args:
-        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
-        gh_api: Callable returning the parsed comment list. Ignored when
-            ``threads`` is supplied.
-        threads: Pre-indexed comment threads from
-            :func:`index_pr_review_comments`. When supplied, the
-            ``/comments`` fetch is skipped, letting a caller that needs
-            both this and :func:`per_finding_resolution_signal` on one row
-            fetch the endpoint once. The run-level signal path must pass
-            threads built with ``session_fingerprints`` so the aggregate
-            is fingerprint-scoped.
-
-    Returns:
-        :class:`CommentResolutionSignal` with ``(0, 0, 0)`` when the row
-        has no associated PR.
-    """
+    Reply presence is context, not acceptance. Reuse supplied threads or fetch
+    once; a row without a PR returns (0, 0, 0). Harvest supplies a scoped index
+    so other runs cannot inflate its counts."""
     if threads is None:
         threads = index_pr_review_comments(row, gh_api=gh_api)
     if threads is None:
@@ -684,39 +450,13 @@ def per_finding_resolution_signal(
     pr_author_logins: frozenset[str] = frozenset(),
     review_author_logins: frozenset[str] = frozenset(),
 ) -> list[PerFindingResolution]:
-    """Resolve each recorded finding to a semantic disposition (M1/M4).
+    """Resolve recorded fingerprints in order against live comment markers.
 
-    Joins the fingerprints recorded at review time (``recorded_fingerprints``)
-    against the PR's live review comments by the hidden
-    ``<!-- daydream-finding: <fp> -->`` marker embedded in each daydream
-    comment body, then classifies the surviving replies through the
-    versioned reply classifier: qualifying decisive votes give their label,
-    qualifying non-directional or conflicting replies give ``ambiguous``,
-    and no qualifying reply gives ``unanswered``. A fingerprint with no
-    surviving comment yields ``missing`` with ``comment_id=None`` (deleted /
-    edited away / never posted) — a deleted comment can never map to
-    ``rejected`` (M4).
-
-    Args:
-        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
-        recorded_fingerprints: Fingerprints captured at review time. The
-            returned list preserves this order, one entry per fingerprint.
-        gh_api: Callable returning the parsed comment list. Ignored when
-            ``threads`` is supplied.
-        threads: Pre-indexed comment threads from
-            :func:`index_pr_review_comments`. When supplied, the
-            ``/comments`` fetch is skipped, letting a caller that needs
-            both this and :func:`comment_resolution_signal` on one row
-            fetch the endpoint once.
-        pr_author_logins: Logins whose replies count as PR-author judgment
-            (recorded in evidence reasons).
-        review_author_logins: Logins whose replies count as formal-review
-            judgment (recorded in evidence reasons).
-
-    Returns:
-        One :class:`PerFindingResolution` per recorded fingerprint, or an
-        empty list when the row has no associated PR.
-    """
+    Qualifying decisive votes agree to accepted/rejected; conflicting or
+    nondirectional votes yield ambiguous; no qualifying reply yields unanswered.
+    Deleted, edited-away, or never-posted comments yield missing, never rejected.
+    Persist every reply and its qualification reason, including PR/review-author
+    gates. Reuse supplied threads or require gh_api; a row without a PR returns []."""
     if threads is None:
         if gh_api is None:
             raise ValueError("per_finding_resolution_signal needs gh_api when threads is not supplied")
@@ -727,23 +467,13 @@ def per_finding_resolution_signal(
     resolutions: list[PerFindingResolution] = []
     for fingerprint in recorded_fingerprints:
         comment_id = threads.comment_id_by_fingerprint.get(fingerprint)
-        if comment_id is None:
-            resolutions.append(
-                PerFindingResolution(
-                    fingerprint=fingerprint, comment_id=None, disposition="missing",
-                    evidence_digest=reply_evidence_digest([]),
-                )
-            )
-            continue
-        replies = threads.replies_by_comment.get(comment_id, [])
+        replies = threads.replies_by_comment.get(comment_id, []) if comment_id is not None else []
         evidence = _reply_evidence(replies, pr_author_logins, review_author_logins)
         resolutions.append(
             PerFindingResolution(
                 fingerprint=fingerprint,
                 comment_id=comment_id,
-                disposition=_disposition_for_replies(
-                    replies, pr_author_logins, review_author_logins
-                ),
+                disposition="missing" if comment_id is None else _disposition_from_evidence(evidence),
                 evidence=evidence,
                 evidence_digest=reply_evidence_digest(evidence),
             )
@@ -756,22 +486,11 @@ def pr_link_signal(
     *,
     gh_api: Callable[..., Any],
 ) -> tuple[int, str] | None:
-    """Resolve an orphan run's PR by its ``head_sha`` (SHA-native lookup).
+    """Find the first PR whose head exactly matches the archived head_sha.
 
-    A run launched before its PR existed has ``pr_number=None`` but carries
-    ``repo_slug`` + ``head_sha``. This looks up the PR(s) whose head commit
-    is ``head_sha`` via ``repos/{slug}/commits/{sha}/pulls`` and returns the
-    one whose head matches exactly, disambiguating reused branch names.
-
-    Args:
-        row: Manifest row carrying ``repo_slug`` and ``head_sha``.
-        gh_api: Callable returning the parsed pull list for the commit.
-
-    Returns:
-        ``(pr_number, repo_slug)`` for the first pull whose head matches
-        ``head_sha``; ``None`` when required fields are missing or no pull
-        matches. Exceptions from ``gh_api`` propagate to the caller.
-    """
+    SHA matching avoids reused branch names. Return (number, head repo), falling
+    back to the archived repo slug; missing identity or no match returns None.
+    Fetcher errors propagate."""
     repo_slug = row.get("repo_slug")
     head_sha = row.get("head_sha")
     if not repo_slug or not head_sha:
@@ -795,21 +514,11 @@ def _default_branch_applied(
     hunks: list[_Hunk],
     file_at_fetcher: Callable[[Path, str, str], str],
 ) -> LocalCommitAppliedSignal:
-    """Fallback posterior when the recorded branch ref no longer resolves.
+    """Check the base tip when a deleted/squashed branch has no readable window.
 
-    A squash merge rewrites the commit and deletes the branch, so the
-    per-commit walk has nothing to walk. The recommended change, if it
-    landed, is still visible at the tip of the base branch — so check there.
-
-    ``origin/<base>`` is tried before the bare local ref: a stale worktree's
-    local branch can sit behind the remote, which would read a landed change
-    as absent. ``file_at_fetcher`` yields ``""`` for an unresolvable ref, so
-    an unusable candidate simply falls through.
-
-    Returns ``"applied"`` when a recommended hunk is present, else
-    ``"unknown"`` — absence at the tip is not evidence of rejection, since
-    the squash may have reworked the change beyond verbatim matching.
-    """
+    Try origin/<base> before the possibly stale local ref. Any present hunk is
+    applied; absence is unknown because squash edits may defeat verbatim matching.
+    An unresolvable ref yields empty content and falls through."""
     base_branch = row.get("base_branch")
     if not base_branch or not hunks:
         return LocalCommitAppliedSignal(verdict="unknown")
@@ -828,40 +537,12 @@ def local_commit_applied_signal(
     commits_since_fetcher: Callable[[Path, str, str], list[str] | None],
     file_at_fetcher: Callable[[Path, str, str], str],
 ) -> LocalCommitAppliedSignal:
-    """Posterior signal for PR-less runs.
+    """Check local commits after head_sha for any complete recommended hunk.
 
-    See ``/tmp/research-no-pr.md``. Walks the commits on ``row["branch"]``
-    that landed after ``row["head_sha"]`` and checks whether any commit
-    contains the added lines from the recommended-change patch
-    (``recommended.patch``, falling back to ``diff.patch`` for older archives).
-
-    Args:
-        row: Manifest row with ``branch``, ``head_sha``, ``archive_path``.
-        repo_clone: Path to local clone. ``"unknown"`` if not a directory.
-        commits_since_fetcher: Returns ordered commit SHAs on ``branch``
-            after ``since_sha``, or ``None`` if the window is unknowable.
-        file_at_fetcher: Returns file content at a given SHA.
-
-    Returns:
-        :class:`LocalCommitAppliedSignal` with ``verdict="unknown"``
-        when ``repo_clone`` is not a directory, ``"rejected"`` when no
-        commits follow ``head_sha`` or none contain the recommended hunk's
-        added lines, and ``"applied"`` when at least one does.
-
-        When the branch ref no longer resolves (``commits_since_fetcher``
-        returns ``None``), falls back to :func:`_default_branch_applied`,
-        which yields ``"applied"`` or ``"unknown"`` — never ``"rejected"``.
-
-    Raises:
-        KeyError: If ``row`` is missing ``archive_path``, ``branch``,
-            or ``head_sha``.
-        OSError: For a legacy archive (no ``recommended.patch``) when
-            ``diff.patch`` cannot be read from ``archive_path``. New-format
-            archives with no ``recommended.patch`` yield an empty patch rather
-            than raising (see :func:`_read_recommended_patch`).
-        Exception: Any exception raised by ``commits_since_fetcher`` or
-            ``file_at_fetcher`` is propagated unchanged.
-    """
+    A missing clone is unknown; a readable window with no matching commit is
+    rejected. An unreadable branch window falls back to the base tip, which can
+    establish applied or unknown but never rejection. Patch reads follow the
+    recommendation-support rule; missing keys and read/fetch errors propagate."""
     if not repo_clone.is_dir():
         return LocalCommitAppliedSignal(verdict="unknown")
 
@@ -893,28 +574,11 @@ def reviewer_logins_signal(
     *,
     gh_api: Callable[..., Any],
 ) -> list[str]:
-    """Return the human reviewer logins associated with the row's PR.
+    """Return sorted human reviewers and authors replying to Daydream threads.
 
-    A "reviewer" is a human GitHub account that either authored a PR
-    review (``/pulls/{n}/reviews``) or replied to one of daydream's
-    footer-marked top-level review comments (``/pulls/{n}/comments``).
-    The union is taken, then ``[bot]`` logins and any login that authored
-    a daydream-footer comment are excluded. ``merged_by`` is **not** used
-    (a merge author is not a reviewer).
-
-    Args:
-        row: Manifest row carrying ``pr_repo`` and ``pr_number``.
-        gh_api: Callable invoked as ``gh_api(repo, endpoint)`` returning
-            the parsed JSON body. Exceptions propagate to the caller.
-
-    Returns:
-        Sorted, deduped list of human reviewer logins. Empty list when
-        the row has no associated PR or no reviewers were found.
-
-    Raises:
-        Exception: Any exception raised by ``gh_api`` is propagated
-            unchanged; failures are never swallowed into ``[]``.
-    """
+    Union formal-review authors with reply authors; exclude bot logins and
+    anyone who authored a Daydream-footer comment. merged_by does not qualify.
+    Missing PR identity returns []; GitHub failures propagate."""
     repo = row.get("pr_repo")
     number = row.get("pr_number")
     if repo is None or number is None:

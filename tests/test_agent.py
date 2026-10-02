@@ -92,22 +92,14 @@ async def test_run_agent_binds_context_and_keeps_backend_registered_across_retry
     observations: list[tuple[RunContext | None, tuple[object, ...], tuple[object, ...]]] = []
     class RetryableFailure(RuntimeError):
         retryable = True
-    class RetryBackend:
-        model = "test-model"
-        retry_attempts = 1
-        retry_base_delay_s = 0
-        retry_max_delay_s = 0
-        def __init__(self) -> None:
-            self.calls = 0
-        async def execute(self, *_args: Any, **_kwargs: Any) -> Any:
-            self.calls += 1
-            observations.append((current_run_context(), context.active_backends(), active_backends()))
-            if self.calls == 1:
-                raise RetryableFailure("retry")
-            yield ResultEvent(structured_output=None, continuation=None)
-        async def cancel(self) -> None:
-            pass
-    backend = RetryBackend()
+    def respond(*_args: Any, **_kwargs: Any) -> Any:
+        observations.append((current_run_context(), context.active_backends(), active_backends()))
+        if backend.call_count == 1:
+            return [RetryableFailure("retry")]
+        return None
+    backend = ScriptedBackend(
+        responder=respond, retry_attempts=1, retry_base_delay_s=0, retry_max_delay_s=0,
+    )
     assert current_run_context() is None
     result = await run_agent(backend, tmp_path, "inspect", phase=DaydreamPhase.REVIEW, run_context=context)
     assert result == ("", None, None)
@@ -126,7 +118,6 @@ async def test_run_agent_unregisters_backend_after_exception(tmp_path: Path) -> 
     assert active_backends() == ()
 
 async def test_run_agent_interrupt_after_registration_cleans_up(tmp_path: Path) -> None:
-    """A signal between registration and execution must not retain a backend."""
     class InjectedInterrupt(BaseException):
         pass
     context = RunContext(InteractionPolicy())
@@ -231,7 +222,6 @@ def test_prepare_sanctioned_exact_inputs_bounds_aggregate_streaming_reads(
 def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A retry rejects growth without hashing beyond the aggregate ceiling."""
     backend = ScriptedBackend()
     inputs = _sized_inputs(tmp_path, 5, SANCTIONED_EXACT_INPUT_AGGREGATE_MAX_BYTES // 5)
     prepared = prepare_sanctioned_inputs(backend, tmp_path, inputs, read_only=False)
@@ -243,9 +233,7 @@ def test_revalidate_sanctioned_exact_inputs_keeps_aggregate_read_bound(
     assert backend.call_count == 0
 
 def test_revalidate_skips_rehash_when_identity_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Retry revalidation re-reads a file only when its stat identity changed. The capture already streamed and hashed
-    the exact bytes; while the ``(dev, ino, size, mtime_ns)`` identity still matches, a retry attempt must not
-    re-read or re-hash the payload (#1162 efficiency item)."""
+    """Matching (dev, ino, size, mtime_ns) reuses already captured bytes without rereading or hashing."""
     artifact, backend, prepared = _captured_artifact(tmp_path)
     capture_calls = _count_capture_calls(monkeypatch)
     # Unchanged file: identity matches, so no re-read/re-hash happens.
@@ -275,9 +263,7 @@ def test_revalidate_fails_closed_when_captured_file_vanishes(tmp_path: Path, mon
 def test_revalidate_unchanged_item_exceeding_remaining_budget_fails_closed(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The identity fast path enforces the aggregate byte cap fail-closed. White-box: an item whose stat identity is
-    unchanged must never silently push the running aggregate past the cap — the skip path raises exactly like an
-    over-budget fresh capture would, without re-reading the file."""
+    """The unchanged-identity fast path enforces aggregate limits without rereading the file."""
     artifact, backend, prepared = _captured_artifact(tmp_path)
     captured = prepared.inputs[0]
     def failing_capture(*args: object, **kwargs: object) -> object:
@@ -350,10 +336,7 @@ def test_is_environmental_failure_both_directions() -> None:
         assert is_environmental_failure(output) is False, output
 
 def test_scrubbed_supervisor_error_scrubs_all_str_surfaces() -> None:
-    """_scrubbed_supervisor_error must never re-surface a redactable value. Regression for issue #702 round 2: the
-    args-scrub must hold for OSError-family types (whose str() is built from errno/strerror, not args) and for
-    types overriding __str__/__repr__, and must preserve the retryable discriminator on the reconstruction path
-    too."""
+    """Scrub OSError fields and custom str/repr surfaces while preserving retryability."""
     credential = "ZAI_API_KEY=credential-shaped-supervisor-value"
     # OSError-family: real (sub)type preserved, str() scrubbed
     err = OSError(2, f"failed auth with {credential}")
@@ -390,10 +373,7 @@ class ExplodingStrError(RuntimeError):
         raise RuntimeError("boom in str")
 
 def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
-    """A supervisor error whose ``__str__`` raises must fail closed everywhere. Regression for issue #1236 round 2:
-    the raise site evaluates ``_ToolSupervisorFailure.__init__`` (which str()s the original) before the fail-closed
-    handlers run, so a hostile ``__str__`` aborted construction and escaped as its own error. The scrubber and the
-    wrapper must both survive it."""
+    """A hostile __str__ must not escape during either wrapper construction or scrubbing."""
     # Scrubber: no raise; fail-closed stand-in carrying only the type name.
     stand_in = _scrubbed_supervisor_error(ExplodingStrError("secret-shaped-payload"))
     assert type(stand_in) is _RedactedSupervisorError
@@ -410,10 +390,6 @@ def test_scrubbed_supervisor_error_hostile_str_fails_closed() -> None:
 async def test_hostile_supervisor_str_surfaces_as_scrubbed_extension_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The agent loop scrubs a hostile supervisor error, never leaking its text. Regression for issue #1236 round 2:
-    with the constructor failing open, the propagated exception was the hostile ``__str__``'s own error
-    misattributed as a backend failure, and the hardened handler never ran. The real loop must print the scrubbed
-    "Extension Failure" panel and propagate the redacted stand-in instead."""
     output = StringIO()
     monkeypatch.setattr("daydream.agent.console", Console(file=output, force_terminal=False))
     def hostile_supervisor(

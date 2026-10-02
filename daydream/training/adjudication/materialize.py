@@ -1,15 +1,9 @@
-"""Preview materialization of per-finding annotation snapshots (issue #1055).
+"""Materialize deterministic sessions.jsonl and a pinned preview-manifest.json.
 
-Collects fresh semantic evidence from production bronze through the harvester's
-read-only services, or reads stored resolutions from legacy/index-only history,
-then runs the resulting per-finding payload through the shared serializer
-(``snapshot.build_canonical_record``) and emits a deterministic
-``sessions.jsonl`` plus a digest-pinned ``preview-manifest.json``.
-
-Preview mode guarantees (AC 4 / M2): never appends ``label_observations``,
-never writes any resume-cache or harvest-complete marker. When the input is a
-hydrated staging archive the SQLite index is only ever **read** (via
-``archive.index.query_runs``) — never written.
+Acquire fresh production evidence through read-only harvest services; legacy
+and index-only history can supply stored resolutions. Serialize all findings
+through snapshot.build_canonical_record. Never append observations, update
+resume/completion markers, or write the hydrated SQLite index.
 """
 
 from __future__ import annotations
@@ -55,45 +49,19 @@ def index_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
 
 
 def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
-    """Build queue-consumable session records from a hydrated staging archive.
+    """Materialize fresh bronze evidence, falling back to stored resolutions for legacy history.
 
-    Production trajectories have no embedded resolutions. Their finding
-    identities and fresh GitHub evidence feed the same annotation builder as
-    ``corpus harvest``, entirely in memory. This happens even when historical
-    annotations exist, so canonical drift checks cannot reuse stale replies.
-    DB-only histories and legacy trajectories retain the stored-resolution
-    adapter. Index reads never create SQLite sidecars or update bronze.
+    Acquire production evidence even when annotations exist, so drift checks see
+    current replies. DB-only histories and embedded legacy resolutions use the
+    winning observation adapter; evidence-only sessions emit no records.
 
-    Latest-observation selection (deterministic): a session's rows are
-    grouped by the harvester dedup key ``(evidence_sha, labeler_policy_version,
-    reply_evidence_digest, labels, has_posterior)``; within an identical key
-    the latest ``observed_at`` wins; across distinct keys the winner follows
-    the archive's ``_PRECEDENCE_ORDER`` (human-first ``source='human'``, then
-    ``observed_at DESC``). The session is **conflicting** only when its
-    generations disagree in disposition-relevant content — more than one
-    distinct decision-bearing ``labels`` set across the dedup-key groups,
-    scoped to non-human rows (``_winning_observation``): the archive appends
-    fresh generations with identical labels on policy-version bumps,
-    edited-reply digest changes, and label-preserving observation overlays
-    (``index.append_label_observation``), so a dedup-key split alone never
-    marks a session non-gold, and neither a human override row (authoritative
-    under the archive's precedence) nor a non-decisive-only generation (a
-    pre-adjudication evolution) does. Production bronze supplies fresh
-    resolutions; the winner supplies them only for stored-history fallbacks.
-    Every emitted record for a conflicted session
-    carries ``"conflicting": true`` with the disposition neutralized to
-    ``_CONFLICTED_DISPOSITION`` (surfaced non-gold downstream, never merged
-    away). A session whose rows carry no materializable per-finding
-    resolutions (``rubric_json`` NULL — a human ``daydream label`` row — or
-    a legacy labels-only row) and no sanitized per-run trajectory contributes
-    no records at all: such sessions are evidence-only (e.g. rows a runbook
-    step-3b import admitted from a backup root outside the curation) and must
-    not fail the whole curation.
+    _winning_observation selects deterministic human-first precedence and marks
+    conflicting non-human decisive generations. The conflict flag travels with
+    all session records; run_materialize neutralizes their dispositions to keep
+    them out of gold while canonical harvest retains original provenance.
 
-    The index revision is the pinned source commit (the single revision
-    directory under ``downloads/``) — a full 40-hex SHA, exactly what the
-    publication machinery's pinned-revision resolver accepts.
-    """
+    Read SQLite without sidecars or writes. Require exactly one downloads/
+    revision directory as the pinned source commit."""
     if not (index_root / "index.db").is_file():
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
@@ -223,22 +191,12 @@ def _semantic_resolutions_readonly(
 def _trajectory_resolutions_readonly(
     index_root: Path, session_id: str
 ) -> list[dict[str, Any]] | None:
-    """Read a session's per-finding resolutions from the sanitized per-run
-    trajectory (the pre-#1095 materialization source). Used when the hydrated
-    staging archive has no materializable ``label_observations`` history for
-    the session: no observation rows yet (freshly hydrated stage; canonical
-    harvest appends the first rows), a NULL ``rubric_json`` (human-sourced
-    row), or only legacy labels-only rows whose rubric_json carries no
-    ``per_finding_resolutions`` (pre-#1095 ``Rubric.to_dict``; such rows are
-    appended verbatim by the import path, runbook step 3b).
+    """Read legacy embedded resolutions when observation history cannot materialize them.
 
-    Returns ``None`` when the trajectory is absent -- the session has no
-    materializable content at all (e.g. a session a runbook step-3b import
-    admitted from a backup root outside the curation: DB-only ``runs`` row,
-    evidence-only observation rows, no ``runs/<sid>`` files) and contributes
-    no records; the caller skips it. Anything *present* but unreadable,
-    malformed, or empty still raises ``HubUnavailableError`` naming the
-    session -- corrupt data is never silently skipped.
+    This includes new sessions, human rows with NULL rubric_json, and imported
+    labels-only history. An absent trajectory returns None for evidence-only
+    sessions; present unreadable, malformed, or empty data raises HubUnavailableError
+    naming the session rather than silently dropping it.
     """
     from daydream.trajectory import run_directory, run_document_path
 
@@ -263,11 +221,9 @@ def _trajectory_resolutions_readonly(
 def _readonly_query(
     db_path: Path, sql: str, params: tuple[Any, ...] = ()
 ) -> list[dict[str, Any]]:
-    """Run one SELECT over a **read-only** ``mode=ro&immutable=1`` URI —
-    never ``_get_connection``, which opens read-write and runs WAL pragmas
-    against the hydrated staging index; ``immutable=1`` also keeps a WAL-mode
-    db from materializing ``-shm``/``-wal`` sidecars on read, while a surviving
-    uncheckpointed ``index.db-wal`` is rejected by ``readonly_connection``.
+    """SELECT through readonly_connection without WAL pragmas or sidecar creation.
+
+    Its immutable read mode refuses surviving uncheckpointed index.db-wal files.
     """
     try:
         conn = readonly_connection(db_path.parent)
@@ -282,14 +238,12 @@ def _readonly_query(
 def _winning_observation(
     observations: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], bool]:
-    """Deterministic latest-observation selection (see the module docstring for
-    the rule). Returns the winning row and whether the session is conflicting
-    (more than one distinct disposition-relevant ``labels`` set across the
-    dedup-key groups — see ``index.append_label_observation``; a dedup-key
-    split that preserves the labels — policy-version bump, edited-reply
-    digest change, label-preserving overlay — is agreeing generations, not a
-    conflict).
-    """
+    """Select the latest row per archive dedup key, then human-first/latest overall.
+
+    Conflict requires distinct decisive label sets among non-human winners.
+    Policy bumps, edited evidence, and label-preserving overlays agree; human
+    overrides are authoritative, and a non-decisive generation resolving to a
+    decisive one is an evolution rather than a conflict."""
     groups: dict[tuple[Any, ...], dict[str, Any]] = {}
     for obs in observations:
         key = (
@@ -310,20 +264,8 @@ def _winning_observation(
             str(o.get("observed_at", "")),
         ),
     )
-    # Conflict is decided from disposition-relevant content (the archived
-    # labels projection), never from the full dedup tuple: two rows agreeing
-    # on the disposition but split on evidence_sha / policy version / reply
-    # digest / has_posterior are agreeing generations that stay gold-eligible.
-    # The comparison is additionally scoped (issue #336): a human override row
-    # is authoritative under the archive's precedence (``_PRECEDENCE_ORDER``,
-    # ``index.update_labels``' human-wins contract) -- never a disagreeing
-    # generation -- so it cannot contribute a distinct label set; and only
-    # decision-bearing label sets (labels claiming a decisive
-    # ``finding-<disposition>``) count, so a pre-adjudication generation
-    # (``[]`` labels, an ``unanswered``-only snapshot) that a later decisive
-    # generation resolves is an evolution -- resolved-unanswered -> accepted --
-    # not a harvester disagreement, and stays gold-eligible after
-    # re-materialization.
+    # Human overrides and non-decisive generations do not compete with
+    # automatic decisive labels; agreeing evidence generations remain gold-eligible.
     decisive_sets = {
         o.get("labels")
         for o in winners
@@ -333,13 +275,9 @@ def _winning_observation(
 
 
 def _labels_claim_decisive(labels: Any) -> bool:
-    """True when the archived labels projection claims at least one decisive
-    ``finding-<disposition>`` label (e.g. ``finding-accepted``). Rows store the
-    labels column as a JSON array string; non-string / non-list / unparsable
-    values claim nothing (a session with no decisive claim cannot disagree
-    about a gold disposition). Non-decisive finding labels (``finding-unanswered``)
-    and non-finding labels (``posterior``) are not claims.
-    """
+    """Recognize decisive finding-* labels in a list or JSON array string.
+
+    Malformed data, non-finding labels and non-decisive labels claim nothing."""
     if isinstance(labels, str):
         try:
             labels = json.loads(labels)
@@ -347,13 +285,10 @@ def _labels_claim_decisive(labels: Any) -> bool:
             return False
     if not isinstance(labels, list):
         return False
-    for label in labels:
-        if not isinstance(label, str):
-            continue
-        disposition = label[len("finding-"):] if label.startswith("finding-") else None
-        if disposition in DECISIVE_DISPOSITIONS:
-            return True
-    return False
+    return any(
+        isinstance(label, str) and label.startswith("finding-") and label[len("finding-"):] in DECISIVE_DISPOSITIONS
+        for label in labels
+    )
 
 
 def run_materialize(
@@ -363,27 +298,13 @@ def run_materialize(
     pin: dict[str, str],
     dry_run: bool = False,
 ) -> dict[str, Any]:
-    """Materialize the preview snapshot for one curation pin.
+    """Atomically write canonical sessions sorted by record_id and their preview manifest.
 
-    Loads the hydrated index's sessions (via ``preview._load_sessions`` —
-    raises the ``HydrationError`` family on a missing/unreadable index and
-    ``MovingBranchError`` on a symbolic index revision), builds one canonical
-    record per finding (every disposition — automatic decisive, human-decisive,
-    and non-decisive), and emits:
-
-    - ``out_dir/sessions.jsonl``: canonical-JSON records sorted by
-      ``record_id``, written atomically. Identical index + pin ⇒
-      byte-identical file (C4).
-    - ``out_dir/preview-manifest.json``: all K2 pin components plus the
-      content-addressed ``snapshot_id`` and ``index_revision``, canonical JSON.
-
-    The ``snapshot_id`` is derived from the pin + the emitted records'
-    evidence digests, so any evidence change yields a new id (AC 8) — a stale
-    id is never reused. Missing/empty pin components raise ``ValueError``
-    naming the field (propagated from ``snapshot.snapshot_id``).
-
-    ``dry_run=True`` validates everything and returns the summary without
-    writing any file.
+    Include every disposition and all pin components. snapshot_id binds the pin
+    and evidence digests, so changed evidence changes identity. Missing/empty pin
+    fields raise ValueError; missing/unreadable indexes raise HydrationError and
+    symbolic revisions raise MovingBranchError. dry_run validates and returns the
+    same summary without writing. Identical inputs produce identical bytes.
     """
     # Validate the pin before touching its components in the loop body:
     # ``snapshot_id`` raises the documented ValueError naming the missing

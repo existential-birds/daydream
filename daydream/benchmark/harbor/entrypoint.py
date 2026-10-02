@@ -1,18 +1,9 @@
-"""Controlled in-container runner for the privacy-safe Harbor review agent (issue #780).
+"""Controlled in-container reviewer invoked by ``DaydreamReviewAgent.run``.
 
-Invoked inside the Harbor task container (``python -m
-daydream.benchmark.harbor.entrypoint``) by :class:`DaydreamReviewAgent`'s
-``run`` via ``environment.exec``. Owns the fail-closed review surface: it maps
-only the ``DAYDREAM_REVIEW_*`` reviewer config/credential into the selected
-backend's native env (OpenRouter for pi, Anthropic for claude), refuses any
-unsupported backend *before* any credential mapping or reviewing, runs the real
-Daydream runner **in-process** against the frozen ``base``/``head`` snapshot
-with a fully controlled :class:`RunConfig` (review-only, non-interactive,
-archiving and eval disabled, empty file config), then publishes the canonical
-candidate artifact from the runner's ``merged-items.json``.
-
-Every failure class surfaces as a typed exception carrying a ``kind`` -- the
-trial is an unscored agent failure, never a silent pass.
+Validate the backend before mapping reviewer credentials into its native environment.
+Run Daydream in-process against frozen base/head with review-only, non-interactive
+config, archiving/evaluation disabled, and empty file config. Publish candidates
+from ``merged-items.json``; failures leave the trial unscored and exit nonzero.
 """
 
 from __future__ import annotations
@@ -31,7 +22,8 @@ from daydream.benchmark.harbor import candidate, env_policy
 from daydream.config_file import DaydreamFileConfig
 from daydream.git_ops import StaticGitHubAuth
 from daydream.github_app import GitHubExecutionInput
-from daydream.runner import RunConfig, RunnerExecutionInput
+from daydream.run_config import RunConfig
+from daydream.runner import RunnerExecutionInput
 
 _DEFAULT_REPO_DIR = "/workspace/repo"
 _DEFAULT_ARTIFACT_PATH = "/logs/artifacts/review.json"
@@ -43,12 +35,7 @@ _SUPPORTED_BACKENDS: tuple[str, ...] = ("pi", "claude")
 
 
 class EntrypointError(Exception):
-    """Typed agent-failure carrier for the in-container entrypoint.
-
-    Raised on any fallible step (missing case key, unsupported backend, runner
-    failure) so a failed run reports which failure class occurred instead of
-    presenting silence.
-    """
+    """Agent failure during reviewer configuration or execution."""
 
 
 @dataclass(frozen=True)

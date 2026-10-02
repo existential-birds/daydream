@@ -1,10 +1,4 @@
-"""Three-tier adjudication precedence: explicit adjudicator > latest human rater > automatic.
-
-Finding-level twin of ``classify_tier``'s fail-closed gate: a finding is gold-eligible only
-when the effective disposition is decisive, evidence is non-empty, and no unresolved rater
-conflict stands. Conflicting human raters keep the finding non-gold until an explicit
-adjudicator resolution with a decisive disposition.
-"""
+"""Adjudication precedence and gold eligibility for immutable per-finding observations."""
 
 from __future__ import annotations
 
@@ -15,8 +9,7 @@ from daydream.training.dispositions import DECISIVE_DISPOSITIONS as DECISIVE_DIS
 
 HUMAN_ROLES = frozenset({"rater", "adjudicator"})
 
-# Secondary sort key so identical timestamps still resolve deterministically
-# regardless of input order.
+# Labeler breaks equal observed_at timestamps deterministically.
 _SORT_TIEBREAK_KEYS = ("observed_at", "labeler")
 
 
@@ -40,10 +33,8 @@ def _required(obs: Mapping[str, Any], field: str) -> Any:
 
 
 def has_rater_conflict(observations: Sequence[Mapping[str, Any]]) -> bool:
-    """True iff >=2 human rater observations for the same record_id + evidence_digest differ in disposition.
-
-    An adjudicator observation clears the conflict only when its own disposition is
-    decisive; a non-decisive adjudicator entry leaves the conflict standing.
+    """Detect differing human dispositions for the same record_id/evidence_digest. Only a decisive
+    adjudicator disposition clears that conflict.
     """
     rater_dispositions: dict[tuple[str, str], set[str]] = {}
     adjudicator_dispositions: dict[tuple[str, str], str | None] = {}
@@ -66,23 +57,19 @@ def has_rater_conflict(observations: Sequence[Mapping[str, Any]]) -> bool:
 
 
 def reopen_on_digest_change(observation: Mapping[str, Any], current_digest: str) -> bool:
-    """True iff the observation's pinned evidence digest differs from the fresh digest.
-
-    Exact string comparison — no normalization and no fallback digest. Digest drift
-    deterministically reopens the item: a prior human judgment made against different
-    evidence must never be silently reused.
+    """Reopen when the pinned and current digest strings differ exactly, without normalization or
+    fallback. Judgments cannot transfer silently to changed evidence.
     """
     return str(observation["evidence_digest"]) != str(current_digest)
 
 
 def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Resolve one record_id's observation list to its effective adjudication.
+    """Resolve one finding by latest adjudicator, else latest human rater, else latest automatic entry,
+    ordered by observed_at then labeler. Empty input raises ValueError.
 
-    Returns ``{"disposition", "labeler", "evidence", "evidence_digest", "role",
-    "conflict", "review_required", "gold_eligible"}`. Precedence: any ``role="adjudicator"`` observation
-    (latest if several), else the latest human rater by ``observed_at``, else the
-    automatic entry. An empty observation list is a caller bug and raises
-    ``ValueError`` naming ``record_id``.
+    Return the effective judgment and provenance plus conflict, review_required, and gold_eligible.
+    Gold requires a decisive disposition, nonempty evidence, no unresolved rater conflict, and no
+    review requirement.
     """
     if not observations:
         msg = "effective_adjudication called with empty observation list for record_id"
@@ -110,7 +97,6 @@ def effective_adjudication(observations: Sequence[Mapping[str, Any]]) -> dict[st
     evidence = _required(effective, "evidence")
     conflict = has_rater_conflict(observations)
 
-    # Adjudicator presence clears the conflict only when its disposition is decisive.
     if conflict and adjudicators and adjudicators[-1].get("disposition") in DECISIVE_DISPOSITIONS:
         conflict = False
 

@@ -1,28 +1,17 @@
-"""Per-finding projection for projection records (Req 6, Req 18, D8).
+"""Project each finding independently from frozen curation and annotation bundles.
 
-Each ``PerFindingResolution`` becomes its own record with a per-record
-``outcome_label`` — a mixed session (some findings accepted, some rejected)
-never collapses into a run-level aggregate like v1's ``contested``
-``outcome_label``. Non-decisive dispositions route to an adjudication
-report (report output, not a pipeline stage) unless the build opts in via
-``emit_process_traces``, which materializes them as schema-distinct
-``process-trace``/``task-only`` training records; the projector stays pure and
-deterministic.
-
-``build_frozen_corpus()`` is the top-level pure projection (no git, no
-network): load bundle → segment → project findings → assign frozen
-content-derived splits → refuse posterior evidence → write split manifests
-atomically with a lineage pin.
+Mixed outcomes retain distinct finding labels. Non-decisive findings feed the
+adjudication report and, when requested, separate process-trace/task-only
+records. Segment, project, assign content-derived splits, enforce evidence
+gates, and write pinned manifests without Git or network access.
 """
 
 import hashlib
 import json
-import math
-from collections.abc import Callable, Iterable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Literal, Mapping, NoReturn, cast, overload
+from typing import Any, Literal, Mapping, cast, overload
 
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
@@ -37,6 +26,13 @@ from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
+from daydream.training.corpus_projection.selection import (
+    Record,
+    _apply_share_caps,
+    _share_caps_report,
+    count_by,
+    retain_group_limits,
+)
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
 from daydream.training.corpus_projection.tiers import classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
@@ -49,23 +45,12 @@ __all__ = [
     "build_frozen_corpus",
 ]
 
-Record = dict[str, object]
-
-
 @dataclass(frozen=True)
 class BatchArtifacts:
-    """Per-batch review artifacts read from a curated bundle's batch directory
-    (``batches/<session_id>/``). Producer-realistic shapes (confirmed by the
-    task-0 spike probe, tests/test_corpus_projection_spike_probe.py):
+    """Optional batch review artifacts, joined to resolutions by fingerprint.
 
-    - ``findings.json`` — ``{"findings": [{"fingerprint": <64-hex>, "body":
-      <str>, ...}]}`` (the same artifact ``daydream/archive/__init__.py``
-      copies into the run bundle; fingerprints join 1:1 with the annotation
-      snapshot resolution rows).
-    - ``diff.patch`` — the run's diff text.
-    - ``manifest.json`` — ``git.head_sha`` plus ``code_context.{base_sha,
-      head_sha}`` (archive/manifest.py serialization).
-    """
+    Findings supply body text; diff.patch supplies task context. Manifest git
+    supplies head_sha, while code_context supplies base_sha and a fallback head."""
 
     findings_by_fingerprint: dict[str, str]
     diff: str
@@ -138,10 +123,7 @@ class BuildFrozenCorpusConfig:
 
     out_dir: Path
     bundle_dir: Path
-    # Required: a build without a pinned annotation bundle is a config error
-    # (raised as ValueError naming the field, not a TypeError from the
-    # dataclass) — declared optional so that misconfiguration, not a missing
-    # kwarg, is what callers see.
+    # None produces a field-specific ValueError in __post_init__, including omitted args.
     annotation_bundle_dir: Path | None = None
     as_of: str | None = None
     holdout_rate: float = 0.1
@@ -156,29 +138,20 @@ class BuildFrozenCorpusConfig:
     rubric_schema_version: str = "per-finding-resolutions-v1"
     license_policy_path: Path | None = None
     allow_copyleft: frozenset[str] = frozenset()
-    # D8 opt-in (issue #1081): when False (default), non-decisive findings
-    # are adjudication-report output only — byte-identical to builds before
-    # the flag existed. When True, each finding the projector would route to
-    # adjudication is additionally materialized as two schema-distinct
-    # training records (a silver ``process-trace`` and a ``task-only``
-    # record, both with ``outcome_label=None``) instead of counting as a
-    # ``non-decisive-adjudication`` exclusion; the adjudication report
-    # itself is unchanged.
+    # Non-decisive findings always enter the adjudication report. Opt in to additional
+    # silver process-trace and task-only records with no outcome label, replacing their
+    # non-decisive-adjudication exclusion count.
     emit_process_traces: bool = False
 
     def __post_init__(self) -> None:
-        if self.annotation_bundle_dir is None:
-            raise ValueError(
-                "annotation_bundle_dir is required: a projection build without a "
-                "pinned annotation bundle is a configuration error"
-            )
-        object.__setattr__(self, "annotation_bundle_dir", Path(self.annotation_bundle_dir))
-        if self.license_policy_path is None:
-            raise ValueError(
-                "license_policy_path is required: a projection build without a "
-                "pinned license policy is a configuration error"
-            )
-        object.__setattr__(self, "license_policy_path", Path(self.license_policy_path))
+        for name, label in (("annotation_bundle_dir", "annotation bundle"), ("license_policy_path", "license policy")):
+            value = getattr(self, name)
+            if value is None:
+                raise ValueError(
+                    f"{name} is required: a projection build without a "
+                    f"pinned {label} is a configuration error"
+                )
+            object.__setattr__(self, name, Path(value))
         for field_name in ("max_stack_share", "max_repo_share", "max_profile_share"):
             share = getattr(self, field_name)
             if share is not None and not (0.0 < share <= 1.0):
@@ -188,11 +161,10 @@ class BuildFrozenCorpusConfig:
 
 
 def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
-    """Parse the annotation bundle's ``annotations.jsonl`` (canonical
-    per-finding record shape): one JSON object per line, keyed by
-    ``record_id``. ``fingerprint`` is required on every row and duplicates
-    of either key fail closed — the canonical record is identified by
-    ``record_id`` and located by ``fingerprint``, so neither may be ambiguous."""
+    """Index canonical annotations.jsonl by record_id and fingerprint.
+
+    Require fingerprints and reject duplicate values of either key.
+    """
     rows: dict[str, dict[str, Any]] = {}
     seen_fingerprints: dict[str, int] = {}
     for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1):
@@ -233,9 +205,7 @@ def _load_snapshot(path: Path) -> dict[str, dict[str, Any]]:
 def _refuse_posterior_evidence(
     session_id: str, fingerprint: str, evidence: list[Record], as_of: str | None
 ) -> None:
-    """Refusal, not drop: any evidence item whose ``valid_at`` lands after
-    the ``as_of`` pin aborts the whole build (spec: "refused"). Reuses v1's
-    chronological ``_is_posterior_leak`` comparison (Pattern Q)."""
+    """Abort the entire build if any evidence is chronologically after as_of."""
     if as_of is None:
         return
     for item in evidence:
@@ -250,14 +220,7 @@ def _refuse_posterior_evidence(
 
 
 def _merge_nested_profile(prov: dict[str, Any], row: Mapping[str, Any]) -> None:
-    """Surface the canonical record's nested ``profile`` block (Req 8).
-
-    ``adjudication.snapshot.build_canonical_record`` emits the four
-    review-profile fields nested under top-level ``profile`` (with ``stack``
-    — not ``profile_*`` — at top level), so a top-level read comes back
-    empty and the nested block must supply the values instead — they are
-    never dropped at the projection boundary.
-    """
+    """Use nested canonical profile fields only when no flat profile value exists."""
     if any(prov["profile"].values()):
         return
     nested = row.get("profile")
@@ -271,13 +234,7 @@ def _merge_nested_profile(prov: dict[str, Any], row: Mapping[str, Any]) -> None:
 def _provenance_for(
     resolution_row: Mapping[str, Any], manifest_row: Mapping[str, Any]
 ) -> dict[str, Any]:
-    """Profile/stack provenance for one record (Req 8).
-
-    The resolution row's native review-profile fields win when present;
-    otherwise the batch manifest row supplies them — the values carried by
-    either row type must not be dropped at the projection boundary. Canonical
-    annotation records nest the profile block, so both shapes are read.
-    """
+    """Prefer resolution provenance (flat or nested); fall back to the batch manifest."""
     prov = extract_provenance(resolution_row)
     _merge_nested_profile(prov, resolution_row)
     if (
@@ -290,10 +247,7 @@ def _provenance_for(
 
 
 def _max_valid_at(evidence: list[Record], base: str | None) -> str | None:
-    """Max ``valid_at`` over evidence items (chronological ISO-8601 compare,
-    mirroring ``_is_posterior_leak``'s parse), never lower than the ``as_of``
-    pin. Parsing both sides with :func:`datetime.fromisoformat` means spelling
-    differences — ``Z`` vs ``+00:00`` — can never mis-order the max."""
+    """Latest evidence time, bounded below by base; parse ISO offsets chronologically."""
     result = base
     for item in evidence:
         if isinstance(item, Mapping) and item.get("valid_at"):
@@ -309,28 +263,13 @@ _ANNOTATION_SCHEMA_PREFIX = "annotation-snapshot/"
 def _verify_annotation_bundle(
     annotation_bundle_dir: Path, bundle: CuratedBundle, bundle_dir: Path
 ) -> dict[str, Any]:
-    """Two-bundle contract: the annotation bundle is verified as its own
-    published artifact and then linked to the curation bundle exactly.
+    """Verify the annotation bundle before linking it to the curation bundle.
 
-    Gates, fail-closed in order:
-
-    1. ``_SUCCESS`` completeness marker (a mid-write bundle is refused).
-    2. Every file against the bundle's own ``SHA256SUMS`` (self-verification
-       via ``bundle._verify_sha256sums`` — raises ``BundleError``, a
-       ``ValueError``).
-    3. Cross-bundle linkage against the curation bundle: ``curation_id``
-       equal to ``bundle.curation_id``, ``sanitized_hub_commit`` equal to
-       ``bundle.source_hub_commit``, a recorded ``batch_fileset_digest`` that
-       matches the curation bundle's actual batch/file-set digest
-       (``_derivative_digest`` of the bundle root — the same canonical
-       file-set vocabulary each batch's ``content_digest`` uses, so a stale
-       annotation bundle harvested against an older file set is refused
-       rather than passing on curation_id + commit alone), a compatible
-       annotation-snapshot schema version, and labeler/rubric/classifier
-       versions plus ``as_of`` present. An empty ``as_of`` is allowed (the
-       unpinned edge) and reported through the build lineage, not refused.
-
-    Any mismatch raises ``ValueError`` naming both sides of the mismatch.
+    Require _SUCCESS, validate its own SHA256SUMS, then match curation_id,
+    sanitized_hub_commit, and the actual batch/file-set digest. Require compatible
+    snapshot schema and labeler/rubric/classifier versions. Empty as_of is an
+    allowed unpinned edge reported in lineage. Failures raise ValueError (including
+    BundleError) naming the mismatched fields/values.
     """
     root = Path(annotation_bundle_dir)
     if not (root / "_SUCCESS").is_file():
@@ -399,13 +338,7 @@ def _verify_annotation_bundle(
 
 
 def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[dict[str, Any]]:
-    """Read a batch's ATIF trajectory document(s).
-
-    The producer writes each batch as a directory (``batches/<sid>/``) whose
-    root trajectory lives at ``trajectory.json`` inside it; a single-object
-    JSON read yields that one trajectory. A file artifact keeps the JSONL
-    shape — one trajectory object per line.
-    """
+    """Read a directory batch's trajectory.json object, or a file artifact as JSONL."""
     artifact = bundle_dir / artifact_relpath
     if artifact.is_dir():
         artifact = artifact / "trajectory.json"
@@ -527,318 +460,33 @@ def project_findings(
     return records
 
 
-def _count_by(records: Iterable[Any], key: Any) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for r in records:
-        k = key(r)
-        counts[k] = counts.get(k, 0) + 1
-    return dict(sorted(counts.items()))
-
-
 def _license_decision_distribution(
     decisions: dict[str, dict[str, Any]]
 ) -> dict[str, int]:
     """Admitted/rejected decision counts across admitted batches, keyed by
     ``admitted`` or the rejection reason code — deterministic order."""
-    return _count_by(
+    return count_by(
         list(decisions.values()),
         lambda d: "admitted" if d["status"] == "admitted" else str(d["reason_code"]),
     )
 
 
-_SHARE_DIMENSIONS: tuple[tuple[str, str, Callable[[Record], Any]], ...] = (
-    # One dimension table consumed by both the share-cap selection stage and
-    # the report builder, so the three vocabulary uses (configured keys,
-    # applied keys, exclusion-key prefixes) can never drift apart: every
-    # consumer spells the repository dimension ``repo``, matching the
-    # ``max_repo_share`` flag.
-    ("stack", "max_stack_share", lambda r: r.get("stack")),
-    (
-        "repo",
-        "max_repo_share",
-        lambda r: cast(dict[str, Any], r.get("lineage") or {}).get("repo_slug"),
-    ),
-    (
-        "profile",
-        "max_profile_share",
-        lambda r: cast(dict[str, Any], r.get("profile") or {}).get("profile_name"),
-    ),
-)
-
-
-def _max_keep_count(total: int, limit: float) -> int:
-    """Largest ``allowed`` with ``allowed / total <= limit`` (float-safety
-    guards around the floor; the same arithmetic runs on every pass, so the
-    result is deterministic and order-invariant)."""
-    allowed = math.floor(limit * total)
-    while (allowed + 1) / total <= limit:
-        allowed += 1
-    while allowed > 0 and allowed / total > limit:
-        allowed -= 1
-    return allowed
-
-
-def _raise_share_caps_fail_closed(
-    *,
-    flag: str,
-    limit: float,
-    dimension: str,
-    population: int | None = None,
-    value: Any | None = None,
-    values: list[Any] | None = None,
-) -> NoReturn:
-    """Single home for the fail-closed ``ValueError`` terminal state of the
-    share-cap stage (the contract documented in ``_apply_share_caps``): every
-    total-population-zero path — the entry degeneracy pre-check, a sole
-    remaining value that can no longer be trimmed without emptying the
-    population, and a trim round that would empty the whole population —
-    funnels through this one raise so the message shape cannot drift between
-    sites. ``value`` names the single over-share value (first two paths);
-    ``values`` spells out the over-share value list (third path)."""
-    if values is not None:
-        raise ValueError(
-            f"{flag}={limit} would reduce the total population to zero across "
-            f"{dimension} values {sorted(str(v) for v in values)} — fail-closed"
-        )
-    raise ValueError(
-        f"{flag}={limit} for {dimension}={value!r} would reduce the total population "
-        f"to zero (population {population}) — fail-closed"
-    )
-
-
-def _apply_share_caps(
-    records: list[Record],
-    *,
-    max_stack_share: float | None,
-    max_repo_share: float | None,
-    max_profile_share: float | None,
-) -> tuple[list[Record], dict[str, int]]:
-    """Pure share-cap selection over the post-tier-cap population.
-
-    Within a dimension, iterates until every value's share of the current
-    population is within its configured limit (strict output-share semantics:
-    ``count / total <= limit`` over the final emitted population), keeping the
-    lowest ``record_id`` records of any over-share group. The three dimensions
-    (stack → repo → profile) are applied sequentially and the whole sequence
-    is re-run to a fixed point: a later dimension's exclusions re-shape the
-    population and can push an earlier dimension's value back over its limit
-    (sequential drift on correlated dimensions — e.g. multi-stack repos,
-    per-repo profiles), so every dimension must be re-enforced until a
-    complete pass excludes nothing and every configured share is within its
-    limit of the final population. Returns the kept list (sorted by
-    ``record_id``) and exclusion counts keyed ``"<dimension>:<value>"``
-    (``None`` values form their own bucket spelled ``(none)``).
-
-    Fails closed with ``ValueError`` if enforcing a cap would leave a total
-    population of zero (the cap cannot keep a single record of the population
-    it is asked to cap). An already-empty population (no decisive findings, or
-    tier caps that trimmed everything) is returned unchanged — configured caps
-    exclude nothing from an empty corpus. A dimension value dropping out
-    entirely is fine — only total-population-zero is fatal; a sole remaining
-    value that can no longer be trimmed without emptying the population hits
-    the same fail-closed terminal state as the entry degeneracy pre-check and
-    raises rather than emitting a lone value at 100% share over its cap.
-    Never samples; input order does not affect the result.
-    """
-    limits = {
-        "stack": max_stack_share,
-        "repo": max_repo_share,
-        "profile": max_profile_share,
-    }
-    dimensions: list[tuple[str, str, Callable[[Record], Any], float]] = []
-    for name, flag, getter in _SHARE_DIMENSIONS:
-        limit = limits[name]
-        if limit is not None:
-            dimensions.append((name, flag, getter, limit))
-    exclusions: dict[str, int] = {}
-    population = sorted(records, key=lambda r: str(r["record_id"]))
-    if not population:
-        # Empty population (no decisive findings, or tier caps trimmed
-        # everything): configured caps exclude nothing — a previously
-        # completing zero-record build stays completing.
-        return population, exclusions
-    original = list(population)
-    # Fail-closed degeneracy pre-check against the original input population:
-    # a cap that cannot keep a single record of an over-share group covering
-    # the whole input would collapse it to zero — refuse before doing any work.
-    # (Populations reduced by earlier dimensions or by a fixed-point re-pass
-    # are handled by the fail-closed sole-value check in the trim loop below,
-    # so this check is invariant and runs once per configured dimension on the
-    # entry population.)
-    entry_total = len(original)
-    for dimension, flag, getter, limit in dimensions:
-        entry_counts: dict[Any, int] = {}
-        for rec in original:
-            value = getter(rec)
-            entry_counts[value] = entry_counts.get(value, 0) + 1
-        for value, count in entry_counts.items():
-            if count / entry_total > limit and count == entry_total:
-                if _max_keep_count(entry_total, limit) == 0:
-                    _raise_share_caps_fail_closed(
-                        flag=flag,
-                        limit=limit,
-                        dimension=dimension,
-                        population=entry_total,
-                        value=value,
-                    )
-    while True:
-        pass_exclusions = 0
-        for dimension, flag, getter, limit in dimensions:
-            while True:
-                total = len(population)
-                counts: dict[Any, int] = {}
-                for rec in population:
-                    value = getter(rec)
-                    counts[value] = counts.get(value, 0) + 1
-                over: dict[Any, int] = {}
-                for value, count in counts.items():
-                    if count / total > limit:
-                        # Largest keep-count whose share of the current
-                        # population is still <= limit.
-                        allowed = _max_keep_count(total, limit)
-                        if allowed == 0 and count == total:
-                            # Sole remaining value after earlier reductions or
-                            # exclusions: trimming it further would empty the
-                            # population entirely — the same terminal state as
-                            # the entry degeneracy pre-check above, so fail
-                            # closed (never emit a lone value above its cap).
-                            _raise_share_caps_fail_closed(
-                                flag=flag,
-                                limit=limit,
-                                dimension=dimension,
-                                population=total,
-                                value=value,
-                            )
-                        over[value] = allowed
-                if not over:
-                    break
-                kept: list[Record] = []
-                taken: dict[Any, int] = {}
-                round_exclusions = 0
-                for rec in population:
-                    value = getter(rec)
-                    if value in over and taken.get(value, 0) >= over[value]:
-                        key = f"{dimension}:{str(value) if value is not None else '(none)'}"
-                        exclusions[key] = exclusions.get(key, 0) + 1
-                        round_exclusions += 1
-                        continue
-                    taken[value] = taken.get(value, 0) + 1
-                    kept.append(rec)
-                if not kept:
-                    _raise_share_caps_fail_closed(
-                        flag=flag,
-                        limit=limit,
-                        dimension=dimension,
-                        values=list(over),
-                    )
-                population = kept
-                pass_exclusions += round_exclusions
-        if pass_exclusions == 0:
-            break
-    return population, exclusions
-
-
-def _share_caps_report(
-    records: list[Record],
-    exclusions: dict[str, int],
-    *,
-    max_stack_share: float | None,
-    max_repo_share: float | None,
-    max_profile_share: float | None,
-) -> dict[str, Any]:
-    """Shared summary/lineage ``share_caps`` block (one builder, two consumers
-    — they cannot drift). ``configured`` lists the non-None share limits keyed
-    stack/repo/profile; ``applied`` reports final per-value counts + shares
-    against the final emitted population per dimension; ``exclusions`` lists
-    the merged ``share-cap:<dimension>:<value>`` exclusion counts. Both draw
-    dimension names and value getters from the single ``_SHARE_DIMENSIONS``
-    table, so configured/applied/exclusion vocabulary stays one spelling."""
-    limits = {
-        "stack": max_stack_share,
-        "repo": max_repo_share,
-        "profile": max_profile_share,
-    }
-    configured = {
-        name: limits[name]
-        for name, _flag, _getter in _SHARE_DIMENSIONS
-        if limits[name] is not None
-    }
-    applied: dict[str, dict[str, dict[str, float]]] = {}
-    total = len(records)
-    for name, _flag, getter in _SHARE_DIMENSIONS:
-        counts: dict[Any, int] = {}
-        for rec in records:
-            value = getter(rec)
-            counts[value] = counts.get(value, 0) + 1
-        applied[name] = {
-            str(value) if value is not None else "(none)": {
-                "count": count,
-                "share": (count / total) if total else 0.0,
-            }
-            for value, count in sorted(
-                counts.items(), key=lambda kv: (kv[0] is None, str(kv[0]))
-            )
-        }
-    return {
-        "version": 1,
-        "configured": configured,
-        "applied": applied,
-        "exclusions": dict(sorted(exclusions.items())),
-    }
-
-
-def _caps_applied(records: list[Record], caps: dict[str, int]) -> dict[str, int]:
-    """Final per-tier population (what the caps resolved to), deterministic."""
-    return _count_by(records, lambda r: str(r["tier"])) if caps else {}
-
-
 def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
-    """Top-level frozen projection (mirrors ``corpus.py:985``'s pipeline
-    contract). Pure — no git, no network; ``base_sha``/hub commit come from
-    the curation manifest only.
+    """Project verified curation and annotation bundles without Git/network access.
 
-    Pipeline: load the curated bundle (fail-closed) → segment each admitted
-    batch's trajectory (fork-order per-agent) → project per-finding records
-    → assign frozen content-derived splits → refuse any record whose
-    annotation evidence carries ``valid_at > as_of`` (raise ``ValueError``
-    naming the session and both timestamps — refusal, not drop) → write
-    ``corpus.jsonl`` plus ``train.jsonl``/``validation.jsonl``/``holdout.jsonl``
-    atomically, copy ``schema/record-schema.json`` alongside, and write ``lineage.json``
-    pinning the annotation bundle's provenance (no wall-clock timestamps — every
-    manifest byte is a function of the immutable inputs, so re-runs are
-    byte-for-byte identical), finishing with a ``_SUCCESS`` completeness
-    marker.
+    Recheck license decisions before any output. Validate every trajectory
+    segment; each session's findings belong to its first segment in fork order.
+    Non-decisive findings go to the adjudication report, optionally also to
+    process-trace/task-only records with no outcome label. Reject evidence after
+    as_of; assign content-derived splits, then apply tier and output-share caps.
 
-    Each finding is projected exactly once (the annotation resolutions are
-    session-scoped, so sibling segments never fabricate per-segment copies);
-    by default non-decisive findings are excluded here and routed to the
-    adjudication report only — with ``emit_process_traces`` they additionally
-    join the emitted population as ``process-trace``/``task-only`` records.
-
-    Returns a summary dict with ``total``/``emitted``, per-type/per-tier/
-    per-split counts, the ``caps`` block (configured vs applied), the
-    ``share_caps`` block (only when at least one output-share cap is
-    configured — shared with lineage.json so the two cannot drift), and
-    ``exclusions_by_reason`` — all derived from the final population in
-    deterministic order. Non-decisive findings land in the human
-    ``adjudication-report.json`` with their evidence (D8: report output, not
-    a pipeline stage — unless ``emit_process_traces`` opts them into the
-    record population as schema-distinct ``process-trace``/``task-only``
-    records).
-    """
+    Write corpus, splits, schema, reports, and lineage atomically per file, with
+    _SUCCESS last. All bytes and returned counts derive from frozen inputs and
+    the final emitted population; no wall-clock timestamp enters lineage."""
     bundle = load_curated_bundle(config.bundle_dir)
     assert config.annotation_bundle_dir is not None  # __post_init__ guarantees
-    # Per-repo license decisions (issue #1080): the projector re-runs the C5/C8
-    # gate over every admitted batch (defence in depth — admission should have
-    # caught these) as the pure function of the batch's recorded repo identity
-    # + evidence under the pinned policy, so the re-evaluation is
-    # replay-identical to admission. Any non-admitted decision refuses the
-    # build outright before any file write (C5-excluded, unopted copyleft,
-    # missing identity/evidence alike — always-enforced, fail-closed), so no
-    # benchmark or unopted-copyleft repo content can reach training data.
-    # mypy narrowing: __post_init__ guarantees a non-None policy path
-    # (ValueError otherwise), but mypy can't see through object.__setattr__,
-    # so assert it at the use site.
+    # Recheck each admitted batch against the pinned license policy before any write.
+    # __post_init__ guarantees the policy path; assert narrows it for mypy.
     assert config.license_policy_path is not None
     policy, policy_digest = load_license_policy(config.license_policy_path)
     decisions: dict[str, dict[str, Any]] = {}
@@ -847,20 +495,9 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         repo_decision = resolve_repo_decision(
             batch.repo_slug or "", batch.license_evidence, policy, config.allow_copyleft
         )
-        decisions[batch.session_id] = {
-            "status": repo_decision.status,
-            "reason_code": repo_decision.reason_code,
-            "spdx_id": repo_decision.spdx_id,
-            "policy_version": repo_decision.policy_version,
-            "evidence_ref": repo_decision.evidence_ref,
-            "repo_slug": repo_decision.repo_slug,
-        }
-        # Any license rejection (not just the always-enforced C5 refusal)
-        # refuses the whole projection before any file write: an unopted
-        # copyleft (or identity/evidence-missing) batch's records must never
-        # be emitted, and the fail-closed ordering is compute rejections →
-        # raise if any → else write (M9; AC6; covered end-to-end by
-        # test_end_to_end_mixed_repo_publication_gated).
+        decisions[batch.session_id] = asdict(repo_decision)
+        # Any rejection aborts the whole projection, including unopted copyleft or
+        # missing identity/evidence; partial admission must not produce training data.
         if repo_decision.status != "admitted":
             license_refusals.append((batch.session_id, repo_decision.reason_code or ""))
     if license_refusals:
@@ -878,15 +515,8 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
 
     records: list[Record] = []
     adjudication: list[Record] = []
-    # The annotation resolutions are session-scoped (keyed by session_id +
-    # fingerprint, not by trajectory/segment), so each finding is projected
-    # exactly once — sibling segments never fabricate per-segment copies that
-    # could hash into different splits (D5 disjointness is per finding).
-    seen_findings: set[tuple[str, str]] = set()
-    adjudicated_findings: set[tuple[str, str]] = set()
-    # Adjudicated findings materialized as process-trace/task-only records
-    # under ``emit_process_traces`` — removed from the exclusion count.
-    materialized_adjudications: set[tuple[str, str]] = set()
+    # A session's resolutions belong to its first segment, preserving fork order.
+    projected_sessions: set[str] = set()
     exclusions_by_reason: dict[str, int] = {}
     for batch in bundle.admitted:
         if batch.manifest_relpath is not None:
@@ -923,15 +553,15 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 seg_records, seg_adjudication = project_findings(
                     session_view, return_adjudication=True
                 )
+                # Still validate every segment, including duplicate session views.
+                if seg.session_id in projected_sessions:
+                    continue
+                projected_sessions.add(seg.session_id)
                 resolution_by_fp = {
                     str(row.get("fingerprint")): row for row in resolutions
                 }
                 for rec in seg_records:
                     fingerprint = str(rec["finding_fingerprint"])
-                    key = (seg.session_id, fingerprint)
-                    if key in seen_findings:
-                        continue
-                    seen_findings.add(key)
                     decision = decisions.get(seg.session_id)
                     if decision is None:
                         raise ValueError(
@@ -939,18 +569,8 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                             "found at projection; refusing to project"
                         )
                     record_decision: dict[str, Any] = decision
-                    # Non-decisive findings are adjudication-report output
-                    # (D8): by default they never become training records, so
-                    # corpus.jsonl and the split manifests exclude them by
-                    # construction while lineage/summary count them under
-                    # exclusions_by_reason. With ``emit_process_traces`` the
-                    # finding is additionally materialized as a silver
-                    # ``process-trace`` record and a ``task-only`` record —
-                    # schema-distinct, never gold (``outcome_label=None``),
-                    # classified via ``classify_tier`` with the matching
-                    # ``record_type`` — and no longer counted as a
-                    # ``non-decisive-adjudication`` exclusion (the report
-                    # itself still carries it).
+                    # Non-decisive findings enter training only as opt-in, schema-distinct
+                    # process-trace/task-only records. Their adjudication report stays intact.
                     if str(rec["tier"]) == "task-only":
                         if not config.emit_process_traces:
                             continue
@@ -970,7 +590,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                                 f"{derived_type}:{fingerprint}",
                             )
                             emit_records.append(derived)
-                        materialized_adjudications.add(key)
                     else:
                         emit_records = [rec]
                     for rec in emit_records:
@@ -1008,13 +627,8 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                             "repo_slug": record_decision["repo_slug"],
                             "license_decision": record_decision,
                         }
-                        # Additive enrichment from the batch's review artifacts
-                        # (findings.json / diff.patch / manifest.json): localized
-                        # finding text and a task-identity block. Every field is
-                        # opt-in on artifact presence — a missing artifact leaves
-                        # the field absent (the consumer fails closed, not the
-                        # projector), and record_id/tier/outcome_label are never
-                        # touched.
+                        # Enrich only present artifacts; consumers enforce required inputs.
+                        # Finding identity, tier, and outcome label remain unchanged.
                         finding_text = batch_artifacts.findings_by_fingerprint.get(fingerprint)
                         if finding_text is not None:
                             rec["finding_text"] = finding_text
@@ -1026,11 +640,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                         }
                         manifest_git = batch_artifacts.manifest_git
                         manifest_code_context = batch_artifacts.manifest_code_context
-                        # Producer-realistic manifest namespaces
-                        # (archive/manifest.py:374-387): ``base_sha`` lives
-                        # under ``code_context`` and only ``head_sha`` under
-                        # ``git`` — mirroring corpus.py's v1 read of the same
-                        # manifest (code_context base, git head).
+                        # Base lives in code_context; git supplies the preferred head.
                         for sha_name, sha_value in (
                             ("base_sha", manifest_code_context.get("base_sha")),
                             (
@@ -1051,50 +661,25 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                             }
                             task_identity["diff_digest"] = diff_digest
                             task_identity["diff_ref"] = diff_ref
-                            # The raw diff body is embedded on the record
-                            # (training record schema ``diff``) so Stage-2 RFT inputs
-                            # carry it without an archive-side materialization
-                            # step — the projection is the frozen boundary.
+                            # Freeze the diff into the record for Stage-2 RFT.
                             rec["diff"] = batch_artifacts.diff
                         rec["task_identity"] = task_identity
                         if "diff_digest" in task_identity:
                             lineage_fields = cast(dict[str, Any], rec["lineage"])
                             lineage_fields["diff_digest"] = task_identity["diff_digest"]
                             lineage_fields["diff_ref"] = task_identity["diff_ref"]
-                        # v2 schema stamp: every projected record carries the
-                        # training-record schema version it was emitted under.
                         rec["schema_version"] = "2"
                         records.append(rec)
-                for entry in seg_adjudication:
-                    key = (seg.session_id, str(entry["fingerprint"]))
-                    if key not in adjudicated_findings:
-                        adjudicated_findings.add(key)
-                        adjudication.append(entry)
+                adjudication.extend(seg_adjudication)
 
     records.sort(key=lambda r: str(r["record_id"]))
     adjudication.sort(key=lambda r: str(r["fingerprint"]))
 
-    # Post-segmentation caps (D6): caps bind after segmentation and split
-    # assignment, over the deduplicated final population. Excess records of a
-    # capped tier are excluded (never silently dropped) and named in the
-    # summary, lineage, and exclusion reasons.
-    exclusions_by_reason["non-decisive-adjudication"] = len(
-        adjudicated_findings - materialized_adjudications
-    )
+    # Cap the deduplicated population after split assignment; account for every exclusion.
+    exclusions_by_reason["non-decisive-adjudication"] = 0 if config.emit_process_traces else len(adjudication)
     if config.caps:
-        kept: list[Record] = []
-        per_tier: dict[str, int] = {}
-        for rec in records:
-            tier = str(rec["tier"])
-            limit = config.caps.get(tier)
-            if limit is not None and per_tier.get(tier, 0) >= limit:
-                exclusions_by_reason[f"tier-cap:{tier}"] = (
-                    exclusions_by_reason.get(f"tier-cap:{tier}", 0) + 1
-                )
-                continue
-            per_tier[tier] = per_tier.get(tier, 0) + 1
-            kept.append(rec)
-        records = kept
+        records, tier_exclusions = retain_group_limits(records, lambda record: str(record["tier"]), config.caps)
+        exclusions_by_reason.update({f"tier-cap:{tier}": count for tier, count in tier_exclusions.items()})
 
     share_caps_report: dict[str, Any] | None = None
     if (
@@ -1120,26 +705,16 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
             max_profile_share=config.max_profile_share,
         )
 
-    # Re-pin lineage valid_at over the final emitted population (post tier-cap
-    # and share-cap exclusions): the in-loop pin above is computed before
-    # either caps stage drops records, so it could name a cap-excluded record's
-    # evidence — contradicting the "emitted records' evidence only" contract
-    # above. Recomputing over the post-cap records keeps the pin reachable;
-    # uncapped builds re-pin to the identical value (max is order-independent).
-    valid_at = config.as_of
-    for rec in records:
-        rec_valid_at = cast(dict[str, Any], rec["lineage"]).get("valid_at")
-        if rec_valid_at is not None and (
-            valid_at is None
-            or datetime.fromisoformat(str(rec_valid_at)) > datetime.fromisoformat(valid_at)
-        ):
-            valid_at = str(rec_valid_at)
+    # Aggregate only emitted evidence; capped-out records must not advance lineage valid_at.
+    valid_at = _max_valid_at([cast(Record, rec["lineage"]) for rec in records], config.as_of)
 
     canonical = _dump_jsonl(records)
     _write_artifact(config.out_dir / "corpus.jsonl", canonical.encode("utf-8"))
+    split_counts: dict[str, int] = {}
     for split_name, filename in SPLIT_FILENAMES.items():
         split_records = [r for r in records if cast(dict[str, Any], r["lineage"])["split"] == split_name]
         _write_artifact(config.out_dir / filename, _dump_jsonl(split_records).encode("utf-8"))
+        split_counts[split_name] = len(split_records)
     _write_artifact(
         config.out_dir / "adjudication-report.json",
         (json.dumps(adjudication, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
@@ -1148,14 +723,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     schema_src = Path(__file__).parent.parent / "schema" / "record-schema.json"
     _write_artifact(config.out_dir / "schema.json", schema_src.read_text(encoding="utf-8").encode("utf-8"))
 
-    split_counts: dict[str, int] = {name: 0 for name in SPLIT_FILENAMES}
-    for r in records:
-        lineage_field = cast(dict[str, Any], r["lineage"])
-        split_counts[str(lineage_field["split"])] += 1
-    # Every Req-11 field: hub commit, curation id, content digests, policy/
-    # classifier/rubric versions, as_of + valid_at pins, split assignment,
-    # exclusion reasons, and each record's per-repo license decision. Nothing
-    # silently dropped.
     content_digests: dict[str, str] = {
         batch.session_id: batch.content_digest for batch in bundle.admitted if batch.content_digest
     }
@@ -1163,7 +730,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
     annotation_as_of = annotation_lineage.get("as_of")
     license_distribution = _license_decision_distribution(decisions)
     caps_report = {"configured": dict(sorted(config.caps.items())),
-                   "applied": _caps_applied(records, config.caps)}
+                   "applied": count_by(records, lambda r: str(r["tier"])) if config.caps else {}}
     share_caps_entry = {"share_caps": share_caps_report} if share_caps_report is not None else {}
     copyleft_opt_ins = sorted(config.allow_copyleft)
     lineage = {
@@ -1172,9 +739,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "hub_commit": bundle.source_hub_commit,
         "source_hub_commit": bundle.source_hub_commit,
         "content_digests": content_digests,
-        # Two-bundle contract (K3): the annotation bundle's snapshot_id/commit
-        # are pinned into the projection lineage; the finalized curation
-        # bundle itself is never touched.
+        # Pin the annotation bundle without modifying the finalized curation bundle.
         "annotation_bundle": {
             "snapshot_id": annotation_lineage.get("snapshot_id")
             or config.annotation_bundle_dir.name,
@@ -1200,11 +765,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "caps": caps_report,
         **share_caps_entry,
         "adjudication_count": len(adjudication),
-        # License identity pin (M7/AC4, issue #1080): the digest-pinned policy
-        # the re-evaluation consumed, the C5 exclusion list the C5 gate
-        # consulted, the copyleft opt-ins, every recorded per-repo decision,
-        # and the admitted/rejected decision distribution — all pure functions
-        # of the bundle + policy, so re-runs stay byte-identical.
+        # Pin all license inputs and decisions for byte-identical reconstruction.
         "license_policy": {
             "path_digest": policy_digest,
             "policy_version": policy.policy_version,
@@ -1221,12 +782,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         (json.dumps(lineage, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
     )
 
-    # Human license report (issue #1080 M7): the digest-pinned policy, the C5
-    # exclusion-list digest, the copyleft opt-ins, every per-repo decision, and
-    # the decision distribution — a pure function of the bundle + policy +
-    # exclusion.txt bytes, so re-runs are byte-identical. Written atomically
-    # before ``_SUCCESS`` so the completeness gate covers it; the license-gate
-    # refusal above means this file only ever exists on clean builds.
+    # The human report shares lineage's license evidence and precedes _SUCCESS.
     license_report = {
         "policy": {"policy_version": policy.policy_version, "digest": policy_digest},
         "exclusion_list_digest": lineage["exclusion_list_digest"],
@@ -1241,9 +797,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         (json.dumps(license_report, sort_keys=True, indent=2, ensure_ascii=False) + "\n").encode("utf-8"),
     )
 
-    # Completeness marker (mirrors the bundle's own ``_SUCCESS`` gate): the
-    # projection file set is only consumable once every member is in place,
-    # so a mid-write failure never leaves a partial projection behind.
+    # Consumers require _SUCCESS; write it only after every artifact succeeds.
     _write_artifact(config.out_dir / "_SUCCESS", b"ok\n")
 
     return {
@@ -1251,8 +805,8 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
         "emitted": len(records),
         "adjudication": len(adjudication),
         **{f"split_{name}": count for name, count in split_counts.items()},
-        "records_by_type": _count_by(records, lambda r: str(r["record_type"])),
-        "records_by_tier": _count_by(records, lambda r: str(r["tier"])),
+        "records_by_type": count_by(records, lambda r: str(r["record_type"])),
+        "records_by_tier": count_by(records, lambda r: str(r["tier"])),
         "records_by_split": dict(split_counts),
         "caps": caps_report,
         **share_caps_entry,

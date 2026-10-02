@@ -17,7 +17,8 @@ from rich.console import Console
 
 from daydream import git_ops
 from daydream.backends import ResultEvent, TextEvent
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_gh import block_real_gh
 

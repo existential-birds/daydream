@@ -1,19 +1,6 @@
-"""Archive-time data-capture tests (issue #124).
-
-Covers the two capture gaps this feature closes:
-
-1. **Eval on by default.** ``analyze_session`` is file-based and cheap, so it
-   runs on every archive unless ``--no-eval`` opts out. AC1/AC1b assert the
-   manifest's eval metrics are populated on a default run and null with
-   ``--no-eval``.
-2. **Recommended-change patch.** A separate ``recommended.patch`` (daydream's
-   proposed diff, captured post-fix) is archived distinct from ``diff.patch``
-   (the PR-under-review diff), and the applied-signal cascades read it. AC3/AC4.
-
-The deep AC1/AC3 test drives the production entrypoint (``runner.run`` →
-``run_deep``) through a real temp git worktree, reusing the deep-orchestrator
-stub harness. The shallow AC3 test drives the shallow single-pass path. Only the
-backend seam is mocked.
+"""Archive capture through real runner/worktree paths with only backend calls mocked.
+Verify default/disabled evaluation and separate recommended versus reviewed patches in
+deep and shallow flows.
 """
 from __future__ import annotations
 
@@ -43,7 +30,8 @@ from daydream.backends import (
 from daydream.backends.codex import CodexBackend
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.review_budget import ReviewLimits
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from daydream.training.labeler_signals import fix_applied_signal, local_commit_applied_signal
 from tests.deep_orchestrator.support import _only_archived_run
 from tests.harness.backend import ScriptedBackend
@@ -51,11 +39,6 @@ from tests.harness.codex_replay import make_mock_process
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import bare_remote, git
 from tests.harness.remote_ci import NoCIRemote
-
-# The prompt-dispatching stub backend and its install helpers are the canonical
-# shared stub (tests/harness/stub_backend.py); re-rolling the dispatch
-# heuristics would be fragile. tests/ is a namespace package, so the harness
-# imports cleanly.
 from tests.harness.stub_backend import (
     StubBackend,
     force_interactive,
@@ -68,7 +51,6 @@ from tests.test_deep_orchestrator import _merge_item, _noop_commit, _ok
 
 
 def _deep_run_config(target: Path, **overrides: Any) -> RunConfig:
-    """The deep loop-mode config shared by the archive-capture tests."""
     config: dict[str, Any] = {"target": str(target), "assume": "yes", "output_mode": "loop", "cleanup": False,}
     config.update(overrides)
     return RunConfig(**config)
@@ -118,10 +100,9 @@ async def _run_real_phases_deep(
     fix_edit_line: str = "# daydream recommended change\n",
     untracked_fix: str | None = None,
 ) -> tuple[Path, int]:
-    """Run one real-internal-phases deep loop over a fresh bare remote.
+    """Run real internal phases against a bare remote; return ``(remote, exit_code)``.
 
-    Returns ``(remote, exit_code)``. ``untracked_fix`` also writes a pre-existing
-    ``notes.txt`` so the two untracked-file exclusion tests share one setup.
+    ``untracked_fix`` also seeds pre-existing notes.txt to test untracked-file exclusions.
     """
     remote = bare_remote(archive_dir.parent / remote_name)
     no_ci_remote.connect(multi_stack_target, remote)
@@ -151,12 +132,7 @@ async def _ok_with_heal_edit(target: Path, **kwargs: Any) -> Any:
 async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_phase_state(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
 ) -> None:
-    """AC1 + AC3: a default deep run (no --no-eval) populates the manifest's eval
-    metrics AND writes a recommended.patch distinct from diff.patch.
-
-    The fix stage edits a TRACKED file (api.py), so the pre-fix → post-fix diff
-    is non-empty and the real test/heal and commit phases run before archiving.
-    """
+    """Editing tracked api.py gives real test/heal and commit phases a nonempty recommended diff."""
     head_before = git_ops.head_sha(multi_stack_target)
     remote, exit_code = await _run_real_phases_deep(multi_stack_target, monkeypatch, archive_dir, no_ci_remote)
     assert exit_code == 0
@@ -193,7 +169,6 @@ async def test_default_deep_run_populates_eval_captures_patch_and_current_merge_
     recommended_text = recommended.read_text()
     diff_text = diff.read_text()
     assert recommended_text != diff_text
-    # The recommended patch carries daydream's fix line; the review diff does not.
     assert "# daydream recommended change" in recommended_text
     assert "# daydream recommended change" not in diff_text
 
@@ -268,8 +243,6 @@ async def test_mixed_case_pr_identity_reaches_remote_ci_and_archives_success(
 async def test_deep_archive_recommended_patch_excludes_preexisting_untracked_files(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
 ) -> None:
-    """A pre-existing untracked file (present before the run) is absent from the
-    archived recommended.patch while a fix-created untracked file is present."""
     _remote, exit_code = await _run_real_phases_deep(
         multi_stack_target, monkeypatch, archive_dir, no_ci_remote, untracked_fix="migrations/0002_add_x.sql",
     )
@@ -296,7 +269,6 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
     run_dir = _only_archived_run(archive_dir)
     assert "heal_edit.py" not in (run_dir / "recommended.patch").read_text()
     assert not (multi_stack_target / "heal_edit.py").exists()
-    # Session-bound capture-point sidecar, mirrored from fix-quality-gate.json.
     sidecar = json.loads((multi_stack_target / ".daydream" / "deep" / "recommended-capture.json").read_text())
     assert sidecar["session_id"] == run_dir.name
     assert sidecar["capture_point"] == "post_test"
@@ -307,35 +279,27 @@ async def test_deep_heal_edit_lands_in_archived_recommended_patch(
 async def test_deep_archive_commit_excludes_preexisting_untracked_files(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
 ) -> None:
-    """A pre-existing untracked file (before the run) is absent from the daydream
-    commit's tree; a fix-created untracked file is present (issue #543)."""
     remote, exit_code = await _run_real_phases_deep(
         multi_stack_target, monkeypatch, archive_dir, no_ci_remote, untracked_fix="migrations/0002_add_x.sql",
     )
     assert exit_code == 0
 
-    # The pushed branch's HEAD tree excludes notes.txt but includes the fix-created
-    # file (the stub pushes the current branch, so query that ref on the remote).
+    # Inspect the ref actually pushed by the stub.
     branch = git(multi_stack_target, "branch", "--show-current")
     committed = git(remote, "ls-tree", "-r", "--name-only", branch).splitlines()
     assert "migrations/0002_add_x.sql" in committed
     assert "notes.txt" not in committed
-    # notes.txt still untracked in the working tree.
     assert "notes.txt" in git(multi_stack_target, "status", "--porcelain")
 
 async def test_dump_artifacts_copies_full_bundle_to_target_dir(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
 ) -> None:
-    """``--dump-artifacts DIR`` copies the fully-assembled run bundle into DIR so CI
-    can upload it — trajectory, deep artifacts, diffs, manifest, and evaluation all
-    land in the user-specified directory, mirroring the archived run."""
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
     dump_dir = tmp_path / "uploaded-artifacts"
     exit_code = await run(_deep_run_config(multi_stack_target, dump_artifacts=str(dump_dir),))
     assert exit_code == 0
 
-    # The dump directory mirrors the archived run bundle.
     run_dir = _only_archived_run(archive_dir)
     assert (dump_dir / "manifest.json").is_file()
     assert (dump_dir / "trajectory.json").is_file()
@@ -346,7 +310,6 @@ async def test_dump_artifacts_copies_full_bundle_to_target_dir(
 async def test_no_dump_artifacts_leaves_no_extra_copy(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
 ) -> None:
-    """Without ``--dump-artifacts`` no bundle copy is made outside the archive."""
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
     dump_dir = tmp_path / "uploaded-artifacts"
     exit_code = await run(_deep_run_config(multi_stack_target))
@@ -356,7 +319,6 @@ async def test_no_dump_artifacts_leaves_no_extra_copy(
 async def test_failed_findings_export_retains_requested_diagnostics(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path, fake_gh: FakeGh,
 ) -> None:
-    """A post-merge metadata failure still publishes the existing diagnostic bundle."""
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
     monkeypatch.delenv("DAYDREAM_APP_ID", raising=False)
     monkeypatch.delenv("DAYDREAM_APP_PRIVATE_KEY", raising=False)
@@ -388,12 +350,7 @@ async def test_failed_findings_export_retains_requested_diagnostics(
     assert (bundle / "manifest.json").read_bytes() == (_only_archived_run(archive_dir) / "manifest.json").read_bytes()
 
 def _commit_scanned_file(target: Path, name: str, body: str) -> None:
-    """Commit *body* on the feature branch so it lands verbatim in ``diff.patch``.
-
-    ``_copy_run_artifacts`` carries ``diff.patch`` into the bundle with no
-    redaction, so a committed file is the real route by which arbitrary source
-    text reaches the egress scanner (#1170).
-    """
+    """Put source bytes through the real egress path: commit -> diff.patch -> archive scan."""
     (target / name).write_text(body, encoding="utf-8")
     git(target, "add", name)
     git(target, "commit", "-m", f"add {name}")
@@ -402,15 +359,7 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
 ) -> None:
-    """#1170: name-shape scan hits report and publish; they never refuse the run.
-
-    A settings module holding a dict-key constant and an f-string DSN template
-    carries no credential, but trips ``_ENV_VAR_PATTERN`` and the userinfo rules.
-    Before the tiering that refused the whole run after every LLM call had been
-    paid for. Now the operator gets a value-free advisory and the complete
-    bundle: review published, archive installed, dump copied, exit 0 (#981's
-    "preserving the local run").
-    """
+    """Credential-free flags and DSN templates must allow an unchanged dump with value-free advisories."""
     _install_deep_capture_backend(multi_stack_target, monkeypatch)
     _commit_scanned_file(multi_stack_target, "settings.py",
         'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"\n'
@@ -421,7 +370,6 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     exit_code = await run(_deep_run_config(multi_stack_target, dump_artifacts=str(dump_dir),))
     assert exit_code == 0
 
-    # Everything publishes: the dump, the archive index row, and the report.
     run_dir = _only_archived_run(archive_dir)
     assert (dump_dir / "manifest.json").is_file()
     assert query_runs(archive_dir)
@@ -433,7 +381,6 @@ async def test_dump_artifacts_publishes_bundle_with_advisory_scan_findings(
     assert "override_flag" not in out
     assert "DB_PASSWORD" not in out
 
-    # An advisory bundle is still dumped byte-for-byte — never redact-then-dump.
     dumped = (dump_dir / "diff.patch").read_bytes()
     assert dumped == (run_dir / "diff.patch").read_bytes()
     assert b"FEATURE_FLAG_OVERRIDE_KEY" in dumped
@@ -605,7 +552,6 @@ async def test_strict_archive_error_is_reported_when_rollback_also_fails(
 async def test_no_eval_leaves_manifest_eval_fields_null(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    """AC1b: --no-eval (run_eval=False) skips the eval pass, leaving its metrics null."""
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
     exit_code = await run(_deep_run_config(multi_stack_target, run_eval=False,))
@@ -620,17 +566,11 @@ async def test_no_eval_leaves_manifest_eval_fields_null(
     assert not (run_dir / "evaluation.json").exists()
 
 def _fix_editing_backend(repo: Path) -> ScriptedBackend:
-    """Shallow-dispatch backend whose fix stage edits a tracked file.
-
-    Mirrors ``PhaseDispatchBackend`` dispatch but writes a real change to
-    ``main.py`` on the fix turn so the shallow runner's recommended-patch capture
-    has a non-empty diff to record.
-    """
+    """Use shallow dispatch with a real tracked main.py edit so recommended-patch capture is nonempty."""
     def responder(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> list[AgentEvent]:
 
         pl = prompt.lower()
-        # Native review prompts are skill-free (#886): dispatch on distinctive
-        # judgment-prose markers instead of a ``beagle-*`` invocation token.
+        # Dispatch native review prompts by their judgment-prose markers.
         if "review" in pl and ("inclusion obligation" in pl
             or "full change spans" in pl
             or "language-agnostic review practices" in pl
@@ -638,8 +578,6 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
             or "repository-wide interactions" in pl
         ):
             return [TextEvent(text="Review complete."),
-                # Issue #745: the per-stack reviewer emits PER_STACK_RECORD_SCHEMA
-                # structured output directly (no separate parse step).
                 ResultEvent(structured_output={"issues": [{
                                 "id": 1, "description": "Add a guard", "file": "main.py", "line": 1,
                                 "severity": "medium", "confidence": "HIGH", "rationale": "guard missing",
@@ -674,17 +612,8 @@ def _fix_editing_backend(repo: Path) -> ScriptedBackend:
 async def test_shallow_run_captures_recommended_patch(
     feature_branch_repo: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, no_ci_remote: NoCIRemote,
 ) -> None:
-    """AC3 (shallow): the shallow single-pass fix path archives a recommended.patch
-    carrying daydream's edit.
-
-    Shallow mode is the deep flow with a forced single stack (#330), so it
-    persists ``diff.patch`` like any deep run; recommended.patch must still be
-    the distinct artifact carrying daydream's own edit (the deep test asserts
-    the same distinctness where both artifacts exist).
-    """
     monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "n")
-    # Host-native commit/push (issue #726): the shallow --yes run commits and
-    # pushes to 'origin' for real, so give the repo a bare remote.
+    # The shallow run commits and pushes for real.
     remote = bare_remote(archive_dir.parent / "origin.git")
     no_ci_remote.connect(feature_branch_repo, remote)
     backend = _fix_editing_backend(feature_branch_repo)
@@ -704,9 +633,6 @@ async def test_shallow_run_captures_recommended_patch(
     assert diff.is_file()
     recommended_text = recommended.read_text()
     diff_text = diff.read_text()
-    # recommended.patch is daydream's proposed diff, distinct from the
-    # PR-under-review diff.patch — both carry the reviewed change, but only the
-    # recommended patch carries the fix daydream applied.
     assert recommended_text != diff_text
     assert "+# daydream recommended change" in recommended_text
     assert "+# daydream recommended change" not in diff_text
@@ -714,24 +640,18 @@ async def test_shallow_run_captures_recommended_patch(
 @pytest.mark.parametrize(
     ("patches", "manifest", "post_window", "expected_verdict", "expected_hunks_total", "expected_hunks_applied",),
     [
-        # AC4: with both patches present, the signal parses recommended.patch
-        # hunks, not diff.patch hunks — a run whose RECOMMENDATION landed labels
-        # 'applied' even though the reviewed line is absent post-window.
+        # Applied recommendation counts even though the originally reviewed line is absent.
         pytest.param(("diff.patch", "recommended.patch"), None,
             "existing\nrecommended = 1\n",
             "applied", 1, 1, id="prefers-recommended-patch",
         ),
-        # AC4 backward compat: an old archive with only diff.patch still labels
-        # via the diff.patch hunks.
+        # Legacy archives use diff.patch when recommended.patch is absent.
         pytest.param(("diff.patch",), None,
             "existing\nreviewed = 2\n",
             "applied", 1, None, id="legacy-falls-back-to-diff-patch",
         ),
-        # A new-format archive (manifest recommended_patch_supported=True) with
-        # no recommended.patch made NO recommendation (review-only /
-        # all-declined / wash). The cascade must score zero hunks and NOT fall
-        # back to diff.patch (the PR-under-review diff), even when diff.patch's
-        # line is present post-window — otherwise such runs are mislabeled.
+        # New archives distinguish no recommendation from a missing legacy patch;
+        # reviewed lines alone must not count as applied recommendations.
         pytest.param(("diff.patch",), {"schema_version": "1.0", "recommended_patch_supported": True},
             "existing\nreviewed = 2\n",
             "not_applied", 0, None, id="new-format-no-recommendation-skips-fallback",
@@ -778,17 +698,9 @@ def test_local_commit_applied_signal_uses_recommended_patch(tmp_path: Path, file
 async def test_deep_run_archives_location_and_shipped_duplication_axes(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    """Real-path: the two new eval axes land in the archived ``evaluation.json``.
+    """Score the near-duplicate pair's original lines 1 and 88 after demotion.
 
-    Drives the production entrypoint over a real temp git worktree with only the
-    backend seam mocked. The run ships two near-duplicate findings on ``api.py``
-    (whose only hunk is ``(1, 2)``): one correctly anchored on line 1 and one
-    anchored on line 88, which the live location validator demotes and stamps
-    with ``location_cited_line``. The harness's structural meta-stack item is
-    the third shipped item (in-hunk, differently worded). The archived
-    evaluation must therefore show a ``beyond_tolerance`` item scored on the
-    CITED line and a shipped near-duplicate pair -- the exact run shape that
-    previously scored perfect.
+    The harness adds one distinct structural finding to the real deep run.
     """
     stub = _install_deep_capture_backend(multi_stack_target, monkeypatch)
     stub.fix_edit_line = "# daydream recommended change\n"
@@ -804,7 +716,6 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     run_dir = _only_archived_run(archive_dir)
     evaluation = json.loads((run_dir / "evaluation.json").read_text())
 
-    # The persisted hunk index (written next to diff.patch) supplied the ranges.
     location = evaluation["location"]
     assert location["hunk_source"] == "hunk-index.json"
     assert location["shipped_items"] == 3
@@ -816,7 +727,6 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
         "file_absent": 0,
     }
     assert location["in_hunk_rate"] == 0.6667
-    # The live validator demoted the mis-anchored item and recorded its citation.
     assert location["distrusted_items"] == 1
     assert location["relocated_items"] == 0   # demoted, not relocated (no snap)
     beyond = [row for row in location["items"] if row["tier"] == "beyond_tolerance"]
@@ -824,7 +734,6 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     assert beyond[0]["cited_line"] == 88
     assert beyond[0]["location_distrust"] is True
 
-    # The shipped duplication escaped merge and is counted as such.
     duplication = evaluation["findings"]["shipped_duplication"]
     assert duplication["shipped_items"] == 3
     assert duplication["comparable_pairs"] == 3
@@ -837,7 +746,6 @@ async def test_deep_run_archives_location_and_shipped_duplication_axes(
     assert escape["same_file"] is True
     assert "grounding" not in evaluation
 
-    # Pre-existing manifest eval metrics are unaffected.
     manifest = json.loads((run_dir / "manifest.json").read_text())
     assert "grounding_rate" not in manifest["metrics"]
     assert manifest["metrics"]["total_findings"] == 3
@@ -891,15 +799,13 @@ def _install_codex_evidence_backend(target: Path, monkeypatch: pytest.MonkeyPatc
 async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flags(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    """runner.run -> archive -> evaluation preserves all unsafe evidence."""
-
     # This telemetry fixture deliberately needs 326 events to keep its write
     # ratio below 5%. Give that fixture sufficient investigation allowance;
     # the production default's truncation is covered by review-runtime tests.
     def telemetry_limits(*args: Any, **kwargs: Any) -> ReviewLimits:
         return replace(ReviewLimits(*args, **kwargs), tool_calls=400)
 
-    monkeypatch.setattr("daydream.phases.ReviewLimits", telemetry_limits)
+    monkeypatch.setattr("daydream.phases.review.ReviewLimits", telemetry_limits)
     _install_codex_evidence_backend(multi_stack_target, monkeypatch, evidence=True,)
 
     assert await run(_deep_run_config(multi_stack_target)) == 0
@@ -938,7 +844,6 @@ async def test_codex_evidence_integrity_archives_semantic_counts_and_review_flag
 async def test_codex_evidence_integrity_clean_archive_stays_clean(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    """An independent paired-success run acquires no telemetry review flag."""
     _install_codex_evidence_backend(multi_stack_target, monkeypatch, evidence=False,)
     assert await run(_deep_run_config(multi_stack_target)) == 0
     run_dir = _only_archived_run(archive_dir)
@@ -954,8 +859,6 @@ async def test_codex_evidence_integrity_clean_archive_stays_clean(
 async def test_malformed_codex_tool_name_survives_real_log_mode_runner_archive(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path,
 ) -> None:
-    """Replay CLI drift through the real parser, log-mode runner, and archive."""
-
     class MalformedToolBackend(StubBackend):
         async def execute(self, cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> AsyncIterator[AgentEvent]:
             if "you are reviewing the python stack" in prompt.lower():
@@ -1056,7 +959,6 @@ class _JoinedArtifactEvidenceBackend(StubBackend):
 async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, artifact_runtime_root: Path,
 ) -> None:
-    """A real run archives routed prompt inputs and preserves parsed findings."""
     silence(monkeypatch)
     force_interactive(monkeypatch)
     backend = _JoinedArtifactEvidenceBackend(multi_stack_target)
@@ -1172,7 +1074,6 @@ async def test_real_deep_archive_preserves_sanctioned_artifacts_and_findings(
 def _retry_stop_event(*, reason: str, attempts: int, backoff_s: float, backend_s: float, retry_recovery_spent_s: float,
     circuit_state: str,
 ) -> dict[str, Any]:
-    """One serialized ``agent_budget_stop`` retry-ladder event."""
     return {"phase": "fix", "event": "agent_budget_stop", "timestamp": "2026-01-01T00:00:00Z",
         "metadata": {"limit_expired": "retry_ladder", "elapsed_s": backend_s + backoff_s, "backend_s": backend_s,
             "backoff_s": backoff_s, "attempts": attempts, "retry_stop_reason": reason, "circuit_state": circuit_state,
@@ -1182,11 +1083,7 @@ def _retry_stop_event(*, reason: str, attempts: int, backoff_s: float, backend_s
 
 def _finalize_minimal_run(*, archive_dir: Path, tmp_path: Path, session_id: str, phase_events: list[dict[str, Any]],
 ) -> Path:
-    """Write one manifest through the production ``finalize_archive_run`` path.
-
-    Only the backend seam is absent here by construction: the reducer reads the
-    frozen phase events and the strict finalizer emits the manifest.
-    """
+    """Run frozen phase events through the production manifest reducer and strict finalizer."""
     target = tmp_path / f"target-{session_id}"
     target.mkdir()
     _strict_archive(

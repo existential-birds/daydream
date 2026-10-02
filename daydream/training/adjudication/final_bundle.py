@@ -1,20 +1,8 @@
-"""Staging final-bundle constructor (issue #1078, M4 core).
+"""Construct the seven semantic annotation files from pinned pipeline state.
 
-Assembles the seven-file semantic annotation staging bundle, including exact
-preview-manifest and verified v2 policy-binding bytes, from pipeline state (the
-materialization dir, the hydrated index, and the archive). Pure construction:
-no Hub I/O, no publishing; :func:`publish_final_annotation_bundle` consumes the
-directory this function produces, so ``--dry-run`` and the real publish share
-100% of the construction/validation code (M6).
-
-Determinism: every file is written as canonical JSON (sorted keys, compact
-separators), so identical pipeline state produces byte-identical bundles
-across re-runs, and atomically via the shared ``atomic_write_bytes``
-primitive, so a torn write can never leave a truncated contract file in the
-staged ``out_dir`` (the deterministic-atomic-writes convention). Every missing
-or invalid input raises ``ValueError`` / ``FileNotFoundError`` naming the
-artifact — no fallback defaults, no silent skips (the lineage file must never
-contain a fabricated field).
+No Hub I/O occurs here: dry-run and publication consume the same validated
+bundle. Canonical JSON and atomic writes keep reconstruction deterministic.
+Missing or invalid inputs name their artifact; lineage never invents defaults.
 """
 
 from __future__ import annotations
@@ -282,22 +270,12 @@ def _enrich_report_items(
     *,
     as_of: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Enrich queue items into report items — the single shared implementation
-    behind both the CLI report path (``cli._report_items``) and the final
-    bundle's coverage report, so the published 80% admission gate sees exactly
-    the same human-decision state as ``corpus adjudicate report``.
+    """Apply the same observation, precedence, and tier rules to CLI and final coverage reports.
 
-    Attaches each record's observations, applies three-tier effective
-    adjudication (a human decisive judgment whose evidence digest matches the
-    fresh item overrides the disposition), stamps the temporal axis first, and
-    classifies ``tier``/``posterior_eligible`` with the projection authority.
-    Gold eligibility requires a human decision made against the item's fresh
-    evidence digest, so automatic decisive records without one — and decisive
-    records whose only human observation was made against older evidence, a
-    judgment the canonical merge refuses to reuse (digest mismatch) — are
-    demoted to task-only and never count as adjudicated. An observation
-    referencing a record_id absent from ``items`` raises ``ValueError`` naming
-    it (fail-closed, mirroring the CLI twin).
+    Stamp temporal eligibility before tier classification. Only decisive human
+    judgments matching the fresh evidence digest count toward gold; automatic
+    or stale-evidence decisions remain task-only. Unknown observation record_ids
+    raise ValueError rather than disappearing from the admission denominator.
     """
     queue_ids = {str(item["record_id"]) for item in items}
     grouped = group_observations_by_record(observations, queue_ids, "report")
@@ -359,48 +337,20 @@ def build_final_bundle(
     curation_bundle_dir: Path | None = None,
     observations_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Construct the final annotation staging bundle into a fresh ``out_dir``.
+    """Construct seven deterministic semantic files without Hub I/O.
 
-    Writes exactly the seven semantic contract files (``_BUNDLE_FILES``) and never
-    publishes: the caller feeds the directory to
-    :func:`daydream.training.adjudication.publish.publish_final_annotation_bundle`.
+    Copy annotations.jsonl to both annotations.jsonl and sessions.jsonl. Flatten
+    archive observation history in observed_at order. Build coverage from the
+    complete queue and _enrich_report_items so only fresh, human-adjudicated,
+    outcome-bearing records count toward the 80% gate. Missing observations_path
+    means an empty human store. Derive lineage from preview pins and the verified
+    curation bundle's actual file-set digest; never invent defaults.
 
-    - ``annotations.jsonl`` / ``sessions.jsonl``: both copied byte-for-byte from the
-      materialization dir (missing file raises ``FileNotFoundError`` naming it).
-    - ``label-observations.jsonl``: the archive's immutable per-session
-      observation history (``archive.index.label_observation_history``) for
-      every session in the snapshot, flattened and sorted chronologically by
-      ``observed_at``. The projector's bundle verification treats unknown
-      bundle files as part of the SHA256SUMS file set, so this extra file is
-      additive-safe.
-    - ``coverage-report.json``: ``report.build_report`` over a fresh complete
-      queue (``build_queue(..., include_decisive=True)``) enriched by the
-      shared :func:`_enrich_report_items` — the same observations/
-      effective-adjudication/gold-eligibility enrichment the CLI report twin
-      (``cli._report_items``) applies — so the published 80% admission gate
-      counts human-adjudicated outcome-bearing records only, never every
-      automatic decisive record. ``observations_path`` (the ``--state-dir``
-      observations store; a missing file is an empty store) supplies the
-      human observations; empty when not given.
-    - ``lineage.json``: generated from the preview manifest's pin fields —
-      never hand-authored, never defaulted. ``batch_fileset_digest`` is
-      ``_derivative_digest`` over ``curation_bundle_dir`` (default: the index
-      root when it *is* the curation bundle root), validated to exist.
-
-    ``out_dir`` must not exist, must be empty, or may contain only the
-    seven contract files from a prior (deterministic) construction — e.g. a
-    ``--dry-run`` validation immediately followed by a real publish over the
-    same state. Construction is deterministic, so re-writing those files is
-    byte-identical; any foreign file (a previous run's ``_SUCCESS``, editor
-    droppings, a partial publish) raises ``ValueError`` naming the directory,
-    because a stale or published staging dir must never be silently mixed
-    with fresh content. A real, non-symlink ``.publish-stage`` directory left
-    by an older publisher is preserved without reading its contents; it is
-    excluded from construction, identity, and publication.
-
-    Returns a summary dict with ``disposition_counts`` covering all five
-    dispositions (``accepted``/``rejected``/``ambiguous``/``unanswered``/
-    ``missing``) plus ``record_count`` and the written file names.
+    out_dir may be absent, empty, or contain only prior contract files. Reject
+    foreign files, including _SUCCESS, to avoid mixing generations. Preserve a
+    real non-symlink legacy .publish-stage directory without reading or including
+    it in identity/publication. Missing input files name their paths. Return all
+    five disposition counts, record_count, and written names; publication is separate.
     """
     bundle_root = curation_bundle_dir if curation_bundle_dir is not None else index_root
     if bundle_root.is_symlink() or not bundle_root.is_dir():

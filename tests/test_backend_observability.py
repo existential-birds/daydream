@@ -233,7 +233,6 @@ async def test_request_event_does_not_fabricate_a_trajectory_step(tmp_path: Path
 # --- P18 Task 1: cross-backend typed-config contract through real event streams
 
 def test_all_four_configs_share_the_common_subset() -> None:
-    """Every backend config subclasses the closed common subset."""
     configs = [
         ClaudeRequestConfig(model_mode="single"), CodexRequestConfig(model_mode="single", sandbox_mode="read-only"),
         PiRequestConfig(model_mode="single", no_skills=True),
@@ -243,14 +242,12 @@ def test_all_four_configs_share_the_common_subset() -> None:
         assert isinstance(config, EffectiveRequestConfig)
         assert config.model_mode == "single"
         assert config.temperature is None  # absent unless explicitly admitted
-    # isinstance is the discriminator (union via inheritance, never dicts).
     assert isinstance(configs[0], ClaudeRequestConfig)
     assert isinstance(configs[1], CodexRequestConfig)
     assert isinstance(configs[2], PiRequestConfig)
     assert isinstance(configs[3], OspreyRequestConfig)
 
 async def test_claude_request_event_through_real_stream_carries_config() -> None:
-    """Claude's real-path stream attaches the closed typed config + provenance."""
     terminal = ResultMessage(
         subtype="success", duration_ms=10, duration_api_ms=8, is_error=False, num_turns=1, session_id="session",
     )
@@ -264,18 +261,15 @@ async def test_claude_request_event_through_real_stream_carries_config() -> None
     assert isinstance(request.config, ClaudeRequestConfig)
     assert request.model_source == "configured"
     assert request.timestamp_source == "host_observed"
-    # Generation lifecycle events are never emitted by an opaque backend.
     assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in events)
 
 async def test_codex_and_osprey_emit_no_generation_events() -> None:
-    """Only Pi is native_generation_interval; the others stay structural."""
     codex_proc = codex_fixture("simple_text.jsonl")
     with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=codex_proc):
         codex_events = [e async for e in CodexBackend(model="gpt-5.3-codex").execute(Path("/tmp"), "p")]
     assert not any(isinstance(e, (GenerationStartEvent, GenerationEndEvent)) for e in codex_events)
     request = next(e for e in codex_events if isinstance(e, RequestEvent))
     assert isinstance(request.config, CodexRequestConfig)
-    # Osprey: build the full JSONL stream inline (protocol/session_start/…).
     osprey_body = [
         {"event": "protocol", "version": 2},
         {"event": "session_start", "session_id": "s-obs", "started_at": "2026-08-15T00:00:00Z",

@@ -1,22 +1,10 @@
-"""Canonical harvest of per-finding annotations into the archive (issue #1055).
+"""Drift-gated harvest of annotations into the archive.
 
-Re-verifies the materialized preview snapshot (every disposition — automatic
-decisive, human-decisive, and non-decisive) against a freshly built
-*complete* queue — ``build_queue(..., include_decisive=True)`` — over the
-hydrated index, so the automatic decisive records drift-check too. It merges
-human observations under three-tier
-precedence, appends exactly one ``label_observations`` row per session via
-``archive.index.append_label_observation`` (the auto dedup key keys on the
-pin's ``snapshot_id`` plus the archived ``rubric_json`` — fed through
-``evidence_sha`` — so unchanged-pin/unchanged-rubric re-runs are no-ops ⇒
-exactly-once while a changed pin or a label-preserving observation-overlay
-change appends a fresh generation, M8), and emits ``annotations.jsonl`` from the
-*same* in-memory merged records used for the append — no second serialization
-(M5). Digest drift raises :class:`AnnotationDriftError` **before any write**
-(fail-closed-then-requeue, M5).
-
-Production bronze is re-read through the same read-only semantic builder as
-preview, including fresh GitHub evidence, before any canonical write.
+Rebuild the complete queue, including automatic decisive records, through the
+read-only semantic builder before writing. Merge human precedence once, then
+use those records for both session observations and annotations.jsonl. The
+append identity includes the snapshot pin and rubric: identical re-runs are
+no-ops, while label-preserving evidence changes append a fresh generation.
 """
 
 from __future__ import annotations
@@ -54,11 +42,9 @@ __all__ = ["AnnotationDriftError", "run_canonical_harvest"]
 
 
 def _evidence_after_as_of(record: Mapping[str, Any], as_of: str | None) -> bool:
-    """Recorded-and-flagged ``as_of`` edge policy: True when any evidence entry's
-    ``created_at`` is after the pin's ``as_of`` (both parsed with
-    :func:`datetime.fromisoformat`, mirroring ``projector.py:_max_valid_at`` so
-    ``Z`` vs ``+00:00`` spelling can never mis-order the comparison). Such
-    records keep their evidence but are never gold-eligible."""
+    """Flag evidence created after the pin, retaining it but excluding gold.
+
+    Parse timestamps like the projector so Z and +00:00 compare identically."""
     if not as_of:
         return False
     pin_dt = datetime.fromisoformat(as_of)
@@ -144,34 +130,17 @@ def run_canonical_harvest(
     *,
     observations_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Harvest the materialized preview snapshot into canonical annotation storage.
+    """Verify all materialized digests against the fresh complete queue before any write.
 
-    1. Re-derives the fresh complete queue over the hydrated index
-       (``build_queue(..., include_decisive=True)``) and verifies every
-       materialized record's ``evidence_digest`` against the fresh queue
-       **before any write**; drift raises :class:`AnnotationDriftError`
-       listing the drifted ``record_id``s.
-    2. Merges human observations under three-tier precedence: a human
-       (rater/adjudicator) observation with a decisive disposition matching
-       the current evidence digest overrides the automatic disposition in the
-       stored per-finding record. An observation referencing an unknown
-       ``record_id`` raises ``ValueError`` naming it.
-    3. Groups records by ``session_id`` and appends one ``label_observations``
-       row per session (``rubric_json`` carries the merged per-finding records,
-       ``reply_evidence_digest`` is the shared serializer's session digest,
-       ``labeler_version`` is the pin's, ``reply_classifier_version`` is
-       ``REPLY_CLASSIFIER_VERSION``). ``evidence_sha`` is a digest over the
-       pin's content-addressed ``snapshot_id`` *plus* the archived
-       ``rubric_json``, so the dedup key changes with the pin or with any
-       rubric-content (observation-overlay) change: unchanged-pin re-runs are
-       no-ops — exactly-once — while a changed pin (new snapshot id) or a
-       label-preserving overlay edit under an unchanged pin appends a fresh
-       generation carrying the new pin's flags/rubric.
-    4. Emits ``materialize_dir/annotations.jsonl`` (one canonical-JSON record
-       per finding, sorted by ``record_id``) from the same merged records.
+    Drift raises AnnotationDriftError with record ids. Merge human precedence only
+    when a decisive observation matches current evidence; unknown record ids raise.
+    Append one observation per session using the merged rubric, shared reply digest,
+    pinned labeler version, and current reply-classifier version. evidence_sha binds
+    snapshot_id plus rubric_json: identical reruns deduplicate, while changed pins
+    or label-preserving overlays append a new generation.
 
-    Returns ``{"appended_sessions", "skipped_sessions", "human_adjudicated",
-    "record_count"}``.
+    Write annotations.jsonl from those same merged records in record_id order.
+    Return appended/skipped sessions, human_adjudicated, and record_count.
     """
     pin = _load_pin(materialize_dir)
     materialized = _load_materialized_records(materialize_dir)

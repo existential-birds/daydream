@@ -59,12 +59,7 @@ def associate_run_trajectory(session_id: str) -> None:
             "daydream.trajectory.id": session_id,
             "traceloop.association.properties.session_id": session_id,
         })
-        # Every scope opened after this association must inherit the session
-        # identity even without an active trajectory recorder (the replay and
-        # interpreter-less paths have none). Without the seed, descendants
-        # would carry only the run id and vendors would split the tree across
-        # sessions. The root scope's exit resets the ContextVar token, so the
-        # seed never leaks into a later run.
+        # Seed descendants even without a recorder; root exit resets this context.
         from daydream.observability.spans import associate_trajectory_identity
 
         associate_trajectory_identity(session_id)
@@ -134,15 +129,10 @@ class TraceSession:
         self.tracer = self.provider.get_tracer("daydream", version("daydream"))
 
     def _build_resource(self, config: ObservabilityConfig) -> Resource:
-        """Assemble the immutable session resource from declared sources only.
+        """Build from declared sources, bypassing ambient SDK resource detectors.
 
-        The operator variable is parsed strictly once per session without
-        mutating ``os.environ``; any parse/decode/duplicate rejection discards
-        the whole variable behind one fixed diagnostic. The authoritative
-        application identity overlays every reserved operator collision except
-        a valid operator ``service.instance.id``, which stays authoritative.
-        ``Resource.create`` is intentionally avoided so ambient entry-point
-        detectors and the unsanitized environment never re-enter the resource.
+        Malformed operator attributes are discarded together. Application identity wins
+        reserved-key collisions, except a valid operator service.instance.id survives.
         """
         attributes: dict[str, str] = {}
         raw = os.environ.get("OTEL_RESOURCE_ATTRIBUTES", "")
@@ -199,15 +189,8 @@ class TraceSession:
                     raise ObservabilityError(f"Trace exporter '{name}' must return an OpenTelemetry SpanExporter")
                 exporter = _SafeExporter(raw_exporter, self.policy)
                 self._unowned.append(exporter)
-                # One owned batch path for every destination and both normal and
-                # notebook environments. The Traceloop default processor's
-                # on_start callback reads ambient workflow/agent/conversation/
-                # entity-path/association/managed-prompt context that Daydream
-                # does not own; owned Traceloop aliases are authored explicitly
-                # on the run scope instead. IPython detection never changes the
-                # processor type, callback, limits, or privacy. An explicit
-                # NoOpMeterProvider keeps the processor's internal metrics
-                # inactive regardless of the ambient enabling variable.
+                # Use the same owned processor in CLI/notebooks, with no ambient
+                # Traceloop context callbacks or enabled internal metrics.
                 processor = BatchSpanProcessor(exporter, meter_provider=NoOpMeterProvider())
                 self.provider.add_span_processor(processor)
                 self._unowned.remove(exporter)

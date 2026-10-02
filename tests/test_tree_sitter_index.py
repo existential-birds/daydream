@@ -7,16 +7,11 @@ import pytest
 
 from daydream import _tree_sitter_safety as safety, git_ops, tree_sitter_index
 from daydream.tree_sitter_index import (
-    _MAX_IMPORTERS,
-    _PARSER_CACHE,
     BRANCH_NODE_TYPES,
     PYTHON_DEF_QUERY,
     TERMINAL_CALL_NAMES,
     TERMINAL_MACRO_NAMES,
     TERMINAL_NODE_TYPES,
-    _def_query_for_language,
-    _diagram_def_query_for_language,
-    _walk,
     branch_statement_lines,
     definitions_in_file,
     detect_affected_files,
@@ -24,7 +19,11 @@ from daydream.tree_sitter_index import (
     is_branch_line,
     is_terminal_line,
     language_for_path,
+    statements,
 )
+from daydream.tree_sitter_index.imports import _MAX_IMPORTERS
+from daydream.tree_sitter_index.runtime import _PARSER_CACHE, _def_query_for_language, _diagram_def_query_for_language
+from daydream.tree_sitter_index.statements import _walk
 from tests.conftest import _make_repo_with_main
 from tests.harness.git_helpers import commit as _commit, configure_identity as _configure_identity, git as _git
 
@@ -79,7 +78,6 @@ def test_python_impact_surface(tmp_path: Path) -> None:
     paths_by_role = {(r.path, r.role) for r in results}
     assert ("daydream_demo/api.py", "modified") in paths_by_role
     assert ("daydream_demo/models.py", "modified") in paths_by_role
-    # The api.py -> models.py forward edge must be exact.
     assert ("daydream_demo/models.py", "imports") in paths_by_role
     assert len(results) >= 2
 
@@ -114,10 +112,7 @@ _SHARED_FIXTURES: dict[str, str] = {
                 ),
             }, "package/models.py",
         ),
-        # `from . import something` resolves to the current package's __init__.py
-        # AND the sibling module package/feature/something.py, because the
-        # capture now spans the whole statement, not just the relative import
-        # node (the dot).
+        # Capture the whole statement to resolve both __init__.py and the sibling module.
         (
             "package/feature/api.py",
             _SHARED_FIXTURES
@@ -154,10 +149,7 @@ def test_python_multilevel_relative_imports(
 @pytest.mark.parametrize(
     "api_rel, files, expected_import_paths",
     [
-        # R3 primary fix: `from .. import services` in package/feature/api.py
-        # resolves to BOTH the parent package __init__.py AND the imported
-        # sibling package's __init__.py — and must NOT include the importer's
-        # own package/feature/__init__.py (C3).
+        # Resolve the parent and services packages, excluding the importer's own package.
         pytest.param(
             "package/feature/api.py",
             _SHARED_FIXTURES
@@ -270,8 +262,6 @@ def test_deleted_file_does_not_raise_filenotfound(tmp_path: Path) -> None:
     assert results[0].role == "modified"
 
 
-# --- Reverse-edge (importers) behavior: real git repo -----------------------
-
 def test_reverse_edge_finds_code_importer(tmp_path: Path) -> None:
     repo = _make_repo_with_main(tmp_path)
     (repo / "pkg").mkdir()
@@ -341,8 +331,6 @@ def test_reverse_edge_capped_at_max(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert {r.path for r in results if r.role == "modified"} == {"widget.py", "gadget.py"}
 
 def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> None:
-    """A generic-stem file that actually defines a symbol must not be skipped
-    by the reverse-import lookup (config.py -> app.py ``imported_by`` edge)."""
     (tmp_path / "config.py").write_text("def load_config():\n    return {}\n")
     (tmp_path / "app.py").write_text("import config\n")
     diff = ("diff --git a/config.py b/config.py\n--- a/config.py\n+++ b/config.py\n" "@@ -1 +1,2 @@\n x\n+y\n")
@@ -354,11 +342,7 @@ def test_config_py_with_definition_receives_reverse_edges(tmp_path: Path) -> Non
     assert any(r.path == "app.py" and r.role == "imported_by" for r in results)
 
 
-# --- Shared version guard (issue #1087, M6) --------------------------------
-
 def test_detect_affected_files_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """#1087 (M6): the shared guard covers every native-analysis entry point,
-    not just the quality analyzer — index consumers refuse bad installs too."""
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     with pytest.raises(safety.TreeSitterBadVersionError):
         detect_affected_files(
@@ -367,9 +351,7 @@ def test_detect_affected_files_refuses_known_bad_tree_sitter(monkeypatch: pytest
         )
 
 def test_get_parser_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatch,) -> None:
-    """#1087 (M6): get_parser is the true Parser construction site, so the
-    shared guard must fire there too — otherwise deep-sharding's
-    build_import_graph can still construct a native parser on a bad install."""
+    """Guard actual Parser construction, including import-graph callers."""
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
     _PARSER_CACHE.clear()
     try:
@@ -380,13 +362,8 @@ def test_get_parser_refuses_known_bad_tree_sitter(monkeypatch: pytest.MonkeyPatc
         _PARSER_CACHE.clear()
 
 
-# --- Diagram grounding primitives (issue #1113) ----------------------------
-#
-# Every node type in ``BRANCH_NODE_TYPES``/``TERMINAL_NODE_TYPES`` and every name
-# in ``TERMINAL_CALL_NAMES``/``TERMINAL_MACRO_NAMES`` is exercised below against a
-# real parse of an inline source, with the asserted line numbers read off that
-# source. ``test_*_table_entries_all_occur_in_probe_sources`` closes the loop by
-# proving no table entry is a name the grammars never produce.
+# Real grammar probes cover every branch/terminal node, call and macro table entry.
+# The table-entry checks reject names the grammars never produce.
 
 PYTHON_CF = b'''import os
 import sys
@@ -585,9 +562,7 @@ fn f(a: bool, b: bool, v: Option<i32>, items: &[i32]) -> Result<i32, std::io::Er
 }
 '''
 
-# ``BRANCH_NODE_TYPES`` coverage per language id. ``tsx``/``javascript`` reuse the
-# TypeScript source: all three ids are served by the tree-sitter-typescript
-# grammars, which is exactly the property under test.
+# TypeScript, TSX and JavaScript share tree-sitter-typescript grammars and probe source.
 _BRANCH_PROBE_SOURCES: dict[str, tuple[bytes, ...]] = {
     "python": (PYTHON_CF,), "typescript": (TYPESCRIPT_CF,), "tsx": (TYPESCRIPT_CF, TSX_CF),
     "javascript": (TYPESCRIPT_CF, JAVASCRIPT_CF), "go": (GO_CF,), "rust": (RUST_CF,),
@@ -621,8 +596,6 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
     }
 
 
-# --- language_for_path -------------------------------------------------------
-
 @pytest.mark.parametrize(
     ("path", "expected"),
     [
@@ -636,8 +609,6 @@ def _defs(repo_root: Path, path: str) -> set[tuple[str, int, int, str]]:
 def test_language_for_path_maps_supported_suffixes(path: str, expected: str | None) -> None:
     assert language_for_path(path) == expected
 
-
-# --- definitions_in_file -----------------------------------------------------
 
 def test_definitions_in_file_typescript_covers_every_diagram_pattern(tmp_path: Path) -> None:
     (tmp_path / "defs.ts").write_text(
@@ -808,18 +779,15 @@ def test_definitions_in_file_degrades_on_syntax_error(tmp_path: Path) -> None:
     assert definitions_in_file(tmp_path, "broken.ts") == []
 
 def test_shared_definition_query_still_excludes_typescript_and_go() -> None:
-    """The diagram query must not widen the reverse-import-edge gate (issue #1113).
+    """Diagram queries must not widen the reverse-import definition gate.
 
-    ``detect_affected_files``' ``defining_paths`` gate reads ``_def_query_for_language``; admitting TypeScript/Go
-    there would start adding reverse edges for every generic-stem ``index.ts``/``main.go`` in every repo."""
+    Admitting TypeScript/Go there adds edges for generic index.ts/main.go files."""
     for language_id in ("typescript", "tsx", "javascript", "go"):
         assert _def_query_for_language(language_id) is None
         assert _diagram_def_query_for_language(language_id) is not None
     assert _def_query_for_language("python") is PYTHON_DEF_QUERY
     assert _diagram_def_query_for_language("python") is PYTHON_DEF_QUERY
 
-
-# --- branch_statement_lines --------------------------------------------------
 
 def test_branch_lines_python_flat_elif_chain_and_match_cases() -> None:
     # The if/elif/else chain is flat in python: `elif` (8) counts, `else` (10)
@@ -881,14 +849,11 @@ def test_branch_lines_degrade_on_malformed_source() -> None:
 
 @pytest.mark.parametrize("language_id", sorted(BRANCH_NODE_TYPES))
 def test_branch_table_entries_all_occur_in_probe_sources(language_id: str) -> None:
-    """No BRANCH_NODE_TYPES entry may be a name the grammars never produce."""
     present: set[str] = set()
     for source in _BRANCH_PROBE_SOURCES[language_id]:
         present |= _node_types(language_id, source)
     assert BRANCH_NODE_TYPES[language_id] - present == set()
 
-
-# --- is_branch_line ----------------------------------------------------------
 
 @pytest.mark.parametrize(
     ("language_id", "line"),
@@ -904,8 +869,7 @@ def test_branch_table_entries_all_occur_in_probe_sources(language_id: str) -> No
     ],
 )
 def test_is_branch_line_reports_switch_container_lines(language_id: str, line: int) -> None:
-    """A container line is a branch line even though branch_statement_lines,
-    which must not double-count, reports its cases instead."""
+    """Container lines count as branches even when the count query reports cases."""
     source = {"python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "go": GO_CF, "rust": RUST_CF}[language_id]
     assert is_branch_line(language_id, source, line) is True
     assert line not in branch_statement_lines(language_id, source)
@@ -1004,7 +968,7 @@ def test_executable_statement_lines_rust() -> None:
     assert _executable_lines("rust", source) == [1, 4, 5, 6, 7, 8, 9, 11, 12, 14]
 
 def test_executable_statement_line_fails_closed_without_a_parser(monkeypatch: pytest.MonkeyPatch,) -> None:
-    monkeypatch.setattr(tree_sitter_index, "get_parser", lambda _language_id: None)
+    monkeypatch.setattr(statements, "get_parser", lambda _language_id: None)
     source = b"def resolve():\n    result = compute()\n"
 
     assert not tree_sitter_index.is_executable_statement_line("python", source, 2)
@@ -1027,8 +991,6 @@ def test_executable_statement_node_types_exist_in_grammar(language_id: str) -> N
 
     assert tree_sitter_index.EXECUTABLE_STATEMENT_NODE_TYPES[language_id] <= named_types
 
-
-# --- is_terminal_line --------------------------------------------------------
 
 def test_terminal_lines_python_return_raise_and_exit_calls() -> None:
     # 33 raise, 35 sys.exit, 37 os._exit, 39 exit, 41 quit, 42 return.
@@ -1068,7 +1030,6 @@ def test_is_terminal_line_falls_back_to_keyword_regex() -> None:
 
 @pytest.mark.parametrize("language_id", sorted(TERMINAL_NODE_TYPES))
 def test_terminal_table_entries_all_occur_in_probe_sources(language_id: str) -> None:
-    """No TERMINAL_NODE_TYPES/TERMINAL_CALL_NAMES entry may be unobservable."""
     source = {
         "python": PYTHON_CF, "typescript": TYPESCRIPT_CF, "tsx": TYPESCRIPT_CF, "javascript": TYPESCRIPT_CF,
         "go": GO_CF, "rust": RUST_CF,

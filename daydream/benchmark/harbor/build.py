@@ -1,12 +1,6 @@
-"""Deterministic, leak-resistant content compiler for private PR benchmarks (issue #778).
-
-Consumes a curated private-PR benchmark workspace and compiles each compilable
-case into an opaque-keyed ``harbor/`` task tree: opaque task keys, a bounded
-delimited PR context block, provenance-free hidden gold + Oracle candidate
-artifact, byte-identical verifier/solution template assets, and an exact
-inventory + private ``benchmark.lock.json``. Stdlib-only and deterministic
-(no timestamps); no CLI here -- issue 9 owns packaging and the ``build-harbor``
-command surface.
+"""Deterministic compiler from private workspace cases to Harbor tasks. Emit opaque task
+keys, hidden gold/oracle artifacts, template assets, and an exact private lock
+inventory. No timestamps enter compiled content.
 """
 
 from __future__ import annotations
@@ -39,13 +33,8 @@ class CompileError(Exception):
 
 
 def render_metric() -> bytes:
-    """Render the compiled ``metric.py`` for a stage root.
-
-    The template carries no aggregation body of its own: at startup it loads
-    ``aggregate_metrics`` from the canonical ``verifier_core.py`` colocated
-    next to it (stdlib-only, never ``daydream``), so the compiled metric and
-    the in-repo corpus pool share one aggregation contract and cannot drift.
-    Use :func:`render_metric_stage` to stage both files together.
+    """Render the metric loader for the colocated canonical verifier_core aggregation
+    implementation.
     """
     from daydream.benchmark.harbor.package import template_text
 
@@ -65,12 +54,8 @@ def _canonical_verifier_bytes() -> bytes:
 
 
 def render_metric_stage(stage: Path) -> tuple[bytes, bytes]:
-    """Write the compiled metric stage files into *stage* and return their bytes.
-
-    Writes ``metric.py`` plus the canonical ``verifier_core.py`` (the host
-    module's exact source) colocated at the stage root, which the metric's
-    loader resolves at startup. Fails closed with :class:`CompileError` if the
-    canonical source cannot be read.
+    """Stage metric.py and exact verifier_core source together; unreadable canonical source
+    fails closed.
     """
     metric_bytes = render_metric()
     verifier_bytes = _canonical_verifier_bytes()
@@ -98,14 +83,8 @@ MAX_PR_CONTEXT_BYTES = 32 * 1024
 
 
 def _escape_historical_delimiters(text: str) -> str:
-    """Neutralize the ``<historical_pr_context>`` block delimiters in untrusted text.
-
-    The PR title/body are untrusted reference data, not instructions. A literal
-    closing tag inside the body would terminate the ``<historical_pr_context>``
-    block early (the leak scan strips it non-greedily) and leak the remainder
-    into control-plane scanning; a literal opening tag could shift the
-    boundary. Escape both delimiters so the untrusted text never forms a real
-    delimiter.
+    """Escape both historical-context delimiters in untrusted PR text. This keeps embedded
+    tags from changing the boundary used by control-plane scanning.
     """
     return text.replace(
         "<historical_pr_context>", "&lt;historical_pr_context&gt;"
@@ -127,19 +106,10 @@ _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 def bounded_pr_context(
     pull_request: dict[str, Any], *, max_bytes: int = MAX_PR_CONTEXT_BYTES
 ) -> str:
-    """Build the delimited ``<historical_pr_context>`` block for one PR.
-
-    Reads ``title`` and ``body`` from *pull_request* (each ``.get(...) or ""``,
-    so a missing key is a legitimate empty body -- the sole allowed default).
-    When the normalized ``title:\n<body>`` text exceeds *max_bytes* bytes (or
-    the body line's share thereof), it is truncated on a whole UTF-8 char and
-    a ``[truncated; full_body_sha256=<digest>]`` marker line is emitted inside
-    the block, before the closing tag. The digest is the persisted normalized-
-    body digest (``body_sha256``) only when it verifies against the stored
-    body (lowercase 64-hex equal to ``sha256(stored body)``, mirroring the
-    schema's ``_body_hash_consistency``), else a deterministic fallback to
-    ``sha256(stored body)`` -- never re-derived from the escaped surface and
-    never interpolated from an unvalidated doc value.
+    """Render bounded, delimited historical PR context, allowing absent title/body.
+    Truncate on UTF-8 character boundaries with a full-body SHA-256 marker. Use a
+    supplied digest only if it matches stored normalized body bytes; otherwise hash
+    those bytes, never the escaped rendering.
     """
     title = _escape_historical_delimiters(str(pull_request.get("title") or ""))
     body = _escape_historical_delimiters(str(pull_request.get("body") or ""))
@@ -190,13 +160,7 @@ def bounded_pr_context(
 
 
 def _gold_severity_label(value: object) -> str:
-    """Label a gold-finding severity for Task.md emission.
-
-    Canonical severity values are lowercased via ``severity.normalize_severity``;
-    a null (or otherwise unknown) severity becomes the explicit labeled string
-    ``"unknown"``. This is a gold-fixture emission label, not a canonical
-    severity level (R6.2: mapped-or-labeled, never silent).
-    """
+    """Normalize canonical severity; label unknown/null values explicitly as unknown."""
     normalized = severity.normalize_severity(value)
     return normalized if normalized is not None else "unknown"
 
@@ -291,13 +255,8 @@ def render_task_spec(case_doc: dict[str, Any], *, instruction: str) -> bytes:
 
 
 def task_spec_digest(case_doc: dict[str, Any]) -> str:
-    """Canonical sha256 hexdigest of the rendered ``Task.md`` for *case_doc*.
-
-    Single source for the task-spec invariant (sha256 over the deterministic
-    render under the fixed ``ASSIGNMENT_TEXT``), shared by the approve,
-    compile-verify, authoring-digest, and legacy-backfill derivations so a
-    change to render_task_spec, its inputs, or the hash algorithm cannot drift
-    between call sites.
+    """Hash deterministic Task.md bytes for approval, compilation, authoring identity, and
+    legacy backfill.
     """
     return hashlib.sha256(
         render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
@@ -328,18 +287,9 @@ def task_spec_approval(case_doc: dict[str, Any]) -> TaskSpecApproval:
 
 
 def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
-    """Map a curated finding to its provenance-free gold/artifact shape.
-
-    Returns the content fields ``{title, body, severity, path, start_line,
-    end_line}``; ``path/start_line/end_line`` come from ``finding["location"]``
-    and are normalized by :func:`verifier_core.parse_finding_content`, so the
-    all-or-none location rule lives in exactly one place. A missing or
-    ``None`` location (a locationless review finding that names a defect without
-    a file or line) collapses to explicit null location fields -- a valid,
-    provably locationless gold entry. A partially populated location (at least
-    one of path/start_line/end_line ``None``) can never emit validation-passing
-    gold, so a :class:`CompileError` is raised naming the finding -- never a
-    silent drop and never a fabricated path or line.
+    """Project content/location through the verifier canonical finding parser. Locationless
+    findings emit explicit nulls; partially populated locations raise CompileError.
+    Provenance never enters the gold artifact.
     """
     location = finding.get("location")
     if location is not None and not isinstance(location, dict):
@@ -366,29 +316,15 @@ def _flatten_finding(finding: dict[str, Any]) -> dict[str, Any]:
 
 
 def _gold_finding_ids(key: str, finding: dict[str, Any]) -> str:
-    """Derive the compiled gold id bound to the opaque task *key*.
-
-    Delegates to the canonical ``schema.derive_finding_id`` digest (sha256 over
-    the case-scoped ``(case_id, title, body, severity, path, start_line,
-    end_line)`` tuple, nulls normalized to the empty string) under the opaque
-    compiled task key as ``case_id``. The compiled gold ids are bound to the
-    opaque compiled task key (never the raw workspace authoring id), so the
-    shipped gold bundle carries no ``pr-...`` authoring token across the judge
-    surface. Delegating keeps this digest identical to the canonical workspace
-    derivation instead of a drifting local re-implementation.
+    """Derive canonical finding ids salted with the opaque compiled task key, excluding
+    authoring ids.
     """
     return schema.derive_finding_id(finding, case_id=key)
 
 
 def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[str, Any]]:
-    """Return the provenance-free hidden gold list, ordered by ``finding_id``.
-
-    ``[]`` for empty input; otherwise each entry carries a ``finding_id``
-    derived under the opaque compiled task *key* (see
-    :func:`_gold_finding_ids`) plus the flattened content fields, sorted by
-    ``finding_id`` ascending. A locationless finding emits explicit nulls for
-    its location fields; a partially populated location raises
-    :class:`CompileError` from :func:`_flatten_finding`.
+    """Return provenance-free gold sorted by opaque-task-bound finding id; reject partial
+    locations.
     """
     flat = [(_flatten_finding(f), _gold_finding_ids(key, f)) for f in findings]
     flat.sort(key=lambda item: item[1])
@@ -401,22 +337,10 @@ def build_gold_list(findings: list[dict[str, Any]], *, key: str) -> list[dict[st
 
 
 def build_oracle_artifact(opaque_key: str, findings: list[dict[str, Any]]) -> dict[str, Any]:
-    """Return the §9 candidate Oracle artifact for one compiled case.
-
-    ``schema_version`` 1, ``case_id`` is the opaque task key, ``base_ref`` /
-    ``head_ref`` are the deterministic ``base`` / ``head`` refs. Findings are
-    flattened (reusing :func:`_flatten_finding` -- a locationless finding
-    emits explicit null locations and a partially populated location raises
-    :class:`CompileError`), ordered by ``finding_id`` ascending, and
-    assigned ordinal 0,1,2,... in that order; each entry is exactly
-    candidate-shaped -- ``candidate_id`` plus the flattened content fields
-    (``title``/``body``/``severity``/``path``/``start_line``/``end_line``),
-    never the gold-only ``finding_id`` -- with ``candidate_id`` derived via
-    ``verifier_core.derive_candidate_id``. Empty input -> ``[]``.
-
-    The ordinal-grouping tuple is normalized with ``or ""`` on all six content
-    components so a locationless compiled artifact groups field-for-field with
-    the verifier's own canonical tuple (``_canonical_tuple``).
+    """Build candidate-shaped oracle content using opaque task identity and base/head refs.
+    Sort by gold finding id, then derive candidate ids with canonical content and
+    per-tuple ordinals. Normalize nullable tuple fields exactly as the verifier does;
+    never expose gold-only finding ids in candidate entries.
     """
     flat = [(_flatten_finding(f), f["finding_id"]) for f in findings]
     flat.sort(key=lambda item: item[1])
@@ -523,13 +447,9 @@ def _bounded_block_strip(text: str) -> str:
 
 
 def leakage_scan(control_plane: dict[str, str], *, repository_slug: str) -> None:
-    """Control-plane leak scan over compiler-generated text only.
-
-    Each ``instruction.md`` is scanned with its bounded block stripped; every
-    other file as-is. Also scans for the literal *repository_slug*. All
-    violations across every scanned file are accumulated and raised as a single
-    :class:`CompileError`, with each violation naming its file and matched
-    token. Returns ``None`` when clean.
+    """Scan generated control-plane text for forbidden tokens and the repository slug.
+    Strip bounded historical blocks only from instruction.md. Accumulate all violations
+    with file/token identity before raising CompileError.
     """
     violations: list[str] = []
     for rel, text in control_plane.items():
@@ -623,14 +543,8 @@ def _authoring_input_digest(case_docs: dict[str, Any], manifest: schema.Benchmar
 
 
 def _write_task_spec(stage: Path, case_doc: dict[str, Any]) -> str:
-    """Render one case's hidden ``Task.md``, verify it, and write it to *stage*.
-
-    The task spec is the byte-deterministic hidden evaluation contract (R10/
-    R8): its sha256 must equal the ``task_spec_sha256`` persisted when the
-    case was marked ready, else the compiled bytes no longer reflect what the
-    curator approved and the case's whole compile aborts rather than silently
-    shipping the stale contract. Returns the derived digest for the case lock
-    row.
+    """Require rendered Task.md to match the curator-approved digest before writing; return
+    that digest.
     """
     task_spec_bytes = render_task_spec(case_doc, instruction=ASSIGNMENT_TEXT)
     approval = task_spec_approval(case_doc)
@@ -654,15 +568,9 @@ def _compile_case(
     reviewer_hosts: list[str],
     judge_hosts: list[str],
 ) -> dict[str, Any]:
-    """Compile one case tree into ``stage/<key>/`` and return its lock row.
-
-    The network policy is threaded from the workspace's persisted privacy
-    allowlists: ``reviewer_hosts`` become ``[agent].allowed_hosts`` and
-    ``judge_hosts`` become ``[verifier.environment].allowed_hosts``, keeping
-    the two egress boundaries separate. Because the policy lands in
-    ``task.toml`` and that file's digest is inventoried in the lock, a policy
-    change propagates to the lock bytes / ``compiled_lock_sha256`` and thereby
-    invalidates any existing Oracle receipt.
+    """Compile one opaque case tree and return its lock row. Reviewer and judge allowlists
+    remain separate in task.toml. Its locked digest makes network-policy changes
+    invalidate prior Oracle receipts.
     """
     case_id = case_doc["case_id"]
     key = derive_task_key(case_id)
@@ -833,18 +741,9 @@ def _build_lock(
 
 
 def compile_workspace(root: Path, *, wheel: Path | None = None) -> dict[str, Any]:
-    """Compile the whole workspace into ``root/harbor/`` atomically.
-
-    Builds into ``root/cache/harbor-build-stage``, validates every indexed case,
-    writes the lock + root control-plane, runs the leakage scan, then swaps the
-    stage in place only on full success. On any rejection the exception
-    re-raises and the prior ``harbor/`` is left untouched.
-
-    The root is resolved to a canonical absolute path before the workspace
-    lock is acquired, so callers passing ``.``, a relative path, or the literal
-    resolved path for the same workspace converge on the same reentrancy key
-    and all downstream-derived paths (stage, bundle sources/destinations,
-    storage digests) inherit canonical form. Absolute inputs are unchanged.
+    """Compile into a private stage, validate and leak-scan, then atomically replace
+    harbor/. Failures preserve the prior tree. Canonicalize root before locking so all
+    path spellings share the same reentrant lock and derived paths.
     """
     root = Path(root).resolve()
     from daydream.benchmark.harbor import package as pkg

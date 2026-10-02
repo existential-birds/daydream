@@ -216,7 +216,6 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
     _seed_git(src, "commit", "-qm", "head", env=_BUNDLE_ENV)
     head = _seed_git(src, "rev-parse", "HEAD", env=_BUNDLE_ENV)
     m = snapshot.ensure_mirror(tmp_path)
-    # push the base/head commits (objects + refs) into the mirror so build_bundle can resolve trees
     _seed_git(src, "push", str(m), f"{base}:refs/heads/base", f"{head}:refs/heads/head", env=_BUNDLE_ENV)
     bundle = tmp_path / "b.bundle"
     snapshot.build_bundle(m, base, head, bundle)
@@ -224,14 +223,6 @@ def _seed_bare_bundle(tmp_path: Path) -> tuple[Path, bytes]:
 
 
 def test_bundle_env_honours_call_time_environment(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_BUNDLE_ENV`` must not replay an import-time snapshot of ``os.environ``.
-
-    ``tests/conftest.py`` installs ``GIT_CONFIG_*`` entries at import time; a
-    module constant that copied ``os.environ`` would later override call-time
-    values (it is the later mapping in ``git()``'s ``{**os.environ, **env}``
-    merge), silently reverting any ``GIT_CONFIG_*`` a test adds. Assert the
-    call-time entry reaches git.
-    """
     repo = tmp_path / "env-shadow"
     init_repo(repo)
     index = int(os.environ.get("GIT_CONFIG_COUNT", "0"))
@@ -277,7 +268,6 @@ def test_bounded_pr_context_truncates_on_utf8_boundary_and_marks() -> None:
     ctx = build.bounded_pr_context({"title": "T", "body": body}, max_bytes=1021)
     assert ctx.endswith("</historical_pr_context>")
     assert "[truncated; full_body_sha256=" in ctx
-    # the truncated body must end on a whole UTF-8 char (no replacement chars / no split bytes)
     inner = ctx.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
     body_line = next(line for line in inner.splitlines() if line.startswith("body: ")).removeprefix("body: ")
     body_line.encode("utf-8")                            # decodes the whole: boundary is valid
@@ -467,10 +457,8 @@ def test_build_oracle_artifact_passes_validation_and_derives_candidate_ids() -> 
         groups[canon] = ordinal + 1
         expected_ids.append(vc.derive_candidate_id(key, f, ordinal))
     assert [f["candidate_id"] for f in art["findings"]] == expected_ids
-    # exactly candidate-shaped: gold-only finding_id and provenance are absent
     for entry in art["findings"]:
         assert set(entry) == {"candidate_id", "title", "body", "severity", "path", "start_line", "end_line"}
-    # round-trips through the verifier's own validation
     assert vc.validate_candidate_artifact(art)
 
 def test_build_oracle_artifact_clean_has_empty_findings() -> None:
@@ -581,7 +569,6 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
     assert vc.validate_gold_set(gold, case_id=key)      # gold passes via the compiled opaque key
     vc.validate_candidate_artifact(oracle)                 # oracle passes candidate validation
     assert [f["finding_id"] for f in gold] == sorted(f["finding_id"] for f in gold)
-    # gold↔oracle agreement: same content fields, in the same finding_id order
     gold_content = [(f["title"], f["body"], f.get("severity"), f["path"], f["start_line"], f["end_line"])
                     for f in sorted(gold, key=lambda f: f["finding_id"])]
     oracle_content = [(f["title"], f["body"], f.get("severity"), f["path"], f["start_line"], f["end_line"])
@@ -595,7 +582,6 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
     raw = storage.load_yaml_strict(ws / "cases" / f"{case_id}.yaml")
     assert f"title: {raw['pull_request']['title']}" in instr
 
-    # root README  + lock;   lock holds packages + private mapping
     assert (ws / "harbor" / "README.md").exists()
     assert (ws / "harbor" / "metric.py").exists()
     assert (ws / "harbor" / "jobs").is_dir()
@@ -608,13 +594,11 @@ def test_compile_findings_case_full_tree_and_gold_oracle_agree(tmp_path: Path, f
         lock["files"][f"{key}/tests/verifier_core.py"]
     assert not any("timestamp" in k or "created_at" in k for k in lock.keys())
 
-    # compiler-rendered immutable verifier metadata beside the gold file
     meta = _load_json(case / "tests" / "verifier-metadata.json")
     assert meta["case_id"] == key and meta["base_ref"] == "base" and meta["head_ref"] == "head"
     assert meta["schema_version"] == 1 and meta["template_version"] == build.TEMPLATE_VERSION
     assert meta["gold_sha256"] == lock["cases"][key]["gold_sha256"]
     assert meta["gold_sha256"] == hashlib.sha256((case / "tests" / "golden-review.json").read_bytes()).hexdigest()
-    # hidden digest + rendered verifier-script digest inventoried in the lock
     assert "verifier_script_sha256" in lock["cases"][key]
     assert lock["cases"][key]["gold_sha256"]  # the hidden-gold sentinel
     sr_bytes = (case / "tests" / "score_review.py").read_bytes()
@@ -639,11 +623,8 @@ def test_compile_lock_records_requested_base_sha(tmp_path: Path, fake_gh: FakeGh
     lock = build.compile_workspace(ws)
     row = lock["cases"][key]
     assert row["requested_base_sha"] == case_doc["snapshot"]["requested_base_sha"]
-    # original_base_sha is the merge base, carried through unchanged
     assert row["original_base_sha"] == case_doc["snapshot"]["original_base_sha"]
 
-    # determinism: the recomputed authoring digest matches the one frozen in the
-    # compiled lock
     manifest = load_benchmark_manifest(ws)
     case_docs = {case_id: case_doc}
     assert build._authoring_input_digest(case_docs, manifest) == lock["authoring_input_digest"]
@@ -669,13 +650,6 @@ def test_compile_clean_case_has_empty_gold_and_oracle(tmp_path: Path, fake_gh: F
     assert lock["cases"][key]["gold_sha256"] == hashlib.sha256(b"[]").hexdigest()
 
 def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """A ready empty-gold case with no clean attestation must not compile.
-
-    mark_ready refuses to final-attest an empty gold set that was never
-    clean-attested, so only a hand-edited doc can reach ready with
-    ``clean_attested=False``; the compiler must reject it rather than ship
-    the empty gold as a clean case.
-    """
     ws, case_id, _ = _seed_clean_workspace(tmp_path, fake_gh, ready=False)  # clean-attested draft
     path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(path)
@@ -693,17 +667,14 @@ def test_ready_empty_gold_without_clean_attestation_does_not_compile(tmp_path: P
 
 def test_unbounded_pr_body_never_leaks_to_compiled_surface(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
-    # inject a long, Unicode, delimiter-bearing body into the case doc
     body = "secret-sentinel-7f3c " + "\U0001F600" * 200 + "\n" + ("<historical_pr_context>" * 3)
     _inject_body(ws, case_id, body)
     lock = compile_workspace(ws)
     key = next(iter(lock["cases"]))
     instr = (ws / "harbor" / key / "instruction.md").read_text()
-    # the raw unbounded body text must not appear outside the bounded block
     inner = instr.split("<historical_pr_context>", 1)[1].split("</historical_pr_context>", 1)[0]
     outside = instr.replace(f"<historical_pr_context>{inner}</historical_pr_context>", "")
     assert "secret-sentinel-7f3c" not in outside
-    # bounded block is escaped: no real closing delimiter from the body
     assert instr.count("</historical_pr_context>") == 1
     # no raw body in any other shipped file (instruction.md's bounded block is
     # the sole allowed conduit and is validated separately above)
@@ -775,7 +746,6 @@ def test_double_compile_is_byte_identical_and_lock_digest_stable(tmp_path: Path,
     tree2 = _harbor_tree_bytes(ws)
     assert tree1 == tree2                                        # byte-identical compiled tree
     assert lock1 == lock2                                        # identical lock digest/content
-    # no timestamps anywhere in any compiled file or lock
     lock_text = (ws / "harbor" / "benchmark.lock.json").read_text()
     assert "created_at" not in lock_text and "timestamp" not in lock_text
 
@@ -824,11 +794,9 @@ def test_harbor_bytes_identical_under_prioritization_fact_change(tmp_path: Path,
     lock_b = build.compile_workspace(ws)
     tree_b = _harbor_tree_bytes(ws)
     assert lock_a == lock_b and tree_a == tree_b
-    # and no triage sentinel in any compiled file:
     for rel, data in tree_b.items():
         assert b"prioritization" not in data, rel
 
-    # deleting the key entirely is also inert
     raw = storage.load_yaml_strict(case_path)
     del raw["prioritization"]
     storage.atomic_write_yaml(case_path, raw)
@@ -846,7 +814,6 @@ def test_compiled_case_dirs_are_canonically_sorted_by_opaque_key(tmp_path: Path,
     lock_a = build.compile_workspace(ws)
     tree_a = _harbor_tree_bytes(ws)
 
-    # reverse the manifest cases[] order - output must not change (canonical ordering)
     manifest["cases"] = manifest["cases"][::-1]
     storage.atomic_write_yaml(ws / "benchmark.yaml", manifest)
     build.compile_workspace(ws)
@@ -909,7 +876,6 @@ def test_leakage_scan_permits_bounded_block_raw_text() -> None:
     build.leakage_scan({"case-x/instruction.md": instr}, repository_slug="o/r")   # no raise
 
 def test_leakage_scan_rejects_clean_readme() -> None:
-    # clean marker leaks into a README
     with pytest.raises(CompileError) as rejected:
         build.leakage_scan({"README.md": "gold_status clean_attested snapshot_attested\n"}, repository_slug="o/r")
     assert "clean_attested" in str(rejected.value)
@@ -923,7 +889,6 @@ def test_validate_bundle_inventory_accepts_valid_base_head_bundle(tmp_path: Path
 def test_validate_bundle_inventory_rejects_extra_ref(tmp_path: Path) -> None:
     m, _ = _seed_bare_bundle(tmp_path)
     bp = tmp_path / "bad.bundle"
-    # add an extra ref to the mirror, then rebuild the bundle including it
     _seed_git(m, "update-ref", "refs/heads/extra", "refs/heads/base")
     _seed_git(m, "bundle", "create", str(bp), "refs/heads/base", "refs/heads/head", "refs/heads/extra", env=_BUNDLE_ENV)
     with pytest.raises(CompileError) as rejected:
@@ -945,19 +910,10 @@ def test_compiled_tree_contains_no_raw_authoring_files(tmp_path: Path, fake_gh: 
 def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     tmp_path: Path, fake_gh: FakeGh, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The same workspace compiled via an absolute root and via a relative root
-    (from a different CWD) yields byte-identical ``harbor/benchmark.lock.json``
-    output, and ``compile_workspace`` acquires ``WorkspaceLock`` under the
-    canonical absolute root either way.
-
-    Asserting the canonical lock root is the regression guard for the
-    root-canonicalization fix: the lock JSON is purely content-derived, so its
-    bytes cannot distinguish canonicalized from verbatim roots — only the
-    reentrancy key handed to ``WorkspaceLock`` can. If ``compile_workspace``
-    stopped resolving the root, a relative invocation from another CWD would key
-    the process-reentrant lock on the verbatim relative path, diverge from the
-    absolute spelling of the same workspace, and self-deadlock on nested
-    acquisition; this test fails on exactly that mutation instead of hanging.
+    """Relative and absolute roots must produce identical bytes and the same canonical lock
+    key. Content-derived lock bytes alone cannot detect divergent reentrancy keys;
+    recording WorkspaceLock input catches the regression without hanging on nested
+    acquisition.
     """
 
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
@@ -1003,12 +959,8 @@ def test_compile_workspace_with_relative_root_matches_resolved_root_bytes(
     finally:
         os.chdir(old)
 
-    # Deterministic rebuild: second compile of the SAME workspace is byte-identical.
     assert lock_path.read_bytes() == lock_bytes_abs
 
-    # Reentrancy-key convergence: even invoked relatively from a different CWD,
-    # the lock is keyed on the resolved workspace, so absolute/relative/"."
-    # spellings share one key.
     assert constructed_roots, "WorkspaceLock was never constructed"
     assert constructed_roots[-1] == ws_resolved, (f"lock keyed on non-canonical root {constructed_roots[-1]!r}, "
         f"expected resolved {ws_resolved!s}"
@@ -1042,13 +994,7 @@ def test_compiled_findings_oracle_scores_reward_1(sr_module: Any, tmp_path: Path
 
 
 def _restamp_gold(case: Path, gold_bytes: bytes) -> None:
-    """Rewrite the compiled hidden gold and re-stamp its sentinel digest.
-
-    Test-only scenario construction: the compiled gold is replaced and the
-    ``gold_sha256`` sentinel in ``verifier-metadata.json`` is recomputed over
-    the new bytes with the same digest the compiler uses, so ``run_verifier``
-    still accepts the rewritten gold as the task's hidden ground truth.
-    """
+    """Replace hidden gold and its sentinel digest so verifier scenarios remain integrity-valid."""
     gold_path = case / "tests" / "golden-review.json"
     gold_path.write_bytes(gold_bytes)
     meta_path = case / "tests" / "verifier-metadata.json"
@@ -1083,14 +1029,6 @@ def _run_oracle(sr_module: Any, tmp_path: Path, fake_gh: FakeGh,
 
 def test_compiled_findings_oracle_scores_reward_1_with_axes_perfect(sr_module: Any, tmp_path: Path, fake_gh: FakeGh
 ) -> None:
-    """Compiled-path oracle: reward 1.0 with both reported axes perfect.
-
-    Extends the base fixture's gold with a non-null severity (re-derived with
-    the canonical gold id digest) and re-renders the oracle artifact with the
-    same severity and exact location, so every matched pair is exact on both
-    axes (R13: oracle still 1.0 with axes perfect).
-    """
-
     def make_finding(_key: str, gold: list[dict[str, Any]]) -> dict[str, Any]:
         return {"finding_id": "a" * 64, "title": gold[0]["title"], "body": gold[0]["body"], "severity": "high",
             "location": {"path": gold[0]["path"], "start_line": gold[0]["start_line"], "end_line": gold[0]["end_line"]},
@@ -1154,7 +1092,6 @@ def test_render_task_spec_is_deterministic_and_sectioned(tmp_path: Path, fake_gh
     assert not re.search(r"\b[0-9a-f]{40}\b", text)          # no raw SHAs (R13 identifiers)
     assert not re.search(r"\bpr-\d{6}-[0-9a-f]{12}\b", text) # no authoring case id
     assert "2026-" not in text                               # no timestamps anywhere
-    # a different case renders different bytes
     raw2 = dict(raw)
     raw2["pull_request"] = dict(raw["pull_request"])
     raw2["pull_request"]["title"] = "Other"
@@ -1212,7 +1149,6 @@ def test_compile_writes_task_md_and_inventories_its_digest(tmp_path: Path, fake_
 def test_spec_change_forces_recompile(tmp_path: Path, fake_gh: FakeGh) -> None:
     ws, case_id, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock1 = build.compile_workspace(ws)
-    # mutate the instruction-relevant input (PR title), re-render, re-approve, recompile
     path = ws / "cases" / f"{case_id}.yaml"
     raw = storage.load_yaml_strict(path)
     head_sha = raw["snapshot"]["original_head_sha"]
@@ -1252,13 +1188,10 @@ def test_compiled_agent_and_verifier_surfaces_exclude_task_md(tmp_path: Path, fa
     build.compile_workspace(ws)
     key = build.derive_task_key(case_id)
     case = ws / "harbor" / key
-    # Task.md lives only at the case root; never under tests/ (verifier) or environment/ (agent)
     assert (case / "Task.md").is_file()
     for sub in ("tests", "environment"):
         rels = {p.name for p in (case / sub).rglob("*") if p.is_file()}
         assert "Task.md" not in rels, f"Task.md must not reach {sub}/"
-    # Agent task surface is instruction.md; environment packaging contains the
-    # repository bundle, agent-safe Dockerfile, and packaged runtime lock.
     env_files = {p.name for p in (case / "environment").rglob("*") if p.is_file()}
     assert env_files == {"repository.bundle", "Dockerfile", "runtime-requirements.lock"
     }, f"unexpected environment files: {env_files}"
@@ -1297,10 +1230,6 @@ def test_openrouter_policy_compiles_and_is_not_leak_flagged(tmp_path: Path, fake
     assert doc["verifier"]["environment"]["allowed_hosts"] == ["openrouter.ai"]
 
 def test_compile_rejects_disallowed_judge_host(tmp_path: Path, fake_gh: FakeGh) -> None:
-    """A malformed judge host must fail compilation (fail closed), never be
-    silently normalized or defaulted.
-    """
-
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["judge_allowed_hosts"] = ["no-dot-segment"]   # normalize_hostname rejects
@@ -1316,7 +1245,6 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     ws, _, _ = _seed_ready_workspace(tmp_path, fake_gh)
     lock_a = build.compile_workspace(ws)
     digest_a = lock_a["files"][next(iter(lock_a["cases"])) + "/task.toml"]
-    # change the reviewer allowlist in benchmark.yaml
     raw = storage.load_yaml_strict(ws / "benchmark.yaml")
     raw["privacy"]["reviewer_allowed_hosts"] = ["other.example"]
     storage.atomic_write_yaml(ws / "benchmark.yaml", raw)
@@ -1326,17 +1254,10 @@ def test_policy_change_alters_compiled_digest(tmp_path: Path, fake_gh: FakeGh) -
     assert lock_a != lock_b          # lock bytes differ -> compiled_lock_sha256 differs
 
 def test_harbor_build_null_gold_severity_labeled_not_silent() -> None:
-    # build.py emits "unknown" for null gold severity — must remain an EXPLICIT
-    # labeled value, documented at the emission site (label, not canonical
-    # passthrough).
     assert build._gold_severity_label(None) == "unknown"
     assert build._gold_severity_label("HIGH") == "high"
 
 def test_compiled_stage_carries_canonical_module_and_metric_loads_it(tmp_path: Path, fake_gh: FakeGh,) -> None:
-    """Compiled stage root carries the canonical verifier_core.py and the rendered
-    metric loads it end-to-end (reuses this module's `_seed_ready_workspace` +
-    `_compile` compiled-build fixture pattern)."""
-
     ws, _case_id, _head = _seed_ready_workspace(tmp_path, fake_gh)
     _compile(ws)
     stage = ws / "harbor"
@@ -1347,9 +1268,7 @@ def test_compiled_stage_carries_canonical_module_and_metric_loads_it(tmp_path: P
     assert "import daydream" not in metric and "getsource" not in metric
     lock = json.loads((stage / "benchmark.lock.json").read_text())
     assert "metric.py" in lock["files"] and "verifier_core.py" in lock["files"]
-    # lock hash agrees with the deployed bytes
     assert lock["files"]["verifier_core.py"] == hashlib.sha256((stage / "verifier_core.py").read_bytes()).hexdigest()
-    # rendered metric runs end-to-end via uv against the colocated module
     rows = stage / "rewards.jsonl"
     rows.write_text(json.dumps({"reward": 1.0, "tp": 1, "fp": 0, "fn": 0,
                     "verifier_error": 0, "clean_task": 1, "clean_pass": 1}) + "\n"

@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
-    from daydream.improve.assemble import AssemblyIssue
+    from daydream.improve.plan_contract import AssemblyIssue
 
 from daydream.config import EffortTier
 from daydream.improve.command_contract import (
@@ -21,7 +21,7 @@ from daydream.improve.command_contract import (
     DIRECTORY_SCOPE_SCHEMA as _DIRECTORY_SCOPE_SCHEMA,
     REPOSITORY_FILE_PATH_SCHEMA as _REPOSITORY_FILE_PATH_SCHEMA,
 )
-from daydream.output_schema import severity_enum_schema, strict_object
+from daydream.output_schema import result_array_schema, severity_enum_schema, strict_object
 from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 from daydream.prompts.schema_block import schema_block
 
@@ -92,57 +92,47 @@ _MAINTENANCE_FINDING_PROPERTIES: dict[str, Any] = {
     },
 }
 
-AUDIT_FINDINGS_SCHEMA: dict[str, Any] = strict_object({
-    "findings": {
+AUDIT_FINDINGS_SCHEMA: dict[str, Any] = result_array_schema("findings", {
+    "title": {"type": "string"},
+    "category": {"type": "string"},
+    "path": {"type": "string"},
+    "line": {"type": ["integer", "null"]},
+    "body": {"type": "string"},
+    "impact": {"enum": ["HIGH", "MED", "LOW"]},
+    "effort": {"enum": ["S", "M", "L"]},
+    "risk": {"enum": ["LOW", "MED", "HIGH"]},
+    "confidence": {"enum": ["HIGH", "MED", "LOW"]},
+    "evidence": {
         "type": "array",
-        "items": strict_object({
-            "title": {"type": "string"},
-            "category": {"type": "string"},
-            "path": {"type": "string"},
-            "line": {"type": ["integer", "null"]},
-            "body": {"type": "string"},
-            "impact": {"enum": ["HIGH", "MED", "LOW"]},
-            "effort": {"enum": ["S", "M", "L"]},
-            "risk": {"enum": ["LOW", "MED", "HIGH"]},
-            "confidence": {"enum": ["HIGH", "MED", "LOW"]},
-            "evidence": {
-                "type": "array",
-                "items": {"type": "string"},
-            },
-            **_MAINTENANCE_FINDING_PROPERTIES,
-        }),
+        "items": {"type": "string"},
     },
+    **_MAINTENANCE_FINDING_PROPERTIES,
 })
 
-VET_SCHEMA: dict[str, Any] = strict_object({
-    "verdicts": {
-        "type": "array",
-        "items": strict_object({
-            "vet_id": {"type": "integer"},
-            "keep": {"type": "boolean"},
-            "reason": {"type": "string"},
-            "severity": severity_enum_schema(nullable=True),
-            "impact": {
-                "type": ["string", "null"],
-                "enum": ["HIGH", "MED", "LOW", None],
-            },
-            "effort": {
-                "type": ["string", "null"],
-                "enum": ["S", "M", "L", None],
-            },
-            "risk": {
-                "type": ["string", "null"],
-                "enum": ["LOW", "MED", "HIGH", None],
-            },
-            "confidence": {
-                "type": ["string", "null"],
-                "enum": ["HIGH", "MED", "LOW", None],
-            },
-            "path": {"type": ["string", "null"]},
-            "line": {"type": ["integer", "null"]},
-            **_MAINTENANCE_FINDING_PROPERTIES,
-        }),
+VET_SCHEMA: dict[str, Any] = result_array_schema("verdicts", {
+    "vet_id": {"type": "integer"},
+    "keep": {"type": "boolean"},
+    "reason": {"type": "string"},
+    "severity": severity_enum_schema(nullable=True),
+    "impact": {
+        "type": ["string", "null"],
+        "enum": ["HIGH", "MED", "LOW", None],
     },
+    "effort": {
+        "type": ["string", "null"],
+        "enum": ["S", "M", "L", None],
+    },
+    "risk": {
+        "type": ["string", "null"],
+        "enum": ["LOW", "MED", "HIGH", None],
+    },
+    "confidence": {
+        "type": ["string", "null"],
+        "enum": ["HIGH", "MED", "LOW", None],
+    },
+    "path": {"type": ["string", "null"]},
+    "line": {"type": ["integer", "null"]},
+    **_MAINTENANCE_FINDING_PROPERTIES,
 })
 
 _STEP_NUMBER_LIST_SCHEMA: dict[str, Any] = {
@@ -747,17 +737,9 @@ def build_audit_prompt(
     cwd: Path,
     tier: EffortTier,
 ) -> str:
-    """Build one category audit prompt for one partition group.
+    """Combine profile strategy ``improve.audit.<category>`` with the host audit envelope.
 
-    Args:
-        category: Audit category name (one of ``AUDIT_CATEGORIES``).
-        strategy: The profile-owned ``improve.audit.<category>`` strategy content
-            (the native category playbook).
-        group: Partition-group mapping rendered by the host envelope.
-        scope_note: Host-owned scope framing.
-        recon_summary: Recon facts (runtime data).
-        cwd: Absolute working directory the agent runs in.
-        tier: The improve effort tier driving audit depth.
+    The host supplies group/scope, runtime recon facts, model cwd, and effort tier.
     """
     return f"""You are a read-only improve audit specialist. Return findings only;
 do not edit files, propose file dumps, or claim issues without evidence.
@@ -791,14 +773,7 @@ Audit depth:
 
 
 def build_vet_prompt(*, strategy: str, findings: Sequence[dict[str, Any]], cwd: Path) -> str:
-    """Build the skeptical re-verification prompt for candidate findings.
-
-    Args:
-        strategy: The profile-owned ``improve.vetting`` strategy content (the
-            native vet playbook).
-        findings: The batched audit candidates to re-verify.
-        cwd: Absolute working directory the agent runs in.
-    """
+    """Ground the profile's ``improve.vetting`` strategy in batched candidates and model cwd."""
     return f"""You are the improve vet. Re-open every cited location before deciding
 whether to keep a candidate.
 

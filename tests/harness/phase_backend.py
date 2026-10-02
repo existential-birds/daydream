@@ -1,13 +1,6 @@
-"""Shared phase-dispatch fake ``Backend`` for shallow review-fix-test tests.
+"""Scripted shallow-flow backend with optional raw event replay.
 
-``PhaseDispatchBackend`` routes prompts to scripted events and can serve a
-per-iteration parse queue. Two response modes:
-
-* ``events``: a raw pre-built ``AgentEvent`` list yielded verbatim (the
-  tool-panel / single-pass-fixture mode the old ``MockBackend(events=...)``
-  supported).
-* default: prompt-heuristic dispatch with a per-iteration parse queue.
-"""
+Dispatch mode consumes per-iteration issue lists and records protocol calls."""
 
 from __future__ import annotations
 
@@ -19,13 +12,7 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent
 
 
 def _shape_issues(issues: list[dict[str, Any]], severity: str | None = None,) -> list[dict[str, Any]]:
-    """Shape a parsed issue list into harness ground-shaped structured records.
-
-    Shared by the review and extract-json dispatch branches (both were
-    near-identical duplicate comprehensions). ``**it`` stays last so explicit
-    per-item fields still win over the grounded defaults. Only the review
-    branch pins a default ``severity``.
-    """
+    """Supply grounded defaults while preserving explicit per-issue overrides."""
     grounded: dict[str, Any] = {"confidence": "HIGH", "rationale": "harness fixture", "evidence": ""}
     if severity is not None:
         grounded["severity"] = severity
@@ -33,21 +20,10 @@ def _shape_issues(issues: list[dict[str, Any]], severity: str | None = None,) ->
 
 
 class PhaseDispatchBackend:
-    """Prompt-heuristic dispatch fake with a per-iteration parse-results queue.
+    """Dispatch review/fix/test prompts and record calls for real-path tests.
 
-    Attributes:
-        model: Stable fake model name (satisfies the ``Backend`` surface).
-        parse_calls: Number of parse-feedback phases dispatched (observable
-            proof of how many loop iterations reached review/parse).
-        call_log: Truncated lowercased prompts, in dispatch order.
-        review_prompts: Full review-phase prompts, in order (lets diff-base
-            assertions inspect ``git diff`` targets per iteration).
-        last_prompt: The most recent prompt passed to ``execute``.
-        call_count: Total ``execute`` invocations.
-        calls: One dict per ``execute`` invocation, keyed by the same nine
-            protocol arguments ``StubBackend`` records.
-        prompts: Full prompt of each recorded call, in call order.
-    """
+    review_prompts and prompts retain full text; call_log keeps 80-character
+    lowercase prefixes. Review and explicit extraction use independent queues."""
 
     model = "mock-model"
 
@@ -55,16 +31,7 @@ class PhaseDispatchBackend:
         self, parse_results: list[list[dict[str, Any]]] | None = None, *, events: list[AgentEvent] | None = None,
         tests_pass: bool = True,
     ) -> None:
-        """Configure the fake.
-
-        Args:
-            parse_results: One issue-list per iteration; the parse phase returns
-                ``{"issues": parse_results[n]}`` on the n-th parse, then ``[]``
-                once the queue is exhausted. ``None`` => always empty.
-            events: When set, ``execute`` yields this raw event list verbatim
-                and skips dispatch (tool-panel / fixed-fixture mode).
-            tests_pass: Controls the test-suite phase's pass/fail text.
-        """
+        """Set issue lists (empty after exhaustion), optional raw events, and suite outcome."""
         self._parse_results = parse_results or []
         self._events = events
         self._tests_pass = tests_pass
@@ -78,7 +45,7 @@ class PhaseDispatchBackend:
 
     @property
     def parse_calls(self) -> int:
-        """Number of parse-feedback phases dispatched so far (observable)."""
+        """Number of explicit extract-JSON dispatches, separate from native review."""
         return self._parse_call
 
     @property
@@ -106,10 +73,8 @@ class PhaseDispatchBackend:
         prompt_lower = prompt.lower()
         self.call_log.append(prompt_lower[:80])
 
-        # Native review prompts are skill-free (#886): the per-stack / structural /
-        # generic-fallback builders no longer carry a ``beagle-*`` invocation, so
-        # dispatch on their distinctive judgment-prose markers instead (covering
-        # the pre- and post-strategy-threading wording).
+        # Recognize both explicit skill prompts and native review instructions.
+        structured: dict[str, Any] | None = None
         _review_markers = (
             "inclusion obligation",  # _stack_scope_instruction (pre-threading)
             "full change spans",  # structural runtime line (pre-threading)
@@ -124,51 +89,41 @@ class PhaseDispatchBackend:
             self.review_prompts.append(prompt)
             yield TextEvent(text="Review complete.")
             if output_schema is not None:
-                # Issue #745 (AC4): the per-stack reviewer emits
-                # PER_STACK_RECORD_SCHEMA structured output directly (the
-                # deep-shallow spine no longer has a separate parse step).
+                # Native review emits structured records directly.
                 issues = (self._parse_results[self._review_call]
                     if self._review_call < len(self._parse_results)
                     else []
                 )
                 self._review_call += 1
                 issues = _shape_issues(issues, severity="medium")
-                yield ResultEvent(structured_output={"issues": issues}, continuation=None,)
-            else:
-                yield ResultEvent(structured_output=None, continuation=None)
+                structured = {"issues": issues}
         elif "extract" in prompt_lower and "json" in prompt_lower:
             issues = (self._parse_results[self._parse_call] if self._parse_call < len(self._parse_results) else [])
             self._parse_call += 1
             issues = _shape_issues(issues)
             yield TextEvent(text="Parsed.")
-            yield ResultEvent(structured_output={"issues": issues}, continuation=None)
+            structured = {"issues": issues}
         elif "post-fix fix-verifier agent" in prompt_lower:
             ids = [int(value) for value in re.findall(r"(?m)^(\d+)\. \[", prompt)]
             yield TextEvent(text="")
-            yield ResultEvent(structured_output={"verdicts": [
-                        {"issue_id": issue_id, "verdict": "resolved", "reason": "harness fix accepted"}
-                        for issue_id in ids
-                    ]
-                }, continuation=None,
-            )
+            structured = {"verdicts": [
+                {"issue_id": issue_id, "verdict": "resolved", "reason": "harness fix accepted"}
+                for issue_id in ids
+            ]}
         elif "fix this issue" in prompt_lower or prompt_lower.startswith("fix these"):
             yield TextEvent(text="Fixed.")
-            yield ResultEvent(structured_output=None, continuation=None)
         elif "test suite" in prompt_lower or "run the project" in prompt_lower:
             if self._tests_pass:
                 yield TextEvent(text="All 1 tests passed. 0 failed.")
             else:
                 yield TextEvent(text="1 test failed.")
-            yield ResultEvent(structured_output=None, continuation=None)
         elif "the daydream changes are already staged" in prompt_lower and "do not push" in prompt_lower:
             yield TextEvent(text="Committed iteration changes.")
-            yield ResultEvent(structured_output=None, continuation=None)
         elif "commit-push" in prompt_lower:
             yield TextEvent(text="Committed.")
-            yield ResultEvent(structured_output=None, continuation=None)
         else:
             yield TextEvent(text="OK")
-            yield ResultEvent(structured_output=None, continuation=None)
+        yield ResultEvent(structured_output=structured, continuation=None)
 
     async def cancel(self) -> None:
         pass

@@ -6,9 +6,10 @@ from typing import Any, cast
 
 import pytest
 
-from daydream.cli import _build_build_corpus_parser, _handle_build_corpus_command
+from daydream.commands.corpus import _build_build_corpus_parser, _handle_build_corpus_command
 from daydream.training.corpus_projection import BuildFrozenCorpusConfig
-from daydream.training.corpus_projection.projector import _apply_share_caps, build_frozen_corpus
+from daydream.training.corpus_projection.projector import build_frozen_corpus
+from daydream.training.corpus_projection.selection import _apply_share_caps
 from tests.test_corpus_projection import (
     _admit_second_batch,
     _config_for,

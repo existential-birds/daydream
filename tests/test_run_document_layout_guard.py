@@ -1,21 +1,9 @@
-"""#1220: the run-document layout literals live in the owner, plus a frozen allowlist.
+"""Keep run-document paths in their owner or the live, reasoned allowlist.
 
-The scan is AST-based (a plain text grep cannot tell a path composition from a
-docstring, a data key, or prose) and is modelled on
-``tests/test_atomic_write_consolidation.py``: declared scope roots, a frozenset of
-reasoned allowances, and a liveness assertion so no allowance can rot into a
-blanket exemption.
-
-A literal counts only when it is *path-shaped*:
-
-* a string that carries ``trajectory.json`` / ``trajectories`` / ``runs`` as a path
-  segment (bare, or embedded in a longer path such as ``runs/*/trajectory.json``), and
-* for the bare names, only in a path context — a ``/`` composition, a comparison
-  against a document name, or an argument to ``Path``/``glob``/``rglob``/
-  ``joinpath``/``with_name``/``with_suffix``/``relative_to``.
-
-Docstrings are skipped: the layout is restated in prose in several modules and
-requirement 6 is about path composition, not message wording.
+The AST guard recognizes trajectory.json/trajectories/runs path segments.
+Bare names count only in path composition, name comparison, or Path/glob/
+joinpath/with_name/with_suffix/relative_to calls. Docstrings and ordinary data
+keys are excluded; the liveness assertion prevents stale blanket exemptions.
 """
 
 from __future__ import annotations
@@ -26,7 +14,7 @@ from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SCOPE_ROOTS = ("daydream", "rl")
-_OWNER = "daydream/trajectory.py"
+_OWNER = "daydream/trajectory/layout.py"
 
 #: Directories that are not first-party source. ``.venv``/``venv``/``site-packages``
 #: keep the scan from walking an installed dependency tree (the ``rl`` project's own
@@ -37,8 +25,9 @@ _EXCLUDED_PARTS = frozenset({"tests", "__pycache__", ".venv", "venv", "site-pack
 _IN_SCOPE_CONSUMERS = frozenset({
     "daydream/archive/__init__.py", "daydream/archive/hydrate.py", "daydream/archive/license_enrich.py",
     "daydream/archive/sanitize.py", "daydream/eval/analyzer.py", "daydream/artifact_visibility.py",
-    "daydream/phases.py", "daydream/training/adjudication/materialize.py", "daydream/training/adjudication/cli.py",
-    "daydream/runner.py",
+    "daydream/phases/handoff.py", "daydream/training/adjudication/materialize.py",
+    "daydream/training/adjudication/import_local.py",
+    "daydream/run_artifacts.py",
 })
 
 #: Symbols that count as "consuming the layout surface".

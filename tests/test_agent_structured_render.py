@@ -1,8 +1,4 @@
-"""Task 1 real-path tests: run_agent must not echo structured-output JSON. Verified terminal-render harness (from Task
-0): rec = Console(file=StringIO(), record=True, force_terminal=True, width=100)
-monkeypatch.setattr("daydream.agent.console", rec) ... drive run_agent ... rec.export_text() # captures the
-rendered agent text run_agent requires the keyword-only `phase=` argument (DaydreamPhase), imported from
-daydream.trajectory. ScriptedBackend is imported from tests.harness.backend (the single canonical definition)."""
+"""Agent terminal rendering, log redaction, and structured-result/fallback precedence."""
 from __future__ import annotations
 
 import json
@@ -59,9 +55,7 @@ async def test_plain_text_still_renders(rec: Console, tmp_path: Path) -> None:
 async def test_log_mode_emission_redacts_sentinels_on_agent_path(
     tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Real-path sentinel-absence check at the agent boundary (no phases.py
-    prints): every --log event type is emitted redacted — markers present, raw
-    sentinel absent — while the returned structured result stays raw."""
+    """Redact every logged event type while returning the original structured result."""
     sentinel = "ghp_" + "x" * 16
     payload = {"status": "complete", "token": sentinel}
     backend = ScriptedBackend(
@@ -101,13 +95,7 @@ async def test_log_mode_captures_structured_output(tmp_path: Path, capsys: pytes
     assert "OpenAPI First" in out   # benign content still serialized
 
 async def test_log_mode_structured_result_wins_over_prose_stray_json(tmp_path: Path) -> None:
-    """Under --log, prose containing stray JSON must not be scraped over the real result. Regression for the deep
-    cross-stack merge crash ("Cross-stack merge returned no item list (got list)"): the merge agent narrates in
-    prose while emitting a ``{"items": [...]}`` structured result. When --log dropped the captured structured
-    result (the if/elif bug), run_agent fell through to the JSON fallback, which scraped the stray ``[]`` out of
-    prose like "all source artifacts are empty: `[]`" and returned a bare list. The merge phase's
-    ``isinstance(result, dict)`` check then failed with "got list". With the fix the captured structured result
-    wins, so the payload survives as a dict and the fallback never runs."""
+    """Captured structured output wins over stray prose JSON, preserving the merge dict shape."""
     merge_prose = "All source artifacts are empty: `stack-python-records.json` is `[]`. Nothing to merge."
     payload: dict[str, Any] = {"items": []}
     backend = ScriptedBackend(
@@ -122,9 +110,7 @@ async def test_log_mode_structured_result_wins_over_prose_stray_json(tmp_path: P
     assert isinstance(result, dict)  # the exact type the merge phase gate requires
 
 async def test_structured_fallback_validates_against_output_schema(rec: Console, tmp_path: Path) -> None:
-    """Must-haves #4/#5: with output_schema set and structured output failing,
-    (a) valid-schema JSON is returned as structured output, and (b) invalid-
-    schema JSON falls through to the plain-text return."""
+    """Return JSON matching the required top-level schema; retain invalid JSON as text."""
     schema = {"type": "object", "required": ["file"], "properties": {"file": {"type": "string"}}}
     # (a) valid-schema raw JSON -> returned as structured output
     valid_backend = _scripted([ TextEvent(text='{"file": "src/a.py"}'), ])
@@ -137,12 +123,10 @@ async def test_structured_fallback_validates_against_output_schema(rec: Console,
     assert isinstance(result2, str)
 
 async def test_structured_fallback_recon_not_gated_all_or_nothing(rec: Console, tmp_path: Path) -> None:
-    """RECON's fallback skips the structured-output gate via the caller-declared ``validate_structured_output=False``
-    kwarg (not a phase carve-out): the top-level RECON schema requires languages/commands/conventions/intent_docs,
-    but the orchestrator salvages per-command records downstream via validate_recon_commands() and defaults missing
-    model fields to []. An extracted response with a valid commands list but a missing top-level field must still
-    reach that salvage path instead of falling through to plain text. Callers that do not opt out keep the gate
-    (see the REVIEW assertions above)."""
+    """Explicit validation opt-out lets recon salvage commands despite missing top-level fields.
+
+    Ordinary callers retain validation; the opt-out is not implicit in the phase.
+    """
     schema = {
         "type": "object", "required": ["languages", "commands", "conventions", "intent_docs"],
         "properties": {
@@ -160,11 +144,10 @@ async def test_structured_fallback_recon_not_gated_all_or_nothing(rec: Console, 
     assert isinstance(result, dict)
 
 async def test_structured_fallback_salvages_partial_dict(rec: Console, tmp_path: Path) -> None:
-    """The fallback gate is salvage-tolerant, not all-or-nothing: a dict whose
-    required top-level field is present but whose nested records contain one
-    schema-invalid item still reaches the consumer. The recommendation verifier
-    (and the per-stack parse) drop invalid records rather than losing the whole
-    payload, so an all-or-nothing gate here would starve every valid record."""
+    """A valid top-level field reaches the consumer even if some nested records are invalid.
+
+    Consumers discard bad records individually, preserving valid siblings.
+    """
     schema = {
         "type": "object", "required": ["verdicts"],
         "properties": {
@@ -191,9 +174,7 @@ async def test_structured_fallback_salvages_partial_dict(rec: Console, tmp_path:
     assert isinstance(result, dict)
 
 async def test_structured_fallback_bare_array_reaches_merge_shape(rec: Console, tmp_path: Path) -> None:
-    """A bare JSON array can never validate against an object-typed schema (MERGED_ITEMS_SCHEMA is ``type: object``),
-    but phase_cross_stack_merge normalizes a bare array to its item list. The gate must let it through instead of
-    falling back to plain text, which would raise CrossStackMergeError downstream and abort the run."""
+    """Pass bare arrays to merge normalization despite its object schema; text fallback would abort."""
     schema = {
         "type": "object", "required": ["items"],
         "properties": {"items": {"type": "array", "items": {"type": "object"}}},

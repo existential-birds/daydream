@@ -1,14 +1,7 @@
-"""Model-facing severity enums must derive from ``severity.CANONICAL_LEVELS``.
+"""Public schema severity enums must derive from severity.CANONICAL_LEVELS.
 
-Discovery is by introspection over the public ``*_SCHEMA`` constants of
-``daydream.phases`` (the collection principle of ``test_output_schema_strict.py``),
-never a hand-maintained call-site list, so a newly added severity-bearing schema is
-covered automatically.
-
-Teeth: the schema constants are built at import. The only way to prove a site
-*tracks* the declaration — rather than coincidentally matching it today — is to
-rebuild the module under a declaration the production vocabulary does not have and
-watch the emitted levels move. A hand-written list does not move, and fails.
+Introspection discovers the roots; rebuilding them after changing vocabulary and
+order distinguishes derived enums from hardcoded lists that happen to match.
 """
 
 from __future__ import annotations
@@ -27,9 +20,9 @@ import daydream.severity as severity
 from daydream import pr_comment_renderer
 from daydream.benchmark.harbor import verifier_core
 from daydream.pr_review import (
+    ClassifiedIssues,
     ParsedIssue,
     ReviewRenderers,
-    _ClassifiedIssues,
     build_payload,
     default_render_finding,
     default_render_summary,
@@ -185,7 +178,7 @@ def test_pr_review_severity_breakdown_follows_the_declaration(monkeypatch: pytes
     # Declaration reversed: the model-facing order must follow it, so a hand-written
     # tuple at the call site renders "1 high, 1 low" and fails here.
     monkeypatch.setattr(severity, "CANONICAL_LEVELS", ("high", "medium", "low"))
-    classified = _ClassifiedIssues(body_only=[
+    classified = ClassifiedIssues(body_only=[
             ParsedIssue(path="a.py", line=10, title="t1", body="b", confidence="HIGH", severity="high"),
             ParsedIssue(path="a.py", line=12, title="t2", body="b", confidence="LOW", severity="low"),
         ]

@@ -99,7 +99,6 @@ def test_candidate_id_scoped_by_case_key() -> None:
     assert a != b
 
 def test_duplicate_content_gets_distinct_ordinals_and_ids() -> None:
-    # two byte-identical findings, ordinals 0 and 1 → distinct IDs, both preserved
     first = derive_candidate_id("case-x", _cand(), 0)
     second = derive_candidate_id("case-x", _cand(), 1)
     assert first != second
@@ -108,7 +107,6 @@ def test_same_content_same_key_same_ordinal_is_stable() -> None:
     assert derive_candidate_id("case-x", _cand(), 0) == derive_candidate_id("case-x", _cand(), 0)
 
 def test_null_fields_normalize_to_empty_string() -> None:
-    # title/body/severity null → "" — the digest must be stable for a null vs "" field
     raw = _cand(title=None, body=None, severity=None)
     cid = derive_candidate_id("case-x", raw, 0)
     raw2 = _cand(title="", body="", severity=None)
@@ -187,7 +185,6 @@ def test_gold_finding_id_is_case_scoped() -> None:
     legacy["finding_id"] = "f" * 64  # valid 64-hex, case_id-less digest -> rejected
     with pytest.raises(VerifierError):
         validate_gold_set([legacy], case_id="case-x")
-    # a case-scoped digest under a different case_id is rejected
     g2 = _gold()
     g2["finding_id"] = _canonical_gold_id("case-y", g2)
     with pytest.raises(VerifierError):
@@ -270,7 +267,6 @@ def test_score_gold_no_candidates() -> None:
     assert r.fp == 0 and r.clean_task == 0
 
 def test_score_zero_match_reward_is_zero() -> None:
-    # nonempty gold and nonempty candidates with zero matching edges → f1/reward 0.0
     gold = [_gold(), _gold(finding_id="b" * 64, title="B")]
     art = _artifact(_valid_findings(2))
     r = score_review(gold, art, [])
@@ -279,7 +275,6 @@ def test_score_zero_match_reward_is_zero() -> None:
     assert r.f1 == 0.0 and r.reward == 0.0
 
 def test_score_f1_example() -> None:
-    # 3 gold / 2 candidates, TP=2, FN=1 → precision 1.0, recall 0.6666666667, f1 0.8
     gold = [_gold(), _gold(finding_id="b" * 64, title="B"), _gold(finding_id="c" * 64, title="C")]
     cands = _valid_findings(2)
     art = _artifact(cands)
@@ -298,7 +293,6 @@ def test_score_malformed_artifact_is_scored_zero() -> None:
     assert r.reward == 0.0 and r.verifier_error == 0   # invalid agent output is scored zero
 
 def test_empty_side_resolves_with_zero_verdicts() -> None:
-    # clean/0 and N/0 both resolve deterministically with an EMPTY verdict set
     r0 = score_review([], _artifact([]), [])
     assert r0.reward == 1.0
     rn = score_review([_gold()], _artifact([]), [])
@@ -337,15 +331,11 @@ def test_reward_details_shape_and_no_source_leak() -> None:
     assert "f1" not in blob  # candidate content never leaks
 
 def test_gold_finding_id_rejects_non_string() -> None:
-    # fail-closed: a raw-dict gold whose finding_id is not a str raises
-    # (reachable via _finding_id on the raw-dict path)
     gold = [{"finding_id": 123}]
     with pytest.raises(VerifierError, match="must be a string"):
         reward_details(gold, [], [], set())
 
 def test_candidate_id_rejects_non_string() -> None:
-    # fail-closed: reward_details rejects a raw candidate whose candidate_id is
-    # not a str (reachable via _candidate_id on the raw-dict path)
     cands = [{"candidate_id": 456}]
     with pytest.raises(VerifierError, match="must be a string"):
         reward_details([_gold()], cands, [], set())
@@ -450,21 +440,15 @@ def test_mixed_located_locationless_set_matching_is_id_keyed() -> None:
     assert (r.tp, r.fp, r.fn) == (2, 0, 0)
     assert r.reward == 1.0 and r.verifier_error == 0
 
-# location-tier + severity-distance helpers (issue #971, task 2)
 
 
 def test_location_tier_classification() -> None:
-    # exact: same path, distance 0 inside the range
     assert vc.location_tier("a.py", 10, 12, "a.py", 10, 12, 3) == "exact"
-    # near: same path, within tolerance
     assert vc.location_tier("a.py", 10, 12, "a.py", 15, 15, 3) == "near"
-    # file: same path, beyond tolerance
     assert vc.location_tier("a.py", 10, 12, "a.py", 100, 100, 3) == "file"
-    # miss: different path
     assert vc.location_tier("a.py", 10, 12, "b.py", 10, 12, 3) == "miss"
 
 def test_location_tier_spans_overlap_counts_exact() -> None:
-    # multi-line candidate range overlapping the gold range at all -> exact
     assert vc.location_tier("a.py", 10, 20, "a.py", 18, 25, 3) == "exact"
     # non-overlapping span uses the nearer boundary distance
     assert vc.location_tier("a.py", 10, 20, "a.py", 22, 24, 3) == "near"
@@ -489,7 +473,6 @@ def test_severity_distance_unknown_raises() -> None:
     with pytest.raises(VerifierError):
         vc.severity_distance("high", "info")
 
-# Task 3: reported location/severity axes over matched pairs (issue #971)
 
 EXPECTED_24_KEYS = {"reward", "tp", "fp", "fn", "precision", "recall", "f1",
     "gold_count", "candidate_count", "clean_task", "clean_pass", "verifier_error",
@@ -518,12 +501,9 @@ def _axis_pair(gold_raw: Any, cand_raw: Any) -> tuple[list[Any], Any, list[Verdi
 
 
 def _metric_row(**overrides: Any) -> dict[str, Any]:
-    """A scored reward row with every axis key at its zero/absent default.
+    """Default all axes to absent, matching older rows without axis keys.
 
-    ``aggregate_metrics`` reads each axis key through ``row.get(k, 0)``, so
-    these defaults are also what a pre-axis row supplies; tests override only
-    the keys their case exercises, and presence is opted into explicitly (an
-    axis with ``*_present == 0`` contributes no pairs).
+    A ``*_present == 0`` axis contributes no pairs; tests opt in explicitly.
     """
     row: dict[str, Any] = {
         "verifier_error": 0, "reward": 1.0, "tp": 0, "fp": 0, "fn": 0, "clean_task": 0, "location_present": 0,
@@ -536,8 +516,7 @@ def _metric_row(**overrides: Any) -> dict[str, Any]:
 
 
 def test_score_review_axes_reported_not_gating() -> None:
-    # 1 gold finding at src/a.py:10-12, high severity; candidate matches content
-    # but reports src/a.py:50 (beyond tolerance) with low severity.
+    # Content matches despite incorrect location and severity.
     gold_raw = _axis_gold()
     cand_raw = _axis_cand_id(path="src/a.py", start_line=50, end_line=50, severity="low")
     reward = score_review(*_axis_pair(gold_raw, cand_raw))
@@ -549,8 +528,6 @@ def test_score_review_axes_reported_not_gating() -> None:
     assert reward.location_credit == 0.0 and reward.severity_mean_distance == 2.0
 
 def test_score_review_axis_absent_never_imputes() -> None:
-    # gold finding is locationless (path/start_line/end_line all None) and
-    # severityless -> both axes absent for the pair
     gold_raw = _gold(path=None, start_line=None, end_line=None, severity=None)
     cand_raw = _cand()
     cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
@@ -561,8 +538,7 @@ def test_score_review_axis_absent_never_imputes() -> None:
     assert reward.severity_present == 0 and reward.severity_mean_distance == 0.0
 
 def test_score_review_locationless_candidate_side_absent() -> None:
-    # candidate locationless, gold located -> location axis absent; severity
-    # axis still scored independently (both sides have severity)
+    # Missing candidate location leaves the severity axis independently scoreable.
     gold_raw = _axis_gold()
     cand_raw = _cand(path=None, start_line=None, end_line=None)
     cand_raw["candidate_id"] = derive_candidate_id("case-x", cand_raw, 0)
@@ -581,12 +557,10 @@ def test_score_review_location_tiers_and_severity_exact() -> None:
     assert r_near.severity_exact == 1 and r_near.severity_within_1 == 1
     assert r_near.severity_mean_distance == 0.0 and r_near.severity_credit == 1.0
 
-    # exact tier
     exact_cand = _axis_cand_id(path="src/a.py", start_line=11, end_line=11)
     r_exact = score_review(*_axis_pair(gold_raw, exact_cand))
     assert r_exact.location_exact == 1 and r_exact.location_credit == 1.0
 
-    # miss: different path -> counted as miss, location still present
     miss_cand = _axis_cand_id(path="src/b.py", start_line=10, end_line=12)
     r_miss = score_review(*_axis_pair(gold_raw, miss_cand))
     assert r_miss.location_miss == 1 and r_miss.location_present == 1
@@ -601,7 +575,6 @@ def test_reward_to_dict_stays_numeric_only() -> None:
     assert set(d) == EXPECTED_24_KEYS
 
 def test_reward_dict_early_returns_have_absent_axes() -> None:
-    # clean pass: no tp pairs -> all axis fields at zero/absent defaults (A4)
     d = score_review([], _artifact([]), []).to_dict()
     assert set(d) == EXPECTED_24_KEYS
     assert d["location_present"] == 0 and d["severity_present"] == 0
@@ -641,9 +614,7 @@ def test_aggregate_metrics_pools_severity_counts_and_credit() -> None:
     assert m["severity_mean_distance"] == 0.5 and m["severity_credit"] == 0.75
 
 def test_aggregate_metrics_multi_pair_severity_rates_bounded() -> None:
-    # A single task with two severity-scored pairs: the per-pair numerators
-    # must divide by the pooled pair count, never the per-task row count, so
-    # the rates stay <= 1.0 (issue: pooled axis rates could exceed 1.0).
+    # Divide by matched pairs, not task rows, to keep rates bounded.
     rows: list[dict[str, object] | None] = [_metric_row(tp=2, clean_task=1, severity_present=1, severity_exact=2,
                     severity_within_1=2, severity_credit=1.0, severity_pairs=2),
     ]
@@ -654,8 +625,6 @@ def test_aggregate_metrics_multi_pair_severity_rates_bounded() -> None:
     assert m["severity_mean_distance"] == 0.0 and m["severity_credit"] == 1.0
 
 def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
-    # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
-    # weighting each task's reported mean by its pair count.
     rows: list[dict[str, object] | None] = [_metric_row(tp=1, clean_task=1, severity_present=1, severity_exact=1,
                     severity_within_1=1, severity_credit=1.0, severity_pairs=1),
         _metric_row(reward=0.5, tp=2, severity_present=1, severity_within_1=2,
@@ -667,22 +636,17 @@ def test_aggregate_metrics_severity_means_weight_by_pair_count() -> None:
     assert m["severity_credit"] == pytest.approx(2.0 / 3)
 
 def test_aggregate_metrics_location_credit_weights_by_pair_count() -> None:
-    # Unequal per-task pair counts (1 vs 2) must pool to the per-pair mean,
-    # weighting each task's reported credit by its pair count (the sum of its
-    # tier counts) so location_credit agrees with the per-pair tier rates.
+    # Location pair count is the sum of tier counts.
     rows: list[dict[str, object] | None] = [
         _metric_row(tp=1, clean_task=1, location_present=1, location_exact=1, location_credit=1.0),
         _metric_row(reward=0.5, tp=2, location_present=1, location_near=1, location_file=1, location_credit=0.5),
     ]
     m = vc.aggregate_metrics(rows)
     assert m["location_pairs_scored"] == 3
-    # unweighted mean of the per-task means would be 0.75; per-pair pooling
-    # (1 pair at 1.0, 2 pairs at 0.5) is 2/3, matching the pair-level rates.
+    # Pair-weighted credit is 2/3; averaging task means would yield 0.75.
     assert m["location_credit"] == pytest.approx(2.0 / 3)
 
 def test_aggregate_metrics_pre_axis_rows_default_to_zero_pairs() -> None:
-    # An older row without any axis keys is a genuinely zero-pair row: it
-    # contributes nothing to the pooled axes and never raises.
     m = vc.aggregate_metrics([{"verifier_error": 0, "reward": 1.0, "tp": 1, "fp": 0, "fn": 0, "clean_task": 1}])
     assert m["location_pairs_scored"] == 0 and m["severity_pairs_scored"] == 0
     assert m["location_exact_rate"] == 0.0 and m["severity_credit"] == 0.0

@@ -1,22 +1,9 @@
-"""Regression: prose brackets must not hijack the arbiter's JSON extraction.
+"""Prose brackets must not hijack arbiter JSON extraction.
 
-Real failure (getsentry/sentry#67876, pi/glm reviewer): the arbiter agent
-returned a correct fenced ``{"findings": [...]}`` answer, but its prose first
-referenced a code snippet ``integration.metadata["sender"]["login"]``. The pi
-backend extracts structured output with ``extract_json(last_assistant_text)``,
-whose old "earliest bracket wins" rule parsed ``["sender"]`` — a valid
-one-element list — and returned that bare list. ``phase_arbiter_review`` then
-crashed at its dict-shape check with
-``ValueError("Arbiter returned no findings list (got list)")``.
-
-The fix makes ``extract_json`` return the LARGEST balanced JSON span (the real
-answer dwarfs an incidental prose bracket), so the arbiter receives the proper
-findings object.
-
-These tests drive the real production path
-(``phase_arbiter_review -> run_agent -> backend ResultEvent``). The mock backend
-reproduces the pi contract faithfully: ``structured_output = extract_json(text)``
-over the model's actual prose-wrapped message. Only the backend is mocked.
+A Pi response can mention metadata["sender"]["login"] before its fenced
+findings object. Extraction must choose the largest balanced JSON span.
+Tests drive phase_arbiter_review through run_agent with only the backend
+mocked, applying the real Pi text-to-structured-output contract.
 """
 from __future__ import annotations
 
@@ -107,14 +94,8 @@ async def test_arbiter_still_raises_on_genuinely_unparseable_output(
         )
 
 
-# Real run (`--log`, pi/glm reviewer): the arbiter streamed a long prose
-# adjudication followed by a JSON answer that got truncated mid-string, so the
-# final assistant *text* held no closeable findings object. The backend had
-# already extracted the complete structured dict into the ResultEvent, but in
-# log_mode run_agent printed `[result]` and dropped it on the floor instead of
-# capturing it, then fell back to extract_json() over the prose. That returned
-# the raw string, and phase_arbiter_review crashed with
-# ``ValueError("Arbiter returned no findings list (got str)")``.
+# Model text has truncated JSON while ResultEvent already carries a complete
+# answer. Log mode must retain that result instead of falling back to prose.
 PROSE_WITH_TRUNCATED_JSON = (
     "## Adjudication\n\n"
     "**arb_id 1** -- Confirmed real, but mis-severitied. The setLevel line has "
@@ -138,13 +119,10 @@ STRUCTURED_OUTPUT: dict[str, Any] = {"findings": [{"arb_id": 1, "keep": True, "s
 
 
 def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
-    """Emits prose text and structured output separately (the real pi contract), gated on the schema.
+    """Emit schema-gated structured data separately from unparseable prose.
 
-    Unlike ``_pi_like_backend``, the final ``TextEvent`` and the ResultEvent's
-    ``structured_output`` diverge: the text is prose the extractor cannot parse
-    into a findings object, while ``structured_output`` is the complete answer.
-    This is what exposes the log_mode result-capture bug -- a backend whose text
-    happens to also contain a parseable object would mask it via the fallback.
+    Keeping text unparseable prevents fallback extraction from masking a lost
+    ResultEvent payload in log mode.
     """
 
     def respond(cwd: Any, prompt: str, output_schema: Any = None, *args: Any) -> list[Any]:
@@ -156,11 +134,7 @@ def _split_text_backend(text: str, structured: Any) -> ScriptedBackend:
 
 async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, make_work: Callable[..., WorkContext],
 ) -> None:
-    """In --log mode the ResultEvent's structured dict must reach the phase, not be dropped.
-
-    Regression for ``Arbiter returned no findings list (got str)``: log_mode printed ``[result]`` but skipped
-    assigning ``structured_result``, so the phase received the prose-fallback string. Drives the real production
-    path (phase_arbiter_review -> run_agent -> backend events) with log_mode on."""
+    """Log mode retains the structured ResultEvent through the real phase/agent path."""
     diff_path, intent_path, alternatives_path = _write_inputs(tmp_path)
     verdicts, _ = await phase_arbiter_review(
         cast(Backend, _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT)), make_work(tmp_path),
@@ -173,10 +147,7 @@ async def test_arbiter_captures_structured_output_in_log_mode(tmp_path: Path, ma
     assert verdicts[2]["keep"] is False
 
 async def test_pi_contract_fakes_gate_structured_output_on_the_requested_schema() -> None:
-    """Both arbiter fakes mirror the real pi contract: no schema requested ⇒ no structured output.
-
-    ``daydream/backends/pi.py`` computes ``structured_output`` only when the call passed an ``output_schema``, so
-    an ungated fake would let a test observe a structured payload production can never produce (and vice versa)."""
+    """Both Pi fakes emit structured output only when output_schema was requested."""
     schema: dict[str, Any] = {"type": "object"}
     fakes = (_pi_like_backend(ARBITER_MESSAGE), _split_text_backend(PROSE_WITH_TRUNCATED_JSON, STRUCTURED_OUTPUT),)
     for fake in fakes:

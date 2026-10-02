@@ -1,12 +1,7 @@
-"""Per-run extension registry.
+"""Per-run extension registry, seeded with builtins before extension registration.
 
-``Registry`` holds phases + flows, named prompts, renderers, a tool supervisor,
-trace destination factories and fork stack rules. ``register_builtins()`` seeds it with everything daydream
-does today; an optional ``daydream_ext`` package mutates it through the same API.
-
-This module must not import from ``daydream.runner`` or ``daydream.phases``
-(import-cycle guard).
-"""
+Own phases, flows, prompts, renderers, supervision, trace factories and stack
+rules. Never import runner or phases here; that would create import cycles."""
 
 from __future__ import annotations
 
@@ -54,12 +49,8 @@ class Registry:
         return self._lookup(self._phases, "phase", name)
 
     def set_flow(self, flow_name: str, entries: Sequence[FlowEntry]) -> None:
-        """Define a flow as an ordered list of phase names and loop groups.
-
-        Entry names are resolved against registered phases by ``run_flow``'s
-        pre-flight pass (and ``daydream ext validate``), not at definition time,
-        so registration order between phases and flows does not matter.
-        """
+        """Store ordered phase names and loop groups. Resolve names during run_flow
+        preflight or ext validate, so registration order remains unrestricted."""
         self._flows[flow_name] = list(entries)
 
     def flow(self, flow_name: str) -> list[FlowEntry]:

@@ -1,11 +1,6 @@
-"""Tests for the shared service-root discovery module.
+"""Shared service ownership and explicit service_roots override contracts.
 
-``daydream.services`` is the single service-discovery implementation after the
-move out of the improve package (issue #1113). This file covers the
-parts that are new at package root: the parameterized ``owning_services``
-containment predicate and the explicit ``service_roots`` override the
-grounded-diagram flow passes. The improve flow's own behavioral coverage stays
-in ``tests/test_improve_services.py``.
+Improve discovery behavior is covered separately in test_improve_services.py.
 """
 
 from __future__ import annotations
@@ -161,11 +156,11 @@ _CONTAINMENT_SHAPES = (
 )
 
 
-# ``_owning_partition`` in the improve orchestrator answers the same *shape* of
+# ``_owning_partition`` in Improve's audit scope answers the same *shape* of
 # question about partitions. It is enumerated Out of Scope and is the one allowed
 # exception, so the exemption is scoped to that function's module and name rather
 # than to any line that happens to mention ``partition.root``.
-_PARTITION_EXCEPTION = Path("daydream") / "improve" / "orchestrator.py"
+_PARTITION_EXCEPTION = Path("daydream") / "improve" / "audit_scope.py"
 
 
 def _function_line_span(path: Path, name: str) -> set[int]:
@@ -180,7 +175,7 @@ def _function_line_span(path: Path, name: str) -> set[int]:
 def test_no_service_containment_shape_lives_outside_services_py() -> None:
     """The acceptance search (issue #1216 M7/S1), executable.
 
-    ``_owning_partition`` in the improve orchestrator answers the same *shape* of question about partitions; it is
+    ``_owning_partition`` in Improve's audit scope answers the same *shape* of question about partitions; it is
     enumerated Out of Scope and is the one allowed exception."""
     repo_root = Path(__file__).resolve().parents[1]
     owner = repo_root / "daydream" / "services.py"

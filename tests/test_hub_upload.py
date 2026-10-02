@@ -9,7 +9,7 @@ import pytest
 
 from daydream.archive import hub, scan
 from daydream.config_file import DaydreamFileConfig, load_file_config
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.harness.config import write_target_hub_key
 
 

@@ -1,13 +1,6 @@
-"""Shared process-group waits for subprocess-cancellation tests.
-
-A group-signal kill reaps the direct child synchronously, but a grandchild
-reparented to PID 1 lingers as a zombie until init reaps it -- and a zombie
-still answers ``killpg(pgid, 0)``. Asserting ``ProcessLookupError`` in the same
-event-loop tick as the kill therefore races the kernel's reap: on a loaded host
-(CI runners, parallel suites) the window is wide enough to fail intermittently.
-Polling until the group is gone makes the assertion deterministic -- the
-observable outcome is "no process remains in the group", not "the group vanished
-by the next instruction".
+"""Readiness waits for cancellation tests. Reparented grandchildren can remain zombies that answer
+killpg(pgid, 0) after the direct child is reaped. Poll group disappearance to tolerate kernel
+reaping delay under load.
 """
 
 from __future__ import annotations
@@ -17,12 +10,8 @@ import json
 import os
 from pathlib import Path
 
-# A CLI that forks a `sleep` grandchild (which inherits the stdout pipe),
-# reports readiness by printing "UP" after the fork, then hangs. A python CLI is
-# used because bash defers SIGTERM while a child runs on macOS, which would
-# stall every test on the TERMINATE_GRACE_S window. The print-after-fork makes
-# these tests deterministic: the code under test is always exercised against a
-# live process group, never racy against the CLI's fork.
+# Fork a sleep grandchild inheriting stdout, then print readiness and hang. Python avoids Bash
+# deferring SIGTERM on macOS; readiness after the fork ensures tests exercise a live process group.
 GROUP_HOLDER_CLI = ("import subprocess, time; "
     "subprocess.Popen(['sleep', '30']); "
     "print('UP', flush=True); "
@@ -31,11 +20,8 @@ GROUP_HOLDER_CLI = ("import subprocess, time; "
 
 
 async def wait_for_process_group_gone(pgid: int, *, timeout_s: float = 30.0) -> None:
-    """Await *pgid*'s disappearance (a readiness wait, not a fixed sleep).
-
-    The loop exits the moment ``killpg`` raises ``ProcessLookupError`` or
-    ``PermissionError`` (a recycled pgid); ``timeout_s`` is a failure bound, not
-    a synchronization delay. Raises ``TimeoutError`` if the group outlives it.
+    """Await group disappearance or PermissionError from a recycled PGID. timeout_s is the failure
+    bound, not a synchronization delay; exceeding it raises TimeoutError.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
@@ -43,8 +29,7 @@ async def wait_for_process_group_gone(pgid: int, *, timeout_s: float = 30.0) -> 
         try:
             os.killpg(pgid, 0)
         except (ProcessLookupError, PermissionError):
-            # EPERM means the pgid was recycled by a foreign-uid process,
-            # i.e. our same-uid group exited.
+            # EPERM means a foreign-UID process recycled the PGID after our group exited.
             return
         if loop.time() > deadline:
             raise TimeoutError(f"process group {pgid} still alive after {timeout_s}s")
@@ -68,12 +53,8 @@ def fd_count() -> int | None:
 
 
 async def wait_for_fd_baseline(baseline: int | None, *, timeout_s: float = 30.0) -> None:
-    """Await the open-descriptor count's return to *baseline*.
-
-    A readiness wait, not a fixed sleep: the loop exits the moment the count
-    matches and ``timeout_s`` is a failure bound. Matches ``None`` when
-    ``/dev/fd`` is unavailable, so a caller that cannot observe the count does
-    not wait.
+    """Await the descriptor count returning to baseline; timeout_s bounds failure. If /dev/fd is
+    unavailable, None matches immediately.
     """
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_s
@@ -84,10 +65,8 @@ async def wait_for_fd_baseline(baseline: int | None, *, timeout_s: float = 30.0)
 
 
 async def wait_for_process_ids(path: Path, *, timeout_s: float = 5.0) -> dict[str, int]:
-    """Await the ``direct``/``grandchild`` pid JSON a fake blocking CLI publishes.
+    """Await the fake CLI's direct/grandchild PID JSON; timeout raises AssertionError naming the path.
 
-    Times out with an :class:`AssertionError` naming *path*, so a failed wait is
-    reported as a test failure rather than a bare timeout.
     """
     deadline = asyncio.get_running_loop().time() + timeout_s
     while asyncio.get_running_loop().time() < deadline:

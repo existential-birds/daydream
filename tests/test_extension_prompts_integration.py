@@ -1,11 +1,6 @@
-"""Real-path test: a fork prompt override reaches the backend wholesale.
+"""Extension prompt overrides through runner.run with real Git and a stub backend.
 
-Drives the production entrypoint (``runner.run``) over a real temp git repo,
-mocking ONLY the backend seam (``daydream.runner.create_backend``) per the
-testing standard — the same shape as ``tests/test_extension_skills_integration.py``.
-A ``daydream_ext`` package written by the ``ext_dir`` fixture overrides the
-``review`` prompt; assertions are on the prompts the backend actually received
-and the exit code.
+ext_dir supplies daydream_ext; assertions inspect received prompts and exit status.
 """
 
 from __future__ import annotations
@@ -19,7 +14,7 @@ import pytest
 from daydream import runner
 from daydream.backends import ResultEvent, TextEvent
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 from tests.harness.improve_backend import (
@@ -34,13 +29,9 @@ async def test_fork_prompt_override_reaches_backend(
     ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
     install_backend: Callable[[object], object], mute_side_effects: Callable[..., None],
 ) -> None:
-    """A daydream_ext override of the ``per-stack`` prompt replaces it wholesale.
+    """The per-stack override replaces the built-in prompt wholesale.
 
-    The ``review`` prompt slot was deleted with the shallow flow (#330): shallow
-    mode now runs the deep flow, whose per-stack reviewer resolves the
-    ``per-stack`` slot. The kwarg assertion (``kw['strategy']`` echoed
-    back — the real parameter name per ``build_per_stack_prompt``) pins that
-    overrides receive the exact built-in kwargs — the wholesale-override contract.
+    The echoed strategy argument proves built-in kwargs reach the override unchanged.
     """
     ext_dir.write_module(
         "def register(r):\n"
@@ -66,14 +57,7 @@ async def test_shallow_without_skill_keeps_detected_language_skill(
     feature_branch_repo: Path, make_config: Callable[..., RunConfig], install_backend: Callable[[object], object],
     mute_side_effects: Callable[..., None],
 ) -> None:
-    """``--shallow <repo>`` without ``--stack`` preserves the detected language scope (#6).
-
-    The diff is `main.py` only, so ``detect_stacks`` routes it to the python
-    stack. Shallow collapse must preserve that stack's scope (python) when no
-    explicit ``--stack`` is given, instead of downgrading to the generic-fallback
-    reviewer -- and must emit no skill token (M2/M12).
-    Observable outcome: the backend receives a per-stack python prompt with no skill.
-    """
+    """Shallow review without --stack retains detected Python scope and emits no skill token."""
     backend = ScriptedBackend(
         events=(TextEvent(text=""), ResultEvent(structured_output={"issues": []}, continuation=None),)
     )

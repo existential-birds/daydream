@@ -1,15 +1,7 @@
-"""Integration tests for --log mode (bypass Rich UI, emit plain text).
+"""Exercise --log through runner.run with real Git/filesystem and a stub backend.
 
-Tests the log mode implementation using real-path tests through runner.run()
-with real filesystem/git/event-loop, mocking only the backend seam.
-
-These tests verify that --log mode:
-1. Bypasses all Rich UI components and emits plain text to stdout
-2. Dumps tool events with proper markers ([tool:bash], [tool:bash result])
-3. Emits cost events with proper formatting ([cost] $0.0042)
-4. Works with other flags like --non-interactive
-5. Still records full trajectory (recorder unaffected)
-6. Default behavior unchanged (Rich UI when --log not used)
+Assert plain tool/cost output, non-interactive compatibility, retained trajectories,
+and the default Rich path.
 """
 from __future__ import annotations
 
@@ -22,13 +14,7 @@ from pathlib import Path
 import anyio
 import pytest
 
-from daydream.agent import (
-    _LogRedactingConsole,
-    _print_log,
-    _summarize_input,
-    _summarize_output,
-    console as phases_console,
-)
+from daydream.agent import _LogRedactingConsole, console as phases_console
 from daydream.backends import (
     AgentEvent,
     CostEvent,
@@ -39,10 +25,14 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
 )
-from daydream.cli import _parse_args
-from daydream.phases import _emit_failure_handoff
+from daydream.commands.review import _parse_args
+from daydream.phases.handoff import (
+    _emit_failure_handoff,
+)
+from daydream.run_config import RunConfig
 from daydream.run_context import InteractionPolicy, RunContext, bind_run_context
-from daydream.runner import RunConfig, run
+from daydream.runner import run
+from daydream.ui.agent_stream import _print_log, _summarize_input, _summarize_output
 from daydream.ui.tools import _primary_tool_value
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
@@ -262,13 +252,9 @@ def test_log_mode_console_redacts_string_payloads() -> None:
 
 
 class _CredentialSummarizerBackend(ScriptedBackend):
-    """Failure-summarizer stub: yields the credential-bearing handoff_prompt.
+    """Yield a credential-bearing FAILURE_SUMMARIZER_SCHEMA result.
 
-    Mirrors the real summarizer contract (``FAILURE_SUMMARIZER_SCHEMA`` in
-    phases.py: structured ``handoff_prompt`` in the ResultEvent) so the REAL
-    ``run_agent`` + ``_run_failure_summarizer`` path consumes it. Reuses
-    ``ScriptedBackend``'s shared four-member Backend surface; only the script
-    differs (one turn: blank text, then the credential-bearing ResultEvent).
+    The shared ScriptedBackend surface drives real run_agent and failure summarization.
     """
 
     def __init__(self, body: str) -> None:

@@ -181,43 +181,31 @@ class AuthorizedFixFootprint:
     ) -> str | None:
         """Accept only a normalized retarget already authorized to this item."""
         own_paths = self.item_paths(item_uid)
+        action: FixFootprintAction = "rejected_retarget"
+        accepted: str | None = None
         try:
             normalized = canonicalize_repository_file_path(repo, candidate)
         except InvalidRepositoryFilePath:
-            self._append_event(
-                action="rejected_retarget",
-                path=self._item_primary[item_uid],
-                path_kind="model",
-                origin="retarget",
-                item_uid=item_uid,
-                phase=phase,
-                round_number=round_number,
-                reason="retarget path is invalid; original target retained",
-            )
-            return None
-        if normalized in own_paths:
-            self._append_event(
-                action="authorize",
-                path=normalized,
-                path_kind="model",
-                origin="retarget",
-                item_uid=item_uid,
-                phase=phase,
-                round_number=round_number,
-                reason="retarget selected an existing item-authorized path; policy unchanged",
-            )
-            return normalized
+            normalized = self._item_primary[item_uid]
+            reason = "retarget path is invalid; original target retained"
+        else:
+            if normalized in own_paths:
+                action = "authorize"
+                accepted = normalized
+                reason = "retarget selected an existing item-authorized path; policy unchanged"
+            else:
+                reason = "retarget is outside the item's authorized paths; original target retained"
         self._append_event(
-            action="rejected_retarget",
+            action=action,
             path=normalized,
             path_kind="model",
             origin="retarget",
             item_uid=item_uid,
             phase=phase,
             round_number=round_number,
-            reason="retarget is outside the item's authorized paths; original target retained",
+            reason=reason,
         )
-        return None
+        return accepted
 
     def authorize_new_generated(
         self,

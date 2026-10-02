@@ -1,11 +1,5 @@
-"""Corpus-v2 integration tests for the four-stage training coordinator.
-
-Enters from the production entrypoint (``run_pipeline``) with a real projected-corpus
-projection directory on the real filesystem (mocking nothing — every stage
-here is CPU-bound) and asserts observable outcomes: Stage 0 consumes the
-projector's frozen split rather than re-freezing at runtime, the manifest
-carries the projection's directory-level digest, and the Stage-1/2 row
-builders read the v2 fields (``finding_text``, ``task_identity``) fail-closed.
+"""Run the CPU pipeline on real projected files without mocks. Preserve frozen splits and projection
+digests, and reject missing Stage-1/2 fields.
 """
 
 from __future__ import annotations
@@ -35,7 +29,6 @@ DIFF_BODY = "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-bad
 
 
 def _record_id(session_id: str, fingerprint: str) -> str:
-    """The v2 record id: sha256 over the canonical (session, fingerprint) join."""
     return hashlib.sha256(f"{session_id}\x1f{fingerprint}".encode("utf-8")).hexdigest()
 
 
@@ -62,7 +55,6 @@ def _v2_record(
                 "relpath": f"batches/{session_id}/diff.patch",
             }, "replay_verification": None,
         },
-        # The materialized diff body the RFT replay rebuilds the task from.
         "diff": DIFF_BODY,
     }
     if finding_text is not None:
@@ -74,19 +66,16 @@ def _v2_record(
 def _build_projection(
     tmp_path: Path, *, omit_finding_text: bool = False, base_sha: str = BASE_SHA, n_sessions: int = 80,
 ) -> Path:
-    """Build a real projected-corpus projection directory with accepted + rejected
-    gold outcome findings (plus one silver process-trace and one task-only
-    record), placed in the split file each record id deterministically
-    assigns. Label assignment is seeded off the deterministic holdout
-    membership so the holdout side always carries both gold classes."""
+    """Build gold outcomes plus silver/task-only records in content-derived splits; seed labels so the
+    holdout contains both gold classes.
+    """
     session_ids = [f"sess-{i:04d}" for i in range(n_sessions)]
     split_of = {sid: assign_split(_record_id(sid, "fp"), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
         for sid in session_ids
     }
     holdout_sessions = [sid for sid in session_ids if split_of[sid] == "holdout"]
     assert len(holdout_sessions) >= 2
-    # Deterministic labels: first holdout session accepted, second rejected,
-    # everything else alternating — both classes on both sides of the boundary.
+    # Seed both labels on both sides of the holdout boundary.
     label_of: dict[str, str] = {holdout_sessions[0]: "accepted", holdout_sessions[1]: "rejected"}
     others = [sid for sid in session_ids if sid not in label_of]
     for idx, sid in enumerate(others):
@@ -106,9 +95,7 @@ def _build_projection(
                 ), base_sha=base_sha,
             )
         )
-    # A silver process-trace and a task-only record — schema-distinct
-    # non-gold types that must not become gold outcome rows. Each lands in
-    # the split its own record id deterministically assigns.
+    # Non-gold derived record types use their own identity split.
     for sid, fingerprint, rtype, tier, text in (
         ("sess-silver", "fp-silver", "process-trace", "silver", "process commentary"),
         ("sess-task", "fp-task", "task-only", "task-only", None),
@@ -151,29 +138,24 @@ def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     manifest = run_pipeline(cfg, dry_run=False)
 
-    # Stage 0 runs to completion on the FROZEN split (not re-frozen at runtime).
     assert manifest["stages"]["stage0"]["status"] == "complete"
     split = json.loads((tmp_path / "out/stage0/split.json").read_text())
     held_out_ids = sorted(_holdout_gold_comment_ids(proj_dir))
     assert split["held_out_rows"] == len(held_out_ids)
-    # The split digest is exactly the frozen projector boundary: the content
-    # digest of the holdout gold comment ids under the run seed.
     assert split["digest"] == _split_digest(held_out_ids, cfg.seed)
 
-    # The manifest's corpus digest is the projection's directory-level digest.
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
 
-    # SFT: non-empty accepted-only completions carrying the real finding text.
+    # SFT retains accepted findings as nonempty completions.
     sft_lines = (tmp_path / "out/stage1/sft-dataset.jsonl").read_text().splitlines()
     assert sft_lines
     sft_rows = [json.loads(line) for line in sft_lines]
     assert sft_rows[0]["completion"] == ACCEPTED_TEXT
     assert all(row["completion"] != REJECTED_TEXT for row in sft_rows)
 
-    # SFT tier counts separate silver process traces from gold rows.
     assert manifest["stages"]["stage1"]["tier_counts"]["silver"] == 1
 
-    # RFT: non-empty inputs with full-length validated SHAs and a diff body.
+    # RFT retains validated full SHAs and the diff body.
     rft_lines = (tmp_path / "out/stage2/rft-inputs.jsonl").read_text().splitlines()
     assert rft_lines
     rft_rows = [json.loads(line) for line in rft_lines]
@@ -181,9 +163,8 @@ def test_stage0_v2_frozen_split_sft_and_rft_rows(tmp_path: Path) -> None:
         assert len(row["base_sha"]) == 40 and all(c in "0123456789abcdef" for c in row["base_sha"])
         assert len(row["head_sha"]) == 40 and all(c in "0123456789abcdef" for c in row["head_sha"])
         assert row["diff"] == DIFF_BODY
-        # V2 rows carry intrinsic scoring signals: the frozen projection
-        # record is format-valid, and the replay scores its adjudicated
-        # outcome through the shared verdict vocabulary — never a flat 0.0.
+        # Frozen V2 records are format-valid; replay scores their adjudicated outcome through the
+        # shared verdict vocabulary.
         assert row["format_valid"] is True
         assert row["verifier_verdicts"]
 
@@ -200,7 +181,6 @@ def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
         run_pipeline(cfg, dry_run=False)
 
 def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
-    """``daydream train --projection DIR --dry-run`` drives run_pipeline end-to-end."""
     proj_dir = _build_projection(tmp_path)
     out = tmp_path / "cli-out"
     res = cli_runner.invoke(["train", "--projection", str(proj_dir), "--out", str(out), "--dry-run"])
@@ -209,17 +189,9 @@ def test_cli_projection_wiring(tmp_path: Path, cli_runner: Any) -> None:
     assert manifest["run_identity"]["corpus_digest"] == load_v2_projection(proj_dir).digest
 
 def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
-    """AC6: the 50-record real-projection fixture feeds the full pipeline.
-
-    The fixture materializes a projected-corpus projection with the real
-    ``build_frozen_corpus`` over a curated bundle + annotation snapshot
-    (finding text, git shas, and diff bodies present — the producer-shaped
-    manifest puts base_sha under ``code_context``; the projector embeds each
-    raw diff body directly), sized so both gold classes are present plus
-    silver process-trace and task-only records. The full pipeline completes
-    over it, the run's corpus digest is stable across runs, and the emitted
-    Stage-2 rows are replayable through ``run_rft`` with no fixture
-    post-processing.
+    """Feed the real 50-record projector fixture through all pipeline stages. Require stable corpus digests
+    and replayable RFT rows without fixture post-processing; both gold classes and non-gold record types
+    are present.
     """
 
     proj_dir = build_projection_50(tmp_path)
@@ -247,32 +219,25 @@ def test_integration_50_real_projection_full_pipeline(tmp_path: Path) -> None:
         assert row["repo_slug"]
         assert row["diff"]
 
-    # The emitted v2 rows are replayable: run_rft rebuilds each task from
-    # the full frozen identity (repo_slug/base_sha/head_sha/diff) carried by
-    # the projection itself — the real-projector -> Stage-2 journey, with no
-    # fixture-side diff materialization step.
+    # Replay rebuilds tasks from the projection's frozen repo/base/head/diff identity without
+    # fixture-side diff materialization.
     replay = run_rft(RftConfig(inputs=tmp_path / "out/stage2/rft-inputs.jsonl", seed=7, rubric_version="2026.08.29-1",
             output_dir=tmp_path / "out/replay",
         )
     )
     assert replay.winners_path.is_file()
-    # Winner selection over the real projection is not degenerate: accepted
-    # gold rows score through a real correctness axis (composite > 0), so the
-    # winner filter reads a breakdown that discriminates instead of pinning
-    # every candidate at composite 0.0.
+    # Accepted gold must score through correctness so winner filtering discriminates between
+    # candidates.
     winners = json.loads(replay.winners_path.read_text())["winners"]
     assert winners
     assert any(float(w["breakdown"]["composite"]) > 0 for w in winners)
 
-    # The run's corpus digest is the projection's directory-level digest and
-    # is stable across runs (deterministic fixture bytes).
     first = manifest["run_identity"]["corpus_digest"]
     assert first == projection.digest
     manifest2 = run_pipeline(PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out2"), dry_run=False)
     assert manifest2["run_identity"]["corpus_digest"] == first
 
 def test_projection_is_the_only_input(tmp_path: Path) -> None:
-    """#1093: the legacy `corpus` kwarg is gone and `projection` is required."""
     legacy_ctor = cast(Any, PipelineConfig)
     with pytest.raises(TypeError):
         legacy_ctor(corpus=tmp_path / "corpus.jsonl", out_dir=tmp_path / "out")

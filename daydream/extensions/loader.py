@@ -1,15 +1,8 @@
-"""Extension discovery, version gate, and per-run registry construction.
+"""Discover extensions and build a version-checked registry for each run.
 
-Discovery precedence: ``$DAYDREAM_EXT_DIR`` (explicit path override and the
-test seam) → ``import
-daydream_ext`` (the fork extension package pre-declared in the wheel) → no
-extension (builtins-only registry). Absence is fine; a present-but-broken
-extension is a loud, named error.
-
-Registry propagation uses a ``ContextVar`` (mirroring the trajectory
-recorder's ``_RECORDER_VAR`` in ``daydream/trajectory.py``): access via
-:func:`get_registry` / :func:`set_registry` only.
-"""
+Precedence: DAYDREAM_EXT_DIR, import daydream_ext, then builtins only. Missing
+extensions are allowed; present but broken ones raise a named error. Access
+the task-local ContextVar through get_registry/set_registry."""
 
 from __future__ import annotations
 
@@ -127,15 +120,10 @@ def set_registry(registry: Registry) -> None:
 
 
 def get_registry() -> Registry:
-    """Return the current registry, lazily building a builtins-only one when unset.
+    """Return the bound registry or fresh builtins without extension discovery.
 
-    The lazy fallback lets direct phase calls in unit tests resolve built-ins
-    without any runner setup; it deliberately skips extension discovery —
-    extensions apply only through :func:`build_registry` at run entry. It also
-    deliberately does NOT cache into the ContextVar: a sync caller before
-    :func:`set_registry` would otherwise pin a stale builtins snapshot on the
-    process-level context, leaking across pytest tests.
-    """
+    Do not cache the fallback: sync callers before set_registry would otherwise
+    leak a stale builtin snapshot across contexts. Extensions load only at run entry."""
     registry = _REGISTRY_VAR.get()
     if registry is None:
         registry = Registry()

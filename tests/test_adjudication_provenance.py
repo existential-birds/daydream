@@ -20,8 +20,8 @@ from daydream.deep.adjudication_provenance import (
     load_provenance,
     record_provenance,
 )
+from daydream.deep.adjudication_steps import _apply_adjudication_verdicts
 from daydream.deep.artifacts import adjudication_provenance_path
-from daydream.deep.merge_steps import _apply_adjudication_verdicts
 
 
 def test_a_revision_that_changes_a_revisable_field_is_recorded(tmp_path: Path) -> None:

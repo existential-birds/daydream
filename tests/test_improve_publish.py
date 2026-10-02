@@ -9,6 +9,7 @@ import pytest
 
 from daydream import git_ops, runner
 from daydream.config_file import DaydreamFileConfig
+from daydream.git_ops import github as git_github
 from daydream.improve.publish import (
     ImprovePublishError,
     IssuePublisher,
@@ -18,7 +19,7 @@ from daydream.improve.publish import (
     member_marker,
     package_marker,
 )
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 
 
 def _issue(package_id: str, *, state: str = "open", number: int = 7) -> dict[str, object]:
@@ -209,7 +210,7 @@ def test_strict_issue_lookup_paginates_and_filters_pull_requests(monkeypatch: py
         captured.update(repo=repo, endpoint=endpoint, **kwargs)
         return rows
 
-    monkeypatch.setattr(git_ops, "gh_api", api)
+    monkeypatch.setattr(git_github, "gh_api", api)
 
     issues = git_ops.gh_issue_list_strict(tmp_path, state="all", repo_slug="acme/widgets",)
 

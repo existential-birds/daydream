@@ -1,11 +1,4 @@
-"""Deterministic per-agent segmentation of ATIF trajectories (projection).
-
-Pinned rule (spike 0B): sibling registration order in
-``TrajectoryRecorder.fork()`` is append-ordered, so enumeration of the
-trajectory's ``subagent_trajectory_ref`` list is the fork registration
-order. Segmentation must never be a coin-flip, so duplicate sibling keys
-raise.
-"""
+"""Segment sibling trajectories in recorder fork-registration order; reject duplicate ids."""
 
 from dataclasses import dataclass
 from typing import Any
@@ -27,15 +20,9 @@ def _descriptor(trajectory_id: str) -> str:
 
 
 def segment(trajectory: dict[str, Any]) -> list[Segment]:
-    """Segment a trajectory dict into per-agent ``Segment`` records.
+    """Enumerate siblings as seg-0..n-1 in registration order; use the root only without siblings.
 
-    Ordering follows the trajectory's ``subagent_trajectory_ref`` list order
-    (fork registration order, per the Task 0B pinned rule). The root trajectory
-    is ``seg-0`` only when no siblings exist; otherwise siblings are ``seg-0..n-1``.
-
-    Raises:
-        ValueError: when two sibling refs share the same ``trajectory_id`` —
-            the message names the duplicated id.
+    Duplicate trajectory_id values raise ValueError naming the id.
     """
     refs = trajectory.get("subagent_trajectory_ref") or []
     if not refs:

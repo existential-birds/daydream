@@ -1,75 +1,20 @@
-"""Harvest pass — assemble immutable bronze signals into reward inputs.
+"""Harvest immutable bronze signals into bitemporal label and reward annotations.
 
-The harvest pass is the single deferred *annotate* step of the corpus
-pipeline: it reads an archived run's immutable bronze artifacts, reduces
-them to a :class:`~daydream.training.reward.ScoringInputs`, derives the
-outcome label, scores a :class:`~daydream.training.reward.RewardBreakdown`
-or :class:`~daydream.training.reward.PosteriorBreakdown`, and appends one
-bitemporal annotation. The stored ``composite_reward`` is the *pure intrinsic*
-composite (C5): the posterior false-positive axis is a sibling field carried on
-:class:`~daydream.training.reward.PosteriorBreakdown`, never folded into the
-composite. There is no separate "labeling" step: a single annotate pass writes
-label + reward together.
+HarvestServices owns acquisition and persistence; build_annotation reduces a
+validated row and frozen evidence without I/O. Posterior false-positive cost
+stays beside the pure intrinsic composite. Qualifying decisive reply time pins
+PR outcomes, falling back to merge time; local outcomes have no valid-time pin.
 
-This module carries the bronze-signal assembly step, the per-run annotation
-builder, and the :func:`run_harvest` orchestrator that walks the archive index
-and appends one fresh annotation generation per run.
+Bronze assembly reads deep/recommendation-verdicts.json and stack-*-records.json.
+Absent verdicts preserve the format gate; malformed present JSON closes it.
+Review-output character count is the length proxy (root path, then deep path).
 
-Signal sources (all under the archived run directory):
-
-* ``deep/recommendation-verdicts.json`` — the ``verdicts`` list produced by
-  the recommendation-verification stage (verdict shape mirrors
-  :data:`daydream.phases.RECOMMENDATION_VERDICTS_SCHEMA`).
-* ``deep/stack-*-records.json`` — per-stack finding records (shape mirrors
-  the reader in :mod:`daydream.eval.analyzer`).
-* ``review-output.md`` (root) falling back to ``deep/review-output.md`` —
-  the char-count length proxy (matching the back-compat fallback in the
-  former exporter).
-
-Failure-propagation rules:
-
-* Absent verdicts ⇒ ``verifier_verdicts=None`` with the format gate intact.
-  Expected for a shallow run and, after the verify relocation, a declined
-  deep run that skipped recommendation verification at the apply-fixes gate.
-* A *present* verdicts/records file that is malformed JSON ⇒ caught as
-  :class:`json.JSONDecodeError` and surfaced as ``format_valid=False``;
-  assembly never crashes on bad data.
-* ``length`` is the documented review-output char-count proxy, ``None`` when
-  no review output exists.
-
-Evidence acquisition and annotation reduction:
-
-* :func:`acquire_harvest_evidence` performs posterior, reviewer, prior, and
-  bronze acquisition through one explicit :class:`HarvestServices` value. A
-  benign PR-merge-status failure (fork PR 404, unpushed-SHA 422) degrades to the
-  local posterior; exhausted rate limits reach the orchestrator.
-* :func:`build_annotation` consumes only a validated row and frozen evidence,
-  derives the outcome label, applies prior sufficiency, scores the reward, and
-  returns a frozen :class:`AnnotationPayload` without I/O.
-* ``valid_at`` is the earliest qualifying decisive-evidence timestamp — the
-  ``created_at`` of a reply supporting an ``accepted``/``rejected`` disposition
-  (M12) — falling back to the PR merge timestamp when no decisive evidence
-  exists, and ``None`` for non-PR/local rows (the write layer collapses
-  ``None`` → ``observed_at``).
-
-Orchestrator (:func:`run_harvest`):
-
-* **Idempotent and re-runnable:** every indexed run is considered on every
-  pass, but the write layer dedups on ``(evidence_sha, labeler_policy_version,
-  reply_evidence_digest, labels, has_posterior)`` — a re-harvest with unchanged
-  evidence is a no-op (counted in ``skipped``). A ``LABELER_POLICY_VERSION`` or
-  reply-evidence change alters the dedup key and so appends a fresh
-  generation, letting older ``as_of`` pins still resolve their original
-  generation. Only the ``cache``/``dry_run`` paths otherwise suppress writes.
-* **Per-row error isolation:** an exception on one row counts in ``errors`` and
-  does not derail subsequent rows. Configuration errors (missing
-  ``archive_dir``) raise before the loop begins.
-* **Capture-time ``base_sha``:** materialized into the manifest when missing
-  (the only fallible git I/O of the annotate pass lives here, not in the pure
-  build-corpus projection).
-
-The rubric-assembly helpers remain harvest-owned; stateful operations cross the
-per-run services boundary.
+Each pass revisits indexed runs. The archive deduplicates unchanged evidence,
+policy, labels, and posterior population; changed evidence/policy appends a new
+generation for historical as_of queries. Dry-run suppresses all writes. Cache
+resume skips completed rows; exhausted rate limits abort without losing progress.
+Other row failures are isolated. Missing base_sha is materialized during
+acquisition, keeping the later frozen corpus projection free of Git I/O.
 """
 
 from __future__ import annotations
@@ -79,7 +24,8 @@ import os
 import re
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from contextlib import closing
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Protocol
@@ -205,16 +151,9 @@ class HarvestServices(Protocol):
 
 
 def _read_review_output(run_dir: Path) -> str | None:
-    r"""Return the review-output text, or ``None`` when absent.
+    """Read review-output.md from the run root, then deep/; return None when absent.
 
-    Tries ``review-output.md`` at the run root first (shallow-loop layout),
-    then ``deep/review-output.md`` (deep-mode layout), mirroring the former
-    exporter's back-compat fallback order.
-
-    Returns:
-        The text of the first review-output file found, or ``None`` when
-        neither location exists. Non-``FileNotFoundError`` ``OSError``\s
-        propagate to the caller.
+    Propagate filesystem errors other than FileNotFoundError.
     """
     for candidate in (run_dir / _REVIEW_OUTPUT_FILE, run_dir / "deep" / _REVIEW_OUTPUT_FILE):
         try:
@@ -283,28 +222,12 @@ def _github_with_retry(
     backoff_sleep: Callable[[float], None],
     **kwargs: Any,
 ) -> Any:
-    """Proxy to :func:`daydream.git_ops.gh_api` keyed by ``repo`` slug.
+    """Call gh_api from the current directory with bounded rate-limit backoff.
 
-    The PR posterior signal extractors call ``gh_api(repo, endpoint, **kwargs)``
-    with ``repo`` as a slug string (``"owner/name"``). :func:`git_ops.gh_api`
-    takes a ``Path`` as its first argument because it uses ``cwd=repo`` for the
-    shell-out. We adapt by using ``Path(".")`` — ``gh api`` works from any cwd
-    because it authenticates against the GitHub host configured in ``gh auth``,
-    not the local repo.
-
-    On a :class:`~daydream.git_ops.RateLimitError`, we sleep with bounded
-    backoff (``min(retry_after, _MAX_BACKOFF_SEC)``, falling back to
-    ``_DEFAULT_BACKOFF_SEC`` only when ``retry_after`` is absent, so an explicit
-    ``Retry-After: 0`` hint is preserved) and
-    retry up to ``_MAX_RATE_LIMIT_RETRIES`` times; if the limit is still
-    exhausted, the :class:`RateLimitError` propagates so the orchestrator can
-    abort cleanly while preserving its resume marker.
-
-    Limitation: ``repo`` is accepted for API compatibility but is not used to
-    resolve the GitHub host; all requests go to the single host configured in
-    ``gh auth`` (typically ``github.com``). Mixing repos from different GitHub
-    hosts in a single harvest run would silently use the wrong host.
-    """
+    Honor Retry-After, including zero; use the default only when absent and cap
+    delays at _MAX_BACKOFF_SEC. Exhaustion propagates for resumable abort.
+    repo is the fetcher-interface slug, not host selection: gh uses its configured
+    host, so one harvest cannot mix repositories from different GitHub hosts."""
     for attempt in range(_MAX_RATE_LIMIT_RETRIES):
         try:
             return git_ops.gh_api(Path("."), endpoint, **kwargs, auth=auth)
@@ -345,12 +268,9 @@ def _safe_fix_applied(
     changed_files: tuple[str, ...],
     repo_clone: Path,
 ) -> FixAppliedSignal:
-    """Run :func:`fix_applied_signal`, swallowing missing-data errors.
+    """Check recommended hunks, using the legacy diff fallback when required.
 
-    The cascade reads ``recommended.patch`` (falling back to ``diff.patch``
-    for legacy archives). When the archive directory is missing (older runs,
-    dry fixtures), or when ``changed_files`` is empty, return
-    :data:`_FIX_APPLIED_STUB`.
+    Missing archive data or an empty changed-file set returns _FIX_APPLIED_STUB.
     """
     if not changed_files:
         return _FIX_APPLIED_STUB
@@ -371,12 +291,7 @@ _BENIGN_PR_ABSENCE_STATUSES = (404, 422)
 
 
 def _is_benign_pr_absence(exc: GitError) -> bool:
-    """Return ``True`` when a ``gh`` ``GitError`` means the PR is genuinely absent.
-
-    Classification is on the HTTP status embedded in the ``gh`` failure message
-    (``... (HTTP 404)``); a failure with no recognizable status is treated as
-    transient (not benign), so it propagates rather than silently degrading.
-    """
+    """Recognize HTTP 404 as absent; unknown statuses propagate as transient failures."""
     match = re.search(r"\bHTTP (\d{3})\b", str(exc))
     return match is not None and int(match.group(1)) in _BENIGN_PR_ABSENCE_STATUSES
 
@@ -387,29 +302,14 @@ def _build_rubric_pr(
     services: HarvestServices,
     github: Callable[..., Any],
     repo_clone: Path,
-    pr_merge: PRMergeSignal | None = None,
-    changed_files: tuple[str, ...],
+    pr_merge: PRMergeSignal,
     pr_author_logins: frozenset[str] = frozenset(),
     review_author_logins: frozenset[str] = frozenset(),
 ) -> Rubric:
-    """Compose all four signals for a row that originated from a PR.
+    """Combine a fetched PR state with scoped comment, fix, and finding signals.
 
-    Args:
-        pr_merge: Pre-fetched :class:`PRMergeSignal`. When supplied
-            (already resolved by the caller before the catch boundary),
-            ``pr_merge_signal`` is not called again. When ``None`` it is
-            fetched here as before.
-        changed_files: Pre-decoded ``changed_files`` for ``row`` (the caller
-            already decoded the JSON column via ``_row_changed_files``).
-        pr_author_logins: Logins whose replies count as PR-author judgment
-            under the M6 gate (passed through to
-            :func:`~daydream.training.labeler_signals.per_finding_resolution_signal`).
-        review_author_logins: Logins whose replies count as formal-review
-            judgment under the M6 gate.
-    """
+    Fetch comments once; PR/review author sets govern decisive reply eligibility."""
     signal_row = row.as_signal_row()
-    if pr_merge is None:
-        pr_merge = pr_merge_signal(signal_row, gh_api=github)
     # Fetch + index the PR's review comments once; both resolution signals
     # consume this index instead of each hitting the /comments endpoint.
     recorded_fingerprints = services.read_recorded_fingerprints(row)
@@ -422,7 +322,7 @@ def _build_rubric_pr(
     fix = _safe_fix_applied(
         row,
         services=services,
-        changed_files=changed_files,
+        changed_files=row.changed_files,
         repo_clone=repo_clone,
     )
     rubric = Rubric(
@@ -452,13 +352,9 @@ def _build_rubric_local(
     repo_clone: Path,
     clone_resolved: bool = False,
 ) -> Rubric:
-    """Compose signals for a PR-less row (local-branch posterior).
+    """Build local-branch signals, forcing unknown when no clone was resolved.
 
-    When ``clone_resolved`` is ``False`` no real git working tree was
-    obtained for the row (the orchestrator passes the archive dir as a
-    placeholder), so the local-commit check cannot distinguish "no follow-up
-    commit applied the fix" from "we could not look". Forcing ``"unknown"``
-    avoids mislabeling such a row ``"rejected"``.
+    An archive-directory placeholder cannot establish that a fix was rejected.
     """
     # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
     # degraded PR row's merge evidence was merely unavailable, so emit "unknown"
@@ -492,12 +388,7 @@ def _build_rubric_local(
 
 
 def _pr_state_for_rubric(rubric: Rubric) -> str | None:
-    """Map a PR-review rubric to a sqlite ``pr_state`` discriminator.
-
-    For local-branch rubrics returns ``None`` so the column reflects "no PR
-    associated". An unmerged PR preserves its live GitHub ``state`` (M11) —
-    ``open`` stays ``open`` rather than being collapsed to ``closed``.
-    """
+    """Return None for local runs; preserve the live open/closed state for unmerged PRs."""
     if rubric.posterior_source != "pr_review":
         return None
     if rubric.pr_merge.merged:
@@ -510,47 +401,16 @@ def _pr_state_for_rubric(rubric: Rubric) -> str | None:
 
 @dataclass(frozen=True)
 class AnnotationPayload:
-    """One run's bitemporal annotation, ready to persist (no DB writes here).
+    """One run's canonical annotation, ready for append_label_observation.
 
-    Attributes:
-        labels: Outcome labels (``[]`` when the derived label is
-            ``"unknown"``, else a single-element list).
-        pr_state: sqlite ``pr_state`` discriminator (``"merged"``/``"closed"``
-            for PR rows, ``None`` for local-branch rows).
-        valid_at: The valid-time of the posterior outcome — the earliest
-            qualifying decisive-evidence timestamp (M12), falling back to the
-            PR merge timestamp when no decisive evidence exists, and ``None``
-            for non-PR/local rows (the write layer collapses ``None`` →
-            ``observed_at``).
-        reward_version: The :data:`daydream.training.reward.REWARD_VERSION`
-            observed at scoring time.
-        reward_json: ``json.dumps`` of the full
-            :meth:`~daydream.training.reward.RewardBreakdown.to_dict` (the
-            :class:`~daydream.training.reward.PosteriorBreakdown` variant on the
-            mapped-label path) so re-projection has every axis, including the
-            posterior sibling fields when present.
-        composite_reward: The cached *pure intrinsic* composite scalar
-            (correctness − length penalty); the posterior penalty is
-            never folded in (C5). ``None`` when uncomputable.
-        evidence_sha: The run's ``head_sha`` (the evidence anchor for the
-            posterior signals), or ``None``.
-        rubric_json: ``json.dumps`` of the posterior rubric, or ``None``.
-        reviewer_logins: The human GitHub accounts whose review/reply outcomes
-            seeded the posterior axis — captured at harvest time (irreproducible
-            later) and persisted. ``[]`` for local/non-PR rows.
-        has_posterior: Population discriminator — ``True`` when the scored
-            breakdown is a :class:`~daydream.training.reward.PosteriorBreakdown`,
-            i.e. a ``pr_review`` row whose maintainer outcome label mapped to a
-            penalty. ``local_branch`` rows keep their label but are **not**
-            posterior evidence (a local commit is not a maintainer acting in a
-            PR), so they carry ``False`` and no ``posterior_cost``.
-        reply_classifier_version: The
-            :data:`~daydream.training.labeler_versions.REPLY_CLASSIFIER_VERSION`
-            that produced the per-finding dispositions (M13 version axis).
-        reply_evidence_digest: Stable digest over the session's combined reply
-            evidence (M14 dedup input), or ``None`` when no reply evidence
-            exists.
-    """
+    Unknown labels become []; evidence_sha is the archived head. valid_at is
+    decisive PR reply time, then merge time, or None for local outcomes (the
+    writer maps None to observed_at). reward_json retains every score axis;
+    composite_reward is intrinsic only and may be uncomputable. rubric_json and
+    reviewer_logins preserve acquisition-time provenance. has_posterior is true
+    only for mapped maintainer feedback on a PR, never a local applied commit.
+    Reply classifier version and combined evidence digest pin the dedup axis;
+    no reply evidence yields a None digest."""
 
     labels: list[str]
     pr_state: str | None
@@ -566,29 +426,6 @@ class AnnotationPayload:
     reply_evidence_digest: str | None = None
 
 
-def _degrade_to_local(
-    row: HarvestRow,
-    *,
-    services: HarvestServices,
-    repo_clone: Path,
-    clone_resolved: bool,
-) -> tuple[Any, None, list[str], None, int]:
-    """Build a local-branch rubric and return the degraded posterior state.
-
-    Used when a PR-path fetch fails benignly (fork PR 404, unpushed-SHA 422)
-    or when the row has no PR at all.  Returns a 5-tuple
-    ``(rubric, valid_at, reviewer_logins, outcome_prior, prior_n)`` with the
-    non-PR defaults so callers can unpack uniformly.
-    """
-    rubric = _build_rubric_local(
-        row,
-        services=services,
-        repo_clone=repo_clone,
-        clone_resolved=clone_resolved,
-    )
-    return rubric, None, [], None, 0
-
-
 def acquire_harvest_evidence(
     row: HarvestRow,
     *,
@@ -596,66 +433,45 @@ def acquire_harvest_evidence(
     repo_resolution: Path | None,
     base_sha_status: BaseShaStatus,
     valid_at_override: str | None = None,
-    github: Callable[..., Any] | None = None,
 ) -> HarvestEvidence:
     """Acquire one row's complete external evidence in established order."""
-    github_api = services.github if github is None else github
     repo_clone = repo_resolution or services.archive_dir
+    pr_merge = None
     if row.is_pr:
-        changed_files = row.changed_files
         try:
-            pr_merge = pr_merge_signal(
-                row.as_signal_row(),
-                gh_api=github_api,
-            )
+            pr_merge = pr_merge_signal(row.as_signal_row(), gh_api=services.github)
         except RateLimitError:
             raise
         except GitError as exc:
             if not _is_benign_pr_absence(exc):
                 raise
-            rubric, _valid_at, reviewer_logins, pooled_prior, prior_n = _degrade_to_local(
-                row,
-                services=services,
-                repo_clone=repo_clone,
-                clone_resolved=repo_resolution is not None,
-            )
-        else:
-            try:
-                reviewer_logins = reviewer_logins_signal(
-                    row.as_signal_row(),
-                    gh_api=github_api,
-                )
-            except RateLimitError:
-                raise
-            except GitError:
-                reviewer_logins = []
-            rubric = _build_rubric_pr(
-                row,
-                services=services,
-                github=github_api,
-                repo_clone=repo_clone,
-                pr_merge=pr_merge,
-                changed_files=changed_files,
-                pr_author_logins=(
-                    frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset()
-                ),
-                review_author_logins=frozenset(reviewer_logins),
-            )
-            valid_at = _decisive_evidence_valid_at(rubric)
-            if valid_at is None and rubric.pr_merge.merged:
-                valid_at = rubric.pr_merge.merged_at
-            pooled_prior, prior_n = services.reviewer_prior(
-                tuple(reviewer_logins),
-                before_valid_at=valid_at or services.now_iso(),
-                exclude_session=row.session_id,
-                repo_slug=row.repo_slug,
-            )
-    else:
-        rubric, _valid_at, reviewer_logins, pooled_prior, prior_n = _degrade_to_local(
-            row,
-            services=services,
-            repo_clone=repo_clone,
+
+    reviewer_logins: list[str] = []
+    pooled_prior = None
+    prior_n = 0
+    if pr_merge is None:
+        rubric = _build_rubric_local(
+            row, services=services, repo_clone=repo_clone,
             clone_resolved=repo_resolution is not None,
+        )
+    else:
+        try:
+            reviewer_logins = reviewer_logins_signal(row.as_signal_row(), gh_api=services.github)
+        except RateLimitError:
+            raise
+        except GitError:
+            pass
+        rubric = _build_rubric_pr(
+            row, services=services, github=services.github, repo_clone=repo_clone,
+            pr_merge=pr_merge,
+            pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
+            review_author_logins=frozenset(reviewer_logins),
+        )
+        pooled_prior, prior_n = services.reviewer_prior(
+            tuple(reviewer_logins),
+            before_valid_at=_rubric_valid_at(rubric) or services.now_iso(),
+            exclude_session=row.session_id,
+            repo_slug=row.repo_slug,
         )
 
     # Preserve the established boundary: bronze reads occur after posterior,
@@ -678,11 +494,7 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
     rubric = evidence.rubric
     outcome_label = derive_outcome_label(rubric)
     labels = [outcome_label] if outcome_label != "unknown" else []
-    valid_at = None
-    if rubric.posterior_source == "pr_review":
-        valid_at = _decisive_evidence_valid_at(rubric)
-        if valid_at is None and rubric.pr_merge.merged:
-            valid_at = rubric.pr_merge.merged_at
+    valid_at = _rubric_valid_at(rubric)
     if evidence.valid_at_override is not None:
         valid_at = evidence.valid_at_override
 
@@ -723,18 +535,22 @@ def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPa
         ),
     )
 
-def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
-    """Earliest qualifying decisive-evidence timestamp from the rubric (M12).
+def _rubric_valid_at(rubric: Rubric) -> str | None:
+    """PR evidence time, falling back to merge time; local labels have no pin."""
+    if rubric.posterior_source != "pr_review":
+        return None
+    decisive = _decisive_evidence_valid_at(rubric)
+    if decisive is not None:
+        return decisive
+    return rubric.pr_merge.merged_at if rubric.pr_merge.merged else None
 
-    Scans the per-finding resolutions' persisted evidence for ``created_at``
-    stamps of replies that support the resolution's ``accepted``/``rejected``
-    disposition: an entry counts only when its author qualified (the
-    ``reason`` is not ``excluded:*``) AND the reply's own ``classifier_label``
-    matches the disposition — so an earlier qualifying-but-ambiguous reply
-    never pulls ``valid_at`` before the reply that actually decided the
-    finding. Malformed entries (missing/blank ``created_at``) are skipped for
-    the min computation; when no decisive timestamp exists the caller falls
-    back to the merge time or ``None`` — never a fabricated timestamp.
+
+def _decisive_evidence_valid_at(rubric: Rubric) -> str | None:
+    """Return the earliest qualifying reply timestamp supporting a decisive disposition.
+
+    Exclude excluded:* authors and classifier labels that differ from the finding's
+    accepted/rejected outcome. Skip missing/blank timestamps; absent decisive time
+    lets the caller fall back to merge time or None.
     """
     stamps: list[str] = []
     for resolution in rubric.per_finding_resolutions or []:
@@ -766,18 +582,9 @@ def _resolve_repo_for_row(
     fetched_repos: set[Path] | None = None,
     console: Console | None = None,
 ) -> Path | None:
-    """Resolve a local repo working tree for a manifest row.
+    """Prefer an existing source_path Git tree, then fetch/clone owner/repo in the cache.
 
-    Priority:
-        1. ``row["source_path"]`` when it exists on disk with a ``.git`` dir.
-        2. Clone cache: ``clone_cache/<owner>/<repo>/`` — fetch if present, clone if not.
-        3. ``None`` when no source is available.
-
-    Clone/fetch failures are caught and logged; they never block harvest.
-
-    Args:
-        row: An indexed manifest row (supplies ``source_path``, ``remote_url``, ``repo_slug``).
-        clone_cache: Root directory for cached clones, or ``None`` to skip cloning.
+    Return None without a source/cache. Log clone/fetch failures without blocking harvest.
     """
     source_path = row.source_path
     if source_path and (source_path / ".git").exists():
@@ -862,24 +669,12 @@ def _materialize_base_sha_if_missing(
 
 @dataclass(frozen=True)
 class HarvestConfig:
-    """Configuration for a single :func:`run_harvest` invocation.
+    """Settings for one archive pass.
 
-    Attributes:
-        archive_dir: Path to the daydream archive root (contains ``index.db``).
-        dry_run: When ``True``, collect evidence without changing bronze,
-            SQLite, repository clones, response caches, or resume state.
-            Existing completion markers do not suppress preview acquisition.
-        cache_dir: Optional directory backing
-            :class:`~daydream.training.backfill_cache.BackfillCache`. When
-            ``None``, ``gh_api`` calls hit the network on every row.
-        repo_clone_root: Optional root under which per-repo clones live (used
-            by the fix-applied / local-commit cascades). Falls back to
-            ``cache_dir / 'repos'`` when unset (or ``None`` if ``cache_dir``
-            is also unset).
-        session_filter: Optional ``session_id`` prefix to restrict the queue.
-        gh_request_spacing_sec: Sleep duration between rows to spread
-            ``gh api`` calls under GitHub's secondary rate limits.
-    """
+    Dry-run acquires fresh evidence without mutating bronze, SQLite, clones,
+    caches, or completion markers. cache_dir enables response caching/resume;
+    repo_clone_root defaults to its repos/ child, or None without a cache.
+    session_filter is a session-id prefix; gh_request_spacing_sec separates rows."""
 
     archive_dir: Path
     dry_run: bool = False
@@ -933,14 +728,11 @@ class _ProductionHarvestServices:
         if not self.archive_dir.exists():
             raise FileNotFoundError(f"archive_dir does not exist: {self.archive_dir}")
         if self._config.dry_run:
-            conn = readonly_connection(self.archive_dir)
-            try:
+            with closing(readonly_connection(self.archive_dir)) as conn:
                 return [dict(row) for row in conn.execute(
                     "SELECT * FROM runs WHERE session_id LIKE ? || '%'",
                     (session_filter or "",),
                 )]
-            finally:
-                conn.close()
         if session_filter:
             return query_runs(
                 self.archive_dir,
@@ -1071,19 +863,8 @@ class _ProductionHarvestServices:
         return append_label_observation(
             self.archive_dir,
             row.session_id,
-            labels=payload.labels,
-            pr_state=payload.pr_state,
             labeler_version=labeler_versions.LABELER_POLICY_VERSION,
-            evidence_sha=payload.evidence_sha,
-            rubric_json=payload.rubric_json,
-            valid_at=payload.valid_at,
-            reward_version=payload.reward_version,
-            reward_json=payload.reward_json,
-            composite_reward=payload.composite_reward,
-            reviewer_logins=payload.reviewer_logins,
-            has_posterior=payload.has_posterior,
-            reply_classifier_version=payload.reply_classifier_version,
-            reply_evidence_digest=payload.reply_evidence_digest,
+            **asdict(payload),
         )
 
     def mark_session_done(self, session_id: str) -> None:

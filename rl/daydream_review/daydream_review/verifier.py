@@ -1,16 +1,7 @@
-"""Stdlib-only seal/verify primitive for reward artifact isolation.
-
-The reward must consume only state the rollout agent cannot rewrite. The trusted
-supervisor seals the staged run-dir artifacts together with the candidate diff
-(:func:`seal_artifacts`), and the reward verifies the seal against the staged
-copy before trusting any value (:func:`verify`). An attempted tamper — a
-rewritten artifact, an altered candidate diff, a missing artifact — makes
-verification fail, which must zero the reward rather than crash scoring:
-:func:`verify` never raises and returns ``False`` on any ``OSError``.
-
-Constraint: standard library only (``hashlib``, ``dataclasses``, ``pathlib``,
-``os``, ``json``). The standalone RL project deliberately keeps verifiers/prime-rl
-out of daydream's lockfile, and this primitive must not disturb that boundary.
+"""Standard-library-only integrity seals for reward artifacts and candidate diffs, keeping
+verifiers/prime-rl out of Daydream's lockfile. The supervisor seals after the agent write window;
+scoring verifies staged inputs before trust. Changed/missing inputs fail verification and zero
+reward. verify never raises and treats OSError as failure.
 """
 
 from __future__ import annotations
@@ -28,20 +19,10 @@ _ALGORITHM: Literal["sha256"] = "sha256"
 
 @dataclass(frozen=True)
 class SealResult:
-    """An integrity seal over a set of artifacts and the candidate diff.
-
-    ``artifact_digests`` maps each artifact's path relative to the common parent
-    of the sealed paths (posix form) to its sha256 hex digest; the algorithm is
-    pinned as ``"sha256"`` so a verify can never silently downgrade.
-    ``candidate_diff`` carries the raw diff bytes as an audit record of what
-    was sealed. Verification does not trust this embedded copy: the verifying
-    side re-derives the diff from the sandbox at scoring time and compares its
-    digest against ``candidate_diff_digest``, so the seal is bound to the diff
-    the verifier checkout actually applies. Diff bytes are arbitrary (git diff
-    output is not guaranteed UTF-8), so the record is serialized to JSON as
-    base64, never as a UTF-8 decode. Serialized by the supervisor
-    (:meth:`model_dump_json`) and parsed back at verification time
-    (:meth:`model_validate_json`).
+    """Seal artifacts by relative POSIX path under their common parent, using pinned SHA-256 digests to
+    prevent algorithm downgrade. candidate_diff stores raw bytes as base64 for audit, including
+    non-UTF-8 diffs. Verification re-derives the sandbox diff and checks candidate_diff_digest; it
+    must never trust the embedded audit copy.
     """
 
     algorithm: Literal["sha256"] = _ALGORITHM
@@ -50,12 +31,8 @@ class SealResult:
     candidate_diff: bytes = b""
 
     def model_dump_json(self) -> str:
-        """Serialize the seal to a JSON string (deterministic key order).
+        """Serialize deterministically, with candidate_diff base64-encoded as specified by SealResult.
 
-        ``candidate_diff`` is base64-encoded: the diff bytes are arbitrary
-        (git diff output is not guaranteed UTF-8), and a UTF-8 decode here
-        would make seal production raise on a non-UTF-8 diff — leaving the run
-        unsealed instead of sealed.
         """
         return json.dumps(
             {
@@ -69,13 +46,8 @@ class SealResult:
 
     @classmethod
     def model_validate_json(cls, raw: str) -> "SealResult":
-        """Parse and validate a ``seal.json`` produced by :meth:`model_dump_json`.
-
-        Raises:
-            ValueError: If the payload is not the sealed shape (malformed JSON,
-                wrong algorithm, or non-string digest values). A tamper must
-                surface as a verification failure, so callers treat this as a
-                failed seal — never as a pass.
+        """Parse a seal, raising ValueError for malformed JSON, wrong algorithm, or invalid digest
+        types. Callers must treat invalid payloads as failed verification.
         """
         try:
             data = json.loads(raw)
@@ -124,38 +96,24 @@ def _relative_keys(paths: list[Path]) -> dict[str, Path]:
 
 
 def read_paths(paths: list[Path]) -> dict[str, bytes]:
-    """Read each path's raw bytes, keyed by its posix path relative to the common parent.
-
-    Raises:
-        OSError: If an artifact cannot be read. Callers choose the policy:
-            :func:`seal_artifacts` lets it propagate (a supervisor-side
-            programming error), :func:`verify` absorbs it as a failed seal.
-        ValueError: If the paths share no common parent (see :func:`_relative_keys`).
+    """Read raw bytes under the relative keys defined by _relative_keys, propagating its ValueError.
+    Unreadable artifacts raise OSError: seal_artifacts propagates this supervisor error, while
+    verify treats it as a failed seal.
     """
     return {rel: path.read_bytes() for rel, path in _relative_keys(paths).items()}
 
 
 def seal_artifacts(paths: list[Path], candidate_diff: bytes) -> SealResult:
-    """Seal *paths* (sha256 of each artifact's raw bytes) plus *candidate_diff*.
-
-    The raw diff is carried in the seal record as an audit copy; verification
-    re-derives the diff from the sandbox at scoring time instead of trusting
-    this embedded copy (:func:`rundir.verify_seal`).
-
-    Raises:
-        OSError: If an artifact cannot be read. Sealing is the supervisor's job
-            over a known-good staged copy, so a missing artifact here is a
-            programming error, not a tamper to absorb.
+    """Seal raw artifact bytes and candidate_diff under the SealResult contract. Unreadable artifacts
+    raise OSError: the supervisor expects a known-good staged copy, so read failures are programming
+    errors.
     """
     return seal_bytes(read_paths(paths), candidate_diff)
 
 
 def seal_bytes(artifacts: dict[str, bytes], candidate_diff: bytes) -> SealResult:
-    """Seal artifacts given as ``{relative posix path: raw bytes}`` plus *candidate_diff*.
-
-    The sandbox-side twin of :func:`seal_artifacts`: the supervisor reads the
-    archived run-dir members as bytes out of the runtime and seals them without
-    staging a host copy first.
+    """Seal {relative POSIX path: raw bytes} plus candidate_diff directly from the runtime, without
+    staging a host copy for seal_artifacts.
     """
     return SealResult(
         algorithm=_ALGORITHM,

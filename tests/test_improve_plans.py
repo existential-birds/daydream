@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 from copy import deepcopy
+from dataclasses import asdict
 from datetime import date
 from pathlib import Path
 from typing import Any, cast
@@ -10,12 +11,13 @@ from typing import Any, cast
 import pytest
 from jsonschema import Draft202012Validator
 
-from daydream import artifact_visibility, git_ops
+from daydream import git_ops
 from daydream.artifact_visibility import (
     ArtifactVisibilityError,
     private_root_locations,
     resolve_private_workspace_owner,
 )
+from daydream.artifacts import ownership as artifact_ownership
 from daydream.cli import main as cli_main
 from daydream.improve.assemble import (
     AssemblyIssue,
@@ -33,35 +35,40 @@ from daydream.improve.command_contract import (
     validate_host_commands,
     validate_recon_commands,
 )
-from daydream.improve.orchestrator import _reanchored_report_section
-from daydream.improve.plans import (
+from daydream.improve.plan_index import (
     PLAN_INDEX_FILENAME,
-    PRUNE_GIT_FAILURE,
-    PRUNE_NOT_FOUND,
-    PRUNE_NOT_REANCHOR,
-    PRUNE_REMOVED,
-    PRUNE_UNSAFE_NAME,
     PlanIndexEntry,
-    PlanWriteSession,
     _entry_fingerprints,
-    _entry_payload,
     _is_retryable,
     _merged_index,
-    list_reanchor_worktrees,
     load_rejections,
-    prune_named_reanchor_worktree,
-    prune_stale_reanchor_worktrees,
     reanchored_plan_rows,
     record_rejections,
+)
+from daydream.improve.plans import (
+    PlanWriteSession,
 )
 from daydream.improve.prioritize import aggregate_cross_service
 from daydream.improve.prompts import (
     PLAN_AUTHOR_SCHEMA,
     build_plan_writer_repair_prompt,
 )
+from daydream.improve.reanchor import (
+    PRUNE_GIT_FAILURE,
+    PRUNE_NOT_FOUND,
+    PRUNE_NOT_REANCHOR,
+    PRUNE_REMOVED,
+    PRUNE_UNSAFE_NAME,
+    list_reanchor_worktrees,
+    prune_named_reanchor_worktree,
+    prune_stale_reanchor_worktrees,
+)
 from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import plan_slug, render_plan
 from daydream.improve.repo_commands import enumerate_repository_commands
+from daydream.improve.reporting import (
+    _reanchored_report_section,
+)
 from tests.harness.git_helpers import bare_remote as _bare_remote, commit, git, init_repo, write_and_stage
 from tests.harness.improve_backend import plan_ref as _ref
 
@@ -117,13 +124,12 @@ def private_locations(tmp_path: Path) -> Any:
 
 @pytest.fixture
 def owner(repo: Path, private_locations: Any) -> Any:
-    """``repo``'s resolved private workspace owner."""
     return resolve_private_workspace_owner(repo, locations=private_locations)
 
 def _forbid_default_private_base(monkeypatch: pytest.MonkeyPatch, reason: str = "unexpected default lookup") -> None:
     """A supplied owner (or a rejected input) must never reach default storage."""
     monkeypatch.setattr(
-        artifact_visibility, "_default_private_base", lambda: (_ for _ in ()).throw(AssertionError(reason)),
+        artifact_ownership, "_default_private_base", lambda: (_ for _ in ()).throw(AssertionError(reason)),
     )
 
 def _finding(*, fingerprint: str = "fp-fix-n-plus-one") -> dict[str, object]:
@@ -416,7 +422,6 @@ def test_recon_applicability_directory_scopes_fail_closed(tmp_path: Path, scope:
     assert errors == ["RECON_APPLICABILITY_INVALID@/commands/0/applicability/scope/paths/0"]
 
 def _criterion(kind: str, description: str, verification: Any = None) -> dict[str, Any]:
-    """One ``done_criteria`` entry; ``verification`` defaults to a null ref."""
     return {"kind": kind, "description": description, "verification": verification}
 
 def _authored_plan(*, title: str = "Batch catalog queries") -> dict[str, Any]:
@@ -502,7 +507,6 @@ def _declare_makefile_out_of_scope(plan: dict[str, Any]) -> None:
     )
 
 def _change(path: str, symbol: str, operation: str, instruction: str, target_state: str,) -> dict[str, Any]:
-    """One plan change entry; the production assembler validates the five fields."""
     return {"path": path, "symbol": symbol, "operation": operation, "instruction": instruction,
         "target_state": target_state,
     }
@@ -553,14 +557,7 @@ def _write_plans(
     plans_dir: Path, selections: list[dict[str, Any]], *, planned_at: str, non_interactive_default: bool = False,
     run_session_id: str | None = None, completion_order: list[int] | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Drive the production plan-write API the way the orchestrator does.
-
-    Numbers are reserved once, in selection order, before any result is
-    committed; each result is then committed on its own, in
-    ``completion_order`` (selection order by default). This mirrors
-    ``_step_write_plans``, which reserves up front and lands each plan as its
-    writer returns.
-    """
+    """Reserve in selection order, then land each result in the requested completion order."""
     session = PlanWriteSession(plans_dir, planned_at=planned_at, non_interactive_default=non_interactive_default,
         run_session_id=run_session_id,
     )
@@ -572,12 +569,10 @@ def _write_plans(
     return session.finish()
 
 def _advance_head(repo: Path, text: str = "# Catalog service\n\nConcurrent branch update.\n") -> str:
-    """Commit a README change on top of *repo* and return the new HEAD SHA."""
     write_and_stage(repo, "README.md", text)
     return commit(repo, "advance head after plan fan-out")
 
 def _read_sidecar(root: Path) -> dict[str, Any]:
-    """Load the production plan-index sidecar written under *root*."""
     return cast(dict[str, Any], json.loads((root / PLAN_INDEX_FILENAME).read_text(encoding="utf-8")))
 
 def _planned_fingerprints(plans_dir: Path) -> set[str]:
@@ -612,11 +607,7 @@ MALFORMED_FIRST_RUN_COMMANDS = (
 
 @pytest.mark.parametrize("literal", MALFORMED_FIRST_RUN_COMMANDS)
 def test_first_run_prose_and_annotation_commands_are_blocked(repo: Path, literal: str) -> None:
-    """Prose-shaped commands are stopped at the recon trust boundary.
-
-    A plan's command text is a verbatim copy of an accepted recon command, so
-    this grammar can only enter the pipeline here.
-    """
+    """Plan commands copy accepted recon verbatim, so unsafe grammar must be rejected at recon."""
     recon = {**_recon_commands()[0], "command": literal}
     commands, errors = validate_recon_commands({"commands": [recon]}, repo=repo,)
     assert commands == []
@@ -731,12 +722,7 @@ _PATH_REJECTION_CODES = {"AUTHOR_SCHEMA_INVALID", "MALFORMED_PATH", "PATH_OUTSID
     ["existing", "new", "out-of-scope", "context-excerpt", "step", "test", "test-exemplar", "stop-related",],
 )
 def test_react_router_dollar_segment_is_rejected(repo: Path, location: str) -> None:
-    """A lone ``$`` in a segment is excluded entirely (shell-expansion risk).
-
-    Regression pin for the relaxed grammar (#572/#573): the ``$`` character
-    stays rejected even though legal punctuation like ``# % ~ ! & ( )`` and
-    spaces are now accepted.
-    """
+    """The otherwise relaxed path grammar still excludes dollar signs because of shell expansion."""
     path = "routes/user.$username.tsx"
     (repo / "routes").mkdir()
     (repo / path).write_text("export default function User() {}\n", encoding="utf-8")
@@ -871,11 +857,6 @@ _CONCURRENT_TITLES = ["Batch catalog queries", "Catalog observability", "Catalog
 def test_plan_numbers_follow_selection_order_not_completion_order(
     repo: Path, head_sha: str, count: int, completion_order: list[int],
 ) -> None:
-    """A plan's number is claimed before any writer runs.
-
-    Numbers are reserved once, in selection order; the filename a finding gets
-    therefore never depends on which writer happens to finish first.
-    """
     plans_dir = repo / "daydream_plans"
     titles = _CONCURRENT_TITLES[:count]
     selections = [_plan_selection(repo, title) for title in titles]
@@ -890,11 +871,6 @@ def test_plan_numbers_follow_selection_order_not_completion_order(
     assert index.count("| TODO |") == count
 
 def test_each_plan_is_on_disk_before_its_slower_siblings_commit(repo: Path, head_sha: str) -> None:
-    """A finished plan is readable while later writers are still outstanding.
-
-    The session commits one result at a time, so after the k-th commit exactly
-    the k plans committed so far — and an index that links them — are on disk.
-    """
     plans_dir = repo / "daydream_plans"
     selections = [_plan_selection(repo, title) for title in _CONCURRENT_TITLES]
     session = PlanWriteSession(plans_dir, planned_at=head_sha)
@@ -916,12 +892,7 @@ def test_each_plan_is_on_disk_before_its_slower_siblings_commit(repo: Path, head
     session.finish()
 
 def test_blocked_sibling_holds_its_number_without_shifting_later_plans(repo: Path, head_sha: str,) -> None:
-    """A blocked plan neither renumbers its siblings nor leaks its number.
-
-    The blocked finding keeps 002 in the index with no file, 003 still belongs
-    to the third selection, and a later retry of the blocked finding reuses
-    002 instead of consuming a fresh number.
-    """
+    """A blocked attempt reserves its number for retry while later siblings retain their own numbers."""
     plans_dir = repo / "daydream_plans"
     invalid = _authored_plan(title="Catalog observability")
     invalid["test_plan"]["cases"] = []
@@ -960,7 +931,6 @@ def test_blocked_sibling_holds_its_number_without_shifting_later_plans(repo: Pat
     assert final_index.count("| TODO |") == 4
 
 def test_already_planned_finding_reserves_no_number_for_its_siblings(repo: Path, head_sha: str,) -> None:
-    """A skipped finding must not consume a number its siblings need."""
     plans_dir = repo / "daydream_plans"
     _write_plans(plans_dir, [_plan_selection(repo, "Batch catalog queries")], planned_at=head_sha,)
 
@@ -991,14 +961,6 @@ def test_planned_at_from_an_unrelated_root_is_rejected(repo: Path, head_sha: str
     assert "PLANNED_AT_NOT_ANCESTOR" in (repo / "daydream_plans/README.md").read_text()
 
 def test_planned_at_naming_only_remote_branch_is_invalid(repo: Path, tmp_path: Path) -> None:
-    """A planned_at that exists only as origin/<name> must report PLANNED_AT_INVALID.
-
-    Regression: routing the existence probe through ref_exists (which delegates
-    to branch_exists and therefore accepts refs/remotes/origin/<ref>) turned a
-    remote-only name into PLANNED_AT_NOT_ANCESTOR. The old cat-file -e
-    {plan}^{commit} probe did not resolve such a short name, so it must be
-    reported as an invalid anchor.
-    """
     bare = _bare_remote(tmp_path / "remote.git")
     git(repo, "remote", "add", "origin", str(bare))
     git(repo, "push", "-u", "origin", "main")
@@ -1032,7 +994,7 @@ def test_plan_anchor_git_timeout_blocks_plan(
             raise subprocess.TimeoutExpired(cmd=timed_out, timeout=5)
         return saved_run(*args, **kwargs)
 
-    monkeypatch.setattr("daydream.git_ops.subprocess.run", stall_probe)
+    monkeypatch.setattr("daydream.git_ops.process.subprocess.run", stall_probe)
 
     result = _write_plans(repo / "daydream_plans", [selection], planned_at=head_sha)
 
@@ -1050,13 +1012,7 @@ def test_plan_anchor_git_timeout_blocks_plan(
     assert [entry["host_blocked"] for entry in sidecar["plans"]] == [True]
 
 def test_head_change_after_planning_reanchors_into_new_worktree(repo: Path, head_sha: str,) -> None:
-    """HEAD advancing after assembling re-anchors the plan instead of blocking.
-
-    The plan's content is finished; only the ``planned_at`` anchor is stale, so
-    the plan lands in a fresh detached worktree at the current HEAD, re-anchored
-    to it, and is reported as written — never silently dropped. The finished
-    text also lands a durable copy in the main index so it survives pruning.
-    """
+    """A stale anchor lands at current HEAD with a durable main copy that survives pruning."""
     assembled = _assembled(repo)
     new_head = _advance_head(repo)
     result = _write_single_plan(repo, assembled, head_sha)
@@ -1081,7 +1037,6 @@ def test_head_change_after_planning_reanchors_into_new_worktree(repo: Path, head
     assert [(entry["number"], entry["slug"], entry["planned_at"], entry["status"])
         for entry in sidecar["plans"]
     ] == [(1, "batch-catalog-queries", new_head, "TODO")]
-    # main repo durable surface now lists the re-anchored plan
     main_index = (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
     assert "REANCHORED" in main_index
     # the durable status points at the surviving main-index sibling, not the
@@ -1092,8 +1047,6 @@ def test_head_change_after_planning_reanchors_into_new_worktree(repo: Path, head
     assert len(reanchored) == 1
     assert reanchored[0]["status"].startswith("REANCHORED")
     assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
-    # the README row links the durable main-dir sibling, exactly like any other
-    # row: the re-anchored content now lives in the main index.
     assert "| [001](001-batch-catalog-queries.md) " in main_index
     assert "REANCHORED" in main_index
 
@@ -1127,15 +1080,7 @@ def test_plan_write_session_rejects_wrong_owner_before_mutation(tmp_path: Path,)
     assert not plans_dir.exists()
 
 def test_reanchored_main_index_is_written_before_finish(repo: Path, head_sha: str,) -> None:
-    """The main sidecar indexes a re-anchored plan before finish() is called.
-
-    Regression for the crash window: the re-anchor path deferred the main
-    index write to finish(), so a process death between the durable file
-    write and finish() left a plan file with no index entry — silently
-    re-planned and orphaned on the next run. The sidecar must already carry
-    the REANCHORED entry (and its fingerprint) as soon as the re-anchor
-    lands, before finish() runs.
-    """
+    """The sidecar must index a re-anchor before finish(), closing the interrupted-run re-planning window."""
     _advance_head(repo)
 
     session = PlanWriteSession(repo / "daydream_plans", planned_at=head_sha,)
@@ -1143,26 +1088,18 @@ def test_reanchored_main_index_is_written_before_finish(repo: Path, head_sha: st
     outcome = session.commit(reservations[0], _selection(repo))
     assert outcome.status == "written"
 
-    # crash-window invariant: main sidecar already indexes the re-anchor
     sidecar = _read_sidecar(repo / "daydream_plans")
     reanchored = [e for e in sidecar["plans"] if e["number"] == 1]
     assert len(reanchored) == 1
     assert reanchored[0]["status"].startswith("REANCHORED")
     assert "001-batch-catalog-queries.md" in reanchored[0]["status"]
-    # no silent re-plan on the next run: the fingerprint is already durable
     assert "fp-fix-n-plus-one" in _planned_fingerprints(repo / "daydream_plans")
 
-    # finish() must not be what made the index correct
     session.finish()
     assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
 
 def test_reanchored_plan_survives_worktree_pruning(repo: Path, head_sha: str,) -> None:
-    """The durable main-index copy outlives the next run's worktree pruning.
-
-    Regression guard for the HIGH finding: the re-anchored plan used to exist
-    only inside the detached worktree that the next run force-removes, so the
-    deliverable was permanently deleted while the index kept a dead pointer.
-    """
+    """The main-index copy must outlive disposal of the worktree where the re-anchored plan landed."""
     assembled = _assembled(repo)
     new_head = _advance_head(repo)
     result = _write_single_plan(repo, assembled, head_sha)
@@ -1181,20 +1118,15 @@ def test_reanchored_plan_survives_worktree_pruning(repo: Path, head_sha: str,) -
     assert "REANCHORED" in (repo / "daydream_plans" / "README.md").read_text(encoding="utf-8")
 
 def test_reanchored_finding_is_not_replanned_on_a_later_run(repo: Path, head_sha: str,) -> None:
-    """A plan re-anchored at a moved HEAD is durably fingerprinted, so a later
-    run in the same repo does not re-plan the same finding (no duplicate number).
-    """
     assembled = _assembled(repo)
     new_head = _advance_head(repo)
     first = _write_single_plan(repo, assembled, head_sha)
     assert len(first["written"]) == 1  # re-anchored as written
-    # a later run in the same repo (HEAD now == new_head) must skip the same finding
     later = _write_single_plan(repo, assembled, new_head)
     assert later["written"] == []
     assert len(later["skipped"]) == 1
 
 def test_stale_reanchor_worktrees_are_pruned_at_next_run(repo: Path,) -> None:
-    """The start of a plan run prunes stale *-reanchor worktrees from prior runs."""
     stale_dir = repo / ".daydream" / "worktrees" / "run-abcd-reanchor"
     git(repo, "worktree", "add", "--detach", str(stale_dir), "HEAD")
     (stale_dir / "marker.txt").write_text("leftover", encoding="utf-8")
@@ -1204,9 +1136,6 @@ def test_stale_reanchor_worktrees_are_pruned_at_next_run(repo: Path,) -> None:
     assert "run-abcd-reanchor" not in git(repo, "worktree", "list")
 
 def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(repo: Path, head_sha: str) -> None:
-    """Acceptance #1/#4/#5: run B's start-of-run prune must not destroy run A's
-    live re-anchor worktree; A's finished plan still lands on finish()."""
-
     new_head = _advance_head(repo)
 
     # Run A: mid-write — worktree created + locked, session NOT finished yet
@@ -1223,7 +1152,6 @@ def test_concurrent_runs_prune_does_not_destroy_live_reanchored_plan(repo: Path,
     assert worktree_a.is_dir()                 # never force-removed
     assert (worktree_a / "daydream_plans/001-batch-catalog-queries.md").is_file()
 
-    # A finishes: durable main copy + REANCHORED entry land; lock released
     result_a = session_a.finish()
     assert len(result_a["written"]) == 1
     main_plan = repo / "daydream_plans/001-batch-catalog-queries.md"
@@ -1305,7 +1233,7 @@ def test_list_and_named_prune_cover_operational_and_legacy_roots(
     monkeypatch: pytest.MonkeyPatch, repo: Path, tmp_path: Path, owner: Any,
 ) -> None:
 
-    monkeypatch.setattr(artifact_visibility, "_default_private_base", lambda: tmp_path / "private",)
+    monkeypatch.setattr(artifact_ownership, "_default_private_base", lambda: tmp_path / "private",)
     operational = owner.operational_state_root / "operational"
     operational.mkdir(mode=0o700)
     legacy = repo / ".daydream" / "worktrees" / "run-legacy-reanchor"
@@ -1421,7 +1349,6 @@ def test_reanchor_scans_reject_linked_legacy_namespace_before_mutation(
     assert not (owner.operational_state_root / "operational" / external.name).exists()
 
 def test_planned_at_still_matching_head_writes_in_place(repo: Path, head_sha: str,) -> None:
-    """The common case is unchanged: a matching anchor writes in place."""
     result = _write_single_plan(repo, _assembled(repo), head_sha)
     assert len(result["written"]) == 1
     assert result["written"][0]["path"] == "001-batch-catalog-queries.md"
@@ -1457,7 +1384,6 @@ def test_valid_linked_plan_is_preserved_for_every_executor_status(repo: Path, he
     ] == [(1, "fp-fix-n-plus-one", "batch-catalog-queries", status)]
 
 def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sha: str) -> None:
-    """An operator who marks a host-blocked attempt resolved is believed."""
     plans_dir = repo / "daydream_plans"
     invalid = _authored_plan()
     invalid["test_plan"]["cases"] = []
@@ -1483,7 +1409,6 @@ def test_hand_edited_status_on_a_blocked_row_stops_the_retry(repo: Path, head_sh
     ] == [(1, "DONE", False)]
 
 def test_deleted_sidecar_is_rebuilt_from_the_rendered_index(repo: Path, head_sha: str) -> None:
-    """Losing the sidecar must not re-plan or renumber what is already there."""
     plans_dir = repo / "daydream_plans"
     selections = [_plan_selection(repo, title) for title in _CONCURRENT_TITLES]
     _write_plans(plans_dir, selections, planned_at=head_sha)
@@ -1524,7 +1449,6 @@ def test_rendered_index_recovers_escaped_pipes_during_reconciliation(repo: Path,
     ],
 )
 def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head_sha: str, payload: str,) -> None:
-    """With no readable state left, the filesystem still bounds numbering."""
     plans_dir = repo / "daydream_plans"
     _write_plans(plans_dir, [_plan_selection(repo, "Batch catalog queries")], planned_at=head_sha,)
     (plans_dir / PLAN_INDEX_FILENAME).write_text(payload, encoding="utf-8")
@@ -1537,11 +1461,7 @@ def test_unusable_sidecar_never_reuses_a_number_already_on_disk(repo: Path, head
     ) == ["001-batch-catalog-queries.md", "002-catalog-observability.md",]
 
 def test_sidecar_entry_survives_a_hand_deleted_plan_file(repo: Path, head_sha: str) -> None:
-    """A deleted plan file frees neither its number nor its fingerprint.
-
-    Only a host-blocked attempt is retryable; a plan the operator deleted is
-    treated as deliberately gone, so nothing is silently rewritten over it.
-    """
+    """Operator deletion is deliberate; only host-blocked attempts free a fingerprint for retry."""
     plans_dir = repo / "daydream_plans"
     _write_plans(plans_dir, [_plan_selection(repo, "Batch catalog queries")], planned_at=head_sha,)
     (plans_dir / "001-batch-catalog-queries.md").unlink()
@@ -1554,7 +1474,6 @@ def test_sidecar_entry_survives_a_hand_deleted_plan_file(repo: Path, head_sha: s
     assert [path.name for path in plans_dir.glob("[0-9][0-9][0-9]-*.md")] == ["002-catalog-observability.md"]
 
 def test_planner_title_credential_is_redacted_in_the_plan_index(repo: Path, head_sha: str) -> None:
-    """The sidecar carries model-authored text and must redact it like the plan."""
     plans_dir = repo / "daydream_plans"
     plan = _authored_plan()
     plan["title"] = "Rotate AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE in deploys"
@@ -1741,11 +1660,7 @@ def test_secret_literal_value_is_redacted_and_never_reaches_artifacts(repo: Path
         assert "hunter2realvalue" not in artifact.read_text(encoding="utf-8")
 
 def test_underscored_secret_key_name_is_redacted_in_quoted_source(repo: Path, head_sha: str,) -> None:
-    """``aws_secret_access_key`` is a key name, not the bare word ``secret``.
-
-    A word-boundary match never fired inside it, so a live AWS key reached the
-    plan file: ``trajectory.redact_text`` does not match this shape either.
-    """
+    """Improve must catch underscored secret-key names missed by word-boundary and trajectory rules."""
     (repo / "apps/catalog/api.py").write_text(
         'aws_secret_access_key = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"\n'
         "    return [load_item(item_id) for item_id in item_ids]\n",
@@ -1832,11 +1747,7 @@ def test_assemble_relocates_an_already_existing_new_path_into_existing_scope(rep
     assert f"- `{collision}` (create) —" not in rendered
 
 def test_a_host_synthesized_anchor_is_redacted_like_an_authored_one(repo: Path) -> None:
-    """The relocation repair anchors a file the model never quoted.
-
-    Those bytes reach ``verbatim_excerpt`` by the same splice as an authored
-    anchor, so they must be redacted on that route too.
-    """
+    """Relocation repair splices bytes the model never quoted; that route must redact too."""
     plan = _authored_new_file_plan()
     relocated = plan["scope"]["new_paths"][0]["path"]
     (repo / relocated).write_text(
@@ -1857,12 +1768,7 @@ def test_assemble_still_rejects_a_new_path_occupied_by_a_directory(repo: Path) -
     assert [render_issue(issue) for issue in issues] == ["NEW_PATH_ALREADY_EXISTS@/scope/new_paths/0/path"]
 
 def test_an_edited_file_the_plan_never_quotes_is_blocked(repo: Path) -> None:
-    """Every path the plan edits must be quoted, or drift has no anchor.
-
-    The drift STOP condition tells the executor to compare each file it is
-    about to edit against the text quoted for it, so an unquoted edited file
-    hands it a condition it cannot evaluate.
-    """
+    """Every edited file needs quoted text for the executor's drift comparison."""
     plan = _authored_plan()
     plan["context_excerpts"] = [entry for entry in plan["context_excerpts"] if entry["path"] != "apps/catalog/api.py"]
     issues = _issues(repo, plan)
@@ -1870,12 +1776,7 @@ def test_an_edited_file_the_plan_never_quotes_is_blocked(repo: Path) -> None:
     assert "context_excerpts" in (issues[0].hint or "")
 
 def test_the_drift_condition_names_only_paths_the_plan_quotes(repo: Path, head_sha: str) -> None:
-    """The drift condition's related_paths are exactly the quoted files.
-
-    Shape that would catch a regression: one path the model quoted itself, one
-    the host had to relocate out of ``new_paths``, and one it declared from a
-    step change the plan left out of scope entirely.
-    """
+    """Cover authored, relocated new-path, and undeclared step-path anchors in the drift condition."""
     plan = _authored_new_file_plan()
     relocated = plan["scope"]["new_paths"][0]["path"]
     (repo / relocated).write_text(
@@ -1918,12 +1819,7 @@ def test_undeclared_step_path_is_declared_existing_with_a_usable_excerpt(repo: P
     assert "`README.md:1-1`" in rendered
 
 def test_step_editing_the_sole_out_of_scope_path_still_blocks(repo: Path) -> None:
-    """In-scope wins the contradiction, exactly as _dedup_scope already decides.
-
-    The out-of-scope entry is dropped, and an emptied ``out_of_scope_paths`` is
-    then the schema defect the model repairs — the same outcome ``_dedup_scope``
-    already produces for a path declared both in scope and out of scope.
-    """
+    """In-scope wins deduplication, leaving an empty out-of-scope list for schema repair."""
     plan = _authored_plan()
     _add_readme_change(plan)
     issues = _issues(repo, plan)
@@ -2318,11 +2214,9 @@ def test_assemble_clamps_excerpt_end_line_but_rejects_start_beyond_eof(repo: Pat
     ] == [("EXCERPT_ANCHOR_INVALID", "/context_excerpts/0", "lines=2")]
 
 def test_repository_secrets_are_redacted_not_blocked_in_excerpts(repo: Path) -> None:
-    """Repository bytes are spliced into excerpts after authored-string
-    redaction has already run, so both splice points must redact them.
+    """Spliced repository bytes need redaction after authored-string processing.
 
-    The secret shape here is lowercase on purpose: ``trajectory.redact_text``
-    does not match it, so only the improve-side redaction can catch it.
+    The lowercase secret exercises Improve's rule, which trajectory redaction lacks.
     """
     (repo / "apps/catalog/api.py").write_text(
         '    password = "s3cr3tplaintext"\n'
@@ -2613,7 +2507,6 @@ def test_all_rejected_members_suppress_package_without_plan_identity(repo: Path,
     assert "path" not in result["skipped"][0]
 
 def _write_single_entry_sidecar(plans_dir: Path, status: str) -> None:
-    """Write a one-entry durable plan index with the given ``status``."""
     plans_dir.mkdir(parents=True, exist_ok=True)
     entry = PlanIndexEntry(
         number=1, slug="batch-catalog-queries", title="Fix N+1 catalog queries", fingerprint="fp-fix-n-plus-one",
@@ -2623,7 +2516,7 @@ def _write_single_entry_sidecar(plans_dir: Path, status: str) -> None:
         change_shape="unknown", maintenance_signals=(), reuse_target="",
     )
     (plans_dir / ".index.json").write_text(
-        json.dumps({"schema_version": 1, "plans": [_entry_payload(entry)],}), encoding="utf-8",
+        json.dumps({"schema_version": 1, "plans": [asdict(entry)],}), encoding="utf-8",
     )
 
 def test_reanchored_plan_rows_tolerant_of_status_without_landed_suffix(tmp_path: Path,) -> None:
@@ -2639,7 +2532,6 @@ def test_reanchored_plan_rows_returns_empty_when_none_reanchored(tmp_path: Path,
     plans_dir = tmp_path / "daydream_plans"
     _write_single_entry_sidecar(plans_dir, "TODO")
     assert reanchored_plan_rows(plans_dir) == []
-    # An absent index is also an empty result, never an error.
     assert reanchored_plan_rows(tmp_path / "does-not-exist") == []
 
 def _make_reanchored_repo(repo: Path, head_sha: str) -> str:
@@ -2709,8 +2601,6 @@ def test_reanchored_report_section_empty(tmp_path: Path) -> None:
     assert "No re-anchored plans" in section
 
 def test_reanchored_failure_releases_worktree_lock(repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch,) -> None:
-    """Should-have #1: a graceful re-anchor write failure releases the lock."""
-
     _advance_head(repo)
 
     def _boom(*args: Any, **kwargs: Any) -> Any:
@@ -2733,10 +2623,6 @@ def test_reanchored_failure_releases_worktree_lock(repo: Path, head_sha: str, mo
 
 def test_failed_reanchor_frees_worktree_for_later_finding(repo: Path, head_sha: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fix #2: a re-anchor failure must remove the worktree so a later
-    re-anchorable finding in the same run can re-add the path instead of
-    failing with PLAN_REANCHOR_FAILED."""
-
     _advance_head(repo)
 
     calls = {"n": 0}
@@ -2745,7 +2631,6 @@ def test_failed_reanchor_frees_worktree_for_later_finding(repo: Path, head_sha: 
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("first re-anchor render fails")
-        # second render (re-anchor of the next finding) succeeds
         return render_plan(*args, **kwargs)
 
     monkeypatch.setattr("daydream.improve.plans.render_plan", _boom)
@@ -2762,8 +2647,6 @@ def test_failed_reanchor_frees_worktree_for_later_finding(repo: Path, head_sha: 
     assert len(result["written"]) == 1
 
 def test_stale_locked_reanchor_worktree_is_reclaimed(repo: Path) -> None:
-    """Acceptance #3: a crashed session's still-locked worktree is eventually
-    reclaimed (lock backdated past the staleness window), not wedged forever."""
     stale = repo / ".daydream" / "worktrees" / "run-dead-reanchor"
     git_ops.worktree_add(repo, stale, "HEAD", lock_reason="run-dead")
     git_dir = Path(git(repo, "rev-parse", "--git-common-dir"))
@@ -2780,11 +2663,6 @@ _NESTED_SECRET = "credential sk-abcdef123456 in the note"
 _NESTED_REDACTED = "credential [REDACTED_API_KEY] in the note"
 
 def test_model_value_redaction_recurses_into_nested_containers() -> None:
-    """The public owner ``redact_model_value`` reaches a leaf three levels down.
-
-    A tuple holding a list holding a dict: any policy that stops recursing below
-    the top level leaves ``sk-abcdef123456`` in the innermost value and fails here.
-    """
     redacted = redact_model_value(([{"note": _NESTED_SECRET}],))
     assert isinstance(redacted, tuple)
     assert isinstance(redacted[0], list)
@@ -2792,13 +2670,11 @@ def test_model_value_redaction_recurses_into_nested_containers() -> None:
     assert redacted[0][0]["note"] == _NESTED_REDACTED
 
 def test_model_value_redaction_rebuilds_each_container_shape() -> None:
-    """A list stays a list, a tuple a tuple, and a dict a fresh dict with its keys."""
     assert redact_model_value(["sk-abcdef123456"]) == ["[REDACTED_API_KEY]"]
     assert redact_model_value(("sk-abcdef123456",)) == ("[REDACTED_API_KEY]",)
     assert redact_model_value({"note": "sk-abcdef123456", "count": 3}) == {"note": "[REDACTED_API_KEY]", "count": 3,}
 
 def test_model_value_redaction_passes_non_container_leaves_through() -> None:
-    """Numbers, ``None``, booleans and arbitrary objects come back untouched."""
     sentinel = object()
     assert redact_model_value(None) is None
     assert redact_model_value(7) == 7
@@ -2806,7 +2682,6 @@ def test_model_value_redaction_passes_non_container_leaves_through() -> None:
     assert redact_model_value(sentinel) is sentinel
 
 def test_model_value_redaction_does_not_mutate_its_argument() -> None:
-    """The caller's object keeps its secret; only a fresh redacted copy moves on."""
     source = {"note": "sk-abcdef123456", "tags": ["sk-abcdef123456"]}
     redacted = redact_model_value(source)
     assert source == {"note": "sk-abcdef123456", "tags": ["sk-abcdef123456"]}

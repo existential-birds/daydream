@@ -1,17 +1,7 @@
-"""Harbor control-plane environment policy declarations.
-
-``HOST`` records the host-side child-env allowlist for
-``agent.build_child_env``; ``CONTAINER`` records the container-side scrub-list
-for ``entrypoint._sanitize_reviewer_environment``. The two-stage scrub is
-intentional defence in depth: the container can see Harbor-injected names the
-host builder never processed. ``RENDERER`` and ``TASK`` describe the inputs to
-``package.render_job_config`` and ``package.render_task_toml`` respectively;
-``JUDGE`` describes the renderer subset and the host-side judge-asset guard.
-The renderer emits a documented subset of the reviewer control-plane channel.
-
-The host's ``claude_keep_vars`` are the same Anthropic names as the
-``render_job_config`` placeholders: only that trio may survive the host
-scrub in Claude mode.
+"""Harbor environment boundaries. HOST allowlists child inputs; CONTAINER scrubs again
+because Harbor may inject new names. RENDERER/TASK declare compiled configuration
+inputs; JUDGE declares its isolated subset. Claude host credentials and renderer
+placeholders share the exact same Anthropic allowlist.
 """
 
 from __future__ import annotations

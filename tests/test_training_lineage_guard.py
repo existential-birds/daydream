@@ -75,7 +75,6 @@ def test_stage_digests_emitted() -> None:
     for stage in ("stage1", "stage2"):
         assert d[stage]["split_digest"]
         assert d[stage]["lineage_digest"]  # M16: per-stage digests
-    # Content-addressed: same records, same digest; different set, different digest.
     assert d["stage1"]["split_digest"] != d["stage2"]["split_digest"]
 
 def test_stage_digests_deterministic() -> None:
@@ -84,7 +83,6 @@ def test_stage_digests_deterministic() -> None:
     assert stage_digests(outputs)["stage1"] == stage_digests(again)["stage1"]
 
 def test_stage_digests_covers_record_lineage_fields() -> None:
-    """Lineage fields carried through from corpus records must affect the digest (M16)."""
     base = {
         "session_id": "s1", "evidence_tier": "gold", "base_sha": "aaa", "head_sha": "bbb", "daydream_version": "1.0",
         "reward_version": "2026.05.28-2", "split": "train",

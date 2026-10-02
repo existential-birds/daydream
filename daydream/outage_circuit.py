@@ -1,16 +1,8 @@
-"""One run-scoped outage circuit that gate-keeps retry decisions.
+"""Coordinate retries across a run after consecutive retryable failures.
 
-When a backend is genuinely down, every concurrent invocation otherwise burns
-its own retry ladder against the same dead endpoint. The circuit collapses those
-ladders into one coordinated decision: after a threshold of consecutive
-retryable failures it opens, and retries (never first attempts) are suppressed
-until a single half-open probe is admitted.
-
-State is pure and caller-clocked: every method takes an explicit ``now`` so the
-circuit never reads a clock of its own and tests can drive it deterministically.
-A single :class:`threading.RLock` guards the fields, mirroring
-``run_context.py``'s run-scoped lock discipline.
-"""
+First attempts remain unrestricted. The circuit opens at its threshold and
+later admits one half-open probe. Callers supply the clock; an RLock guards
+shared state across concurrent invocations."""
 
 from __future__ import annotations
 
@@ -32,13 +24,9 @@ class CircuitAdmission:
 
 
 class OutageCircuit:
-    """Run-scoped consecutive-failure breaker for retry ladders.
-
-    ``closed`` admits every retry; ``open`` suppresses retries until the probe
-    interval has elapsed; ``half_open`` admits exactly one probe at a time. The
-    circuit only ever decides whether a *retry* may dispatch -- first attempts
-    are never consulted, so stale open state cannot block a healthy call.
-    """
+    """Closed admits retries; open waits for the probe interval; half_open admits
+    one probe. Only retries consult this circuit, so stale state cannot block
+    a healthy first attempt."""
 
     def __init__(self, *, failure_threshold: int, probe_interval_s: float) -> None:
         self._failure_threshold = failure_threshold
@@ -49,12 +37,8 @@ class OutageCircuit:
         self._opened_at: float | None = None
 
     def record_failure(self, now: float) -> bool:
-        """Count one consecutive retryable failure, opening at the threshold.
-
-        Returns ``True`` when this failure is what opened (or re-opened) the
-        circuit, so the caller knows its own retry was admitted before the trip
-        and can let that one in-flight retry finish.
-        """
+        """Count a retryable failure. Return True when it opens or reopens the circuit,
+        allowing that caller's already-admitted retry to finish."""
         with self._lock:
             self._consecutive_failures += 1
             # A failed probe re-opens the circuit for a full interval.

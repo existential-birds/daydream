@@ -54,7 +54,7 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
              "severity": "high", "confidence": "HIGH", "rationale": "empty list", "evidence": "sum(xs)/len(xs)"}
     async def checkpoint(*args: Any, **kwargs: Any) -> Any:
         return {"issues": [issue]}, None, "wall_budget_exceeded"
-    monkeypatch.setattr("daydream.phases.run_agent", checkpoint)
+    monkeypatch.setattr("daydream.agent.run_agent", checkpoint)
     diff, intent, alts = _mk_context_files(tmp_path)
     _, failures = await phase_per_stack_reviews(
         _review_backend(), make_work(tmp_path), _mk_stacks()[:1], diff_path=diff,

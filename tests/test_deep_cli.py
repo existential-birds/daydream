@@ -5,7 +5,7 @@ Deep is the default; ``--shallow`` opts into the single-stack flow.
 
 import pytest
 
-from daydream.cli import _parse_args
+from daydream.commands.review import _parse_args
 
 
 def test_default_is_deep() -> None:

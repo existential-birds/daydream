@@ -1,8 +1,4 @@
-"""Tests for posterior-signal extractors.
-
-Each signal is a pure function over ``(manifest_row, fetcher)`` — no LLM,
-no I/O beyond fetchers.
-"""
+"""Test pure posterior-signal extraction with all external reads supplied by fetchers."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -47,13 +43,11 @@ def _row(tmp_path: Path, **overrides: Any) -> dict[str, Any]:
 
 
 def test_reviewed_commit_line_does_not_break_daydream_footer_detection() -> None:
-    """M5: a comment body containing the reviewed-commit line is still
-    recognised by _is_daydream_comment and still ends with exactly one
-    version-stable footer."""
+    """Reviewed-commit metadata must preserve detection and exactly one stable footer."""
     pr = PRInfo(number=1, head_sha="f" * 40, base_sha="0" * 40, base_ref="main", head_ref="feature", owner="acme",
         repo="widgets", url="https://github.com/acme/widgets/pull/1",
     )
-    payload = build_payload(pr, pr_review._ClassifiedIssues(),
+    payload = build_payload(pr, pr_review.ClassifiedIssues(),
         renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
         run_info="Fixture run info",
     )
@@ -106,10 +100,8 @@ def test_fix_applied_signal_without_matching_changes(tmp_path: Path, files: list
     assert sig.verdict == verdict
 
 def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
-    """≥50% hunks applied → applied; below → not_applied."""
     (tmp_path / "diff.patch").write_text(
-        # A valid single-file three-hunk diff: distinct new-side line numbers so
-        # each added line belongs to exactly one hunk.
+        # Distinct new-side line numbers assign each added line to exactly one hunk.
         "diff --git a/app.py b/app.py\n"
         "--- a/app.py\n"
         "+++ b/app.py\n"
@@ -129,7 +121,6 @@ def test_fix_applied_signal_50pct_hunk_threshold(tmp_path: Path) -> None:
         commits_in_window_fetcher=lambda repo, base, head: ["c1"],
         file_at_fetcher=lambda repo, path, sha: "foo = 1\nbar = 2\n",
     )
-    # 2 of 3 hunks applied → applied
     assert sig.verdict == "applied"
     assert sig.hunks_applied == 2
     assert sig.hunks_total == 3
@@ -138,7 +129,6 @@ FP = "a" * 64
 
 
 def test_comment_resolution_signal_counts_top_level_threads() -> None:
-    """Aggregate counts top-level daydream threads and reply presence (context only)."""
     comments = [
         _comment(1, f"finding\n\n{DAYDREAM_FOOTER}"),
         _comment(2, "ack", in_reply_to=1),
@@ -184,12 +174,8 @@ def test_disposition_ambiguous_on_question() -> None:
     assert res.disposition == "ambiguous"
 
 def test_disposition_non_qualifying_author_does_not_vote() -> None:
-    """A decisive-text reply from a non-qualifying author never casts a vote.
-
-    assoc NONE with no PR/review-author match persists evidence reason
-    ``excluded:non-qualifying``, so the disposition must agree (M6): no
-    qualifying reply means ``unanswered``, and the timestamp is not decisive
-    evidence either.
+    """A non-qualifying author's decisive-looking reply stays excluded evidence: no vote, no decisive
+    timestamp, and an unanswered disposition.
     """
     (res,) = _resolve([("Fixed in abc123", {"login": "dev", "assoc": "NONE"})])
     assert res.disposition == "unanswered"
@@ -200,7 +186,7 @@ def test_disposition_unanswered_on_bot_only_and_self_replies() -> None:
         ("Fixed in abc", {"login": "daydream-agent", "assoc": "NONE", "_self": True}),
     ])
     assert res.disposition == "unanswered"
-    # evidence still persists (M3) — exclusion is recorded, not dropped
+    # Persist excluded evidence so the reason remains auditable.
     assert len(res.evidence) == 2
     assert all("excluded" in ev["reason"] for ev in res.evidence)
 
@@ -214,13 +200,11 @@ def test_disposition_missing_when_comment_deleted() -> None:
     assert res.disposition == "missing" and res.comment_id is None
 
 def test_disposition_evidence_digest_changes_with_reply_edit() -> None:
-    """An edited reply body changes the evidence digest (M14 input)."""
     (r1,) = _resolve([("Fixed in abc", {"login": "m", "assoc": "OWNER"})])
     (r2,) = _resolve([("Fixed in abc — well, partially", {"login": "m", "assoc": "OWNER"})])
     assert r1.evidence_digest != r2.evidence_digest
 
 def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
-    """When the diff.patch content appears in a local commit on the branch ≥ head_sha."""
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = _row(tmp_path, branch="feat/x")
     sig = local_commit_applied_signal(row, repo_clone=tmp_path,
@@ -231,11 +215,8 @@ def test_local_commit_applied_signal_positive(tmp_path: Path) -> None:
 
 
 def _fake_gh_reviews() -> Any:
-    """gh_api stub mirroring the reviews + comments endpoints.
-
-    /reviews → alice (human, approved) + octobot[bot] (commented).
-    /comments → a daydream-runner top-level comment whose body carries
-    DAYDREAM_FOOTER, with bob replying to it (so bob is a reviewer).
+    """Serve human/bot reviews and a footer-marked finding with a human reply, exercising reviewer
+    extraction from both endpoints.
     """
     responses = {("o/r", "repos/o/r/pulls/7/reviews"): [{"user": {"login": "alice"}, "state": "APPROVED"},
             {"user": {"login": "octobot[bot]"}, "state": "COMMENTED"},
@@ -266,12 +247,8 @@ def test_local_commit_applied_signal_no_local_commits_returns_rejected(tmp_path:
     assert sig == LocalCommitAppliedSignal(verdict="rejected")
 
 def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path: Path) -> None:
-    """A None commit window means "could not look" — not "nobody applied it".
-
-    Same inputs as the rejected case above; only the fetcher's answer differs
-    ([] vs None). The verdicts must differ too, or an unreadable branch ref
-    silently becomes a negative training label. Here the change is absent from
-    the base branch too, so the fallback cannot upgrade it past "unknown".
+    """An unreadable commit window is unknown, not rejection. The fixture also lacks the change on base, so
+    fallback cannot upgrade it.
     """
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = _row(tmp_path, branch="feat/x", base_branch="main")
@@ -281,55 +258,31 @@ def test_local_commit_applied_signal_unreadable_window_returns_unknown(tmp_path:
     )
     assert sig == LocalCommitAppliedSignal(verdict="unknown")
 
-def test_local_commit_applied_signal_unreadable_window_falls_back_to_base_branch(tmp_path: Path) -> None:
-    """A deleted branch ref still resolves via the base branch tip.
-
-    The squash-merge case: the branch is gone, but the recommended line is
-    present on ``main``, so the change demonstrably landed → "applied".
-    """
+@pytest.mark.parametrize(("available_ref", "expected_refs"), [
+    pytest.param("origin/main", ["origin/main"], id="deleted-branch-remote-tip"),
+    pytest.param("main", ["origin/main", "main"], id="remote-missing-local-fallback"),
+])
+def test_local_commit_applied_signal_base_branch_fallback(
+    tmp_path: Path, available_ref: str, expected_refs: list[str],
+) -> None:
+    """A deleted branch uses the remote base before the possibly stale local tip."""
     (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
     row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
     seen_refs: list[str] = []
 
     def _file_at(repo: Path, path: str, ref: str) -> str:
         seen_refs.append(ref)
-        return "existing\nfoo = 1\n" if ref == "origin/main" else ""
+        return "existing\nfoo = 1\n" if ref == available_ref else ""
 
     sig = local_commit_applied_signal(row, repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
+        commits_since_fetcher=lambda _repo, _branch, _since_sha: None,
         file_at_fetcher=_file_at,
     )
     assert sig == LocalCommitAppliedSignal(verdict="applied")
-    assert seen_refs == ["origin/main"]  # remote ref preferred; no stale-local read needed
-
-def test_local_commit_applied_signal_base_branch_fallback_prefers_remote_over_stale_local(tmp_path: Path,) -> None:
-    """``origin/<base>`` is consulted before the bare local ref.
-
-    A worktree's local ``main`` can sit behind the remote. Reading it first
-    would report a landed change as absent, so the remote ref must win — but
-    the local ref is still tried when the remote is unresolvable.
-    """
-    (tmp_path / "diff.patch").write_text(diff_adding("foo = 1"))
-    row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
-    seen_refs: list[str] = []
-
-    def _file_at(repo: Path, path: str, ref: str) -> str:
-        seen_refs.append(ref)
-        return "existing\nfoo = 1\n" if ref == "main" else ""  # no origin/ ref in this clone
-
-    sig = local_commit_applied_signal(row, repo_clone=tmp_path,
-        commits_since_fetcher=lambda repo, branch, since_sha: None,  # noqa
-        file_at_fetcher=_file_at,
-    )
-    assert sig == LocalCommitAppliedSignal(verdict="applied")
-    assert seen_refs == ["origin/main", "main"]  # remote tried first, then local fallback
+    assert seen_refs == expected_refs
 
 def test_local_commit_applied_signal_unreadable_window_no_hunks_is_unknown(tmp_path: Path) -> None:
-    """A run that recommended nothing cannot be "applied" by the fallback.
-
-    With no recommended hunks there is nothing to look for on the base branch,
-    so the fallback must not read "no hunks absent" as "everything landed".
-    """
+    """No recommended hunks means no applied change; an empty search must not vacuously prove success."""
     (tmp_path / "diff.patch").write_text("")
     row = _row(tmp_path, branch="feat/squashed-away", base_branch="main")
     sig = local_commit_applied_signal(row, repo_clone=tmp_path,
@@ -356,7 +309,6 @@ def _fake_commits_pulls(pulls: Any) -> Any:
     ],
 )
 def test_pr_link_signal_matches_pr_by_head_sha(pulls: list[dict[str, Any]]) -> None:
-    """Identify the matching PR by head SHA when branch names are ambiguous."""
     row = {"repo_slug": "org/repo", "branch": "feat/x", "head_sha": "abc123", "pr_number": None}
     gh = _fake_commits_pulls(pulls)
     assert pr_link_signal(row, gh_api=gh) == (7, "org/repo")
@@ -383,7 +335,6 @@ def _daydream_finding_comment(comment_id: int, fingerprint: str) -> dict[str, An
 
 
 def test_per_finding_resolution_signal_mixed_outcomes() -> None:
-    """Two findings: one with a decisive human reply, one only a non-directional reply."""
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/42/comments"): [
                 _daydream_finding_comment(1, _FP_A), _daydream_finding_comment(2, _FP_B),
@@ -398,7 +349,6 @@ def test_per_finding_resolution_signal_mixed_outcomes() -> None:
     assert result[0].evidence and not result[1].evidence
 
 def test_per_finding_resolution_signal_deleted_comment() -> None:
-    """A recorded fingerprint with no surviving comment → missing, comment_id=None (M4)."""
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/42/comments"): [_daydream_finding_comment(1, _FP_A)]})
     result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A, _FP_C], gh_api=gh)
@@ -407,11 +357,8 @@ def test_per_finding_resolution_signal_deleted_comment() -> None:
     ]
 
 def test_per_finding_resolution_signal_single_finding() -> None:
-    """Standard single-finding case: reply body drives the disposition (M22).
-
-    The reply avoids a pre-matching negation token so the reject phrase is not
-    canceled by the negation guard ("Not a bug — already handled" now fails
-    closed to ambiguous: the sentence-level ``not`` negates ``already handled``).
+    """Avoid a pre-matching negation token in the reject reply: sentence-level "not" would negate "already
+    handled" and make the result ambiguous.
     """
     row = {"pr_repo": "org/repo", "pr_number": 42}
     gh = _fake_gh_responder({("org/repo", "repos/org/repo/pulls/42/comments"): [_daydream_finding_comment(9, _FP_A),
@@ -424,7 +371,6 @@ def test_per_finding_resolution_signal_single_finding() -> None:
     assert (result[0].comment_id, result[0].disposition) == (9, "rejected")
 
 def test_per_finding_resolution_signal_no_pr() -> None:
-    """No PR (repo/number None) → empty list, no API call."""
     row = {"pr_repo": None, "pr_number": None}
     result = per_finding_resolution_signal(row, recorded_fingerprints=[_FP_A], gh_api=_fake_gh_responder({}))
     assert result == []
@@ -449,7 +395,6 @@ def _daydream_body(*fps: str) -> str:
 
 
 def test_pr_merge_signal_preserves_state() -> None:
-    """Open PR keeps state='open'; closed-unmerged keeps 'closed' (M11)."""
     gh = _fake_gh_responder({
         ("org/repo", "repos/org/repo/pulls/1"): {"merged": False, "merged_at": None, "state": "open", "draft": False},
         ("org/repo", "repos/org/repo/pulls/2"): {"merged": False, "merged_at": None, "state": "closed", "draft": False},
@@ -465,7 +410,6 @@ def test_pr_merge_signal_legacy_payload_defaults() -> None:
     assert sig.state == "unknown" and sig.draft is False
 
 def test_thread_index_keeps_full_reply_objects() -> None:
-    """Replies persist as objects with author/body/assoc/timestamps (M3), not a count."""
     fp_a, fp_b = "a" * 64, "b" * 64
     comments = [_comment(10, _daydream_body(fp_a)), _comment(11, _daydream_body(fp_b)),
         _comment(20, "Fixed in abc123", in_reply_to=10, login="maint", assoc="OWNER", created="2026-08-02T10:00:00Z"),
@@ -480,7 +424,6 @@ def test_thread_index_keeps_full_reply_objects() -> None:
     assert r["body"] == "Fixed in abc123" and r["created_at"] == "2026-08-02T10:00:00Z"
 
 def test_thread_index_scopes_to_fingerprints() -> None:
-    """Only the session's recorded fingerprints are exposed; other runs' threads are context (M8)."""
     fp_mine, fp_other = "c" * 64, "d" * 64
     comments = [_comment(30, _daydream_body(fp_mine)),
         _comment(31, _daydream_body(fp_other)),  # another daydream run's finding
@@ -497,7 +440,6 @@ def test_thread_index_scopes_to_fingerprints() -> None:
     assert threads.replies_by_comment.get(31) is None  # other-run thread not in evidence
 
 def test_comment_resolution_signal_becomes_fingerprint_scoped_aggregate() -> None:
-    """Run-level counts derive from session fingerprints only (M8) — other runs' replies don't count."""
     fp_mine, fp_other = "e" * 64, "f" * 64
     comments = [_comment(50, _daydream_body(fp_mine)), _comment(51, _daydream_body(fp_other)),
         _comment(60, "thanks", in_reply_to=51),

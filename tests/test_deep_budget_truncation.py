@@ -11,7 +11,8 @@ import pytest
 
 from daydream.backends import AgentEvent, ToolStartEvent
 from daydream.config_file import DaydreamFileConfig
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import _scan_trajectory_extra
 from tests.harness.fake_clock import FakeClock
 from tests.harness.review_profile import independent_alternatives_profile
@@ -26,7 +27,7 @@ async def test_budget_truncated_stack_lands_in_failed_stacks(
     """A truncated per-stack review is recorded as a failure, not a success."""
 
     silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_stack = "python"
     mute_side_effects()
@@ -46,7 +47,7 @@ async def test_runaway_test_turn_is_bounded_and_reaches_abort(
     """A hung test turn is capped, so the run reaches the heal/abort path."""
 
     silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_test = True
     mute_side_effects(heal=False)
@@ -100,7 +101,7 @@ async def test_review_budget_stop_emits_partial_findings(
     )
     monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: stub)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3 if budget == "tool_call" else None)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3 if budget == "tool_call" else None)
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"
     with anyio.fail_after(30):
@@ -125,7 +126,7 @@ async def test_single_stack_alternatives_timeout_still_emits_findings(
     silence(monkeypatch)
     stub = install_stub_backend(monkeypatch, tiny_diff_target)
     stub.runaway_alternatives = True
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     _pin_findings_pr(monkeypatch, tiny_diff_target)
     out = tiny_diff_target / "findings.json"
     assert await run(make_config(
@@ -151,7 +152,7 @@ async def test_partial_checkpoint_survives_publication_and_merge_resume(
     backend.parse_severity = "high"
     backend.merge_echo_records = True
     monkeypatch.setattr("daydream.runner.create_backend", lambda *a, **kw: backend)
-    monkeypatch.setattr("daydream.phases.DEFAULT_TOOL_CALL_BUDGET", 3)
+    monkeypatch.setattr("daydream.config.DEFAULT_TOOL_CALL_BUDGET", 3)
     monkeypatch.setattr("daydream.deep.review_steps.EXPLORATION_AVAILABLE", False)
     _pin_findings_pr(monkeypatch, multi_stack_target)
     out = multi_stack_target / "findings.json"

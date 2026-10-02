@@ -1,12 +1,8 @@
-"""Tests for the verbose fatal-diagnostic formatter (``daydream.diagnostics``).
+"""Verbose diagnostics preserve exception structure within privacy and size bounds.
 
-Pins the observable contract of :func:`format_verbose_exception`: chaining
-order, context suppression, notes, exception-group caps, local-variable
-privacy, credential redaction (before any size bound), control-character
-neutralization, the head + single-marker + root-cause-tail bound, and the
-fail-closed ``[VERBOSE_DIAGNOSTIC_UNAVAILABLE]`` marker. The module must stay
-import-light (stdlib + ``PrivacyPolicy`` only) so a fatal path can never pull
-in logging/rich/telemetry.
+Check chaining, suppression, notes/groups, redaction before truncation, control
+characters, and the fixed failure marker. Imports must remain stdlib plus privacy
+policy so a fatal path cannot initialize logging, Rich, or telemetry.
 """
 
 from __future__ import annotations
@@ -134,7 +130,7 @@ def test_large_diagnostics_capped_with_single_marker(char: str) -> None:
     assert out.index("[VERBOSE_DIAGNOSTIC_TRUNCATED]") < out.index("root cause tail")
 
 def test_formatter_failure_returns_only_unavailable_marker(monkeypatch: pytest.MonkeyPatch,) -> None:
-    monkeypatch.setattr("daydream.diagnostics.PrivacyPolicy.text",
+    monkeypatch.setattr("daydream.observability.privacy.PrivacyPolicy.text",
         lambda self, value: (_ for _ in ()).throw(RuntimeError("redaction boom")),
     )
     assert format_verbose_exception(RuntimeError("any")) == "[VERBOSE_DIAGNOSTIC_UNAVAILABLE]"

@@ -1,28 +1,17 @@
-"""Rubric: bundle posterior signals + derive outcome label.
+"""Serialize posterior evidence and derive conservative finding/run labels.
 
-The labeler (Task 13) gathers four posterior signals from
-:mod:`daydream.training.labeler_signals` and packages them into a
-:class:`Rubric` along with a ``posterior_source`` discriminator that
-tells callers which sub-signal carries the authoritative outcome.
-
-A :class:`Rubric` knows two things:
-
-* How to serialize itself to a JSON-friendly ``dict`` for the exporter
-  to embed in the manifest / JSONL row (``Rubric.to_dict``).
-* How its fields combine into a single outcome label via
-  :func:`derive_outcome_label`. Both are pure functions — invalid
-  invariants (e.g. ``unresolved > total``) are not validated here;
-  upstream extractors guarantee them.
-
-Per-finding label vocabulary: ``accepted`` / ``rejected`` (decisive
-classifier dispositions), ``ambiguous`` / ``unanswered`` /
-``missing`` (non-decisive), and ``unknown`` (non-PR posterior sources).
+PR merge state is contextual; per-finding human dispositions decide outcome.
+The Stage-0 scoring rubric separately combines learned outcome, subtractive FP
+penalty and intrinsic evidence, with golden overlap retained as telemetry.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import types
 from collections.abc import Sequence
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Any, Literal
 
 from daydream.training.dispositions import (
@@ -37,6 +26,7 @@ from daydream.training.labeler_signals import (
     PRMergeSignal,
     resolution_to_dict,
 )
+from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, _clip, score_trajectory
 
 PosteriorSource = Literal["pr_review", "local_branch", "none"]
 
@@ -45,25 +35,10 @@ PerFindingLabel = Literal["accepted", "rejected", "ambiguous", "unanswered", "mi
 
 @dataclass(frozen=True)
 class Rubric:
-    """Bundle of posterior signals + the discriminator for outcome derivation.
+    """Posterior signals with an authoritative-source discriminator.
 
-    Attributes:
-        pr_merge: Whether the originating PR was merged (plus preserved
-            PR ``state``/``draft`` context).
-        fix_applied: Layered-cascade verdict on whether the recommended
-            diff landed upstream within the review window.
-        comment_resolution: Proxy for "review comments addressed".
-        local_commit_applied: PR-less branch signal; ``None`` when the
-            row originated from a PR.
-        posterior_source: Discriminator selecting which sub-signal
-            carries the authoritative outcome label.
-        per_finding_resolutions: Per-finding dispositions joined by
-            fingerprint, or ``None`` when no per-finding join was
-            performed. Serialized two ways: the full resolution objects
-            (fingerprint, disposition, evidence, evidence digest) under
-            ``per_finding_resolutions``, and the derived labels-only view
-            under ``per_finding_outcomes`` for existing consumers.
-    """
+    Per-finding resolutions serialize as full provenance records and a separate
+    labels-only view. None means no per-finding join was performed."""
 
     pr_merge: PRMergeSignal
     fix_applied: FixAppliedSignal
@@ -86,17 +61,8 @@ class Rubric:
                 "state": self.pr_merge.state,
                 "draft": self.pr_merge.draft,
             },
-            "fix_applied": {
-                "verdict": self.fix_applied.verdict,
-                "hunks_applied": self.fix_applied.hunks_applied,
-                "hunks_total": self.fix_applied.hunks_total,
-                "window_commits": list(self.fix_applied.window_commits),
-            },
-            "comment_resolution": {
-                "total": self.comment_resolution.total,
-                "replied": self.comment_resolution.replied,
-                "unresolved": self.comment_resolution.unresolved,
-            },
+            "fix_applied": {**asdict(self.fix_applied), "window_commits": list(self.fix_applied.window_commits)},
+            "comment_resolution": asdict(self.comment_resolution),
         }
         if self.local_commit_applied is not None:
             out["local_commit_applied"] = {"verdict": self.local_commit_applied.verdict}
@@ -107,40 +73,19 @@ class Rubric:
 
 
 def derive_outcome_label(rubric: Rubric) -> str:
-    """Reduce a rubric to a single outcome label.
+    """Aggregate findings conservatively; merge state never supplies a label.
 
-    Selection follows ``rubric.posterior_source``:
-
-    * ``"pr_review"`` — conservatively aggregate the per-finding
-      dispositions (never bare merge state): ``"accepted"`` when every
-      disposition is ``accepted`` and at least one finding was mapped,
-      ``"rejected"`` when every disposition is ``rejected`` (also with at
-      least one mapped finding), ``"contested"`` when decisive
-      dispositions are mixed or decisive evidence coexists with
-      ambiguous/unanswered/missing findings, and ``"unknown"`` when no
-      finding was mapped or none of the dispositions is decisive. Merge
-      state is context only — it never decides the label.
-    * ``"local_branch"`` — passes through the verdict on
-      :attr:`Rubric.local_commit_applied`.
-    * ``"none"`` — always ``"unknown"``.
-
-    Returns:
-        One of ``"accepted"``, ``"contested"``, ``"rejected"``, or
-        ``"unknown"``.
-    """
+    PR evidence is accepted/rejected only when decisive findings agree without
+    non-decisive findings. Mixed evidence is contested; no decisive findings is
+    unknown. Local-branch verdicts map independently, and source none is unknown.
+    Extractors guarantee signal invariants; this reducer does not repair them."""
     if rubric.posterior_source == "pr_review":
-        dispositions = [r.disposition for r in (rubric.per_finding_resolutions or [])]
-        if not dispositions:
-            return "unknown"
-        decisive = [d for d in dispositions if d in DECISIVE_DISPOSITIONS]
+        dispositions = {r.disposition for r in (rubric.per_finding_resolutions or [])}
+        decisive = dispositions & DECISIVE_DISPOSITIONS
         if not decisive:
             return "unknown"
-        if any(d in NON_DECISIVE_DISPOSITIONS for d in dispositions):
-            return "contested"
-        if all(d == "accepted" for d in decisive):
-            return "accepted"
-        if all(d == "rejected" for d in decisive):
-            return "rejected"
+        if len(decisive) == 1 and dispositions.isdisjoint(NON_DECISIVE_DISPOSITIONS):
+            return next(iter(decisive))
         return "contested"
     if rubric.posterior_source == "local_branch":
         # Extractor invariant: posterior_source="local_branch" implies
@@ -162,52 +107,16 @@ def derive_per_finding_labels(
     rubric: Rubric,
     per_finding: Sequence[PerFindingResolution],
 ) -> list[PerFindingLabel]:
-    """Reduce per-finding resolutions to one outcome label per finding.
+    """Pass PR finding dispositions through in order; other sources yield unknown.
 
-    Only ``posterior_source == "pr_review"`` yields dispositions as
-    labels, passed through verbatim in order — the classifier already
-    decided per finding, and merge state is context only (never mapped
-    onto a disposition). Any other posterior source is inconclusive at
-    finding granularity: all ``"unknown"``.
-
-    Args:
-        rubric: The rubric whose posterior source decides whether
-            dispositions may be trusted.
-        per_finding: The per-finding resolutions to label, in order.
-
-    Returns:
-        One :data:`PerFindingLabel` per entry in ``per_finding``, order
-        preserved.
-    """
+    Finding-level labels never derive from merge state."""
     if rubric.posterior_source != "pr_review":
         return ["unknown" for _ in per_finding]
     return [resolution.disposition for resolution in per_finding]
 
 
-# Stage-0 scoring rubric (M2, M5, M6, M7): learned outcome term + CR-Bench FP
-# penalty.
-#
-# - a **learned outcome term** from the Stage-0 two-class model
-#   (:func:`daydream.training.reward_model.score_comment`) — the model's
-#   ``[0, 1]`` probability that a finished comment reads as gold-accepted
-#   review prose rather than noise;
-# - an explicit **false-positive penalty** with CR-Bench Usefulness Rate
-#   semantics (``(total − fp)/total``; KD3): the penalty magnitude is
-#   ``fp/total`` and it enters the composite subtractively, so a run whose
-#   findings are all noise can never outrank a clean run at the same recall
-#   (M5).
-#
-# The intrinsic composite and the golden-overlap telemetry are carried as
-# **signals only**: neither can substitute for the learned outcome term or the
-# Stage-0 gate (M6). Missing signals are ``None`` and renormalized out of the
-# composite — never imputed ``0.0`` (mirrors ``reward.py``'s ``axes_present``
-# rule).
-
-import hashlib  # noqa: E402  (rubric-scoring section)
-import json  # noqa: E402  (rubric-scoring section)
-import types  # noqa: E402  (rubric-scoring section)
-
-from daydream.training.reward import DEFAULT_WEIGHTS, ScoringInputs, _clip, score_trajectory  # noqa: E402
+# Missing signals are renormalized out, never imputed as zero. Intrinsic and
+# golden signals cannot replace the learned outcome term or its Stage-0 gate.
 
 REWARD_VERSION_RUBRIC = "2026.10.01-rubric-1"
 """Bump on any change to rubric weights, penalty semantics, or composite shape.
@@ -225,19 +134,11 @@ _PROTOCOL_ATTR = "score_comment"
 
 @dataclass(frozen=True)
 class RubricV2Weights:
-    """Tunable weights for :func:`score_review`.
+    """Stage-0 term weights; the subtractive FP weight must be positive.
 
-    Defaults reproduce the golden-locked rubric; overriding any field is an
-    analysis-time choice stamped with a ``+custom-`` suffix (never stored as
-    the canonical rubric score).
-
-    Attributes:
-        w_learned_outcome: Weight of the learned outcome term (the M6 anchor —
-            the term that cannot be substituted by intrinsic or golden signals).
-        w_false_positive: Weight of the subtractive CR-Bench false-positive
-            penalty. Must be positive (M2).
-        w_intrinsic: Weight of the shipped intrinsic composite (signal only).
-    """
+    Custom instances receive a fingerprinted version instead of the canonical
+    DEFAULT_RUBRIC_WEIGHTS stamp. Intrinsic evidence is a signal, never a
+    substitute for the learned outcome term."""
 
     w_learned_outcome: float = 0.4
     w_false_positive: float = 0.3
@@ -255,19 +156,12 @@ DEFAULT_RUBRIC_WEIGHTS = RubricV2Weights()
 """The golden-locked rubric weights; only this instance earns the canonical
 :data:`REWARD_VERSION_RUBRIC` stamp (identity-checked, as in ``reward.py``)."""
 
-_WEIGHT_FIELDS = (
-    "w_learned_outcome",
-    "w_false_positive",
-    "w_intrinsic",
-)
-
-
 def _rubric_fingerprint(weights: RubricV2Weights) -> str:
     """Stable 8-hex SHA-256 fingerprint of rubric weights (sorted-key JSON).
 
     Mirrors ``reward._weights_fingerprint``. Pure; no I/O.
     """
-    payload = {name: getattr(weights, name) for name in _WEIGHT_FIELDS}
+    payload = {field.name: getattr(weights, field.name) for field in fields(RubricV2Weights)}
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()[:8]
 
 
@@ -287,31 +181,16 @@ def _validate_findings(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 @dataclass(frozen=True)
 class RubricV2Breakdown:
-    """Per-term decomposition + composite for one review under rubric v2.
+    """Stage-0 review score with explicit term presence and telemetry.
 
-    Attributes:
-        learned_outcome: Mean learned outcome score over finding texts
-            (``[0, 1]``), or ``None`` when there are no findings to score.
-        false_positive_penalty: CR-Bench penalty magnitude ``fp/total``
-            (``[0, 1]``), or ``None`` when ``total`` is zero; the composite
-            term is ``−w_false_positive ×`` this.
-        signal_to_noise: CR-Bench Usefulness Rate ``(total − fp)/total``
-            telemetry (not a composite term), or ``None`` when ``total`` is
-            zero.
-        golden_overlap: Telemetry — fraction of findings present in the
-            supplied gold evidence set (``0.0`` when none supplied). Carried
-            as a signal only; never a substitute for the learned term (M6).
-        intrinsic_composite: The shipped pure-intrinsic composite from
-            ``reward.score_trajectory`` (read, never recomputed), or ``None``
-            when the intrinsic score was uncomputable.
-        terms: Composite-term map (negative values are penalties; ``None``
-            marks an absent signal that was renormalized out; telemetry-only
-            entries such as ``golden_overlap`` are present but excluded from
-            the weighted mean).
-        composite: The rubric composite — weighted mean of present terms,
-            renormalized, clipped to ``[0, 1]``, rounded to 4 places.
-        reward_version: The version stamp at scoring time.
-    """
+    learned_outcome is the mean model score; FP penalty is fp/total and
+    signal_to_noise is (total-fp)/total. Ratios are absent at zero total.
+    Golden overlap is telemetry only. intrinsic_composite comes from the shipped
+    intrinsic scorer and may be absent.
+
+    terms carries negative penalties, None for missing signals, and unweighted
+    telemetry. The weighted mean renormalizes present terms, clips to [0, 1],
+    and rounds to four places."""
 
     learned_outcome: float | None
     false_positive_penalty: float | None
@@ -337,27 +216,12 @@ def score_review(
     gold_texts: frozenset[str] | set[str] | None = None,
     weights: RubricV2Weights = DEFAULT_RUBRIC_WEIGHTS,
 ) -> float | RubricV2Breakdown:
-    """Score one finished review under the Stage-0 rubric v2.
+    """Score a review using model.score_comment(text), returning a scalar or breakdown.
 
-    Args:
-        model: The trained outcome model (or any object exposing
-            ``score_comment(text) -> float``).
-        findings: Well-formed finding dicts (each a mapping with a string
-            ``text``); malformed entries raise :class:`ValueError` naming the
-            finding id.
-        fp_count: Number of the findings judged false positives.
-        total_findings: Total number of findings reported.
-        breakdown: When ``True`` return the full :class:`RubricV2Breakdown`;
-            otherwise return the composite scalar only.
-        gold_texts: Optional set of finding texts known to overlap gold
-            accepted evidence; drives the golden-overlap telemetry only.
-        weights: The :class:`RubricV2Weights` to score under; defaults to
-            :data:`DEFAULT_RUBRIC_WEIGHTS`.
-
-    Returns:
-        The composite ``[0, 1]`` scalar, or the frozen breakdown when
-        ``breakdown=True``.
-    """
+    Reject malformed findings with their index/id and FP counts outside
+    [0, total_findings]. gold_texts affects overlap telemetry only. Missing
+    composite terms are renormalized out; no present term or nonpositive total
+    weight raises ValueError."""
     if not hasattr(model, _PROTOCOL_ATTR):
         raise TypeError(f"model must expose {_PROTOCOL_ATTR}(text) -> float; got {type(model).__name__!r}.")
     if not 0 <= fp_count <= total_findings:

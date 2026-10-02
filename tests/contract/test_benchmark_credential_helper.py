@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from daydream import git_ops
+from daydream.git_ops import process as git_process
 
 
 def _serve_bare_repo(root: Path) -> tuple[str, str]:
@@ -74,7 +75,7 @@ def test_git_ls_remote_drives_credential_helper_contract(tmp_path: Path, monkeyp
         'fi\n'
     )
     wrapper.chmod(0o755)
-    monkeypatch.setattr(git_ops, "GH_CREDENTIAL_HELPER", f"!{wrapper}")
+    monkeypatch.setattr(git_process, "GH_CREDENTIAL_HELPER", f"!{wrapper}")
 
     _, url = _serve_bare_repo(tmp_path)
     out = git_ops.git_ls_remote(tmp_path, url)

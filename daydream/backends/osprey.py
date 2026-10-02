@@ -1,9 +1,6 @@
-"""Osprey headless JSONL backend for daydream.
+"""Translate Osprey's versioned headless JSONL into backend events.
 
-This module is deliberately a thin subprocess adapter.  Osprey owns the agent
-loop, tool-search catalog, MCP lifecycle, policy checks, hooks, caps, and
-provider telemetry; daydream only translates the versioned stream into its
-existing backend event union.
+Osprey owns the agent loop, tools, MCP, policy, hooks, caps, and provider telemetry.
 """
 
 from __future__ import annotations
@@ -58,9 +55,7 @@ _MAX_DIAGNOSTIC_LINE_CHARS = 500
 _SUCCESS_OUTCOMES = frozenset({"completed", "terminal_tool"})
 _KNOWN_IGNORED_EVENTS = frozenset(
     {
-        # Osprey's stream contains these provider-neutral lifecycle and
-        # telemetry records.  Daydream has no corresponding event class, so
-        # they are retained in the producer/ATIF path and not reinterpreted.
+        # Producer/ATIF lifecycle and telemetry without a Daydream event equivalent.
         "completion_gate",
         "finalization_record",
         "verification_checkpoint",
@@ -207,11 +202,7 @@ def _bounded_diagnostic_line(line: str) -> str:
 
 
 def _osprey_process_exit_message(stderr_lines: list[str], returncode: int) -> str:
-    """Build osprey's structurally distinct PROCESS_EXIT message.
-
-    Osprey inlines the bounded diagnostic list after ``": "`` instead of the
-    shared builder's ``"(last N non-JSON lines)"`` header and count.
-    """
+    """Inline bounded diagnostics without Codex/Pi's count header."""
     return f"Osprey CLI exited with return code {returncode}: {_bounded_diagnostics(stderr_lines)}"
 
 
@@ -315,9 +306,7 @@ class OspreyBackend:
             )
 
         self._model_override = model
-        # Osprey may resolve an omitted model from its own config and model
-        # preference store. Until session_start reports that choice, the
-        # backend name is not a valid model identity.
+        # An omitted model remains unknown until Osprey reports its configured choice.
         self.model = model or "unknown"
         self.reasoning_effort = reasoning_effort
         self.osprey_binary = osprey_binary or os.environ.get("OSPREY_BINARY", "osprey")
@@ -528,9 +517,7 @@ class OspreyBackend:
                 stdin_mode=StdinMode.DEVNULL,
                 stderr_policy=StderrPolicy.DRAIN_TASK,
                 stderr_sink=_stderr_diagnostic_sink(stderr_lines),
-                # Replace-decode as the pre-transport osprey read loop did, so
-                # a non-UTF-8 byte inside JSON tool output is repaired and the
-                # session completes instead of hard-failing the phase.
+                # Repair non-UTF-8 tool output inside valid JSON rather than aborting.
                 decode_errors="replace",
                 limit=_OSPREY_STDOUT_LIMIT_BYTES,
                 env=child_env,
@@ -580,17 +567,11 @@ class OspreyBackend:
                     session_id = _required_string(event, "session_id")
                     started_at = _required_string(event, "started_at")
                     session_model = _required_string(event, "model")
-                    # ``self.model`` starts as a backend-only placeholder when
-                    # Osprey is allowed to resolve its own config. The session
-                    # header is the authoritative model identity for this run.
+                    # The native header supplies the authoritative model identity.
                     self.model = session_model
                     provider = _required_string(event, "provider")
                     saw_session_start = True
-                    # P18 Task 1: closed typed effective-config admission from
-                    # the exact command built above. Arbitrary persona/toolset
-                    # values never cross this boundary — presence booleans
-                    # only; the header's native timestamp distinguishes via
-                    # ``timestamp_source="native"``.
+                    # Admit only command facts; arbitrary persona/toolset labels stay private.
                     yield RequestEvent(
                         prompt=prompt,
                         model_name=session_model,
@@ -782,10 +763,8 @@ class OspreyBackend:
                             started_at=turn_started_at,
                             measurement_source="turn_end",
                         )
-                    # P18: per-turn model override where the stream exposes one
-                    # (turn_end "model"); provider stays the session provider.
-                    # Session outcome is never a model finish reason — finish
-                    # reasons stay unset on this boundary (U in the stream).
+                    # Allow native per-turn model overrides. Provider remains session-scoped;
+                    # a session outcome is not a model finish reason.
                     turn_model = event.get("model")
                     yield TurnEndEvent(
                         message_id=turn_id,
@@ -819,15 +798,9 @@ class OspreyBackend:
                 else:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
-            # Reap the child; the shared reap returns the exit code without
-            # raising, and the shared check below formats the backend-specific
-            # message from the code and captured stderr lines.
             returncode = await reap(transport)
-            # A descendant can outlive Osprey while retaining the inherited
-            # stderr fd. Reap the process group and close its transports before
-            # awaiting EOF so the diagnostic drain cannot hang indefinitely —
-            # the drained stderr is what the message below carries. The
-            # ``finally`` teardown is a no-op second call.
+            # Close descendant-held stderr before joining its drain, or EOF may never
+            # arrive. This also completes diagnostics; finally's teardown is idempotent.
             await teardown(transport, self._transports)
             # No retryable= kwarg: osprey's PROCESS_EXIT is not retryable.
             raise_for_exit(

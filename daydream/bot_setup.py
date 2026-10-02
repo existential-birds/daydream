@@ -1,35 +1,18 @@
-"""Self-hosted review-bot setup orchestrator.
-
-Takes an operator from nothing to a live, self-hosted review bot. The first
-leg is the App-from-manifest localhost handshake: a one-shot ``http.server``
-serves an auto-submitting HTML form that POSTs a GitHub App *manifest* to
-GitHub's app-creation page, GitHub redirects the operator's browser back to a
-``/callback`` route with a temporary conversion ``code``, and that code is
-exchanged for the freshly created App's credentials and slug.
-
-The live browser/manifest leg is isolated behind :class:`_ManifestListener` so
-the code-exchange behavior is testable without real GitHub: drive
-:meth:`_ManifestListener._handle_code` directly.
-"""
+"""Register, configure, and verify the self-hosted review bot."""
 
 from __future__ import annotations
 
 import getpass
-import html
-import json
 import os
 import shutil
 import sys
-import threading
-import webbrowser
 from dataclasses import dataclass
-from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qs, urlparse
 
 from daydream import config, git_ops
 from daydream.agent import console
+from daydream.bot_manifest import register_app_via_manifest
 from daydream.git_ops import GitError
 from daydream.github_app import (
     APP_ID_ENV,
@@ -37,7 +20,6 @@ from daydream.github_app import (
     AppCredentials,
     GitHubAppError,
     build_app_jwt_auth,
-    exchange_manifest_code,
     get_app_metadata,
     resolve_credentials,
 )
@@ -47,207 +29,9 @@ from daydream.ui import print_error, print_info, print_success, print_warning
 _ANTHROPIC_KEY_ENV = "ANTHROPIC_API_KEY"
 _SETUP_BRANCH = "daydream/setup-bot"
 
-# Events consumed by the approval-gated workflows: trusted review commands and
-# completed review runs. Credential-bearing review workflows are not subscribed
-# to pull_request events.
-_MANIFEST_EVENTS = ("issue_comment", "workflow_run")
-
-_APP_NAME_DEFAULT = "Daydream Review Bot"
-_GITHUB_NEW_APP_URL = "https://github.com/settings/apps/new"
-_GITHUB_NEW_APP_ORG_URL = "https://github.com/organizations/{org}/settings/apps/new"
-
-
-def _manifest_payload(*, redirect_url: str) -> dict[str, object]:
-    """Build the GitHub App manifest JSON for the from-manifest flow.
-
-    Args:
-        redirect_url: The ``http://localhost:<port>/callback`` URL GitHub
-            redirects to with the conversion code.
-
-    Returns:
-        The manifest dict: name, the homepage/redirect URLs, the
-        :data:`config.APP_PERMISSIONS` default permissions, and the
-        :data:`_MANIFEST_EVENTS` the shipped workflows consume.
-    """
-    return {
-        "name": _APP_NAME_DEFAULT,
-        "url": "https://github.com/anthropics/daydream",
-        "redirect_url": redirect_url,
-        "public": False,
-        "default_permissions": dict(config.APP_PERMISSIONS),
-        "default_events": list(_MANIFEST_EVENTS),
-    }
-
-
-def _manifest_form_html(*, action_url: str, manifest: dict[str, object]) -> str:
-    """Render an auto-submitting HTML form POSTing the manifest to GitHub.
-
-    Returns:
-        A self-contained HTML page that submits on load.
-    """
-    manifest_json = html.escape(json.dumps(manifest), quote=True)
-    return (
-        "<!DOCTYPE html><html><head><title>Daydream setup</title></head>"
-        "<body onload='document.forms[0].submit()'>"
-        "<p>Redirecting to GitHub to create your review-bot App&hellip;</p>"
-        f"<form action='{html.escape(action_url, quote=True)}' method='post'>"
-        f"<input type='hidden' name='manifest' value='{manifest_json}'>"
-        "<noscript><button type='submit'>Continue to GitHub</button></noscript>"
-        "</form></body></html>"
-    )
-
-
-class _ManifestListener:
-    """One-shot localhost listener for the App-from-manifest handshake.
-
-    Serves ``/`` (the auto-submitting manifest form) and ``/callback`` (where
-    GitHub redirects with the conversion ``code``). :meth:`serve` binds an
-    ephemeral port, opens the browser at ``/``, and blocks until the callback
-    arrives, then returns the exchanged credentials. :meth:`_handle_code` is
-    the testable seam: it validates the code and performs the exchange,
-    isolated from the blocking serve loop.
-
-    Attributes:
-        repo_dir: Working directory threaded to ``exchange_manifest_code``.
-        org: Organization login when org-scoped, else None.
-    """
-
-    def __init__(self, *, repo_dir: Path, org: str | None) -> None:
-        self.repo_dir = repo_dir
-        self.org = org
-        self._result: tuple[AppCredentials, str] | None = None
-        self._error: GitHubAppError | None = None
-        self._port: int = 0
-        self._done = threading.Event()
-
-    def _action_url(self) -> str:
-        """GitHub's app-creation URL — org variant when an org is set."""
-        if self.org:
-            return _GITHUB_NEW_APP_ORG_URL.format(org=self.org)
-        return _GITHUB_NEW_APP_URL
-
-    def _handle_code(self, code: str | None) -> tuple[AppCredentials, str]:
-        """Validate the callback code and exchange it for App credentials.
-
-        Args:
-            code: The ``code`` query param from GitHub's callback redirect.
-
-        Returns:
-            The ``(credentials, slug)`` tuple from
-            :func:`exchange_manifest_code`.
-
-        Raises:
-            GitHubAppError: If the callback carried no code (the operator
-                declined the App creation); never proceeds with empty creds.
-        """
-        if not code:
-            raise GitHubAppError("App registration was cancelled")
-        return exchange_manifest_code(self.repo_dir, code, auth=git_ops.INHERIT_GITHUB_AUTH)
-
-    def serve(self) -> tuple[AppCredentials, str]:
-        """Bind a localhost port, open the browser, and block on the callback.
-
-        Raises:
-            GitHubAppError: If the operator declined or the exchange failed.
-        """
-        listener = self
-
-        class _Handler(BaseHTTPRequestHandler):
-            def log_message(self, *args: object) -> None:  # noqa: A003 - silence stdlib access log
-                return
-
-            def do_GET(self) -> None:  # noqa: N802 - stdlib handler naming
-                parsed = urlparse(self.path)
-                if parsed.path == "/":
-                    self._serve_form()
-                elif parsed.path == "/callback":
-                    self._serve_callback(parsed.query)
-                else:
-                    self.send_response(404)
-                    self.end_headers()
-
-            def _serve_form(self) -> None:
-                redirect_url = f"http://localhost:{listener._port}/callback"
-                manifest = _manifest_payload(redirect_url=redirect_url)
-                body = _manifest_form_html(action_url=listener._action_url(), manifest=manifest).encode("utf-8")
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(body)
-
-            def _serve_callback(self, query: str) -> None:
-                code = parse_qs(query).get("code", [None])[0]
-                try:
-                    listener._result = listener._handle_code(code)
-                except GitHubAppError as exc:
-                    listener._error = exc
-                message = (
-                    "Daydream: App created. You can close this tab and return to the terminal."
-                    if listener._error is None
-                    else "Daydream: App registration was cancelled. Return to the terminal."
-                )
-                self.send_response(200)
-                self.send_header("Content-Type", "text/html; charset=utf-8")
-                self.end_headers()
-                self.wfile.write(f"<!DOCTYPE html><html><body><p>{html.escape(message)}</p></body></html>".encode())
-                listener._done.set()
-
-        server = HTTPServer(("localhost", 0), _Handler)
-        port = server.socket.getsockname()[1]
-        self._port = port
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            webbrowser.open(f"http://localhost:{port}/")
-            self._done.wait(timeout=300)  # 5-minute bound; avoids indefinite hang if browser flow is abandoned
-        finally:
-            server.shutdown()
-            thread.join(timeout=5)
-
-        if self._error is not None:
-            raise self._error
-        if self._result is None:
-            raise GitHubAppError("App registration was cancelled")
-        return self._result
-
-
-def register_app_via_manifest(repo_dir: Path, *, org: str | None = None) -> tuple[AppCredentials, str]:
-    """Register a GitHub App via the from-manifest localhost browser flow.
-
-    Binds a localhost ``http.server`` on an ephemeral port, opens the
-    operator's browser to an auto-submitting form that POSTs the App manifest
-    to GitHub's app-creation page (the org variant when *org* is set), blocks
-    until GitHub redirects back to ``/callback?code=...``, and exchanges that
-    code for the new App's credentials.
-
-    Args:
-        repo_dir: Working directory for the ``gh`` subprocess used by the
-            manifest-code exchange.
-        org: Organization login to register an org-owned App, else None for a
-            personal-account App.
-
-    Returns:
-        A ``(credentials, slug)`` tuple: the new App's id/PEM and its slug.
-
-    Raises:
-        GitHubAppError: If the operator declined (callback without a code) or
-            the manifest-code exchange failed.
-    """
-    return _ManifestListener(repo_dir=repo_dir, org=org).serve()
-
-
 @dataclass(frozen=True)
 class Scope:
-    """Target scope for deposited Actions secrets/variables.
-
-    Exactly one of *repo* or *org* must be set; the orchestrator threads it to
-    the ``gh`` ``--repo``/``--org`` flags. Validated at construction so an
-    ambiguous/empty scope can never reach a ``gh`` call.
-
-    Attributes:
-        repo: ``owner/repo`` slug for a repository-scoped deposit, else None.
-        org: Organization login for an org-scoped deposit, else None.
-    """
+    """Exactly one repository or organization target for Actions secrets and variables."""
 
     repo: str | None = None
     org: str | None = None
@@ -271,30 +55,11 @@ def deposit_secrets(
     bot_handle: str,
     scope: Scope,
 ) -> None:
-    """Deposit the App credentials and bot handle as Actions secrets/variables.
+    """Overwrite the three setup secrets and bot-handle variable at ``scope``.
 
-    Sets the three :data:`config.SETUP_SECRET_NAMES` secrets
-    (``DAYDREAM_APP_ID`` = the numeric App id, ``DAYDREAM_APP_PRIVATE_KEY`` =
-    the PEM, ``ANTHROPIC_API_KEY`` = the operator key) via
-    :func:`git_ops.gh_secret_set` (value piped on stdin, never argv), and the
-    :data:`config.BOT_HANDLE_VAR` Actions variable via
-    :func:`git_ops.gh_variable_set`, threading *scope* to ``--repo``/``--org``.
-
-    Idempotent: ``gh`` overwrites an existing secret/variable, so a re-run is
-    safe. Pre-existing secrets are listed first and logged by name only —
-    secret *values* are never logged. The PEM is passed on stdin so it cannot
-    leak into process listings.
-
-    Args:
-        repo_dir: Working directory (ambient ``gh`` auth context).
-        creds: The App credentials (``app_id``, ``private_key``).
-        anthropic_key: The operator's ``ANTHROPIC_API_KEY`` value.
-        bot_handle: The bot's login handle for ``DAYDREAM_BOT_HANDLE``.
-        scope: Repo- or org-scoped target (exactly one).
-
-    Raises:
-        GitHubAppError: If any ``gh`` set call fails — named so no partial,
-            silently-incomplete deposit is reported as success.
+    Secret values, including the PEM, travel on stdin and are never logged.
+    GitHubAppError names any failed list/set operation; partial deposits cannot
+    be reported as success.
     """
     scope_kwargs = scope._secret_kwargs()
     secret_values = {
@@ -346,32 +111,11 @@ _PR_BODY = (
 
 
 def land_workflows(repo_dir: Path, *, branch: str) -> str:
-    """Copy the packaged workflow templates and open a reviewable PR.
+    """Land packaged workflows through a branch and reviewable PR.
 
-    Copies each :func:`daydream.templates.workflow_template_files` into
-    ``<repo>/.github/workflows/``, then creates *branch*, commits **only** the
-    three workflow files, pushes the branch, and opens a pull request against
-    the repository's default branch. Never commits to or pushes the default
-    branch — the workflows always land via a reviewable PR.
-
-    Idempotent: a template whose target file already exists with identical
-    content is skipped. A target file that exists with divergent content (a
-    customized workflow) is replaced with a warning that workflow customization
-    is intentionally unsupported. When all three already match, no branch or PR
-    is created and the :data:`WORKFLOWS_ALREADY_INSTALLED` sentinel is returned
-    (distinguishable from a PR URL).
-
-    Args:
-        repo_dir: Repository working directory (ambient ``gh``/``git`` context).
-        branch: The branch name to create the workflow files on.
-
-    Returns:
-        The opened PR's URL, or :data:`WORKFLOWS_ALREADY_INSTALLED` when every
-        workflow file already exists verbatim.
-
-    Raises:
-        GitError: If a git/``gh`` operation (branch, commit, push, PR) fails.
-        BranchNotFoundError: If the default branch cannot be resolved.
+    Commit only changed workflow files. Customized files are replaced with a
+    warning. If every file already matches, return WORKFLOWS_ALREADY_INSTALLED
+    without creating a branch or PR. Git/gh failures propagate.
     """
     workflows_dir = repo_dir / _WORKFLOWS_DIR
     workflows_dir.mkdir(parents=True, exist_ok=True)
@@ -412,17 +156,9 @@ def land_workflows(repo_dir: Path, *, branch: str) -> str:
 
 @dataclass(frozen=True)
 class Check:
-    """One verify-doctor check outcome.
+    """One doctor result, with remediation in ``detail`` when it fails.
 
-    Attributes:
-        name: Short check identifier (e.g. ``"secrets"``).
-        passed: True when the check passed (a skipped optional check is
-            reported as passed with an explanatory *detail*).
-        detail: Human-readable result. On failure it names the exact missing
-            secret/variable/file/permission **and** the remediation.
-        required: When False, the check is informational and does not affect
-            :attr:`VerifyResult.ok` (used for checks skipped because no local
-            App credentials are available to read App-level state).
+    Non-required checks are informational and do not affect VerifyResult.ok.
     """
 
     name: str
@@ -433,12 +169,7 @@ class Check:
 
 @dataclass(frozen=True)
 class VerifyResult:
-    """Aggregate outcome of :func:`run_verify`.
-
-    Attributes:
-        checks: The ordered per-check results.
-        ok: True iff every *required* check passed.
-    """
+    """Ordered doctor results; success requires every required check to pass."""
 
     checks: tuple[Check, ...]
 
@@ -463,11 +194,7 @@ def _bot_handle_for(slug: str | None, scope: Scope) -> str:
 
 
 def _installed_owner_logins(repo_dir: Path, creds: AppCredentials) -> set[str | None]:
-    """Return the set of account logins from ``GET /app/installations``.
-
-    Callers are responsible for catching :class:`GitError` and converting it
-    to their own error type or return value as appropriate.
-    """
+    """Read installed account logins under App JWT authentication; GitError propagates."""
     jwt_auth, bearer = build_app_jwt_auth(creds.app_id, creds.private_key)
     installations = git_ops.gh_api(
         repo_dir, "/app/installations", headers=bearer, idempotent=True, auth=jwt_auth,
@@ -479,11 +206,7 @@ def _installed_owner_logins(repo_dir: Path, creds: AppCredentials) -> set[str | 
 
 
 def _skipped_no_app_credentials(name: str, purpose: str) -> Check:
-    """Passing, non-required Check note when no local App credentials exist.
-
-    The App-level reads (installations, permissions) cannot be authenticated
-    without them, so the check is reported as a skip rather than a failure.
-    """
+    """Report an optional App-level check as skipped when no local credentials exist."""
     return Check(
         name=name,
         passed=True,
@@ -496,12 +219,7 @@ def _skipped_no_app_credentials(name: str, purpose: str) -> Check:
 
 
 def _check_app_installed(repo_dir: Path, scope: Scope, creds: AppCredentials | None) -> Check:
-    """Check (1): the App is installed on the target owner.
-
-    Reads ``GET /app/installations`` under an App JWT and confirms the target
-    owner appears. Skipped (reported as a passing, non-required note) when no
-    local App credentials are available to authenticate the App-level read.
-    """
+    """Check the target owner installation, or skip without local App credentials."""
     if creds is None:
         return _skipped_no_app_credentials(
             "app_installed",
@@ -606,14 +324,10 @@ _WORKFLOW_COMMAND_OPTIONS = ("review", "sequence", "flowchart")
 
 
 def _command_input_intact(spec: Any) -> bool:
-    """True when a review workflow's ``command`` dispatch input is safely bounded.
+    """Allow an absent optional selector, or a choice restricted to approved commands.
 
-    Absent is fine — the input is optional, and a workflow predating the bot
-    commands simply has no selector. Present means it must be a ``choice``
-    whose options are exactly :data:`_WORKFLOW_COMMAND_OPTIONS`, so the value
-    that selects which run the approved head gets cannot be widened (a
-    ``type: string`` selector, or an extra option, would let a dispatcher pick
-    a run the maintainer never approved).
+    A free-form selector or extra choice could dispatch a run the maintainer
+    did not approve.
     """
     if spec is None:
         return True
@@ -626,37 +340,12 @@ def _command_input_intact(spec: Any) -> bool:
 
 
 def _workflow_contract_intact(name: str, content: str) -> bool:
-    """True when *content* still satisfies the approval-gate security contract.
+    """Check the parsed workflow's approval boundary; invalid/unknown files fail.
 
-    The gate era binds every credential-bearing review to an approved head, so
-    an installed workflow that drifts from the packaged template is acceptable
-    only while it keeps the contract:
-
-    - ``daydream-review.yml`` must require the ``approved_head_sha`` dispatch
-      input and must not auto-trigger on ``pull_request`` (a pre-gate workflow
-      triggers on PR open, re-opening the unapproved-review hole). If it also
-      declares the optional ``command`` input (the bot-command selector added
-      for the diagram commands), that input must be a ``choice`` restricted to
-      exactly ``review``/``sequence``/``flowchart``: a free-form ``string``
-      would let a dispatcher name a run the maintainer never approved.
-    - ``daydream-command.yml`` must pass ``approved_head_sha`` — it is the
-      single approval point.
-    - ``daydream-post.yml`` must run off the review's ``workflow_run``
-      completion.
-
-    A drift that breaks the contract is a stale workflow and a hard doctor
-    failure; a drift that keeps it (e.g. a backend-variant customization such
-    as a Codex deployment) is reported as a warning: customization is
-    intentionally unsupported, and ``daydream setup`` replaces customized
-    files with the packaged templates.
-
-    The checks are structural (parsed YAML), mirroring the gate assertions in
-    ``tests/test_workflow_templates.py``: whole-file substring matching would
-    hard-fail a gate-intact workflow that merely mentions ``pull_request`` in
-    prose and could disagree with the test harness. Content that does not parse
-    to a workflow mapping is not gate-intact. A template with no explicit
-    contract below (a future non-review/command file) is treated as broken
-    rather than silently judged by a guess.
+    Reviews require approved_head_sha and may not trigger on pull_request.
+    An optional command selector must retain exactly the approved choices.
+    Every command dispatch must bind the live API-resolved HEAD_SHA; post runs
+    must follow workflow_run completion. Comments cannot satisfy these checks.
     """
     try:
         import yaml  # lazy: pyyaml is a dev-only dependency (see pyproject.toml)
@@ -710,15 +399,10 @@ def _workflow_contract_intact(name: str, content: str) -> bool:
 
 
 def _check_workflows(repo_dir: Path) -> Check:
-    """Check (4): installed workflows carry the approval gate on the default branch.
+    """Check default-branch workflows against templates and the approval contract.
 
-    Byte-compares installed workflows against the packaged templates, but a
-    byte drift is only a hard failure when it breaks the gate contract (see
-    :func:`_workflow_contract_intact`) — e.g. a stale pre-gate workflow that
-    auto-triggers on ``pull_request`` would re-open the unapproved-review hole.
-    A contract-intact drift (a customized variant, such as a different model
-    backend) passes with a warning that customization is intentionally
-    unsupported; missing files always fail.
+    Missing or gate-breaking files fail. Intact customized variants pass with
+    an unsupported-customization warning.
     """
     try:
         base = git_ops.default_branch(repo_dir)
@@ -784,25 +468,10 @@ def _scope_flag(scope: Scope) -> str:
 
 
 def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
-    """Run the read-only setup doctor against the target scope.
+    """Read installation, secret/variable, permission and workflow state.
 
-    Runs four checks and aggregates them into a :class:`VerifyResult`:
-
-    1. **App installed** — the App appears in ``GET /app/installations`` for the
-       target owner (skipped, non-required, when no local App credentials are
-       available to authenticate the read).
-    2. **Secrets & variable** — every :data:`config.SETUP_SECRET_NAMES` secret
-       and the :data:`config.BOT_HANDLE_VAR` variable exist at the scope.
-    3. **Permissions** — the App grants a superset of
-       :data:`config.APP_PERMISSIONS` (skipped, non-required, without creds).
-    4. **Workflows** — the installed workflow files carry the approval gate on
-       the default branch: they byte-match the packaged templates, or diverge
-       only as contract-intact customizations (warned, not failed). Stale
-       gate-less workflows and missing files fail.
-
-    This is strictly read-only: it never sets a secret, variable, or file. Each
-    failed required check's ``detail`` names the exact missing element and the
-    remediation; :attr:`VerifyResult.ok` is True iff every required check passed.
+    App-level checks are optional without local credentials. Required failures
+    name the missing element and remediation; this doctor never mutates state.
     """
     creds = resolve_credentials()
     checks = (
@@ -815,13 +484,7 @@ def run_verify(repo_dir: Path, *, scope: Scope) -> VerifyResult:
 
 
 def print_verify_result(result: VerifyResult) -> None:
-    """Render a :class:`VerifyResult` to the console (one line per check).
-
-    Passed checks print as a success line; failed required checks print as an
-    error naming the missing element and remediation; skipped optional checks
-    print as a dim/info note. The CLI handler maps :attr:`VerifyResult.ok` to
-    the process exit code separately.
-    """
+    """Render successes, required failures and informational skips; the CLI sets the exit code."""
     for check in result.checks:
         if check.passed and check.required:
             print_success(console, f"[{check.name}] {check.detail}")
@@ -836,20 +499,7 @@ def print_verify_result(result: VerifyResult) -> None:
 
 
 def _confirm_installation(repo_dir: Path, scope: Scope, creds: AppCredentials) -> bool:
-    """Return True once the App is installed on the target owner.
-
-    Re-checks ``GET /app/installations`` under the App JWT. If the owner is not
-    yet present, prints the install URL, blocks on the manual **Install** click
-    via the :func:`_wait_for_install_click` seam, then re-checks once more.
-
-    The installations read is attempted first, so an install that already
-    happened (e.g. an org-wide App) is auto-satisfied without prompting — this
-    is what lets the real-path test drive the full-auto flow without blocking
-    on stdin.
-
-    Returns:
-        True if the owner appears in the installations after at most one wait.
-    """
+    """Check installation, prompt for the manual Install click if needed, then re-check once."""
     owner = _owner_of(scope)
     if _owner_installed(repo_dir, owner, creds):
         return True
@@ -868,12 +518,7 @@ def _confirm_installation(repo_dir: Path, scope: Scope, creds: AppCredentials) -
 
 
 def _owner_installed(repo_dir: Path, owner: str, creds: AppCredentials) -> bool:
-    """True when *owner* appears in ``GET /app/installations`` under the App JWT.
-
-    Raises:
-        GitHubAppError: If the installations read fails (so a transport error is
-            never silently read as "not installed").
-    """
+    """Read installation state; transport errors raise GitHubAppError instead of returning False."""
     try:
         logins = _installed_owner_logins(repo_dir, creds)
     except GitError as exc:
@@ -882,31 +527,12 @@ def _owner_installed(repo_dir: Path, owner: str, creds: AppCredentials) -> bool:
 
 
 def _wait_for_install_click() -> None:
-    """Block until the operator confirms the manual GitHub App Install click.
-
-    Isolated as a module-level seam so the real-path test can drive
-    :func:`run_setup` without blocking on real stdin (the happy path
-    auto-satisfies the installations re-check before this is reached).
-    """
+    """Wait for the operator to confirm installation."""
     input("Press Enter once you have installed the App on the target...")
 
 
 def _prompt_for_anthropic_key() -> str | None:
-    """Prompt the operator for their ``ANTHROPIC_API_KEY`` when it is not preset.
-
-    The key is bound for deposit as an Actions secret, so asking for it inline
-    keeps the "one command" promise instead of stranding a new operator on a
-    pre-flight error. Input is read with :func:`getpass.getpass` so the secret
-    is never echoed to the terminal or shell history.
-
-    Isolated as a module-level seam so the real-path test can drive
-    :func:`run_setup` without blocking on real stdin.
-
-    Returns:
-        The entered key (stripped, non-empty), or ``None`` when stdin is not a
-        TTY (unattended/CI run) or the operator cancels — so the caller falls
-        back to a clean pre-flight error rather than blocking or guessing.
-    """
+    """Read a hidden, stripped key on a TTY; return None for cancellation or non-TTY input."""
     if not sys.stdin.isatty():
         return None
     print_info(
@@ -927,36 +553,11 @@ def run_setup(
     force: bool,
     anthropic_key: str | None,
 ) -> int:
-    """Take an operator from nothing to a landed self-hosted review bot.
+    """Resolve the API key, register/reuse the App, confirm installation and deposit secrets.
 
-    Orchestrates the full-auto path:
-
-    1. **Pre-flight** — ``gh`` is on ``PATH`` and the ``ANTHROPIC_API_KEY`` is
-       resolvable (explicit arg, environment, or an interactive hidden prompt;
-       a non-interactive stdin without the key fails cleanly here).
-    2. **Register** — unless the credentials are already deposited (idempotency)
-       and *force* is not set, register the App via
-       :func:`register_app_via_manifest` (the localhost browser handshake).
-    3. **Install** — confirm the App is installed on the target owner, blocking
-       on the manual Install click when it is not yet present.
-    4. **Deposit** — :func:`deposit_secrets` writes the three secrets + handle.
-    5. **Land** — :func:`land_workflows` opens a reviewable PR with the three
-       workflow files (never pushing to the default branch).
-
-    Args:
-        target_dir: Repository working directory.
-        scope: Repo- or org-scoped deposit target (exactly one).
-        force: Re-register the App even if credentials are already deposited.
-        anthropic_key: The ``ANTHROPIC_API_KEY`` value, or None to read it from
-            the environment.
-
-    Returns:
-        ``0`` on success (including a no-op when workflows already exist); ``1``
-        on a recoverable failure surfaced to the operator.
-
-    Raises:
-        GitHubAppError: Propagated from registration/deposit on hard failure.
-        GitError: Propagated from the git/``gh`` landing operations.
+    Workflow files land through a reviewable PR. ``force`` re-registers even when
+    secrets exist. Return 0 for success/no-op and 1 for recoverable preflight or
+    installation failures; registration, deposit and Git errors propagate.
     """
     if shutil.which("gh") is None:
         print_error(

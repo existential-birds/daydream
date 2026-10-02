@@ -1,0 +1,621 @@
+"""Review for review and fix phases."""
+
+import json
+from pathlib import Path
+from typing import Any
+
+import anyio
+
+from daydream import agent, config as phase_config, git_ops, review_profile as _rp, ui
+from daydream.agent import (
+    _validates_schema,
+    resolve_gate,
+)
+from daydream.artifact_visibility import (
+    ArtifactSession,
+    artifact_session_active,
+)
+from daydream.backends import (
+    Backend,
+    effective_fanout_concurrency,
+)
+from daydream.config import (
+    STRUCTURE_STACK_NAME,
+)
+from daydream.deep.artifacts import (
+    deep_dir,
+    per_stack_records_path,
+    per_stack_review_path,
+    write_review_markdown,
+)
+from daydream.deep.detection import GENERIC_STACK, StackAssignment
+from daydream.deep.records import (
+    stamp_record_uids,
+)
+from daydream.deep.reuse_key import (
+    PhaseIdentity,
+    blob_map_digest,
+    digest_text,
+    grounding_digests,
+    shard_key_payload,
+    unit_key,
+)
+from daydream.deep.reuse_store import (
+    ReuseCache,
+    lookup_reuse_entry,
+    record_absent_components,
+    record_reuse_hit,
+    reuse_grounding_statuses,
+)
+from daydream.extensions import Registry, get_registry
+from daydream.hunk_index import load_hunk_index
+from daydream.phases.inputs import (
+    _budgeted_exploration_inputs,
+    _inlineable_diff,
+    _pointer_dir,
+    _prepare_existing_phase_inputs,
+    _recipe_for_work,
+    append_extended_facts,
+)
+from daydream.phases.schemas import ALTERNATIVE_REVIEW_SCHEMA, PER_STACK_RECORD_SCHEMA
+from daydream.prompt_budget import (
+    INLINE_DIFF_BUDGET_BYTES,
+    PreparedSanctionedInputs,
+    fits_inline_diff_budget,
+    truncate_utf8_to_budget,
+    uses_diff_reference,
+)
+from daydream.prompts.authorial_intent import (
+    AUTHORITATIVE_INTENT_BLOCK,
+)
+from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
+from daydream.review_budget import (
+    ReviewBudgetExceeded,
+    ReviewLimits,
+)
+from daydream.review_evidence import FinalizationContext
+from daydream.run_context import RunContext, bind_resolved_run_context, resolve_run_context
+from daydream.test_execution import (
+    load_test_recipe,
+)
+from daydream.trajectory import (
+    DaydreamPhase,
+    dispatch_scope,
+    finish_partial_or_failed,
+    get_current_recorder,
+    maybe_fork,
+)
+from daydream.workspace import WorkContext
+
+
+@bind_resolved_run_context
+async def phase_understand_intent(
+    backend: Backend,
+    work: WorkContext,
+    diff_path: Path,
+    log: str,
+    branch: str,
+    *,
+    exploration_dir: Path | None = None,
+    pr_description: str | None = None,
+    diff_text: str | None = None,
+    strategy: str | None = None,
+    run_context: RunContext | None = None,
+) -> str:
+    """Record author intent for later fix prompts."""
+    run_context = resolve_run_context(run_context)
+    ui.print_phase_hero(agent.console, "LISTEN", ui.phase_subtitle("LISTEN"))
+    ui.print_dim(agent.console, f"Model: {backend.model}")
+
+    # Read-only intent uses session-sanctioned exploration inputs. Standalone
+    # Codex clones retain bounded inline summary/diff fallback.
+    read_only_disposable_clone = getattr(backend, "read_only_disposable_clone", False)
+    inline_diff: str | None
+    if read_only_disposable_clone and diff_text and not fits_inline_diff_budget(diff_text):
+        # Clone runs cannot read gitignored artifact pointers. Keep the inline diff
+        # self-contained within the shared budget, including its truncation marker.
+        inline_diff = truncate_utf8_to_budget(
+            diff_text, INLINE_DIFF_BUDGET_BYTES, "\n[diff truncated to fit the prompt budget]\n"
+        )
+    else:
+        inline_diff = None if uses_diff_reference(backend, work.repo, read_only=True) else _inlineable_diff(diff_text)
+    session_active = artifact_session_active()
+    inline_exploration_summary: str | None = None
+    if not session_active and read_only_disposable_clone and exploration_dir is not None:
+        try:
+            summary_text: str | None = (exploration_dir / "summary.md").read_text(
+                encoding="utf-8"
+            )
+        except OSError:
+            summary_text = None
+        if summary_text is not None:
+            inline_exploration_summary = truncate_utf8_to_budget(
+                summary_text, INLINE_DIFF_BUDGET_BYTES, "\n[exploration summary truncated]\n"
+            )
+    # Exploration is advisory: the shared selector drops inputs that exceed the
+    # aggregate INLINE budget. Exact diff capture has its own hard limit; the
+    # post-capture transport remains authoritative.
+    sanctioned_inputs = _prepare_existing_phase_inputs(
+        backend, work,
+        {
+            "diff": diff_path if inline_diff is None else None,
+            **_budgeted_exploration_inputs(
+                exploration_dir,
+                backend=backend,
+                cwd=work.repo,
+                read_only=True,
+            ),
+        },
+        capture_without_session=True,
+        read_only=True,
+    )
+    prompt = get_registry().prompt("intent")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["intent"].content,
+        diff_path=str(diff_path),
+        branch=branch,
+        log=log,
+        exploration_dir=_pointer_dir(
+            sanctioned_inputs,
+            None if not session_active and read_only_disposable_clone else exploration_dir,
+        ),
+        pr_description=pr_description,
+        inline_diff=inline_diff,
+        inline_exploration_summary=inline_exploration_summary,
+    )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
+
+    intent_correction = ""
+    while True:
+        agent.console.print()
+        ui.print_info(agent.console, "Agent is analyzing the changes...")
+
+        output, _, budget_reason = await agent.run_agent(
+            backend, work.repo, prompt, phase=DaydreamPhase.INTENT,
+            review_limits=ReviewLimits(120, 60, 12),
+            finalization_context=FinalizationContext(
+                task="Describe the intent of the supplied change",
+                input_priority=("diff", "exploration-summary"),
+                output_semantics="Return concise plain text explaining the problem and proposed behavior. "
+                "State unresolved intent explicitly; do not produce a correctness review.",
+                supplied_context=(("branch", branch), ("commit log", log),
+                                  ("author description", pr_description or ""),
+                                  ("author correction", intent_correction),
+                                  ("diff", inline_diff or "")),
+            ),
+            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
+            wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+            read_only=True,
+            sanctioned_inputs=sanctioned_inputs,
+            run_context=run_context,
+        )
+        if budget_reason is not None:
+            raise ReviewBudgetExceeded("Intent analysis", budget_reason, output)
+        intent_text = output if isinstance(output, str) else str(output)
+
+        agent.console.print()
+        # Show the understanding the gate below asks about — the live transcript
+        # above may end on tool noise rather than the summary itself.
+        ui.print_intent_summary(agent.console, intent_text)
+        agent.console.print()
+        # Unattended runs accept this read-only understanding, including forced no.
+        # Only interactive runs can request a correction; --yes accepts immediately.
+        gate = resolve_gate(
+            assume=run_context.policy.assume,
+            interactive=run_context.policy.interactive,
+            safe_default=True,
+        )
+        if gate is True:
+            return intent_text
+        if gate is False and not run_context.policy.interactive:
+            return intent_text
+
+        response = run_context.choice(
+            "Is this understanding correct? [y/provide correction]",
+            default="y",
+            safe_default="y",
+            console=agent.console,
+        )
+
+        if response.lower() in ("y", "yes"):
+            return intent_text
+
+        intent_correction = response
+        # Correction remains read-only. Reuse bounded inline diff when selected;
+        # only EXACT_PATHS transport may receive the sanctioned diff_path.
+        if inline_diff is not None:
+            diff_clause = (
+                f"{UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY}\n\n"
+                "Re-examine the codebase and the diff inlined below, and present an "
+                "updated understanding of the intent.\n\n"
+                f"{inline_diff.rstrip()}\n"
+            )
+        else:
+            diff_clause = (
+                f"Re-examine the codebase and the diff at {diff_path}, and present an "
+                "updated understanding of the intent.\n"
+            )
+        prompt = f"""You previously described the intent of these changes as:
+
+{intent_text}
+
+The user corrected your understanding: {response}
+
+{diff_clause}
+The diff is the complete review target — do not look up pull requests or invoke any skills
+or slash commands; reply with your updated understanding as plain text.
+
+Branch: {branch}
+
+Commit log:
+{log}
+"""
+
+
+@bind_resolved_run_context
+async def phase_alternative_review(
+    backend: Backend,
+    work: WorkContext,
+    diff_path: Path,
+    intent_summary: str,
+    *,
+    exploration_dir: Path | None = None,
+    diff_text: str | None = None,
+    strategy: str | None = None,
+    run_context: RunContext | None = None,
+) -> list[dict[str, Any]]:
+    """Use confirmed intent to find concrete implementation problems in a fresh review.
+
+    Return issues with id, title, description, recommendation, severity, and files.
+    """
+    run_context = resolve_run_context(run_context)
+    ui.print_phase_hero(agent.console, "WONDER", ui.phase_subtitle("WONDER"))
+    ui.print_dim(agent.console, f"Model: {backend.model}")
+
+    read_only = uses_diff_reference(backend, work.repo, read_only=True)
+    inline_diff = None if read_only else _inlineable_diff(diff_text)
+    # Apply the shared advisory exploration budget; exact diff limits stay strict.
+    sanctioned_inputs = _prepare_existing_phase_inputs(
+        backend, work,
+        {
+            "diff": diff_path if inline_diff is None else None,
+            **_budgeted_exploration_inputs(
+                exploration_dir,
+                backend=backend,
+                cwd=work.repo,
+                read_only=read_only,
+            ),
+        },
+        capture_without_session=True,
+        read_only=read_only,
+    )
+    prompt = get_registry().prompt("alternatives")(
+        strategy=strategy if strategy is not None else _rp.build_default_profile().strategies["alternatives"].content,
+        intent_summary=intent_summary,
+        diff_path=str(diff_path),
+        exploration_dir=_pointer_dir(sanctioned_inputs, exploration_dir),
+        inline_diff=inline_diff,
+    )
+    prompt = append_extended_facts(prompt, _recipe_for_work(work))
+
+    agent.console.print()
+    ui.print_info(agent.console, "Agent is evaluating the implementation...")
+
+    result, _, budget_reason = await agent.run_agent(
+        backend,
+        work.repo,
+        prompt,
+        output_schema=ALTERNATIVE_REVIEW_SCHEMA,
+        phase=DaydreamPhase.ALTERNATIVES,
+        review_limits=ReviewLimits(300, 90, 24),
+        finalization_context=FinalizationContext(
+            task="Finalize the assessment of implementation alternatives",
+            input_priority=("diff", "exploration-summary"),
+            output_semantics="Return issues only for substantiated design failures "
+            "or repository convention violations. "
+            "An empty issues array is valid.",
+            supplied_context=(("confirmed intent", intent_summary), ("diff", inline_diff or "")),
+        ),
+        tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
+        wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+        sanctioned_inputs=sanctioned_inputs,
+        read_only=read_only,
+        run_context=run_context,
+    )
+
+    if budget_reason:
+        raise ReviewBudgetExceeded("Alternatives", budget_reason, result)
+
+    if isinstance(result, dict) and "issues" in result:
+        issues = result["issues"]
+        if not isinstance(issues, list):
+            issues = []
+    else:
+        # Budget stops are handled by the orchestrator as incomplete coverage.
+        if not run_context.policy.quiet:
+            ui.print_warning(agent.console, f"TTT review returned unexpected result type: {type(result).__name__}")
+        issues = []
+
+    if issues:
+        ui.print_info(agent.console, f"Found {len(issues)} issues")
+        ui.print_issues_table(agent.console, issues)
+    else:
+        ui.print_info(agent.console, "No issues found — the implementation looks good")
+
+    return issues
+
+
+# Deep-mode: per-stack fan-out
+
+
+def _read_text_or_none(path: Path | None) -> str | None:
+    """Read a text artifact, or ``None`` when it is absent or unreadable."""
+    if path is None:
+        return None
+    try:
+        return path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def _frontier_files_for_stack(stack: "StackAssignment") -> list[str]:
+    """Return the persisted frontier shared by the prompt and reuse key.
+
+    Never recompute it from a fresh graph that could disagree with reviewed inputs.
+    """
+    return list(stack.frontier_files)
+
+
+@bind_resolved_run_context
+async def phase_per_stack_reviews(
+    backend: Backend,
+    work: WorkContext,
+    stacks: list["StackAssignment"],
+    *,
+    diff_path: Path,
+    intent_path: Path,
+    alternatives_path: Path,
+    exploration_dir: Path | None = None,
+    diff_text: str | None = None,
+    intent_authoritative: bool = False,
+    include_alternatives: bool = True,
+    strategies: dict[str, str] | None = None,
+    registry: Registry | None = None,
+    artifact_session: ArtifactSession | None = None,
+    allow_standalone: bool = False,
+    run_context: RunContext | None = None,
+    reuse_cache: ReuseCache | None = None,
+    phase_identity: PhaseIdentity | None = None,
+) -> tuple[dict[str, Path], dict[str, str]]:
+    """Run scoped per-stack reviews under the backend fan-out limit and record each result.
+
+    """
+    active_registry = registry if registry is not None else get_registry()
+    run_context = resolve_run_context(run_context)
+    # Prompt builders import phases, so keep this import local.
+    from daydream.deep.diff import _diff_blocks_for_files
+
+    deep_dir_path = deep_dir(work.repo, session=artifact_session, allow_standalone=allow_standalone)
+    recipe_for_prompts = load_test_recipe(deep_dir_path)
+    recorder = get_current_recorder()
+    if strategies is None:
+        defaults = _rp.build_default_profile().strategies
+        strategies = {name: defaults[name].content for name in (
+            "discovery.per_stack", "discovery.structural", "discovery.generic_fallback",
+        )}
+    results: dict[str, Path] = {}
+    failures: dict[str, str] = {}
+    limiter = anyio.CapacityLimiter(
+        effective_fanout_concurrency(10, backend)
+    )
+    prior_commits = git_ops.daydream_commits(work.repo, work.base_branch)
+    common_inputs: dict[str, Path | None] = {
+        "hunk-index": diff_path.parent / "hunk-index.json",
+        "intent": intent_path,
+        "alternatives": alternatives_path if include_alternatives else None,
+    }
+    read_only = uses_diff_reference(backend, work.repo, read_only=True)
+
+    hunk_index = load_hunk_index(deep_dir_path.parent)
+
+    prepared: dict[str, tuple[str | None, PreparedSanctionedInputs | None]] = {}
+    for stack in stacks:
+        inline_diff = (
+            _diff_blocks_for_files(diff_text, stack.files)
+            if not read_only and diff_text is not None and stack.stack_name != STRUCTURE_STACK_NAME else None
+        )
+        inputs = _prepare_existing_phase_inputs(
+            backend, work, common_inputs | ({} if inline_diff is not None else {"diff": diff_path}),
+            capture_without_session=True, exploration_dir=exploration_dir, read_only=read_only,
+        )
+        prepared[stack.stack_name] = (inline_diff, inputs)
+    structural_records = per_stack_records_path(deep_dir_path, STRUCTURE_STACK_NAME)
+    structural_output = per_stack_review_path(deep_dir_path, STRUCTURE_STACK_NAME)
+    # A rerun supersedes structural output from any earlier attempt.
+    for stale_path in (structural_records, structural_output):
+        stale_path.unlink(missing_ok=True)
+
+    dispatch_descriptors = tuple(f"deep-{stack.stack_name}" for stack in stacks)
+    async with dispatch_scope(
+        recorder,
+        phase=DaydreamPhase.DEEP,
+        descriptors=dispatch_descriptors,
+    ) as dispatch:
+        async def _review_stack(stack: "StackAssignment") -> None:
+            output_path = per_stack_review_path(deep_dir_path, stack.stack_name)
+            inline_diff, stack_sanctioned_inputs = prepared[stack.stack_name]
+            stack_reuse_key: str | None = None
+            stack_payload: dict[str, Any] | None = None
+            if reuse_cache is not None and phase_identity is not None:
+                stack_payload = shard_key_payload(
+                    stack_name=stack.stack_name,
+                    files=stack.files,
+                    frontier_files=_frontier_files_for_stack(stack),
+                    docs_only=stack.is_docs_only,
+                    diff_path_or_hunks=diff_text,
+                    hunk_index=hunk_index,
+                    exploration_dir=exploration_dir,
+                    worktree_root=work.repo,
+                    identity=phase_identity,
+                    intent_authoritative=intent_authoritative,
+                    include_alternatives=include_alternatives,
+                    prior_commits=prior_commits,
+                    intent_text=_read_text_or_none(intent_path),
+                    alternatives_text=(
+                        _read_text_or_none(alternatives_path) if include_alternatives else None
+                    ),
+                )
+                if stack.stack_name == STRUCTURE_STACK_NAME:
+                    # Structural review reads the recorded whole-diff pointer. Key its file-set
+                    # scope and contract, excluding content that serves only as grounding.
+                    components = stack_payload["components"]
+                    components["hunk_slice"] = digest_text("")
+                    components["assigned_blobs"] = blob_map_digest(work.repo, [])
+                    components["frontier_blobs"] = blob_map_digest(work.repo, [])
+                unit_name = f"shard:{stack.stack_name}"
+                candidate_key = unit_key(stack_payload)
+                if candidate_key is None:
+                    record_absent_components(reuse_cache, unit_name, stack_payload)
+                else:
+                    stack_reuse_key = candidate_key
+                    hit = lookup_reuse_entry(
+                        reuse_cache,
+                        unit_name,
+                        candidate_key,
+                        deep_dir_path,
+                        on_restore_failure=lambda reason: ui.print_warning(
+                            agent.console, f"Reuse restore failed for {stack.stack_name}: {reason}"
+                        ),
+                    )
+                    if hit is not None:
+                        record_reuse_hit(reuse_cache, unit_name, candidate_key, hit, stack_payload)
+                        results[stack.stack_name] = output_path
+                        return
+            per_stack_records_path(deep_dir_path, stack.stack_name).unlink(missing_ok=True)
+            pointer_dir = _pointer_dir(stack_sanctioned_inputs, exploration_dir)
+            prompt_name, strategy_name = {
+                STRUCTURE_STACK_NAME: ("structural", "discovery.structural"),
+                GENERIC_STACK: ("generic-fallback", "discovery.generic_fallback"),
+            }.get(stack.stack_name, ("per-stack", "discovery.per_stack"))
+            prompt_args: dict[str, Any] = {
+                "strategy": strategies[strategy_name],
+                "files": stack.files,
+                "diff_path": diff_path,
+                "intent_path": intent_path,
+                "alternatives_path": alternatives_path,
+                "output_path": output_path,
+                "cwd": work.repo,
+                "exploration_dir": pointer_dir,
+                "prior_commits": prior_commits,
+                "intent_authoritative": intent_authoritative,
+                "include_alternatives": include_alternatives,
+            }
+            # Structural review ranges over the whole repository and therefore
+            # keeps the diff pointer. Language and generic scopes can inline hunks.
+            if stack.stack_name != STRUCTURE_STACK_NAME:
+                prompt_args.update(inline_diff=inline_diff, frontier_files=_frontier_files_for_stack(stack))
+                if stack.stack_name == GENERIC_STACK:
+                    prompt_args["is_docs_only"] = stack.is_docs_only
+                else:
+                    prompt_args["stack_name"] = stack.stack_name
+            prompt = active_registry.prompt(prompt_name)(**prompt_args)
+
+            prompt = append_extended_facts(prompt, recipe_for_prompts)
+            task_context = FinalizationContext(
+                task=f"Finalize {stack.stack_name} review",
+                input_priority=("diff", "intent"),
+                assigned_files=tuple(stack.files),
+                output_semantics="Return issues in the required schema. "
+                "An empty issues array is valid when no defect is established; "
+                "unfinished review work must not be described as clean.",
+                supplied_context=(("diff", inline_diff or ""),
+                                  ("intent authority", AUTHORITATIVE_INTENT_BLOCK
+                                   if intent_authoritative else "Intent is advisory context.")),
+            )
+            stack_name = stack.stack_name
+            structured: Any = None
+            budget_reason: str | None = None
+            async with limiter:
+                try:
+                    async with maybe_fork(
+                        recorder, f"deep-{stack_name}", dispatch=dispatch,
+                    ):
+                        # The reviewer returns structured records directly.
+                        structured, _, budget_reason = await agent.run_agent(
+                            backend,
+                            work.repo,
+                            prompt,
+                            phase=DaydreamPhase.DEEP,
+                            output_schema=PER_STACK_RECORD_SCHEMA,
+                            review_limits=ReviewLimits(),
+                            finalization_context=task_context,
+                            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
+                            wall_budget_s=phase_config.REVIEW_WALL_BUDGET_S,
+                            sanctioned_inputs=stack_sanctioned_inputs,
+                            read_only=read_only,
+                            run_context=run_context,
+                        )
+                except Exception as e:  # noqa: BLE001 -- intentionally broad for parallel isolation
+                    failures[stack_name] = f"{type(e).__name__}: {e}"
+                    return
+                if budget_reason:
+                    # Report truncation under Uncovered stacks instead of claiming a complete review.
+                    failures[stack_name] = f"budget exhausted: {budget_reason}"
+                    if not _validates_schema(structured, PER_STACK_RECORD_SCHEMA):
+                        return
+                if not isinstance(structured, dict):
+                    failures[stack_name] = "no structured output produced"
+                    return
+                raw_issues = structured.get("issues")
+                raw_issues = raw_issues if isinstance(raw_issues, list) else []
+                # Drop non-record entries before ordinal uid assignment. Copy
+                # records so host ids never mutate backend-owned trajectory data
+                # or leak between stack calls sharing the same result objects.
+                issues = [dict(issue) for issue in raw_issues if isinstance(issue, dict)]
+                # Uids are host-only fields, added after strict model validation.
+                stamp_record_uids(issues, stack_name)
+                try:
+                    per_stack_records_path(deep_dir_path, stack_name).write_text(
+                        json.dumps({"issues": issues,
+                                    **({"incomplete": True} if budget_reason else {})}, indent=2)
+                    )
+                    write_review_markdown(output_path, issues)
+                except OSError as exc:
+                    failures[stack_name] = f"{type(exc).__name__}: {exc}"
+                    return
+                results[stack_name] = output_path
+                if (
+                    reuse_cache is not None
+                    and phase_identity is not None
+                    and stack_payload is not None
+                    and stack_reuse_key is not None
+                    and budget_reason is None
+                ):
+                    records_path = per_stack_records_path(deep_dir_path, stack_name)
+                    reuse_cache.store(
+                        stack_reuse_key,
+                        unit=f"shard:{stack_name}",
+                        payload={
+                            records_path.name: records_path.read_bytes(),
+                            output_path.name: output_path.read_bytes(),
+                        },
+                        components=stack_payload["components"],
+                        identity=phase_identity,
+                        grounding=grounding_digests(stack_payload),
+                        grounding_status=reuse_grounding_statuses(reuse_cache, stack_payload),
+                    )
+
+        async with anyio.create_task_group() as tg:
+            for stack in stacks:
+                tg.start_soon(_review_stack, stack)
+        if dispatch is not None and failures:
+            finish_partial_or_failed(dispatch, results)
+
+    if failures:
+        lines = "\n".join(f"  - {name}: {reason}" for name, reason in sorted(failures.items()))
+        ui.print_warning(
+            agent.console,
+            f"Per-stack reviews failed for {len(failures)} stack(s); "
+            "failures will be passed to the merge step.\n" + lines,
+        )
+
+    return results, failures

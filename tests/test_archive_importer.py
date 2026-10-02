@@ -1,13 +1,7 @@
-"""Tests for the local-observation importer's pure core.
+"""Local-observation identity linkage, canonical deduplication, and safe import.
 
-Task 2 covers ``link_session_identity``: Hub session identity linkage with
-session_id primary rule, repo_slug+SHA fallback, and report-don't-drop
-unmatched / identity-conflict buckets (M2, KD1).
-
-Task 3 covers ``dedupe_observations``: idempotent, byte-identical dedupe
-across overlapping backups keyed on the writer's versioned auto-dedup tuple
-plus the canonical-JSON payload digest, with content-conflict accounting
-(M4, KD2/Assumption 3).
+Unmatched sessions and conflicts remain accounted for; overlapping backups
+use versioned writer identity plus canonical payload digests.
 """
 
 from __future__ import annotations
@@ -80,7 +74,6 @@ def test_link_session_by_session_id() -> None:
     assert entry["matched_by"] == "session_id"
 
 def test_link_fallback_repo_slug_sha() -> None:
-    # session_id absent from the hydrated index; repo_slug+SHA fallback matches.
     lookup = {("org/repo", "a" * 40, "b" * 40): "hub-999"}
     result = link_session_identity([_record("s1")], hydrated_index={}, repo_slug_sha_lookup=lookup)
     entry = result["linked"]["s1"]
@@ -104,8 +97,6 @@ def test_conflicting_digest_never_links() -> None:
     assert SID in r["identity_conflict"]
 
 def test_missing_fallback_fields_raises(tmp_path: Path) -> None:
-    # session_id absent from the Hub index and the record lacks the session
-    # fields required for the fallback -> ValueError naming the session_id.
     record = _record("s-broken", repo_slug=None, base_sha=None, head_sha=None)
     record.pop("derivative_digest")
     with pytest.raises(ValueError, match="s-broken"):
@@ -115,11 +106,7 @@ def _seed_run(root: Path) -> None:
     upsert_run(root, make_manifest(session_id=SID, repo_slug="org/repo", head_sha="b" * 40, base_sha="a" * 40,),)
 
 def read_label_rows(root: Path) -> list[dict[str, Any]]:
-    """Read-only inventory of one root's ``label_observations`` rows.
-
-    Local test stand-in for the Task 1 inventory: a ``mode=ro`` SQLite read of
-    every column, returned as plain dicts.
-    """
+    """Read all observation columns through a read-only SQLite connection."""
     conn = sqlite3.connect(f"file:{root / 'index.db'}?mode=ro", uri=True)
     try:
         conn.row_factory = sqlite3.Row
@@ -130,9 +117,7 @@ def read_label_rows(root: Path) -> list[dict[str, Any]]:
         conn.close()
 
 def mk_backup_pair(tmp_path: Path, evidence_sha: str) -> tuple[Path, Path]:
-    """Two backup roots holding one shared evidence payload under different
-    ``observed_at`` stamps (root A at ``_OBSERVED_A``, root B at
-    ``_OBSERVED_B``) — the overlapping-backup shape from the plan."""
+    """Overlapping backups: one evidence payload recorded at different observation times."""
     root_a = tmp_path / "backup-a"
     root_b = tmp_path / "backup-b"
     for root in (root_a, root_b):
@@ -140,9 +125,6 @@ def mk_backup_pair(tmp_path: Path, evidence_sha: str) -> tuple[Path, Path]:
         _seed_run(root)
     _seed_generation(root_a, observed_at=_OBSERVED_A, evidence_sha=evidence_sha, labels=["accepted"])
     _seed_generation(root_b, observed_at=_OBSERVED_B, evidence_sha=evidence_sha, labels=["accepted"])
-    # Each root is an independent capture: the writer's within-root auto-dedup
-    # only compares the latest row, so both first-time appends insert — the
-    # shared evidence payload now exists in both roots at different stamps.
     return root_a, root_b
 
 def canonical_digest(rows: list[dict[str, Any]]) -> str:
@@ -158,9 +140,7 @@ def test_overlapping_backups_byte_identical(tmp_path: Path) -> None:
     canon = canonical_digest(merged["rows"])
     merged_once = dedupe_observations([inv_a])
     assert canonical_digest(dedupe_observations([merged_once["rows"], inv_b])["rows"]) == canon
-    # and re-running is a no-op:
     assert canonical_digest(dedupe_observations([merged["rows"], inv_b])["rows"]) == canon
-    # inventory order must not affect the merged row set:
     assert canonical_digest(dedupe_observations([inv_b, inv_a])["rows"]) == canon
 
 def test_no_duplicate_same_evidence_diff_observed_at(tmp_path: Path) -> None:
@@ -168,9 +148,7 @@ def test_no_duplicate_same_evidence_diff_observed_at(tmp_path: Path) -> None:
     merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
     keys = {(r["session_id"], r["evidence_sha"], r["labels"]) for r in merged["rows"]}
     assert len(keys) == len(merged["rows"])  # no dup evidence rows survived
-    # exactly one row was deduped (the second capture of the same evidence)
     assert merged["deduped_count"] == 1
-    # one surviving row, stamped with the earliest observed_at of the pair
     assert len(merged["rows"]) == 1
     assert merged["rows"][0]["observed_at"] == _OBSERVED_A
 
@@ -197,8 +175,6 @@ def test_human_rows_across_backups_kept(tmp_path: Path) -> None:
         )
     merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
     human = [r for r in merged["rows"] if r["source"] == "human"]
-    # Both human stamps survive (PK collisions in each root bump the stamp by
-    # a microsecond, which does not matter) — they are never collapsed.
     assert len(human) == 2
     assert len({r["observed_at"] for r in human}) == 2
 
@@ -223,7 +199,6 @@ def test_same_tuple_diff_payload_routes_to_content_conflict(tmp_path: Path) -> N
     _force_insert_rubric_variant(src_b, observed_at="2026-05-05T00:00:00+00:00")
     merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
     assert merged["rows"] == []
-    # every row sharing the ambiguous tuple is reported, none silently kept
     assert len(merged["content_conflict"]) == 3
     assert merged["deduped_count"] == 0
 
@@ -269,9 +244,6 @@ def make_session_row(*, session_id: str = SID, evidence_sha: str = "c" * 64, lab
     }
 
 def test_run_level_label_never_fans_out() -> None:
-    # A run-level label with no projected findings in the session: it is
-    # emitted as run-level evidence only — never copied onto every finding
-    # of the run (AC2) — and lands in the run_level_only bucket.
     rec = make_session_row()
     out = classify_run_level([rec], projector_findings={})
     assert out["per_finding"].get(SID) is None
@@ -279,10 +251,6 @@ def test_run_level_label_never_fans_out() -> None:
     assert out["ambiguous_run_mapping"] == {}
 
 def test_ambiguous_mapping_routes_to_queue() -> None:
-    # Two candidate findings, neither matching the row's evidence digest:
-    # the run<->finding mapping is ambiguous — the row routes to the
-    # ambiguous_run_mapping bucket (the per-finding adjudication queue),
-    # never a fan-out and never a silent per_finding substitution.
     rec = make_session_row()
     ambiguous = {SID: [{"record_id": "r1", "evidence_sha": "z" * 64}, {"record_id": "r2", "evidence_sha": "y" * 64},]}
     out = classify_run_level([rec], projector_findings=ambiguous)
@@ -291,9 +259,6 @@ def test_ambiguous_mapping_routes_to_queue() -> None:
     assert SID not in out["run_level_only"]
 
 def test_decisive_identity_and_digest_match_lands_per_finding() -> None:
-    # Exactly one candidate finding matching identity + evidence digest:
-    # the row is per-finding eligible (feeds the _is_admitted_outcome_gold
-    # path through the existing decisive-only semantics).
     rec = make_session_row(evidence_sha="c" * 64)
     findings = {SID: [{"record_id": "r1", "evidence_sha": "c" * 64}]}
     out = classify_run_level([rec], projector_findings=findings)
@@ -302,8 +267,6 @@ def test_decisive_identity_and_digest_match_lands_per_finding() -> None:
     assert out["ambiguous_run_mapping"] == {}
 
 def test_multiple_candidates_one_digest_match_is_decisive() -> None:
-    # Multiple candidates but exactly one matches the evidence digest: the
-    # identity+digest match is decisive, not ambiguous.
     rec = make_session_row(evidence_sha="c" * 64)
     findings = {SID: [{"record_id": "r1", "evidence_sha": "z" * 64}, {"record_id": "r2", "evidence_sha": "c" * 64},]}
     out = classify_run_level([rec], projector_findings=findings)
@@ -315,17 +278,12 @@ def test_malformed_labels_json_raises_naming_session() -> None:
         classify_run_level([rec], projector_findings={})
 
 def test_referenced_finding_missing_fields_raises() -> None:
-    # A projector_findings entry referenced by the run is malformed (missing
-    # record_id/evidence_sha): raise, never silently substitute.
     rec = make_session_row(evidence_sha="c" * 64)
     findings = {SID: [{"record_id": "r1"}]}  # no evidence_sha
     with pytest.raises(ValueError, match="evidence_sha"):
         classify_run_level([rec], projector_findings=findings)
 
 def test_per_finding_row_is_not_run_level() -> None:
-    # A row that already carries a record_id is per-finding evidence; it is
-    # accounted for in per_finding, never routed through the run-level
-    # buckets (M7: bucket sum == source row count).
     rec = make_session_row(record_id="r1")
     out = classify_run_level([rec], projector_findings={})
     assert out["per_finding"][SID] == [rec]
@@ -333,7 +291,6 @@ def test_per_finding_row_is_not_run_level() -> None:
     assert out["ambiguous_run_mapping"] == {}
 
 def test_buckets_account_for_every_row() -> None:
-    # Deterministic partition: every input row lands in exactly one bucket.
     run_level = make_session_row()
     per_finding = make_session_row(record_id="r1", evidence_sha="c" * 64)
     out = classify_run_level([run_level, per_finding], projector_findings={})
@@ -454,8 +411,6 @@ def _seed_generation(root: Path, *, observed_at: str, evidence_sha: str, labels:
     )
 
 def test_bitemporal_history_preserved(tmp_path: Path) -> None:
-    # Three evidence generations A->B->C captured in a surviving backup are
-    # appended into the target archive in order, verbatim (M3).
     source_root = tmp_path / "backup"
     source_root.mkdir()
     _seed_run(source_root)
@@ -496,7 +451,6 @@ def test_newer_existing_observation_never_displaced(tmp_path: Path) -> None:
     assert merged["appended"] == 1
     hist = label_observation_history(target, SID)
     assert [r["observed_at"] for r in hist] == [_OBSERVED_A, newer_at]  # append-only
-    # runs.outcome_labels cache still reflects the precedence projection:
     conn = sqlite3.connect(target / "index.db")
     try:
         conn.row_factory = sqlite3.Row
@@ -507,8 +461,6 @@ def test_newer_existing_observation_never_displaced(tmp_path: Path) -> None:
     assert run["outcome_labels"] == json.dumps(["accepted"])
 
 def test_idempotent_reimport_dedupes_auto_rows(tmp_path: Path) -> None:
-    # Byte-identical re-import (M4): auto rows already present dedupe via the
-    # existing writer; no new generations appear.
     source_root = tmp_path / "backup"
     source_root.mkdir()
     _seed_run(source_root)
@@ -580,9 +532,6 @@ def test_human_source_appended_verbatim(tmp_path: Path) -> None:
     [("observed_at", "not-an-iso-stamp"), ("observed_at", "2026-05-01T00:00:00"), ("valid_at", "not-a-valid-time"),],
 )
 def test_bad_timestamp_fails_closed_before_any_write(tmp_path: Path, field: str, bad_value: str) -> None:
-    """A hand-edited bad timestamp (non-ISO observed_at, naive observed_at, or
-    non-ISO valid_at) must abort the merge at the pre-write gate, not
-    mid-append: ValueError naming the row and zero rows written (S2/M9)."""
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
@@ -593,9 +542,7 @@ def test_bad_timestamp_fails_closed_before_any_write(tmp_path: Path, field: str,
     assert label_observation_history(target, SID) == []
 
 def test_idempotent_reimport_dedupes_human_rows(tmp_path: Path) -> None:
-    """Human-sourced rows are byte-identical on a re-import, so the PK
-    collision no-op must dedupe them — never a 1-microsecond-shifted
-    duplicate generation (M4)."""
+    """Identical human imports must use the primary-key no-op, without shifting observation time."""
     source_root = tmp_path / "backup"
     source_root.mkdir()
     _seed_run(source_root)
@@ -615,9 +562,7 @@ def test_idempotent_reimport_dedupes_human_rows(tmp_path: Path) -> None:
     assert label_observation_history(target, SID) == before
 
 def test_policy_axis_generations_survive_merge(tmp_path: Path) -> None:
-    """A generation pair differing only in labeler_policy_version survives the
-    importer dedupe AND the writer's auto-dedup: distinct policy axes are
-    distinct generations, never collapsed (M3/M14)."""
+    """Both importer and writer dedupe must preserve generations differing only in policy version."""
     source_root = tmp_path / "backup"
     source_root.mkdir()
     _seed_run(source_root)
@@ -637,10 +582,7 @@ def test_policy_axis_generations_survive_merge(tmp_path: Path) -> None:
     assert {r["labeler_policy_version"] for r in hist} == {"980-policy-r1", "9999-policy-r2"}
 
 def test_legacy_sentinel_merge_stores_null_policy_and_legacy(tmp_path: Path) -> None:
-    """A legacy-schema source row (labeler_policy_version == STALE_LEGACY)
-    merges as the canonical legacy representation — NULL policy + legacy='legacy'
-    — so the corpus gold gate (labeler_policy_version IS NOT NULL) can never
-    admit a row the importer's version gate excluded (M6)."""
+    """Store excluded legacy versions as NULL policy so the corpus gold gate also rejects them."""
     target = tmp_path / "target"
     target.mkdir()
     _seed_run(target)
@@ -680,7 +622,6 @@ def test_clean_metadata_passes_scan(tmp_path: Path) -> None:
     assert result["blocked"] is False
     assert scan_dir.is_dir()
     assert scan_run_dir(scan_dir).clean
-    # The payload file scanned is the redacted payload itself.
     payload = json.loads((scan_dir / "payload.json").read_text(encoding="utf-8"))
     assert payload == result["payload"]
 
@@ -720,14 +661,7 @@ def test_dirty_metadata_blocks_publish(tmp_path: Path) -> None:
     assert result["blocked_reasons"] == [REASON_CODE_IMPORT_UNREDACTABLE_METADATA]
 
 def test_advisory_metadata_does_not_block_publish(tmp_path: Path) -> None:
-    """Issue #1170: an advisory-only finding reports but never blocks the payload.
-
-    ``payload.json`` is built from free-text ``rubric_json``/``reward_json``/
-    ``notes``, which is exactly the content that carries the ``env_var`` name
-    shape — an upper-case name ending in ``KEY`` assigned an ordinary flag
-    string. The value-free summary is still returned, so the finding is visible
-    rather than silent.
-    """
+    """A credential-free KEY assignment remains publishable with a value-free scan summary."""
     row = _metadata_row(notes='FEATURE_FLAG_OVERRIDE_KEY = "override_flag"')
     result = redact_imported_metadata([row], scan_dir=tmp_path / "scan")
     scanned = scan_run_dir(tmp_path / "scan")
@@ -736,7 +670,6 @@ def test_advisory_metadata_does_not_block_publish(tmp_path: Path) -> None:
     assert result["blocked_reasons"] == []
     assert "env_var" in result["scan_summary"]
     assert "override_flag" not in result["scan_summary"]  # M11: never a value
-    # The row is published as-is: an advisory shape is not credential material.
     assert result["payload"][0]["notes"] == 'FEATURE_FLAG_OVERRIDE_KEY = "override_flag"'
 
 def test_blocked_payload_carries_marker_skipping(tmp_path: Path) -> None:

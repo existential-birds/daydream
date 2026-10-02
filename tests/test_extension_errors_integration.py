@@ -1,11 +1,6 @@
-"""Real-path tests: broken extensions fail fast with named, actionable errors.
+"""Broken extension flows/API versions fail before agents run, naming the fault.
 
-Enters from the production entrypoint (``runner.run``) with a real temp git
-repo, mocking ONLY the backend seam (``daydream.runner.create_backend``) per
-the testing standard. A ``daydream_ext`` package written by the ``ext_dir``
-fixture is deliberately broken (dangling flow reference / wrong API version);
-assertions pin the CLI-visible outcome: exit code 1, zero agents run, and
-error output naming the broken piece (Task 16 of the extension-seam plan).
+Drive runner.run with real Git and an ext_dir package; only the backend is doubled.
 """
 
 from __future__ import annotations
@@ -21,7 +16,7 @@ from daydream.extensions import (
     EXTENSION_API_VERSION,
     MIN_SUPPORTED_EXTENSION_API_VERSION,
 )
-from daydream.runner import RunConfig
+from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
 

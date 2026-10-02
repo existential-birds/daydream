@@ -1,32 +1,12 @@
-"""Legacy bronze bundle sanitizer (issue #981 M14/M15/M19).
+"""Copy legacy bundles into credential-free derivatives without modifying sources.
 
-Copies legacy bronze run bundles into content-addressed, credential-free
-derivatives under ``<archive_dir>/sanitized/<session_id>/``. Sources are never
-modified (M14): the bundle is copied first, then the copy is transformed.
+JSON URL leaves use the shared Git URL normalizer; all string content uses
+shared text/value redaction. A publication scan gates release: blocking
+findings quarantine the derivative, while advisory findings remain visible
+in a value-free report.
 
-Transformation pipeline per file:
-
-* ``manifest.json`` (and any JSON file): credential-bearing URL string leaves
-  are rewritten through :func:`daydream.archive.git_safe.normalize_remote_url`
-  (the sole URL authority); every string leaf then runs through the same text
-  pipeline the non-JSON branch uses, and the whole document through
-  :func:`daydream.trajectory.redact_value`.
-* Text files: :func:`daydream.trajectory.redact_text`, which shares URL
-  credential patterns with the publication scanner.
-
-Release gate: every derivative is re-scanned with
-:func:`daydream.archive.scan.scan_run_dir`; a derivative carrying a *blocking*
-finding is moved to ``<archive_dir>/quarantine/<session_id>/`` and recorded
-with ``status="quarantined"`` — never released (fail-closed). An advisory
-finding is a name/template shape, not a credential (issue #1170): it is
-reported value-free and the derivative is released.
-
-``derivative_digest`` is a SHA-256 over a canonical manifest of
-``(relative path, per-file SHA-256)`` pairs, stable across runs on identical
-input (M15). Bulk passes via :func:`sanitize_archive` are resumable: a
-``progress.jsonl`` marker records completed session ids + digests (mirroring
-the ``BackfillCache`` resume-marker pattern), and a session is only skipped
-when its derivative still hashes to the recorded digest (M19).
+Digests hash canonical (relative path, file SHA-256) pairs. Resume markers are
+trusted only while the derivative's current bytes match the recorded digest.
 """
 
 from __future__ import annotations
@@ -155,13 +135,7 @@ def _append_jsonl(path: Path, record: dict[str, Any]) -> None:
 
 
 def _resolve_session_id(run_dir: Path) -> str:
-    """Return the session id that keys this bundle's derivative and resume marker.
-
-    Mirrors the manifest-driven identity used by :func:`sanitize_bundle`
-    (manifest ``session_id``, falling back to the directory name) so a bulk
-    pass skips a completed bundle even when a legacy manifest's ``session_id``
-    differs from its run-dir name (M19).
-    """
+    """Use manifest identity, falling back to the directory name, consistently with bundle sanitization."""
     manifest_path = run_dir / "manifest.json"
     if manifest_path.exists():
         try:
@@ -225,12 +199,10 @@ def _append_audit(
 def _quarantine_derivative(
     derivative_dir: Path, sanitized_dir: Path, archive_dir: Path, run_dir: Path, session_id: str
 ) -> None:
-    """Move a failed derivative to quarantine and record it (M16, fail-closed).
+    """Quarantine a derivative without overwriting imported source bundles.
 
-    Nothing deleted is ever a source: a prior derivative copy in the slot is
-    replaced only when the marker proves it is ours; an imported source bundle
-    parked at the same ``quarantine/<name>`` namespace by :func:`import_bundle`
-    is never touched (the failed derivative is parked in a sibling slot).
+    Only an ownership marker permits replacing a prior derivative slot;
+    unowned collisions use a sibling slot.
     """
     quarantine_dir = archive_dir / "quarantine" / session_id
     quarantine_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -248,15 +220,11 @@ def _quarantine_derivative(
 
 
 def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
-    """Sanitize one legacy bundle into ``archive_dir/sanitized/<session_id>/``.
+    """Copy, sanitize, and scan one bundle; release only nonblocking derivatives.
 
-    The source bundle is never modified. The derivative is released only when
-    the post-transform release scan comes back clean; otherwise it is moved to
-    ``archive_dir/quarantine/<session_id>/``, a ``status="quarantined"`` audit
-    record is appended, and a quarantined (``released=False``) result is
-    returned — nothing under ``sanitized/`` (M16, fail-closed). Unexpected
-    failures clean the partial derivative, record the quarantine, and re-raise
-    so a bulk caller can continue with the next bundle.
+    The source remains untouched. Blocked output moves to quarantine with an
+    audit record. Unexpected failures remove partial output, record quarantine,
+    and propagate for the bulk caller to handle.
     """
     sanitized_dir = archive_dir / "sanitized"
     session_id = _resolve_session_id(run_dir)
@@ -313,12 +281,9 @@ def sanitize_bundle(run_dir: Path, archive_dir: Path) -> SanitizeResult:
 
 
 def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
-    """Sanitize every bundle under ``archive_dir/runs/*``; resumable (M19).
+    """Sanitize all run bundles, continuing after quarantined failures.
 
-    A session recorded in ``progress.jsonl`` is skipped only when its
-    derivative still exists and hashes to the recorded digest — partial or
-    corrupted derivatives are re-processed. One bad bundle never stops the
-    pass: its failure is quarantined and the loop continues.
+    Skip completed sessions only when derivative bytes still match the resume digest.
     """
     sanitized_dir = archive_dir / "sanitized"
     sanitized_dir.mkdir(parents=True, exist_ok=True)
@@ -350,16 +315,11 @@ def sanitize_archive(archive_dir: Path) -> list[SanitizeResult]:
 
 
 def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
-    """Fail-closed ingest gate for a downloaded Hub bundle (M18).
+    """Scan downloaded bytes before ingest; quarantine on blocking findings or scan errors.
 
-    The incoming bundle is scanned before ingestion. A bundle with no blocking
-    finding is imported in place (advisory findings are reported value-free and
-    do not gate ingest — #1170); a bundle carrying a blocking finding, or a
-    scanner error, is moved to ``<archive_dir>/quarantine/<session_id>/`` and
-    skipped — never imported raw, even when a released derivative exists. The
-    move is never a deletion of a source bundle; when the quarantine slot is
-    already occupied the move is skipped and the bundle is still reported
-    quarantined.
+    Advisories are reported value-free and permit ingest. An occupied quarantine
+    slot is preserved; the incoming bundle remains rejected even if a sanitized
+    derivative exists.
     """
     scan_result = scan.scan_run_dir(run_dir)
     if not scan_result.blocking:
@@ -377,13 +337,7 @@ def import_bundle(run_dir: Path, archive_dir: Path) -> ImportResult:
 
 
 def report_inventory(archive_dir: Path) -> dict[str, int]:
-    """Value-free inventory mode (M11): classify each bundle's remote URL.
-
-    For every ``runs/*`` bundle, ``manifest.json``'s ``git.remote_url`` is
-    classified via :func:`classify_remote_url`. Prints and returns counts by
-    category (session counts only — never a URL fragment or matched value).
-    A malformed manifest counts under ``"unparseable"``. Never raises.
-    """
+    """Report URL-classification counts without values; malformed manifests count as unparseable."""
     counts: dict[str, int] = {}
     runs_dir = archive_dir / RUNS_DIRNAME
     if runs_dir.is_dir():

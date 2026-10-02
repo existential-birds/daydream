@@ -1,11 +1,5 @@
-"""Stage-2 deterministic RFT (M11, M12): offline replay, breakdown-filtered
-byte-identical winners.
-
-The fixture freezes base/head/diff identity (M16: tasks are rebuilt from the
-record's frozen inputs, never live repo state) in a temp JSONL corpus and the
-tests assert observable outcomes: byte-identical winners on rerun, every
-winner passing through ``score_trajectory``'s breakdown, and fail-closed
-propagation on missing identity / scalar thresholds.
+"""Replay RFT against frozen base/head/diff identity. Require deterministic winners that pass breakdown
+thresholds; missing identity or invalid thresholds fail closed.
 """
 
 from __future__ import annotations
@@ -47,7 +41,6 @@ def test_winners_byte_identical_on_rerun(frozen_rft_inputs: Path, tmp_path: Path
     cfg_b = RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b")
     w1 = run_rft(cfg_a)
     w2 = run_rft(cfg_b)
-    # AC6: byte-identical winners given the same inputs/model/seeds/rubric version.
     assert w1.winners_path.read_bytes() == w2.winners_path.read_bytes()
     assert w1.records, "expected at least one winner from a well-formed corpus"
 
@@ -63,7 +56,6 @@ def test_filter_threshold_reads_breakdown(frozen_rft_inputs: Path, tmp_path: Pat
         assert sum(w.breakdown.correctness_per_finding) / len(w.breakdown.correctness_per_finding) >= 0.5
 
 def test_shipped_threshold_example_replays_current_reward(frozen_rft_inputs: Path, tmp_path: Path,) -> None:
-    """The shipped launch example must produce winners with supported reward axes."""
     example = Path(__file__).resolve().parents[1] / "rl/train/rft.toml"
     match = re.search(r"e\.g\. (\{[^\n]+\})", example.read_text())
     assert match is not None, "the reference recipe must document a winner threshold"
@@ -76,10 +68,8 @@ def test_shipped_threshold_example_replays_current_reward(frozen_rft_inputs: Pat
                for w in winners.records)
 
 def test_spec_axes_match_score_trajectory_breakdown_fields(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    """Stage-boundary contract: allowed spec axes are the breakdown's actual attribute names."""
-    # "correctness" is not a field of score_trajectory's RewardBreakdown — the real
-    # axis is correctness_per_finding. A spec naming a non-axis must be rejected at
-    # config time (fail closed), and the real axis name must filter.
+    # Filter axes must name real RewardBreakdown fields: correctness_per_finding is valid;
+    # correctness is not.
     with pytest.raises(TypeError, match="unknown axis"):
         RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="v", output_dir=tmp_path / "axis-bogus",
             min_breakdown={"correctness": 0.5},
@@ -93,7 +83,6 @@ def test_spec_axes_match_score_trajectory_breakdown_fields(frozen_rft_inputs: Pa
         assert min(w.breakdown.correctness_per_finding) >= 0.5
 
 def test_scalar_threshold_is_rejected(frozen_rft_inputs: Path, tmp_path: Path) -> None:
-    # M12: the filter threshold names axes, never a bare scalar.
     with pytest.raises(TypeError, match="min_breakdown"):
         RftConfig(inputs=frozen_rft_inputs, seed=11, rubric_version="v", output_dir=tmp_path / "d",
             min_breakdown=0.6,  # type: ignore[arg-type]
@@ -117,9 +106,9 @@ def test_winners_header_stamps_provenance(frozen_rft_inputs: Path, tmp_path: Pat
     assert ids == sorted(ids)
 
 def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
-    """Issue 6: scoring inputs derive from the sampled findings subset, so candidates
-    that differ only in their findings score differently (breakdown filter can prefer
-    one sampled completion). Determinism on identical inputs is preserved."""
+    """Varying the sampled finding subset must vary the breakdown while identical samples remain
+    deterministic.
+    """
     rec: dict[str, object] = _record("r-vary",
         findings=[{"id": "r-vary-f1", "text": "grounded fix A", "grounded": True, "verdict": "consistent"},
             {"id": "r-vary-f2", "text": "ungrounded guess B", "grounded": False, "verdict": "contradicts"},
@@ -128,10 +117,7 @@ def test_sampled_findings_drive_breakdown_variance(tmp_path: Path) -> None:
     path = _write_corpus(tmp_path, [rec])
     out_a = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "a"))
     out_b = run_rft(RftConfig(inputs=path, seed=11, rubric_version="2026.08.29-1", output_dir=tmp_path / "b"))
-    # Byte-identical on rerun (M11) while the per-candidate breakdowns vary.
     assert out_a.winners_path.read_bytes() == out_b.winners_path.read_bytes()
     breakpoints = {(w.candidate_index, w.breakdown.composite, tuple(w.breakdown.correctness_per_finding or []))
                    for w in out_a.records}
-    # With mixed finding signals, sampled subsets yield distinct breakdowns, not
-    # byte-identical duplicates differing only in candidate_index.
     assert len(breakpoints) > 1

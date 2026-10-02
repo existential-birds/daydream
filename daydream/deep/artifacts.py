@@ -1,11 +1,7 @@
-"""Deep-review artifact path helpers + predecessor-check guard.
+"""Session-private deep-review artifact paths and resume prerequisites.
 
-Deep artifacts use the explicit session's private `.daydream/deep` route.
-Intentional standalone callers opt into `target / ".daydream" / "deep"`.
-The session publishes the merged report to `target / REVIEW_OUTPUT_FILE`.
-
-The check_deep_artifacts() helper uses the same exception type and actionable
-message format as the other artifact-predecessor guards.
+Standalone callers explicitly use target/.daydream/deep; sessions publish the
+merged markdown report to target/REVIEW_OUTPUT_FILE.
 """
 
 from __future__ import annotations
@@ -18,20 +14,14 @@ from typing import Any
 
 from daydream.artifact_visibility import ArtifactSession, artifact_dir_for
 
-# Structured merge-failure entry reserved in ``per-stack-failures.json`` (issue #361).
-# Distinct from per-stack entries (``{stack_name: reason}`` str->str) so the resume
-# loader can skip it rather than misread it as a failed stack.
+# Reserved entry; resume loaders must not interpret it as a stack name.
 MERGE_FAILURE_KEY = "__merge__"
 
-# Stage prerequisites -- single source of truth.
-# Value is a list of file names (relative to deep_dir) that must exist before the
-# given stage can run. Special handling for "merge" (needs a current reviewer output)
-# and "fix" (checks merged-items.json in deep_dir -- the canonical source of truth).
 _DEEP_STAGE_PREREQS: dict[str, list[str]] = {
     "ttt": [],
     "per-stack": ["intent.md", "alternatives.json"],
     "merge": ["intent.md", "alternatives.json"],  # + at least one current reviewer output
-    "fix": [],  # special-cased: needs merged-items.json in deep_dir
+    "fix": ["merged-items.json"],  # Markdown is only a derived view.
 }
 
 # Which --start-at to suggest when a stage's prerequisites are missing.
@@ -80,77 +70,37 @@ def per_stack_records_path(deep_dir_path: Path, stack_name: str) -> Path:
 
 
 def arbiter_input_path(deep_dir_path: Path) -> Path:
-    """Scoped-arbiter input findings JSON (issue #168).
-
-    The high-severity / contested per-stack records selected for the Opus
-    arbiter, each tagged with an ``arb_id`` the arbiter echoes back.
-    """
+    """High-severity/contested records tagged with arb_id for the arbiter to echo."""
     return deep_dir_path / "arbiter-input.json"
 
 
 def suppression_input_path(deep_dir_path: Path) -> Path:
-    """Precision-mode suppression input findings JSON (issue #232).
-
-    The borderline (LOW-confidence / low-severity uncontested) per-stack records
-    selected for the skeptical suppression pass, each tagged with a ``sup_id`` the
-    suppression agent echoes back. Distinct from ``arbiter-input.json`` so a run's
-    arbiter and suppression inputs are separately auditable.
-    """
+    """Borderline records tagged with sup_id, audited separately from arbiter inputs."""
     return deep_dir_path / "suppression-input.json"
 
 
 def adjudication_complete_path(deep_dir_path: Path) -> Path:
-    """Marker proving the WHOLE adjudication block finalised the per-stack records.
+    """Marker proving final records were persisted after arbiter and suppression.
 
-    Covers BOTH adjudication passes that rewrite ``stack-*-records.json`` before
-    the cross-stack merge: the scoped arbiter (#168) AND, when precision mode is
-    on, the suppression pass (#232). Written only once the on-disk records are
-    known-final for a fresh run -- after ``_rewrite_stack_records`` persists the
-    final pass's verdicts, or when nothing qualified for either pass. Its presence
-    lets a ``--start-at merge`` resume trust the records; its absence forces the
-    whole block to re-run from disk so an interrupted arbiter OR suppression pass
-    cannot leak partly-adjudicated findings into the merge.
-
-    The on-disk filename is kept as ``arbiter-complete.marker`` (not renamed when
-    suppression was added) so an in-flight run dir from before that change still
-    satisfies ``--start-at merge`` resume; do not rename the file without a
-    migration. The symbol was renamed from ``arbiter_complete_path`` so the scope
-    it actually proves (both passes) is not silently under-read as arbiter-only.
-    The per-group markers below are additive siblings: they gate reuse of the
-    sharded arbiter's own groups and never replace this whole-block marker.
+    Absence forces the whole adjudication block to rerun before merge. Group
+    markers cannot replace it. Keep the legacy arbiter-complete.marker filename
+    for resume compatibility.
     """
     return deep_dir_path / "arbiter-complete.marker"
 
 
 def arbiter_group_input_path(deep_dir_path: Path, group_id: str) -> Path:
-    """Scoped-arbiter input findings JSON for one sharded group (issue #732).
-
-    Group-scoped, additive sibling of :func:`arbiter_input_path`: the unsharded
-    path keeps ``arbiter-input.json`` exactly as before (MH2), while a sharded run
-    writes each planned group's slice to ``<group_id>-input.json``. The filename
-    is a sharded-arbiter resume input, not a whole-block prerequisite.
-    """
+    """One sharded group's resume input; the unsharded input path remains separate."""
     return deep_dir_path / f"{group_id}-input.json"
 
 
 def arbiter_group_verdicts_path(deep_dir_path: Path, group_id: str) -> Path:
-    """Scoped-arbiter verdicts JSON for one sharded group (issue #732).
-
-    Group-scoped, additive sibling of the shared rewrite path: the group's
-    arbiter verdicts, merged into the per-stack records once every group is
-    complete, so a resume can rerun only a group whose verdicts are absent.
-    """
+    """One group's verdicts, merged into records after every group completes."""
     return deep_dir_path / f"{group_id}-verdicts.json"
 
 
 def arbiter_group_complete_path(deep_dir_path: Path, group_id: str) -> Path:
-    """Completion marker for one sharded arbiter group (issue #732).
-
-    Group-scoped, additive sibling of :func:`adjudication_complete_path`: it
-    proves *this* group's verdicts are final and persisted, which lets a
-    ``--start-at merge`` resume rerun only the incomplete groups. It never
-    substitutes for the whole-block ``arbiter-complete.marker``.
-    """
+    """Persisted group verdict marker; does not replace whole-block completion."""
     return deep_dir_path / f"{group_id}-complete.marker"
 
 
@@ -160,78 +110,45 @@ def dedup_candidates_path(deep_dir_path: Path) -> Path:
 
 
 def diagram_path(deep_dir_path: Path) -> Path:
-    """Grounded-diagram decision + result artifact (issue #1113).
+    """Eligibility and per-kind proposed/final specs, grounding verdicts and mermaid.
 
-    ``{"eligibility": ..., "results": {"sequence": ..., "flowchart": ...}}`` —
-    the deterministic eligibility signals plus, per kind, the model's proposed
-    spec, the pruned final spec, every element's grounding verdict and the
-    rendered mermaid. Written whenever the diagram step runs, including when
-    every kind is skipped, so the decision is auditable either way.
+    Written even when all kinds are skipped so the decision remains auditable.
     """
     return deep_dir_path / "diagram.json"
 
 
 def diagram_markdown_path(deep_dir_path: Path) -> Path:
-    """Rendered grounded-diagram markdown blocks (issue #1113).
-
-    The same folded ``<details>`` blocks the PR summary carries, rendered from
-    ``diagram.json``'s final specs by the pure renderer. Empty-file/absent when
-    no kind rendered.
-    """
+    """Folded blocks rendered from diagram.json; empty/absent when no kind rendered."""
     return deep_dir_path / "diagram.md"
 
 
 def merged_report_path(deep_dir_path: Path) -> Path:
-    """Rendered human review report inside the deep artifact directory.
-
-    ``phase_cross_stack_merge`` renders this markdown *from* the canonical
-    ``merged-items.json`` (the merge agent no longer emits markdown) into the
-    deep dir -- which avoids sandbox write restrictions on repo-root dotfiles --
-    then copies it to ``target / REVIEW_OUTPUT_FILE`` for downstream consumers.
-    """
+    """Markdown rendered from canonical merged-items.json and copied to the public report."""
     return deep_dir_path / "review-output.md"
 
 
 def merged_items_path(deep_dir_path: Path) -> Path:
-    """Canonical merged finding items (JSON) inside the deep artifact directory.
+    """Canonical {items: [...]} findings for fixes, verification and PR posting.
 
-    This is the single source of truth produced by the cross-stack merge: a
-    schema-validated item list (``{"items": [...]}``) carrying per-stack,
-    cross-stack, and structural findings, each tagged with ``lens`` and
-    ``severity``. The human ``review-output.md`` is rendered *from* this file;
-    downstream consumers (fix gate, PR posting, verifier) read it rather than
-    re-parsing prose.
+    Schema-validated items carry lens and severity; markdown is a derived view.
     """
     return deep_dir_path / "merged-items.json"
 
 
 def per_stack_failures_path(deep_dir_path: Path) -> Path:
-    """Per-stack agent failure summary ({stack_name: reason} JSON).
-
-    Persisted so a resume at `merge` can still surface uncovered stacks in the
-    final report -- otherwise the failure info lives only in-memory inside the
-    per-stack fan-out call.
-    """
+    """Persisted {stack_name: reason} failures, retained across merge resumes."""
     return deep_dir_path / "per-stack-failures.json"
 
 
 def fix_failures_path(deep_dir_path: Path) -> Path:
-    """Fix-phase agent failure summary ({file_group: reason} JSON).
-
-    Persisted whenever ``phase_fix_parallel`` drops one or more file-groups so a
-    user inspecting the run -- or the archive manifest builder -- can see that
-    fixes were left unapplied. Mirrors :func:`per_stack_failures_path`; the
-    archive reads this file to mark the run ``partial`` instead of ``complete``.
-    """
+    """Persisted {file_group: reason} failures; the archive marks such runs partial."""
     return deep_dir_path / "fix-failures.json"
 
 
 def fix_outcomes_path(deep_dir_path: Path) -> Path:
-    """Post-fix verifier outcomes ({finding_id: verdict} JSON, issue #744).
+    """Full-canonical verification keyed by durable item UID and bound to session/evidence.
 
-    Sidecar adjacent to :func:`fix_failures_path`: the current session and
-    evidence key bind one full-canonical verification result, keyed by durable
-    item UID. Each verification replaces the preceding round's envelope.
+    Each round replaces the preceding envelope.
     """
     return deep_dir_path / "fix-outcomes.json"
 
@@ -247,24 +164,17 @@ def stabilization_failed_path(deep_dir_path: Path) -> Path:
 
 
 def recommended_capture_path(deep_dir_path: Path) -> Path:
-    """Capture-point sidecar recording which tree produced recommended.patch.
+    """Identify the tree producing recommended.patch: post_test, or pre_test fallback.
 
-    Mirrors :func:`fix_quality_gate_path`: written session-bound by the deep
-    orchestrator's post-test re-capture (``"post_test"``) or, when absent,
-    defaulted to ``"pre_test"`` by the archive manifest builder. The archive
-    reads this file to record which capture produced the archived patch.
+    The orchestrator writes the session-bound capture; the archive supplies fallback.
     """
     return deep_dir_path / "recommended-capture.json"
 
 
 def fix_quality_gate_path(deep_dir_path: Path) -> Path:
-    """Fix-phase anti-degradation quality gate verdict (issue #315).
+    """Fail-open per-round quality deltas for edited files, consumed by the archive.
 
-    Per-round before/after erosion + verbosity deltas over the files the fix
-    phase edited, computed from :func:`daydream.eval.analyzer.analyze_quality`.
-    Fail-open: written whenever the gate runs (``{"enabled": false}`` when
-    disabled, a per-round ``per_file`` map when enabled), never aborting the
-    run. The archive manifest reads this file to surface flagged files.
+    Disabled gates write {enabled: false}; enabled gates include per_file results.
     """
     return deep_dir_path / "fix-quality-gate.json"
 
@@ -275,13 +185,9 @@ def generated_file_violations_path(deep_dir_path: Path) -> Path:
 
 
 def fix_leftover_untracked_path(deep_dir_path: Path) -> Path:
-    """Untracked paths that newly appeared during a failed fix pass (JSON list).
+    """New surviving paths from a failed fix pass, written alongside fix failures.
 
-    Parallel fix groups share one working tree, so an untracked file left behind
-    cannot be attributed to a specific group. Rather than risk deleting a
-    successful group's legitimate new file, the orchestrator records every path
-    that appeared during the fix pass and survived tree-protection here, so the
-    partial run is fully auditable. Written only alongside ``fix-failures.json``.
+    Parallel groups share a tree, so unattributable paths are preserved and audited.
     """
     return deep_dir_path / "fix-leftover-untracked.json"
 
@@ -292,39 +198,25 @@ def verdicts_path(deep_dir_path: Path) -> Path:
 
 
 def adjudication_provenance_path(deep_dir_path: Path) -> Path:
-    """Path to the host-stamped adjudication provenance ledger (issue #735).
+    """Host-stamped targeting, verdict binding, survival and rewrite provenance.
 
-    Written by the arbiter/suppression verdict-application seam, this sidecar
-    records what each adjudication pass did to each canonical record: whether
-    the record was targeted, whether a verdict bound to it, whether it survived,
-    and which revisable fields were materially rewritten. The verify-selection
-    predicate consumes it to tell a strongly-evidenced, confirmed-adjudicated
-    routine finding from one that needs an independent second pass. It is a
-    sibling of, not a replacement for, ``recommendation-verdicts.json``.
+    Verify selection reads this alongside the separate recommendation verdicts.
     """
     return deep_dir_path / "adjudication-provenance.json"
 
 
 def test_verdict_path(deep_dir_path: Path) -> Path:
-    """Post-fix test-suite verdict (``{"passed": bool, "retries": int}``).
+    """Persist {passed: bool, retries: int} for both successful and failed test runs.
 
-    The verdict itself comes from ``detect_test_success``, a regex over the
-    agent's prose, so it is a *claim* rather than ground truth. It is persisted
-    anyway because otherwise the only durable trace of the test phase is the
-    process exit code, which conflates "tests failed" with every other fatal
-    exit. Written for BOTH outcomes -- a run that stops at a red suite is exactly
-    the run whose verdict a consumer needs.
+    The verdict is inferred from agent prose, not independent proof of test success.
     """
     return deep_dir_path / "test-verdict.json"
 
 
 def evidence_reuse_path(deep_dir_path: Path) -> Path:
-    """Per-gate audit of each evidence-reuse decision (issue #1408).
+    """Gate-keyed audit retaining both declined-commit and pre-push decisions.
 
-    One mapping keyed by gate (``declined-commit`` / ``pre-push``), so the
-    decline decision survives a later pre-push decision. Records only identity
-    facts (tree keys, HEAD shas, branch, mismatched component names) — never a
-    command, config-input digest, secret, or prompt text.
+    Contains identity facts only: no command, config digest, secret or prompt.
     """
     return deep_dir_path / "evidence-reuse.json"
 
@@ -345,12 +237,7 @@ def remote_ci_handoff_path(deep_dir_path: Path) -> Path:
 
 
 def latency_routing_path(deep_dir_path: Path) -> Path:
-    """Per-run latency-routing record (issue #732).
-
-    The single artifact each step appends its routing decision to: the resolved
-    profile + risk floors, then the wonder and arbiter choices. Evidence only --
-    never an input a step reads to decide behaviour.
-    """
+    """Append-only profile/risk/wonder/arbiter routing evidence; never a decision input."""
     return deep_dir_path / "latency-routing.json"
 
 
@@ -368,54 +255,23 @@ def check_deep_artifacts(
     stage: str, deep_dir_path: Path, *, current_diff_sha: str | None = None,
     record_paths: Sequence[Path] = (),
 ) -> None:
-    """Validate predecessor artifacts exist, and are fresh, for a resume stage.
+    """Require current predecessor files and, when supplied, a matching fresh diff key.
 
-    Args:
-        stage: The ``--start-at`` stage being resumed into.
-        deep_dir_path: The run's ``.daydream/deep`` directory.
-        record_paths: Legitimate reviewer outputs for the current review assignments.
-            Stale files outside this list cannot satisfy a merge prerequisite.
-        current_diff_sha: When given, the artifacts must have been produced from
-            this diff. A missing key file (a pre-upgrade artifact directory) or a
-            mismatched one refuses the resume: an unverifiable artifact set is
-            treated as stale, because resuming onto artifacts from a different
-            diff silently reviews the wrong code. Safety over back-compat — the
-            message says how to regenerate.
-
-    Raises:
-        ValueError: If stage is not a known deep-mode stage.
-        FileNotFoundError: With an actionable multi-line message naming missing
-            files and the --start-at value that would produce them, or naming the
-            staleness when the diff key does not match.
+    Only record_paths from current assignments satisfy merge. Missing/mismatched
+    keys or prerequisites older than the key reject resume with regeneration advice.
+    Unknown stages raise ValueError; absent/stale artifacts raise FileNotFoundError.
     """
     if stage not in _DEEP_STAGE_PREREQS:
         raise ValueError(f"Unknown deep stage: {stage!r}")
 
-    missing: list[Path] = []
-
-    # Regular file prerequisites.
-    # Use is_file() (not exists()) so a directory sharing the prereq name doesn't
-    # pass the gate and fail later in less actionable places.
-    for name in _DEEP_STAGE_PREREQS[stage]:
-        p = deep_dir_path / name
-        if not p.is_file():
-            missing.append(p)
-
-    # Only current reviewer assignments can satisfy the merge prerequisite.
+    prerequisites = [deep_dir_path / name for name in _DEEP_STAGE_PREREQS[stage]]
+    # is_file rejects directories shadowing prerequisite filenames.
+    missing = [path for path in prerequisites if not path.is_file()]
     if stage == "merge":
         records = [path for path in record_paths if path.is_file()]
         if not records:
             missing.append(deep_dir_path / "stack-*-records.json")
-
-    # Fix stage needs the canonical merged items (merged-items.json) -- the
-    # single source of truth the fix gate reads. The markdown review-output.md
-    # is render-only (the fix gate, verifier, and PR posting all read the JSON),
-    # so its absence must NOT block a --start-at fix resume when the JSON is
-    # present. Only the JSON's absence is fatal here.
-    if stage == "fix":
-        items_file = merged_items_path(deep_dir_path)
-        if not items_file.is_file():
-            missing.append(items_file)
+        prerequisites.extend(records)
 
     if missing:
         expected_block = "\n".join(f"  - {p}" for p in missing)
@@ -434,12 +290,6 @@ def check_deep_artifacts(
             stored = key_file.read_text(encoding="utf-8").strip()
         except OSError:
             stored = ""
-        prerequisites = [deep_dir_path / name for name in _DEEP_STAGE_PREREQS[stage]]
-        if stage == "merge":
-            prerequisites.extend(records)
-        if stage == "fix":
-            prerequisites.append(merged_items_path(deep_dir_path))
-
         try:
             key_mtime = key_file.stat().st_mtime_ns
             has_stale_prerequisite = any(
@@ -469,14 +319,9 @@ def check_deep_artifacts(
 
 
 def _load_failures(path: Path) -> dict[str, Any]:
-    """Load a ``per-stack-failures.json`` into a dict, defaulting to ``{}`` on absent/malformed.
+    """Load failures verbatim, including the reserved merge entry.
 
-    Shared defensive loader for the "load existing per-stack-failures.json"
-    pattern (resume loader in ``_per_stack_body`` and merge-failure salvage in
-    ``_salvage_merge_failure``). Content is returned verbatim -- including the
-    structured ``MERGE_FAILURE_KEY`` entry, which each caller filters or
-    handles per its own contract. Only a missing file, malformed JSON, or a
-    non-dict root degrades to the ``{}`` "no prior failures" default.
+    Missing files, malformed JSON and non-dict roots yield {}; other I/O errors propagate.
     """
     if not path.is_file():
         return {}

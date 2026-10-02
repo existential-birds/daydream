@@ -1,11 +1,6 @@
-"""Structural consumption gate for ``load_dataset_v2`` (issue #1080).
+"""Real projection loads require record identity, license decisions, and C5/C8 gates.
 
-Enters from the production entrypoint (``load_dataset_v2``) over real
-projection directories on the real filesystem and asserts observable
-outcomes: the loader must structurally require per-record repo identity and
-license decisions, and re-run the C5/C8 gates fail-closed over the loaded
-records — no kwarg can suppress C5, and C8 is admitted only via the exact
-``allow_copyleft`` opt-in.
+No argument may suppress C5; only explicit allow_copyleft admits C8.
 """
 
 from __future__ import annotations

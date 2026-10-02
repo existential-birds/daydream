@@ -1,14 +1,6 @@
-"""Harness: one rollout is one headless daydream deep run inside the sandbox.
-
-The harness starts exactly one program and returns; every model turn it makes —
-including the parallel exploration and per-stack fan-outs — flows through the
-interception server on the way out, so the whole run lands in one trace as a DAG
-of branches. Branches are training samples; nothing here flattens them.
-
-Deliberately NOT a new daydream backend. Every existing backend delegates tool
-execution to its own CLI runtime; a raw HTTP backend would mean reimplementing
-daydream's entire tool loop, which is a different project (osprey). Swapping the
-rollout agent is one config key: ``backend``.
+"""Run one headless Daydream deep program per rollout. All model turns, including parallel fan-outs,
+pass through interception as a DAG of training branches, never a flattened trace. The backend config
+key selects the existing CLI runtime and its tool execution.
 """
 
 from __future__ import annotations
@@ -115,7 +107,7 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         return STRATEGIES[self.config.backend](self.config.home)
 
     async def setup(self, runtime: vf.Runtime) -> None:
-        """Fail fast with remediation text; the image bakes everything else (D6)."""
+        """Fail fast with remediation text; all remaining dependencies are baked into the image."""
         strategy = self.strategy
         binaries = ("daydream", *strategy.required_binaries)
         if runtime.type == "docker":
@@ -156,15 +148,9 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             # _ROLLOUT_ENV_TO_CLEAR).
             **{name: "" for name in _ROLLOUT_ENV_TO_CLEAR},
         }
-        # --yes is load-bearing: --non-interactive alone takes the fix gate's safe
-        # default and exits 0 having applied nothing (deep/orchestrator.py:1187-1196),
-        # which would make every rollout a review-only rollout. --review is never
-        # set: with --yes it is a parse error (cli.py:978-981). Deep is the default
-        # flow, so there is no --deep to pass (runner.py:812).
-        #
-        # The subprocess runtime inherits non-API-key host variables. Explicitly
-        # remove GitHub credentials so a developer's App configuration cannot
-        # divert or abort the hermetic fixture rollout before its first model call.
+        # --yes authorizes fixes; --non-interactive alone accepts the no-fix default. Never combine
+        # --review with --yes. Deep is the default flow. Clear inherited GitHub credentials so host
+        # App settings cannot divert or abort a hermetic rollout before its first model call.
         github_env_unsets = [
             argument
             for name in _ROLLOUT_GITHUB_ENV_TO_UNSET
@@ -186,16 +172,9 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
             self.config.repo_path,
         ]
         if runtime.type == "docker":
-            # The image bakes both trees agent-owned at build time
-            # (repo.Dockerfile's combined chown layer covers /work/repo and
-            # /srv/mirror.git), so launch issues no ownership command at all.
-            # Instead, a constant-size writability preflight runs through the
-            # same run-as-agent privilege drop the launch will use, so it probes
-            # the agent's actual write access — running it as the container root
-            # would vacuously succeed on a root-owned tree (CAP_DAC_OVERRIDE)
-            # and never catch a missing ownership layer. It fails closed if the
-            # image was not built with the ownership layer — a non-agent-
-            # writable tree is a rebuild signal, never a runtime repair.
+            # The image bakes agent-owned repository/mirror trees. Probe writability through
+            # run-as-agent, since a root probe would pass via CAP_DAC_OVERRIDE and hide missing
+            # ownership. Failure requires rebuilding the image, never runtime ownership repair.
             preflight = await runtime.run(
                 [
                     "run-as-agent",
@@ -205,18 +184,10 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
                 ],
                 env,
             )
-            # The two tree roots are not the deep flow's whole write surface:
-            # its git add/commit writes into <repo>/.git and the terminal push
-            # updates the mirror's refs, so the preflight probes those per-file
-            # surfaces too. A checkout whose .git or mirror refs stayed
-            # root-owned would pass the root probes yet EACCES on the agent's
-            # first commit or push — that partial-ownership state is a rebuild
-            # signal just like a missing layer, never a runtime repair. The
-            # path is shlex.quote()d because it is interpolated into the
-            # privileged `sh -c` string: an unbaked config value containing
-            # whitespace would word-split the probe onto the wrong paths, and
-            # shell metacharacters would execute as the sandbox agent uid with
-            # the rollout env.
+            # Also probe .git and mirror refs: writable roots alone do not guarantee commits/pushes
+            # can write their files. Partial ownership requires rebuilding. Quote configured paths
+            # in the privileged sh -c command to prevent whitespace splitting or shell metacharacter
+            # execution under the agent UID.
             surfaces = await runtime.run(
                 [
                     "run-as-agent",
@@ -235,26 +206,16 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
                     f"{self.config.repo_path} and /srv/mirror.git: "
                     f"{preflight.stdout}{preflight.stderr}{surfaces.stdout}{surfaces.stderr}"
                 )
-            # Container launches drop from the container default user (root) to
-            # the non-root agent identity through the image's root-owned
-            # run-as-agent wrapper, so every daydream process and backend CLI
-            # subprocess it spawns runs as the agent uid — never root, and never
-            # able to write the sealed surfaces. The local subprocess smoke path
-            # has no wrapper (there is no root boundary to cross).
+            # Use the root-owned wrapper to drop Docker launches and all backend subprocesses to the
+            # agent UID, which cannot write sealed surfaces. The local smoke runtime has no root
+            # boundary or wrapper.
             argv = ["run-as-agent", *argv]
         result = await runtime.run_program(argv, env)
 
-        # A deep run always talks to a model. Zero captured turns means the CLI
-        # reached a provider directly and the whole rollout is untrainable — and
-        # it would otherwise SCORE, because the reward reads daydream's artifacts
-        # and those look perfectly normal. A live codex rollout did exactly this:
-        # real tokens billed, zero turns in the trace, reward 1.0. Silent capture
-        # loss is the one failure mode this harness must never absorb.
-        #
-        # `num_turns`, not `trace.calls`: the per-call list is a 0.2.1 field that
-        # prime-rl's vendored verifiers submodule does not have, while the turn
-        # count is derived from the node graph and exists in both. The guard has
-        # to survive the version this actually trains under.
+        # Zero captured turns means model calls may have bypassed interception: artifacts can still
+        # score normally, but the rollout is untrainable. Never absorb capture loss. Use num_turns
+        # from the node graph; trace.calls exists in verifiers 0.2.1 but not prime-rl's vendored
+        # version.
         if not trace.num_turns:
             raise RuntimeError(
                 f"backend={strategy.name} made no model calls through the interception server at "
@@ -269,33 +230,19 @@ class DaydreamReviewHarness(vf.Harness[DaydreamReviewHarnessConfig]):
         info["daydream_repo_path"] = self.config.repo_path
         info["daydream_archive_root"] = self.config.archive_root
 
-        # Exit 1 with complete artifacts is a legitimate outcome, not a crash: the
-        # deep flow stops non-zero when the suite is still red after the fix pass
-        # (orchestrator.py:1389). Setting a stop condition makes the framework
-        # return quietly instead of raising HarnessError (harness.py:99-118), so the
-        # rollout SCORES — a red suite is exactly the signal suite_non_regression wants.
-        # A non-zero exit with no artifacts is left to raise: that is infrastructure
-        # failure and belongs to the retry budget, not to the gradient.
+        # Nonzero exit with completed artifacts remains scoreable (for example, a red post-fix
+        # suite); set the framework stop condition to avoid HarnessError. Without completed
+        # artifacts, let infrastructure failure raise into the retry budget.
         if result.exit_code != 0 and await daydream_completed(runtime, self.config.archive_root):
             trace.stop("daydream_completed_nonzero")
-        # Produce the integrity seal over the archived run dir now that the
-        # agent's write window has closed: the reward verifies the staged copy
-        # against this seal before trusting any value, so an attempted tamper
-        # with the archived artifacts zeroes the reward instead of recording
-        # honest telemetry. The candidate diff is the rollout's own current
-        # tracked diff against the baked head (b"" when it cannot be re-derived).
         sealed = await seal_archived_run(
             runtime,
             self.config.archive_root,
             repo=self.config.repo_path,
             head_sha=data.head_sha,
         )
-        # A seal-production failure must never be silent or fail-open:
-        # seal_archived_run overwrites seal.json with an unvalidatable marker
-        # (verify_seal -> False -> zero reward), and the trace records the
-        # outcome so an operator can distinguish "sealed and verified" from
-        # "sealing failed, zero protection" — a completed run with no valid
-        # seal is never scored at full trust as if the protection existed.
+        # Record sealing failure for operators and scoring. seal_archived_run marks invalid seals; a
+        # completed run without valid protection must never receive legacy full trust.
         trace.info["daydream_seal_ok"] = sealed
         if not sealed:
             logger.warning(

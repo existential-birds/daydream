@@ -1,14 +1,8 @@
-"""Cross-backend gate: each backend enforces its read-only profile under read_only.
+"""Read-only enforcement through each backend's real execution boundary.
 
-Claude refuses mutation at the tool layer (PreToolUse guard). Codex combines
-its ``--sandbox read-only`` sandbox with a disposable standalone clone whenever
-the cwd is a Git worktree root: a ``git commit`` inside that cwd can advance
-only the disposable clone's refs and index — the caller's HEAD, staged index,
-refs, and remotes are physically unreachable and deleted with the clone at
-exit. The audit worktree remains, and Codex now additionally gets this hard
-disposable-clone boundary. The real committing-subprocess regression proves
-the caller's Git state survives a read-only Codex commit byte-for-byte; the
-Claude guard tests pin the tool-layer denial surface.
+Claude denies mutating tools. Codex combines its sandbox with a disposable clone
+for linked-worktree inputs, isolating the caller's HEAD/index/refs/remotes.
+A committing subprocess proves the caller's Git state survives byte-for-byte.
 """
 
 import os

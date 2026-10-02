@@ -1,32 +1,13 @@
-"""Deterministic grounded-diagram eligibility (issue #1113).
+"""Determine diagram eligibility from changed code, boundaries, and branch points.
 
-Which diagram kinds a run may attempt is decided here, before any model is
-asked anything: a sequence diagram when the change crosses a service or module
-boundary, a flowchart when a single changed function gained or reworked enough
-branch points to be worth drawing. The decision is a pure function of its
-arguments -- it reads no ``FlowContext``, no config file and no environment,
-and touches the filesystem only to parse the changed files it was handed -- so
-the whole of it round-trips into ``diagram.json`` via
-:meth:`Eligibility.to_dict` and a reviewer can re-derive it later.
+Sequence diagrams require service/module crossings; flowcharts require enough
+changed branch points in one function. Inputs are explicit; filesystem access
+only parses supplied changed files, and the decision is persisted for audit.
 
-Two properties are worth stating because they are easy to break:
-
-* **Stacks must come from a fresh** ``detect_stacks(sorted(changed_files))``.
-  The orchestrator's published ``ctx.data["stacks"]`` is post-collapse and
-  post-shard: on a diff of two files in two languages the tiny-diff collapse
-  folds everything into one ``generic`` assignment, which would classify an
-  entirely real code change as "no code files" and make every diagram
-  permanently ineligible. ``decide_eligibility`` therefore takes ``stacks`` by
-  argument and the caller owns building them un-collapsed.
-* **Everything about tree-sitter here is fail-open.** A missing grammar, an
-  unparseable file or a known-bad ``tree-sitter`` install yields *no* branch
-  points, never an exception. Failing open can only ever suppress a diagram,
-  and a review must not die over a picture.
-
-:class:`CandidateRoot` and :class:`DiagramThresholds` are defined in
-``daydream.deep.diagram_types`` (so the grounding pass can consume them
-without importing this module) and re-exported here, where the eligibility
-call sites read them most naturally.
+Pass fresh, uncollapsed stack detection: tiny-diff collapse can hide languages
+inside generic. Tree-sitter failures yield no branch points and can only suppress
+a diagram. CandidateRoot and DiagramThresholds live in diagram_types and are
+re-exported here for eligibility callers.
 """
 
 from __future__ import annotations
@@ -74,17 +55,7 @@ _OFF_REASON = "Diagram mode is off."
 
 @dataclass(frozen=True)
 class KindDecision:
-    """Whether one diagram kind may be attempted, and why.
-
-    Attributes:
-        eligible: Whether the kind may be attempted this run.
-        rule: The rule that decided it -- ``"cross-service"``,
-            ``"cross-module"``, ``"branch-points"``, ``"forced"``, or ``None``
-            when the kind is not eligible.
-        reason: A human sentence, always set, for ``diagram.json`` and the
-            omission notice. Set for the eligible case too, so the artifact
-            records why a diagram was drawn and not only why it was not.
-    """
+    """Eligibility, matching rule, and a reason for both accepted and omitted kinds."""
 
     eligible: bool
     rule: str | None
@@ -93,29 +64,13 @@ class KindDecision:
 
 @dataclass
 class Eligibility:
-    """Every signal behind one run's diagram decision.
+    """Persisted eligibility signals and resolved policy.
 
-    Attributes:
-        code_files: Sorted changed non-test files assigned to a real language
-            stack (the ``generic`` and ``structure`` buckets are not code).
-        modules: ``{code file: module}``, where a module is the owning service
-            root when one owns the file and its top-level directory otherwise
-            (``"."`` for a repository-root file).
-        services: ``{code file: service name}`` for the code files an
-            enumerated service owns. Files outside every service root are
-            absent rather than mapped to a placeholder.
-        cross_module_edges: Count of directed import edges between two code
-            files in different modules.
-        function_branch_counts: Every changed function with at least one
-            changed branch point, in candidate order.
-        candidate_roots: The roots the flowchart may be rooted at -- the
-            functions meeting ``thresholds.min_branch_points``, or every
-            changed function when the flowchart is forced and none meet it.
-            Sorted by branch points descending, then file, then line.
-        sequence: The sequence diagram's decision.
-        flowchart: The flowchart's decision.
-        thresholds: The thresholds the decision was taken against.
-        force: The resolved diagram mode this decision was taken under.
+    code_files excludes tests, generic, and structure. modules maps each file to its
+    service root or top-level directory ("." at root); services omits unowned files.
+    Cross-module edges are directed. Candidate roots meet the branch threshold, or
+    fall back to every changed function when forced; order is descending branch
+    count, then file and line.
     """
 
     code_files: list[str]
@@ -144,14 +99,7 @@ class Eligibility:
 
 
 def _code_files(stacks: list[StackAssignment], changed_files: list[str]) -> list[str]:
-    """Return the sorted changed non-test files that belong to a language stack.
-
-    A file is code when ``detect_stacks`` routed it to a real language stack:
-    the ``generic`` bucket holds docs and config (``.md`` is pinned there) and
-    the ``structure`` meta-stack holds a copy of *every* changed file, so both
-    are skipped. Shard suffixes (``python#2``) are stripped so a sharded
-    assignment list classifies identically to an unsharded one.
-    """
+    """Select changed non-test language files, ignoring shard suffixes and meta-stacks."""
     changed = set(changed_files)
     selected: set[str] = set()
     for assignment in stacks:
@@ -188,12 +136,7 @@ def _module_of(path: str, services: list[Service]) -> str:
 def _count_cross_module_edges(
     import_graph: dict[str, set[str]], modules: dict[str, str]
 ) -> int:
-    """Count directed import edges whose endpoints are code files in different modules.
-
-    Directed, so a mutual import between two modules counts twice -- the number
-    is a strength signal for the cross-module rule (which needs >= 1), never an
-    undirected edge count.
-    """
+    """Count directed imports across code modules; mutual imports count twice."""
     total = 0
     for source, targets in import_graph.items():
         source_module = modules.get(source)
@@ -209,22 +152,11 @@ def _count_cross_module_edges(
 def count_function_branch_points(
     repo_root: Path, file: str, ranges: list[tuple[int, int]]
 ) -> list[CandidateRoot]:
-    """Return every changed function in ``file`` with its changed branch-point count.
+    """Count changed branches in each changed function, including zero-count candidates.
 
-    "Changed function" means a tree-sitter function definition whose
-    ``line..end_line`` body range overlaps at least one of ``ranges`` (the
-    file's head-side changed hunks). A branch point counts for a function when
-    its line is inside both that function's range and a changed hunk, and it is
-    attributed to the *innermost* enclosing definition, so a branch inside a
-    nested closure belongs to the closure and not to its host.
-
-    Functions with zero changed branch points are still returned -- they are
-    the candidate pool a forced flowchart falls back to. Callers filter by
-    ``branch_points``.
-
-    Returns ``[]`` for a language with no grammar, an unreadable file, or any
-    tree-sitter failure (fail-open: no branch points can only suppress a
-    diagram, never fabricate one).
+    A function must overlap a head-side hunk. Each branch belongs to the innermost
+    enclosing definition and must itself be in a hunk. Missing grammars, unreadable
+    files, and tree-sitter failures return no candidates, never invented evidence.
     """
     if not ranges:
         return []
@@ -410,27 +342,10 @@ def decide_eligibility(
     thresholds: DiagramThresholds,
     force: str,
 ) -> Eligibility:
-    """Decide which diagram kinds this run may attempt, and record why.
+    """Decide from fresh stacks, head-side ranges, services, imports, and resolved thresholds.
 
-    Args:
-        repo_root: Absolute path the changed files are read under.
-        changed_files: Repository-relative POSIX paths in the diff.
-        hunk_ranges: ``{file: [(new_start, new_end), ...]}`` head-side changed
-            ranges, from ``hunk_index.head_side_ranges_by_file``.
-        stacks: ``detect_stacks(sorted(changed_files))`` -- un-collapsed and
-            un-sharded (see the module docstring).
-        services: ``services.enumerate_services`` output for the repository.
-        import_graph: ``dependency.build_import_graph`` output over the changed
-            files. An empty graph simply denies the cross-module rule.
-        thresholds: Resolved ``[tool.daydream.diagram]`` thresholds.
-        force: The resolved diagram mode -- ``"auto"``, ``"sequence"``,
-            ``"flowchart"``, ``"both"`` or ``"off"``. An unrecognized value is
-            treated as ``"auto"`` (this function never raises; the CLI and
-            config-file parsers are the vocabulary gate).
-
-    Returns:
-        The :class:`Eligibility` record, whose ``to_dict`` is written to
-        ``diagram.json`` so the decision is auditable after the fact.
+    An empty graph denies the cross-module rule; unknown force values act as auto.
+    Return every decision signal for persistence to diagram.json.
     """
     code_files = _code_files(stacks, changed_files)
     modules = {path: _module_of(path, services) for path in code_files}

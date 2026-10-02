@@ -1,17 +1,7 @@
-"""Single source of truth for classifying backend failures.
+"""Pure backend-failure classification and cumulative retry-recovery accounting.
 
-Before this module the retry decision in :func:`daydream.agent.run_agent` and the
-Pi backend's diagnostic category disagreed: the retry branch trusted an opt-in
-``retryable`` flag (derived from a message heuristic) and never consulted
-``category``, so a permanent condition that happened to mention a transient
-token (``"model not found: gpt-5 (503)"``) retried. :func:`classify_failure`
-collapses both views into one total, single-valued decision in which permanent
-conditions win ties.
-
-The classifier is deliberately pure: no I/O, no clock reads, and it never
-raises. Every attribute access is guarded and ``str(exc)`` is bounded, so a
-hostile exception cannot make classification itself a failure.
-"""
+Explicit permanent conditions take precedence over transient message hints.
+Exception messages use the shared safe conversion boundary."""
 from __future__ import annotations
 
 import math
@@ -20,6 +10,8 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
+
+from daydream.diagnostics import exception_text
 
 
 class FailureClass(StrEnum):
@@ -85,24 +77,11 @@ _RETRY_HINT_RE = re.compile(r"retry[- ]after[:\s]+([+-]?\d+(?:\.\d+)?)", re.IGNO
 
 
 def parse_message_retry_hint(message: str) -> float | None:
-    """Extract a numeric-seconds server retry hint from *message*.
-
-    Returns ``None`` for an absent, non-numeric, negative, or non-finite hint;
-    an unparseable hint degrades to jitter rather than to a fabricated delay.
-    ``0`` is a valid hint. Never raises.
-    """
+    """Return finite nonnegative retry-after seconds, including zero; else None."""
     if not message:
         return None
     match = _RETRY_HINT_RE.search(message)
-    if match is None:
-        return None
-    try:
-        value = float(match.group(1))
-    except ValueError:
-        return None
-    if not math.isfinite(value) or value < 0:
-        return None
-    return value
+    return decode_retry_recovery_allowance(match.group(1)) if match else None
 
 
 @dataclass(frozen=True)
@@ -114,21 +93,10 @@ class RetryDecision:
 
 
 def decode_retry_recovery_allowance(raw: Any) -> float | None:
-    """Decode one declared retry-recovery allowance value, or ``None`` if refused.
+    """Decode a shared backend/config/environment allowance, or None if undeclared.
 
-    The single decode rule shared by every allowance source -- a backend
-    ``RetryPolicy`` field, a backend attribute, ``run_agent``'s explicit argument,
-    the ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var, and the repo
-    ``retry_recovery_allowance_s`` config key -- so one value can never be
-    accepted on one path and refused on another. A numeric string (the env
-    shape) is accepted; a bool, a non-number, a non-finite value, or a negative
-    value is refused as ``None``, which means "not declared" and never becomes an
-    effective bound; ``0`` is a real declaration that disables retry recovery.
-
-    Callers keep their own logging surface, but should render the refusal with
-    :func:`undeclared_retry_allowance_message` so one rule reads the same way
-    everywhere. Never raises.
-    """
+    Numeric strings are accepted; bools, nonnumbers, negatives, and nonfinite values
+    are refused. Zero disables recovery. Callers own logging via the shared warning."""
     if isinstance(raw, bool):
         return None
     if isinstance(raw, (int, float)):
@@ -146,12 +114,7 @@ def decode_retry_recovery_allowance(raw: Any) -> float | None:
 
 
 def undeclared_retry_allowance_message(source: str, raw: Any) -> str:
-    """One warning shape for a refused allowance value, shared by every source.
-
-    Names the source and the raw value and states the consequence: the value
-    stays undeclared, so the caller's own default applies downstream. The refused
-    value is never restated as if it were a bound.
-    """
+    """Name a refused value and source without presenting it as an effective bound."""
     return (
         f"{source}={raw!r} is not a finite non-negative number; "
         "the retry-recovery allowance stays undeclared"
@@ -160,31 +123,17 @@ def undeclared_retry_allowance_message(source: str, raw: Any) -> str:
 
 @dataclass
 class RetryRecoveryBudget:
-    """Cumulative retry-overhead allowance for one invocation's ladder.
+    """Accumulate invocation retry overhead independently of useful-work time.
 
-    A retry may spend only the recovery budget it was given, never the
-    invocation's useful-work time. The budget is activated on the *first*
-    retryable failure; at that instant its ``allowance_s`` is clamped once to
-    the remaining effective deadline so it composes with the single invocation
-    deadline by clamping, never by re-basing. Every later failure consults the
-    same cumulative accumulator, so a retry storm cannot reset the allowance.
-
-    Pure state: the caller supplies every clock value. Charges are cumulative
-    and independent of ``backend_s``/``backoff_s``; :meth:`remaining` never
-    returns a negative value.
-    """
+    The first retryable failure clamps the allowance once to the remaining deadline.
+    Later failures cannot reset it. Callers supply clocks; remaining time is nonnegative."""
 
     allowance_s: float
     _activated_at: float | None = field(default=None, init=False)
     _spent_s: float = field(default=0.0, init=False)
 
     def activate(self, now: float, effective_deadline: float | None = None) -> None:
-        """Start the allowance clock; idempotent on every later failure.
-
-        On the first call the activation instant is recorded and ``allowance_s``
-        is clamped to whatever the effective deadline leaves (never increased),
-        once, never re-based. Later calls are no-ops.
-        """
+        """Activate once and clamp the allowance to the remaining effective deadline."""
         if self._activated_at is not None:
             return
         self._activated_at = now
@@ -222,22 +171,11 @@ def _numeric(value: Any) -> float:
 
 
 def derive_retry_summary(phase_events: Any) -> dict[str, Any] | None:
-    """Reduce frozen phase events into a retry/circuit summary.
+    """Reduce retry-ladder stops to reason counts, durations, and ordered circuit states.
 
-    Counts every retry-ladder stop's ``retry_stop_reason`` (omitting ``None``),
-    sums the duration/count fields over those events only, and collects the
-    distinct non-``None`` ``circuit_state`` values in first-seen order. A
-    deadline stop carries an ``agent_budget_stop`` payload but no retry reason,
-    so it is skipped entirely: its ``attempts``/``backend_s`` are useful-work
-    time, not retry overhead. Returns ``None`` when no event carries a
-    retry-ladder stop reason, so a run without retry activity produces no
-    summary and its manifest stays byte-identical.
-
-    The reducer is total: a malformed container or payload degrades to
-    ``None``/zero contributions instead of raising on the archive write path.
-    Only durations, counts and reason/state codes are emitted -- never an
-    absolute or monotonic deadline value.
-    """
+    Skip ordinary deadline stops: they describe useful work. Missing retry activity
+    returns None, preserving old manifest shapes. Malformed containers contribute
+    nothing; absolute or monotonic deadlines are never emitted."""
     if not isinstance(phase_events, Sequence) or isinstance(phase_events, (str, bytes, bytearray)):
         return None
 
@@ -335,10 +273,7 @@ def classify_failure(exc: BaseException) -> RetryDecision:
     if getattr(exc, "permanent", False):
         return _decide(FailureClass.PERMANENT)
 
-    try:
-        message = str(exc)
-    except Exception:  # noqa: BLE001 - a broken __str__ must not break classification
-        message = ""
+    message = exception_text(exc) or ""
     if _PERMANENT_CONDITION_RE.search(message):
         return _decide(FailureClass.PERMANENT)
 

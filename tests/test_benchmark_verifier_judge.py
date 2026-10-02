@@ -1,12 +1,4 @@
-"""Fake-HTTP tests for the isolated Harbor verifier entry (``templates/tests/score_review.py``).
-
-Exercises the self-contained judge clients (Anthropic, OpenAI-compatible,
-Claude Code CLI),
-the bounded prompt renderer, strict verdict parsing, shared retry/redirect
-policy, concurrency/pair-cap runner, fail-whole-task error path, provider
-selection, oracle parity, and end-to-end ``run_verifier`` — all with an
-injected fake HTTP client against ``tmp_path``.
-"""
+"""Isolated verifier clients and scoring over fake HTTP, CLI runners, and real temp files."""
 import asyncio
 import hashlib as _h
 import json
@@ -60,7 +52,6 @@ def _finding(*,
 
 
 def test_spike_template_loads_with_bare_import(sr_module: Any) -> None:
-    """The template loads via importlib and its bare import resolves to the sibling copy."""
     assert sr_module.__name__ == "score_review"
     assert sr_module.verifier_core is not None
     assert sr_module.verifier_core.CONFIDENCE_THRESHOLD == 0.7
@@ -508,7 +499,6 @@ def test_oracle_artifact_scores_reward_1_for_findings_and_clean(sr_module: Any, 
     _, reward, _ = _run_verifier_case(sr, gold_path, artifact_path, tmp_path, client=MatchClient())
     assert reward.reward == 1.0 and reward.tp == 2 and reward.clean_pass == 0
 
-    # clean fixture: gold empty, candidates empty -> reward 1, clean_pass 1
     clean_gold = tmp_path / "cg.json"
     clean_gold.write_text(json.dumps([]))
     _write_metadata(clean_gold, case_id="c", base_ref="b", head_ref="h")
@@ -573,15 +563,9 @@ def test_generated_asset_tree_is_self_contained(sr_module: Any) -> None:
     assert "FROM" in (base / "Dockerfile").read_text()
 
 def test_shipped_gold_and_oracle_fixtures_validate_and_score_reward_1(sr_module: Any, tmp_path: Path) -> None:
-    """The checked-in fixtures must stay valid under the derivation scheme.
+    """Validate shipped fixture identities and score their oracle perfectly.
 
-    The synthetic-candidate suite derives candidate ids on the fly, so it is
-    self-consistent and cannot detect drift in the shipped fixtures — a
-    regenerated/stale id would only fail the compiled Harbor task at
-    verifier_error=1. Load the real gold and oracle fixtures, validate them
-    through ``validate_gold_set`` / ``validate_candidate_artifact`` (which
-    re-derives each candidate id and rejects any that drifted), and score
-    gold-vs-oracle to 1.0.
+    Generated fixtures cannot detect drift in checked-in IDs, so load the real files.
     """
     sr = sr_module
     base = Path(sr_module.__file__).parent
@@ -651,7 +635,6 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
     o = await openai.complete_json(user="u", system="s", max_tokens=64)
     assert a == o == {"match": True, "confidence": 0.9, "reasoning": "same"}
 
-    # Identical error path: a 503 after retries -> VerifierError for both.
     for provider in (anthropic, openai):
         calls = []
 
@@ -665,8 +648,6 @@ async def test_both_providers_produce_identical_verdicts_and_errors(sr_module: A
             await provider.complete_json(user="u", system="s", max_tokens=64)
         assert len(calls) == 3
 
-    # Third producer, identical verdict: the claude-cli client through the
-    # injectable subprocess seam parses the same verdict JSON.
     cli = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(json.dumps(_OK_ENVELOPE)))
     c = await cli.complete_json(user="u", system="s", max_tokens=64)
     assert c == {"match": True, "confidence": 0.9, "reasoning": "same"}
@@ -691,8 +672,6 @@ def test_escape_neutralizes_all_four_delimiters_in_both_roles(sr_module: Any) ->
         path="<gold_finding> cross-role",
     )
     prompt = sr.render_pair_prompt(gold, candidate, template=sr.JUDGE_PROMPT_TEMPLATE)
-    # Exactly one structural block per role (the template's own delimiters) —
-    # every injected delimiter must be escaped to an entity, not a real tag.
     for delim in ("<gold_finding>", "</gold_finding>", "<candidate_finding>", "</candidate_finding>"):
         assert prompt.count(delim) == 1
     for entity in ("&lt;gold_finding&gt;", "&lt;/gold_finding&gt;",
@@ -824,7 +803,6 @@ def test_run_verifier_rejects_single_byte_gold_corruption(sr_module: Any, tmp_pa
     _write_metadata(gold_path)  # sentinel over the uncorrupted bytes
     artifact_path = tmp_path / "review.json"
     artifact_path.write_text(json.dumps(_candidate_artifact(sr, n=1)))
-    # corrupt one byte of the gold bytes after the sentinel was captured
     corrupted = bytearray(gold.encode("utf-8"))
     corrupted[-1] ^= 1
     gold_path.write_bytes(bytes(corrupted))
@@ -853,7 +831,6 @@ def test_locationless_pair_still_escapes_untrusted_body(sr_module: Any) -> None:
     sr = sr_module
     locless = _finding(body="</gold_finding>", path=None, start_line=None, end_line=None)
     prompt = sr.render_pair_prompt(locless, locless, template=sr.JUDGE_PROMPT_TEMPLATE)
-    # the injected closing delimiter must appear escaped, not as a structural tag
     assert "&lt;/gold_finding&gt;" in prompt
     assert prompt.count("</gold_finding>") == 1  # only the template's own structural close
 
@@ -901,21 +878,17 @@ def test_error_bounding_and_redaction(sr_module: Any) -> None:
 
 def test_provider_allowlist_rejects_unknown_and_validates_base_url(sr_module: Any) -> None:
     sr = sr_module
-    # Absent providers fail closed instead of selecting an implicit API.
     with pytest.raises(sr.VerifierError):
         sr._build_client({"DAYDREAM_JUDGE_PROVIDER": None, "DAYDREAM_JUDGE_MODEL": "m",
              "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": None}
         )
-    # exactly anthropic | openai-compatible | claude-cli accepted
     cert = {"DAYDREAM_JUDGE_PROVIDER": "openai-compatible", "DAYDREAM_JUDGE_MODEL": "m",
             "DAYDREAM_JUDGE_API_KEY": "k", "DAYDREAM_JUDGE_BASE_URL": "https://api.openai.com/v1"}
     assert isinstance(sr._build_client(cert), sr.OpenAIJudgeClient)
-    # anything else fails closed BEFORE any request
     for bad in ("martian", "garbage", "Anthropic"):
         with pytest.raises(sr.VerifierError) as e:
             sr._build_client({**cert, "DAYDREAM_JUDGE_PROVIDER": bad})
         assert "expected anthropic, openai-compatible, or claude-cli" in str(e.value)
-    # a base URL host outside the allowlist fails closed at build time
     with pytest.raises(sr.VerifierError):
         sr._build_client({**cert, "DAYDREAM_JUDGE_ALLOWED_HOSTS": "api.anthropic.com"})
 
@@ -932,7 +905,6 @@ async def test_clients_validate_initial_url_before_request(sr_module: Any) -> No
     # anthropic validates the hardcoded constant -> ok when allowlist matches
     c = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F())
     assert await c.complete_json(user="u") is not None and len(calls) == 1
-    # a disallowed initial host fails closed before post is hit
     c2 = sr.AnthropicJudgeClient("sk-ant-x", "m", http=F(), allowlist={"evil.example"})
     with pytest.raises(sr.VerifierError):
         await c2.complete_json(user="u")
@@ -966,13 +938,11 @@ async def test_redirects_preserve_configured_headers_and_bound_depth(sr_module: 
     assert final_headers["x-api-key"] == "SECRET"             # configured header preserved
     assert "x-server-token" not in final_headers             # server header never replayed
 
-    # cross-host redirect rejected
     bad = Redirecting(["https://evil.example/x"])
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(bad, url="https://api.anthropic.com/v1/messages",
             payload={}, headers={"x-api-key": "K"}, content=lambda b: b, allowlist=allow)
 
-    # redirect loop bounded by _MAX_REDIRECTS
     loop = Redirecting(["/v1/next"] * (sr._MAX_REDIRECTS + 1))
     with pytest.raises(sr.VerifierError):
         await sr._complete_json_with_http(loop, url="https://api.anthropic.com/v1/messages",
@@ -996,12 +966,10 @@ def test_verdict_reasoning_is_size_capped_and_errors_are_bounded(sr_module: Any)
     sr = sr_module
     ok = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "short"})
     assert ok.match is True
-    # over-cap reasoning rejected with a typed bounded diagnostic
     with pytest.raises(sr.VerifierError) as e:
         sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "r" * (sr._REASONING_CAP_BYTES + 1)})
     assert "reasoning" in str(e.value)
     assert ("r" * 64) not in str(e.value)  # never embeds the oversized value
-    # non-string reasoning whose repr is huge is bounded
     huge = {"match": True, "confidence": 0.9, "reasoning": ["x" * 5000]}
     with pytest.raises(sr.VerifierError) as e:
         sr.parse_verdict(huge)
@@ -1018,7 +986,6 @@ def test_arbitrary_runtime_failure_writes_bounded_diagnostics(sr_module: Any, tm
         async def complete_json(self, *, user: Any, system: Any, max_tokens: Any) -> None:
             raise RuntimeError("sk-ant-leakme123 boom %s" % ("y" * 1000))
     out, reward, _ = _run_verifier_case(sr, gold_path, art_path, tmp_path, client=Exploding())
-    # unexpected runtime exception no longer escapes to a bare exit
     assert reward.verifier_error == 1 and reward.reward == 0.0
     details = _assert_infra_zero(out)
     blob = json.dumps(details)
@@ -1050,8 +1017,6 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
     anthropic = sr.AnthropicJudgeClient("k", "m", allowlist=allow)
     openai = sr.OpenAIJudgeClient("k", "m", base_url="https://api.anthropic.com/v1", allowlist=allow)
     for client in (anthropic, openai):
-        # identical redirect-hop bound: a forever-redirecting judge exhausts
-        # _MAX_REDIRECTS on both providers before the same VerifierError
         seen = []
         class RedirectRule:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
@@ -1063,7 +1028,6 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
             await client.complete_json(user="u")
         assert len(seen) == (sr._MAX_REDIRECTS + 1)       # identical hop bound on both
 
-        # identical oversized-response diagnostic on both providers
         class Oversize:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
                 return type("R", (), {"status_code": 200, "text": "",
@@ -1073,7 +1037,6 @@ async def test_both_providers_share_identical_hardened_error_and_redirect_policy
             await client.complete_json(user="u")
         assert "256 KiB" in str(e.value)
 
-        # identical out-of-allowlist redirect rejection on both providers
         class BadRedirect:
             async def post(self, url: Any, *, headers: Any, json: Any, timeout: Any) -> Any:
                 return type("R", (), {"status_code": 302,
@@ -1142,14 +1105,6 @@ def test_run_verifier_missing_gold_file_is_unscored(sr_module: Any, tmp_path: Pa
     assert any("not found" in e for e in details["errors"])
 
 def test_run_verifier_missing_artifact_file_is_unscored_infra(sr_module: Any, tmp_path: Path) -> None:
-    """A missing candidate-artifact file is infra, not a scored-zero agent failure.
-
-    The FileNotFoundError branch is routed to the unscored infra zone
-    (reward-details only, verifier_error=1) so an infra path misconfiguration
-    (wrong DAYDREAM_JUDGE_ARTIFACT_PATH, missing mount) never drags down the
-    mean with no infra_error_task_count signal. This pins finding #820's
-    file-absent vs file-invalid distinction.
-    """
     sr = sr_module
     gold_path, artifact_path, out = _seed_scored_case(sr, tmp_path)
     artifact_path.unlink()                                 # artifact missing
@@ -1178,7 +1133,6 @@ async def test_claude_cli_client_shells_subprocess_and_returns_verdict(sr_module
     calls = []
 
     class FakeProc:
-        # returncode 0, stdout = one JSON line with the verdict in "result"
         rc = 0
         stdout = json.dumps(_OK_ENVELOPE)
         stderr = ""
@@ -1269,13 +1223,6 @@ async def test_claude_cli_parse_verdict_rejection_propagates_raw(sr_module: Any)
     ],
 )
 async def test_claude_cli_terminal_failures_raise_immediately(sr_module: Any, stdout_arg: str, needle: str) -> None:
-    """Non-timeout failure classes are terminal, never retried like a timeout.
-
-    rc != 0 is covered by ``test_both_providers_produce_identical_verdicts_and_errors``;
-    here the remaining terminal classes -- empty stdout, malformed output,
-    cli-reported error, missing result -- each raise VerifierError on the first
-    attempt instead of riding the 3-attempt backoff loop reserved for the
-    transient timeout class."""
     sr = sr_module
     client = sr.ClaudeCliJudgeClient(model="m", runner=_fake_cli_runner(stdout_arg))
     with pytest.raises(sr.VerifierError) as e:
@@ -1285,12 +1232,6 @@ async def test_claude_cli_terminal_failures_raise_immediately(sr_module: Any, st
 
 @pytest.mark.asyncio
 async def test_claude_cli_streaming_oversize_kills_child(sr_module: Any) -> None:
-    """Streaming-path over-cap kill: mid-stream totals past _RESPONSE_CAP_BYTES.
-
-    Unlike the str-seam oversize test, this drives the real incremental
-    ``StreamReader`` loop: a chunk at a time is accumulated, and the moment the
-    running total exceeds the cap the child is killed and the output rejected --
-    never read to completion and truncated-and-accepted."""
     sr = sr_module
     killed: list[int] = []
 
@@ -1356,12 +1297,7 @@ async def test_claude_cli_post_eof_wait_settles(sr_module: Any) -> None:
 
 @pytest.mark.asyncio
 async def test_claude_cli_post_eof_wait_timeout_kills_child(sr_module: Any, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The post-EOF ``wait()`` settle past the deadline is killed, then retried.
-
-    A child whose stdout reached EOF but that never exits (e.g. blocked writing
-    to an undrained stderr pipe) must not burn the whole deadline silently: the
-    wait() settle inherits the timeout, the child is killed, and the timeout
-    retry loop proceeds."""
+    """A child that hangs after stdout EOF is killed at the deadline and retried."""
     sr = sr_module
     killed: list[int] = []
 
@@ -1397,12 +1333,7 @@ async def test_claude_cli_post_eof_wait_timeout_kills_child(sr_module: Any, monk
 
 @pytest.mark.asyncio
 async def test_claude_cli_communicate_only_fallback(sr_module: Any) -> None:
-    """communicate()-only seam: no stdout attribute drains via communicate().
-
-    Exercises the fallback that processes with no exposed ``stdout`` stream
-    (both real pipes closed into one ``communicate()``) take: communicate()
-    drains stdout *and* stderr together, so the stderr pipe can never block the
-    parent regardless of volume."""
+    """Without an exposed stdout stream, communicate() drains both pipes together."""
     sr = sr_module
     seen: list[tuple[bytes, bytes]] = []
 

@@ -1,4 +1,3 @@
-"""Tests for daydream.config_file module (config-file loader)."""
 
 from pathlib import Path
 
@@ -102,7 +101,6 @@ def test_per_key_merge_preserves_pyproject_phase(tmp_path: Path) -> None:
     )
     (tmp_path / ".daydream.toml").write_text('[phases.fix]\nbackend = "codex"\n')
     cfg = load_file_config(tmp_path)
-    # dotfile's [phases.fix] must not wipe pyproject's [phases.review]
     assert cfg.phase_model("review") == "pyproject-review"
     assert cfg.phase_backend("fix") == "codex"
     assert cfg.backend == "claude"
@@ -111,9 +109,8 @@ def test_config_has_no_bench_field(tmp_path: Path, caplog: pytest.LogCaptureFixt
     (tmp_path / "pyproject.toml").write_text('[tool.daydream.bench]\nmodel = "claude-opus-4-5-20251101"\n')
     cfg = load_file_config(tmp_path)
     assert not hasattr(cfg, "bench")
-    # A stale [tool.daydream.bench] table is ignored, not silently dropped: the
-    # loader warns, mirroring the removed legacy `bench` verb's loud CLI
-    # rejection (issue-785).
+    # A stale bench table must produce a warning, matching the removed CLI verb's explicit
+    # rejection.
     assert any("no longer a supported daydream config section" in rec.message for rec in caplog.records)
 
 @pytest.mark.parametrize("key", ["precision_mode", "approve_on_clean", "scope_issue_filing"])
@@ -124,15 +121,12 @@ def test_bool_key_true_parses_as_bool(tmp_path: Path, key: str) -> None:
 
 @pytest.mark.parametrize("key", ["precision_mode", "approve_on_clean", "scope_issue_filing"])
 def test_bool_key_non_bool_degrades_to_none(tmp_path: Path, key: str) -> None:
-    # bool-only coercion: a truthy int is NOT enabled, it degrades to None (unset)
-    # rather than crashing or coercing to True.
+    # Truthy integers stay unset under bool-only coercion.
     (tmp_path / ".daydream.toml").write_text(f"{key} = 1\n")
     cfg = load_file_config(tmp_path)
     assert getattr(cfg, key) is None
 
 def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
-    """A target file setting trajectory_hub_repo loads cleanly and contributes
-    nothing — the field is removed from the model entirely."""
     write_target_hub_key(tmp_path)
     cfg = load_file_config(tmp_path)
     assert not hasattr(cfg, "trajectory_hub_repo")  # field removed from the model
@@ -153,7 +147,6 @@ def test_target_trajectory_hub_repo_key_is_ignored(tmp_path: Path) -> None:
 )
 def test_supervision_config(tmp_path: Path, content: str, expected: tuple[str | None, list[str], str | None, list[str]],
 ) -> None:
-    """Load supervisor identities and deny lists from supported config spellings."""
     (tmp_path / ".daydream.toml").write_text(content)
     cfg = load_file_config(tmp_path)
 
@@ -173,13 +166,10 @@ def test_empty_config_helper() -> None:
     ],
 )
 def test_quality_gate_threshold_coercion(raw: object, expected: float | None) -> None:
-    """#329/Finding 7: quality-gate thresholds accept only finite non-negative values.
+    """Thresholds require finite nonnegative numbers; invalid values defer to defaults.
 
-    A negative threshold would flag every unchanged file (a zero delta exceeds
-    it); NaN/inf would silently disable the metric (every comparison is False)
-    and write non-standard ``NaN`` into JSON; bool/string/list are never
-    meaningful floors. Each invalid input degrades to ``None`` so the
-    ``config.py`` default applies.
+    Negative floors flag unchanged files, while NaN/inf disable comparisons. Reject
+    booleans, strings, and lists as well as invalid numeric values.
     """
     value = _coerce_non_negative_float(raw)
     if expected is None:
@@ -193,13 +183,6 @@ def test_quality_gate_threshold_coercion(raw: object, expected: float | None) ->
     ],
 )
 def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, value: str) -> None:
-    """#329/Finding 7: invalid thresholds in ``.daydream.toml`` degrade to None.
-
-    Exercises the real TOML parse path: negative, NaN, inf, bool, and string
-    values for any of the four threshold keys (the delta and the absolute
-    undefined-baseline knobs) land as ``None`` in the loaded config, so
-    ``_step_fix`` resolves the named default rather than a gate-breaking floor.
-    """
     (tmp_path / ".daydream.toml").write_text(
         f"quality_gate_erosion_delta = {value}\n"
         f"quality_gate_verbosity_delta = {value}\n"
@@ -213,7 +196,6 @@ def test_quality_gate_thresholds_in_file_config_degrade_to_none(tmp_path: Path, 
     assert cfg.quality_gate_verbosity_absolute is None
 
 def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> None:
-    """#329/Finding 7: valid thresholds parse through unchanged."""
     (tmp_path / ".daydream.toml").write_text(
         "quality_gate_erosion_delta = 0.0\n"
         "quality_gate_verbosity_delta = 0.25\n"
@@ -227,7 +209,6 @@ def test_quality_gate_thresholds_accept_finite_non_negative(tmp_path: Path) -> N
     assert cfg.quality_gate_verbosity_absolute == 0.75
 
 def test_diagram_table_parses_from_pyproject(tmp_path: Path) -> None:
-    """#1113: every ``[tool.daydream.diagram]`` key lands on its flat field."""
     (tmp_path / "pyproject.toml").write_text(
         "[tool.daydream.diagram]\n"
         'mode = "off"\n'
@@ -244,8 +225,7 @@ def test_diagram_table_parses_from_pyproject(tmp_path: Path) -> None:
     assert cfg.diagram_service_roots == ["apps/*", "services/*"]
 
 def test_diagram_table_parses_from_dotfile_and_merges_per_key(tmp_path: Path) -> None:
-    """#1113: the dotfile's ``[diagram]`` table is merged per-key, so it can set
-    ``mode`` without discarding thresholds declared in ``pyproject.toml``."""
+    """Dotfile diagram keys override individually without discarding pyproject siblings."""
     (tmp_path / "pyproject.toml").write_text("[tool.daydream.diagram]\nmin_branch_points = 6\nmode = \"auto\"\n")
     (tmp_path / ".daydream.toml").write_text('[diagram]\nmode = "off"\n')
     cfg = load_file_config(tmp_path)
@@ -253,8 +233,7 @@ def test_diagram_table_parses_from_dotfile_and_merges_per_key(tmp_path: Path) ->
     assert cfg.diagram_min_branch_points == 6
 
 def test_diagram_config_absent_defaults_to_unset(tmp_path: Path) -> None:
-    """#1113: absent means unset (``None``/``[]``), never a materialized default
-    — the orchestrator owns the fallback so CLI > file > default holds."""
+    """Absent diagram settings stay unset so the orchestrator can apply CLI > file > default."""
     cfg = load_file_config(tmp_path)
     assert cfg.diagram_mode is None
     assert cfg.diagram_min_code_files is None
@@ -263,8 +242,7 @@ def test_diagram_config_absent_defaults_to_unset(tmp_path: Path) -> None:
     assert cfg.diagram_service_roots == []
 
 def test_diagram_junk_values_degrade_to_unset(tmp_path: Path) -> None:
-    """#1113: a bad key degrades to unset rather than crashing the loader. A
-    file may not force a kind: ``mode = "both"`` is not accepted."""
+    """Malformed diagram keys stay unset; file config cannot force a diagram kind."""
     (tmp_path / "pyproject.toml").write_text(
         "[tool.daydream.diagram]\n"
         'mode = "both"\n'
@@ -281,15 +259,12 @@ def test_diagram_junk_values_degrade_to_unset(tmp_path: Path) -> None:
     assert cfg.diagram_service_roots == []
 
 def test_diagram_junk_table_degrades_to_unset(tmp_path: Path) -> None:
-    """#1113: even a non-table ``diagram`` value leaves every field unset."""
     (tmp_path / "pyproject.toml").write_text('[tool.daydream]\ndiagram = "on"\n')
     cfg = load_file_config(tmp_path)
     assert cfg.diagram_mode is None
     assert cfg.diagram_min_branch_points is None
 
 def test_diagram_threshold_keys_accept_hyphenated_spellings(tmp_path: Path) -> None:
-    """#1113: the positive-int coercer accepts the hyphenated TOML spelling, as
-    it already does for the improve partition bounds."""
     (tmp_path / "pyproject.toml").write_text(
         "[tool.daydream.diagram]\n"
         "min-code-files = 4\n"
@@ -318,7 +293,6 @@ def test_an_invalid_retry_recovery_allowance_degrades_observably(tmp_path: Path,
     assert any("retry_recovery_allowance_s" in r.message for r in caplog.records)
 
 def test_an_absent_retry_recovery_allowance_stays_silent(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
-    """A repo that never declares the key gets no warning and the default applies."""
     config = load_file_config(tmp_path)
 
     assert config.retry_recovery_allowance_s is None

@@ -1,10 +1,6 @@
-"""Tests for the v2 directory loader wrapper (``load_v2_projection``).
+"""Exercise split access, deterministic digests, and split-drift rejection on real projections.
 
-Enters from the production entrypoint over real projection directories on the
-real filesystem and asserts observable outcomes: per-split record access, a
-deterministic directory-level digest, and a fail-closed split-drift gate that
-refuses any record whose recorded ``lineage.split`` disagrees with the split
-recomputed from its record id.
+Recorded lineage.split must match the split recomputed from record identity.
 """
 
 from __future__ import annotations

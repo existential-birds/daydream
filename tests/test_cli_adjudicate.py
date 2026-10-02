@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from daydream import cli
+from daydream.commands.corpus import _handle_corpus_command
 from daydream.training.adjudication import cli as adjudication_cli
 from daydream.training.adjudication.cli import handle_adjudicate
 from daydream.training.adjudication.final_bundle import final_snapshot_id
@@ -45,7 +45,6 @@ def _wired_hub(monkeypatch: pytest.MonkeyPatch, *, repo_id: str = "org/private-a
 def _publish_final(
     index_root: Path, materialize_dir: Path, archive_dir: Path, state_dir: Path, *, dry_run: bool = False,
 ) -> int:
-    """Drive the real ``publish-final`` argv through the adjudicate CLI."""
     argv = ["publish-final", "--index-root", str(index_root),
         "--materialize-dir", str(materialize_dir), "--archive-dir", str(archive_dir),
         "--curation-bundle-dir", str(index_root), "--state-dir", str(state_dir), "--hub-repo", "org/private-ds",
@@ -73,7 +72,7 @@ def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
     _built_queue(tmp_path)
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
     record_id = str(queue[0]["record_id"])
-    rc = cli._handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
+    rc = _handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
          "--record-id", record_id, "--disposition", "accepted",
          "--rationale", "reply confirms fix", "--labeler", "kevin"]
     )
@@ -85,7 +84,7 @@ def test_adjudicate_label_records_human_observation(tmp_path: Path) -> None:
 
 def test_adjudicate_label_unknown_record_id_exits_1(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _built_queue(tmp_path)
-    rc = cli._handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
+    rc = _handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
          "--record-id", "a" * 64, "--disposition", "accepted",
          "--rationale", "reply confirms fix", "--labeler", "kevin"]
     )
@@ -95,14 +94,14 @@ def test_adjudicate_label_unknown_record_id_exits_1(tmp_path: Path, capsys: pyte
 
 def test_adjudicate_label_batch_n_processes_unresolved_in_order(tmp_path: Path) -> None:
     _built_queue(tmp_path)
-    rc = cli._handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
+    rc = _handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
          "--batch", "1", "--disposition", "rejected", "--rationale", "stale finding",
          "--labeler", "kevin"]
     )
     assert rc == 0
     obs = [json.loads(line) for line in (tmp_path / "adj" / "observations.jsonl").read_text().splitlines()]
     assert len(obs) == 1  # one observation per item; re-run advances, never duplicates
-    rc2 = cli._handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
+    rc2 = _handle_corpus_command(["adjudicate", "label", "--state-dir", str(tmp_path / "adj"),
          "--batch", "1", "--disposition", "rejected", "--rationale", "stale finding",
          "--labeler", "kevin"]
     )
@@ -112,18 +111,17 @@ def test_adjudicate_label_batch_n_processes_unresolved_in_order(tmp_path: Path) 
 
 def test_adjudicate_show_lists_queue_and_progress(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     _built_queue(tmp_path)
-    rc = cli._handle_corpus_command(["adjudicate", "show", "--state-dir", str(tmp_path / "adj")])
+    rc = _handle_corpus_command(["adjudicate", "show", "--state-dir", str(tmp_path / "adj")])
     assert rc == 0
     out = capsys.readouterr().out
     assert "ambiguous" in out and "unanswered" in out
 
 
 def _built_queue(tmp_path: Path) -> tuple[Path, Path, list[dict[str, object]]]:
-    """Build the hydrated-index queue shared by the adjudication seed helpers."""
     root = tmp_path
     state = tmp_path / "adj"
     write_sessions_index(root)
-    assert cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
+    assert _handle_corpus_command(["adjudicate", "build", "--index-root", str(root), "--state-dir", str(state)]
     ) == 0
     queue = json.loads((state / "queue.json").read_text())
     return root, state, queue
@@ -135,7 +133,7 @@ def _seed_adjudicated(tmp_path: Path) -> tuple[Path, Path]:
 
     root, state, queue = _built_queue(tmp_path)
     record_id = str(queue[0]["record_id"])
-    assert cli._handle_corpus_command(["adjudicate", "label", "--state-dir", str(state), "--record-id", record_id,
+    assert _handle_corpus_command(["adjudicate", "label", "--state-dir", str(state), "--record-id", record_id,
          "--disposition", "accepted", "--rationale", "reply confirms fix", "--labeler", "kevin"]
     ) == 0
     run_preview(root, state / "preview-ledger.json")
@@ -176,11 +174,11 @@ def _seed_with_conflict(tmp_path: Path) -> tuple[Path, Path]:
 
 def test_export_writes_projector_shape_and_dry_run_validates_only(tmp_path: Path) -> None:
     root, state = _seed_adjudicated(tmp_path)
-    rc = cli._handle_corpus_command(["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state),
+    rc = _handle_corpus_command(["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state),
          "--out", str(tmp_path / "export.jsonl"), "--dry-run"])
     assert rc == 0
     assert not (tmp_path / "export.jsonl").exists()  # dry-run validates without writing
-    rc = cli._handle_corpus_command(["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state),
+    rc = _handle_corpus_command(["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state),
          "--out", str(tmp_path / "export.jsonl")])
     assert rc == 0
     rows = [json.loads(line) for line in (tmp_path / "export.jsonl").read_text().splitlines()]
@@ -192,25 +190,23 @@ def test_export_writes_projector_shape_and_dry_run_validates_only(tmp_path: Path
 def test_export_requires_out_without_dry_run(tmp_path: Path) -> None:
     root, state = _seed_adjudicated(tmp_path)
     with pytest.raises(SystemExit) as excinfo:
-        cli._handle_corpus_command(["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state)])
+        _handle_corpus_command(["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state)])
     assert excinfo.value.code == 2
 
 def test_report_subverb_prints_coverage_and_strata(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     root, state = _seed_adjudicated(tmp_path)
-    rc = cli._handle_corpus_command(["adjudicate", "report", "--index-root", str(root), "--state-dir", str(state)])
+    rc = _handle_corpus_command(["adjudicate", "report", "--index-root", str(root), "--state-dir", str(state)])
     assert rc == 0
     out = capsys.readouterr().out
     assert "outcome-bearing" in out and "silver/task-only" in out
     assert "inter-rater" in out.lower()
-    # The admission gate reads real adjudication state on the CLI path: one
-    # human-accepted gold pr_review item in the seeded queue is outcome-bearing.
     assert "adjudicated 1 / 1" in out
     assert "80% gate PASS" in out
 
 def test_conflict_review_lists_disagreeing_raters_oldest_first(tmp_path: Path, capsys: pytest.CaptureFixture[str],
 ) -> None:
     root, state = _seed_with_conflict(tmp_path)
-    rc = cli._handle_corpus_command(
+    rc = _handle_corpus_command(
         ["adjudicate", "report", "--index-root", str(root), "--state-dir", str(state), "--conflicts"])
     assert rc == 0
     out = capsys.readouterr().out
@@ -218,16 +214,16 @@ def test_conflict_review_lists_disagreeing_raters_oldest_first(tmp_path: Path, c
 
 def test_adjudicate_unknown_subverb_exits_2() -> None:
     with pytest.raises(SystemExit):
-        cli._handle_corpus_command(["adjudicate", "bogus"])
+        _handle_corpus_command(["adjudicate", "bogus"])
 
 def test_adjudicate_bare_invocation_exits_2() -> None:
     with pytest.raises(SystemExit):
-        cli._handle_corpus_command(["adjudicate"])
+        _handle_corpus_command(["adjudicate"])
 
 def test_adjudicate_build_preserves_observations_and_is_idempotent(tmp_path: Path) -> None:
     write_sessions_index(tmp_path)
     for _ in range(2):
-        rc = cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
+        rc = _handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path),
                                          "--state-dir", str(tmp_path / "adj")])
         assert rc == 0
     queue = json.loads((tmp_path / "adj" / "queue.json").read_text())
@@ -291,8 +287,6 @@ def test_cli_materialize_missing_pin_component_exits_1(tmp_path: Path) -> None:
     ]) == 1
 
 def test_cli_materialize_without_as_of_is_unpinned_edge(tmp_path: Path) -> None:
-    """Empty/absent as_of is the supported unpinned edge: materializing without
-    --as-of succeeds, and the manifest + records carry the empty pin (C5/M9)."""
     out = tmp_path / "out"
     code = handle_adjudicate(["materialize", "--index-root", str(_cli_index(tmp_path)),
         "--out-dir", str(out), "--archive-index-digest", "c" * 64, "--curation-id", "cur-1",
@@ -313,7 +307,6 @@ def test_cli_materialize_malformed_invocation_exits_2() -> None:
 def test_cli_publish_state_missing_state_file_exits_1(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Missing state files fail closed with exit 1, naming the offender (cli.py:31-44)."""
     class _FakeHub:
         @property
         def repo_private(self) -> bool:
@@ -477,16 +470,12 @@ from tests.test_training_adjudication_final_bundle import seed_final_bundle_stat
 def test_publish_final_dry_run_validates_and_publishes_nothing(tmp_path: Path, capsys: pytest.CaptureFixture[str],
         monkeypatch: pytest.MonkeyPatch, legacy_stage: bool) -> None:
 
-    # Route the CLI's only external boundary at the revision-aware fixture so
-    # the dry-run and actual-success OID assertions observe real CLI behavior.
+    # Replace only the external Hub; retain the real CLI dry run and OID state.
     hub = _wired_hub(monkeypatch)
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
     state = tmp_path / "state"
     state.mkdir()
-    # The human adjudication state the final bundle's coverage report must see
-    # for the 80% admission gate to pass (the same shape the CLI `label` verb
-    # records): alice decisive on the s1 finding, evidence digest matching the
-    # materialized record.
+    # Coverage requires a matching human observation.
     (state / "observations.jsonl").write_text(json.dumps(accepted_observation()) + "\n", encoding="utf-8")
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=state / "observations.jsonl")
     scratch = mat / "final-bundle" / ".publish-stage"
@@ -501,13 +490,10 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(tmp_path: Path, c
 
     final_id, _digests = final_snapshot_id(mat / "final-bundle")
     assert final_id in "".join(out.split()).replace("║", "")
-    # nothing was published: the dry-run validated the bundle without ever
-    # constructing a client, so the wired hub still carries no final/ keys
     assert not any(k.startswith("annotations/") and "/final/" in k for k in hub.files)
 
-    # Contrast experiment: the same invocation without --dry-run publishes
-    # through the very same wired hub and the final/ keys appear, proving the
-    # "nothing was published" assertion above is not structurally blind.
+    # Publish through the same Hub fake as a positive control for the dry-run no-publication
+    # assertion.
     assert _publish_final(index_root, mat, archive_dir, state) == 0
     published_output = _console_text(capsys)
     assert final_id in published_output
@@ -519,18 +505,10 @@ def test_publish_final_dry_run_validates_and_publishes_nothing(tmp_path: Path, c
         assert not any(scratch_bytes in data for data in hub.files.values())
 
 def test_publish_final_refuses_when_admission_gate_not_met(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The real (non-dry-run) publish path must refuse a bundle whose own
-    coverage report fails the 80% human-adjudication admission gate: with no
-    human observations the bundle's report says passes_80pct=false, and the
-    handler must exit 1 without any byte reaching the Hub (issue #336 finding
-    2 — publish-final must not upload identically to a fully adjudicated
-    run)."""
     hub = build_snapshot()
     hub.commit_revision("a" * 40)
     _install_annotation_hub(monkeypatch, hub)
     index_root, mat, archive_dir, pin = seed_final_bundle_state(tmp_path)
-    # canonical harvest with no human observations anywhere: the coverage
-    # report's gate has a 0/0 outcome-bearing numerator/denominator
     run_canonical_harvest(index_root, mat, archive_dir, observations_path=None)
     rc = _publish_final(index_root, mat, archive_dir, tmp_path / "state")
     assert rc == 1
@@ -544,9 +522,7 @@ def test_publish_final_missing_artifact_exits_nonzero(tmp_path: Path, capsys: py
     rc = _publish_final(index_root, mat, archive_dir, tmp_path / "state", dry_run=True)
     assert rc == 1
     captured = capsys.readouterr()
-    # the panel hard-folds long messages mid-word (with the right border
-    # character interleaved); stripping borders and whitespace reconstitutes
-    # the unsplittable path token
+    # Remove Rich borders and wrapping before comparing the long path.
     flattened = "".join(captured.out.split()).replace("║", "")
     assert "annotations.jsonl" in flattened + captured.err
 

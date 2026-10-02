@@ -1,11 +1,6 @@
-"""The runs column set is declared once in ``_schema.RUNS_COLUMNS``.
+"""Fresh schema, migrations, and upserts share RUNS_COLUMNS.
 
-Every schema path — the ``CREATE TABLE`` text, the ``ALTER TABLE ADD COLUMN``
-entries ``_migrate_schema`` applies, and the run-upsert statement — is generated
-from that one declaration, so a column can no longer exist for fresh databases
-and be missing for every existing corpus. The witnesses below are frozen
-historical facts about the schema at the time of the refactor (issue #1219); a
-deliberate edit is required to change them, which is the point.
+Independent frozen column/type witnesses make compatibility changes explicit.
 """
 
 from __future__ import annotations

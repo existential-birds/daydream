@@ -63,7 +63,7 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
         attempted.append("structure" if "repository-wide interactions" in args[2] else "primary")
         return {"issues": []}, None, None
 
-    monkeypatch.setattr("daydream.phases.run_agent", review)
+    monkeypatch.setattr("daydream.agent.run_agent", review)
     backend = PiBackend(model="test", reasoning_effort="high")
     ctx = FlowContext(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),

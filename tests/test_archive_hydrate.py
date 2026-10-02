@@ -1,4 +1,4 @@
-"""Unit/component tests for the #982 hydrate module."""
+"""Hydration admission, policy binding, resumable publication, and verification tests."""
 from __future__ import annotations
 
 import hashlib
@@ -32,8 +32,7 @@ from tests.fixtures.training.build_hub_snapshot import SNAPSHOT_REVISION, build_
 
 
 def _write_policy(tmp_path: Path) -> str:
-    """Minimal valid policy for tests that drive the full non-dry pipeline
-    (the orchestrator fail-closes without one since issue #1094)."""
+    """Full non-dry hydration requires an explicit license policy."""
     policy = tmp_path / "license-policy.json"
     policy.write_text(json.dumps({"policy_version": "1", "spdx_decisions": {"MIT": "accepted"}}))
     return str(policy)
@@ -62,12 +61,10 @@ def _stage_and_ingest(hub: FakeHub, tmp_path: Path, revision: str = "a" * 40
     return stage, hydrate.ingest_bundles(stage, revision=revision)
 
 def _ingested_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
-    """A staged snapshot downloaded and ingested at ``revision``."""
     stage, _ = _stage_and_ingest(make_fake_hub(tmp_path), tmp_path, revision)
     return stage
 
 def _admitted_stage(tmp_path: Path, revision: str = "a" * 40) -> Path:
-    """An ingested stage that has also passed dedupe and ledger building."""
     stage = _ingested_stage(tmp_path, revision)
     hydrate.dedupe_admitted(stage, revision=revision)
     hydrate.build_import_ledger(stage, revision=revision, source_commit=revision)
@@ -115,7 +112,6 @@ class TestCurationManifestSchema:
         assert {"session_id", "content_digest", "status", "reason_code", "artifact_relpath"} <= set(batch)
 
 def test_hf_client_missing_extra_is_fatal_and_redacted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Missing huggingface_hub is fatal for hydrate (operator command), redacted, never leaks argv."""
     monkeypatch.setattr(hydrate, "_import_hf_hub", lambda: None)  # simulate ImportError
     with pytest.raises(hydrate.HubUnavailableError) as excinfo:
         hydrate._make_client("org/private-ds")
@@ -178,6 +174,11 @@ def _hf_http_error(status: int, message: str = "Hub request failed") -> HfHubHTT
     request = httpx.Request("POST", "https://huggingface.co/api/datasets/org/private-ds/commit/main")
     return HfHubHTTPError(message, response=httpx.Response(status, request=request))
 
+def _hf_error_without_response() -> HfHubHTTPError:
+    error = _hf_http_error(412)
+    error.response = None  # type: ignore[assignment]  # malformed third-party exception
+    return error
+
 def test_hf_atomic_commit_uses_one_guarded_dataset_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     api = _install_fake_hf_atomic(monkeypatch)
     client = hydrate.HfHubClient("org/private-ds")
@@ -224,35 +225,20 @@ def test_hf_atomic_commit_maps_only_precondition_failed_to_concurrent_update(
     assert len(api.create_commit_calls) == 1
     assert "hf_secret_token" not in str(excinfo.value)
 
-@pytest.mark.parametrize("status", [409, 401, 403, 404, 500, 503])
-def test_hf_atomic_commit_does_not_misclassify_other_http_errors(
-    status: int, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("error", [
+    *[_hf_http_error(status, "https://user:hf_secret_token@huggingface.co/private")
+      for status in (409, 401, 403, 404, 500, 503)],
+    RuntimeError("transport failed"), ValueError("bad request"),
+    _hf_error_without_response(),
+])
+def test_hf_atomic_commit_does_not_misclassify_other_errors(
+    error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    secret = "https://user:hf_secret_token@huggingface.co/private"
-    _install_fake_hf_atomic(monkeypatch, error=_hf_http_error(status, secret))
+    _install_fake_hf_atomic(monkeypatch, error=error)
     with pytest.raises(hydrate.HydrationError) as excinfo:
         _commit_state(tmp_path)
     assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
     assert "hf_secret_token" not in str(excinfo.value)
-
-@pytest.mark.parametrize("error", [RuntimeError("transport failed"), ValueError("bad request")])
-def test_hf_atomic_commit_does_not_misclassify_unrelated_errors(
-    error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _install_fake_hf_atomic(monkeypatch, error=error)
-    with pytest.raises(hydrate.HydrationError) as excinfo:
-        _commit_state(tmp_path)
-    assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
-
-def test_hf_atomic_commit_does_not_misclassify_http_error_without_response(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    error = _hf_http_error(412)
-    error.response = None  # type: ignore[assignment]  # model a malformed third-party exception
-    _install_fake_hf_atomic(monkeypatch, error=error)
-    with pytest.raises(hydrate.HydrationError) as excinfo:
-        _commit_state(tmp_path)
-    assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
 
 def test_hf_atomic_commit_rejects_non_commit_oid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_hf_atomic(monkeypatch, oid="not-a-commit")
@@ -318,7 +304,6 @@ class TestHydrateRules:
         }
         cid = derive_curation_id(**base)  # type: ignore[arg-type]
         assert cid.startswith("cur-") and len(cid) == 20 and cid[4:].isalnum()
-        # Any change to any bound input changes the id (identity-breaking by design).
         for key, value in [("policy_digest", "d" * 63 + "0"), ("policy_version", "prod-2"),
             ("allow_copyleft", frozenset({"acme/other"})), ("exclusions_digest", "e" * 63 + "0"),
             ("decisions_digest", "f" * 63 + "0"), ("distribution_digest", "0" * 63 + "1"),
@@ -360,7 +345,6 @@ class TestResolveRevision:
             hydrate.resolve_source_revision(hub, "main", exploratory=False)
 
     def test_symbolic_ref_not_case_folded(self) -> None:
-        """Case-sensitive refs are never silently mapped to a differently-cased name."""
         hub = make_fake_hub(Path("/tmp"))
         hub.commit_revision("b" * 40, ref="main")
         with pytest.raises(hydrate.HydrationError, match="unknown revision"):
@@ -433,8 +417,7 @@ class TestDownloadSnapshot:
         stage = tmp_path / "stage" / "downloads"
         result = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
 
-        # M10: bronze raw-ingest content is immutable companion data, never
-        # a canonical session candidate.
+        # Bronze is immutable companion data, outside canonical session discovery.
         assert result.discovered == 1
         assert result.run_shaped_manifests == 1
         assert not (stage / ("a" * 40) / "bundles" / "bronze").exists()
@@ -442,8 +425,7 @@ class TestDownloadSnapshot:
     def test_legacy_reserved_root_is_never_discovered(self, tmp_path: Path) -> None:
         hub = FakeHub(repo_id="org/private-ds", private=True,
             files={"bundles/sess-a/manifest.json": b'{"session_id": "sess-a"}', "bundles/sess-a/trajectory.json": b"{}",
-                # Same shape as a complete legacy session under a reserved
-                # root: excluded, exactly like its top-level sibling.
+                # A complete legacy session shape cannot override a reserved root.
                 "bundles/curated/manifest.json": b'{"session_id": "curated"}', "bundles/curated/trajectory.json": b"{}",
                 "bundles/curated/batches/old/items.jsonl": b"{}\n",
             },
@@ -491,8 +473,6 @@ class TestDownloadSnapshot:
         assert (stage / ("a" * 40) / art["relpath"]).read_bytes() == SNAPSHOT[art["relpath"]]
 
     def test_legacy_manifest_without_discovery_block_returns_empty(self, tmp_path: Path) -> None:
-        # A manifest predating the discovery ledger must not raise: the block
-        # accessor falls back to {} and the candidate accessor to legacy None.
         stage = tmp_path / "stage"
         revision = "a" * 40
         manifest_dir = stage / "downloads" / revision
@@ -507,7 +487,6 @@ class TestDownloadSnapshot:
         stage = tmp_path / "stage" / "downloads"
         first = hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
         assert first.downloaded == len(SNAPSHOT)
-        # interrupt: remove one artifact file, rerun — only it is re-fetched
         manifest_path = stage / ("a" * 40) / "_download_manifest.json"
         art = json.loads(manifest_path.read_text())["artifacts"][0]
         (stage / ("a" * 40) / art["relpath"]).unlink()
@@ -534,7 +513,6 @@ class TestDownloadSnapshot:
             hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage)
 
     def test_traversal_from_manifest_never_writes(self, tmp_path: Path) -> None:
-        """A hostile Hub listing pointing outside the staging root writes nothing outside."""
         hub = make_fake_hub(tmp_path)
         hub.files["bundles/../../outside.txt"] = b"pwned"  # pinned with the snapshot revision
         hub.commit_revision("a" * 40)
@@ -574,7 +552,6 @@ class TestPublish:
         assert ledger["session_id"] == "sess-a"
         assert ledger["batch_digest"]
         assert ledger["source_commit"] == "a" * 40
-        # Idempotent re-upload: same content lands at the same content-addressed paths.
         before = dict(hub.files)
         hydrate.publish_batches(hub, stage, curation_id=cid)
         assert hub.files == before
@@ -584,7 +561,6 @@ class TestPublish:
         stage = _admitted_stage(tmp_path)
         cid = "cur-" + "0" * 16
         hydrate.publish_batches(hub, stage, curation_id=cid)
-        # a fresh VM with empty disk discovers the remote ledger and skips completed batches
         fresh = tmp_path / "fresh"
         state = hydrate.resume_state(hub, curation_id=cid, stage_dir=fresh)
         assert state.completed_sessions == {"sess-a"}
@@ -593,11 +569,7 @@ class TestPublish:
 def _seed_admitted_runs(
     stage: Path, specs: list[tuple[str, str | None] | tuple[str, str | None, dict[str, str] | None]],
 ) -> None:
-    """Seed admitted derivatives directly under ``stage/runs/`` (enrichment input set).
-
-    A spec may carry an optional declared ``license_evidence`` dict as its third
-    element (written straight into the manifest like producer data would be).
-    """
+    """Seed stage/runs manifests; each spec may include declared license evidence as its third field."""
     for spec in specs:
         sid, slug = spec[0], spec[1]
         declared = spec[2] if len(spec) > 2 else None
@@ -611,10 +583,7 @@ def _seed_admitted_runs(
         (d / "manifest.json").write_text(json.dumps(data), encoding="utf-8")
 
 def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) -> None:
-    """Issue #1094 task 11: the same (repo, spdx) decided via a declared
-    manifest vs via enrichment must yield identical decisions and identical
-    published manifest rows — the gate proves the two evidence supply paths
-    agree under one contract."""
+    """Declared and enriched licenses must yield the same admission and published evidence shape."""
 
     stage = tmp_path / "stage"
     _seed_admitted_runs(stage, [("sess-declared", "acme/widget", {"spdx_id": "MIT", "source": "producer"}),
@@ -628,17 +597,12 @@ def test_enriched_evidence_matches_declared_evidence_contract(tmp_path: Path) ->
     assert (declared.status, declared.reason_code) == (enriched.status, enriched.reason_code)
     assert (declared.status, declared.reason_code) == ("admitted", None)
 
-    # Gate-level parity: the enrichment-written manifest evidence is consumed
-    # by the gate exactly like declared evidence — both sessions stay admitted
-    # and the ledger records no rejections for either.
     rejected = hydrate.apply_license_gate(
         stage, revision="a" * 40, license_policy_path="daydream/training/schema/license-policy-production.json",
         allow_copyleft=frozenset(),
     )
     assert rejected == []
 
-    # Manifest rows: both sessions publish the same decision fields, differing
-    # only in the evidence source string.
     row_declared_t: tuple[str | None, dict[str, str] | None] = hydrate._session_identity(
         stage, "sess-declared", "a" * 40, root="runs", collision=False)
     row_enriched_t: tuple[str | None, dict[str, str] | None] = hydrate._session_identity(
@@ -691,25 +655,18 @@ class TestResolutionMap:
         hydrate.build_resolution_map(stage, repo_commits={})  # must not raise
 
 def test_resolution_map_records_resolved_repo_commits_not_hub_revision(tmp_path: Path) -> None:
-    """Issue #1094: pinned_sha is the resolved Git repository commit; the Hub
-    dataset revision is never recorded as a repository commit."""
     stage = tmp_path / "stage"
     _seed_admitted_runs(stage, [("sess-1", "acme/widget"), ("sess-2", "acme/widget"), ("sess-nohost", None),])
     hydrate.rebuild_index(stage)
-    # repo_commits mirrors what the enrichment cache provides (Task 3 seam:
-    # only acme/widget resolved, to its full Git repository commit).
     cmap = hydrate.build_resolution_map(stage, repo_commits={"acme/widget": "b" * 40},)
     entry = cmap["acme/widget"]
     assert entry["pinned_sha"] == "b" * 40          # the GIT repo commit
     assert entry["pinned_sha"] != "a" * 40          # never the Hub dataset revision
     assert set(entry["session_ids"]) == {"sess-1", "sess-2"}
-    # Unresolvable identity still reports, never fabricates a revision.
     assert "sess-nohost" in cmap["unavailable"]
 
 def test_resolution_map_wired_from_enrichment_cache_in_pipeline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """run_hydrate_hub publishes a resolution map whose pinned_sha values come
-    from the enrichment cache's resolved Git commits, never the Hub revision."""
     _fake_resolver(monkeypatch)
     hub = FakeHub(repo_id="org/private-ds", private=True, files={"bundles/sess-a/manifest.json": json.dumps({
             "session_id": "sess-a",
@@ -737,7 +694,6 @@ class TestIngestAndIndex:
         assert [r.status for r in results] == ["admitted"]
         row_dir = stage / "runs" / "sess-a"
         assert row_dir.is_dir()
-        # index row carries staging-local paths only
         hydrate.rebuild_index(stage)
         rows = query_runs(stage)
         assert len(rows) == 1
@@ -755,7 +711,6 @@ class TestIngestAndIndex:
         bad = [r for r in results if r.session_id == "sess-bad"]
         assert bad and bad[0].status == "quarantined"
         assert bad[0].reason_code == "secrets_scan_dirty"
-        # never visible to the index / harvest
         hydrate.rebuild_index(stage)
         assert all(row["session_id"] != "sess-bad" for row in query_runs(stage))
         assert (stage / "quarantine" / "sess-bad").exists()
@@ -770,11 +725,9 @@ class TestIngestAndIndex:
         stage, results = _stage_and_ingest(hub, tmp_path)
         evil = [r for r in results if r.session_id == "sess-evil"]
         assert evil and evil[0].status == "quarantined"   # non-allowlisted host fails closed
-        # nothing outside staging was touched
         assert not pathlib.Path("/etc/passwd.git").exists()
 
     def test_traversal_session_id_quarantined_before_any_write(self, tmp_path: Path) -> None:
-        """A traversal-bearing manifest session id is quarantined pre-write (M4)."""
         hub = FakeHub(repo_id="org/private-ds", private=True, files={"bundles/sess-evil/manifest.json":
                 b'{"session_id": "../escape", "remote_url": "https://github.com/o/r"}',
             "bundles/sess-evil/trajectory.json": b"{}",
@@ -805,7 +758,6 @@ class TestIngestAndIndex:
         assert rows[0]["repo_slug"] == "octo/nested-repo"  # nested git.remote_url read
 
     def test_bundles_exclude_git_dirs(self, tmp_path: Path) -> None:
-        """Task 0B constraint: no .git ships inside hydrated bundles (harvest priority-1 safety)."""
         stage = _ingested_stage(tmp_path)
         hydrate.ingest_bundles(stage, revision="a" * 40)
         assert not list((stage / "runs").rglob(".git"))
@@ -813,8 +765,7 @@ class TestIngestAndIndex:
 class TestFinalizeAndVerify:
     @pytest.fixture(autouse=True)
     def _policy_required_pipeline(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """The non-dry pipeline requires a policy (issue #1094) and enrichment
-        must stay offline in tests: a fake resolver resolves every repo to MIT."""
+        """Supply required policy while `_fake_resolver` keeps enrichment offline."""
         _fake_resolver(monkeypatch)
         self._policy_path = _write_policy(tmp_path)
 
@@ -825,7 +776,6 @@ class TestFinalizeAndVerify:
 
     def test_verify_failure_never_publishes_success_marker(self, tmp_path: Path,
             monkeypatch: pytest.MonkeyPatch) -> None:
-        """A post-publication verification failure leaves no published _SUCCESS."""
         class CorruptingHub(FakeHub):
             def download_file(self, path_in_repo: str, revision: str | None = None) -> bytes:
                 data = super().download_file(path_in_repo, revision)
@@ -881,17 +831,9 @@ class TestFinalizeAndVerify:
         assert not any(p.endswith("_SUCCESS") for p in hub.uploaded_paths)
 
 def _publish_verifiable_curation(tmp_path: Path, batch_files: dict[str, str]) -> tuple[FakeHub, Path, str, str]:
-    """Hand-build one self-consistent published curation for verify_publication.
+    """Build checksum-valid publication bytes directly to isolate scan failures.
 
-    Every digest the verify cycle checks (SHA256SUMS over the published bytes,
-    the batch ``content_digest``) is computed from the same local tree, so the
-    only thing the scan gate can trip on is *batch_files*' content. Building
-    the published state directly is what makes the gate reachable at all: the
-    real pipeline sanitizes every bundle before publication, so neither an
-    advisory nor a credential-bearing batch can be driven into
-    :func:`verify_publication` through ``run_hydrate_hub``.
-
-    Returns ``(hub, stage, curation_id, output_commit_sha)``.
+    Normal publication would sanitize them before verify_publication could see them.
     """
     curation_id = "cur-" + "0" * 16
     prefix = f"curated/{curation_id}/"
@@ -925,13 +867,7 @@ def _publish_verifiable_curation(tmp_path: Path, batch_files: dict[str, str]) ->
 _BATCH_MANIFEST = json.dumps({"session_id": "sess-a", "git": {"remote_url": "https://github.com/owner/repo-a"}})
 
 def test_verify_publication_admits_advisory_only_batch(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    """Issue #1170: an advisory-only published batch verifies instead of failing.
-
-    ``diff.patch`` carries the issue's ``env_var`` false positive — an
-    upper-case name ending in ``KEY`` assigned an ordinary flag string. A rule
-    that cannot identify a secret must not fail an already-published commit, so
-    the batch verifies and the finding is reported value-free.
-    """
+    """An ordinary flag assigned to a KEY variable verifies with a value-free advisory."""
     hub, stage, curation_id, output_sha = _publish_verifiable_curation(tmp_path,
         {"manifest.json": _BATCH_MANIFEST,
             "diff.patch": '+FEATURE_FLAG_OVERRIDE_KEY = "override_flag"\n',
@@ -951,7 +887,6 @@ def test_verify_publication_admits_advisory_only_batch(tmp_path: Path, capsys: p
     assert "override_flag" not in out  # M11: never a matched value
 
 def test_verify_publication_rejects_credential_bearing_batch(tmp_path: Path) -> None:
-    """A literal credential in a published batch still fails the clean-room scan."""
     hub, stage, curation_id, output_sha = _publish_verifiable_curation(tmp_path,
         {"manifest.json": _BATCH_MANIFEST,
             "diff.patch": "+clone from https://user:s3cr3tcanary@github.com/x/y.git\n",
@@ -967,9 +902,7 @@ def test_verify_publication_rejects_credential_bearing_batch(tmp_path: Path) -> 
     assert "s3cr3tcanary" not in message
 
 class TestPrefixBindingGate:
-    """Issue #1094 task 7: a curated prefix records its policy binding at
-    finalize; any republication whose binding differs fails closed before a
-    single byte is uploaded."""
+    """Published policy bindings must match before any republication writes."""
 
     @pytest.fixture(autouse=True)
     def _offline_enrichment(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -981,8 +914,6 @@ class TestPrefixBindingGate:
             license_policy_path=policy_path), client=hub)
 
     def test_conflicting_prefix_binding_fails_closed_before_upload(self, tmp_path: Path) -> None:
-        """A prefix whose published binding record differs from the current
-        run's binding is never republished; a byte-identical record resumes."""
         hub = make_fake_hub(tmp_path)
         policy = _write_policy(tmp_path)
         summary = self._run(tmp_path, hub, policy)
@@ -993,7 +924,6 @@ class TestPrefixBindingGate:
         assert json.loads(record)["schema_version"] == "2"
         before = len(hub.commit_order)
 
-        # Same prefix published under a different policy binding: refuse.
         conflicting = json.loads(record)
         conflicting["policy_digest"] = "0" * 64
         hub.files[record_path] = (json.dumps(conflicting, sort_keys=True) + "\n").encode()
@@ -1001,13 +931,11 @@ class TestPrefixBindingGate:
             self._run(tmp_path, hub, policy)
         assert len(hub.commit_order) == before  # zero bytes uploaded
 
-        # Byte-identical binding resumes cleanly (no false positive).
         hub.files[record_path] = record
         self._run(tmp_path, hub, policy)  # must not raise
 
     def test_legacy_prefix_without_binding_record_fails_closed(self, tmp_path: Path) -> None:
-        """A pre-v2 legacy prefix (published batches, no binding record, no
-        resume ledger) is never republished under the new scheme."""
+        """Legacy batches without a binding or resume ledger cannot establish publication ownership."""
         hub = build_snapshot()  # fixture snapshot with admitted sessions
         summary = self._run(tmp_path, hub, _write_policy(tmp_path), revision=SNAPSHOT_REVISION)
         cid = summary.curation_id
@@ -1020,27 +948,31 @@ class TestPrefixBindingGate:
         assert len(hub.commit_order) == before
 
 class TestDedupeAndLedger:
-    def test_collision_durable_across_reruns(self, tmp_path: Path) -> None:
-        """A collision re-quarantines on every later run; the mutated derivative
-        is never re-admitted over the published baseline (M7 durability)."""
+    @pytest.mark.parametrize("filename,payload,repeats", [
+        pytest.param("manifest.json", b'{"tampered": true}', 2, id="manifest-durable-rerun"),
+        pytest.param("trajectory.json", b'{"different": true}', 1, id="trajectory-collision"),
+    ])
+    def test_collision_preserves_admitted_baseline(
+        self, tmp_path: Path, filename: str, payload: bytes, repeats: int,
+    ) -> None:
         hub = make_fake_hub(tmp_path)
         stage, _ = _stage_and_ingest(hub, tmp_path)
-        hydrate.dedupe_admitted(stage, revision="a" * 40)  # run 1: admit baseline
-        baseline_manifest = (stage / "runs" / "sess-a" / "manifest.json").read_bytes()
-        # mutate + re-download + re-ingest (runs 2 and 3 see the same mutated tree)
-        hub.mutate_bundle("a" * 40, "sess-a", b'{"tampered": true}')
-        for _ in range(2):
-            staged = stage / "downloads" / ("a" * 40) / "bundles" / "sess-a" / "manifest.json"
-            staged.unlink()
+        hydrate.dedupe_admitted(stage, revision="a" * 40)
+        admitted = stage / "runs" / "sess-a"
+        baseline = {p.name: p.read_bytes() for p in admitted.iterdir() if p.is_file()}
+        hub.files[f"bundles/sess-a/{filename}"] = payload
+        hub.commit_revision("a" * 40)
+        for _ in range(repeats):
+            (stage / "downloads" / ("a" * 40) / "bundles" / "sess-a" / filename).unlink()
             hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage / "downloads")
             hydrate.ingest_bundles(stage, revision="a" * 40)
-            rerun = hydrate.dedupe_admitted(stage, revision="a" * 40)
-            assert rerun.collisions == 1   # every later run re-quarantines
-            assert rerun.admitted == 0     # the mutated derivative is never admitted
-        # the admitted derivative is the restored baseline, byte for byte
-        restored = stage / "runs" / "sess-a" / "manifest.json"
-        assert restored.read_bytes() == baseline_manifest
-        assert len(query_runs(stage)) == 1  # one session row, never overwritten
+            result = hydrate.dedupe_admitted(stage, revision="a" * 40)
+            assert result.collisions == 1 and result.admitted == 0
+            assert result.collision_ids == ["sess-a"]
+            assert (stage / "quarantine" / "sess-a.conflict").is_dir()
+            assert {p.name: p.read_bytes() for p in admitted.iterdir() if p.is_file()} == baseline
+            rows = query_runs(stage)
+            assert len(rows) == 1 and rows[0]["session_id"] == "sess-a"
 
     def test_idempotent_rerun_no_duplicates(self, tmp_path: Path) -> None:
         stage = _ingested_stage(tmp_path)
@@ -1050,24 +982,6 @@ class TestDedupeAndLedger:
         assert second.admitted == 1 and second.collisions == 0
         assert len(query_runs(stage)) == 1  # no duplicate rows
 
-    def test_identity_collision_quarantined(self, tmp_path: Path) -> None:
-        hub = make_fake_hub(tmp_path)
-        stage, _ = _stage_and_ingest(hub, tmp_path)
-        hydrate.dedupe_admitted(stage, revision="a" * 40)
-        # same session identity, different content -> quarantine, never overwrite
-        hub.files["bundles/sess-a/trajectory.json"] = b'{"different": true}'
-        hub.commit_revision("a" * 40)  # re-pin the mutated tree at the same revision
-        stage2_dir = stage / "downloads"
-        # re-download only the changed file then re-ingest into the same stage
-        (stage2_dir / ("a" * 40) / "bundles/sess-a/trajectory.json").unlink()
-        hydrate.download_snapshot(hub, revision="a" * 40, stage_dir=stage2_dir)
-        hydrate.ingest_bundles(stage, revision="a" * 40)
-        result = hydrate.dedupe_admitted(stage, revision="a" * 40)
-        assert result.collisions == 1
-        assert (stage / "quarantine" / "sess-a.conflict").exists() or \
-            result.collision_ids == ["sess-a"]
-        rows = [r for r in query_runs(stage) if r["session_id"] == "sess-a"]
-        assert len(rows) == 1  # original retained, never overwritten
 
     def test_fixture_bundle_excluded_with_code(self, tmp_path: Path) -> None:
         hub = make_fake_hub(tmp_path)
@@ -1093,14 +1007,11 @@ class TestDedupeAndLedger:
         assert ledger["pinned_revision"] == "a" * 40
         assert {"imported", "quarantined", "excluded", "rejections"} <= set(ledger)
         assert any(e["session_id"] == "sess-bad" for e in ledger["quarantined"])
-        # ledger file persisted under the curated prefix, atomically
         ledger_path = stage / "curated" / ledger["curation_id"] / "import-ledger.json"
         assert ledger_path.is_file()
         assert json.loads(ledger_path.read_text())["pinned_revision"] == "a" * 40
 
 class TestLicenseAdmissionGate:
-    """Issue #1080 task 3: per-repo license decisions at hydration admission."""
-
     REV = "a" * 40
 
     @staticmethod
@@ -1166,14 +1077,11 @@ class TestLicenseAdmissionGate:
         })
         manifest, c5 = self._c5_exclusion(stage, tmp_path)
         assert c5["artifact_relpath"].startswith("excluded/")
-        # the admitted MIT repo is untouched
         admitted = [b for b in manifest["batches"] if b["status"] == "admitted"]
         assert [b["session_id"] for b in admitted] == ["sess-a"]
 
     def test_hydration_c5_gate_catches_non_canonical_slug_spelling(self, tmp_path: Path) -> None:
-        # The license gate compares the canonical owner/repo identity: a
-        # manifest that stamps the clone URL as repo_slug cannot bypass C5
-        # (issue #1080, fail-closed).
+        # Canonicalize clone-URL-shaped repo_slug before applying C5 exclusion.
         c5_manifest = {"session_id": "sess-c5",
             "git": {
                 "remote_url": "https://github.com/getsentry/sentry", "repo_slug": "https://github.com/getsentry/sentry",
@@ -1212,12 +1120,10 @@ class TestLicenseAdmissionGate:
         stage = self._seed_stage(tmp_path, {"sess-a": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),})
         with pytest.raises(ValueError, match="license_policy_path"):
             hydrate.apply_license_gate(stage, revision=self.REV, license_policy_path=None, allow_copyleft=frozenset())
-        # refusal is pre-work: nothing moved, nothing recorded
         assert (stage / "runs" / "sess-a").exists()
         assert not (stage / "excluded").exists()
 
     def test_gate_wired_into_run_hydrate_hub_and_manifest_rows(self, tmp_path: Path) -> None:
-        """run_hydrate_hub threads the policy through; the C5 repo never publishes."""
         hub = FakeHub(repo_id="org/private-ds", private=True, files={
             "bundles/sess-a/manifest.json": self._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
             "bundles/sess-a/trajectory.json": b"{}",
@@ -1241,8 +1147,6 @@ class TestLicenseAdmissionGate:
         assert rows["sess-c5"]["status"] == "excluded"
 
 class TestAdmissionSummary:
-    """Issue #1080 task 9 (S2): per-repo human summary over the admission ledger."""
-
     def test_admission_summary_buckets_every_session(self, tmp_path: Path) -> None:
         gate = TestLicenseAdmissionGate()
         stage = gate._seed_stage(tmp_path, {"sess-a": gate._session_manifest("sess-a", "owner/repo-a", spdx="MIT"),
@@ -1258,7 +1162,6 @@ class TestAdmissionSummary:
         assert summary["c5_excluded"] == 1
         assert summary["c8_copyleft_unopted"] == 1
         assert summary["license_evidence_missing"] == 1
-        # M8: the buckets partition the license-gate sessions by construction.
         assert sum(summary.values()) == 4
 
     def test_admission_summary_pure_helper_buckets_seed_entries(self) -> None:
@@ -1275,9 +1178,7 @@ class TestAdmissionSummary:
         assert sum(summary.values()) == 5
 
 def _identity_for(stage: Path, *, policy_path: str, allow_copyleft: frozenset[str] = frozenset(),) -> str:
-    """Thin test helper: stages the pipeline stages the identity depends on
-    (enrich -> gate) and then calls the production post-gate binding
-    derivation exactly as ``run_hydrate_hub`` does — never a reimplementation."""
+    """Derive production curation identity only after its enrichment and policy-gate prerequisites."""
     revision = "a" * 40
     license_enrich.enrich_license_evidence(stage, resolver=_FakeLicenseResolver())
     hydrate.restamp_admitted_digests(stage, revision=revision)
@@ -1289,10 +1190,7 @@ def _identity_for(stage: Path, *, policy_path: str, allow_copyleft: frozenset[st
     return str(binding["curation_id"])
 
 def test_curation_id_changes_with_policy_binding(tmp_path: Path) -> None:
-    """Issue #1094 task 6: the v2 curation id is derived post-gate from the
-    resolved policy binding, so two full runs over the same stage with
-    different policies land under different curated/ prefixes; the same
-    policy twice reproduces the same prefix (byte-reproducible identity)."""
+    """Post-gate identity is reproducible for one policy and changes with its binding."""
     stage = tmp_path / "stage"
     _seed_admitted_runs(stage, [("sess-1", "acme/widget")])
     policy_a = _write_policy(tmp_path)  # policy_version "1"

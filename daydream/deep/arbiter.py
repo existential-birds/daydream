@@ -1,34 +1,8 @@
-"""Arbiter selection logic for deep-mode per-stack reviews (issue #168).
+"""Pure selection and deterministic grouping for arbiter and suppression passes.
 
-Sonnet runs the N per-stack reviews; a single Opus *arbiter* re-reviews only the
-findings that warrant a heavyweight second opinion. This module holds the pure,
-side-effect-free predicate that decides which parsed per-stack records reach the
-arbiter, so it can be unit-tested against adversarial shapes (mixed-severity,
-multi-stack, same-``file:line`` collisions) independent of any agent call.
-
-A record is selected when EITHER:
-  - its severity is at or above the ``min_severity`` knob (default ``"high"``;
-    heavy findings always get the Opus second look), OR
-  - it is *contested*: the same ``(file, line)`` location is surfaced by two or
-    more distinct stacks that disagree on severity. Divergent severity at one
-    location is exactly the case a cheaper model is most likely to mis-rank.
-
-With the default knob, low/medium uncontested findings never reach the arbiter —
-that is the whole point of the cost split. Lowering ``min_severity`` (the
-profile's ``Arbitration.min_severity``) widens the severity branch; the contested
-branch is unaffected. The contested test itself has one owner,
-:func:`contested_indices`, which :func:`select_arbiter_targets` calls.
-
-Residual risk: a genuinely-high issue that a cheaper per-stack model under-ranked
-as an isolated, uncontested medium/low at a unique location is also never
-arbitrated — an accepted cost trade-off of the high-OR-contested selection scope.
-
-The same module owns the *review-risk* grouping used once targets are selected:
-:func:`partition_arbiter_targets` packs the already-selected target ordinals into
-small co-located :class:`ArbiterGroup` chunks. That grouping is pure,
-deterministic, and stable for a diff (group identity feeds the sharded arbiter's
-resume). It is deliberately not `select_tier`/exploration tiering and not stack
-sharding — those remain their own owners.
+Arbitration selects sufficiently severe or contested findings. Isolated findings
+ranked below the severity threshold receive no arbiter review, an intentional
+cost trade-off. Group identity and membership are stable resume inputs.
 """
 
 from __future__ import annotations
@@ -48,38 +22,15 @@ _CONFIDENCE_LEVELS: frozenset[str] = frozenset(("HIGH", "MEDIUM", "LOW"))
 
 
 def _severity(record: dict[str, Any]) -> str:
-    """Normalize a record's severity to a lowercase string ("" when absent).
-
-    Unified fallback policy for the arbiter's own view (issue #972 R3.1): an
-    empty string means "absent severity ⇒ not selectable by severity"; the
-    contested path still applies to such records. No severity value is
-    fabricated here.
-    """
+    """Lowercase severity; absent/non-string values cannot qualify by severity."""
     value = record.get("severity")
     return value.lower() if isinstance(value, str) else ""
 
 
 def _stack_name(record: dict[str, Any], source: str) -> str:
-    """Return the stack that owns *record*, in one canonical spelling.
+    """Prefer the host-minted UID's stack, falling back to a normalized source.
 
-    The contested branch below asks "did two or more DISTINCT stacks report this
-    location?", so it needs one spelling per stack. ``source`` does not provide
-    that: the pipeline tags records with the ``stack-<name>-records.json``
-    filename on every path that loads them off disk, and with a bare stack name
-    for direct in-memory records, so comparing raw ``source``
-    strings could count a single stack twice and mark a location contested that
-    only one stack ever reported. The record's ``uid`` (issue #1111) is the
-    single-form handle -- one host-minted spelling, assigned at record birth --
-    so it is preferred; ``source`` is normalized as the fallback for a record
-    carrying no uid, which keeps such records grouped per-stack instead of
-    collapsing them all onto one empty pseudo-stack.
-
-    Args:
-        record: A parsed per-stack record.
-        source: That record's ``source`` tag (filename or bare stack name).
-
-    Returns:
-        The owning stack's bare name.
+    A bare stack name and its records filename must count as the same stack.
     """
     return stack_name_from_uid(record_uid(record)) or stack_name_from_records_source(source)
 
@@ -91,13 +42,7 @@ def _confidence(record: dict[str, Any]) -> str:
 
 
 def _at_or_above(min_severity: str) -> frozenset[str]:
-    """Return every canonical level ranked at or above ``min_severity``.
-
-    Raises:
-        ValueError: If ``min_severity`` is not a canonical severity level
-            (fail loud — an unknown knob value must never silently widen or
-            narrow selection).
-    """
+    """Return canonical levels at least as severe as the validated threshold."""
     if min_severity not in SEVERITY_RANK:
         raise ValueError(
             f"min_severity must be one of {', '.join(CANONICAL_LEVELS)}; got {min_severity!r}"
@@ -112,72 +57,35 @@ def contested_indices(
     *,
     contested_only: Iterable[int] = (),
 ) -> frozenset[int]:
-    """Return the indices whose ``(file, line)`` location is contested.
+    """Select locations where distinct stacks report different nonempty severities.
 
-    One definition of "contested": the same location surfaced by two or more
-    distinct stacks that disagree on severity. Grouping widens exactly as
-    :func:`select_arbiter_targets` documents — a ``contested_only`` record
-    anchored at the reserved ``line: 0`` whole-file location co-locates with
-    every line in its file, scoped to records in ``contested_only``.
-
-    Args:
-        records: Parsed per-stack records.
-        sources: Per-record originating stack name, positionally aligned with
-            ``records``.
-        contested_only: Indices allowed to use the ``line: 0`` whole-file
-            widening. Every record remains eligible for an ordinary
-            same-location contest.
-
-    Returns:
-        A ``frozenset`` of indices at a contested location. Pure and
-        order-independent: the result depends only on record locations,
-        severities, and owning stacks.
+    Ordinary records group by (file, line). A contested-only line-0 record also
+    joins a file's sole ordinary location, when exactly one exists; widening to
+    several locations would conflate unrelated defects. Whole-file records retain
+    their own line-0 group. Sources must align positionally with records.
     """
     severity_exempt = set(contested_only)
     contested: set[int] = set()
     by_location: dict[tuple[Any, Any], list[int]] = defaultdict(list)
-    # ``line: 0`` is the reserved whole-file anchor, not a line number, so a
-    # ``contested_only`` record carrying it is about the whole file and belongs
-    # to every group in that file (issue #1103). The widening is scoped to
-    # ``contested_only`` records: an ordinary line-0 record from a non-exempt
-    # stack is not the structural whole-file case this exists for, so it stays a
-    # literal ``(file, 0)`` location instead of sweeping every other line in the
-    # file into its contest check. Collect the eligible whole-file records
-    # separately, then fold each file's whole-file records into that file's line
-    # groups.
     whole_file: dict[Any, list[int]] = defaultdict(list)
     for i, record in enumerate(records):
         if record.get("line") == 0 and i in severity_exempt:
             whole_file[record.get("file")].append(i)
         else:
             by_location[(record.get("file"), record.get("line"))].append(i)
-    # Widening is further scoped to files with exactly one distinct non-exempt
-    # line: with location alone (no description text) there is no way to tell
-    # which of two-or-more reported lines, if any, restates the whole-file
-    # finding, so folding the whole-file record into every line group would
-    # findings that merely share a file -- not the defect -- into
-    # arbitration and out of the precision-mode suppression pool.
     lines_per_file: dict[Any, set[Any]] = defaultdict(set)
     for file, line in by_location:
         lines_per_file[file].add(line)
     for (file, _line), indices in by_location.items():
         if len(lines_per_file[file]) == 1:
             indices.extend(whole_file.get(file, ()))
-    # Every file with at least one whole-file record also gets its own group at
-    # the reserved (file, 0) key, so two whole-file findings from different
-    # stacks can contest each other -- this runs whether or not that file also
-    # has line-anchored records (already widened above). ``setdefault`` guards
-    # the one collision that can occur here: a non-exempt record that itself
-    # reports line 0 already owns the ``(file, 0)`` key (already widened above),
-    # so this must not overwrite it and drop that record.
+    # Preserve an existing ordinary line-0 group, already widened above.
     for file, indices in whole_file.items():
         by_location.setdefault((file, 0), list(indices))
 
     for indices in by_location.values():
-        # One stack must count once however its records were tagged, hence
-        # `_stack_name` rather than the raw `sources[i]` string.
         stacks = {_stack_name(records[i], sources[i]) for i in indices}
-        severities = {_severity(records[i]) for i in indices if _severity(records[i])}
+        severities = {severity for i in indices if (severity := _severity(records[i]))}
         if len(stacks) >= 2 and len(severities) >= 2:
             contested.update(indices)
     return frozenset(contested)
@@ -190,73 +98,23 @@ def select_arbiter_targets(
     contested_location: bool = True,
     contested_only: Iterable[int] = (),
 ) -> list[int]:
-    """Return the indices of records that need arbiter re-review.
+    """Return sorted unique indices qualifying by severity or contested location.
 
-    Args:
-        records: Parsed per-stack records (each ideally carrying ``severity``,
-            ``file``, ``line``). Records missing ``severity`` are treated as
-            below the severity knob and only become selectable through the
-            contested path.
-        sources: Per-record originating stack name, positionally aligned with
-            ``records`` (``len(sources) == len(records)``). Used by the
-            contested branch only as a fallback spelling of the owning stack,
-            behind each record's ``uid`` (see :func:`_stack_name`).
-        min_severity: Lowest canonical severity level the severity branch
-            selects (``"high"`` by default; ``"medium"`` also selects medium
-            records, ``"low"`` selects everything). The contested branch is
-            independent of this knob.
-        contested_location: Whether the contested branch (same location
-            reported by >=2 distinct stacks with divergent severity) selects
-            records (default ``True``; the profile's
-            ``Arbitration.contested_location`` governs this in the production
-            path).
-        contested_only: Indices the severity branch must skip. They stay fully
-            eligible through the contested branch. The deep pipeline passes the
-            structural meta-stack's records here (issue #1103) so a structural
-            finding is adjudicated against the language-stack finding that
-            restates it, without widening severity-based arbitration to a lens
-            that is high-conviction by construction.
-
-    Returns:
-        Sorted, de-duplicated list of indices into ``records`` selected for the
-        arbiter: every record at or above ``min_severity`` (excluding
-        ``contested_only``), plus every record at a location contested across
-        >=2 stacks with divergent severity (when ``contested_location`` is
-        enabled).
-
-    Contested locations are ``(file, line)`` pairs, with one widening: a
-    ``contested_only`` record anchored at ``line: 0`` is a whole-file finding
-    (the reserved whole-file anchor), so it co-locates with *every* line
-    reported in that file rather than only with other ``line: 0`` records.
-    Without that, a whole-file structural finding and the line-anchored
-    language finding describing the same defect land in different groups and
-    can never contest each other (issue #1103, case B). The widening is scoped
-    to ``contested_only`` records: an ordinary (non-exempt) record that
-    happens to report ``line: 0`` is just a record at that literal location,
-    not a signal to contest every line in the file.
-
-    Raises:
-        ValueError: If ``records`` and ``sources`` differ in length, or if
-            ``min_severity`` is not a canonical severity level.
+    Records in contested_only skip severity selection but remain eligible through
+    contested_indices. Missing severity cannot qualify by severity. Mismatched
+    record/source lengths or a noncanonical minimum raise ValueError.
     """
     if len(records) != len(sources):
         raise ValueError(
             f"records/sources length mismatch: {len(records)} != {len(sources)}"
         )
 
-    selected: set[int] = set()
     severity_exempt = set(contested_only)
-
-    # Severity branch: everything at or above the ``min_severity`` knob
-    # (default "high" — the profile's ``Arbitration.min_severity`` governs this
-    # in the production path). ``contested_only`` records opt out of this
-    # branch and reach the arbiter only by being contested.
     eligible = _at_or_above(min_severity)
-    for i, record in enumerate(records):
-        if i not in severity_exempt and _severity(record) in eligible:
-            selected.add(i)
-
-    # Contested: the single definition lives in :func:`contested_indices`.
+    selected = {
+        i for i, record in enumerate(records)
+        if i not in severity_exempt and _severity(record) in eligible
+    }
     if contested_location:
         selected.update(contested_indices(records, sources, contested_only=severity_exempt))
 
@@ -265,12 +123,9 @@ def select_arbiter_targets(
 
 @dataclass(frozen=True)
 class ArbiterGroup:
-    """A stable, location-atomic chunk of selected arbiter target ordinals.
+    """A deterministic, location-atomic chunk with a positional resume key.
 
-    ``group_id`` is positional (``arbiter-group-<i>``) over the deterministic
-    group ordering, so it is stable for the same diff and safe to use as a
-    resume key. ``target_uids`` mirrors ``target_indices`` and is persisted so a
-    resume can refuse a group whose membership no longer matches.
+    Persisted target_uids mirror target_indices to detect changed membership.
     """
 
     group_id: str
@@ -287,14 +142,9 @@ def _line_value(record: dict[str, Any]) -> int:
 def _chunk_location_atomic(
     members: list[int], records: list[dict[str, Any]], max_targets: int
 ) -> list[list[int]]:
-    """Chunk sorted ``members`` into deterministic, location-atomic runs.
+    """Keep each location intact; close at the next location after exceeding the cap.
 
-    A chunk boundary may never land between two targets sharing the same
-    ``(file, line)``: the arbiter dedupes same-location twins inside one call, so
-    splitting a location would change what it can dedupe (A8). The bound is a
-    soft one -- a run whose members share one location is kept whole even when
-    it exceeds ``max_targets`` -- and a chunk is only closed at a location
-    boundary once it already holds more than ``max_targets`` targets.
+    The strict > threshold and whole-location runs make max_targets a soft bound.
     """
     chunks: list[list[int]] = []
     current: list[int] = []
@@ -326,33 +176,12 @@ def partition_arbiter_targets(
     edges: dict[str, set[str]],
     max_targets: int,
 ) -> list[ArbiterGroup]:
-    """Partition selected arbiter targets into deterministic co-located groups.
+    """Group selected records by file dependency component and location.
 
-    This is the *review-risk* grouping of already-selected arbiter targets, not
-    exploration ``select_tier`` and not stack sharding: it changes nothing about
-    which records are selected, only how their adjudication is chunked.
-
-    The partition is pure and order-independent: the caller's
-    ``target_indices`` order never affects the result.
-
-    * File components come from
-      :func:`daydream.deep.dependency.co_locate_groups` over the targets'
-      post-state files and the run's import ``edges``.
-    * Targets inside a component are sorted by ``(file, line, uid)``.
-    * Consecutive chunks are closed at location boundaries once they hold more
-      than ``max_targets`` targets. A same-location run is never split, so a
-      chunk can exceed the bound by keeping that run -- and the target on which
-      it closed -- whole.
-    * The resulting groups are ordered most-severe first (ties broken by the
-      ``target_uids`` tuple), which is deterministic for the same diff, and
-      numbered ``arbiter-group-<i>``.
-
-    Records are never de-duplicated: a repeated uid only appears if the caller
-    passed it twice.
-
-    Raises:
-        ValueError: If any index is outside ``records`` (the message names the
-            offending index) or ``max_targets`` is below 1.
+    Members sort by (file, line, uid, index), then form location-atomic chunks.
+    Groups sort by severity and UID tuple before receiving positional IDs.
+    Input order does not affect output; repeated indices remain repeated.
+    Invalid indices or max_targets below 1 raise ValueError.
     """
     indices = list(target_indices)
     for index in indices:
@@ -390,49 +219,12 @@ def select_suppression_targets(
     severity_classes: tuple[str, ...] = ("low",),
     confidence_classes: tuple[str, ...] = ("LOW",),
 ) -> list[int]:
-    """Return indices of borderline, uncontested records for the suppression pass (#232).
+    """Select records matching a severity or confidence class, except excluded indices.
 
-    The precision-mode suppression pass gives a skeptical LLM second opinion to
-    *evidenced-but-minor* findings the arbiter never scrutinizes: records that are
-    in ``confidence_classes`` and/or low-severity (per ``severity_classes``) and are
-    neither high-severity nor contested. It mirrors :func:`select_arbiter_targets` as a
-    pure, side-effect-free predicate so it can be unit-tested against adversarial
-    shapes independent of any agent call.
-
-    High-severity and contested records reach the *arbiter* (fail-open); this pass
-    must never touch them, so callers pass the arbiter's target indices as
-    ``exclude``. Because that set already covers every high-severity and contested
-    record, excluding it leaves only higher-severity uncontested records -- of
-    which the ones in ``confidence_classes`` and those in ``severity_classes`` are the
-    borderline findings selected here.
-
-    Args:
-        records: Parsed per-stack records (each ideally carrying ``severity`` and
-            ``confidence``).
-        exclude: Indices to skip (the arbiter target set). A record already routed
-            to the arbiter is never a suppression target.
-
-        severity_classes: Canonical severity levels the severity branch selects
-            (default ``("low",)``; the profile's ``Suppression.severity_classes``
-            governs this in the production path).
-        confidence_classes: Canonical uppercase confidence levels the confidence
-            branch selects (default ``("LOW",)``; the profile's
-            ``Suppression.confidence_classes`` governs this in the production
-            path).
-
-    Returns:
-        Sorted, de-duplicated list of indices into ``records`` selected for the
-        suppression pass: every ``exclude``-free record that is in
-        ``confidence_classes`` or low-severity (per ``severity_classes``).
-
-    Raises:
-        ValueError: If ``severity_classes`` contains a non-canonical severity
-            value, or if ``confidence_classes`` contains a non-canonical
-            confidence value.
+    Callers exclude arbiter targets to keep high-severity/contested findings out.
+    Classes are case-normalized and validated; results retain record order.
     """
-    classes = frozenset(
-        cls.lower() for cls in severity_classes
-    )
+    classes = frozenset(cls.lower() for cls in severity_classes)
     unknown = classes - frozenset(CANONICAL_LEVELS)
     if unknown:
         raise ValueError(
@@ -447,10 +239,9 @@ def select_suppression_targets(
             f"got unknown value(s): {', '.join(sorted(unknown_conf))}"
         )
     excluded = set(exclude)
-    selected: list[int] = []
-    for i, record in enumerate(records):
-        if i in excluded:
-            continue
-        if _confidence(record) in confidence or _severity(record) in classes:
-            selected.append(i)
-    return selected
+    return [
+        i for i, record in enumerate(records)
+        if i not in excluded and (
+            _confidence(record) in confidence or _severity(record) in classes
+        )
+    ]

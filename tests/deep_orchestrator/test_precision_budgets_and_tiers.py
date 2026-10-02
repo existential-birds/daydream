@@ -17,7 +17,8 @@ from daydream.backends import AgentEvent, ResultEvent, TextEvent
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep.orchestrator import DEFAULT_SHALLOW_FANOUT_THRESHOLD, _shallow_fanout_threshold
 from daydream.deep.settings import _resolve_opt_in
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _batched_group_size,
     _install_accept_gate_pipeline,
@@ -170,18 +171,10 @@ def test_mirrored_boolean_names_reads_declared_types() -> None:
 )
 def test_opt_in_tiers_resolve_cli_then_file(flag: str, cli_tier: str, file_value: bool | None, expected: bool
 ) -> None:
-    """#1225: pin the precedence rule of ``daydream/deep/settings.py:_resolve_opt_in``.
+    """Opt-ins use truthy CLI > truthy file > False, without a None sentinel.
 
-    One table over all three deep-mode opt-ins: a truthy ``RunConfig`` attr (CLI tier)
-    outranks a truthy ``DaydreamFileConfig`` attr, which outranks the built-in ``False``;
-    an explicit file-config ``False`` falls through to the default rather than forcing it
-    off. T5 and T7 are the two rows that separate this truthiness rule from the
-    ``is not None`` sentinel rule of the sibling ``_resolve_config_value``: both put the
-    CLI tier at its built-in ``False`` while the file tier says ``True``. T7 constructs the
-    CLI tier as an explicit ``False`` and T5 as an unset field; because ``RunConfig``'s
-    fields are ``bool = False`` with no ``None`` sentinel, the two are indistinguishable by
-    design — which is why a CLI ``False`` cannot mask a repo that opted in. T4 covers the
-    opposite inversion (a rule where the file tier outranks an explicit CLI ``True``).
+    Unset and explicit CLI False are equivalent and cannot mask file True; CLI True
+    still wins over file False. All three opt-ins share this rule.
     """
     run_kwargs: dict[str, Any] = {"target": "/t"}
     if file_value is not None:
@@ -235,7 +228,7 @@ async def test_run_terminates_under_fix_turn_budget(
     """A runaway fix records the specific tool-call or wall-clock budget that stopped it."""
 
     _silence(monkeypatch)
-    monkeypatch.setattr("daydream.phases." + budget_attr, budget_value)
+    monkeypatch.setattr("daydream.config." + budget_attr, budget_value)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.runaway_fix = True
     stub.runaway_fix_sleep_s = sleep_s
@@ -348,7 +341,7 @@ async def test_run_batched_wall_trip_carries_into_group_fallback(
     _silence(monkeypatch)
     # Tiny per-invocation wall so the batched turn (scaled to N * 0.3s) trips after
     # ~1.8s of real wall; patch the binding read at the fix call site.
-    monkeypatch.setattr("daydream.phases.DEFAULT_WALL_BUDGET_S", 0.3)
+    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
     # Group wall ceiling below the batched turn's scaled per-invocation budget, so
     # the wall the batched turn already burned guarantees the fallback's first
     # check trips (deterministic: 1.0 < 0.3 * 6).

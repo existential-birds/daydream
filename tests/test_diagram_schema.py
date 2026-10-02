@@ -1,11 +1,6 @@
-"""Grounded-diagram spec schemas and coercion (issue #1113).
+"""Diagram schemas accept groundable specs; coercion drops malformed entries individually.
 
-Covers ``daydream.deep.diagram_schema``: that both hand-written schemas accept
-the spec shapes the prompts ask for and reject the shapes grounding could not
-check, and that coercion drops malformed entries one at a time instead of
-losing a whole spec. Codex/OpenAI strict-mode conformance of the two schemas is
-asserted separately (and by introspection) in
-``tests/test_output_schema_strict.py``.
+Recursive Codex strict-mode conformance is covered by test_output_schema_strict.py.
 """
 
 from __future__ import annotations
@@ -76,11 +71,9 @@ def _full_flowchart_spec() -> dict[str, Any]:
     }
 
 def test_sequence_spec_accepts_a_full_example() -> None:
-    """The sequence schema accepts every documented field, including blocks."""
     jsonschema.validate(_full_sequence_spec(), SEQUENCE_SPEC_SCHEMA)
 
 def test_flowchart_spec_accepts_a_full_example() -> None:
-    """The flowchart schema accepts every documented field."""
     jsonschema.validate(_full_flowchart_spec(), FLOWCHART_SPEC_SCHEMA)
 
 def test_empty_specs_are_the_pinned_shapes() -> None:
@@ -94,7 +87,6 @@ def test_empty_specs_are_the_pinned_shapes() -> None:
         jsonschema.validate(EMPTY_FLOWCHART_SPEC, FLOWCHART_SPEC_SCHEMA)
 
 def test_empty_specs_are_fresh_objects_per_call() -> None:
-    """Two degraded coercions never share one mutable spec."""
     first = coerce_sequence_spec(7)
     second = coerce_sequence_spec(7)
     first["messages"].append(_message())
@@ -122,7 +114,6 @@ def test_empty_specs_are_fresh_objects_per_call() -> None:
     ],
 )
 def test_sequence_spec_rejects(mutate: Any) -> None:
-    """Each departure from the sequence contract fails validation."""
     spec = _full_sequence_spec()
     mutate(spec)
     with pytest.raises(jsonschema.ValidationError):
@@ -140,14 +131,12 @@ def test_sequence_spec_rejects(mutate: Any) -> None:
     ],
 )
 def test_flowchart_spec_rejects(mutate: Any) -> None:
-    """Each departure from the flowchart contract fails validation."""
     spec = _full_flowchart_spec()
     mutate(spec)
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(spec, FLOWCHART_SPEC_SCHEMA)
 
 def test_coerce_sequence_drops_malformed_entries_individually() -> None:
-    """One bad participant, message and block do not cost the whole spec."""
     coerced = coerce_sequence_spec({"participants": [
                 {"name": "Handler", "kind": "internal", "files": ["proxy/handler.py"]},
                 {"name": "", "kind": "internal", "files": []}, {"name": "Ghost", "kind": "daemon", "files": []},
@@ -168,7 +157,6 @@ def test_coerce_sequence_drops_malformed_entries_individually() -> None:
     jsonschema.validate(coerced, SEQUENCE_SPEC_SCHEMA)
 
 def test_coerce_sequence_remaps_branch_indices_over_a_dropped_message() -> None:
-    """Branch indices follow the messages that survived, not the raw positions."""
     coerced = coerce_sequence_spec({"participants": [],
             "messages": [_message(label="first"), _message(label="dropped", kind="broadcast"), _message(label="third"),
             ], "blocks": [{"kind": "alt",

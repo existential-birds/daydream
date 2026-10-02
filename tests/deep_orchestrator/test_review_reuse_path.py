@@ -1,10 +1,4 @@
-"""Real-path tests for content-addressed reuse of deep review results.
-
-These tests enter from ``runner.run`` with the real filesystem and event loop,
-mocking only the external backend through the ``create_backend`` seam. They
-assert observable outcomes of the ``.daydream/review-cache/`` store: that it is
-published through the artifact-visibility anchors and survives a fresh run.
-"""
+"""Real runner tests of cache publication and survival across fresh runs."""
 
 from __future__ import annotations
 
@@ -144,13 +138,7 @@ def _latest_provenance(deep: Path) -> dict[str, object]:
 
 
 def _session_id_of(deep: Path) -> str:
-    """The provenance key of the run that just finished.
-
-    ``ReuseCache`` names each run's provenance file after ``WorkContext.run_id``
-    and keeps every earlier run's record, so the run under test is the newest
-    file by mtime. The file stem is what :func:`reuse_store.provenance_path`
-    expects.
-    """
+    """Return the newest provenance file stem: prior run records remain in the cache."""
     return _newest_provenance_path(deep).stem
 
 
@@ -179,9 +167,7 @@ def _review_surface_prompts(calls: list[dict[str, object]],) -> list[dict[str, o
 async def test_identical_rerun_reuses_intent_and_wonder_units(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH1/MH2/MH16: an identical rerun performs no intent or alternatives model
-    call at all; the two whole-change units restore their recorded artifacts
-    byte-for-byte, because a moved pre-scan (grounding) never moves their keys."""
+    """Moved pre-scan grounding does not change intent/wonder keys; reuse restores their exact bytes."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target, review_profile=independent_alternatives_profile())
     assert await run(config) == 0
@@ -205,9 +191,7 @@ async def test_identical_rerun_reuses_intent_and_wonder_units(
 async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """The `.daydream/review-cache/` sibling is published back into the tree, so a
-    later run (which detaches and re-seeds its live root) can read what an earlier
-    run wrote."""
+    """Published review-cache survives detachment and reseeding of the next live root."""
     install_stub_backend(monkeypatch, multi_stack_target)
     assert await run(make_config(multi_stack_target)) == 0
     store = multi_stack_target / ".daydream" / "review-cache"
@@ -220,8 +204,7 @@ async def test_store_directory_survives_a_fresh_run_and_is_readable_by_the_next(
 async def test_exploration_provenance_is_recorded_in_the_store(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH5/MH16: every named unit is accounted for, and the record lives in the
-    store so it outlives the fresh-run wipe of `.daydream/deep/`."""
+    """Named-unit provenance outlives the fresh-run wipe of deep/ because it resides in the store."""
     install_stub_backend(monkeypatch, multi_stack_target)
     assert await run(make_config(multi_stack_target)) == 0
     provenance = multi_stack_target / ".daydream" / "review-cache" / "provenance"
@@ -233,8 +216,7 @@ async def test_exploration_provenance_is_recorded_in_the_store(
 async def test_identical_rerun_reviews_no_stack_and_a_leaf_edit_misses_only_its_shard(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH1/MH2/MH9: an identical rerun reuses every shard (zero review prompts);
-    editing one assigned file misses exactly the shard that owns it."""
+    """An identical run reuses every shard; one assigned-file edit invalidates only its owner."""
     stub = install_stub_backend(monkeypatch, shard_many_python_target)
     run_config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
                              deep_shard_max_bytes=10**9)
@@ -270,11 +252,10 @@ async def test_reused_shard_leaves_no_stale_companion_artifact(
 async def test_editing_a_recorded_frontier_file_misses_every_shard_that_named_it(
     sibling_frontier_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH7: the frontier component of a shard's key is its *recorded* frontier, so an
-    edit to a shared interface file invalidates every shard whose review prompt was
-    grounded with it -- not only the shard that owns it. A shard that neither names
-    nor owns the file (the structural meta-stack, whose per-file content is grounding
-    rather than keying) still hits."""
+    """A recorded frontier file invalidates every shard that named it, not just its primary owner.
+
+    Structural file content is grounding rather than keying, so that meta-stack still hits.
+    """
     stub = install_stub_backend(monkeypatch, sibling_frontier_target)
     config = make_config(sibling_frontier_target, deep_shard_enabled=True, deep_shard_max_files=1,
                          deep_shard_max_bytes=10**9)
@@ -329,8 +310,7 @@ def _count_arbiter_prompts(calls: list[dict[str, object]]) -> int:
 async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_per_group_when_one_is(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH1/MH8: one content key per arbiter unit; #732's per-group markers still resume
-    a partially adjudicated run without re-running the groups already done."""
+    """Unit content keys enable whole reuse; per-group markers still resume partial arbitration."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     stub.parse_by_stack = _arbiter_stacks({"python": "high", "react": "high", "generic": "high"})
     stub.merge_echo_records = True
@@ -360,11 +340,10 @@ async def test_arbiter_reuses_whole_when_its_records_are_unchanged_and_resumes_p
 async def test_fix_loop_commit_reuses_untouched_shards_and_recomputes_the_rest_with_grounding(
     shard_many_python_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH8/MH9/MH16 -- the S4 gate. A one-file fix committed the way the fix phase
-    commits (build_commit_message -> 'Daydream-Run:' trailer) moves ``head``, so the
-    pre-scan and intent are regenerated; the untouched shards must still hit, the
-    affected shard and the aggregation units downstream must recompute, and every
-    reused unit must carry its grounding provenance."""
+    """A real Daydream fix commit moves HEAD and refreshes pre-scan/intent.
+
+    Untouched shards reuse with provenance; affected shards and downstream aggregation recompute.
+    """
     stub = install_stub_backend(monkeypatch, shard_many_python_target, enable_exploration=True)
     config = make_config(shard_many_python_target, deep_shard_enabled=True, deep_shard_max_files=1,
                          deep_shard_max_bytes=10**9)
@@ -416,8 +395,7 @@ async def test_run_reports_which_units_were_reused_and_that_their_grounding_move
 async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_byte(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH9/MH10: no model call anywhere on the review surface, and the canonical
-    artifacts come back byte-identical."""
+    """A reused review makes no model calls and restores canonical artifact bytes."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target)
     assert await run(config) == 0
@@ -434,9 +412,7 @@ async def test_identical_rerun_pays_nothing_and_matches_the_first_run_byte_for_b
 async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH1/MH8/MH16: an identical rerun performs no cross-stack merge call; the
-    merged items and the dedup candidates are restored byte-for-byte, and the
-    render-only public report still lands."""
+    """Restore merge items/dedup bytes without a merge call while still publishing the rendered report."""
     stub = install_stub_backend(monkeypatch, multi_stack_target)
     config = make_config(multi_stack_target)
     assert await run(config) == 0
@@ -469,9 +445,7 @@ async def test_merge_unit_reuses_when_every_contributing_unit_is_unchanged(
 async def test_no_review_cache_disables_the_store_and_bypasses_the_exploration_cache(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """MH13: `--no-review-cache` must give a run that would be forensic-clean —
-    no entry is read, none is written, and the exploration pre-scan cache is
-    bypassed too, with the bypass recorded in provenance."""
+    """--no-review-cache disables store reads/writes and pre-scan reuse, recording the bypass."""
     # The real pre-scan must be live for the bypass to be observable: the warm
     # run leaves a cache-key on disk, so a disabled run that still consulted the
     # pre-scan cache would emit no exploration specialist calls.

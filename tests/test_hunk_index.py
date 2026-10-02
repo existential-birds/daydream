@@ -1,10 +1,4 @@
-"""Tests for the shared unified-diff hunk parser and its consumer views.
-
-Pins the load-bearing claim of the hunk-index refactor: a single parser in
-``daydream.hunk_index`` reproduces all three previously-siloed line-numbering
-contracts (pr_review head-side ranges, coverage added/removed totals,
-quote_scrub added-line numbers), so the three can never drift apart.
-"""
+"""Shared hunk parsing preserves posting ranges, coverage totals, and added-line numbering."""
 from __future__ import annotations
 
 from pathlib import Path

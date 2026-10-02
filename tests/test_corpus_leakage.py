@@ -1,14 +1,7 @@
-"""Unit tests for the corpus projection's temporal-leakage guard.
+"""Posterior-derived labels must not leak into a corpus pinned before their outcome.
 
-Exercises the ``_is_posterior_leak`` boundary semantics in isolation: an
-annotation whose outcome only became true *after* the ``as_of`` pin must not
-leak its posterior-derived ``outcome_label`` into a corpus pinned to that
-``as_of``. The guard compares parsed datetimes chronologically, so ``Z``/
-``+00:00`` spellings, sub-second precision, and non-UTC offsets can never
-mis-order it.
-
-(#1093: the legacy emission path these guards fed is deleted; the guard
-itself is canonical shared infrastructure for the corpus projection.)
+The shared projection guard compares parsed datetimes, including equivalent zone
+spellings, fractional seconds, and non-UTC offsets.
 """
 from __future__ import annotations
 

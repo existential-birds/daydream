@@ -1,9 +1,5 @@
-"""Seal/verify primitive for reward artifact isolation — stdlib only.
-
-The reward must consume only state the rollout agent cannot rewrite. The
-supervisor seals the staged run-dir artifacts (with the candidate diff) and the
-reward verifies the seal before trusting any value; an attempted tamper must
-make verification fail. These tests pin the round-trip and every tamper shape.
+"""Seal staged reward artifacts with the candidate diff, then reject every tested tamper before trusting
+their values. These primitives use only the standard library.
 """
 
 from __future__ import annotations
@@ -52,7 +48,6 @@ def test_verify_detects_missing_artifact(tmp_path: Path) -> None:
     assert verify(seal, [a], candidate_diff=b"") is False
 
 def test_seal_json_roundtrip(tmp_path: Path) -> None:
-    """The seal serializes to JSON and parses back to the same verification result."""
 
     a = tmp_path / "a.json"
     a.write_text('{"x": 1}', encoding="utf-8")
@@ -65,7 +60,6 @@ def test_seal_json_roundtrip(tmp_path: Path) -> None:
     assert verify(parsed, [a], candidate_diff=b"candidate-diff") is True
 
 def test_validate_rejects_unsupported_algorithm() -> None:
-    """A seal.json with a downgraded algorithm (e.g. md5) must fail closed."""
 
     raw = json.dumps({"algorithm": "md5", "artifact_digests": {"a.json": "0" * 32}, "candidate_diff_digest": "0" * 64,
             "candidate_diff": "",
@@ -75,7 +69,6 @@ def test_validate_rejects_unsupported_algorithm() -> None:
         SealResult.model_validate_json(raw)
 
 def test_validate_rejects_malformed_json() -> None:
-    """Garbage seal.json content must fail closed as a verification failure."""
 
     with pytest.raises(ValueError, match="not valid JSON"):
         SealResult.model_validate_json("this is not json{")

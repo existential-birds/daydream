@@ -9,7 +9,7 @@ from daydream.config_file import _coerce_non_negative_float, _coerce_non_negativ
 
 if TYPE_CHECKING:
     from daydream.deep.detection import StackAssignment
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 
 def _resolve_config_value[T: (int, float, bool)](config: RunConfig, attr: str, default: T) -> T:

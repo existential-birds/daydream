@@ -19,8 +19,8 @@ from typing import Any
 
 import pytest
 
-from daydream import cli
 from daydream.benchmark.harbor import candidate
+from daydream.commands.corpus import _handle_corpus_command
 from daydream.json_utils import atomic_write_bytes, atomic_write_pair
 from daydream.training.adjudication.canonical import run_canonical_harvest
 from daydream.training.adjudication.export import write_export_rows
@@ -99,7 +99,7 @@ class TestWriterCharacterization:
         root, state = _seed_adjudicated(tmp_path)
         out = tmp_path / "export.jsonl"
         with _umask(0o022):
-            assert cli._handle_corpus_command(
+            assert _handle_corpus_command(
                 ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
             ) == 0
         rows = [json.loads(line) for line in out.read_text().splitlines()]
@@ -165,7 +165,7 @@ class TestWriterCharacterization:
     def test_queue_bytes_and_private_mode(self, tmp_path: Path) -> None:
         write_sessions_index(tmp_path)
         state = tmp_path / "adj"
-        assert cli._handle_corpus_command(
+        assert _handle_corpus_command(
             ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
         ) == 0
         raw = (state / "queue.json").read_bytes()
@@ -209,7 +209,7 @@ class TestExportKnobs:
         # A restrictive umask pins the umask-derived mode: 0o600 here proves the
         # site passes umask_derived_mode(), not a hard-coded 0o644.
         with _umask(0o077):
-            assert cli._handle_corpus_command(
+            assert _handle_corpus_command(
                 ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
             ) == 0
         [(target, content, kwargs)] = calls
@@ -224,7 +224,7 @@ class TestExportKnobs:
         out.write_bytes(b"prior\n")
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
-            cli._handle_corpus_command(
+            _handle_corpus_command(
                 ["adjudicate", "export", "--index-root", str(root), "--state-dir", str(state), "--out", str(out)]
             )
         assert out.read_bytes() == b"prior\n"
@@ -377,7 +377,7 @@ class TestQueueKnobs:
         write_sessions_index(tmp_path)
         state = tmp_path / "adj"
         calls = _instrument(monkeypatch, "daydream.training.adjudication.cli")
-        assert cli._handle_corpus_command(
+        assert _handle_corpus_command(
             ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
         ) == 0
         [(target, content, kwargs)] = calls
@@ -390,13 +390,13 @@ class TestQueueKnobs:
                                                                 monkeypatch: pytest.MonkeyPatch) -> None:
         write_sessions_index(tmp_path)
         state = tmp_path / "adj"
-        assert cli._handle_corpus_command(
+        assert _handle_corpus_command(
             ["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
         ) == 0
         prior = (state / "queue.json").read_bytes()
         _fail_all_renames(monkeypatch)
         with pytest.raises(OSError, match="No space left"):
-            cli._handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
+            _handle_corpus_command(["adjudicate", "build", "--index-root", str(tmp_path), "--state-dir", str(state)]
             )
         assert (state / "queue.json").read_bytes() == prior
         assert sorted(p.name for p in state.iterdir()) == ["queue.json"]

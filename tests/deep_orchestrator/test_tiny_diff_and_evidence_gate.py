@@ -18,7 +18,8 @@ from daydream.deep.orchestrator import (
     _single_stack_agent_count,
     total_agent_count,
 )
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.deep_orchestrator.support import (
     _count_merge_prompts,
     _count_review_prompts,

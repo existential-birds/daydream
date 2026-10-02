@@ -1,14 +1,7 @@
-"""Persisted unified-diff hunk index and the single shared diff parser.
+"""Unified-diff parsing and persisted hunk indexes shared by review consumers.
 
-Every deep-review agent used to re-derive three deterministic facts -- changed
-file/line ranges, symbol definitions, and finding ``file:line`` validity -- by
-re-running ``git diff`` / ``sed`` on ``diff.patch``. This module owns the single
-unified-diff parser and the persisted ``hunk-index.json`` write/load, and
-exposes the consumer views (``head_side_ranges``, ``head_side_ranges_by_file``,
-``added_line_numbers``) so ``pr_review``,
-``quote_scrub``, ``coverage`` and the grounded-diagram pass all count from the
-same source and cannot drift.
-"""
+Posting, quote scrubbing, coverage, verification selection, and diagram grounding
+use the same changed-range and added-line projections."""
 
 from __future__ import annotations
 
@@ -25,13 +18,7 @@ HUNK_INDEX_FILENAME = "hunk-index.json"
 
 
 def _unquote_git_path(quoted: str) -> str:
-    """Unquote a ``core.quotepath``-quoted path from ``git diff`` output.
-
-    Git quotes non-ASCII path names as C-style string literals, e.g.
-    ``"b/caf\\303\\251.go"`` (octal escapes of the raw UTF-8 bytes). Strips the
-    surrounding quotes, decodes the escapes back to bytes, and decodes those as
-    UTF-8. Non-quoted input passes through unchanged.
-    """
+    """Decode Git’s quoted C-style path escapes through raw UTF-8 bytes."""
     if not (quoted.startswith('"') and quoted.endswith('"')):
         return quoted
     inner = quoted[1:-1]
@@ -65,14 +52,9 @@ def _unquote_git_path(quoted: str) -> str:
 
 
 def _header_path(raw: str) -> str | None:
-    """Resolve the repo-relative path from a ``+++ `` file-header line.
+    """Resolve a +++ header, handling Git quoting, optional b/, and trailing tabs.
 
-    The canonical shared parser (moved here from ``quote_scrub``) so every
-    consumer keys files identically: handles the plain ``+++ b/rel/path`` form,
-    git's ``core.quotepath`` quoted form, and ``diff.noprefix`` output (no ``b/``
-    prefix). A trailing tab (git appends one after space-containing paths) is
-    stripped first. Returns ``None`` for the ``+++ /dev/null`` deletion header.
-    """
+    Return None for /dev/null deletions."""
     if not raw.startswith("+++ "):
         return None
     tail = raw[4:].rstrip("\t")
@@ -86,29 +68,12 @@ def _header_path(raw: str) -> str | None:
 
 
 def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
-    """Parse a unified diff into per-file hunk information.
+    """Return sorted path-keyed hunks, added/removed totals, and in-memory added lines.
 
-    Returns ``{path: {"hunks": [{"old_start", "old_end", "new_start",
-    "new_end", "added", "removed"}], "added_total": N,
-    "removed_total": N, "added_lines": set[int],
-    "added_text": {new_line: (hunk_index, text)}}}``.
-
-    ``added_lines`` (the new-side line numbers of ``+`` content lines) is the
-    quote_scrub counter contract and ``added_text`` (each ``+`` line's text
-    keyed by new-side line, with the index of its owning hunk) is the
-    ``verify_selection.changed_text_at`` contract. Both live only in the
-    in-memory result; neither is persisted to ``hunk-index.json``. A ``+++ ``
-    line counts as a file header only when preceded by its ``--- `` pair.
-    Malformed input with no parseable hunks returns ``{}`` (a caller with no
-    hunks behaves exactly as today, never raising).
-
-    Args:
-        diff_text: Unified-diff text (as written to ``diff.patch``).
-
-    Returns:
-        A path-keyed dict (sorted deterministically by path) of per-file hunk
-        information.
-    """
+    Each hunk has old/new inclusive bounds and added/removed counts. added_lines
+    contains new-side + line numbers; added_text maps each to (hunk_index, text).
+    These two projections are not persisted. A +++ header requires a preceding ---;
+    malformed input without parseable hunks returns {}."""
     result: dict[str, dict[str, Any]] = {}
     current_meta: dict[str, Any] | None = None
     current_hunk: dict[str, Any] | None = None
@@ -182,15 +147,7 @@ def parse_hunks(diff_text: str) -> dict[str, dict[str, Any]]:
 
 
 def range_distance(line: int, start: int, end: int) -> int:
-    """Distance from ``line`` to the inclusive ``[start, end]`` hunk range.
-
-    ``0`` when ``line`` lies inside the range, else the distance to the nearer
-    boundary (``start`` when ``line`` is below it, ``end`` when above). The
-    single shared two-sided boundary-distance primitive consumed by both the
-    pre-report location validator (``daydream.deep.location_validator``) and
-    the posting ``snap_to_hunk`` backstop in ``pr_review``, so the two cannot
-    drift on what ``in hunk`` / ``near boundary`` means (issue #745).
-    """
+    """Return zero inside an inclusive hunk range, else distance to its nearest boundary."""
     if start <= line <= end:
         return 0
     if line < start:
@@ -199,11 +156,7 @@ def range_distance(line: int, start: int, end: int) -> int:
 
 
 def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]:
-    """Flatten every hunk's new-side inclusive range across all files.
-
-    Mirrors the ``pr_review._parse_hunks`` contract: ``(new_start,
-    new_start + count - 1)`` for each hunk, in diff order.
-    """
+    """Flatten new-side inclusive hunk ranges across files in diff order."""
     return [
         pair
         for per_file in head_side_ranges_by_file(parsed).values()
@@ -212,19 +165,10 @@ def head_side_ranges(parsed: dict[str, dict[str, Any]]) -> list[tuple[int, int]]
 
 
 def head_side_ranges_by_file(parsed: dict[str, dict[str, Any]]) -> dict[str, list[tuple[int, int]]]:
-    """Group every hunk's new-side inclusive range by changed file (issue #1113).
+    """Group new-side inclusive ranges by file, preserving within-file hunk order.
 
-    The per-file view of :func:`head_side_ranges`, which flattens across files
-    and so cannot answer "is this line inside a changed hunk *of this file*" —
-    the question grounded-diagram eligibility and evidence checks ask. Ranges
-    stay in diff order within each file; every file in ``parsed`` is a key, so a
-    file whose only hunk was a pure deletion (dropped by ``parse_hunks``) maps
-    to ``[]`` rather than being absent.
-
-    Works on both the in-memory ``parse_hunks`` output and a loaded
-    ``hunk-index.json`` — persistence drops only ``added_lines``, never the
-    ``new_start``/``new_end`` pair this reads.
-    """
+    Retain empty file entries, including pure deletions. Accept both parsed and
+    persisted indexes; added-line projections are not needed."""
     return {
         path: [(hunk["new_start"], hunk["new_end"]) for hunk in info["hunks"]]
         for path, info in parsed.items()
@@ -232,12 +176,7 @@ def head_side_ranges_by_file(parsed: dict[str, dict[str, Any]]) -> dict[str, lis
 
 
 def added_line_numbers(parsed: dict[str, dict[str, Any]]) -> dict[str, set[int]]:
-    """Map each changed file to the new-side line numbers of its ``+`` lines.
-
-    Mirrors the ``quote_scrub._added_line_numbers`` contract (every file in the
-    diff is a key; values are the union of per-hunk new-side added-line
-    numbers).
-    """
+    """Map every changed file to the union of its new-side + line numbers."""
     return {path: set(info["added_lines"]) for path, info in parsed.items()}
 
 
@@ -247,13 +186,9 @@ def hunk_index_path(daydream_dir: Path) -> Path:
 
 
 def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
-    """Write ``hunk-index.json`` under ``daydream_dir`` from a diff text.
+    """Write deterministic path-sorted hunks and totals; return the artifact path.
 
-    The persisted shape is exactly the issue's: ``{path: {"hunks": [{"new_start",
-    "new_end", "old_start", "old_end", "added", "removed"}], "added_total": N,
-    "removed_total": N}}`` (JSON, sorted by path for determinism). ``added_lines``
-    and ``added_text`` are intentionally NOT persisted. Returns the written path.
-    """
+    Omit the in-memory added_lines and added_text projections."""
     parsed = parse_hunks(diff_text)
     persist: dict[str, Any] = {}
     for file_path, info in parsed.items():
@@ -268,10 +203,7 @@ def write_hunk_index(daydream_dir: Path, diff_text: str) -> Path:
 
 
 def load_hunk_index(daydream_dir: Path) -> dict[str, Any]:
-    """Load the persisted hunk index, or ``{}`` when missing/malformed.
-
-    Fail-open: a missing index degrades to "no changed files", never raises.
-    """
+    """Load the persisted index; missing or malformed data yields {}."""
     path = hunk_index_path(daydream_dir)
     if not path.is_file():
         return {}

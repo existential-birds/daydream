@@ -1,10 +1,4 @@
-"""Unit tests for the single failure-classification source of truth.
-
-``classify_failure`` collapses the two views that used to disagree (an opt-in
-message heuristic and a diagnostic category) into one total decision. These
-tests pin the classifier's contract directly; ``test_agent_retry.py`` proves the
-production retry branch consumes it.
-"""
+"""Pin shared failure classification; test_agent_retry covers its production consumer."""
 from __future__ import annotations
 
 import logging
@@ -12,7 +6,8 @@ from typing import Any
 
 import pytest
 
-from daydream.agent import _coerce_retry_recovery_allowance, _ToolSupervisorFailure
+from daydream.agent import _ToolSupervisorFailure
+from daydream.agent_retry import _coerce_retry_recovery_allowance
 from daydream.backends import BackendExecutionInput
 from daydream.backends.pi import PiError
 from daydream.config_file import _coerce_retry_recovery_allowance as file_coerce
@@ -33,11 +28,7 @@ def test_permanent_condition_beats_transient_token_in_same_message() -> None:
     assert decision.retries_allowed is False
 
 def test_rate_limit_message_mentioning_provider_stays_transient() -> None:
-    """A bare 'provider' token is not a permanent condition.
-
-    The improve plan-writer's real-path rate limit (``category=RATE_LIMIT``, ``retryable=True``) carries the
-    message "provider rate limit"; a generic 'provider' substring must not veto an explicitly transient category
-    and strand the retry ladder on its first failure."""
+    """Generic "provider" text must not override an explicitly transient rate-limit category."""
     decision = classify_failure(PiError("provider rate limit", retryable=True, category="RATE_LIMIT"))
 
     assert decision.failure_class is FailureClass.RATE_LIMIT
@@ -153,10 +144,7 @@ def test_the_shared_allowance_decoder_is_one_rule(raw: Any, expected: float | No
     assert decode_retry_recovery_allowance(raw) == expected
 
 def test_every_allowance_source_decodes_with_the_same_rule() -> None:
-    """The three decode sites cannot disagree about one value.
-
-    The config-file key, the explicit argument and the env var each used to carry their own copy of the rule --
-    with three different warning texts and a real drift hazard -- so agreement is pinned here rather than assumed."""
+    """Config, explicit arguments, and environment values must apply identical allowance rules."""
 
     for raw in (5, 0, 42.5, "42", "0", True, False, -1, "-1", "nonsense", None):
         argument = _coerce_retry_recovery_allowance(raw, "retry_recovery_allowance_s")

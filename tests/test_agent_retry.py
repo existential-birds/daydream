@@ -1,6 +1,4 @@
-"""Tests for retry/backoff logic in run_agent (daydream/agent.py). Every test drives run_agent — the production
-entrypoint — with a mock backend that simulates retryable and non-retryable failures. Tests assert on observable
-outcomes (returned output, call count) never on internal implementation details."""
+"""Agent retry/backoff behavior and settings precedence."""
 from __future__ import annotations
 
 import json
@@ -13,7 +11,8 @@ import anyio
 import pytest
 from rich.console import Console
 
-from daydream.agent import _plan_retry_delay, _resolve_retry_settings, _retry_hint, run_agent
+from daydream.agent import run_agent
+from daydream.agent_retry import _plan_retry_delay, _resolve_retry_settings, _retry_hint
 from daydream.backends import Backend, ResultEvent, RetryPolicy, TextEvent
 from daydream.backends._subprocess import StreamStalledError
 from daydream.backends.pi import PiError, _pi_error_category, _pi_retryable_for
@@ -52,10 +51,7 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
                 PiError("429 overload", retryable=True), text="final text", partial="partial text",
             ), "final text", id="partial-output-discarded",
         ),
-        # Stream drop. ``retryable`` comes from the PRODUCTION classifier, mirroring how
-        # PiBackend constructs PiError, so this param exercises the real classification
-        # path: if the shared classifier ever returns False for "terminated",
-        # run_agent does NOT retry and this fails.
+        # Use the production Pi classifier so retrying a terminated stream stays covered.
         pytest.param(
             lambda: _fail_then_succeed(
                 PiError(
@@ -69,7 +65,6 @@ def _always_raises(error: BaseException) -> ScriptedBackend:
 async def test_run_agent_retries_and_returns_the_successful_attempt(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, make_backend: Any, expected_output: str,
 ) -> None:
-    """A retryable first attempt is re-run; the second attempt's output is what returns."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
     backend = make_backend()
     output, _, _ = await run_agent(backend, tmp_path, "review this", phase=DaydreamPhase.REVIEW)
@@ -77,7 +72,6 @@ async def test_run_agent_retries_and_returns_the_successful_attempt(
     assert backend.call_count == 2
 
 async def test_run_agent_no_retry_on_non_retryable(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Non-retryable PiError propagates immediately without any retry."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
     backend = _always_raises(PiError("auth failed", retryable=False))
     with pytest.raises(PiError, match="auth failed"):
@@ -85,7 +79,6 @@ async def test_run_agent_no_retry_on_non_retryable(monkeypatch: pytest.MonkeyPat
     assert backend.call_count == 1
 
 async def test_run_agent_ignores_malformed_retry_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Malformed Pi retry environment values fall back without blocking a backend call."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "not-an-integer")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "nan")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_MAX_DELAY_S", "inf")
@@ -100,7 +93,6 @@ async def test_run_agent_ignores_malformed_retry_environment(monkeypatch: pytest
 async def test_run_agent_uses_backend_retry_policy_without_reading_ambient_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """An injected backend policy is complete; ambient retry values are untouched."""
     backend = _fail_then_succeed(PiError("429 overloaded", retryable=True), text="done")
     backend_with_policy: Any = backend
     backend_with_policy.retry_policy = RetryPolicy(attempts=1, base_delay_s=0.0, max_delay_s=0.0)
@@ -109,7 +101,7 @@ async def test_run_agent_uses_backend_retry_policy_without_reading_ambient_envir
             if key.startswith("DAYDREAM_PI_RETRY_"):
                 raise AssertionError(f"ambient retry read: {key}")
             return default
-    monkeypatch.setattr("daydream.agent.os", SimpleNamespace(environ=_ForbiddenEnvironment()))
+    monkeypatch.setattr("daydream.agent_retry.os", SimpleNamespace(environ=_ForbiddenEnvironment()))
     output, _, _ = await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
     assert output == "done"
     assert backend.call_count == 2
@@ -118,9 +110,7 @@ async def test_run_agent_surfaces_backend_error_message(monkeypatch: pytest.Monk
     """A categoryless backend error surfaces its MESSAGE to the user, not a bare class name."""
     rec = Console(file=StringIO(), record=True, force_terminal=True, width=200)
     monkeypatch.setattr("daydream.agent.console", rec)
-    # A plain exception with NO ``.category`` (Claude/Codex-style): a human-readable
-    # reason plus a secret-shaped substring, to prove the message surfaces AND that
-    # secrets are scrubbed at the host boundary.
+    # A categoryless message must remain useful while embedded credentials are redacted.
     backend = _always_raises(RuntimeError("overloaded-502 ZAI_API_KEY=leaked-secret-abc123"))
     with pytest.raises(RuntimeError, match="overloaded-502"):
         await run_agent(backend, tmp_path, "review", phase=DaydreamPhase.REVIEW)
@@ -156,22 +146,11 @@ async def test_stream_stall_gets_only_one_fresh_attempt(monkeypatch: pytest.Monk
 async def test_concurrent_retry_does_not_kill_sibling_invocations(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Shared-backend concurrency shape: a retryable failure on one concurrent invocation must not abort sibling
-    invocations that share the same backend instance. This mirrors phases.phase_per_stack_reviews, where multiple
-    run_agent calls share a single Backend under an anyio TaskGroup with a CapacityLimiter. The key contract under
-    test: agent.py's retry path does NOT call backend.cancel() (which would kill all subprocesses on the shared
-    backend, including siblings). It only closes the individual event iterator for the failing invocation."""
+    """Close only the failed invocation iterator so shared-backend siblings survive."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
     call_counts: dict[str, int] = {}
     def responder(cwd: Any, prompt: str, *args: Any, **kwargs: Any) -> list[Any]:
-        """Three named prompt → behaviour mappings on one shared instance.
-
-        - prompt containing "fail-once": retryable PiError on first call, succeeds on retry.
-        - prompt containing "ok-a" / "ok-b": always succeeds immediately.
-
-        ``cancel()`` is tracked by the harness; the test asserts it is NOT called during
-        retry so that sibling concurrent invocations are unaffected.
-        """
+        """fail-once retries successfully; ok-a/ok-b succeed immediately on the shared backend."""
         key = (
             "fail-once"
             if "fail-once" in prompt
@@ -217,11 +196,6 @@ async def test_concurrent_retry_does_not_kill_sibling_invocations(
 async def test_run_agent_retry_exhausted_marks_trajectory_partial(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
-    """Retry-exhaustion → trajectory ``partial`` composition (PR headline). When a retryable ``PiError`` exhausts all
-    retries, ``run_agent`` re-raises and the exception propagates through the active ``TrajectoryRecorder`` scope.
-    The recorder stamps ``extra.partial = True`` on the emitted trajectory so downstream consumers can distinguish
-    clean completions from aborted ones. Real-path test driving the PR's headline behavior through the production
-    entrypoint (``run_agent``) with a real recorder on the real filesystem."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_BASE_DELAY_S", "0.01")
     monkeypatch.setenv("DAYDREAM_PI_RETRY_ATTEMPTS", "2")
     backend = _always_raises(PiError("429 rate limit", retryable=True))
@@ -298,13 +272,11 @@ class _HintError(RuntimeError):
 async def test_bounded_full_jitter_never_exceeds_the_cap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, pinned: object, expected: float
 ) -> None:
-    """The delay is ``min(sample(0, cap), cap)``: a hostile sampler cannot overshoot. ``retry_attempts=1`` pins the
-    ladder to a single retry so the delay list is exactly the one computed backoff;
-    ``base_delay_s``/``max_delay_s`` pin the exponential cap to 30 s."""
+    """One retry at a fixed 30-second cap exposes any overshoot by a hostile jitter sampler."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
     sampler = {"cap": lambda cap: cap, 0.0: lambda _cap: 0.0, "hostile": lambda cap: cap * 10}[pinned]
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", sampler)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", sampler)
     backend = ScriptedBackend(
         events=[_HintError("503 Service Unavailable")], retry_attempts=1, retry_base_delay_s=30.0,
         retry_max_delay_s=60.0,
@@ -328,12 +300,10 @@ async def test_server_retry_hint_is_honoured_and_capped(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, retry_after: float | None, expected_slept: list[float],
     stop: str | None,
 ) -> None:
-    """A numeric server hint replaces jitter but never extends the budget. ``retry_attempts=1`` pins the ladder to a
-    single retry so a fitting hint is observable as exactly one sleep and two dispatches. The jitter seam is pinned
-    to the cap so an absent hint is distinguishable from a hint."""
+    """Server hints replace jitter within budget; cap-pinned jitter makes ignored hints observable."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     backend = ScriptedBackend(
         events=[_HintError("503 Service Unavailable", retry_after=retry_after)], retry_attempts=1,
         retry_base_delay_s=30.0, retry_max_delay_s=60.0,
@@ -356,10 +326,9 @@ class _MessageHintError(RuntimeError):
 async def test_server_retry_hint_is_read_from_the_message_when_the_attribute_is_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """A ``retry-after: N`` message token is honoured when no attribute is set."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     backend = ScriptedBackend(
         events=[_MessageHintError("503 Service Unavailable; retry-after: 45")], retry_attempts=1,
         retry_base_delay_s=60.0, retry_max_delay_s=60.0,
@@ -384,7 +353,7 @@ async def test_a_malformed_retry_after_attribute_degrades_to_jitter(
     """A present-but-invalid ``retry_after`` is ignored, never coerced to a delay."""
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     slept = patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     backend = ScriptedBackend(
         events=[_HintError("503 Service Unavailable", retry_after=malformed)], retry_attempts=1,
         retry_base_delay_s=30.0, retry_max_delay_s=60.0,
@@ -445,7 +414,7 @@ async def test_retry_recovery_allowance_argument_outranks_environment(
     monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "0")
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     argument_backend = ScriptedBackend(
         events=[_HintError("503")], retry_attempts=1, retry_base_delay_s=0.0, retry_max_delay_s=0.0,
     )
@@ -453,7 +422,7 @@ async def test_retry_recovery_allowance_argument_outranks_environment(
         await run_agent(argument_backend, tmp_path, "go", phase=DaydreamPhase.FIX, retry_recovery_allowance_s=300.0)
     assert argument_backend.call_count == 2  # the argument's 300s outranked the env's 0s
     # Nothing declared but the env: the env's zero stops after one dispatch.
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     env_backend = ScriptedBackend(events=[_HintError("503")], retry_attempts=5)
     with pytest.raises(_HintError):
         await run_agent(env_backend, tmp_path, "go", phase=DaydreamPhase.FIX)
@@ -462,9 +431,7 @@ async def test_retry_recovery_allowance_argument_outranks_environment(
 async def test_the_retry_policy_allowance_field_governs_the_ladder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """The documented top precedence tier is a real field with real effect. A policy that declares
-    ``retry_recovery_allowance_s = 0`` ends the ladder after one dispatch, and — because a declared ``RetryPolicy``
-    is complete — the ambient env override cannot re-grant recovery behind its back."""
+    """A complete policy with zero recovery allowance cannot be overridden by ambient environment."""
     monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "600")
     fake = FakeClock(monotonic_value=0.0).install(monkeypatch)
     patch_retry_sleep(monkeypatch, fake)
@@ -486,15 +453,11 @@ async def test_the_retry_hint_reader_never_raises_on_a_hostile_message() -> None
     assert classify_failure(_HostileHint()).retries_allowed is True  # still classified
 
 def _resolver_backend(**attrs: Any) -> Any:
-    """A minimal backend stand-in for the pure retry-settings resolver. Only the attributes the resolver reads are
-    needed, so the extraction stays testable without a full ``Backend`` (which would have to be driven to observe
-    the same values)."""
+    """Supply only the attributes consumed by the pure settings resolver."""
     return SimpleNamespace(model="mock-model", **attrs)
 
 def test_the_extracted_settings_resolver_keeps_the_documented_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_resolve_retry_settings`` is the precedence ladder, testable on its own. The retry branch's resolution used
-    to be inline in ``_run_agent``; pinning it here keeps the documented order (policy field > backend attribute >
-    argument > env > default) observable without driving a ladder."""
+    """Pin policy field > backend attribute > argument > environment > default precedence."""
     def _resolve(backend: Any, explicit: float | None = None) -> Any:
         return _resolve_retry_settings(cast(Backend, backend), explicit)
     monkeypatch.setenv("DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S", "10")
@@ -529,8 +492,7 @@ def test_the_extracted_settings_resolver_refuses_contradictions() -> None:
     assert _resolve_retry_settings(cast(Backend, plain), None).max_attempts == 0
 
 def test_the_extracted_retry_delay_planner_clamps_to_every_bound(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_plan_retry_delay`` decides the delay or the hint stop, on its own."""
-    monkeypatch.setattr("daydream.agent._sample_retry_delay", lambda cap: cap)
+    monkeypatch.setattr("daydream.agent_retry._sample_retry_delay", lambda cap: cap)
     # Cap = min(exponential growth, max delay, remaining allowance, deadline time).
     assert _plan_retry_delay(
         attempt=0, base_delay_s=10.0, max_delay_s=120.0,

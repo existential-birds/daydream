@@ -9,7 +9,8 @@ from typing import Any
 
 import pytest
 
-from daydream.runner import RunConfig, run
+from daydream.run_config import RunConfig
+from daydream.runner import run
 from tests.harness.phase_backend import PhaseDispatchBackend
 
 # Minimal FEEDBACK_SCHEMA issue record.

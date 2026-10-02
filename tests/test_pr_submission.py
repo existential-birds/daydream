@@ -37,7 +37,7 @@ def _plan(*, inline: list[InlineReviewComment] | None = None, inline_issues: lis
     file_level: list[ParsedIssue] | None = None, body_only: list[ParsedIssue] | None = None,
     event: ReviewEvent = ReviewEvent.COMMENT,
 ) -> ClassifiedReviewPlan:
-    classified = pr_review._ClassifiedIssues(
+    classified = pr_review.ClassifiedIssues(
         inline=[] if inline is None else inline, inline_issues=[] if inline_issues is None else inline_issues,
         file_level=[] if file_level is None else file_level, body_only=[] if body_only is None else body_only,
     )

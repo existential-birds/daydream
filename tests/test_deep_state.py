@@ -7,8 +7,8 @@ import pytest
 
 from daydream.backends import ContinuationToken
 from daydream.deep.detection import StackAssignment
-from daydream.deep.fix_steps import FixCycleState, RetainedTreeSnapshot
-from daydream.deep.prompts import DeepDiffBoundInfo
+from daydream.deep.diff import DeepDiffBoundInfo
+from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
 from daydream.deep.state import DeepState
 from daydream.phases import PushReceipt
 

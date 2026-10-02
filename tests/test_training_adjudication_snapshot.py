@@ -84,18 +84,14 @@ def test_record_evidence_digest_matches_frozen_harvest_digest_with_nested_json()
     assert record_evidence_digest([frozen.evidence]) == record_evidence_digest([mutable.evidence])
 
 def test_record_evidence_digest_flattens_and_orders_per_finding_evidence() -> None:
-    # K5 spike verdict: shared digest == the flattened harvest row digest.
     ev_a = [{"reply_id": 1, "body_sha256": "aaa"}]
     ev_b = [{"reply_id": 2, "body_sha256": "bbb"}]
 
     shared = record_evidence_digest([ev_a, ev_b])
     assert shared == reply_evidence_digest(ev_a + ev_b)
-    # order of the per-finding list must not matter (digest normalizes by reply_id)
     assert shared == record_evidence_digest([ev_b, ev_a])
 
-    # empty-evidence boundary (K5 parity): no reply evidence yields None, never
-    # a concrete digest of the canonical empty list, so a digest-less row
-    # cannot collide with a digested one.
+    # Represent absent evidence as None rather than an empty digest to avoid identity collisions.
     assert record_evidence_digest([]) is None
 
 def test_snapshot_id_is_content_addressed_and_order_stable() -> None:
@@ -122,8 +118,7 @@ def test_build_canonical_record_rejects_missing_digest() -> None:
 
 @pytest.mark.parametrize("rows", [[], [{"fingerprint": "fp-1"}] * 2])
 def test_build_canonical_record_rejects_wrong_resolution_row_count(rows: list[dict[str, object]]) -> None:
-    # the exactly-1-resolution-row guard (0 and 2 rows) fires independently of
-    # the evidence_digest check: a valid digest is supplied so this check is what raises
+    # Keep the digest valid to isolate the row-count guard.
     session = {"session_id": "s1", "trajectory_id": "t", "segment_id": "g", "resolutions": rows}
     with pytest.raises(ValueError, match="expected exactly 1"):
         build_canonical_record(session, _resolution(), evidence_observed_at="2026-01-01")
@@ -134,7 +129,6 @@ def test_build_canonical_record_as_of_passthrough() -> None:
         session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00", as_of="2026-02-01T00:00:00+00:00",
     )
     assert record["as_of"] == "2026-02-01T00:00:00+00:00"
-    # passthrough is conditional: no as_of arg => no as_of key
     assert "as_of" not in build_canonical_record(
         session, _resolution(), evidence_observed_at="2026-01-01T00:00:00+00:00"
     )
@@ -146,11 +140,8 @@ def test_snapshot_id_allows_empty_as_of_unpinned_edge() -> None:
     }
     unpinned = snapshot_id(pin)
     assert len(unpinned) == 64
-    # Empty and missing as_of hash identically: one canonical unpinned id.
     del pin["as_of"]
     assert snapshot_id(pin) == unpinned
-    # A pinned as_of still yields a distinct id (AC 8).
     assert snapshot_id(dict(pin, as_of="2026-02-01T00:00:00+00:00")) != unpinned
-    # Other components remain fail-closed on empty values.
     with pytest.raises(ValueError, match="evidence_observed_at"):
         snapshot_id(dict(pin, evidence_observed_at=""))

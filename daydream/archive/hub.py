@@ -1,16 +1,7 @@
-"""Opt-in HuggingFace dataset repo upload of daydream run bundles.
+"""Opt-in HuggingFace dataset upload of completed run bundles.
 
-Resolves the 2-tier ``trajectory_hub_repo`` source (CLI flag -> env var) and
-uploads a completed run bundle (``~/.daydream/archive/runs/<session_id>/``)
-to a private HuggingFace dataset repo, one folder per run keyed by session id.
-The target checkout's file config is never a destination source. Everything
-here is non-fatal: the archive callback that invokes it must never fail the
-run, so every failure mode degrades to a warning and ``False``, and a
-pre-existing public target repo is reused only with a visibility warning (the
-upload still proceeds).
-
-``huggingface_hub`` is imported lazily inside :func:`upload_run_bundle` so
-users who never enable the feature carry no hard dependency.
+Destination resolution and upload admission live here. Upload failures preserve
+the local run; ``huggingface_hub`` is loaded only when upload is requested.
 """
 
 from __future__ import annotations
@@ -23,26 +14,20 @@ from typing import TYPE_CHECKING
 from daydream.archive._console import warn as _warn
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
-# Set lazily on first upload to avoid a hard dependency on huggingface_hub;
-# tests swap it for a fake via monkeypatch.setattr(hub, "HfApi", ...).
+# Lazy optional dependency.
 HfApi: type | None = None
 
-# Exponential backoff for commit-conflict upload retries (2s, 4s, ... capped at
-# 120s), mirroring the shape agent.py applies to backend retries. Tests lower
-# the base delay via monkeypatch to keep the retry tests fast.
+# Exponential commit-conflict backoff, capped at 120 seconds.
 _UPLOAD_RETRY_BASE_DELAY_S = 2.0
 _UPLOAD_RETRY_MAX_DELAY_S = 120.0
 
 
 def resolve_hub_repo(config: RunConfig) -> str | None:
-    """Resolve the configured HuggingFace dataset repo id, or None if unset.
+    """Resolve the dataset ID from CLI config, then ``DAYDREAM_TRAJECTORY_HUB_REPO``.
 
-    Tier order (highest first): the CLI-tier ``config.trajectory_hub_repo``,
-    then the ``DAYDREAM_TRAJECTORY_HUB_REPO`` env var. The target checkout's
-    file config never selects a destination. Empty strings are treated as
-    unset.
+    Empty values are unset; target-checkout file config cannot select a destination.
     """
     if config.trajectory_hub_repo:
         return config.trajectory_hub_repo
@@ -53,24 +38,14 @@ def resolve_hub_repo(config: RunConfig) -> str | None:
 
 
 def upload_run_bundle(run_dir: Path, repo_id: str, session_id: str) -> bool:
-    """Upload ``run_dir`` to ``repo_id`` under ``path_in_repo=session_id``.
+    """Upload the complete bundle to dataset ``repo_id`` under ``session_id``.
 
-    Never raises: all failures degrade to a one-line warning and ``False`` so
-    the archive callback cannot fail the run. Skips (``False`` + warning) when
-    ``HF_TOKEN`` is absent. A pre-existing repo is reused with its current
-    visibility (documented behavior), but a public one triggers a warning
-    before the upload proceeds. Before anything reaches the Hub the bundle is
-    scanned for secrets (fail-closed): a *blocking* finding — or a scanner
-    error — refuses the upload with a safe-only warning and ``False``. An
-    advisory finding is by construction not a credential (issue #1170), and a
-    rule that cannot identify a secret must not gate irreversible egress
-    either, so it is reported and the upload proceeds. Retries the upload
-    commit up to 3 total
-    attempts on a commit-conflict shape (concurrent commits from parallel
-    processes), backing off exponentially between attempts.
-
-    Returns:
-        True on success, False when skipped or failed.
+    Return True on success; skips and failures warn and return False. Missing
+    ``HF_TOKEN`` or the optional Hub dependency skips upload. New repos are private;
+    existing visibility is retained, with a warning before uploading to a public repo.
+    Blocking secrets or scanner errors refuse upload with value-free diagnostics;
+    advisory name/template matches are reported and allow upload. Concurrent commit
+    conflicts retry up to three total attempts with exponential backoff.
     """
     if not os.environ.get("HF_TOKEN"):
         _warn(f"Skip HF upload of {session_id}: HF_TOKEN not set (set it to upload run bundles)")

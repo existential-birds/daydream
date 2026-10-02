@@ -1,28 +1,11 @@
-"""Stall-capable in-process stand-in for a backend CLI subprocess.
+"""Model silent streams and SIGTERM-resistant children without spawning processes or racing scripted
+sleeps. A permanently pending readline leaves the tested timeout as the only timer.
 
-:func:`tests.harness.pi_replay.make_mock_process` replays a finite happy-path
-stream. This harness models the *pathological* process shapes the idle-stall
-and teardown code paths exist for — a stream that goes permanently silent, a
-child that ignores SIGTERM — without spawning any OS process and without
-racing scripted sleeps against a timeout window. Silence is modeled as a
-``readline()`` that never resolves, so the only timer in a test is the one
-under test and the outcome cannot depend on host load.
+terminate exits with -SIGTERM unless ignored; kill always exits with -SIGKILL. Exit closes stdout,
+and wait resolves only after exit and marks the child reaped.
 
-OS semantics modeled by :class:`FakeCliProcess`:
-
-- ``terminate()`` exits the child (``-SIGTERM``) unless ``ignore_sigterm``;
-- ``kill()`` always exits it (``-SIGKILL``);
-- exiting closes stdout (EOF), like a real pipe when the writer dies;
-- ``wait()`` resolves only once the child has exited, and marks it
-  ``reaped`` — the fake equivalent of "gone from the process table".
-
-:func:`install_fake_cli_process` patches ``asyncio.create_subprocess_exec`` at
-the transport seam (``daydream.backends._transport``), where the codex/pi
-backends now spawn via :class:`~daydream.backends._transport.CliTransport`,
-as seen by the backend module, so everything of daydream's runs for real —
-argv construction, the readline loop, the idle window, the shielded
-SIGTERM→SIGKILL teardown — only the OS fork is replaced (the same seam
-treatment as ``tests/harness/fake_gh.py``).
+install_fake_cli_process replaces only OS spawning at the shared transport seam. Real argv, reads,
+idle windows, and shielded terminate/kill teardown remain active.
 """
 
 from __future__ import annotations
@@ -82,10 +65,8 @@ class ImmediateStdout:
 
 
 class BlockingStdout:
-    """A stdout whose first ``readline`` blocks until the test releases it.
+    """Block the first readline until released; reject a concurrent read like asyncio.StreamReader.
 
-    A second concurrent ``readline`` raises, modeling the asyncio StreamReader
-    guard that a backend sharing one reader across runs would trip.
     """
 
     def __init__(self) -> None:
@@ -120,12 +101,8 @@ def cli_process(stdout: object) -> MagicMock:
 
 
 async def assert_concurrent_streams_isolated(backend: Any, first_lines: list[str]) -> None:
-    """Overlapping runs on one backend keep reading their own process.
-
-    Drives *backend* through two overlapped ``execute()`` runs while patching
-    the transport seam to hand out two scripted processes. The second run's
-    first ``readline`` must block (:class:`BlockingStdout`) while the first run
-    still reaches its TurnEnd/Cost, proving no shared stdout reader.
+    """Overlap two executions of one backend with separate scripted processes. The second reader blocks
+    while the first reaches TurnEnd/Cost, proving stdout ownership is per execution.
     """
     first_proc = cli_process(ImmediateStdout(first_lines))
     second_stdout = BlockingStdout()
@@ -158,11 +135,7 @@ async def assert_concurrent_streams_isolated(backend: Any, first_lines: list[str
 
 
 class _FakePipeTransport:
-    """The fd owner ``terminate_process`` closes to release the pipe read ends.
-
-    Closing releases the read ends regardless of EOF — the mechanism that lets
-    a stderr drain finish even when a surviving descendant holds the fd open.
-    """
+    """Model transport.close releasing read descriptors even when a descendant keeps stderr open."""
 
     def __init__(self, proc: FakeCliProcess) -> None:
         self._proc = proc
@@ -174,7 +147,6 @@ class _FakePipeTransport:
 
 
 class FakeCliProcess:
-    """An ``asyncio.subprocess.Process`` stand-in with modeled exit semantics."""
 
     def __init__(self, lines: list[str], *, hang: bool = False, exit_code: int = 0, ignore_sigterm: bool = False,
         stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
@@ -248,20 +220,9 @@ def install_fake_cli_process(
     ignore_sigterm: bool = False, stderr_lines: list[str] | None = None, stderr_held_open: bool = False,
     stdout_reader: asyncio.StreamReader | None = None, stderr_reader: asyncio.StreamReader | None = None,
 ) -> FakeCliSpawner:
-    """Patch ``create_subprocess_exec`` at the transport seam.
-
-    ``cli`` names the backend under test; every spawn is asserted to carry
-    that name as its first argv element, so a test whose declared cli no
-    longer matches what the transport actually launches fails loudly here
-    (e.g. after a backend switches transports) instead of silently driving
-    the wrong process shape.
-
-    Every launch gets a fresh :class:`FakeCliProcess` with the given shape and
-    is recorded on the returned spawner, so tests can assert how many
-    subprocesses were actually started (e.g. "a stall must not relaunch").
-    The ``stderr_*`` options model osprey's separate stderr pipe: lines fed to
-    the drain, optionally held open past the child's exit (a surviving
-    descendant inheriting the fd) until the teardown releases the fds.
+    """Patch spawning at the transport seam and assert the declared CLI is argv[0]. Each launch gets a
+    fresh process recorded by the returned spawner. stderr options model Osprey's separate pipe,
+    including a descendant holding it open after child exit until teardown releases descriptors.
     """
     spawner = FakeCliSpawner()
 

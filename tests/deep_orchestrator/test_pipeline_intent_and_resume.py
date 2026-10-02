@@ -134,7 +134,6 @@ async def test_pipeline_order(multi_stack_target: Path, monkeypatch: pytest.Monk
 
 async def test_deep_run_writes_hunk_index_after_diff(multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The persisted hunk index is written right after diff materialization."""
     _silence(monkeypatch)
     _install_stub_backend(monkeypatch, multi_stack_target)
     exit_code = await _run_deep(multi_stack_target)
@@ -151,7 +150,6 @@ async def test_deep_run_writes_hunk_index_after_diff(multi_stack_target: Path, m
 async def test_pr_body_reaches_intent_prompt(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """The PR description body is threaded into the initial intent prompt."""
     _silence(monkeypatch)
     monkeypatch.setattr(
         "daydream.git_ops.gh_pr_view", lambda repo, pr=None, **_kwargs: {"number": 7, "body": PR_SENTINEL},
@@ -167,7 +165,6 @@ async def test_pr_body_reaches_intent_prompt(
 async def test_no_pr_body_degrades_cleanly(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """No PR body -> intent prompt carries no PR-description section."""
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view", lambda repo, pr=None, **_kwargs: None)
@@ -209,7 +206,6 @@ async def test_pr_lookup_failure_warns_and_degrades_intent_cleanly(
 async def test_whitespace_only_pr_body_is_not_authoritative(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
 ) -> None:
-    """Whitespace-only PR bodies must not publish intent_authoritative (#279)."""
 
     _silence(monkeypatch)
     monkeypatch.setattr("daydream.git_ops.gh_pr_view",
@@ -340,58 +336,31 @@ async def test_yes_auto_applies_fix(multi_stack_target: Path, monkeypatch: pytes
     assert _fix_prompts(stub), "phase_fix never ran -> --yes did not auto-apply"
 
 @pytest.mark.parametrize("scope_issue_filing", [False, True])
-async def test_fix_gate_authorizes_canonical_finding_outside_reviewed_diff(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-    scope_issue_filing: bool,
+@pytest.mark.parametrize("primary", ["api.py", "./api.py"])
+async def test_fix_gate_authorizes_canonical_finding_paths(
+    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute, scope_issue_filing: bool, primary: str,
 ) -> None:
-    """A canonical primary path is authorized even when absent from the diff."""
-
+    """Canonical paths include off-diff files; a leading ./ cannot change authorization."""
     _silence(monkeypatch)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "api.py", "high", desc="in-scope finding"),
+    stub.merge_items = [
+        _merge_item(1, primary, "high", desc="in-scope finding"),
         _merge_item(2, "notes.txt", "medium", desc="out-of-scope finding"),
     ]
     mute_side_effects()
-
     issues: list[tuple[Any, ...]] = []
-
     monkeypatch.setattr("daydream.git_ops.gh_issue_create", _make_record_issue(issues))
 
-    exit_code = await run(
-        make_config(multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=scope_issue_filing,)
-    )
-    assert exit_code == 0
+    exit_code = await run(make_config(
+        multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=scope_issue_filing,
+    ))
 
+    assert exit_code == 0
     fix_prompts = _fix_prompts(stub)
     assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
-    assert any("notes.txt" in p for p in fix_prompts)
-    assert any("api.py" in p for p in fix_prompts), "in-scope finding was not fixed"
-    assert issues == []
-
-async def test_fix_gate_keeps_dot_slash_in_scope_finding_in_fix(
-    multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
-) -> None:
-    """#572/#573: a ``./``-prefixed finding file stays in scope."""
-
-    _silence(monkeypatch)
-    stub = _install_stub_backend(monkeypatch, multi_stack_target)
-    stub.merge_items = [_merge_item(1, "./api.py", "high", desc="dot-slash in-scope finding"),
-        _merge_item(2, "notes.txt", "medium", desc="truly out-of-scope finding"),
-    ]
-    mute_side_effects()
-
-    issues: list[tuple[Any, ...]] = []
-
-    monkeypatch.setattr("daydream.git_ops.gh_issue_create", _make_record_issue(issues))
-
-    exit_code = await run(make_config(multi_stack_target, assume="yes", output_mode="loop", scope_issue_filing=True))
-    assert exit_code == 0
-
-    fix_prompts = _fix_prompts(stub)
-    assert fix_prompts, "no fix prompt dispatched — fix phase did not run"
-    # The ./api.py finding was normalized and stays in scope: it is fixed.
-    assert any("api.py" in p for p in fix_prompts), "dot-slash in-scope finding was misfiled out-of-scope and not fixed"
-    assert any("notes.txt" in p for p in fix_prompts)
+    assert any("notes.txt" in prompt for prompt in fix_prompts)
+    assert any("api.py" in prompt for prompt in fix_prompts), "in-scope finding was not fixed"
     assert issues == []
 
 async def test_fix_gate_runs_when_all_canonical_findings_are_outside_reviewed_diff(

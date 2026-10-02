@@ -1,40 +1,13 @@
-"""Four-stage training coordinator: one command, stage manifest, loadable adapter.
+"""Run ordered training stages and atomically publish their manifest.
 
-Implements M15 (the single ``daydream train`` entrypoint chaining Stage 0 → 3)
-and M16 (the stage manifest with per-stage digests and gate evidence), tying
-into M18 via the :class:`~daydream.training.lineage.RunIdentity` stamped into
-every manifest.
+The projection loader enforces admission and frozen splits. Stage 0 trains and
+evaluates on that split; Stage 3 requires its passed gate before creating any
+adapter directory. Dry runs skip GPU training but still assemble the adapter
+from Stage-0 state, preserving a loadable handoff for CI.
 
-Contract points:
-
-- **Ordered execution**: stages run in the order given in
-  :class:`PipelineConfig.stages`; each writes its outputs under
-  ``out_dir/stageN/`` and one ``manifest.json`` lands at the run root carrying
-  stage digests, the run identity, gate evidence, and the final adapter path.
-- **Gate-enforced handoff (M4/M15)**: Stage 3 runs only after a *passed*
-  Stage-0 gate. A failed or missing gate raises :class:`RuntimeError` before
-  Stage 3's directory is created, and the manifest is not written — a refused
-  run leaves no partial-success artifact.
-- **Dry path (CI)**: ``dry_run=True`` executes everything that needs no GPU —
-  projection load (fail-closed via :mod:`daydream.training.stacks`), Stage-0
-  gate evaluation on cached model state, validation, manifest — and marks the wall-
-  clock GPU stages ``skipped_dry``. The Stage-3 adapter *handoff* (pure file
-  assembly from Stage-0 state, no GPU) is still produced on the dry path so
-  the declared adapter path is loadable-shape-validated in CI.
-- **Resume guard first (M18)**: the prior manifest is validated before any
-  stage runs, so a drifted re-run aborts without overwriting the prior run's
-  stage artifacts; only the split digest (frozen by Stage 0) is rechecked
-  after Stage 0 has computed it.
-- **Atomicity**: the manifest is written temp-then-rename, mirroring the
-  corpus exporter's atomic-write discipline in
-  :func:`daydream.training.corpus_projection.build_frozen_corpus`.
-- **Adapter handoff**: the final stage's output is a LoRA adapter checkpoint
-  in the ``save_adapter_separately`` shape (``adapter_config.json`` +
-  ``adapter_state.json``), and the manifest's ``adapter_path`` points at it.
-
-The manifest write is the last step: any raise anywhere above it leaves the
-run with stage artifacts but no manifest, so a manifest's presence is proof
-the run completed or was refused cleanly before Stage 3.
+Resume validates locked identity before stage writes, then checks the split
+digest after Stage 0. The manifest is written last; failures may leave stage
+artifacts but cannot publish a new successful manifest.
 """
 
 from __future__ import annotations
@@ -56,38 +29,14 @@ from daydream.training.stacks import V2Projection, load_v2_projection
 __all__ = ["PipelineConfig", "run_pipeline"]
 
 STAGES: tuple[str, ...] = ("stage0", "stage1", "stage2", "stage3")
-GPU_STAGES: frozenset[str] = frozenset({"stage1", "stage2", "stage3"})
 
 
 @dataclass(frozen=True)
 class PipelineConfig:
-    """Configuration for one four-stage training run.
+    """Training inputs and hyperparameters, locked into RunIdentity for resume.
 
-    The hyperparameter fields below feed the locked
-    :class:`~daydream.training.lineage.RunIdentity`; changing any of them
-    changes the run's identity and invalidates a resume (M18).
-
-    Attributes:
-        projection: Path to a frozen projection directory (the
-            ``build_frozen_corpus`` output). The pipeline loads the projection
-            via :func:`daydream.training.stacks.load_v2_projection` and
-            Stage 0 consumes the projector's frozen split. This is the only
-            pipeline input — the legacy v1 ``corpus`` JSONL input was removed
-            (#1093).
-        out_dir: Root directory for stage outputs and ``manifest.json``.
-        stages: Ordered stage names to run.
-        base_model: HuggingFace model id the LoRA adapter trains against.
-        tokenizer_renderer: Renderer family (``default`` — never stock qwen3).
-        max_seq_len: Maximum packed sequence length.
-        lora_rank: LoRA rank (SFT rank 64–128 per the spec).
-        lora_targets: LoRA target modules.
-        optimizer: Optimizer name.
-        learning_rate: Learning rate.
-        seed: Master seed (split freeze + training determinism).
-        gate_config: Documented Stage-0 gate thresholds.
-        allow_copyleft: Explicitly opted-in copyleft slugs (C8).
-        profile_policy: Profile policy name carried in the run identity.
-        stack_pins: Exact dependency pins carried in the run identity.
+    Only frozen projection directories are accepted. The default renderer must
+    remain compatible with the training recipes; stage order is caller-supplied.
     """
 
     out_dir: Path
@@ -124,20 +73,11 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
 
 
 def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Extract gold outcome rows for the Stage-0 labels file from v2 records.
+    """Select accepted/rejected gold labels with localized finding text.
 
-    Gold-gate evidence fields (``has_posterior``, ``labeler_policy_version``,
-    ``decisive_mix``, ``decisive_only``) are carried through when the record
-    provides them; an absent ``labeler_policy_version`` is left absent so the
-    admission guard in :mod:`daydream.training.reward_model` refuses the
-    legacy row rather than silently admitting it. The policy version lives
-    under ``lineage`` and is promoted from there when the record carries no
-    top-level value.
-
-    Raises:
-        RuntimeError: When a gold-labeled record carries no ``finding_text`` —
-            a v2 gold record without its localized finding text is a broken
-            projection, never an empty row.
+    Preserve admission evidence and promote lineage.labeler_policy_version only
+    when absent at top level. Missing policy stays missing so model admission
+    refuses it; missing text or identity on a labeled row raises RuntimeError.
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
@@ -172,20 +112,10 @@ def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    """Materialize the Stage-1 dataset-SFT JSONL and tier counts (M8/M9).
+    """Build prompt/completion rows from accepted findings only.
 
-    The Stage-1 dataset is **gold-positive only** (M8): only accepted-class
-    gold completions are written, so the shipped ``sft@`` recipe never trains
-    on rejected or silver traces. Rows are prompt/completion JSONL — the shape
-    the prime-rl ``sft`` loader accepts (``messages`` column or both
-    ``prompt``/``completion``). Gold vs silver counts are reported separately
-    (M9), matching the recipe's tier accounting. The completion is the v2
-    record's localized ``finding_text``.
-
-    Returns:
-        ``(rows, tier_counts)`` where ``tier_counts`` has ``gold`` and
-        ``silver`` counts (silver = explicitly ``tier == "silver"`` rows,
-        never mixed into the gold-positive data).
+    Count silver rows separately without training on them. Empty or non-string
+    finding text is excluded from either count.
     """
     silver = 0
     gold: list[dict[str, Any]] = []
@@ -218,13 +148,7 @@ def _record_views(
 
 
 def _sft_prompt(rec: dict[str, Any]) -> str:
-    """Deterministic SFT prompt built from a record's frozen review context.
-
-    On projection records the repo slug and task SHAs live under
-    ``task_identity`` (the repo slug also under ``lineage``), so the prompt
-    carries the record's real repo slug and frozen task shas instead of
-    degrading to 'unknown'.
-    """
+    """Build a deterministic prompt from frozen task identity, lineage, and stack."""
     identity, lineage_obj = _record_views(rec)
     repo_slug = identity.get("repo_slug") or lineage_obj.get("repo_slug") or "unknown"
     parts = [f"repo: {repo_slug}"]
@@ -239,37 +163,11 @@ def _sft_prompt(rec: dict[str, Any]) -> str:
 
 
 def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Materialize Stage-2 RFT replay inputs from corpus records (M16).
+    """Build replay inputs from frozen repo/base/head/diff identity, refusing missing fields.
 
-    Each input carries the frozen task identity :func:`daydream.training.rft.run_rft`
-    rebuilds tasks from (``id``/``base_sha``/``head_sha``/``diff``) plus the
-    intrinsic signals ``reward.score_trajectory`` consumes. Identity is
-    validated fail-closed, matching ``run_rft``: a record missing
-    repo_slug/base/head/diff raises naming it — the same missing-gate
-    ``run_rft._reconstruct_task`` enforces — so Stage 2 is never recorded
-    complete over unrunnable inputs. base/head are read from ``task_identity``
-    and must be full-length hex SHAs — validated through the shared
-    :func:`daydream.training.rft.validate_full_sha`, so Stage 2 and
-    ``run_rft`` enforce the identical full 40-hex contract; a truncated or
-    non-hex SHA is refused like a missing one. ``repo_slug`` is likewise read
-    from ``task_identity`` (then ``lineage``) and is fail-closed like the
-    SHAs, so a v2 row never carries a null repo_slug that the replay's
-    ``_reconstruct_task`` would refuse.
-
-    On projection records the intrinsic scoring signals are derived from the
-    record itself: the frozen projection record is admission/shape/drift-
-    validated, so ``format_valid`` is True (the v1 bronze-parse failure floor
-    cannot apply), and the record's adjudicated outcome is mapped onto the
-    shared verdict vocabulary (``accepted`` → ``consistent``, ``rejected`` →
-    ``contradicts``, ambiguous/unanswered/missing → ``uncertain``) so the
-    replay's winner filter reads a real correctness axis instead of scoring
-    every candidate at a flat 0.0 composite. Missing verifier evidence remains absent
-    (unknown, never an invented zero).
-
-    Raises:
-        RuntimeError: When any record lacks ``repo_slug``/``base_sha``/
-            ``head_sha``/``diff`` identity or carries a truncated/non-hex SHA
-            (never written, never skipped silently).
+    Both SHAs use the replay's shared full-hex validator. Validated projection rows
+    are format-valid; adjudicated outcomes map to the shared verdict vocabulary.
+    Absent verifier evidence stays unknown, and missing length uses finding text.
     """
     rows: list[dict[str, Any]] = []
     for rec in records:
@@ -342,28 +240,11 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 def _frozen_split_from_projection(
     projection: V2Projection, labels_path: Path, *, seed: int
 ) -> FrozenSplit:
-    """Build the Stage-0 :class:`FrozenSplit` from the projector's frozen
-    boundary instead of re-freezing at runtime.
+    """Use the validated projection partition: train+validation train, holdout evaluates.
 
-    The projection was split deterministically at build time
-    (``lineage.split`` per record); :func:`load_v2_projection` already
-    drift-gates every record's recorded split against the id-recomputed
-    value, so Stage 0 trusts that boundary. It maps the three-way partition
-    onto its two-way form — train+validation rows train, holdout rows
-    evaluate.
-
-    The split digest is the same content address :func:`freeze_split` emits
-    (SHA-256 over the sorted held-out comment ids plus the seed), and the
-    digest sidecar (``<labels>.gate-split.json``) is written by the shared
-    :func:`daydream.training.gate._build_frozen_split`, so the resume guard
-    and stage manifest consume the identical contract whichever producer
-    froze the boundary. The reported ``held_out_fraction`` is the
-    projection's own frozen holdout rate (``lineage.holdout_rate``), never
-    the run-config tunable — matching :class:`FrozenSplit.held_out_fraction`'s
-    contract ("the fraction that determined the partition size").
-
-    Raises:
-        RuntimeError: When the holdout side has no gold outcome rows.
+    The shared split builder writes the same content digest and sidecar as
+    freeze_split. Report the projection's holdout rate, not a run-time tuning
+    value. Refuse a holdout with no gold outcome rows.
     """
     train = _outcome_rows(
         [*projection.by_split["train"], *projection.by_split["validation"]],
@@ -391,12 +272,9 @@ def _run_stage0(
     *,
     projection: V2Projection,
 ) -> tuple[dict[str, Any], GateReport, FrozenSplit]:
-    """Stage 0: freeze split, train the outcome model, evaluate the gate.
+    """Train and evaluate the CPU outcome model on the projection's frozen split.
 
-    All CPU-bound; runs identically on the dry path (the gate evaluates on
-    cached model state — the small classifier is trained in-process, no GPU).
-    The split is not re-frozen: the projector's frozen boundary is consumed via
-    :func:`_frozen_split_from_projection`.
+    Dry and ordinary runs perform identical Stage-0 work.
     """
     rows = _outcome_rows(records)
     if not rows:
@@ -438,15 +316,13 @@ def _run_stage0(
     return entry, report, split
 
 
-def _run_gpu_stage_shim(
+def _run_stage_artifacts(
     config: PipelineConfig, records: list[dict[str, Any]], stage: str, stage_dir: Path
 ) -> dict[str, Any]:
-    """Execute the CPU-side artifact work of a GPU stage (non-dry runs only).
+    """Write the SFT dataset, RFT replay inputs, or adapter checkpoint.
 
-    The wall-clock training itself happens in the standalone prime-rl project
-    (``rl/train/{sft,rft}.toml``); the coordinator owns the file artifacts the
-    handoff needs: the Stage-1 dataset, the Stage-2 replay inputs, and the
-    Stage-3 adapter checkpoint.
+    Actual GPU training lives in rl/train/{sft,rft}.toml. Adapter assembly also
+    runs on the dry path, using the validated Stage-0 model state.
     """
     stage_dir.mkdir(parents=True, exist_ok=True)
     if stage == "stage1":
@@ -492,12 +368,7 @@ def _run_gpu_stage_shim(
 
 
 def _reward_weights_snapshot() -> dict[str, float]:
-    """Scalar snapshot of the golden-locked reward weights for the manifest.
-
-    Only the numeric weight fields are carried (the mapping fields and the
-    identity flag are not scalars); the manifest keeps a plain JSON-dict so
-    the run identity is serializable without pickling.
-    """
+    """Capture numeric reward weights for JSON lineage, excluding mappings and flags."""
     return {
         name: float(getattr(DEFAULT_WEIGHTS, name))
         for name in ("w_len", "w_fp", "len_tau", "len_scale")
@@ -524,24 +395,11 @@ def _make_identity(config: PipelineConfig, corpus_digest: str, split_digest: str
 
 
 def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
-    """Run the configured stages in order and write the stage manifest.
+    """Run stages in order and atomically publish the completed manifest.
 
-    Args:
-        config: The pipeline configuration (projection input, output
-            root, stages).
-        dry_run: When true, execute only what needs no GPU (projection load,
-            Stage-0 gate, validation, manifest) and mark the GPU stages
-            ``skipped_dry`` — the CI path.
-
-    Returns:
-        The manifest payload (also written atomically to
-        ``<out_dir>/manifest.json``).
-
-    Raises:
-        ValueError: On a fail-closed projection load (C5/C8), an unknown stage,
-            or a resumed run whose locked run-identity drifted (ResumeAborted).
-        RuntimeError: When Stage 3 is requested without a passed Stage-0 gate,
-            or the corpus carries no gold outcome rows for Stage 0.
+    Projection/admission or resume drift raises ValueError; missing gold evidence
+    or an absent/failed Stage-0 gate for Stage 3 raises RuntimeError. Dry runs
+    retain Stage 0 and adapter assembly while marking GPU stages skipped_dry.
     """
     # PipelineConfig.__post_init__ enforces a projection input; the assert keeps
     # the invariant documented and narrows the type for mypy.
@@ -600,18 +458,12 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
                     "adapter stage; no manifest is written for a refused run"
                 )
 
-        if dry_run and stage in GPU_STAGES:
-            if stage == "stage3":
-                # The adapter handoff is pure file assembly from Stage-0 state
-                # (no GPU), so the dry path still produces a declared, loadable-
-                # shape adapter checkpoint even while the wall-clock training
-                # itself is skipped.
-                _run_gpu_stage_shim(config, records, stage, stage_dir)
-            stage_entries[stage] = {"status": "skipped_dry"}
-            continue
-
-        entry = _run_gpu_stage_shim(config, records, stage, stage_dir)
-        stage_entries[stage] = entry
+        # Adapter assembly is CPU-only and must remain loadable on dry runs.
+        entry = (
+            _run_stage_artifacts(config, records, stage, stage_dir)
+            if not dry_run or stage == "stage3" else {}
+        )
+        stage_entries[stage] = {"status": "skipped_dry"} if dry_run else entry
 
     # The split is frozen only by Stage 0, so its digest is rechecked against
     # the prior run here; every other locked field was compared pre-loop.

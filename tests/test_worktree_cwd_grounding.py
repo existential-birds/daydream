@@ -1,10 +1,7 @@
-"""Real-path test for cwd grounding in a linked git worktree (issue #221).
+"""Ground pre_scan in a linked worktree whose sibling has different same-path content.
 
-Drives the real ``pre_scan`` exploration pipeline against an actual linked git
-worktree whose sibling main worktree contains different content at the same
-relative paths. Only the backend is mocked. Asserts that the specialist prompts
-carry cwd-absolute paths under the LINKED worktree (never the main worktree) and
-the cwd-grounding instruction — the deterministic contract the fix locks.
+Only the backend is doubled. Specialist prompts must name the linked worktree's
+absolute paths and include the cwd-grounding instruction.
 """
 
 from __future__ import annotations

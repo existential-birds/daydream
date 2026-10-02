@@ -1,19 +1,8 @@
-"""Structured dedup pre-filter for deep-review mode (D-27).
+"""Deterministic same-concern candidates for merge and arbiter adjudication.
 
-Pure function. Takes parsed per-stack records + TTT alternative-review issues and
-emits ``CandidatePair`` entries where each pair shares at least one file AND has
-a normalized-title bigram Jaccard similarity >= 0.5.
-
-The merge agent adjudicates candidate pairs. This pre-filter keeps the merger's
-prompt small and keeps quadratic-pair enumeration out of the LLM.
-
-Thresholds:
-
-- Bigram Jaccard similarity >= 0.5 on normalized titles
-- AND at least one shared file path
-
-Both gates must hold — a loose pre-filter is safer than a tight one because the
-merge agent still adjudicates.
+Record/alternative pairs require a shared file and normalized-title bigram
+Jaccard similarity >= 0.5. Record/record pairs may span files. Candidates still
+need adjudication; destructive host folding uses the separate, higher bar.
 """
 
 from __future__ import annotations
@@ -31,30 +20,14 @@ _STOP_WORDS = frozenset(
 _PUNCT_RE = re.compile(r"[^a-z0-9\s]+")
 _SIM_THRESHOLD = 0.5
 
-# Destructive-fold threshold (issue #1103 addendum). The pre-filter's 0.5 bar
-# is deliberately loose because every candidate it emits still goes in front
-# of the merge agent (or the arbiter) for adjudication before anything is
-# dropped. The host-side structural fold in
-# ``phases._fold_structural_duplicates`` has no such downstream review: it
-# collapses two findings into one on its own, so it needs a materially
-# higher bar than the pre-filter's. Named separately (rather than raising
-# ``_SIM_THRESHOLD`` itself) so the pre-filter's intentionally loose
-# candidate generation is untouched.
+# Host folding has no downstream adjudicator, so it requires a higher
+# similarity than candidate generation.
 FOLD_SIM_THRESHOLD = 0.8
 
 
 @dataclass(frozen=True)
 class CandidatePair:
-    """A same-concern candidate between a per-stack record and a TTT alt-review issue.
-
-    Attributes:
-        record_id: The parsed record's id (from FEEDBACK_SCHEMA).
-        record_file: The record's file field.
-        record_description: The record's description (kept verbatim).
-        alt_title: The TTT alternative-review issue's title.
-        alt_files: The TTT issue's files tuple.
-        similarity: Jaccard bigram similarity between normalized titles.
-    """
+    """Record/alternative candidate with verbatim descriptions and bigram similarity."""
 
     record_id: str
     record_file: str
@@ -72,13 +45,7 @@ def normalize_title(text: str) -> str:
 
 
 def bigrams(normalized: str) -> set[str]:
-    """Return the set of 2-character bigrams from a normalized title string.
-
-    Character-level bigrams are used because they are robust to token
-    reordering (per RESEARCH.md Open Question 3 recommendation). Titles
-    shorter than 2 characters return a sentinel single-element set so
-    very short titles remain comparable under Jaccard.
-    """
+    """Character bigrams tolerate token reordering; a one-character title is its own gram."""
     if len(normalized) < 2:
         return {normalized} if normalized else set()
     return {normalized[i : i + 2] for i in range(len(normalized) - 1)}
@@ -92,21 +59,10 @@ def jaccard(a: set[str], b: set[str]) -> float:
 
 
 def descriptions_match(a: str, b: str, *, threshold: float = _SIM_THRESHOLD) -> bool:
-    """Return True when two finding descriptions clear the given similarity bar.
+    """Compare normalized-description bigrams, rejecting empty/stop-word-only input.
 
-    The scalar form of the gate :func:`build_record_dedup_candidates` applies
-    pairwise: normalized bigram Jaccard at or above ``threshold``. Exposed so
-    callers share this module's bigram/Jaccard comparison instead of keeping
-    a second copy that can drift away from it.
-
-    ``threshold`` defaults to ``_SIM_THRESHOLD``; a caller making a
-    destructive, unreviewed "same defect" decision -- such as the host-side
-    structural fold (#1103) -- must pass ``FOLD_SIM_THRESHOLD`` instead (see
-    its definition above for the two-bars rationale).
-
-    Degenerate input never matches: either description empty (or reduced to
-    nothing by :func:`normalize_title`) returns ``False`` rather than letting
-    two contentless findings collapse into one.
+    The default threshold proposes candidates for review. Destructive host folding
+    must use FOLD_SIM_THRESHOLD because no later adjudicator checks its decision.
     """
     a_bigrams = bigrams(normalize_title(a))
     b_bigrams = bigrams(normalize_title(b))
@@ -122,29 +78,11 @@ def _files_overlap(record_file: str, alt_files: Iterable[str]) -> bool:
 
 @dataclass(frozen=True)
 class RecordDuplicatePair:
-    """Two per-stack records that likely describe the same concern.
+    """Candidate pair whose field names are the dedup-candidates.json wire format.
 
-    **These field names are the on-disk wire format.** The writer,
-    ``deep.orchestrator._candidate_pair_to_json``, is a bare
-    ``dataclasses.asdict``, so every attribute below appears verbatim as a key
-    in ``dedup-candidates.json`` -- which the merge agent's prompt points at and
-    which ``eval.analyzer`` reads back. Renaming or dropping a field here
-    changes that artifact's schema; adding one widens it.
-
-    Attributes:
-        record_a_id: First record's id (reviewer-assigned, restarts at 1 per
-            stack, so it is NOT unique across the pool).
-        record_a_uid: First record's host-assigned ``uid`` (issue #1111), or
-            ``""`` when the record carries no pre-merge identity.
-        record_a_file: First record's file field.
-        record_a_description: First record's description.
-        record_a_source: Originating stack name or records filename for record A.
-        record_b_id: Second record's id.
-        record_b_uid: Second record's host-assigned ``uid``, or ``""``.
-        record_b_file: Second record's file field.
-        record_b_description: Second record's description.
-        record_b_source: Originating stack name or records filename for record B.
-        similarity: Jaccard bigram similarity between normalized descriptions.
+    Serialization preserves every field. Reviewer IDs may repeat across stacks;
+    host UIDs disambiguate them, or are empty for post-merge inputs without that
+    identity. Renaming or dropping fields changes the persisted schema.
     """
 
     record_a_id: str
@@ -164,18 +102,9 @@ def build_dedup_candidates(
     records: list[dict[str, Any]],
     alt_issues: list[dict[str, Any]],
 ) -> list[CandidatePair]:
-    """Return same-concern candidate pairs per D-27 thresholds.
+    """Return record/alternative pairs sharing a file with similarity >= 0.5.
 
-    Args:
-        records: Parsed per-stack records matching FEEDBACK_SCHEMA
-            (``id``, ``file``, ``line``, ``description`` keys).
-        alt_issues: TTT alternative-review issues matching ALTERNATIVE_REVIEW_SCHEMA
-            (``title``, ``files`` keys).
-
-    Returns:
-        Deterministically-ordered list of ``CandidatePair`` instances for every
-        record/alt-issue combination that shares a file path AND has normalized
-        title bigram Jaccard similarity >= 0.5. Order is ``(record_id, alt_title)``.
+    Sort by (record_id, alt_title); descriptions and alternative files stay verbatim.
     """
     pairs: list[CandidatePair] = []
     for r in records:
@@ -213,32 +142,10 @@ def build_record_dedup_candidates(
     *,
     threshold: float = _SIM_THRESHOLD,
 ) -> list[RecordDuplicatePair]:
-    """Find per-stack records that likely describe the same concern.
+    """Compare record descriptions across files, ordered by IDs then UID tie-breakers.
 
-    Compares every record pair (i < j) and surfaces those with normalized
-    description bigram Jaccard similarity >= threshold. Unlike
-    ``build_dedup_candidates`` this does NOT require file overlap -- the same
-    architectural finding (e.g. code duplication) often gets reported against
-    different files with near-identical descriptions.
-
-    Args:
-        records: Parsed per-stack records matching FEEDBACK_SCHEMA.
-        sources: Parallel list where ``sources[i]`` is the originating
-            stack name (or records filename) for ``records[i]``.
-        threshold: Minimum normalized bigram Jaccard similarity a pair must
-            clear to be emitted. Defaults to ``_SIM_THRESHOLD`` (see its
-            definition above). Pass ``threshold=0.0`` to get every
-            comparable pair with its similarity attached, for callers that
-            need the full similarity distribution rather than the pre-filter's
-            candidate set (e.g. an eval axis that has to detect a mis-set
-            threshold, which a threshold-only count cannot).
-
-    Returns:
-        Deterministically-ordered list of ``RecordDuplicatePair`` instances,
-        ordered by ``(record_a_id, record_b_id, record_a_uid, record_b_uid)``.
-
-    Raises:
-        ValueError: If ``sources`` is not parallel to ``records``.
+    sources must parallel records or ValueError is raised. A zero threshold returns
+    every comparable pair for distribution analysis; empty descriptions never pair.
     """
     if len(sources) != len(records):
         raise ValueError("sources must contain exactly one entry per record")
@@ -247,11 +154,7 @@ def build_record_dedup_candidates(
     for i in range(n):
         r_a = records[i]
         a_id = str(r_a.get("id", ""))
-        # A record with no ``uid`` yields ``""`` and is still paired: this
-        # function is deliberately also called over POST-merge items by
-        # ``eval.analyzer.analyze_shipped_duplication``, and merge-agent-authored
-        # items legitimately have no pre-merge identity. Skipping them would
-        # silently blank out that whole eval axis.
+        # Post-merge eval inputs may lack pre-merge UIDs; they must still participate.
         a_uid = record_uid(r_a)
         a_file = str(r_a.get("file", ""))
         a_desc = str(r_a.get("description", ""))
@@ -287,12 +190,6 @@ def build_record_dedup_candidates(
                         similarity=sim,
                     )
                 )
-    # ``(record_a_id, record_b_id)`` alone is not a total order: those ids are
-    # reviewer-assigned and restart at 1 for every stack, so two pairs drawn
-    # from different stacks routinely tie on both components and land in
-    # whatever relative order enumeration happened to produce. The ``uid`` is
-    # the only globally unique handle a record carries (issue #1111), so it is
-    # appended as the tiebreaker. The id components stay leading so existing
-    # expected orderings do not churn.
+    # Reviewer IDs repeat across stacks; UID tie-breakers make their order stable.
     pairs.sort(key=lambda p: (p.record_a_id, p.record_b_id, p.record_a_uid, p.record_b_uid))
     return pairs

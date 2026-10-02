@@ -167,9 +167,6 @@ def test_objective_rejects_identity_disagreement(tmp_path: Path) -> None:
     assert "compiled_lock" in str(e.value).lower()
 
 def test_objective_metrics_equal_verifier_core(tmp_path: Path) -> None:
-    """Run-objective fields must equal the canonical scorer directly — the same
-    module the deployed metric loads (cross-surface equality is structural:
-    one module, both consumers import it)."""
     ws = _complete_ws(tmp_path, trials=[_reward(tp=2, fp=1, fn=0, reward=0.8),
                                         _reward(tp=1, fp=0, fn=1, reward=0.5), None])
     run = objective.read_completed_run(ws, "run-1", env={})
@@ -265,12 +262,6 @@ def test_aggregate_suite_fails_closed_on_incompatible_identity(tmp_path: Path) -
     assert "profile_digest" in str(e.value)
 
 def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: Path) -> None:
-    """Task 11 gate: pooled output equals the authoritative scoring.
-
-    The pooled ``SuiteObjective`` must equal ``verifier_core.aggregate_metrics``
-    — the canonical module — over the exact flattened cross-run rows, the same
-    module the deployed metric loads at runtime.
-    """
     # Two compatible workspaces with a realistic, comparison-eligible mix: scored
     # and gold-free clean tasks (an infra-error ``None`` trial would make the entry
     # comparison-ineligible and ``aggregate_suite`` correctly refuses to pool it).
@@ -307,13 +298,6 @@ def test_suite_manifest_rejects_duplicate_and_incomplete(tmp_path: Path) -> None
         objective.validate_suite_manifest(unsupported)
 
 def test_identity_to_dict_is_single_source_for_all_projections(tmp_path: Path) -> None:
-    """Issue #888 anti-slop: one shared identity projection everywhere.
-
-    ``objective_to_json`` (per-run), ``identity_to_dict`` (pool compat),
-    and the suite aggregate identity must all be byte-identical projections of
-    the same ``CompatibilityIdentity`` so a field added/renamed in one place
-    can't silently desynchronize the others.
-    """
     ws = _complete_ws(tmp_path)
     run = objective.read_completed_run(ws, "run-1", env=_env())
     assert run.identity is not None
@@ -339,13 +323,6 @@ def test_objective_metric_dict_includes_axis_keys() -> None:
     )._as_metric_dict()) == set(verifier_core.aggregate_metrics([]))
 
 def test_objective_json_carries_reported_axes(tmp_path: Path) -> None:
-    """Per-run objective JSON must carry the reported location/severity axes.
-
-    ``objective_to_json`` and ``_as_metric_dict`` are two projections of the
-    same ``Objective``; the per-run JSON must never silently drop the axis
-    keys, or the runbook's ``objective --json`` output would desynchronize
-    from the pooled projection the suite aggregate emits (anti-slop).
-    """
     ws = _complete_ws(tmp_path,
         trials=[_reward(tp=2, fp=1, fn=0, reward=0.8, location_present=1, location_exact=2, location_near=1,
             location_file=1, location_miss=0, location_credit=0.75,

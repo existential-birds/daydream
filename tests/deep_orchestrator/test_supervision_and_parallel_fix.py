@@ -153,7 +153,6 @@ async def test_supervise_llm_drop_records_step(
 async def test_supervise_llm_edit_revises_severity(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """LLM edit verdicts revise severity in canonical items and findings-out."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="downgrade me")]
@@ -172,7 +171,6 @@ async def test_supervise_llm_edit_revises_severity(
 async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """All findings may be dropped while findings-out still writes an empty artifact."""
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop everything")]
     (multi_stack_target / ".daydream.toml").write_text('supervisor = "rules"\nsupervisor_deny_globs = ["**"]\n')
@@ -184,7 +182,6 @@ async def test_supervise_drop_all_writes_empty_artifact_exit_zero(
 async def test_supervise_off_byte_identical(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """No config and explicit off produce the same canonical items bytes."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects, pin_pr=True)
     stub.merge_items = [
@@ -208,7 +205,6 @@ async def test_supervise_off_byte_identical(
 async def test_supervise_dropped_finding_never_reaches_fix(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """A dropped finding is absent from the real fix prompt and remains unmodified."""
 
     stub = _supervision_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.merge_items = [_merge_item(1, "api.py", "high", desc="drop before fix"),
@@ -229,7 +225,6 @@ async def test_supervise_dropped_finding_never_reaches_fix(
 async def test_run_deep_renders_prescan_summary_not_json(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """Real-path: the pre-scan summary renders as a readable panel, not raw JSON."""
 
 
     # Add a 4th changed file so select_tier() -> "parallel" (the pattern-scanner
@@ -257,7 +252,6 @@ async def test_run_deep_renders_prescan_summary_not_json(
 async def test_parallel_fix_applies_all_disjoint_files(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """AC#3: every disjoint-file group receives its own fixer dispatch."""
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     files = ["f1.py", "f2.py", "f3.py", "f4.py"]
     _add_to_reviewed_diff(multi_stack_target, files)
@@ -272,7 +266,6 @@ async def test_long_fix_is_not_turn_capped(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
 ) -> None:
-    """Real-path: a fix that needs many turns lands instead of dying on max_turns."""
 
     stub = _prepare_fix_stub(multi_stack_target, monkeypatch, mute_side_effects)
     stub.fix_turns_needed = 200
@@ -358,7 +351,6 @@ async def test_fix_verify_turn_is_read_only(
 async def test_fix_verify_uses_verify_backend_key_through_runner(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
 ) -> None:
-    """The registered fix-verify step deliberately resolves the verify model."""
 
     (multi_stack_target / ".daydream.toml").write_text(
         '[phases.verify]\nmodel = "verify-model-sentinel"\n[phases.fix-verify]\nmodel = "registered-step-sentinel"\n'
@@ -464,7 +456,6 @@ async def test_parallel_fix_failure_isolated_returns_nonzero(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, mute_side_effects: Mute,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """AC#5: a failed fix group is isolated, surfaced, and exits nonzero."""
 
     _silence(monkeypatch)
     _force_interactive(monkeypatch)

@@ -25,7 +25,7 @@ async def test_structural_finalizer_captures_prioritized_diff_without_session(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
 ) -> None:
     backend = _stop_then_finalize({"issues": []})
-    monkeypatch.setattr(phases, "ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
+    monkeypatch.setattr("daydream.phases.review.ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
     diff = tmp_path / "diff.patch"
     diff.write_text("diff --git a/api.py b/api.py\n+FOUNDATIONAL_DIFF\n")
     intent = tmp_path / "intent.md"
@@ -53,7 +53,7 @@ async def test_merge_finalizer_prioritizes_records_and_keeps_budget_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_work: Callable[..., WorkContext],
 ) -> None:
     backend = _stop_then_finalize({"items": []})
-    monkeypatch.setattr(phases, "ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
+    monkeypatch.setattr("daydream.phases.merge.ReviewLimits", lambda *a, **kw: ReviewLimits(10, 2, 0))
     records = tmp_path / "stack-python-records.json"
     records.write_text(json.dumps({"issues": [{"description": "ESTABLISHED_RECORD"}]}))
     intent = tmp_path / "intent.md"

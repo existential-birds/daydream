@@ -15,28 +15,18 @@ from tests.harness.git_helpers import git as _git
 from tests.harness.stub_backend import StubBackend, install_stub_backend
 
 if TYPE_CHECKING:
-    from daydream.runner import RunConfig
+    from daydream.run_config import RunConfig
 
 MakeConfig = Callable[..., "RunConfig"]
 
-# Deterministic deep-sharding bounds the live canaries lock (issue #763).
-# ``CANARY_MAX_BYTES`` is set BELOW the fixture's file-bound packing so the
-# changed-byte budget -- not the 5-file ceiling -- is the binding constraint:
-# a byte-budget regression in sharding._pack_shards would silently pack
-# oversized shards past this budget and the canary's AC2 byte check fails.
+# Set the byte limit below file-bound packing so a byte-budget regression cannot pass the canary.
 CANARY_MAX_FILES = 5
 CANARY_MAX_BYTES = 700
 CANARY_FANOUT_CAP = 16
 CANARY_FRONTIER_MAX = 8
 
 def _diff_change_bytes(diff: str) -> dict[str, int]:
-    """Per-file changed-byte sizes, mirroring ``sharding._file_change_bytes``.
-
-    Splits ``diff`` into ``diff --git`` blocks (the shared ``_DIFF_BLOCK_SPLIT``
-    contract) and records each block's encoded byte length under its post-state
-    path. Files absent from the map size as 1 byte, exactly as ``_pack_shards``
-    sizes them, so the AC2 byte check compares like with like.
-    """
+    """Independently measure header-inclusive UTF-8 diff blocks for the sharding assertions."""
     sizes: dict[str, int] = {}
     for block in re.split(r"^(?=diff --git )", diff, flags=re.M):
         m = re.match(r"^diff --git a/(.+?) b/", block)
@@ -47,13 +37,7 @@ def _diff_change_bytes(diff: str) -> dict[str, int]:
 async def _drive_canary(target: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig, *,
     parse_by_stack: dict[str, dict[str, object]] | None = None,
 ) -> tuple[Path, StubBackend]:
-    """Run one enabled-sharding deep canary through the real ``runner.run``.
-
-    Shared harness preamble for the two live canary tests (issue #763):
-    installs the stub backend,
-    drives a single deep run at the locked sharding bounds, and returns the
-    ``.daydream/deep`` output dir against which both tests assert.
-    """
+    """Run the real deep entrypoint with fixed sharding bounds; return artifact directory and backend."""
     stub = install_stub_backend(monkeypatch, target)
     stub.parse_by_stack = parse_by_stack
     exit_code = await run(make_config(target, deep_shard_enabled=True, deep_shard_max_files=CANARY_MAX_FILES,

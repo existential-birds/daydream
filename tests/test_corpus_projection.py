@@ -13,7 +13,7 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_REPO_IDENTITY_MISSING,
 )
 from daydream.archive.sanitize import _derivative_digest
-from daydream.cli import _CORPUS_SUBVERBS
+from daydream.commands.corpus import _CORPUS_SUBVERBS
 from daydream.training.corpus_projection.bundle import (
     BundleBatch,
     BundleError,

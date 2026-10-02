@@ -58,12 +58,8 @@ from daydream.backends import (
 )
 from daydream.config import TEST_WALL_BUDGET_S
 
-# Read-only Bash allowlist shared by every agent that runs under the read-only
-# guard (setup-investigator, failure summarizer, exploration specialists,
-# verification agent): permitted only if the command begins with one of these
-# prefixes AND has no shell-chaining metacharacter that could smuggle in a
-# mutation. Mirrored via _render_bash_allowlist() in the sibling prompts that
-# advertise it (phases.py, deep/prompts.py).
+# Shared read-only Bash families; shell controls are rejected separately.
+# _render_bash_allowlist renders this same list into inspection prompts.
 READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "ls",
     "cat",
@@ -74,26 +70,13 @@ READ_ONLY_BASH_ALLOWLIST: tuple[str, ...] = (
     "git diff",
 )
 
-# Shell-control tokens checked against shlex output: shlex (non-posix)
-# splits multi-char sequences like ``&&``/``$(`` into single chars, so we check
-# per-char. ``<``/``>`` are included so redirection can never write to or
-# truncate a file in the caller's tree.
+# Non-posix shlex splits controls into characters, including redirection.
+# Leading parentheses are checked separately; mid-word parentheses produce
+# Bash syntax errors. Operators already reject chained subshells.
 #
-# ``(``/``)`` are deliberately NOT here: bash rejects an unquoted paren glued to
-# a word (``--format=%C(red)%h``, ``foo(1).txt``) as a syntax error, so nothing
-# executes and no file is touched; a subshell only executes when ``(`` begins
-# the command, which the command-leading check in _is_read_only_command()
-# denies. A subshell reached after an operator (``a | (rm x)``,
-# ``a && (rm x)``, ``a; (rm x)``, ``$(rm x)``) is already caught by that
-# operator token in this set.
-#
-# The quote-safety claim holds only inside single quotes and for *literal*
-# characters inside double quotes: ``|``/``;``/``&``/``<``/``>`` are inert in
-# both, and shlex returns the wrapped chunk as one token. ``$`` and backtick are
-# NOT inert inside double quotes -- bash still performs parameter
-# expansion/command substitution there, so ``git log "$(rm x)"`` passes this
-# token scan yet stays live in bash. That gap is pre-existing and is not sealed
-# here, so the guard must not be advertised as "safe inside any quotes".
+# Quoted | ; & < > are inert, but $ and backticks inside double quotes still
+# expand in Bash. For example, git log "$(rm x)" passes this token scan.
+# Do not claim this guard makes arbitrary double-quoted arguments safe.
 _SHELL_CONTROL_TOKENS: frozenset[str] = frozenset({"|", ";", "&", "`", "$", "<", ">"})
 
 # Git options that write the command's output to a file. Scanned only after a
@@ -110,12 +93,8 @@ _READ_ONLY_HOOK_MATCHER = ".*"
 _DANGEROUS_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"^\s*find\s+/(\s|$)"),       # find / ...  (root-anchored scan)
     re.compile(r"^\s*grep\b.*\s/\s*$"),      # grep ... /  (root is the sole trailing path)
-    # rm wiping filesystem root or its glob, with a recursive flag anywhere in
-    # the option list (-rf, -fr, -R, --recursive) regardless of token order, so
-    # ``rm --force --recursive /`` and ``rm -f -r /`` are caught too. Two
-    # lookaheads: one for a recursive flag, one for ``/`` (or ``/*``) as a
-    # standalone target. A subpath like ``/home`` is left alone — this is a
-    # runaway/wipe backstop, not a security boundary (the read-only sandbox is).
+    # Match recursive rm flags in any order plus a standalone / or /* target.
+    # Subpaths such as /home are outside this catastrophic-wipe backstop.
     re.compile(r"^\s*rm\b(?=.*(?:^|\s)(?:-\w*[rR]\w*|--recursive)\b)(?=.*(?:^|\s)/\*?(?:\s|$)).*$"),
 )
 
@@ -125,22 +104,13 @@ _READ_ONLY_ALLOWED_TOOLS: frozenset[str] = frozenset(
     {"Read", "Grep", "Glob", "StructuredOutput"}
 )
 
-# Ceiling for one foreground Bash call inside the CLI subprocess, in ms. The CLI
-# clamps the tool's ``timeout`` to 600s by default, which is shorter than a
-# real test suite under coverage -- and was exactly why a test-phase agent
-# reached for ``run_in_background``. The host's own per-turn wall budget
-# already bounds every turn (TEST_WALL_BUDGET_S is the largest one granted), so
-# a shell call can never usefully outlive it; raising the CLI ceiling to match
-# removes the incentive without loosening any host-side bound.
+# Match the largest host wall budget so foreground test suites can exceed
+# Claude's default 600s shell timeout without needing background execution.
 _BASH_TIMEOUT_MS = int(TEST_WALL_BUDGET_S * 1000)
 
-# Environment for the CLI subprocess (merged over the inherited env by the SDK).
-# daydream consumes a turn's final text as the phase result and stops reading
-# the session when the turn ends; the CLI then tears down its background tasks.
-# A backgrounded command therefore never reports, and the agent's "I'll wait
-# for the notification" narration is what the host would parse as the verdict.
-# Backgrounding is switched off at the source, and ``_background_bash_guard``
-# below is the enforcement should a CLI build ignore the switch.
+# Disable background tasks: the host consumes final turn text, then the CLI
+# kills background work before it can report. _background_bash_guard enforces
+# this when a CLI ignores the switch. SDK merges these over inherited env.
 _CLI_ENV: dict[str, str] = {
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
     "BASH_DEFAULT_TIMEOUT_MS": str(_BASH_TIMEOUT_MS),
@@ -364,14 +334,11 @@ class _RunLocalSubprocessCLITransport(_sdk_subprocess.SubprocessCLITransport):
 
 
 class _RunLocalClaudeSDKClient(ClaudeSDKClient):
-    """Pinned-SDK startup that keeps initialization timing run-owned.
+    """Pinned-SDK startup using the run-owned initialization timeout.
 
-    The SDK accepts a custom transport but still reads
-    ``CLAUDE_CODE_STREAM_CLOSE_TIMEOUT`` from ``os.environ`` while constructing
-    its Query. This narrow override mirrors that startup sequence for the
-    options Daydream uses and substitutes the value parsed from the owning
-    execution environment. The inherited connect error unwind, message API,
-    disconnect, and context-manager lifecycle remain unchanged.
+    Override Query construction because the SDK otherwise reads the ambient
+    CLAUDE_CODE_STREAM_CLOSE_TIMEOUT even with a custom transport. Retain the
+    inherited error unwind, message API, disconnect, and context-manager lifecycle.
     """
 
     def __init__(
@@ -527,16 +494,10 @@ def _audit_symlink_inventory(root: Path) -> frozenset[Path]:
 
 
 def _total_input_tokens(usage: dict[str, Any]) -> int | None:
-    """Fold Anthropic's three input buckets into the true total input.
+    """Sum uncached input, cache reads, and cache writes for ATIF prompt_tokens.
 
-    Anthropic reports `input_tokens` as the *uncached remainder* only, with
-    cache hits and writes split into `cache_read_input_tokens` and
-    `cache_creation_input_tokens`. These two cache buckets are not mutually
-    exclusive: a single response can both read one cache breakpoint and write
-    another, so both may be non-zero at once. ATIF's `Metrics.prompt_tokens`
-    is the total input, so sum `input_tokens`, `cache_read_input_tokens`, and
-    `cache_creation_input_tokens` whenever present. Returns None when
-    `input_tokens` is absent (preserves the no-token-count gate).
+    Both cache buckets may be nonzero in one response. An absent input_tokens
+    keeps the total absent, preserving the no-token-count gate.
     """
     input_tokens = usage.get("input_tokens")
     if input_tokens is None:
@@ -549,25 +510,11 @@ def _total_input_tokens(usage: dict[str, Any]) -> int | None:
 
 
 class ClaudeAgentError(Exception):
-    """Raised when the Claude agent run reports an error result.
-
-    The SDK surfaces fatal run failures (invalid API key, execution errors,
-    hitting max turns) as a ``ResultMessage`` with ``is_error=True`` rather
-    than raising. Translating that flag into an exception here keeps an
-    errored run from masquerading as a clean empty result downstream — e.g.
-    a review exiting 0 with "no issues found" because the agent never ran.
-    """
+    """Translate an SDK is_error result into a failure instead of a clean empty review."""
 
 
 class MaxTurnsError(ClaudeAgentError):
-    """Raised when the Claude agent run terminates by hitting the turn cap.
-
-    A subtype of :class:`ClaudeAgentError` so existing ``except
-    ClaudeAgentError`` handlers keep working, while callers that care about
-    the max-turns case specifically can catch it and record/surface it
-    distinctly. Carries the SDK ``subtype`` (``"error_max_turns"``) so the
-    trajectory recorder can stamp it into the ATIF archive.
-    """
+    """A ClaudeAgentError carrying the SDK turn-cap subtype for trajectory recording."""
 
     def __init__(self, message: str, *, subtype: str = "error_max_turns") -> None:
         super().__init__(message)
@@ -575,19 +522,9 @@ class MaxTurnsError(ClaudeAgentError):
 
 
 def _denies_git_output_option(argv: list[str], start: int) -> bool:
-    """True when an allowlisted ``git …`` argv writes output to a file.
+    """Reject --output and --output= after the matched Git family in argv[start:].
 
-    Scans ``argv[start:]`` (skipping the matched allowlist family words) for the
-    ``--output`` option in both separated (``--output log.txt``) and equals
-    (``--output=diff.patch``) forms. The scan stops at a standalone ``--`` path
-    separator, so a literal path argument named ``--output`` after it stays
-    allowed. Returns False (not denied) when no write option appears before that
-    boundary.
-
-    Args:
-        argv: The posix-split argv tokens.
-        start: Index of the first token after the matched allowlist family
-            words (e.g. 2 for ``git status``).
+    Stop at the standalone -- path separator, where --output is a literal path.
     """
     for tok in argv[start:]:
         if tok == "--":
@@ -600,21 +537,11 @@ def _denies_git_output_option(argv: list[str], start: int) -> bool:
 
 
 def _shlex_tokens(cmd: str, *, posix: bool, words: bool) -> list[str] | None:
-    """Lex *cmd* via shlex; return the token list, or None on malformed quoting.
+    """Lex command tokens, returning None for malformed quoting.
 
-    Both the control-token scan and the argv reconstruction pass through this
-    single helper so they share one explicit comment policy: ``commenters`` is
-    cleared, making ``#`` always a literal character. Bash only treats a ``#``
-    that begins a word as a comment; the default ``#`` commenter would instead
-    strip everything after ANY ``#`` -- even mid-word -- hiding a trailing
-    redirection/chaining token from the control-token scan. That is exactly the
-    escape the deny set closes, so the comment semantics must be explicit and
-    identical for both passes (a future edit cannot silently resurrect the
-    blind spot by changing only one).
-
-    ``words=True`` yields whole argv words; ``words=False`` yields per-char bare
-    metacharacters so the control-token scan sees ``<``/``>``/``(``, etc. The
-    ``words`` flag maps onto shlex ``whitespace_split``.
+    Disable shlex comments in both passes: its default treats even a mid-word #
+    as a comment, hiding later redirection or chaining. words=True preserves
+    argv words; False exposes individual bare control characters.
     """
     lexer = shlex.shlex(cmd, posix=posix)
     lexer.commenters = ""  # '#' is never a comment; keep every character.
@@ -626,33 +553,14 @@ def _shlex_tokens(cmd: str, *, posix: bool, words: bool) -> list[str] | None:
 
 
 def _is_read_only_command(cmd: str) -> bool:
-    """Return True only if *cmd* is a single allowlisted read-only command.
+    """Admit one allowlisted command with no shell controls or Git output writes.
 
-    Denies (returns False) on: an empty/blank command, any command containing a
-    newline or carriage return, any command containing a shell-control
-    metacharacter (``|``, ``;``, ``&``, backtick, ``$``, ``<``, ``>``) or a
-    command-leading ``(``/``)`` subshell group, any command whose leading argv
-    words do not match an allowlisted family word-for-word, and any allowlisted
-    ``git …`` command that writes its output to a file via ``--output``.
-
-    ``<``/``>``/``|``/``;``/``&``/``$``/backtick are shell operators wherever
-    they appear unquoted, closing the redirection (``>``/``>>``/``<``) and
-    command-substitution escapes that could otherwise create, truncate, or
-    append files in the caller's working tree. ``(``/``)`` only execute as a
-    subshell when they begin the command, so only that position is denied;
-    parens mid-command or glued to a word (``--format=%C(red)%h``,
-    ``cat foo(1).txt``) are bash syntax errors that never run and must stay
-    allowed. Word-bounded argv matching uses posix ``shlex.split`` so a token
-    merely *beginning* with an allowlisted word (``git logfoo``) is never an
-    allowlist hit.
-
-    Metacharacter detection uses ``shlex`` to avoid false positives from
-    metacharacters that appear only inside quoted arguments (e.g.
-    ``git log --grep='fix|bug'`` is safe and must be allowed).  Newlines and
-    carriage returns are bash command separators but ``shlex`` treats them as
-    whitespace and strips them, so they are rejected directly on the raw string.
-    Malformed quoting makes ``shlex`` raise ``ValueError``; the shared lexing
-    helper maps that to deny (fail-closed) and never propagates.
+    Reject raw newlines/carriage returns before shlex discards them as whitespace.
+    Use a control-token pass followed by whole-word argv matching; malformed
+    quoting fails closed and git logfoo cannot match git log. Quoted literal
+    metacharacters remain allowed, subject to the double-quote limitation
+    documented beside _SHELL_CONTROL_TOKENS. Leading parentheses are denied;
+    mid-word parentheses are Bash syntax errors and remain allowed.
     """
     stripped = cmd.strip()
     if not stripped:
@@ -669,11 +577,8 @@ def _is_read_only_command(cmd: str) -> bool:
         if tok in _SHELL_CONTROL_TOKENS:
             return False
     if tokens[0] in ("(", ")"):
-        # Command-leading ``(``/``)`` starts a subshell group that executes
-        # (``( rm x )``, ``(rm x)``) -> deny. Anywhere else in a command bash
-        # rejects unquoted parens (``--format=%C(red)%h``, ``foo(1).txt``,
-        # ``ls -la ( x )``) as a syntax error, so nothing runs and the command
-        # stays harmless; those previously-allowed forms must not be denied.
+        # Deny leading subshell groups; mid-command unquoted parentheses are
+        # Bash syntax errors and retain their previously allowed treatment.
         return False
     # Argv pass: whole argv words (``whitespace_split=True``), matching the
     # allowlist families word-for-word (rejecting ``git logfoo``) and allowing
@@ -700,11 +605,9 @@ def _tool_input(input_data: Any) -> dict[str, Any]:
 
 
 def _bash_command(input_data: Any) -> str | None:
-    """Extract the Bash command from a PreToolUse payload.
+    """Extract Bash command text; None means non-Bash/malformed payload.
 
-    Returns ``None`` when the payload is not a Bash tool call (or is malformed),
-    and ``""`` when it is Bash but the command is missing or not a string —
-    matching the guards' fail-closed defaults.
+    A Bash call with a missing or non-string command returns "" to fail closed.
     """
     if not isinstance(input_data, dict) or input_data.get("tool_name") != "Bash":
         return None
@@ -815,12 +718,9 @@ async def _finalization_guard(
 
 
 async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
-    """PreToolUse hook enforcing the read-only guard contract.
+    """Allow only inspection tools and allowlisted Bash; malformed/unknown tools deny.
 
-    Fires for ALL tools (matcher ``.*``). Explicitly allows only the safe set
-    (Read, Grep, Glob, StructuredOutput, and allowlisted Bash commands) and
-    denies everything else. Fails closed: malformed input → deny.
-    Returns ``{}`` (allow) only for a permitted tool/command.
+    The .* matcher must run this guard for every tool under bypassPermissions.
     """
     command = _bash_command(input_data)
     if command is not None:
@@ -838,22 +738,12 @@ async def _read_only_guard(input_data: Any, tool_use_id: Any, context: Any) -> H
 
 
 def _is_dangerous_command(cmd: str) -> bool:
-    """Return True if *cmd* is a catastrophic Bash command (always-on deny-list).
-
-    Matches full-filesystem-root scans (``find /``, ``grep ... /``) and ``rm -rf /``
-    — the runaway-turn pathologies. Conservative: a scoped path (``find core/...``)
-    or a non-matching command (``ls``, ``rg foo src/``) returns False.
-    """
+    """Match catastrophic root scans/wipes; scoped paths and unmatched commands pass."""
     return any(pattern.search(cmd) for pattern in _DANGEROUS_COMMAND_PATTERNS)
 
 
 async def _dangerous_command_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
-    """PreToolUse hook denying catastrophic Bash commands in ALL phases (#177).
-
-    Registered unconditionally. Allows everything except a small deny-list of
-    root-anchored scans and wipes (see ``_is_dangerous_command``). Codex has no
-    equivalent PreToolUse seam (out of scope; its enforcement is ``--sandbox``).
-    """
+    """Deny catastrophic Bash commands in every phase; allow other calls."""
     command = _bash_command(input_data)
     if command is None:
         return {}
@@ -874,13 +764,10 @@ def _is_background_bash(input_data: Any) -> bool:
 
 
 async def _background_bash_guard(input_data: Any, tool_use_id: Any, context: Any) -> HookJSONOutput:
-    """PreToolUse hook denying ``Bash(run_in_background=True)`` in ALL phases.
+    """Deny background Bash in every phase, reinforcing the CLI environment switch.
 
-    Registered unconditionally. The deny reason tells the agent why and what to
-    do instead, because the model has no other way to learn that a background
-    command's result can never reach the host: the CLI kills background tasks
-    when the turn ends, and the host reads the turn's final text as the result.
-    Composes with ``CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`` in ``_CLI_ENV``.
+    The denial explains that the CLI kills background tasks at turn end and the
+    host consumes final text, so background results never reach it.
     """
     if not _is_background_bash(input_data):
         return {}
@@ -934,10 +821,7 @@ def _model_usage_totals(raw: dict[str, Any] | None) -> dict[str, ModelUsageTotal
 
 
 class ClaudeBackend:
-    """Backend that wraps the Claude Agent SDK.
-
-    Translates Claude SDK message types into the unified AgentEvent stream.
-    """
+    """Translate Claude SDK messages into the unified AgentEvent stream."""
 
     supports_finalization = True
 
@@ -998,34 +882,15 @@ class ClaudeBackend:
         persist_session: bool = True,
         finalization: bool = False,
     ) -> AsyncGenerator[AgentEvent, None]:
-        """Execute a prompt and yield unified events.
+        """Yield normalized SDK events; error results raise ClaudeAgentError.
 
-        Args:
-            continuation: When it carries ``backend == "claude"``, its
-                ``session_id`` is passed to the SDK as ``options.resume`` so the
-                CLI replays the prior turn's conversation. A token minted by any
-                other backend is ignored (cold start), never an error. A retried
-                attempt resumes from the same original token, since ``run_agent``
-                passes the input token on every attempt.
-            agents: Optional mapping of specialist name -> AgentDefinition for
-                subagent support. Keys are the specialist names the lead agent
-                dispatches by; they MUST be preserved verbatim.
-            read_only: When True, register a ``PreToolUse`` guard hook that
-                denies file-mutating tools (Write/Edit/...) and any Bash command
-                not on ``READ_ONLY_BASH_ALLOWLIST``. The hook is the enforcement
-                — under ``bypassPermissions`` ``allowed_tools`` does not restrict
-                the toolset — so the tool list is left unchanged.
-            finalization: Use low effort and remove native investigative tools.
-                Existing guards remain active; StructuredOutput serialization
-                stays permitted. Controls apply only to this invocation.
-            persist_session: When True, the final ``ResultEvent`` mints a
-                ``ContinuationToken`` carrying ``ResultMessage.session_id`` so a
-                later call can resume this conversation. False suppresses the
-                token (the turn is one-shot).
+        Resume only Claude tokens, using the original input token on each retry;
+        foreign tokens cold-start. Preserve specialist agent names verbatim.
 
-        Raises:
-            ClaudeAgentError: If the agent run ends with an error result
-                (``ResultMessage.is_error``), e.g. an invalid API key.
+        read_only is enforced by PreToolUse hooks: allowed_tools does not restrict
+        tools under bypassPermissions. finalization removes investigative tools and
+        uses low effort for this invocation, retaining guards and StructuredOutput.
+        persist_session=False suppresses the terminal continuation token.
         """
         audit_root = self.audit_root
         audit_guard = self._audit_root_guard
@@ -1053,84 +918,51 @@ class ClaudeBackend:
             else None
         )
 
-        # PreToolUse hooks — NOT allowed_tools — are the enforcement, since
-        # bypassPermissions leaves the tool list unrestricted. The dangerous-command
-        # and background-Bash guards are always-on (all phases); the read-only guard
-        # composes on top when read_only=True.
-        #
-        # In ordinary mode (#887), the skill tool is intentionally left unguarded:
-        # daydream no longer invokes a skill itself. Strict audit mode takes the
-        # separate branch below and denies Skill along with every unhandled tool.
+        # Permission preapproval does not restrict tools under bypassPermissions;
+        # PreToolUse guards enforce mutation, background-task, and audit boundaries.
+        options = ClaudeAgentOptions(
+            cwd=str(audit_root if audit_guard is not None else cwd),
+            permission_mode="bypassPermissions",
+            model=self.model,
+            output_format=output_format,
+            max_buffer_size=10 * 1024 * 1024,
+            max_turns=max_turns,
+            extra_args={"no-session-persistence": None} if not persist_session else {},
+            effort=effort,
+        )
+        pre_tool_use_hooks: list[HookCallback]
         if audit_guard is not None:
             assert audit_root is not None
-            base_environment = (
-                self._execution_input.child_environment()
-                if self._execution_input is not None
-                else None
-            )
-            options = ClaudeAgentOptions(
-                cwd=str(audit_root),
-                permission_mode="bypassPermissions",
-                tools=list(_AUDIT_TOOLS),
-                allowed_tools=list(_AUDIT_TOOLS),
-                mcp_servers={},
-                strict_mcp_config=True,
-                setting_sources=[],
-                skills=[],
-                plugins=[],
-                agents=None,
-                model=self.model,
-                output_format=output_format,
-                max_buffer_size=10 * 1024 * 1024,
-                max_turns=max_turns,
-                extra_args={"no-session-persistence": None},
-                effort=effort,
-                env=_audit_cli_env(
-                    audit_root, base_environment=base_environment
+            options.tools = list(_AUDIT_TOOLS)
+            options.allowed_tools = list(_AUDIT_TOOLS)
+            options.mcp_servers = {}
+            options.strict_mcp_config = True
+            options.setting_sources = []
+            options.skills = []
+            options.plugins = []
+            options.agents = None
+            options.env = _audit_cli_env(
+                audit_root,
+                base_environment=(
+                    self._execution_input.child_environment()
+                    if self._execution_input is not None
+                    else None
                 ),
-                hooks={
-                    "PreToolUse": [
-                        HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=[audit_guard])
-                    ]
-                },
             )
+            pre_tool_use_hooks = [audit_guard]
         else:
-            sdk_environment = (
-                {
-                    **self._execution_input.child_environment(),
-                    **_CLI_ENV,
-                }
-                if self._execution_input is not None
-                else dict(_CLI_ENV)
-            )
-            pre_tool_use_hooks: list[HookCallback] = [
-                _dangerous_command_guard,
-                _background_bash_guard,
-            ]
+            options.allowed_tools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep"]
+            options.setting_sources = ["user"]
+            options.env = {
+                **(self._execution_input.child_environment() if self._execution_input is not None else {}),
+                **_CLI_ENV,
+            }
+            pre_tool_use_hooks = [_dangerous_command_guard, _background_bash_guard]
             if read_only:
                 pre_tool_use_hooks.append(_read_only_guard)
-            options = ClaudeAgentOptions(
-                cwd=str(cwd),
-                permission_mode="bypassPermissions",
-                allowed_tools=["Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-                setting_sources=["user"],
-                model=self.model,
-                output_format=output_format,
-                max_buffer_size=10 * 1024 * 1024,  # 10MB — handles large git diffs
-                max_turns=max_turns,
-                extra_args={"no-session-persistence": None} if not persist_session else {},
-                # None leaves the CLI's ambient default; the SDK omits --effort.
-                effort=effort,
-                env=sdk_environment,
-                hooks={
-                    "PreToolUse": [
-                        HookMatcher(
-                            matcher=_READ_ONLY_HOOK_MATCHER,
-                            hooks=pre_tool_use_hooks,
-                        )
-                    ]
-                },
-            )
+        options.hooks = {
+            "PreToolUse": [HookMatcher(matcher=_READ_ONLY_HOOK_MATCHER, hooks=pre_tool_use_hooks)]
+        }
 
         if finalization:
             # `allowed_tools=[]` is a permission preapproval list, not tool
@@ -1157,13 +989,8 @@ class ClaudeBackend:
         if agents:
             options.agents = agents
 
-        # P18 Task 1: closed typed effective-config admission, populated from
-        # the exact options built above (never from config files/env).
-        # - read_only/persist_session are actual passed controls (execute args).
-        # - continuation_mode is "resume" only when a claude-minted token was
-        #   applied; "fresh" otherwise. Fork is not a Claude surface.
-        # - A nonempty agents mapping makes the request aggregate
-        #   multi-model-capable without inspecting any AgentDefinition.
+        # Record exact applied options, including resume only for an accepted
+        # Claude token and multi-model capability for any nonempty agent mapping.
         resume_applied = (
             continuation is not None
             and continuation.backend == "claude"
@@ -1315,12 +1142,8 @@ class ClaudeBackend:
                         provider = next(iter(providers)) if len(providers) == 1 else None
                         if msg.structured_output is not None:
                             structured_result = msg.structured_output
-                        # EVNT-04/05: emit CostEvent when cost OR usage is available.
-                        # Per-call semantics trusted for SDK 0.1.52 (D-14). Anthropic's raw
-                        # `input_tokens` is the *uncached remainder* only; we fold in the
-                        # cache-read and cache-creation buckets so the emitted value is the
-                        # true total input, matching ATIF Metrics.prompt_tokens. cached_tokens
-                        # stays the cache-read hit subset of that total.
+                        # Emit cost when either cost or usage exists. Anthropic input excludes
+                        # cache reads/writes; fold both in while retaining the cached subset.
                         result_usage = getattr(msg, "usage", None)
                         if msg.total_cost_usd is not None or result_usage is not None or model_usage:
                             usage = result_usage or {}
@@ -1382,10 +1205,6 @@ class ClaudeBackend:
                 self._active_clients.discard(client)
 
     async def cancel(self) -> None:
-        """Interrupt every active SDK client.
-
-        Sends an interrupt to each in-flight agent client in turn; an error
-        raised by any client's interrupt propagates to the caller.
-        """
+        """Interrupt each active client in turn; propagate any interruption error."""
         for client in list(self._active_clients):
             await client.interrupt()

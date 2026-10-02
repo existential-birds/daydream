@@ -204,12 +204,7 @@ def _file_scope_issue(
     ident: str,
     auth: GitHubAuth,
 ) -> None:
-    """Best-effort: file one scope-related GitHub issue; never raise.
-
-    The residual-edit filer records work the footprint guard restored instead
-    of landing it in the PR. Filing is best-effort: a failed ``gh issue create``
-    (no auth, cross-org, offline) logs a warning and the restore stands.
-    """
+    """File a residual-edit issue best-effort; failures warn and leave the restore intact."""
     try:
         url = git_ops.gh_issue_create(repo, title=title, body=body, auth=auth)
         print_warning(console, f"Filed out-of-scope {noun} as issue: {url}")
@@ -218,35 +213,19 @@ def _file_scope_issue(
 
 
 def _scope_already_filed(repo: Path, marker: str, *, auth: GitHubAuth) -> bool:
-    """Best-effort: has an open issue already filed this scope marker?
+    """Find an open issue carrying the caller's edit fingerprint marker.
 
-    GitHub is the store: scan open issues for the reverted edit's fingerprint
-    marker and skip filing when present, so a re-run reproducing the same edit
-    does not file a duplicate issue. Best-effort by construction:
-    ``gh_issue_list`` returns an empty list on failure, so a failed lookup
-    degrades to filing rather than silently dropping the restored edit.
-
-    The marker is computed once by the caller and threaded in, so the edit's
-    fingerprint is not recomputed for both the dedup lookup and the issue body.
+    A failed lookup yields no match so the edit is filed rather than silently lost.
     """
     issues = git_ops.gh_issue_list(repo, search="out-of-scope", auth=auth)
     return any(marker in (issue.get("body") or "") for issue in issues)
 
 
 def _scope_edit_fingerprint(path: str, patch: str) -> str:
-    """Stable cross-run identity for a reverted out-of-scope edit (issue #1051).
+    """Hash the path and changed content, excluding volatile hunk offsets and context.
 
-    Keyed on the file path plus the edit's changed content lines (the spec's
-    "file path plus diff content" option): a re-run that reproduces the same
-    residual edit on the same file maps to the same fingerprint and is
-    recognized as already-filed. The raw ``git diff`` evidence embeds volatile
-    hunk offsets (``@@ -x,y +z,w @@``) and context lines, so fingerprinting the
-    raw patch would re-file a duplicate whenever a re-run reproduces the edit
-    at shifted offsets — the duplicate-issue regression #1051 set out to close.
-    Stripping the hunk headers and context lines (keeping only the ``+``/``-``
-    content lines) mirrors how :func:`daydream.pr_review.compute_fingerprint`
-    excludes line numbers so code shifts do not change a finding's identity.
-    Its scope-edit marker namespace stays distinct from PR-comment findings.
+    The scope-edit namespace is separate from finding fingerprints; identical edits
+    at shifted lines retain their cross-run dedup identity.
     """
     from daydream.pr_review import compute_fingerprint
 
@@ -270,15 +249,10 @@ def _scope_edit_marker(fingerprint: str) -> str:
 def _file_reverted_edit_issue(
     repo: Path, path: str, patch: str, *, auth: GitHubAuth
 ) -> None:
-    """Best-effort: file one reverted out-of-scope edit as a tracked GitHub issue.
+    """File restored out-of-scope work, with its diff and a cross-run fingerprint.
 
-    Issue #336 — the post-fix residual check reverts edits the fix pass made
-    outside the reviewed diff. The reverted edit is still *valid* work, so it
-    is filed as an issue (with the diff as evidence) instead of being lost.
-    Cross-run dedup (issue #1051): the edit's fingerprint is embedded as a
-    hidden marker in the body, and a re-run/resume skips filing when an open
-    issue already carries it. Filing is best-effort: a failed ``gh issue
-    create`` logs a warning and the revert stands regardless.
+    An existing open issue suppresses duplicates. Creation failure only warns; the
+    revert stands regardless.
     """
     # Compute the fingerprint marker once and thread it into both the dedup
     # lookup and the issue body, rather than recomputing it for each.
@@ -297,14 +271,10 @@ def _file_reverted_edit_issue(
 
 
 def _resolve_changed_files(ctx: FlowContext) -> set[str] | None:
-    """Resolve the complete reviewed-diff file set for fix-cycle provenance.
+    """Read reviewed paths from flow state, falling back to diff on fix resumes.
 
-    Issue #336 — the reviewed-diff file set is computed once in the
-    ``_run_review_spine`` preamble and carried in ``ctx.data["changed_files"]``.
-    On a ``--start-at fix`` resume that lost it but retained ``diff`` it is
-    recomputed via ``_diff_changed_files``. The fix gate records these paths as
-    reviewed origins in the authorized footprint, and the quality gate uses the
-    Python subset. Canonical finding paths are authorized independently.
+    The footprint records reviewed origins; the quality gate uses their Python
+    subset. Canonical finding paths are authorized independently.
     """
     deep_state = DeepState(ctx.data)
     from daydream.deep.diff import _diff_changed_files, _read_full_diff

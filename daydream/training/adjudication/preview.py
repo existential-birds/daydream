@@ -1,16 +1,7 @@
-"""Pre-harvest preview ledger over the hydrated index (issue #984, Task 9).
+"""Build a deterministic evidence-digest ledger over the read-only hydrated index.
 
-Builds the adjudication queue over a hydrated index and writes a
-digest-pinned, canonical-JSON ledger so an operator can inspect exactly what a
-subsequent canonical harvest would adjudicate *before* running it. A
-hydrated staging archive with no ``sessions.jsonl`` is served through the
-same read-only SQLite adapter materialize uses (never the read-write
-``_get_connection``); preview never mutates the index. The ledger
-pins per-finding evidence digests (delta on
-``corpus_projection.bundle``'s bundle-digest SHA256SUMS verification and
-the projector's two-bundle verification), and a re-preview against an
-existing ledger reports any ``record_id`` whose evidence digest changed —
-drift is surfaced, never silently merged.
+The same SQLite adapter serves preview and materialization. Re-preview reports
+changed finding digests instead of silently merging drift.
 """
 
 import hashlib
@@ -32,14 +23,10 @@ _ITEM_KEYS = ("disposition", "evidence_digest", "fingerprint", "record_id", "sta
 
 
 class _LocalIndexClient:
-    """Minimal ``resolve_source_revision`` client over a local hydrated index.
+    """Reuse source-revision policy for a local index.
 
-    The index is already on disk, so a full 40-hex SHA is pinned by definition
-    and "exists". Symbolic refs (moving branches/tags) resolve to nothing —
-    the revision list is empty — so ``resolve_source_revision`` raises
-    ``MovingBranchError`` with its own semantics; preview never re-implements
-    pinned-revision policy.
-    """
+    A full SHA is already pinned; an empty revision list makes symbolic refs
+    raise MovingBranchError. This client never downloads or uploads."""
 
     def repo_info(self, revision: str | None = None) -> RepoInfo:
         return RepoInfo(sha=revision or "", private=True)
@@ -96,26 +83,12 @@ def _load_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
 def run_preview(
     index_root: Path, ledger_path: Path, *, observations_path: Path | None = None,
 ) -> dict[str, Any]:
-    """Preview the adjudication queue over the hydrated index at ``index_root``.
+    """Write a deterministic evidence-digest ledger over the read-only hydrated index.
 
-    Builds the queue (deterministic, ``record_id``-ordered), computes each
-    item's evidence digest, and writes a canonical-JSON ledger
-    ``{"index_revision", "items": [...], "ledger_digest"}`` to
-    ``ledger_path`` (sorted keys, sorted items — identical index ⇒
-    byte-identical ledger).
-
-    Returns ``{"index_revision", "ledger_digest", "item_count",
-    "drifted_record_ids"}`` where ``drifted_record_ids`` compares the fresh
-    queue against any existing ledger at ``ledger_path``: a digest mismatch on
-    a known ``record_id`` is reported, never silently merged. A first preview
-    (no prior ledger) reports an empty drifted set.
-
-    Failure policy: a missing/unreadable sessions file raises the
-    ``HydrationError`` family (via ``HubUnavailableError``); a moving-branch
-    source revision raises ``MovingBranchError`` through
-    ``resolve_source_revision``; malformed evidence raises ``ValueError``
-    from the queue builder naming the offending fingerprint.
-    """
+    Return revision, ledger digest, item count and IDs whose evidence changed
+    from a prior ledger. A first preview has no drift. Missing/unreadable input
+    raises HubUnavailableError, moving refs raise MovingBranchError, and invalid
+    evidence raises the queue builder's ValueError."""
     from daydream.training.adjudication.materialize import index_sessions
 
     sessions, index_revision = index_sessions(index_root)

@@ -1,27 +1,9 @@
-"""Self-contained isolated Harbor judge verifier for the compiled-grade verifier image.
-
-Stdlib + httpx only. Never imports daydream: this file must run unchanged
-inside a compiled-grade verifier image that has no daydream wheel. It wires a
-bounded per-pair judge prompt, three isolated external judge clients (Anthropic
-Messages + OpenAI-compatible + Claude Code CLI) behind one ``complete_json``
-seam, strict verdict parsing, a shared retry/redirect/timeout policy, a
-concurrency-10 runner, and ``run_verifier`` which writes ``reward.json`` /
-``reward-details.json`` atomically.
-
-The external judge surface is fail-closed and bounded: the
-``anthropic | openai-compatible | claude-cli`` providers are accepted, the judge
-host must
-sit in the configured allowlist (``DAYDREAM_JUDGE_ALLOWED_HOSTS``; own-host
-fallback when absent), redirects are bounded to ``_MAX_REDIRECTS``
-credential-preserving same-origin hops whose targets are re-validated against
-the allowlist, response/reasoning payloads are size-capped (rejected, never
-truncated-and-accepted), and failures split into two zones: invalid candidate
-output (read/validate/bind failures on the agent's own artifact) is a scored
-zero written to ``reward.json`` / ``reward-details.json``, while every
-infrastructure failure (metadata, gold, judging, credentials, a verifier bug)
-is unscored and writes ONLY ``reward-details.json`` -- never a bare exit and
-never an unbounded or credential-bearing error, and never a numeric zero on an
-infra path.
+"""Standalone Harbor judge verifier: stdlib plus httpx, with no Daydream dependency. Three
+explicit provider adapters share bounded prompts, strict verdicts, retry/timeouts, and
+concurrency limits. HTTP requests use validated host allowlists and bounded same-origin
+redirects; oversized responses are rejected whole. Invalid agent candidates score zero.
+Missing/unreadable inputs and infrastructure failures write only bounded, redacted
+reward details and remain unscored.
 """
 
 from __future__ import annotations
@@ -145,14 +127,9 @@ async def _claude_cli_stdout(proc: Any) -> str:
 
 
 class _InputFileNotFound(verifier_core.VerifierError):
-    """A required input file is absent or unreadable — an infrastructure problem, not agent output.
-
-    Subclass of ``VerifierError`` so the candidate-zone handler can route a
-    missing or unreadable candidate-artifact file (EACCES/EISDIR/ENOTDIR and
-    friends) to the unscored infra zone (reward-details only) instead of
-    treating it as a scored-zero agent failure. A missing artifact file almost
-    always means a wrong ``DAYDREAM_JUDGE_ARTIFACT_PATH`` or a missing mount
-    reaching the entrypoint — infrastructure, never a real score of zero.
+    """Missing or unreadable input is infrastructure failure, including an unavailable
+    candidate artifact. Keep it separate from malformed agent content so mount/path
+    failures cannot become numeric zero scores.
     """
 
 JUDGE_PROMPT_TEMPLATE = (
@@ -189,14 +166,8 @@ _LOCATIONLESS_MARKER = "<none>"
 
 
 def _escape_finding_delimiters(text: str) -> str:
-    """Neutralize the ``<..._finding>`` block delimiters in untrusted text.
-
-    Every untrusted scalar field (title, severity, path, start_line, end_line)
-    as well as both bodies is escaped at render time. A literal closing tag
-    inside one block would terminate its structural block early and leak the
-    remainder into the other role's region; a literal opening tag could shift
-    the boundary or synthesize extra blocks. Rewriting every delimiter to its
-    entity form means injected text can never form a real structural delimiter.
+    """Escape structural finding delimiters in every untrusted scalar and body. Embedded
+    tags must never close, shift, or manufacture gold/candidate blocks.
     """
     escaped = text
     for delimiter, entity in _ESCAPED_FINDING_TAGS.items():
@@ -226,12 +197,8 @@ def _normalize_host(host: str | None) -> str:
 
 
 def _effective_allowlist(base_url: str, env: dict[str, Any]) -> set[str]:
-    """Resolve the judge-host allowlist from env; absent -> own-host fail-closed.
-
-    A non-empty ``DAYDREAM_JUDGE_ALLOWED_HOSTS`` (whitespace/comma-separated)
-    wins; otherwise the effective allowlist is exactly the resolved judge
-    host of ``base_url`` so an unconfigured verifier can only ever reach its
-    own judge endpoint -- never an arbitrary host.
+    """Use the explicit whitespace/comma-separated judge allowlist, otherwise permit only
+    the resolved judge host.
     """
     raw = (env or {}).get(_ENV_ALLOWED_HOSTS)
     if raw:
@@ -246,12 +213,8 @@ def _effective_allowlist(base_url: str, env: dict[str, Any]) -> set[str]:
 
 
 def _validate_base_url(url: str, allowlist: set[str]) -> str:
-    """Validate ``url`` against the hardened judge-request contract.
-
-    Rejects userinfo, any query string or fragment, non-HTTPS remote schemes
-    (``http`` is permitted only to a loopback host), and any host outside
-    ``allowlist``. Returns ``url`` unchanged; every rejection is a bounded
-    ``VerifierError`` naming only the rejected form -- never URL content.
+    """Require an allowed host, no userinfo/query/fragment, and HTTPS except loopback HTTP.
+    Return the unchanged URL; bounded rejections never disclose URL content.
     """
     parsed = urllib.parse.urlsplit(url)
     if parsed.username is not None or parsed.password is not None:
@@ -271,12 +234,8 @@ def _validate_base_url(url: str, allowlist: set[str]) -> str:
 
 
 def _resolve_redirect(request_url: str, location: str, allowlist: set[str]) -> str:
-    """Resolve a redirect ``location`` against ``request_url`` and host-check it.
-
-    A relative ``Location`` is resolved against the request URL first, then the
-    resolved target is validated against ``allowlist`` exactly like an initial
-    base URL -- a cross-host, out-of-allowlist, or malformed target is a
-    terminal bounded ``VerifierError``.
+    """Resolve relative Location values against the request, then revalidate origin and
+    allowlist. Malformed or forbidden targets fail terminally.
     """
     resolved = urllib.parse.urljoin(request_url, location)
     return _validate_base_url(resolved, allowlist)
@@ -315,13 +274,7 @@ def _bounded_error(text: object) -> str:
 
 
 def _bounded_repr(value: object) -> str:
-    """Return ``repr(value)`` redacted and bounded like any other error text.
-
-    Composes the module's single redact-and-bound seam (``_bounded_error``)
-    over ``repr`` so the four verdict-field diagnostics (match/confidence/
-    reasoning) never repeat the wrap and stay byte-identical to today's
-    output.
-    """
+    """Redact and bound repr(value) through the shared error sanitizer."""
     return _bounded_error(repr(value))
 
 
@@ -334,24 +287,14 @@ def _render_filled(
     candidate_body: str,
     escape: bool = True,
 ) -> str:
-    """Render one gold/candidate pair into ``template`` for a judge.
-
-    Every untrusted scalar field and each body is passed through
-    ``_escape_finding_delimiters`` so no literal delimiter can form a structural
-    block. With ``escape=False`` the raw payload is returned instead -- the
-    caller's pre-inflation budget yardstick.
+    """Render a pair with all untrusted delimiters escaped; escape=False supplies the raw
+    budget measurement.
     """
 
     def _field(value: object, none_marker: str = "") -> str:
-        """Render a scalar field, optionally marking a ``None`` component.
-
-        A locationless review finding (no file or line) renders its null
-        location fields as ``none_marker`` (the fixed ``_LOCATIONLESS_MARKER``)
-        so the judge sees an explicit all-null location rather than an empty,
-        shape-ambiguous value. The marker is supplied by the caller -- never
-        derived from untrusted input -- and is run through the same escaping
-        path as every other field (respecting ``escape=False`` for the raw
-        budget yardstick).
+        """Render a scalar with optional trusted null-location marker, applying the same
+        escaping policy as other fields. escape=False retains the raw budget
+        representation.
         """
         if value is None and none_marker:
             text = none_marker
@@ -376,15 +319,9 @@ def _render_filled(
 
 
 def render_pair_prompt(gold: dict[str, Any], candidate: dict[str, Any], *, template: str) -> str:
-    """Render a bounded, untrusted-fenced prompt for one gold/candidate pair.
-
-    The untrusted finding fields are escaped by ``_render_filled`` so injected
-    delimiters can never form structural blocks. The 24 KiB budget is checked
-    against the raw, pre-escape payload — the same yardstick ``verifier_core``
-    uses when it bounds each field — because the escaping fence can only
-    inflate, and a pair the verifier accepts must not be voided whole by that
-    inflation. A pair that exceeds the raw budget fails deterministically with
-    ``VerifierError``: never truncate and never report a partial result.
+    """Render fenced findings after enforcing the 24 KiB raw, pre-escape budget. Escaping
+    may inflate accepted content; oversize raw pairs fail without truncation or partial
+    results.
     """
     gold_body = gold.get("body", "") or ""
     candidate_body = candidate.get("body", "") or ""
@@ -414,12 +351,8 @@ def render_pair_prompt(gold: dict[str, Any], candidate: dict[str, Any], *, templ
 
 
 def parse_verdict(raw: object) -> verifier_core.Verdict:
-    """Validate a raw judge verdict dict and return a ``verifier_core.Verdict``.
-
-    ``gold_id``/``candidate_id`` are placeholders the caller (``judge_pairs``)
-    stamps onto the returned verdict. Any violation — wrong type, out-of-range
-    confidence, missing key, unknown key, non-dict input — raises
-    ``VerifierError``; never silently coerces a fallback value.
+    """Strictly validate verdict keys/types/confidence without coercion. The caller stamps
+    gold/candidate identity onto the returned placeholders.
     """
     if not isinstance(raw, dict):
         raise VerifierError("verdict must be a JSON object")
@@ -463,12 +396,8 @@ class _Retryable(Exception):
 
 
 def _parse_json_response(response: Any, *, content: Any) -> dict[str, Any]:
-    """Parse an httpx-like response through the ``content`` extraction callable.
-
-    The raw body is size-capped (``_RESPONSE_CAP_BYTES``) BEFORE any status
-    handling, so an oversized body is rejected regardless of status code -- a
-    non-2xx (4xx/5xx) judge body must not bypass the cap. An over-cap body is a
-    terminal ``VerifierError`` (rejected, never truncated-and-accepted).
+    """Enforce the raw response cap before status handling, including non-2xx bodies.
+    Oversize bodies fail terminally and are never truncated into acceptance.
     """
     body = _response_bytes(response)
     if len(body) > _RESPONSE_CAP_BYTES:
@@ -663,26 +592,11 @@ class AnthropicJudgeClient:
 
 
 class ClaudeCliJudgeClient:
-    """Judge client that shells the pinned Claude Code CLI in non-interactive print mode.
-
-    Invokes ``claude -p --output-format json --model <model> --max-turns 1
-    --permission-mode plan --allowedTools [] [--append-system-prompt <system>]
-    <user>`` and parses the single JSON result object on stdout, passing
-    ``result`` through the strict ``parse_verdict``. The subprocess is an
-    injectable seam (``runner``, mirroring the ``http=`` seam on the HTTP
-    clients) defaulting to ``asyncio.create_subprocess_exec``. The OAuth token
-    is never placed on argv; it reaches the CLI only through the inherited
-    environment, whose tools are denied outright so the prompt-influenced
-    agent cannot read/execute/exfiltrate through them. Print-mode output is
-    capped at ``max_tokens`` via ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` and its
-    collected stdout is byte-capped and rejected whole -- never truncated-and-
-    accepted. Only the timeout failure class is transient and retried with the
-    same bounded policy as the HTTP clients; every other failure class (non-zero
-    exit, empty/malformed output, cli-reported error, missing result) is
-    terminal and raises on the first attempt. A timed-out child is
-    killed before the retry so hung processes cannot accumulate; every terminal
-    failure raises ``VerifierError`` naming only the failure class — never a
-    stderr echo, stack trace, or silent fallback to a partial verdict.
+    """Run the pinned Claude CLI in noninteractive JSON print mode with one turn and no
+    tools. OAuth stays in the environment, never argv; output has token and byte caps.
+    Only timeouts retry, after killing the child. All other failures are terminal
+    VerifierError classes without stderr or prompt disclosure. The injectable runner
+    replaces subprocess creation for tests.
     """
 
     def __init__(self, model: str, *, runner: Any = None) -> None:
@@ -829,12 +743,8 @@ def _openai_content(body: dict[str, Any]) -> str:
 
 
 class OpenAIJudgeClient:
-    """Small OpenAI-compatible Chat Completions client returning strict parsed verdicts.
-
-    Validates the initial Chat Completions URL against the effective
-    judge-host allowlist before any request (fail-closed); redirects are
-    bounded and allowlist-checked inside the shared ``_complete_json_with_http``
-    policy -- identical to the Anthropic client.
+    """Strict OpenAI-compatible verdict client. Validate the initial URL before requests
+    and share bounded redirect/allowlist policy with Anthropic.
     """
     def __init__(
         self,
@@ -994,12 +904,8 @@ def _read_json(path: Path) -> Any:
 
 
 def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
-    """Read the candidate artifact as raw bytes, size-checked and parsed in one step.
-
-    The raw byte size is checked against ``verifier_core.MAX_ARTIFACT_BYTES``
-    BEFORE any parse -- a whitespace-inflated payload over the cap fails on its
-    raw size alone, never reaching the judge. A ``JSONDecodeError`` becomes a
-    ``VerifierError`` naming only the path (never content).
+    """Cap candidate raw bytes before JSON parsing, including whitespace inflation. Decode
+    errors identify only the path.
     """
     try:
         raw = Path(path).read_bytes()
@@ -1023,13 +929,8 @@ def _read_artifact_bytes(path: str | Path) -> dict[str, Any]:
 
 
 def _read_gold_bytes(gold_path: Path, expected_sha256: str) -> list[Any]:
-    """Read the gold set as raw bytes, digest-checked, parsed, and list-validated.
-
-    Symmetric to ``_read_artifact_bytes`` for the trusted gold half: read the
-    raw bytes, verify the sha256 against the compiler-rendered sentinel, parse
-    the JSON, and assert the payload is a list. No raw-size cap applies -- gold
-    is shipped, read-only task data while the candidate artifact is the
-    attacker-controlled surface.
+    """Read trusted gold bytes, verify the compiler digest, then require a JSON list. Gold
+    is shipped read-only task data and has no candidate-size cap.
     """
     try:
         gold_bytes = gold_path.read_bytes()
@@ -1049,15 +950,8 @@ def _read_gold_bytes(gold_path: Path, expected_sha256: str) -> list[Any]:
 
 
 def _load_verifier_metadata(gold_path: Path) -> dict[str, Any]:
-    """Load the sibling immutable task-bound verifier metadata beside the gold file.
-
-    Requires the ``{schema_version, case_id, base_ref, head_ref,
-    template_version, gold_sha256}`` object the compiler renders per case; a
-    missing/dict-violating field raises ``VerifierError``. The versioned shape
-    is gated: ``schema_version`` must be 1 (parity with the candidate
-    artifact's own gate in ``verifier_core``) and ``template_version`` must be
-    a non-empty string, so a mismatched metadata schema fails the task whole
-    rather than mis-binding it.
+    """Require sibling immutable task identity, refs, gold digest, schema 1, and nonempty
+    template version. Missing or malformed metadata fails the task before binding.
     """
     meta = _read_json(gold_path.parent / "verifier-metadata.json")
     if not isinstance(meta, dict):
@@ -1100,15 +994,9 @@ def _write_reward_artifacts(
     *,
     verifier_error: int,
 ) -> verifier_core.Reward:
-    """Write the reward artifacts for a zero-reward outcome.
-
-    ``reward-details.json`` is always written atomically with typed bounded
-    diagnostics, so no failure path is a bare exit. ``verifier_error=0``
-    (candidate/binding-zone failure about the agent's own artifact) is a scored
-    outcome: ``reward.json`` (``reward=0``) is written and the trial scores
-    zero. ``verifier_error=1`` (infra-zone failure) writes only the details
-    file, so the trial is unscored, never a numeric zero. ``errors`` must
-    already be bounded/redacted before the call.
+    """Always atomically write bounded/redacted details. Agent candidate failures also
+    write reward zero; infrastructure failures write no reward.json and remain unscored.
+    Callers must sanitize errors first.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1166,22 +1054,11 @@ def run_verifier(
     client: Any,
     env: dict[str, Any],
 ) -> verifier_core.Reward:
-    """Validate gold + the candidate artifact, judge all pairs, score, and write atomically.
-
-    Validation order (issue #817): the candidate artifact is read as raw bytes
-    (size-checked before parse), validated to its exact schema, then bound to
-    the task's immutable ``verifier-metadata.json`` (case id + base/head refs);
-    the gold is then read as raw bytes and its sha256 must match the
-    compiler-rendered ``gold_sha256`` sentinel before it is parsed and validated
-    (canonical/unique gold ids). Failures split into two zones: anything about
-    the agent's own candidate artifact (read, validate, task-bind) is a scored
-    outcome written to ``reward.json`` with ``reward=0, verifier_error=0``
-    (plus bounded ``reward-details.json``); anything about the environment
-    (metadata, gold read/digest/validate, judging, exhausted retries, a missing
-    client, an unexpected runtime exception) is unscored and writes ONLY
-    ``reward-details.json`` -- never a bare exit, never a numeric zero, and
-    never a partial score. Error text is redacted and size-bounded before it
-    reaches any artifact. Never emits source or diffs.
+    """Validate candidate bytes/schema and immutable task binding, then digest-check and
+    validate gold before judging all pairs. Malformed candidate content/binding scores
+    zero; absent/unreadable files, metadata, gold, judge, credentials, exhausted
+    retries, and unexpected failures remain unscored with details only. Never emit
+    partial scores, source, diffs, or unbounded/unredacted errors.
     """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1280,15 +1157,9 @@ def run_verifier(
 
 
 def _build_client(env: dict[str, Any]) -> Any:
-    """Build the judge client from the DAYDREAM_JUDGE_* env surface.
-
-    the ``anthropic`` | ``openai-compatible`` | ``claude-cli`` set is accepted
-    when explicit; absent or unsupported values raise before any request.
-    The ``anthropic`` and ``openai-compatible`` providers require an API key,
-    resolve a base URL, and validate the initial request URL against the
-    effective judge-host allowlist at build time; the ``claude-cli`` provider
-    instead requires a non-empty ``CLAUDE_CODE_OAUTH_TOKEN`` and validates its
-    resolved judge host (``api.anthropic.com``) against the same allowlist.
+    """Require an explicit supported judge provider and validate its host before any
+    request. HTTP providers require API credentials and a validated URL; claude-cli
+    requires its OAuth token and allowlisted api.anthropic.com host.
     """
     provider = env.get(_ENV_PROVIDER) or ""
     model = env.get(_ENV_MODEL)
@@ -1349,29 +1220,17 @@ def _env_path(name: str, default: str) -> Path:
 
 
 def _emit_reward(reward: verifier_core.Reward) -> int:
-    """Print the reward payload JSON and return the verifier-error exit code.
-
-    Shared by both ``main()`` terminal paths (a fail-closed client build
-    rejection and the completed ``run_verifier``) so the two failure/success
-    emissions cannot drift. ``Reward.to_dict()`` always exists (the compiled
-    verifier_core twin is byte-identical), so the payload is always the full
-    24-key typed dict.
-    """
+    """Print the complete typed reward payload and return the verifier-error exit code."""
     payload = reward.to_dict()
     print(json.dumps(payload))
     return 1 if reward.verifier_error else 0
 
 
 def main() -> int:
-    """Compiled entry: resolve the §10 paths, read real env, judge, print reward JSON.
-
-    Provider selection is fail-closed: an unsupported ``DAYDREAM_JUDGE_PROVIDER``
-    or an out-of-allowlist judge host writes a typed bounded diagnostic artifact
-    (``reward-details.json`` only -- infra zone, no numeric reward) instead of a
-    barren ``client=None`` exit with no provider reason. ``DAYDREAM_JUDGE_ARTIFACT_PATH`` /
-    ``DAYDREAM_JUDGE_OUT_PATH`` relocate the compiled defaults for isolated
-    subprocess runs; the compiled defaults ``/logs/artifacts/review.json`` and
-    ``/logs/verifier`` are unchanged.
+    """Resolve compiled paths/environment, run the judge, and print the typed result.
+    Provider/host rejection writes bounded infrastructure diagnostics without numeric
+    reward. ARTIFACT_PATH and OUT_PATH overrides support isolated runs; defaults remain
+    /logs/artifacts/review.json and /logs/verifier.
     """
     gold_path = Path(__file__).with_name("golden-review.json")
     artifact_path = _env_path(_ENV_ARTIFACT_PATH, "/logs/artifacts/review.json")

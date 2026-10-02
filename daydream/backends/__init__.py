@@ -1,26 +1,10 @@
-"""Backend abstraction layer for daydream.
+"""Backend protocol, normalized events, and construction.
 
-Defines the unified event stream, Backend protocol, and factory function.
-Backends yield AgentEvent instances that the UI layer consumes without
-knowing which backend produced them.
-
-Event vocabulary (members of the ``AgentEvent`` TypeAlias union):
-
-- ``RequestEvent`` — actual request after backend transformations.
-- ``TextEvent`` — agent text output.
-- ``ThinkingEvent`` — extended reasoning / thinking content.
-- ``ToolStartEvent`` — tool invocation started.
-- ``ToolResultEvent`` — tool invocation completed.
-- ``DiagnosticEvent`` — backend parser/transport coverage evidence.
-- ``CostEvent`` — end-of-call cost/usage signal.
-- ``MetricsEvent`` — per-turn LLM token/cost usage.
-- ``TurnEndEvent`` — assistant-turn boundary; closes the recorder's open
-  Step so multi-turn invocations are not collapsed into one Step.
-- ``GenerationStartEvent`` / ``GenerationEndEvent`` — provider-generation
-  lifecycle with a sealed typed choice (currently Pi only); correlation is
-  a host invocation-local generation ID, never a provider identity.
-- ``ResultEvent`` — terminal metadata, structured output and continuation;
-  a failed backend can subsequently raise after exposing its billed usage.
+Events carry host UTC timestamps at yield time. RequestEvent records only exposed
+request facts; MetricsEvent owns turn usage, CostEvent owns invocation totals,
+and TurnEndEvent closes a recorder step. Generation events describe provider
+boundaries using host-local correlators. A terminal ResultEvent may precede an
+exception, so its presence does not imply successful execution.
 """
 
 from __future__ import annotations
@@ -31,17 +15,19 @@ import os
 import re
 import unicodedata
 import uuid
-from collections.abc import AsyncIterator, Mapping
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable, Mapping
+from dataclasses import dataclass, field, fields
+from functools import partial
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal, Protocol, Union
+from typing import TYPE_CHECKING, Any, Literal, Protocol, Union, get_args, get_origin, get_type_hints
 
+from daydream.redaction import redact_structured_text
 from daydream.retry_policy import (
     decode_retry_recovery_allowance,
     undeclared_retry_allowance_message,
 )
-from daydream.trajectory import now_iso, redact_structured_text
+from daydream.timeutil import now_iso
 
 logger = logging.getLogger(__name__)
 
@@ -53,18 +39,9 @@ class RetryPolicy:
     attempts: int
     base_delay_s: float
     max_delay_s: float
-    #: Cumulative retry-overhead allowance, in seconds, for one invocation.
-    #: ``None`` means this backend declares none, so ``run_agent`` falls through
-    #: to its backend-attribute tier, then its explicit argument, and -- only when
-    #: the backend declares no ``RetryPolicy`` at all -- the
-    #: ``DAYDREAM_PI_RETRY_RECOVERY_ALLOWANCE_S`` env var, then
-    #: ``config.DEFAULT_RETRY_RECOVERY_ALLOWANCE_S``. A declared policy is complete:
-    #: it suppresses every ambient ``DAYDREAM_PI_RETRY_*`` read, so a non-``None``
-    #: value here is the invocation's answer. ``0`` is a real declaration ("no
-    #: retry recovery"), distinct from ``None``. The embedded/benchmark
-    #: construction path materialises the env var into this field
-    #: (``BackendExecutionInput.from_environment``), which is why the env value
-    #: reaches those runs at this tier rather than the ambient one.
+    #: Invocation retry overhead in seconds; zero disables recovery, None defers.
+    #: A declared RetryPolicy suppresses ambient PI retry settings. Embedded runs
+    #: materialize environment overrides into this policy during construction.
     retry_recovery_allowance_s: float | None = None
 
 
@@ -108,13 +85,9 @@ def _parsed_nonnegative_float(
 def _parsed_optional_retry_allowance(
     environment: Mapping[str, str], name: str
 ) -> float | None:
-    """Parse the optional retry-recovery allowance env knob.
+    """Decode an optional retry allowance, warning on malformed declarations.
 
-    Delegates the decode rule to :func:`decode_retry_recovery_allowance` so the
-    env source accepts exactly what the argument, attribute and config-file
-    sources accept. ``None`` means absent (silent; the caller's default applies)
-    or present-but-invalid (warned, never an effective bound and never
-    masquerading as an operator declaration).
+    None means absent or invalid; the caller's fallback remains authoritative.
     """
     raw = environment.get(name)
     if raw is None:
@@ -342,22 +315,12 @@ def _has_unicode_controls(value: str) -> bool:
 
 
 def _changed_by_redaction(value: str) -> bool:
-    """True when the shared credential redactor would rewrite *value*.
-
-    A configured label that only survives redaction because it *is* shaped
-    like a credential must never be emitted verbatim into telemetry; the
-    admission boundary drops it with a fixed diagnostic instead.
-    """
+    """Reject telemetry identity labels that contain credential-shaped text."""
     return redact_structured_text(value) != value
 
 
 def _is_private_path(value: str) -> bool:
-    """True for absolute POSIX/Windows paths and home-anchored locations.
-
-    Model namespace slashes (``nous/deepseek-v4``) are ordinary identity
-    spellings and never match: a namespace segment is not rooted, has no
-    drive, and contains no ``~`` expansion.
-    """
+    """Identify absolute or home-anchored paths; relative model namespaces remain valid."""
     if not value:
         return False
     if value.startswith(("/", "\\\\")) or _WINDOWS_DRIVE_PREFIX.match(value):
@@ -373,13 +336,9 @@ def _admit_identity_label(
     max_chars: int,
     context: str,
 ) -> tuple[str | None, EvidenceDiagnostic | None]:
-    """Admit one model/provider/phase identity label per the contract.
+    """Admit a nonempty bounded label without controls, credentials, or private paths.
 
-    Requires an exact ``str``, length 1..max_chars (counted in Unicode scalar
-    values), no C0/C1 controls, no bidi/format characters, no line/paragraph
-    separators, unchanged by credential redaction, and never equal to or
-    containing a known private absolute path. Returns ``(value, None)`` on
-    success (never truncated) or ``(None, diagnostic)``.
+    Returns the unchanged value or a fixed diagnostic; never truncates an identity.
     """
     if not isinstance(value, str) or not value:
         return None, EvidenceDiagnostic(_DIAG_IDENTITY_UNSAFE_CHARS, context)
@@ -405,17 +364,13 @@ def _admit_runtime_tool_name(value: Any) -> tuple[str | None, EvidenceDiagnostic
 
 
 def _admit_native_unix_ms(value: Any) -> tuple[int | None, EvidenceDiagnostic | None]:
-    """Admit a strict native Unix-millisecond timestamp.
+    """Admit an exact nonnegative int whose nanosecond conversion fits int64.
 
-    Requires ``type(value) is int`` (bool rejected), ``0 <= value`` and a
-    value that survives exact multiplication to nanoseconds without int64
-    overflow: ``value <= (2**63-1) // 1_000_000``. Returns ``(None, None)``
-    for ``None`` (absence is not malformation); malformed values yield
-    ``(None, diagnostic)``. Never clamps or coerces.
+    None is absence; malformed values yield diagnostics without coercion or clamping.
     """
     if value is None:
         return None, None
-    if isinstance(value, bool) or type(value) is not int:
+    if type(value) is not int:
         return None, EvidenceDiagnostic(_DIAG_TIMESTAMP_TYPE, "native_unix_ms")
     if not 0 <= value <= _MAX_NATIVE_UNIX_MS:
         return None, EvidenceDiagnostic(_DIAG_TIMESTAMP_RANGE, "native_unix_ms")
@@ -428,12 +383,9 @@ def unix_ms_to_ns(ms: int) -> int:
 
 
 def _admit_json_value(value: Any, depth: int = 0) -> tuple[Any, EvidenceDiagnostic | None]:
-    """Validate one closed recursive JSON value (tool-call arguments).
+    """Copy JSON-compatible values, rejecting nonfinite floats and unsafe dictionary keys.
 
-    Accepts exactly ``None | bool | int | float | str | list | dict[str, ...]``
-    with finite floats and JSON-compatible dict keys. Non-JSON types (bytes,
-    sets, objects, non-finite floats) fail closed with a fixed diagnostic.
-    Depth is bounded defensively against pathological nesting.
+    Nesting beyond 64 levels and non-JSON types produce a fixed diagnostic.
     """
     if depth > 64:
         return None, EvidenceDiagnostic(_DIAG_JSON_VALUE, "json_depth")
@@ -467,22 +419,18 @@ def _admit_json_value(value: Any, depth: int = 0) -> tuple[Any, EvidenceDiagnost
 
 
 class _AdmissionBase:
-    """Construction-time rejection for the frozen admission dataclasses.
+    """Reject malformed controls at construction using the built-in field declarations.
 
-    Subclasses implement :meth:`_validate` by calling the ``_require_*``
-    helpers on every field; any non-admitted value raises ``ValueError`` so a
-    wrong-typed or out-of-range control can never exist inside the closed
-    type (plan Step 1: "dataclass construction rejects"). The runtime
-    admission helpers above are the complementary layer adapters use to
-    *omit* an unsafe backend value with a fixed diagnostic instead of ever
-    constructing with one.
+    Adapters instead omit unsafe runtime evidence and emit fixed diagnostics.
     """
 
     def __post_init__(self) -> None:
         self._validate()
 
     def _validate(self) -> None:
-        raise NotImplementedError
+        checks = next(_CONFIG_CHECKS[base] for base in type(self).__mro__ if base in _CONFIG_CHECKS)
+        for name, check in checks:
+            check(getattr(self, name), name)
 
 
 def _require_bool(value: Any, field: str) -> None:
@@ -496,7 +444,7 @@ def _require_nonnegative_int(value: Any, field: str) -> None:
     """Reject a non-``int`` or out-of-range value at construction."""
     if value is None:
         return
-    if isinstance(value, bool) or type(value) is not int:
+    if type(value) is not int:
         raise ValueError(f"{field}: {_DIAG_INT_TYPE}")
     if not 0 <= value <= _INT64_MAX:
         raise ValueError(f"{field}: {_DIAG_INT_RANGE}")
@@ -512,7 +460,7 @@ def _require_finite_float(value: Any, field: str) -> None:
         raise ValueError(f"{field}: {_DIAG_FLOAT_NOT_FINITE}")
 
 
-def _require_literal(value: Any, allowed: tuple[str, ...], field: str) -> None:
+def _require_literal(value: Any, field: str, *, allowed: tuple[str, ...]) -> None:
     """Reject a value outside ``allowed`` at construction."""
     if value is None or value in allowed:
         return
@@ -521,12 +469,9 @@ def _require_literal(value: Any, allowed: tuple[str, ...], field: str) -> None:
 
 @dataclass(frozen=True)
 class EffectiveRequestConfig(_AdmissionBase):
-    """Closed common-subset request configuration, per the admission contract.
+    """Effective request controls: None means absent, never an inferred default.
 
-    Every field is ``None`` when the control was not actually passed/effective
-    — absence never claims a default. Construction rejects wrong-typed,
-    out-of-range and non-admitted values (``ValueError``); adapters omit an
-    unsafe backend value before ever constructing.
+    Construction rejects invalid types/ranges/modes; adapters omit unsafe evidence.
     """
 
     finalization: bool | None = field(default=None, kw_only=True)
@@ -537,24 +482,11 @@ class EffectiveRequestConfig(_AdmissionBase):
     continuation_mode: Literal["fresh", "resume", "fork"] | None = None
     model_mode: Literal["single", "multi_or_dynamic"] | None = None
 
-    def _validate(self) -> None:
-        _require_bool(self.finalization, "finalization")
-        _require_finite_float(self.temperature, "temperature")
-        _require_nonnegative_int(self.max_turns, "max_turns")
-        _require_bool(self.read_only, "read_only")
-        _require_bool(self.persist_session, "persist_session")
-        _require_literal(self.continuation_mode, ("fresh", "resume", "fork"), "continuation_mode")
-        _require_literal(self.model_mode, ("single", "multi_or_dynamic"), "model_mode")
 
 
 @dataclass(frozen=True)
 class ClaudeRequestConfig(EffectiveRequestConfig):
-    """Claude-only effective controls layered on the closed common subset.
-
-    Cwd, environment, agent definitions, prompts, persona labels and
-    credentials stay absent by construction: only the admitted shapes below
-    exist as fields, so nothing else can be smuggled into telemetry.
-    """
+    """Claude effective controls; paths, environment, prompts, and credentials stay absent."""
 
     permission_mode: Literal["bypassPermissions"] | None = None
     tools_count: int | None = field(default=None, kw_only=True)
@@ -567,18 +499,6 @@ class ClaudeRequestConfig(EffectiveRequestConfig):
     buffer_limit_bytes: int | None = None
     hooks_enabled: bool | None = None
 
-    def _validate(self) -> None:
-        super()._validate()
-        _require_literal(self.permission_mode, ("bypassPermissions",), "permission_mode")
-        _require_nonnegative_int(self.tools_count, "tools_count")
-        _require_nonnegative_int(self.allowed_tools_count, "allowed_tools_count")
-        _require_bool(self.allowed_tools_present, "allowed_tools_present")
-        _require_nonnegative_int(self.audit_tools_count, "audit_tools_count")
-        _require_bool(self.audit_tools_present, "audit_tools_present")
-        _require_bool(self.setting_sources_present, "setting_sources_present")
-        _require_bool(self.native_output_format, "native_output_format")
-        _require_nonnegative_int(self.buffer_limit_bytes, "buffer_limit_bytes")
-        _require_bool(self.hooks_enabled, "hooks_enabled")
 
 
 @dataclass(frozen=True)
@@ -590,12 +510,6 @@ class CodexRequestConfig(EffectiveRequestConfig):
     native_output_schema: bool | None = None
     read_only_isolation: bool | None = None
 
-    def _validate(self) -> None:
-        super()._validate()
-        _require_literal(self.sandbox_mode, ("read-only", "danger-full-access"), "sandbox_mode")
-        _require_bool(self.experimental_json, "experimental_json")
-        _require_bool(self.native_output_schema, "native_output_schema")
-        _require_bool(self.read_only_isolation, "read_only_isolation")
 
 
 @dataclass(frozen=True)
@@ -608,23 +522,13 @@ class PiRequestConfig(EffectiveRequestConfig):
     no_skills: bool | None = None
     schema_emulated: bool | None = None
 
-    def _validate(self) -> None:
-        super()._validate()
-        _require_nonnegative_int(self.selected_tools_count, "selected_tools_count")
-        _require_bool(self.selected_tools_present, "selected_tools_present")
-        _require_bool(self.no_tools, "no_tools")
-        _require_bool(self.no_skills, "no_skills")
-        _require_bool(self.schema_emulated, "schema_emulated")
 
 
 @dataclass(frozen=True)
 class OspreyRequestConfig(EffectiveRequestConfig):
-    """Osprey-only effective controls (exact argv facts; labels stay absent).
+    """Osprey argv facts with no arbitrary labels or inferred configuration.
 
-    Only explicit temperature=0.0 is eligible for the inherited common
-    ``temperature`` field (the Osprey adapter passes it only when it actually
-    emitted ``--temperature``); hidden/config-resolved temperatures stay
-    absent.
+    Temperature is present only when the adapter explicitly passes --temperature.
     """
 
     persona_present: bool | None = None
@@ -656,40 +560,38 @@ class OspreyRequestConfig(EffectiveRequestConfig):
     observation_admission_bytes: int | None = None
     vars_count: int | None = None
 
-    def _validate(self) -> None:
-        super()._validate()
-        _require_bool(self.persona_present, "persona_present")
-        _require_bool(self.toolset_present, "toolset_present")
-        _require_literal(self.approval_mode, ("deny-untrusted",), "approval_mode")
-        _require_bool(self.sandbox, "sandbox")
-        _require_bool(self.immutable_surface, "immutable_surface")
-        _require_bool(self.compress_context, "compress_context")
-        _require_bool(self.ultracode, "ultracode")
-        for int_field in (
-            "max_turns",
-            "turn_timeout",
-            "stream_idle_timeout_secs",
-            "streaming_timeout_secs",
-            "empty_completion_threshold",
-            "driver_max_retries",
-            "compress_min_bytes",
-            "tool_result_cap",
-            "tool_result_head",
-            "tool_result_tail",
-            "tool_result_max_lines",
-            "retry_failure_threshold",
-            "no_progress_family_threshold",
-            "no_progress_family_window",
-            "no_progress_artifact_threshold",
-            "no_progress_suppression_window",
-            "max_subagents",
-            "llm_rpm",
-            "observation_update_bytes",
-            "observation_inline_bytes",
-            "observation_admission_bytes",
-            "vars_count",
-        ):
-            _require_nonnegative_int(getattr(self, int_field), int_field)
+
+
+_ConfigCheck = Callable[[Any, str], None]
+
+
+def _config_checks(schema: type[EffectiveRequestConfig]) -> tuple[tuple[str, _ConfigCheck], ...]:
+    """Compile closed-field validators once from their declared types.
+
+    Custom subclasses keep their own fields; admission checks only the nearest
+    built-in config. Telemetry separately rejects unknown concrete config types.
+    """
+    hints = get_type_hints(schema)
+    scalar_checks: dict[Any, _ConfigCheck] = {
+        bool: _require_bool, int: _require_nonnegative_int, float: _require_finite_float,
+    }
+    checks: list[tuple[str, _ConfigCheck]] = []
+    for config_field in fields(schema):
+        (value_type,) = (part for part in get_args(hints[config_field.name]) if part is not type(None))
+        check = (
+            partial(_require_literal, allowed=get_args(value_type))
+            if get_origin(value_type) is Literal else scalar_checks[value_type]
+        )
+        checks.append((config_field.name, check))
+    return tuple(checks)
+
+
+_CONFIG_CHECKS = {
+    schema: _config_checks(schema)
+    for schema in (
+        EffectiveRequestConfig, ClaudeRequestConfig, CodexRequestConfig, PiRequestConfig, OspreyRequestConfig,
+    )
+}
 
 
 @dataclass
@@ -709,11 +611,7 @@ class RequestEvent:
     reasoning_effort: str | None = None
     output_schema: dict[str, Any] | None = None
     timestamp: str = field(default_factory=now_iso)
-    # Keep P18 fields after timestamp so existing positional callers keep
-    # interpreting their arguments exactly as before. ``config`` holds one
-    # frozen closed dataclass — the common subset (``EffectiveRequestConfig``)
-    # or a backend-specific subclass of it (a discriminated union via
-    # inheritance per the plan; never ``dict[str, Any]``).
+    # Appended fields preserve positional construction through timestamp.
     config: EffectiveRequestConfig = field(default_factory=EffectiveRequestConfig)
     model_source: EvidenceSource | None = None
     provider_source: EvidenceSource | None = None
@@ -723,13 +621,7 @@ class RequestEvent:
 
 @dataclass
 class TextEvent:
-    """Agent text output.
-
-    Attributes:
-        text: The text emitted by the agent.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time
-            via ``now_iso()`` (Pitfall 2 single-source-of-truth).
-    """
+    """Agent text, timestamped at backend yield."""
 
     text: str
     timestamp: str = field(default_factory=now_iso)
@@ -737,12 +629,7 @@ class TextEvent:
 
 @dataclass
 class ThinkingEvent:
-    """Extended thinking / reasoning.
-
-    Attributes:
-        text: Reasoning content emitted by the agent.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
-    """
+    """Reasoning text, timestamped at backend yield."""
 
     text: str
     timestamp: str = field(default_factory=now_iso)
@@ -750,15 +637,7 @@ class ThinkingEvent:
 
 @dataclass
 class ToolStartEvent:
-    """Tool invocation started.
-
-    Attributes:
-        id: Tool call identifier (Claude block.id or Codex item.id /
-            synthesized UUID).
-        name: Tool function name.
-        input: Tool arguments dict; may be empty but is never None.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
-    """
+    """Tool call with native or synthesized id and non-null arguments."""
 
     id: str
     name: str
@@ -768,32 +647,17 @@ class ToolStartEvent:
 
 @dataclass
 class ToolResultEvent:
-    """Tool invocation completed.
+    """Tool completion correlated with ToolStartEvent.id.
 
-    Attributes:
-        id: Tool call identifier matching the prior ToolStartEvent.id.
-        output: Tool output as a string.
-        is_error: True if the tool reported an error.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
-        exit_code: Exit code as reported by the backend; None when the
-            backend has no structured exit code (Claude/Pi).
-        status: Backend-native status string (e.g. Codex's
-            "completed"/"declined"); None when unavailable.
-        duration_ms: Wall-clock duration in milliseconds; None when
-            unavailable.
-        cancelled: True if the backend reported the tool call as cancelled.
-        truncated: True if the backend marked the output as truncated.
-        All five are optional; they default to None/False for backends
-        without structured metadata (Claude/Pi).
+    Native exit/status/duration metadata stays None when unavailable; cancellation
+    and truncation flags default to False.
     """
 
     id: str
     output: str
     is_error: bool
     timestamp: str = field(default_factory=now_iso)
-    # Keep these after timestamp so existing positional ToolResultEvent
-    # callers continue to interpret their arguments up to is_error/timestamp
-    # as-is; the metadata fields are optional and defaulted.
+    # Optional metadata follows the original positional fields.
     exit_code: int | None = None
     status: str | None = None
     duration_ms: float | None = None
@@ -803,12 +667,7 @@ class ToolResultEvent:
 
 @dataclass
 class DiagnosticEvent:
-    """Backend parser or transport coverage evidence for the active invocation.
-
-    Diagnostics are recorder-only signals. The trajectory recorder applies the
-    backend-neutral JSON normalization and redaction boundary before persisting
-    any of these fields.
-    """
+    """Recorder-only parser/transport evidence, normalized and redacted before persistence."""
 
     code: str
     message: str
@@ -831,37 +690,12 @@ class ModelUsageTotals:
 
 @dataclass
 class CostEvent:
-    """Cost and usage information (end-of-call signal feeding FinalMetrics).
+    """Invocation billing totals; None means unavailable.
 
-    ``provider_name`` is the exposed native provider identity;
-    ``cache_creation_tokens`` is the cache-write subset of total input.
-    ``model_usage`` contains selected native per-model totals, not extra billing.
-
-    Attributes:
-        cost_usd: Total cost in USD; None when unavailable. Codex synthesizes
-            via the #61 price table (#194 reverses D-16); None only when the
-            model is unknown to the table.
-        input_tokens: Prompt tokens (None when unavailable).
-        output_tokens: Completion tokens (None when unavailable).
-        cached_tokens: Cache-read hit subset of input_tokens. input_tokens
-            is the total input (backends fold cache read+creation into it);
-            cached_tokens is the read subset, NOT added to input_tokens.
-            None when unavailable. Default ``None`` keeps existing
-            3-positional-arg call sites in ``backends/claude.py`` and
-            ``backends/codex.py`` valid until Plans 03/04 update them.
-        reasoning_tokens: Reasoning portion of output_tokens (subset, NOT
-            additive — Codex's ``accounting.rs`` already counts these
-            inside ``output_tokens``). Surfaces Codex's
-            ``reasoning_output_tokens`` for cost attribution / perf
-            observability (#192; openai/codex#26428 — count-only, no
-            reasoning *content* is emitted). ``None`` on Claude (reasoning
-            arrives via ThinkingEvent, a separate path) and when Codex
-            omits the field.
-        model_name: Real SDK model id observed during this call (e.g.
-            ``claude-opus-4-5-20250901``). ``None`` when unavailable; the
-            recorder uses it to upgrade a generic backend label
-            (``"claude"``, ``"codex"``, ``"osprey"``) to the actual model id.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    Cache reads/writes are subsets of total input, and reasoning tokens are a subset
+    of output. model_usage contains per-model attribution, not extra billing.
+    Native model identity upgrades generic recorder labels. cost_source distinguishes
+    provider totals from host price-table estimates; absent provenance makes no claim.
     """
 
     cost_usd: float | None
@@ -874,9 +708,7 @@ class CostEvent:
     provider_name: str | None = None
     cache_creation_tokens: int | None = None
     model_usage: dict[str, ModelUsageTotals] | None = None
-    # P18 Task 1 (additive): closed measurement provenance, generation
-    # correlation and cost provenance. ``None`` keeps every existing call
-    # site valid and means "not assessed", never a claim.
+    # Missing provenance means unassessed, never an inferred source.
     measurement_source: MeasurementSource | None = None
     generation_id: str | None = None
     cost_source: CostSource | None = None
@@ -884,50 +716,11 @@ class CostEvent:
 
 @dataclass
 class MetricsEvent:
-    """Per-step LLM token/cost usage.
+    """Turn usage correlated by message_id; Codex uses an empty id and invocation scope.
 
-    ``usage_scope`` distinguishes per-message usage from an invocation
-    aggregate (Codex); cache creation is a subset of total prompt tokens.
-    ``duration_ms`` and ``started_at`` are native backend timing, when exposed.
-
-    Emitted once per AssistantMessage by the Claude backend (keyed via
-    ``AssistantMessage.message_id``), and once per ``turn.completed`` by
-    the Codex backend (with empty ``message_id`` since Codex has no
-    per-message id). The recorder uses ``message_id`` to attach Metrics
-    to the correct agent Step (D-04, MAP-06).
-
-    Attributes:
-        message_id: Identifier matching the AssistantMessage that owns
-            this metric. Empty string for Codex (D-16).
-        prompt_tokens: Prompt tokens for this turn. REQUIRED per EVNT-02
-            (int, not Optional) — every AssistantMessage / turn.completed
-            carries it. Backends read the SDK key (Claude
-            ``usage["input_tokens"]``, Codex ``usage["input_tokens"]``)
-            and rename at the boundary.
-        completion_tokens: Completion tokens for this turn. REQUIRED per
-            EVNT-02 (int, not Optional). Backends read the SDK key
-            (Claude ``usage["output_tokens"]``, Codex
-            ``usage["output_tokens"]``) and rename at the boundary.
-        cached_tokens: Cache-read hit subset of ``prompt_tokens``
-            (None when unavailable). ``prompt_tokens`` is the total input
-            (backends fold cache read+creation into it); cached_tokens is
-            the read subset, NOT additive to ``prompt_tokens``.
-        cost_usd: Per-turn cost in USD (None when unavailable). Codex
-            synthesizes via the #61 price table (#194 reverses D-16); None
-            only when the model is unknown to the table.
-        reasoning_tokens: Reasoning portion of ``completion_tokens``
-            (subset, NOT additive — Codex's ``accounting.rs`` already
-            counts these inside ``output_tokens``). Surfaces Codex's
-            ``reasoning_output_tokens`` for cost attribution / perf
-            observability (#192; openai/codex#26428 — count-only, no
-            reasoning *content* is emitted). ``None`` on Claude (reasoning
-            arrives via ThinkingEvent, a separate path) and when Codex
-            omits the field.
-        model_name: Real SDK model id observed for this turn (e.g.
-            ``claude-opus-4-5-20250901``). ``None`` when unavailable;
-            recorder uses it to upgrade a generic backend label
-            (``"claude"``, ``"codex"``, ``"osprey"``) to the actual model id.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    Cache reads/writes are subsets of prompt tokens, and reasoning is a subset of
+    completion tokens. Native duration/start and model/provider identities are optional.
+    Measurement/cost provenance distinguishes native observations from estimates.
     """
 
     message_id: str
@@ -943,36 +736,18 @@ class MetricsEvent:
     cache_creation_tokens: int | None = None
     duration_ms: float | None = None
     started_at: str | None = None
-    # P18 Task 1 (additive): closed measurement provenance and generation
-    # correlation. ``None`` keeps every existing call site valid and means
-    # "not assessed", never a claim.
+    # Missing provenance means unassessed.
     measurement_source: MeasurementSource | None = None
     generation_id: str | None = None
 
 
 @dataclass
 class TurnEndEvent:
-    """Assistant-turn boundary signal.
-
-    Emitted by each backend at the end of an assistant "turn" — for
-    Claude, once per ``AssistantMessage``; for Codex, once per
-    ``item.completed`` of type ``agent_message``. The trajectory
-    recorder uses this to close its open Step so multi-turn invocations
-    are recorded as one Step per turn (instead of collapsing into a
-    single Step at invocation finish).
-
-    Attributes:
-        message_id: Correlator matching the message that ended this turn
-            (e.g. Claude's ``AssistantMessage.message_id``). Empty string
-            when the backend cannot supply one (Codex has no per-message
-            id surface — D-04 correlator unused for Codex).
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
-    """
+    """Close one assistant step; message_id is empty when the backend exposes none."""
 
     message_id: str = ""
     timestamp: str = field(default_factory=now_iso)
-    # P18 additions sit after the existing fields; every existing
-    # positional caller (message_id, timestamp) is unaffected.
+    # Preserve positional construction of message_id and timestamp.
     finish_reason: str | None = None
     model_name: str | None = None
     provider_name: str | None = None
@@ -1014,11 +789,7 @@ class ReasoningChoicePart:
 
 @dataclass(frozen=True)
 class ToolCallChoicePart:
-    """Ordered provider-choice tool-call part with exact call identity.
-
-    ``arguments`` is validated as a closed recursive JSON value at
-    construction; a non-JSON payload is rejected (never coerced).
-    """
+    """Sealed provider tool choice with admitted name and JSON arguments; never coerced."""
 
     call_id: str
     name: str
@@ -1041,14 +812,10 @@ AssistantChoicePart = TextChoicePart | ReasoningChoicePart | ToolCallChoicePart
 
 @dataclass
 class GenerationStartEvent:
-    """Generation started: host receipt of a provider generation boundary.
+    """Host receipt of a provider generation boundary, correlated by a host-local UUID.
 
-    ``generation_id`` is a host invocation-local correlation UUID — never a
-    provider identity. ``observed_at_unix_ns`` is the host receipt time only;
-    it is never relabeled as the provider request start. ``boundary_complete``
-    is False for a partial/missing boundary (e.g. an end without a start or a
-    synthetic error start) so downstream consumers can distinguish a complete
-    start/end pair from an explicit incomplete one.
+    The timestamp is not a claimed provider start. boundary_complete=False marks
+    synthetic/missing boundaries so consumers cannot infer a complete start/end pair.
     """
 
     generation_id: str
@@ -1059,16 +826,11 @@ class GenerationStartEvent:
 
 @dataclass
 class GenerationEndEvent:
-    """Generation ended: sealed provider choice plus lifecycle evidence.
+    """Seal ordered provider choice parts and generation lifecycle evidence.
 
-    ``native_started_at_unix_ms`` is the strict validated native Unix-ms
-    start from the completed provider message (``None`` when absent or
-    malformed — never clamped or guessed). ``ended_at_unix_ns`` is the host
-    receipt of the end boundary. ``end_source`` records which boundary
-    supplied the end: the host-observed ``message_end`` receipt, a native
-    end timestamp, or an explicit fallback. ``choice_parts`` is the ordered
-    provider choice sealed at this boundary; later tool execution links by
-    call ID but never authors or duplicates these parts.
+    The optional native start is validated Unix milliseconds; end time is host receipt
+    unless end_source says otherwise. Later tool execution links by call id and never
+    authors or duplicates choice parts. Provider response_id does not replace generation_id.
     """
 
     generation_id: str
@@ -1094,31 +856,16 @@ class ContinuationToken:
 
 @dataclass
 class ResultEvent:
-    """Terminal data, including native identity, finish reason and duration.
+    """Terminal metadata; a failed backend may emit it before raising.
 
-    A failed backend exposes known terminal data before raising; receiving
-    this event is not evidence that the enclosing invocation succeeded.
-    ``session_id`` is independent of whether a continuation token is requested.
-
-    Attributes:
-        structured_output: Structured result as emitted by the backend,
-            schema-validated (or salvage-checked) at the run_agent return
-            path when the caller opts in (``validate_structured_output``
-            True), or None. Callers that pass
-            ``validate_structured_output=False`` re-validate downstream.
-        continuation: Optional continuation token for multi-turn flows.
-        model_name: Real SDK model id observed for this invocation. Backends
-            should populate this when the model is only available from a
-            session-level terminal event rather than per-turn usage.
-        timestamp: ISO 8601 UTC timestamp populated at backend yield time.
+    run_agent validates or salvage-checks structured_output when enabled; callers
+    opting out validate downstream. session_id is independent of continuation requests.
     """
 
     structured_output: Any | None
     continuation: ContinuationToken | None
     timestamp: str = field(default_factory=now_iso)
-    # Keep this after timestamp so existing three-positional-argument
-    # ResultEvent callers continue to interpret their third argument as the
-    # timestamp.
+    # Preserve timestamp as the third positional argument.
     model_name: str | None = None
     provider_name: str | None = None
     session_id: str | None = None
@@ -1157,61 +904,22 @@ class AgentEventStream(AsyncIterator[AgentEvent], Protocol):
 
 
 class Backend(Protocol):
-    """Protocol for agent backends.
+    """Yield normalized events from execute; keep invocation resources independent.
 
-    Each backend yields a stream of AgentEvent instances from execute().
-
-    Optional extension: backends may expose ``fanout_concurrency: int`` as a
-    scheduling hint for orchestrator-managed parallel calls. Callers combine
-    the hint with their workflow ceiling via
-    :func:`effective_fanout_concurrency`; absent hints fall back to four.
-
-    Optional extension: backends may expose ``concise_fix_prompts: bool`` to
-    request verbosity-suppressing fix-phase prompts (set True for pi/GLM, which
-    produces verbose reasoning). When absent, the caller falls back to False via
-    ``getattr(backend, "concise_fix_prompts", False)``.
-
-    Optional extension: backends may expose ``read_only_disposable_clone: bool``
-    to indicate the backend runs against a disposable read-only checkout (Codex).
-    Such backends get over-budget diffs inlined truncated to the inline budget
-    and exploration summaries inlined instead of file pointers, and their
-    correction-loop rebuilds are framed with the untrusted-content boundary.
-    When absent, the caller falls back to False via
-    ``getattr(backend, "read_only_disposable_clone", False)``.
-
-    Optional extension: backends may expose ``audit_root_isolation`` and
-    ``audit_root`` when they mediate every filesystem-capable tool against one
-    exact improve audit snapshot. This tool-layer capability is separate from
-    ``read_only_disposable_clone`` and does not claim an OS/container sandbox.
-    Callers must compare the capability to :data:`AUDIT_ROOT_ISOLATION` and
-    the bound root by canonical identity; missing or different values fail
-    closed.
-
-    Optional extension: ``supports_finalization = True`` declares support for
-    an invocation-local ``execute(finalization=True)`` keyword. Callers must
-    gate that keyword on the capability; Osprey and custom backends keep their
-    existing interface. Supported adapters lower reasoning and apply only
-    their native supported tool controls without mutating shared settings.
-    Codex still needs the host zero-tool guard; its sandbox permits reads.
-
-    Optional extension: ``supports_tools_disabled = True`` declares native
-    invocation-local ``execute(tools_disabled=True)`` support that removes tools
-    without lowering reasoning or replacing the review task with finalization.
-    Callers must gate this request on the capability; it is not interchangeable
-    with a host tool-call budget or the backend's read-only profile.
-
-    Optional extension: backends may expose ``reasoning_effort``, the per-phase
-    reasoning level resolved by ``daydream.runner._resolved_reasoning_effort``
-    and applied through the driver's native knob (Claude
-    ``ClaudeAgentOptions.effort``, Codex ``-c model_reasoning_effort=``, Pi
-    ``--thinking``). All three shipped backends set it; it stays off the
-    protocol because each narrows it to its own driver's literal vocabulary.
-    Read it via ``getattr(backend, "reasoning_effort", None)``. It is set at
-    construction rather than per ``execute`` call because a backend instance is
-    already cached per resolved ``(kind, model, reasoning_effort, audit_root)``
-    tuple, so one instance serves exactly one effort level and audit boundary.
-    ``None`` means no source supplied one and the driver applies its own ambient
-    default.
+    Optional capabilities (read via getattr):
+    - fanout_concurrency: scheduling hint, default 4; capped by the workflow.
+    - concise_fix_prompts: suppress verbose fix reasoning, default False.
+    - read_only_disposable_clone: inline bounded diffs and exploration context for
+      disposable checkouts; correction prompts retain the untrusted-content boundary.
+    - audit_root_isolation/audit_root: tool-layer confinement to an exact Improve
+      snapshot. Callers require AUDIT_ROOT_ISOLATION and canonical root equality;
+      this does not claim an OS sandbox.
+    - supports_finalization: permits invocation-local finalization=True with reduced
+      reasoning and native tool controls. Codex still requires a host zero-tool guard.
+    - supports_tools_disabled: removes tools without lowering reasoning or changing
+      the task. Distinct from finalization, read-only mode, and tool-call budgets.
+    - reasoning_effort: native level fixed at construction; None defers to the driver.
+      Backend instances are cached by kind, model, effort, and audit root.
     """
 
     model: str
@@ -1227,36 +935,17 @@ class Backend(Protocol):
         read_only: bool = False,
         persist_session: bool = True,
     ) -> AgentEventStream:
-        """Yield AgentEvents for *prompt*.
+        """Yield events while owning this invocation's stream resources.
 
-        Args:
-            read_only: When True, the backend enforces a non-mutating tool
-                profile at the tool layer (Claude via a PreToolUse guard hook)
-                so the agent can inspect history but cannot write/edit/delete
-                or mutate the working tree. The Codex backend combines its
-                ``--sandbox read-only`` with a disposable standalone clone
-                whenever *cwd* is a Git worktree root: the subprocess runs in
-                a clone that mirrors HEAD, the staged index, and tracked /
-                nonignored untracked files with no source remote, and the
-                clone is deleted after the subprocess exits. Codex's sandbox
-                restricts filesystem writes but not git index/object-store
-                operations, so the clone is what makes a commit update only
-                the disposable clone's refs and index — never the caller's
-                HEAD, staged index, refs, or remotes, which are unreachable
-                via any path the subprocess is given (its argv, stdin, env,
-                and cwd); a model that independently discovers the source
-                path could still write to its refs. Any other *cwd* — one
-                outside a Git worktree, or inside a worktree but not at its
-                root — uses the read-only sandbox in place. Callers select
-                this flag explicitly per call site: the diagnostic subagents
-                (setup-investigator, recommendation-verifier), the failure
-                summarizer, and the exploration and repository
-                reconnaissance specialists (pre_scan, repo_scan, improve
-                recon) pass True, while mutating phases keep the False
-                default.
-            persist_session: When False, request an invocation that leaves no
-                resumable backend session. Backends without persisted sessions
-                accept and ignore this option.
+        read_only enables a non-mutating tool profile. Codex additionally clones Git
+        worktree roots, including staged/tracked/nonignored files but no source remote,
+        so Git metadata changes affect the disposable clone. Its filesystem sandbox alone
+        does not protect Git refs. The source path is excluded from argv/stdin/env/cwd;
+        an independently discovered source path remains a limitation. Non-root cwd values
+        use the sandbox in place. Callers explicitly choose read-only diagnostic/recon
+        work; mutating phases retain the default.
+
+        persist_session=False requests no resumable session; stateless backends ignore it.
         """
         ...
 
@@ -1270,13 +959,7 @@ class Backend(Protocol):
 
 
 def resolve_fanout_concurrency(env_var: str, default: int) -> int:
-    """Read a backend's fan-out hint from *env_var*, falling back to *default*.
-
-    The right value is a property of the endpoint serving the turns, not of the
-    backend, which is why it is an environment override rather than a constant.
-    A non-integer or non-positive value warns and falls back rather than failing
-    the run: a malformed knob should not cost a review.
-    """
+    """Read a positive endpoint concurrency hint; warn and use the default if malformed."""
     return _parsed_positive_int(os.environ, env_var, default)
 
 
@@ -1299,30 +982,11 @@ def create_backend(
     audit_outward_symlinks: frozenset[Path] = frozenset(),
     execution_input: BackendExecutionInput | None = None,
 ) -> Backend:
-    """Create a backend by name.
+    """Construct a backend with explicit model, effort, and execution settings.
 
-    Args:
-        name: Backend name ("claude", "codex", "pi", or "osprey").
-        model: Optional model override. Claude and Codex apply their built-in
-            defaults here. Pi receives ``None`` unchanged so its own configured
-            default can win before Pi's GLM fallback is selected.
-        cwd: Target workspace used to resolve Pi's configured default model.
-        reasoning_effort: Optional reasoning-effort override (one of
-            ``low``, ``medium``, ``high``, ``xhigh``, ``max``). Every backend applies
-            it through its own native knob: Claude via
-            ``ClaudeAgentOptions.effort``, Codex via
-            ``-c model_reasoning_effort=...``, Pi via ``--thinking``.
-        audit_root: Exact standalone improve snapshot to which every exposed
-            filesystem-capable tool must be confined. Currently supported only
-            by Claude.
-        audit_outward_symlinks: Lexical paths of snapshot symlinks whose
-            targets resolve outside ``audit_root``.
-
-    Returns:
-        A Backend instance whose ``.model`` attribute is a non-empty string.
-
-    Raises:
-        ValueError: If the backend name is unknown.
+    Claude/Codex apply built-in models; Pi resolves its configured model before its
+    fallback. Effort uses each driver's native control. Only Claude supports an exact
+    audit_root with lexical outward-symlink restrictions. Unknown names raise ValueError.
     """
     from daydream.config import DEFAULT_CLAUDE_MODEL, DEFAULT_CODEX_MODEL
 

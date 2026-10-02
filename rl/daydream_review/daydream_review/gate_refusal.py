@@ -1,12 +1,6 @@
-"""Stage-0 gate refusal (M4): a Stage-3 rollout set may not start without gate evidence.
-
-The offline Stage-0 gate (``daydream/training/gate.py``) validates the learned
-outcome model on a frozen held-out split and writes a ``GateReport``. Before
-any rollout can be scheduled, the taskset load path re-reads that report here,
-unconditionally, and refuses closed on any doubt: a missing file, an
-unreadable payload, or a report that did not pass all stop the run with a
-:class:`Stage0GateRefused`. There is no flag, no bypass, and no
-default-to-allowed branch — an unvalidated reward model never trains a policy.
+"""Stage-3 taskset loading requires a passed Stage-0 held-out gate report. Re-read it unconditionally
+before scheduling: missing, unreadable, or failed reports raise Stage0GateRefused. No flag or
+default-allow path may admit an unvalidated reward model.
 """
 
 from __future__ import annotations
@@ -23,20 +17,9 @@ class Stage0GateRefused(ValueError):
 
 
 def require_stage0_gate(gate_report_path: Path) -> dict[str, Any]:
-    """Read and validate the Stage-0 gate report at *gate_report_path*.
-
-    Args:
-        gate_report_path: Path to a ``GateReport.to_dict()`` payload written by
-            the Stage-0 offline gate.
-
-    Returns:
-        The parsed gate report (so the caller can stamp provenance, e.g. the
-        ``evidence_digest``, into run artifacts).
-
-    Raises:
-        Stage0GateRefused: When the file is missing, unreadable or unparseable,
-            or when the report does not record ``passed: true``. The message
-            names the reason and the report path.
+    """Read a GateReport.to_dict payload and return it for provenance stamping. Raise Stage0GateRefused
+    for missing, unreadable, unparseable, or non-passed reports; diagnostics name the path and
+    reason.
     """
     if not gate_report_path.is_file():
         raise Stage0GateRefused(
@@ -61,25 +44,12 @@ def require_stage0_gate(gate_report_path: Path) -> dict[str, Any]:
 
 
 def require_outcome_model_bound(gate_report: dict[str, Any], outcome_model_path: Path) -> None:
-    """Bind the Stage-0 outcome model checkpoint to the passed gate report (M4).
+    """Require the exact OutcomeModel.state_dict checkpoint evaluated by the passed gate. Recompute
+    evidence_digest from checkpoint split_digest/model_fingerprint and report thresholds,
+    held_out_rows, separation, calibration, and accepted_ratio.
 
-    The gate's ``evidence_digest`` covers exactly ``{split_digest,
-    model_fingerprint, thresholds, held_out_rows, separation, calibration,
-    accepted_ratio}`` (``daydream/training/gate.py``): the first two come from
-    the checkpoint state, the rest are the report's clear-text measurements, so
-    the digest is recomputable at load and must match. A passed report plus an
-    unrelated checkpoint must not cross the Stage-3 boundary — only the exact
-    model the gate evaluated may schedule rollouts.
-
-    Args:
-        gate_report: The passed report returned by :func:`require_stage0_gate`.
-        outcome_model_path: Path to the Stage-0 outcome model checkpoint
-            (``OutcomeModel.state_dict()`` payload).
-
-    Raises:
-        Stage0GateRefused: When the checkpoint is missing or unparseable, when
-            the report lacks the recomputable measurements, or when the
-            recomputed digest does not equal the report's ``evidence_digest``.
+    Raise Stage0GateRefused for a missing/unparseable checkpoint, absent report measurements, or a
+    mismatched digest; a passed report cannot authorize an unrelated model.
     """
     if not outcome_model_path.is_file():
         raise Stage0GateRefused(

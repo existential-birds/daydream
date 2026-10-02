@@ -23,16 +23,7 @@ def _docker_ok() -> _pkg.DockerNetworkPolicyCapability:
 
 @pytest.fixture(autouse=True)
 def _stub_harbor_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep the run-supervisor suite hermetic without a Harbor install.
-
-    The supervisor's production path only reads ``importlib.metadata.version
-    ("harbor")`` / ``package.resolve_harbor()`` after ``_preflight`` has already
-    confirmed Harbor is present. These unit tests exercise the receipt and gate
-    logic directly, so they must not require the optional ``[benchmark]`` extra
-    (Harbor is only installed when that extra is enabled — e.g. the review VMs
-    — but the CI ``check`` job installs base deps only). Stub the Harbor
-    environment so the suite stays hermetic.
-    """
+    """Supply Harbor discovery for receipt/gate tests without requiring the optional extra."""
     real_version = importlib.metadata.version
 
     def _version(dist: str) -> Any:
@@ -82,13 +73,7 @@ def _seed_compiled_lock(ws: Path, wheel: Any=_WHEEL) -> None:
 
 
 def _seed_compiled_task(ws: Path, *, reviewer: Any, judge: Any) -> None:
-    """Write the compiled task.toml egress policy Harbor will enforce.
-
-    Mirrors what ``compile_workspace`` threads into ``harbor/case-*/task.toml``
-    (reviewer -> ``[agent].allowed_hosts``, judge -> ``[verifier.environment].allowed_hosts``)
-    so the preflight, which now reads the compiled tree (not raw benchmark.yaml),
-    has the same artifact Harbor executes.
-    """
+    """Write reviewer and verifier egress rules into the task.toml that Harbor executes."""
     case = ws / "harbor" / "case-a"
     case.mkdir(parents=True, exist_ok=True)
     (case / "task.toml").write_text(
@@ -141,8 +126,6 @@ def test_preflight_requires_explicit_judge_endpoint(tmp_path: Path) -> None:
     assert any("missing DAYDREAM_JUDGE_BASE_URL" in error for error in errs)
 
 def test_preflight_claude_cli_judge_needs_no_base_url(tmp_path: Path) -> None:
-    """claude-cli resolves its judge host (api.anthropic.com) without a base URL."""
-
     ws = _ws(tmp_path, judge_allowed_hosts=["api.anthropic.com"])
     errs = run_mod._preflight(
         ws, oracle=True, env=_env(DAYDREAM_JUDGE_PROVIDER="claude-cli", DAYDREAM_JUDGE_BASE_URL=None),
@@ -253,12 +236,9 @@ def _compiled_lock_sha(ws: Path) -> str:
 def _reward_spawn(ws: Path, *, reward: float = 1.0, candidate_count: int = 1, capture: dict[str, Any] | None = None,
     returncode: int = 0,
 ) -> Any:
-    """Build a hermetic Harbor ``spawn`` callable that records score evidence.
+    """Write fake verifier scores under the job directory recorded before spawn.
 
-    ``run_run`` writes the ledger (with the fresh uuid4 job dir) before
-    spawning, so the fake reads that recorded ``job_dir`` and writes
-    ``<trial>/verifier/reward.json`` exactly as a real verifier would. Tests
-    that assert the spawn's ``cwd``/``args``/``env`` pass ``capture``.
+    Optionally capture the supervisor's command, environment, and working directory.
     """
     def spawn(cmd: Any, *, cwd: Any, env: Any) -> dict[str, Any]:
         if capture is not None:

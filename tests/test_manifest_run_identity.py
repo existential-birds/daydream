@@ -10,13 +10,14 @@ from typing import Any
 
 import pytest
 
-from daydream import git_ops, runner
+from daydream import git_ops, run_artifacts, runner
 from daydream.backends import AgentEvent, BackendExecutionInput, MetricsEvent, ResultEvent, TextEvent
 from daydream.backends.pi import PiBackend
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.config_file import DaydreamFileConfig
 from daydream.github_app import GitHubExecutionInput
 from daydream.review_profile import ProfileError
+from daydream.run_config import RunConfig
 from daydream.run_snapshot import ManifestRunIdentity
 from tests.conftest import ExtDir
 from tests.harness.backend import ScriptedBackend
@@ -76,7 +77,7 @@ async def test_runner_archives_identity_before_model_mutates_live_policy(
 ) -> None:
     _install_probe(ext_dir)
     monkeypatch.delenv("DAYDREAM_TRAJECTORY_HUB_REPO", raising=False)
-    config = runner.RunConfig(
+    config = RunConfig(
         target=str(multi_stack_target), base="main", cleanup=False, non_interactive=True, archive=True, run_eval=False,
         backend="codex" if cli_override else None, model="cli-model" if cli_override else None,
         pr_number=7, pr_repo="Owner/Repo", file_config=DaydreamFileConfig(backend="claude", model="file-global-model",
@@ -88,14 +89,14 @@ async def test_runner_archives_identity_before_model_mutates_live_policy(
     observed_profile: dict[str, Any] = {}
     calls: list[tuple[str, str | None]] = []
     captured: list[ManifestRunIdentity] = []
-    capture_identity = runner.capture_manifest_run_identity
+    capture_identity = run_artifacts.capture_manifest_run_identity
 
     def observe_capture(*args: Any, **kwargs: Any) -> ManifestRunIdentity:
         identity = capture_identity(*args, **kwargs)
         captured.append(identity)
         return identity
 
-    monkeypatch.setattr(runner, "capture_manifest_run_identity", observe_capture)
+    monkeypatch.setattr(run_artifacts, "capture_manifest_run_identity", observe_capture)
 
     def mutate() -> None:
         if observed_profile:
@@ -190,7 +191,7 @@ async def test_runner_captures_pi_default_from_owned_execution_before_settings_c
             yield event
 
     monkeypatch.setattr(PiBackend, "execute", execute)
-    assert await runner.run(runner.RunConfig(target=str(multi_stack_target), base="main", backend="pi",
+    assert await runner.run(RunConfig(target=str(multi_stack_target), base="main", backend="pi",
             cleanup=False, non_interactive=True, archive=True, run_eval=False, file_config=DaydreamFileConfig(),
         ), execution=execution,
     ) == 0
@@ -216,7 +217,7 @@ async def test_runner_rejects_invalid_profile_before_recorder_or_backend(
     archives_before = set((archive_dir / "runs").glob("*/manifest.json"))
     trajectory_path = tmp_path / "invalid-profile-trajectory.json"
     with pytest.raises(ProfileError, match="invalid review profile") as failure:
-        await runner.run(runner.RunConfig(target=str(multi_stack_target), base="main", flow_name=flow,
+        await runner.run(RunConfig(target=str(multi_stack_target), base="main", flow_name=flow,
             cleanup=False, non_interactive=True, archive=True, run_eval=False,
             file_config=DaydreamFileConfig(), review_profile_path=bad_profile, trajectory_path=trajectory_path,
         ))

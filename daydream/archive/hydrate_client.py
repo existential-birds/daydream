@@ -1,9 +1,4 @@
-"""In-memory Hub double for offline hydration tests (issue #982).
-
-Implements the :class:`~daydream.archive.hydrate.HubClient` protocol against a
-plain ``dict[str, bytes]`` file tree. Kept in-package so integration tests and
-future tooling share one fake; production modules must never import it.
-"""
+"""In-memory Hub protocol double for offline tests; production modules must not import it."""
 
 from __future__ import annotations
 
@@ -102,13 +97,7 @@ class FakeHub:
         return tree[path_in_repo]
 
     def mutate_bundle(self, revision: str, session_id: str, content: bytes) -> None:
-        """Re-commit one bundle file at ``revision`` with new content (test setup seam).
-
-        Used to stage an identity collision: same session identity, different
-        bytes. The pinned revision's tree is updated in place, so a client
-        downloading that revision observes the mutation while older pinned
-        revisions remain untouched.
-        """
+        """Mutate one pinned revision for collision tests, leaving older revision trees untouched."""
         path = f"{session_id}/manifest.json"
         if path not in self.files:
             # Keep the test double useful for legacy bundles/<id>/ snapshots.

@@ -1,9 +1,7 @@
-"""Tests for ``daydream corpus calibrate-reward`` CLI registration (issue #999, M1).
+"""Test calibration CLI registration and real tampered-digest refusal.
 
-Drives ``cli.main`` through ``sys.argv`` (the production entrypoint),
-mocking only the ``run_calibration`` seam. The validation-failure path runs
-the real fail-closed gates against the checked-in tampered-digest fixture
-variant and asserts the nonzero exit plus the gate message on stderr.
+Mock only run_calibration on success; invalid fixtures must exit nonzero with
+the gate message on stderr.
 """
 
 from __future__ import annotations
@@ -40,12 +38,11 @@ def test_corpus_calibrate_routes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     assert cfg.out_dir == tmp_path / "out"
 
 def test_calibrate_validation_failure_exits_nonzero(capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
-    # variants/digest holds a tampered corpus.jsonl against a pristine
-    # SHA256SUMS manifest: the real digest gate must fire before anything else.
+    # Tamper with corpus content while retaining pristine SHA256SUMS; the digest gate must fire
+    # first.
     rc = _run_main(_base_argv(tmp_path, corpus_dir="variants/digest"))
     assert rc == 1
-    # print_error renders a rich panel on the shared console (stdout);
-    # assert the gate message on the captured output stream.
+    # Rich error panels are written to stdout.
     captured = capsys.readouterr()
     assert "digest mismatch" in captured.out + captured.err
     assert not (tmp_path / "out").exists()
