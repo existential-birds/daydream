@@ -253,8 +253,7 @@ def _in_hunk(line: int, hunks: list[tuple[int, int]]) -> bool:
 
 
 def resolve_line(
-    target_dir: Path,
-    head_sha: str,
+    lines: list[str],
     issue: ParsedIssue,
     hunks: list[tuple[int, int]] | None = None,
 ) -> int | None:
@@ -262,12 +261,7 @@ def resolve_line(
 
     Out-of-hunk hints require an anchor within five lines. Whole-file search prefers
     in-hunk matches, using an out-of-hunk match only when no changed-line match exists.
-    Missing files, empty files, and absent anchors return None."""
-    try:
-        raw = git_ops.show(target_dir, head_sha, issue.path)
-    except GitError:
-        return None
-    lines = raw.decode(errors="replace").splitlines()
+    Empty content and absent anchors return None."""
     if not lines:
         return None
 
@@ -302,91 +296,12 @@ def resolve_line(
     return out_of_hunk
 
 
-# Splits a unified diff on each `diff --git` header so we can pick out the
-# block for a single file from a full-PR diff.
-_DIFF_BLOCK_SPLIT = re.compile(r"(?m)^(?=diff --git )")
-
 # Max distance (in lines) from a diff-hunk boundary that still counts as
 # "within" the hunk for PR-comment placement.
 HUNK_TOLERANCE: int = 3
 
 
-def file_hunks(
-    target_dir: Path,
-    base_sha: str,
-    head_sha: str,
-    path: str,
-    *,
-    pr_number: int | None = None,
-    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> list[tuple[int, int]]:
-    """Read inclusive head-side hunk ranges, falling back to gh for unreachable bases.
-
-    The GitHub fallback selects this path's block from the full PR diff."""
-    try:
-        diff_text = git_ops.diff_paths(
-            target_dir, base_sha, head_sha, [path], unified=3, merge_base_diff=False
-        )
-    except GitError:
-        diff_text = (
-            _gh_pr_diff_for_path(target_dir, pr_number, path, auth=auth)
-            if pr_number is not None else ""
-        )
-    return _parse_hunks(diff_text)
-
-
-def _gh_pr_diff_for_path(
-    target_dir: Path,
-    pr_number: int,
-    path: str,
-    *,
-    auth: GitHubAuth = INHERIT_GITHUB_AUTH,
-) -> str:
-    """Fetch the PR's full diff via `gh pr diff` and return just the block for `path`."""
-    try:
-        full_diff = git_ops.gh_pr_diff(target_dir, pr_number, auth=auth)
-    except GitError:
-        return ""
-    # Pick the `diff --git a/<path> b/<path>` block.
-    needle_a = f"a/{path} "
-    needle_b = f"b/{path}\n"
-    for block in _DIFF_BLOCK_SPLIT.split(full_diff):
-        if not block.startswith("diff --git "):
-            continue
-        header_line = block.split("\n", 1)[0]
-        if (
-            needle_a in header_line
-            or header_line.endswith(f"b/{path}")
-            or needle_b in header_line
-        ):
-            return block
-    return ""
-
-
 _DIFF_GIT_HEADER = re.compile(r"(?m)^diff --git a/.+ b/(.+)$")
-
-
-def pr_changed_files(
-    target_dir: Path, pr: PRInfo, *, auth: GitHubAuth = INHERIT_GITHUB_AUTH
-) -> set[str]:
-    """Read head-side changed paths, falling back to gh when local diff is unavailable.
-
-    This set gates file comments: GitHub rejects paths outside the PR diff."""
-    changed = set(git_ops.diff_name_only(target_dir, pr.base_sha, pr.head_sha))
-    if changed:
-        return changed
-    try:
-        full_diff = git_ops.gh_pr_diff(target_dir, pr.number, auth=auth)
-    except GitError:
-        return set()
-    return set(_DIFF_GIT_HEADER.findall(full_diff))
-
-
-def _parse_hunks(diff_text: str) -> list[tuple[int, int]]:
-    """Read inclusive head-side ranges using the shared unified-diff parser."""
-    from daydream.hunk_index import head_side_ranges, parse_hunks
-
-    return head_side_ranges(parse_hunks(diff_text))
 
 
 def snap_to_hunk(
@@ -429,14 +344,27 @@ def classify(
     thread for the labeler. Inline relocation annotates the caller-owned issue body."""
     renderers = renderers if renderers is not None else resolve_review_renderers(get_registry())
     out = ClassifiedIssues()
+    from daydream.hunk_index import head_side_ranges, head_side_ranges_by_file, parse_hunks
+
+    remote_diff: str | None = None
+
+    def _read_remote_diff() -> str:
+        nonlocal remote_diff
+        if remote_diff is None:
+            try:
+                remote_diff = git_ops.gh_pr_diff(target_dir, pr.number, auth=auth)
+            except GitError:
+                return ""
+        return remote_diff
+
     hunks_cache: dict[str, list[tuple[int, int]]] = {}
     if snapshot_diff is not None:
-        from daydream.hunk_index import head_side_ranges_by_file, parse_hunks
-
         hunks_cache = head_side_ranges_by_file(parse_hunks(snapshot_diff))
         changed_files = set(git_ops.diff_name_only_strict(target_dir, pr.base_sha, pr.head_sha))
     else:
-        changed_files = pr_changed_files(target_dir, pr, auth=auth)
+        changed_files = set(git_ops.diff_name_only(target_dir, pr.base_sha, pr.head_sha))
+        if not changed_files:
+            changed_files = set(_DIFF_GIT_HEADER.findall(_read_remote_diff()))
 
     def _unplaced(issue: ParsedIssue) -> None:
         if issue.path in changed_files:
@@ -448,31 +376,37 @@ def classify(
         if issue.is_cross_stack:
             _unplaced(issue)
             continue
-        # Skip the file_hunks() diff lookup -- a git-diff subprocess call with
-        # a gh-pr-diff network fallback on GitError -- for a path that cannot
-        # resolve at head_sha at all (e.g. deleted or renamed away in this
-        # PR). resolve_line would reject such a path via this same git show
-        # regardless of what hunks it was handed, so there is nothing for the
-        # hunk lookup to buy here.
+        # Missing/deleted head paths require no hunk read or remote fallback.
         try:
-            git_ops.show(target_dir, pr.head_sha, issue.path)
+            raw = git_ops.show(target_dir, pr.head_sha, issue.path)
+            lines = raw.decode(errors="replace").splitlines()
         except GitError:
             _unplaced(issue)
             continue
-        # The hunk ranges are resolved BEFORE line resolution, not after: they
-        # are what lets `resolve_line` pass an already-valid in-hunk line
-        # through untouched instead of re-deriving it from prose (issue #1102).
         if issue.path not in hunks_cache:
-            hunks_cache[issue.path] = ([] if snapshot_diff is not None else file_hunks(
-                target_dir,
-                pr.base_sha,
-                pr.head_sha,
-                issue.path,
-                pr_number=pr.number,
-                auth=auth,
-            ))
+            if snapshot_diff is not None:
+                hunks_cache[issue.path] = []
+            else:
+                try:
+                    local_diff = git_ops.diff_paths(
+                        target_dir, pr.base_sha, pr.head_sha, [issue.path],
+                        unified=3, merge_base_diff=False,
+                    )
+                except GitError:
+                    # Select the first matching Git header before parsing. A malformed
+                    # unrelated file must not prevent placement in this file.
+                    local_diff = ""
+                    for block in re.split(r"(?m)^(?=diff --git )", _read_remote_diff()):
+                        header = block.split("\n", 1)[0]
+                        if header.startswith("diff --git ") and (
+                            f"a/{issue.path} " in header
+                            or header.endswith(f"b/{issue.path}")
+                        ):
+                            local_diff = block
+                            break
+                hunks_cache[issue.path] = head_side_ranges(parse_hunks(local_diff))
         hunks = hunks_cache[issue.path]
-        line = resolve_line(target_dir, pr.head_sha, issue, hunks)
+        line = resolve_line(lines, issue, hunks)
         if line is None:
             _unplaced(issue)
             continue

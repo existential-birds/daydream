@@ -46,8 +46,6 @@ from daydream.archive.hydrate_stage import (
     ingest_bundles as ingest_bundles,
 )
 from daydream.archive.hydrate_types import (
-    DedupeResult as DedupeResult,
-    DownloadResult as DownloadResult,
     HubClient as HubClient,
     HubConcurrentUpdateError as HubConcurrentUpdateError,
     HubDownloadError as HubDownloadError,
@@ -55,7 +53,6 @@ from daydream.archive.hydrate_types import (
     HydrateHubConfig as HydrateHubConfig,
     HydrateSummary as HydrateSummary,
     HydrationError as HydrationError,
-    IngestResult as IngestResult,
     MovingBranchError as MovingBranchError,
     NoSessionCandidatesError as NoSessionCandidatesError,
     PublicDestinationError as PublicDestinationError,

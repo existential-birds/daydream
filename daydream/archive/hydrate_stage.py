@@ -24,10 +24,8 @@ from daydream.archive.hydrate_rules import (
     REASON_CODE_UNTRUSTED_REMOTE_HOST,
 )
 from daydream.archive.hydrate_types import (
-    DownloadResult,
     HubClient,
     HydrationError,
-    IngestResult,
     NoSessionCandidatesError,
     StageError,
 )
@@ -43,7 +41,7 @@ def download_snapshot(
     revision: str,
     stage_dir: Path,
     expect: dict[str, str] | None = None,
-) -> DownloadResult:
+) -> None:
     """Download a pinned snapshot into ``stage_dir/<revision>/bundles/<session-id>``."""
     revision = str(revision)
     root = stage_dir / revision
@@ -74,9 +72,6 @@ def download_snapshot(
                 f"bundles/<session-id>/...; {details}"
             )
         )
-    downloaded = 0
-    skipped = 0
-    digests: dict[str, str] = {}
     artifacts: list[dict[str, Any]] = []
 
     for normalized, source_relpath in discovery.normalized_paths:
@@ -87,8 +82,6 @@ def download_snapshot(
                 existing = hashlib.sha256(target.read_bytes()).hexdigest()
                 record_sha = records.get(normalized, {}).get("sha256")
                 if expected_sha in (None, existing) and record_sha in (None, existing):
-                    digests[normalized] = existing
-                    skipped += 1
                     artifacts.append(
                         {
                             **records.get(normalized, {}),
@@ -114,8 +107,6 @@ def download_snapshot(
         except OSError as exc:
             tmp.unlink(missing_ok=True)
             raise StageError(redact_text(f"write failed for {normalized!r}: {exc}")) from exc
-        downloaded += 1
-        digests[normalized] = sha
         artifacts.append(
             {
                 "relpath": normalized,
@@ -142,14 +133,6 @@ def download_snapshot(
             },
             indent=2,
         )
-    )
-    return DownloadResult(
-        downloaded=downloaded,
-        skipped=skipped,
-        digests=digests,
-        discovered=len(discovery.sessions),
-        run_shaped_manifests=discovery.run_shaped_manifests,
-        incomplete_manifests=discovery.incomplete_manifests,
     )
 
 
@@ -251,7 +234,7 @@ def _discovered_session_ids(stage: Path, revision: str) -> list[str] | None:
     return list(candidates)
 
 
-def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
+def ingest_bundles(stage: Path, *, revision: str) -> None:
     """Admit discovered bundles through the shared import and sanitization gates."""
     bundles_root = stage / "downloads" / str(revision) / "bundles"
     discovered_ids = _discovered_session_ids(stage, revision)
@@ -260,30 +243,32 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
         if discovered_ids is None
         else [(session_id, bundles_root / session_id) for session_id in discovered_ids]
     )
-    results: list[IngestResult] = []
+    results: list[dict[str, str | None]] = []
     for name, bundle_dir in bundle_items:
         data = _read_manifest_dict(bundle_dir)
+        session_id = str(data.get("session_id") or name) if data is not None else name
+        result: dict[str, str | None] = {
+            "session_id": session_id, "status": "quarantined", "reason_code": None,
+        }
+        results.append(result)
         if data is None:
-            results.append(IngestResult(name, "quarantined", REASON_CODE_BUNDLE_UNREADABLE))
+            result["reason_code"] = REASON_CODE_BUNDLE_UNREADABLE
             continue
-        session_id = str(data.get("session_id") or name)
         if not _is_bare_segment(session_id):
             # M4: the manifest's session id is Hub-provided path data; reject
             # traversal/absolute ids before any write — the sanitize gate
             # (which mkdirs from the session id) never sees them.
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_PATH_TRAVERSAL))
+            result["reason_code"] = REASON_CODE_PATH_TRAVERSAL
             continue
         has_url, identity, _canonical = _manifest_remote_fields(data)
         if has_url and identity is None:
             # Non-allowlisted host: rejected as admission data before any
             # gate work; the raw copy stays in downloads, never indexed.
-            results.append(
-                IngestResult(session_id, "quarantined", REASON_CODE_UNTRUSTED_REMOTE_HOST)
-            )
+            result["reason_code"] = REASON_CODE_UNTRUSTED_REMOTE_HOST
             continue
         gate = sanitize.import_bundle(bundle_dir, stage)
         if gate.quarantined or not gate.imported:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
+            result["reason_code"] = REASON_CODE_SECRETS_SCAN_DIRTY
             continue
         # Task 0B constraint: hydrated staging bundles must exclude .git (the
         # raw download copy is daydream-staged data, safe to prune locally).
@@ -293,26 +278,22 @@ def ingest_bundles(stage: Path, *, revision: str) -> list[IngestResult]:
         try:
             sanitized = sanitize.sanitize_bundle(bundle_dir, stage)
         except Exception:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SANITIZE_FAILED))
+            result["reason_code"] = REASON_CODE_SANITIZE_FAILED
             continue
         if not sanitized.released:
-            results.append(IngestResult(session_id, "quarantined", REASON_CODE_SECRETS_SCAN_DIRTY))
+            result["reason_code"] = REASON_CODE_SECRETS_SCAN_DIRTY
             continue
         derivative = stage / "sanitized" / session_id
         target = stage / RUNS_DIRNAME / session_id
         _move_dir(derivative, target)  # staging layout only, not the gate
-        results.append(IngestResult(session_id, "admitted"))
+        result["status"] = "admitted"
     atomic_write_json(
         bundles_root.parent / "_ingest_results.json",
         {
             "revision": str(revision),
-            "results": [
-                {"session_id": r.session_id, "status": r.status, "reason_code": r.reason_code}
-                for r in results
-            ],
+            "results": results,
         },
     )
-    return results
 
 
 def _move_dir(source: Path, target: Path) -> None:

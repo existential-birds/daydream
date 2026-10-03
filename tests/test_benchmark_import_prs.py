@@ -581,26 +581,67 @@ def _seed_manifest(ws: Path) -> None:
     init_workspace(ws, "o/r", ["h1.example.com"], ["h2.example.com"])
 
 
-def test_preflight_six_checks_in_order_and_atomic_identity(tmp_path: Path, fake_gh: FakeGh) -> None:
+def test_preflight_six_checks_in_order_and_atomic_identity(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+) -> None:
     ws = tmp_path / "ws"
     _seed_manifest(ws)  # unresolved Source (repository=o/r)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
-    out = gi.preflight(ws, pr_count=2)
-    assert out.login == "octocat" and out.repository_id == _REPO_ID and out.visibility == "private"
+    gi.preflight(ws, pr_count=2)
+    assert "authenticated identity: octocat" in capsys.readouterr().out
+    ledger = load_json_strict(ws / "runtime" / "preflight.json")
+    assert ledger["repository_id"] == _REPO_ID and ledger["visibility"] == "private"
     raw = load_yaml_strict(ws / "benchmark.yaml")
     assert raw["source"]["repository_id"] == _REPO_ID and raw["source"]["visibility"] == "private"
     # Immutable repository identity is re-verified on every import.
-    out2 = gi.preflight(ws, pr_count=1)
-    assert out2.repository_id == _REPO_ID
+    gi.preflight(ws, pr_count=1)
+    assert load_json_strict(ws / "runtime" / "preflight.json")["repository_id"] == _REPO_ID
 
-def test_preflight_reverifies_identity_on_every_run_and_fails_closed(tmp_path: Path, fake_gh: FakeGh) -> None:
+@pytest.mark.parametrize("repository_id", [_REPO_ID, "12345"])
+def test_import_cli_preflight_reports_only_persisted_identity(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str], repository_id: str,
+) -> None:
+    ws = tmp_path / "ws"
+    _seed_manifest(ws)
+    before = (ws / "benchmark.yaml").read_bytes()
+    fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
+    fake_gh.set_response("repo-view-full", value={**_REPO_VIEW, "id": repository_id})
+    fake_gh.set_response("GET", "repos/o/r/pulls/101", {"__error__": "Not Found (HTTP 404)"})
+    with pytest.raises(SystemExit) as exit_info:
+        top_cli.main(["benchmark", "import-prs", str(ws), "--pr", "101"])
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    ledger_path = ws / "runtime" / "preflight.json"
+    if repository_id == _REPO_ID:
+        ledger = load_json_strict(ledger_path)
+        assert ledger["repository_id"] == _REPO_ID
+        assert ledger["visibility"] == "private" and ledger["matched"] is True
+        assert captured.out.splitlines() == [
+            "authenticated identity: octocat",
+            "repository visibility: private",
+            "requested PR count: 1",
+            f"local destination: {ws / 'imports'}",
+        ]
+        assert "fetch_failed" in json.dumps(load_yaml_strict(ws / "benchmark.yaml"))
+    else:
+        assert not ledger_path.exists()
+        assert (ws / "benchmark.yaml").read_bytes() == before
+        assert captured.out == ""
+        assert "repo_unresolved" in captured.err
+
+
+def test_preflight_reverifies_identity_on_every_run_and_fails_closed(
+    tmp_path: Path, fake_gh: FakeGh, capsys: pytest.CaptureFixture[str],
+) -> None:
     ws = tmp_path / "ws"
     _seed_manifest(ws)                                  # unresolved Source (repository=repo)
     fake_gh.set_response("GET", "user", {"login": "octocat", "type": "User"})
     fake_gh.set_response("repo-view-full", value=dict(_REPO_VIEW))
-    out = gi.preflight(ws, pr_count=2)
-    assert out.login == "octocat" and out.repository_id == _REPO_ID and out.visibility == "private"
+    gi.preflight(ws, pr_count=2)
+    assert "authenticated identity: octocat" in capsys.readouterr().out
+    ledger = load_json_strict(ws / "runtime" / "preflight.json")
+    assert ledger["repository_id"] == _REPO_ID and ledger["visibility"] == "private"
     raw = load_yaml_strict(ws / "benchmark.yaml")
     assert raw["source"]["repository_id"] == _REPO_ID and raw["source"]["visibility"] == "private"
 

@@ -86,8 +86,11 @@ def test_later_fixture_exclusion_removes_current_row_but_preserves_history(tmp_p
     data = json.loads(path.read_text())
     data["source_path"] = "/tmp/pytest-of-user/test_x"
     path.write_text(json.dumps(data))
-    result = hydrate.dedupe_admitted(stage, revision="a" * 40)
-    assert result.excluded == [("sess-a", "fixture_pytest_path")]
+    hydrate.dedupe_admitted(stage, revision="a" * 40)
+    entry = json.loads(next(stage.glob("_dedupe/*/dedupe.jsonl")).read_text().splitlines()[-1])
+    assert (entry["session_id"], entry["status"], entry["reason_code"]) == (
+        "sess-a", "excluded", "fixture_pytest_path",
+    )
     assert query_runs(stage) == []
     assert label_observation_history(stage, "sess-a") == history
 
@@ -99,8 +102,9 @@ def test_collision_restores_current_baseline_and_keeps_observation_history(tmp_p
     path = stage / "runs" / "sess-a" / "trajectory.json"
     before = path.read_bytes()
     path.write_bytes(b'{"different": true}')
-    result = hydrate.dedupe_admitted(stage, revision="a" * 40)
-    assert result.collisions == 1
+    hydrate.dedupe_admitted(stage, revision="a" * 40)
+    entry = json.loads(next(stage.glob("_dedupe/*/dedupe.jsonl")).read_text().splitlines()[-1])
+    assert (entry["session_id"], entry["status"]) == ("sess-a", "collision")
     assert path.read_bytes() == before
     assert [row["session_id"] for row in query_runs(stage)] == ["sess-a"]
     assert label_observation_history(stage, "sess-a") == history

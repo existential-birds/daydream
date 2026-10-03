@@ -20,7 +20,7 @@ def test_parse_hunks_matches_pr_head_side_ranges() -> None:
         "@@ -1,3 +10,5 @@\n old\n+new1\n+new2\n@@ -20 +30,2 @@\n+new3\n"
     )
     parsed = parse_hunks(diff)
-    # pr_review._parse_hunks contract: head-side (new_start,new_start+count-1)
+    # Head-side ranges are inclusive: (new_start,new_start+count-1)
     assert head_side_ranges(parsed) == [(10, 14), (30, 31)]
     # coverage.hunk_change_line_count contract: total + lines, headers excluded
     assert sum(fi["added_total"] + fi["removed_total"] for fi in parsed.values()) == 3

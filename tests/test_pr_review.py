@@ -27,7 +27,6 @@ from daydream.pr_review import (
     ParsedIssue,
     PRInfo,
     ReviewRenderers,
-    _parse_hunks,
     classify,
     extract_anchors,
     parsed_issues_from_items,
@@ -260,9 +259,9 @@ def test_parse_hunks() -> None:
         "@@ -20 +30,2 @@\n"
         "+new3\n"
     )
-    assert _parse_hunks(diff) == [(10, 14), (30, 31)]
+    assert hunk_index.head_side_ranges(hunk_index.parse_hunks(diff)) == [(10, 14), (30, 31)]
 
-def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_classify_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None:
 
     calls = {"n": 0}
     real = hunk_index.parse_hunks
@@ -276,8 +275,12 @@ def test_parse_hunks_uses_shared_parser(monkeypatch: pytest.MonkeyPatch) -> None
         "diff --git a/x.py b/x.py\n--- a/x.py\n+++ b/x.py\n"
         "@@ -1,3 +10,5 @@\n old\n+new1\n+new2\n@@ -20 +30,2 @@\n+new3\n"
     )
-    assert _parse_hunks(diff) == [(10, 14), (30, 31)]
-    assert calls["n"] == 1, "_parse_hunks must delegate to the shared parser"
+    monkeypatch.setattr(git_ops, "show", lambda *_args: b"content\n" * 40)
+    monkeypatch.setattr(git_ops, "diff_name_only", lambda *_args: ["x.py"])
+    monkeypatch.setattr(git_ops, "diff_paths", lambda *_args, **_kwargs: diff)
+    out = classify(Path("."), sample_pr(), [ParsedIssue("x.py", 10, "t", "prose only")])
+    assert [comment.line for comment in out.inline] == [10]
+    assert calls["n"] == 1, "classify must use the canonical hunk parser"
 
 def test_snap_to_hunk_inside_returns_unchanged() -> None:
     hunks = [(10, 20), (30, 40)]
@@ -311,7 +314,7 @@ def pr() -> PRInfo:
     return sample_pr()
 
 
-def _assert_hunks_resolve(_td: Path, _sha: str, issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
+def _assert_hunks_resolve(_lines: list[str], issue: ParsedIssue, hunks: list[tuple[int, int]] | None = None
 ) -> int | None:
     assert hunks is not None, "classify called resolve_line without the file's hunks"
     return issue.line
@@ -331,17 +334,17 @@ def test_classify_splits_inline_vs_body(monkeypatch: pytest.MonkeyPatch, pr: PRI
         ParsedIssue(path="c.py", line=None, title="t3", body="xstack", is_cross_stack=True),
     ]
 
-    def fake_hunks(_td: Path, _base: str, _head: str, path: str, *, pr_number: int | None = None, **_kwargs: Any,
-    ) -> list[tuple[int, int]]:
+    def fake_hunks(_td: Path, _base: str, _head: str, paths: list[str], **_kwargs: Any) -> str:
+        path = paths[0]
         if path == "a.py":
-            return [(8, 12)]  # 10 is inside
+            return "--- a/a.py\n+++ b/a.py\n@@ -1 +8,5 @@\n+x\n"
         if path == "b.py":
-            return [(1, 5)]  # 99 is outside
-        return []
+            return "--- a/b.py\n+++ b/b.py\n@@ -1 +1,5 @@\n+x\n"
+        return ""
 
     monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
     monkeypatch.setattr(pr_review, "resolve_line", _assert_hunks_resolve)
-    monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
+    monkeypatch.setattr(git_ops, "diff_paths", fake_hunks)
 
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 1
@@ -358,17 +361,20 @@ def test_classify_snaps_tolerance_line_to_hunk_boundary(monkeypatch: pytest.Monk
         ParsedIssue(path="scripts/modernize-app.py", line=105, title="t2", body="anchor_two"),
     ]
 
-    def fake_hunks(_td: Path, _base: str, _head: str, path: str, *, pr_number: int | None = None, **_kwargs: Any,
-    ) -> list[tuple[int, int]]:
+    def fake_hunks(_td: Path, _base: str, _head: str, paths: list[str], **_kwargs: Any) -> str:
+        path = paths[0]
         if path == "conftest.py":
-            return [(90, 105)]  # 89 is 1 below start
+            return "--- a/conftest.py\n+++ b/conftest.py\n@@ -1 +90,16 @@\n+x\n"
         if path == "scripts/modernize-app.py":
-            return [(80, 98), (106, 120)]  # 105 is 1 before second hunk
-        return []
+            return (
+                "--- a/scripts/modernize-app.py\n+++ b/scripts/modernize-app.py\n"
+                "@@ -1 +80,19 @@\n+x\n@@ -1 +106,15 @@\n+x\n"
+            )
+        return ""
 
     monkeypatch.setattr(git_ops, "show", lambda *_a, **_k: b"")
     monkeypatch.setattr(pr_review, "resolve_line", _assert_hunks_resolve)
-    monkeypatch.setattr(pr_review, "file_hunks", fake_hunks)
+    monkeypatch.setattr(git_ops, "diff_paths", fake_hunks)
 
     result = classify(Path("."), pr, issues)
     assert len(result.inline) == 2
@@ -1020,19 +1026,18 @@ def test_resolve_line_verifies_hint(git_repo: Path) -> None:
     text = "\n".join(f"line_{i} extra" for i in range(1, 21)) + "\n"
     sha = _commit_file(git_repo, "x.py", text, "add x.py")
     issue = ParsedIssue(path="x.py", line=10, title="t", body="`line_10`")
-    assert pr_review.resolve_line(git_repo, sha, issue) == 10
+    assert pr_review.resolve_line(git_ops.show(git_repo, sha, issue.path).decode().splitlines(), issue) == 10
 
 def test_resolve_line_full_search_when_hint_bad(git_repo: Path) -> None:
     """Hint points to line 2, but the anchor is at line 15 -- full-file search wins."""
     text = "\n".join(f"row_{i}" for i in range(1, 21)) + "\n"
     sha = _commit_file(git_repo, "x.py", text, "add x.py")
     issue = ParsedIssue(path="x.py", line=2, title="t", body="`row_15`")
-    assert pr_review.resolve_line(git_repo, sha, issue) == 15
+    assert pr_review.resolve_line(git_ops.show(git_repo, sha, issue.path).decode().splitlines(), issue) == 15
 
-def test_resolve_line_none_when_missing_file(git_repo: Path) -> None:
-    sha = _git(git_repo, "rev-parse", "HEAD")
+def test_resolve_line_none_for_empty_content() -> None:
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="b")
-    assert pr_review.resolve_line(git_repo, sha, issue) is None
+    assert pr_review.resolve_line([], issue) is None
 
 
 # Valid in-hunk locations must survive prose matching: an earlier anchor outside
@@ -1098,8 +1103,8 @@ def test_resolve_line_trusts_in_hunk_hint_without_any_anchor_match(git_repo: Pat
     sha = _commit_file(git_repo, "x.py", text, "add x.py")
     issue = ParsedIssue(path="x.py", line=10, title="Latency regression", body="prose only")
     # No anchor from the title/body occurs anywhere in the file.
-    assert pr_review.resolve_line(git_repo, sha, issue) is None
-    assert pr_review.resolve_line(git_repo, sha, issue, [(8, 12)]) == 10
+    assert pr_review.resolve_line(git_ops.show(git_repo, sha, issue.path).decode().splitlines(), issue) is None
+    assert pr_review.resolve_line(git_ops.show(git_repo, sha, issue.path).decode().splitlines(), issue, [(8, 12)]) == 10
 
 def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: Path) -> None:
     lines = [f"row_{i}" for i in range(1, 21)]
@@ -1108,16 +1113,17 @@ def test_resolve_line_prefers_in_hunk_anchor_hit_over_first_file_hit(git_repo: P
     sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
     issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
     # Without hunks the first hit (line 2) wins, as before.
-    assert pr_review.resolve_line(git_repo, sha, issue) == 2
+    assert pr_review.resolve_line(git_ops.show(git_repo, sha, issue.path).decode().splitlines(), issue) == 2
     # With hunks, the in-hunk hit (line 18) wins over the earlier out-of-hunk one.
-    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 18
+    captured_lines = git_ops.show(git_repo, sha, issue.path).decode().splitlines()
+    assert pr_review.resolve_line(captured_lines, issue, [(16, 20)]) == 18
 
 def test_resolve_line_returns_out_of_hunk_hit_when_no_in_hunk_candidate(git_repo: Path,) -> None:
     lines = [f"row_{i}" for i in range(1, 21)]
     lines[1] = "marker_token  # pre-existing, unchanged"
     sha = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add x.py")
     issue = ParsedIssue(path="x.py", line=None, title="t", body="`marker_token`")
-    assert pr_review.resolve_line(git_repo, sha, issue, [(16, 20)]) == 2
+    assert pr_review.resolve_line(git_ops.show(git_repo, sha, issue.path).decode().splitlines(), issue, [(16, 20)]) == 2
 
 def test_classify_keeps_prose_heavy_in_hunk_finding_inline(git_repo: Path) -> None:
     """A valid line-12 citation survives prose-only anchors in a real Git diff.
@@ -1156,7 +1162,7 @@ def test_classify_annotates_relocated_line(git_repo: Path) -> None:
     classify(git_repo, _pr_for(base, head), [issue])
     assert issue.body.count("**Placement:**") == 1
 
-def test_classify_skips_file_hunks_for_path_missing_at_head(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+def test_classify_skips_hunk_read_for_path_missing_at_head(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     """Reject absent head paths before reading hunks or invoking gh fallback."""
     base = _commit_file(git_repo, "gone.py", "x = 1\n", "add gone.py")
     _git(git_repo, "rm", "gone.py")
@@ -1165,9 +1171,9 @@ def test_classify_skips_file_hunks_for_path_missing_at_head(monkeypatch: pytest.
     issue = ParsedIssue(path="gone.py", line=1, title="t", body="`x`")
 
     def fail_if_called(*_a: Any, **_k: Any) -> list[tuple[int, int]]:
-        raise AssertionError("file_hunks should not be called for a path missing at head_sha")
+        raise AssertionError("Git diff should not be read for a path missing at head_sha")
 
-    monkeypatch.setattr(pr_review, "file_hunks", fail_if_called)
+    monkeypatch.setattr(git_ops, "diff_paths", fail_if_called)
 
     result = classify(git_repo, _pr_for(base, head), [issue])
 
@@ -1190,45 +1196,47 @@ _GH_PR_DIFF = (
     "+noise\n"
 )
 
-def test_file_hunks_uses_git_diff_when_it_succeeds(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    # Build base, then add 5 lines on a feature branch starting at line N.
-    _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(1, 30)) + "\n", "baseline")
-    base = _git(git_repo, "rev-parse", "HEAD")
+def test_classify_uses_git_diff_when_it_succeeds(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    base = _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(1, 30)) + "\n", "baseline")
     lines = [f"line {i}" for i in range(1, 30)]
-    # Insert two new lines after position 20 to create a clear hunk.
     lines[19:19] = ["NEW1", "NEW2"]
-    (git_repo / "x.py").write_text("\n".join(lines) + "\n")
-    _git(git_repo, "add", "x.py")
-    _git(git_repo, "commit", "-m", "add 2 lines")
-    head = _git(git_repo, "rev-parse", "HEAD")
-
+    head = _commit_file(git_repo, "x.py", "\n".join(lines) + "\n", "add two lines")
     monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
+    issue = ParsedIssue("x.py", 20, "new line", "`NEW1`")
+    out = classify(git_repo, _pr_for(base, head), [issue])
+    assert [c.line for c in out.inline] == [20]
 
-    hunks = pr_review.file_hunks(git_repo, base, head, "x.py", pr_number=42)
-    assert hunks  # at least one hunk
 
-def test_file_hunks_falls_back_to_gh_when_base_unreachable(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """A gh-wrapper fake supplies hunks after real Git rejects the base SHA."""
+def test_classify_falls_back_to_gh_when_base_unreachable(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    head = _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(1, 30)) + "\n", "baseline")
     monkeypatch.setattr(git_ops, "gh_pr_diff", lambda _r, _n, **_kwargs: _GH_PR_DIFF)
-    hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42)
-    # Must come from the x.py block only -- the other.py hunk starts at line 1
-    # and must NOT leak into x.py's result.
-    assert hunks == [(10, 14)]
+    out = classify(git_repo, _pr_for("deadbeef" * 5, head), [
+        ParsedIssue("x.py", 11, "valid", "prose only"),
+        ParsedIssue("x.py", 1, "foreign hunk", "prose only"),
+    ])
+    assert [c.line for c in out.inline] == [11]
+    assert [i.title for i in out.file_level] == ["foreign hunk"]
 
-def test_file_hunks_no_fallback_without_pr_number(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+
+def test_classify_snapshot_does_not_fall_back_to_gh(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    base = _commit_file(git_repo, "x.py", "line 1\n", "baseline")
+    head = _commit_file(git_repo, "x.py", "line 2\n", "change")
     monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
-    hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py")
-    assert hunks == []
+    monkeypatch.setattr(git_ops, "diff_paths", _raise_on_gh_fallback)
+    out = classify(git_repo, _pr_for(base, head), [ParsedIssue("x.py", 1, "t", "`line`")], snapshot_diff="")
+    assert not out.inline
+    assert [i.path for i in out.file_level] == ["x.py"]
 
-def test_file_hunks_gh_fallback_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
-    """After real Git fails, a GitError from gh degrades to an empty hunk list."""
 
+def test_classify_gh_fallback_handles_subprocess_error(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
+    head = _commit_file(git_repo, "x.py", "line 1\n", "baseline")
     def raise_git_error(*_a: Any, **_k: Any) -> str:
         raise git_ops.GitError("gh blew up")
-
     monkeypatch.setattr(git_ops, "gh_pr_diff", raise_git_error)
-    hunks = pr_review.file_hunks(git_repo, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef", "HEAD", "x.py", pr_number=42)
-    assert hunks == []
+    out = classify(git_repo, _pr_for("deadbeef" * 5, head), [ParsedIssue("x.py", 1, "t", "`line`")])
+    assert not out.inline
+    assert [i.path for i in out.body_only] == ["x.py"]
+
 
 def test_demoted_high_finding_still_blocks_approval(pr: PRInfo) -> None:
     classified = pr_review.ClassifiedIssues(inline=[_inline()],
@@ -1560,3 +1568,85 @@ def test_snapshot_placement_decodes_git_quoted_paths(git_repo: Path, path: str) 
     placed = classify(git_repo, pr, [issue], snapshot_diff=diff)
     assert [(finding.path, finding.line) for finding in placed.inline] == [(path, 1)]
     assert placed.body_only == []
+
+
+def test_classify_captures_remote_diff_once_after_native_base_failure(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
+) -> None:
+    _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(30)), "x")
+    head = _commit_file(git_repo, "other.py", "line 1\nline 2\n", "other")
+    calls: list[int] = []
+    def remote(_repo: Path, number: int, **_kwargs: Any) -> str:
+        calls.append(number)
+        return _GH_PR_DIFF
+    monkeypatch.setattr(git_ops, "gh_pr_diff", remote)
+    out = classify(git_repo, _pr_for("deadbeef" * 5, head), [
+        ParsedIssue("x.py", 11, "x", "prose only"),
+        ParsedIssue("other.py", 1, "other", "prose only"),
+        ParsedIssue("x.py", 12, "x again", "prose only"),
+    ])
+    assert [(c.path, c.line) for c in out.inline] == [("x.py", 11), ("other.py", 1), ("x.py", 12)]
+    assert len(calls) == 1
+
+
+def test_classify_failed_remote_acquisition_remains_retryable_for_later_path(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
+) -> None:
+    _commit_file(git_repo, "x.py", "line 1\n", "x")
+    head = _commit_file(git_repo, "other.py", "line 1\n", "other")
+    calls: list[int] = []
+    def remote(_repo: Path, number: int, **_kwargs: Any) -> str:
+        calls.append(number)
+        if len(calls) == 1:
+            raise GitError("remote temporarily unavailable")
+        return _GH_PR_DIFF
+    monkeypatch.setattr(git_ops, "diff_name_only", lambda *_args: ["x.py", "other.py"])
+    monkeypatch.setattr(git_ops, "gh_pr_diff", remote)
+    out = classify(git_repo, _pr_for("deadbeef" * 5, head), [
+        ParsedIssue("x.py", 1, "first", "prose only"),
+        ParsedIssue("other.py", 1, "later", "prose only"),
+        ParsedIssue("x.py", 1, "cached failure", "prose only"),
+    ])
+    assert [(c.path, c.line) for c in out.inline] == [("other.py", 1)]
+    assert [i.title for i in out.file_level] == ["first", "cached failure"]
+    assert len(calls) == 2
+
+
+def test_classify_remote_foreign_malformed_path_does_not_affect_selected_file(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
+) -> None:
+    head = _commit_file(git_repo, "x.py", "\n".join(f"line {i}" for i in range(30)), "x")
+    foreign = 'diff --git a/broken b/broken\n--- a/broken\n+++ "b/\\377"\n@@ -1 +1 @@\n+x\n'
+    monkeypatch.setattr(git_ops, "gh_pr_diff", lambda *_args, **_kwargs: foreign + _GH_PR_DIFF)
+    out = classify(git_repo, _pr_for("deadbeef" * 5, head), [ParsedIssue("x.py", 11, "t", "prose only")])
+    assert [(c.path, c.line) for c in out.inline] == [("x.py", 11)]
+
+
+def test_classify_resolves_anchors_from_the_same_head_bytes_it_admitted(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
+) -> None:
+    base = _commit_file(git_repo, "x.py", "original\n", "base")
+    head = _commit_file(git_repo, "x.py", "captured_marker\n", "head")
+    real_show = git_ops.show
+    calls: list[str] = []
+    def capture(repo: Path, sha: str, path: str) -> bytes:
+        calls.append(path)
+        if len(calls) > 1:
+            raise GitError("a second acquisition is unavailable")
+        return real_show(repo, sha, path)
+    monkeypatch.setattr(git_ops, "show", capture)
+    out = classify(git_repo, _pr_for(base, head), [ParsedIssue("x.py", None, "t", "`captured_marker`")])
+    assert [c.line for c in out.inline] == [1]
+    assert calls == ["x.py"]
+
+
+def test_classify_unchanged_rename_preserves_native_per_path_hunks(
+    monkeypatch: pytest.MonkeyPatch, git_repo: Path,
+) -> None:
+    base = _commit_file(git_repo, "old.py", "\n".join(f"line {i}" for i in range(30)), "base")
+    _git(git_repo, "mv", "old.py", "new.py")
+    _git(git_repo, "commit", "-m", "rename")
+    head = _git(git_repo, "rev-parse", "HEAD")
+    monkeypatch.setattr(git_ops, "gh_pr_diff", _raise_on_gh_fallback)
+    out = classify(git_repo, _pr_for(base, head), [ParsedIssue("new.py", 15, "t", "prose only")])
+    assert [(c.path, c.line) for c in out.inline] == [("new.py", 15)]

@@ -37,7 +37,6 @@ from daydream.archive.hydrate_stage import (
     _read_manifest_field,
 )
 from daydream.archive.hydrate_types import (
-    DedupeResult,
     HydrationError,
 )
 from daydream.archive.index import manifest_index_fields, query_runs, replace_run_inventory
@@ -460,7 +459,7 @@ def _deep_artifact_evidence(derivative: Path, data: dict[str, Any]) -> dict[str,
     return evidence or None
 
 
-def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
+def dedupe_admitted(stage: Path, *, revision: str) -> None:
     """Exclude fixtures, revalidate legacy status, then dedupe by session and digest."""
     revision = str(revision)
     curated = _pre_identity_dir(stage, revision)
@@ -469,7 +468,6 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
     baseline_root = dedupe_dir / "admitted"
     # Collision records never replace the last admitted digest or its history.
     ledger = _DedupeLedger.load(ledger_path)
-    result = DedupeResult()
     for derivative, data in _derivative_manifests(stage):
         sid = _admitted_session_id(derivative, data)
         try:
@@ -486,7 +484,6 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
             code = codes[0]
             _move_dir(derivative, stage / "excluded" / sid)
             _append_dedupe_entry(ledger_path, sid, revision, status="excluded", reason_code=code)
-            result.excluded.append((sid, code))
             continue
 
         digest = sanitize._derivative_digest(derivative)
@@ -512,13 +509,7 @@ def dedupe_admitted(stage: Path, *, revision: str) -> DedupeResult:
             baseline.parent.mkdir(parents=True, exist_ok=True)
             shutil.copytree(derivative, baseline)
         _append_dedupe_entry(ledger_path, sid, revision, status=status, reason_code=reason_code, digest=digest)
-        if status == "collision":
-            result.collisions += 1
-            result.collision_ids.append(sid)
-        else:
-            result.admitted += 1
     rebuild_index(stage)
-    return result
 
 
 def _license_bucket(code: str | None) -> str:

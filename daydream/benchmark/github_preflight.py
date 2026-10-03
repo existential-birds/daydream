@@ -36,15 +36,6 @@ class PreflightError(Exception):
         self.message = message
 
 
-@dataclass
-class PreflightResult:
-    """The authenticated identity + verified repository captured by preflight."""
-
-    login: str
-    repository_id: str
-    visibility: str
-
-
 def _run_repo_view(root: Path, repo_slug: str) -> dict[str, Any]:
     """Fetch the repository's current identity and the caller's read access to it."""
     proc = git_process._run_gh(
@@ -104,7 +95,7 @@ def _persist_identity(root: Path, repo_slug: str, repository_id: str, visibility
             tx.commit()
 
 
-def preflight(root: Path, pr_count: int) -> PreflightResult:
+def preflight(root: Path, pr_count: int) -> None:
     """Run fixed-order binary, authentication, identity, and access checks."""
     root = Path(root)
     if shutil.which("git") is None or shutil.which("gh") is None:
@@ -171,7 +162,6 @@ def preflight(root: Path, pr_count: int) -> PreflightResult:
     print(f"repository visibility: {visibility}")
     print(f"requested PR count: {pr_count}")
     print(f"local destination: {root / 'imports'}")
-    return PreflightResult(login=login, repository_id=repository_id, visibility=visibility)
 
 
 class ImportTargetError(Exception):

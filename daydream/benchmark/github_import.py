@@ -43,7 +43,6 @@ from daydream.benchmark.github_preflight import (
     ImportTargetError as ImportTargetError,
     ImportTargets as ImportTargets,
     PreflightError as PreflightError,
-    PreflightResult as PreflightResult,
     _run_gh_api_user as _run_gh_api_user,
     parse_import_targets as parse_import_targets,
     preflight as preflight,

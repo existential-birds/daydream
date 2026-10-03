@@ -70,38 +70,6 @@ class HubClient(Protocol):
 
 
 @dataclass(frozen=True)
-class DownloadResult:
-    """Outcome of one :func:`download_snapshot` pass over the pinned revision."""
-
-    downloaded: int = 0
-    skipped: int = 0
-    digests: dict[str, str] = field(default_factory=dict)  # relpath -> sha256
-    discovered: int = 0
-    run_shaped_manifests: int = 0
-    incomplete_manifests: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class IngestResult:
-    """Outcome of the ingest gate for one staged session bundle (issue #982 M4/M6)."""
-
-    session_id: str
-    status: str  # "admitted" | "quarantined"
-    reason_code: str | None = None
-
-
-@dataclass
-class DedupeResult:
-    """Outcome of one :func:`dedupe_admitted` pass over ``stage/runs/`` (M7/M8/M9)."""
-
-    admitted: int = 0
-    skipped: int = 0
-    collisions: int = 0
-    collision_ids: list[str] = field(default_factory=list)
-    excluded: list[tuple[str, str]] = field(default_factory=list)  # (session_id, reason_code)
-
-
-@dataclass(frozen=True)
 class ResumeState:
     """Resume checkpoint derived from the remote Hub ledger (never VM-local state)."""
 

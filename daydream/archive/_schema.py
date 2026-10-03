@@ -100,35 +100,15 @@ def _create_table_sql(
     return f"\nCREATE TABLE IF NOT EXISTS {table} (\n" + ",\n".join(lines) + "\n)\n"
 
 
-_UPSERT_LINE_WIDTH = 92
-"""Maximum length of a generated upsert column/parameter line (4-space indent included)."""
-
-
-def _wrap_tokens(tokens: tuple[str, ...]) -> str:
-    """Wrap comma-separated tokens at _UPSERT_LINE_WIDTH using four-space indentation."""
-    lines: list[str] = []
-    current = "    "
-    for token in tokens:
-        separator = ", " if current.strip() else ""
-        candidate = current + separator + token
-        if current.strip() and len(candidate) > _UPSERT_LINE_WIDTH:
-            lines.append(current + ",")
-            current = "    " + token
-        else:
-            current = candidate
-    lines.append(current)
-    return "\n".join(lines)
-
-
 def _upsert_sql(columns: Iterable[RunColumn]) -> str:
     """Generate matching column and parameter lists for declared upsert columns."""
     participating = tuple(col.name for col in columns if col.upserted)
     parameters = tuple(f":{name}" for name in participating)
     return (
         "\nINSERT OR REPLACE INTO runs (\n"
-        + _wrap_tokens(participating)
+        + "    " + ", ".join(participating)
         + "\n) VALUES (\n"
-        + _wrap_tokens(parameters)
+        + "    " + ", ".join(parameters)
         + "\n)\n"
     )
 

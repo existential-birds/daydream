@@ -355,7 +355,6 @@ class LiveToolPanelRegistry:
         self._console = console
         self._quiet_mode = quiet_mode
         self._panels: dict[str, LiveToolPanel] = {}
-        self._static_ids: set[str] = set()
         self._live: Live | None = None
         self._group = _ActivePanelsGroup(self)
         self._task_labels: dict[str, str] = {}  # keyed by _task_label_ns_key(name, id)
@@ -423,7 +422,6 @@ class LiveToolPanelRegistry:
 
         # Static tools (e.g. Task) scroll inline instead of joining Live.
         if name in self._STATIC_TOOL_NAMES:
-            self._static_ids.add(tool_use_id)
             self._stop_live()
             self._console.print()
             self._console.print(panel._render_panel())
@@ -443,8 +441,8 @@ class LiveToolPanelRegistry:
     def iter_active_panels(self) -> Iterator[LiveToolPanel]:
         """Iterate over active panels in order."""
         # Rich refreshes from another thread while tool calls mutate the registry.
-        for tid, panel in self._panels.copy().items():
-            if tid not in self._static_ids:
+        for panel in self._panels.copy().values():
+            if panel._name not in self._STATIC_TOOL_NAMES:
                 yield panel
 
     def remove(self, tool_use_id: str) -> None:
@@ -461,7 +459,6 @@ class LiveToolPanelRegistry:
     def discard_all(self) -> None:
         """Stop rendering and clear tracked panels without printing them."""
         self._stop_live()
-        self._static_ids.clear()
         self._panels.clear()
         self._call_args.clear()
         self._task_labels.clear()
@@ -492,7 +489,6 @@ class LiveToolPanelRegistry:
         # has already harvested any task_id → label mapping from it.
         self._call_args.pop(tool_use_id, None)
 
-        self._static_ids.discard(tool_use_id)
         panel = self._panels.pop(tool_use_id, None)
         if panel is not None:
             self._stop_live()

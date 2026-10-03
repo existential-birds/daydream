@@ -24,14 +24,17 @@ pytestmark = pytest.mark.skipif(not _run, reason="live gh smoke test disabled (D
 _SMOKE_PRS = os.environ.get("DAYDREAM_SMOKE_PRS", "")
 
 
-def test_private_preflight_smoke_with_installed_gh(tmp_path: Path) -> None:
+def test_private_preflight_smoke_with_installed_gh(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
     """A public repo the operator can read; proves the real authenticated path."""
     ws = tmp_path / "ws"
     ws.mkdir()
     init_workspace(ws, "existential-birds/daydream", ["h1.example.com"], ["h2.example.com"])
-    out = gi.preflight(ws, pr_count=0)
-    assert out.login
-    assert out.repository_id.startswith("R_kgD") and out.visibility in ("public", "private")
+    gi.preflight(ws, pr_count=0)
+    assert "authenticated identity: " in capsys.readouterr().out
+    ledger = json.loads((ws / "runtime" / "preflight.json").read_text())
+    assert ledger["repository_id"].startswith("R_kgD") and ledger["visibility"] in ("public", "private")
     raw = load_yaml_strict(ws / "benchmark.yaml")
     assert raw["source"]["repository_id"].startswith("R_kgD")
     assert "password=" not in json.dumps(raw)     # no credential leakage into the manifest

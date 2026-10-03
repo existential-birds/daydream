@@ -7,11 +7,11 @@ Continuation started at `b98a9dd51fde81df5dc4534a85ab29a986f6a127` on
 The original inventory and pinned Python 3.12 / scb-check 0.2.0 method reproduce
 113,364 physical lines and 85,527 source lines at baseline. The continuation's
 starting inventory reproduces 111,025 physical lines across 364 production files.
-The latest pushed checkpoint `4d2967f626d6e83c754ae4ac7b74bd93e580476a` has
-362 production files, 108,842 physical lines and 83,415 source lines
-(3.989% and 2.469% aggregate reductions). Starting source LOC is 85,165.
+The latest pushed checkpoint `25d1ac7cc35d834ec612c889977cbbe8c62dfa53` has
+362 production files, 108,776 physical lines and 83,349 source lines
+(4.047% and 2.547% aggregate reductions). Starting source LOC is 85,165.
 Targets remain at most 102,027 physical and 76,974 source lines: shortfalls are
-6,815 physical and 6,441 source lines. The objective remains unmet; useful
+6,749 physical and 6,375 source lines. The objective remains unmet; useful
 owner consolidation and passing checks do not establish completion.
 
 ## Decisions under integration
@@ -435,3 +435,53 @@ The original baseline and inventory scope remain unchanged. A literal-prompt
 duplication assessment found no repeated twelve-line production string blocks
 to consolidate; no prompt behavior was removed for line credit. Broader review
 evidence, corpus/checkpoint, and original extraction ownership assessments continue.
+
+### Seventh checkpoint normal-hook result
+
+Signed `25d1ac7cc35d834ec612c889977cbbe8c62dfa53` committed and pushed normally.
+All commit signatures verify; the ordinary pre-push `make check` passed lock/sync,
+Ruff, both Vulture scans, mypy (748 files), 9,464 tests / 14 existing skips /
+202 warnings in 591.78 seconds, 90.60% branch coverage against the unchanged
+86% floor, Docker actionlint, coverage artifact and naming checks. All 362 Git
+production paths and bytes are exact matches for the independently reproduced
+seventh-readable snapshot. PR base remains the original baseline; PR #1444 is
+open/draft at this head. No hooks were bypassed and no gate/test was weakened.
+The integration freeze is released for subsequent approved architectural work.
+
+
+## Eighth integrated checkpoint (normal-hook verification pending)
+
+The fixed 362-file production inventory measures 108,612 physical and 83,232
+source lines: aggregate reductions of 4.192% and 2.683%. This wave removes
+164 physical / 117 source lines, with unchanged clone LOC (2,240), high CC (492)
+and high cognitive complexity (604). The source shortfall is 6,258 lines and
+physical shortfall 6,585. The target remains unmet; the PR remains draft.
+
+- PR classification acquires successful remote diff evidence once and captures
+  each admitted source body once. Per-path local Git diffs retain rename behavior;
+  remote fallback selects a file header before parsing, preserving unrelated
+  malformed-file isolation. Failed remote acquisition remains retryable. The
+  separate query wrappers disappear. 4,000 differential classifications and seven
+  real Git workflows match; five native acquisition/rename regression tests remain.
+- Hydration persists its native phase receipts without three unused return models
+  or mirrored counters/digest/ID accumulators. Download, ingest, dedupe, progress,
+  resume, SQL inventory, immutable observations and collision restoration remain.
+  172 native before/after phase executions match; 194 affected checks pass.
+- The UI derives static-panel membership from each captured panel's immutable
+  tool name instead of synchronizing a second mutable set. 3,600 native Rich state
+  and rendering comparisons match with controlled identical random state; all 46
+  UI checks pass. The reduction is four source lines, with no broader UI claim.
+- GitHub preflight retains authoritative persisted identity/receipt and operator
+  output; its discarded result allocation and reexport disappear. 40 native gate,
+  CLI, file and permissions cases match. Identity assertions move to real persisted
+  YAML/ledger/output; success and failure top-level CLI regressions remain.
+- SQLite upsert generation uses ordinary ordered comma joins. Internal SQL line
+  wrapping and its width policy disappear; declared names, named parameters,
+  column defaults, constraints and additive migration behavior remain. 40 native
+  SQLite variants with up to 39 extra declared columns match; 85 focused checks pass.
+
+Independent owner reviews are closed; full integrated review, fixed-metric
+reproduction and ordinary hook verification remain required before pushing this
+checkpoint. No generated/packed code or inventory changes contribute to its count.
+Further assessment targets one captured license-policy gate and native plan/event
+ownership across all callers; unchanged rejected local conversions are not repeated.
