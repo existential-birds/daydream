@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 
+from daydream import json_utils
 from daydream.json_utils import (
     atomic_write_bytes,
     atomic_write_json,
@@ -125,6 +126,28 @@ class TestExtractJsonBySchema:
                                      schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
         assert sel.value is None
         assert sel.candidate_count == 0
+
+    @pytest.mark.parametrize("text", [
+        '["module", "surface"] inspected. {"issues": []}',
+        'prefix {bad {"issues": []}} suffix',
+        '```json\n{"issues": []}\n```',
+        "This is just prose with no JSON whatsoever.",
+        "",
+    ])
+    def test_selection_offers_exactly_the_shared_candidate_scan(self, text: str) -> None:
+        """Schema selection reads the one scan, not a second copy of it: the offered
+        values are the whole candidate set in descending document order (the order
+        "last admitted wins" walks), and candidate_count is that scan's size."""
+        offered: list[Any] = []
+
+        def record(value: Any, _schema: dict[str, Any]) -> bool:
+            offered.append(value)
+            return False
+
+        selection = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=record)
+        scan = sorted(json_utils._json_candidates(text), key=lambda item: item[0], reverse=True)
+        assert offered == [value for _start, value, _span_len in scan]
+        assert (selection.candidate_count, selection.value) == (len(scan), None)
 
 class TestAtomicWritePrimitives:
     def test_bytes_roundtrip_and_replaces_prior_content(self, tmp_path: Path) -> None:

@@ -188,44 +188,10 @@ def extract_json(text: str) -> Any:
 
     The largest span favors structured output over incidental prose brackets such as
     metadata["sender"]. Clean JSON scalars are accepted; no parseable span yields None."""
-    if not text or not text.strip():
+    candidates = _json_candidates(text)
+    if not candidates:
         return None
-
-    # Strip surrounding whitespace and markdown code fences
-    # (```json\n...\n``` or ```\n...\n```) through the shared helper.
-    cleaned = _strip_json_fences(text)
-
-    # Fast path — the entire text is valid JSON.
-    try:
-        return json.loads(cleaned)
-    except ValueError:
-        pass
-
-    # Prefer the largest embedded payload over incidental prose brackets.
-    best: Any = None
-    best_len = 0
-    decoder = json.JSONDecoder()
-    for start_char in ("{", "["):
-        scan_from = 0
-        while True:
-            start_idx = cleaned.find(start_char, scan_from)
-            if start_idx == -1:
-                break
-            try:
-                parsed, end_idx = decoder.raw_decode(cleaned, start_idx)
-            except ValueError:
-                # Invalid or unbalanced: a nested span may still be valid JSON.
-                scan_from = start_idx + 1
-                continue
-            span_len = end_idx - start_idx
-            if span_len > best_len:
-                best = parsed
-                best_len = span_len
-            # A parsed span's nested children can only be smaller, so skipping
-            # past it never drops the winner and keeps well-formed scans near-linear.
-            scan_from = end_idx
-
-    return best
+    return _largest_span(candidates)[1]
 
 
 def validates_schema(value: Any, schema: dict[str, Any]) -> bool:
@@ -253,10 +219,9 @@ class SchemaAwareSelection:
 def _strip_json_fences(text: str) -> str:
     """Strip surrounding whitespace and markdown code fences.
 
-    The single source of truth for the candidate-set precondition shared by
-    ``extract_json`` and ``extract_json_by_schema``: the opening fence line
-    (which may carry a language tag like ``json``) and the closing fence line
-    are dropped, leaving the payload.
+    The candidate-set precondition for ``_json_candidates``: the opening fence
+    line (which may carry a language tag like ``json``) and the closing fence
+    line are dropped, leaving the payload.
     """
     cleaned = text.strip()
     if not cleaned.startswith("```"):
@@ -267,25 +232,19 @@ def _strip_json_fences(text: str) -> str:
     return "\n".join(lines).strip()
 
 
-def extract_json_by_schema(
-    text: str,
-    *,
-    schema: dict[str, Any],
-    accept: Callable[[Any, dict[str, Any]], bool],
-) -> SchemaAwareSelection:
-    """Return the *last* candidate in document order that ``accept`` admits.
+def _json_candidates(text: str) -> list[tuple[int, Any, int]]:
+    """Enumerate every decodable JSON value in *text* as ``(start, value, span_len)``.
 
-    The candidate set is exactly the one ``extract_json`` enumerates: the whole
-    text when it parses, then every decodable ``{``/``[`` span, including spans
-    nested inside a root that failed to decode. Selection is schema-driven rather
-    than size-driven, so a trailing empty result outranks a larger incidental
-    object. A whole text that parses but is rejected falls through to the scan.
+    The single source of truth for the candidate set behind both ``extract_json``
+    and ``extract_json_by_schema``: the whole fence-stripped text when it parses,
+    then every decodable ``{``/``[`` span, including spans nested inside a root
+    that failed to decode. Duplicates are collapsed, so a whole text that parses
+    and also matches a zero-offset scan yields one candidate, not two.
     """
     if not text or not text.strip():
-        return SchemaAwareSelection(None, 0, None, None)
+        return []
 
     cleaned = _strip_json_fences(text)
-
     candidates: list[tuple[int, Any, int]] = []
     try:
         candidates.append((0, json.loads(cleaned), len(cleaned)))
@@ -307,8 +266,36 @@ def extract_json_by_schema(
                 continue
             if (start_idx, parsed, end_idx - start_idx) not in candidates:
                 candidates.append((start_idx, parsed, end_idx - start_idx))
+            # A parsed span's nested children can only be smaller, so skipping
+            # past it never drops the winner and keeps well-formed scans near-linear.
             scan_from = end_idx
+    return candidates
 
+
+def _largest_span(candidates: list[tuple[int, Any, int]]) -> tuple[int, Any, int]:
+    """Pick the longest candidate; a length tie goes to the earlier enumeration slot.
+
+    ``_json_candidates`` emits object spans before array spans and each family in
+    document order, so ``max``'s first-wins rule reproduces the long-standing
+    preference for a structured object over an equal-length array (``prefix [1]
+    then { }`` decodes to ``{}``) without either selector restating the rule."""
+    return max(candidates, key=lambda item: item[2])
+
+
+def extract_json_by_schema(
+    text: str,
+    *,
+    schema: dict[str, Any],
+    accept: Callable[[Any, dict[str, Any]], bool],
+) -> SchemaAwareSelection:
+    """Return the *last* candidate in document order that ``accept`` admits.
+
+    Candidates come from ``_json_candidates`` — the same enumeration
+    ``extract_json`` uses. Selection is schema-driven rather than size-driven, so
+    a trailing empty result outranks a larger incidental object. A whole text
+    that parses but is rejected falls through to the scan.
+    """
+    candidates = _json_candidates(text)
     if not candidates:
         return SchemaAwareSelection(None, 0, None, None)
 
@@ -318,7 +305,7 @@ def extract_json_by_schema(
 
     # Nothing accepted: trace the largest span (extract_json's own tie-break) with
     # content-free rejection evidence so the caller can report a bounded reason.
-    largest = max(candidates, key=lambda item: (item[2], -item[0]))
+    largest = _largest_span(candidates)
     reason = None
     for error in Draft202012Validator(schema).iter_errors(largest[1]):
         reason = f"{error.validator} at {error.json_path}"

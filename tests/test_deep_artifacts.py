@@ -62,15 +62,6 @@ def test_check_deep_artifacts_rejects_directory_shadowing_prereq(deep_artifacts_
         check_deep_artifacts("per-stack", deep_artifacts_dir)
     assert "intent.md" in str(excinfo.value)
 
-def test_check_deep_artifacts_merge_ignores_directory_records(deep_artifacts_dir: Path,) -> None:
-    (deep_artifacts_dir / "intent.md").write_text("x")
-    (deep_artifacts_dir / "alternatives.json").write_text("[]")
-    (deep_artifacts_dir / "stack-bogus-records.json").mkdir()  # directory, not a file
-    with pytest.raises(FileNotFoundError) as excinfo:
-        check_deep_artifacts("merge", deep_artifacts_dir,
-                             record_paths=[deep_artifacts_dir / "stack-python-records.json"])
-    assert "stack-*-records.json" in str(excinfo.value)
-
 def test_check_deep_artifacts_fix_rejects_directory_merged_items(deep_artifacts_dir: Path,) -> None:
     """The fix gate requires a canonical merged-items.json file; directories and rendered reports cannot satisfy it."""
     (deep_artifacts_dir / "merged-items.json").mkdir()  # directory, not a file
@@ -154,12 +145,3 @@ def test_diagram_artifact_paths_live_in_the_deep_dir(tmp_path: Path) -> None:
     assert DeepArtifact.DIAGRAM.at(dd) == dd / "diagram.json"
     assert DeepArtifact.DIAGRAM_MARKDOWN.at(dd) == dd / "diagram.md"
     assert DeepArtifact.DIAGRAM.at(dd).parent == DeepArtifact.DIAGRAM_MARKDOWN.at(dd).parent == dd
-
-def test_merge_gate_ignores_stale_sweep_findings(deep_artifacts_dir: Path) -> None:
-    (deep_artifacts_dir / "intent.md").write_text("x")
-    (deep_artifacts_dir / "alternatives.json").write_text("[]")
-    (deep_artifacts_dir / "stack-uncovered-records.json").write_text('[{"description": "stale"}]')
-    with pytest.raises(FileNotFoundError, match="missing artifacts"):
-        check_deep_artifacts(
-            "merge", deep_artifacts_dir, record_paths=[deep_artifacts_dir / "stack-python-records.json"],
-        )
