@@ -289,6 +289,66 @@ async def test_findings_out_rejects_a_moved_head_before_diagram_export(
     assert "re-run against the new head" in panel
 
 
+async def test_findings_out_rejects_a_dirty_diagram_checkout_before_export(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A commit-bound diagram export refuses to describe an uncommitted tree.
+
+    The diagram path still reads its diff (and the diagram grounding) from
+    working-tree content, so an artifact whose ``head_sha`` names the captured
+    commit would not describe the lines it actually read. The clean-checkout
+    gate is therefore mode-independent.
+    """
+    target = dr.build_branch_heavy_repo(tmp_path)
+    fake_gh.serve_open_pr(target)
+    artifact_path = tmp_path / "findings.json"
+    (target / "app/pipeline.py").write_text("DIRTY = True\n", encoding="utf-8")
+
+    exit_code, stub = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 1
+    assert not artifact_path.exists(), "no artifact may name a commit it did not read"
+    assert stub.calls == [], "the run must reject before spending an agent turn"
+    panel = collapse_panel_text(capsys)
+    assert "clean analyzed checkout" in panel
+
+
+async def test_findings_out_names_a_pr_lookup_failure_instead_of_the_diff(
+    tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed PR lookup is reported as a lookup failure, not a diff failure.
+
+    The capture sits outside the diff try-block, so a transport error while
+    resolving the target PR cannot be misreported as "unable to determine base
+    branch for diff" -- the diff was never the thing that failed.
+    """
+    target = dr.build_branch_heavy_repo(tmp_path)
+    fake_gh.serve_open_pr(target)
+    artifact_path = tmp_path / "findings.json"
+
+    def explode(*_a: Any, **_k: Any) -> Any:
+        raise git_ops.GitError("gh pr view: connection reset")
+
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", explode)
+    monkeypatch.setattr("daydream.pr_review.find_open_pr", explode)
+
+    exit_code, _stub = await diagram_run(
+        target, diagram="flowchart", specs={"flowchart": [dr.flowchart_spec()]},
+        findings_out=str(artifact_path), pr_number=7,
+    )
+
+    assert exit_code == 1
+    assert not artifact_path.exists()
+    panel = collapse_panel_text(capsys)
+    assert "Unable to resolve pull request for findings export" in panel
+    assert "connection reset" in panel
+    assert "Unable to determine base branch for diff" not in panel
+
+
 async def test_findings_out_binds_a_diagram_artifact_to_the_analyzed_checkout(
     tmp_path: Path, fake_gh: FakeGh, diagram_run: Callable[..., Any], monkeypatch: pytest.MonkeyPatch,
 ) -> None:

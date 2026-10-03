@@ -229,7 +229,7 @@ def _print_findings_target_mismatch(analyzed_head: str, pr_head: str | None) -> 
 
 
 def _capture_findings_target(
-    target_dir: str,
+    target_dir: Path,
     config: RunConfig,
     github_execution: GitHubExecutionInput,
     captured_head: str,
