@@ -109,6 +109,7 @@ from daydream.phases.test_evidence import (
 from daydream.phases.testing import (
     _REPAIR_EXCERPT_MAX_CHARS,
     _build_fix_prompt,
+    _compose_repair_prompt,
     _reject_test_healing_generated_file_edits,
     _sanitize_suggested_command,
 )
@@ -1260,6 +1261,44 @@ def test_build_fix_prompt_carries_generated_file_rule() -> None:
     assert "package manifests" in prompt.lower()
     assert "lockfile update" in prompt.lower()
 
+# A path that never exists on disk: the prompt renderer only stats it, so the
+# repository-relative form is what these pure prompt tests assert on.
+REPO = Path("/daydream-repair-prompt-contract-repo")
+
+
+def test_repair_prompt_never_contains_both_permissions() -> None:
+    """The invitation to widen and the restriction must never co-occur in one prompt."""
+    prompt = _compose_repair_prompt(repo=REPO, feedback_items=[{"file": "src/handler.py"}],
+                                   edit_scope=frozenset({"src/other.rs"}))
+    invites_wider = "another file" in prompt
+    restricts = "ONLY these repository-relative paths" in prompt
+    assert restricts, "the authorization clause must remain the enforcement contract"
+    assert not invites_wider, "the contradicting invitation must be gone"
+
+
+def test_repair_prompt_file_list_does_not_claim_to_be_a_diff() -> None:
+    """The file list names finding targets, and says so."""
+    prompt = _compose_repair_prompt(repo=REPO, feedback_items=[{"file": "src/handler.py"}],
+                                   edit_scope=frozenset({"src/handler.py"}))
+    assert "Files modified during the fix phase:" not in prompt
+    assert "Finding target files (not a diff of what changed):" in prompt
+
+
+def test_repair_prompt_discloses_truncation() -> None:
+    """Truncation is disclosed, as it already is for the human handoff."""
+    long_output = "\n".join(f"line {n}" for n in range(500))
+    prompt = _compose_repair_prompt(repo=REPO, output=long_output,
+                                   edit_scope=frozenset({"src/handler.py"}))
+    assert "truncated" in prompt.lower()
+
+
+def test_repair_prompt_states_the_effective_wall_allowance_and_no_tool_cap() -> None:
+    """The budget preamble states the allowance that is actually enforced."""
+    prompt = _compose_repair_prompt(repo=REPO, edit_scope=frozenset({"src/handler.py"}),
+                                   wall_budget_s=1800.0, tool_call_budget=None)
+    assert "1800" in prompt
+    assert "tool-call budget" not in prompt.lower()
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("exists", [False, True], ids=["missing-relative", "existing-absolute"])
 async def test_fix_resolves_repository_files(
@@ -1584,7 +1623,8 @@ class TestBuildFixPrompt:
         assert "- src/bar.py" in result
         assert "- src/foo.py" in result
         assert "Focus on the files listed above" in result
-        assert "if a correct fix needs another file, edit it and say which and why" in result
+        assert "Finding target files (not a diff of what changed):" in result
+        assert "another file" not in result
         # foo.py deduped to a single entry.
         assert result.count("- src/foo.py") == 1
 

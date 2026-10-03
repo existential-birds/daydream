@@ -41,7 +41,12 @@ from daydream.phases.fix import (
     _item_evidence,
 )
 from daydream.phases.handoff import _emit_failure_handoff
-from daydream.phases.inputs import _render_bash_allowlist, _tail_test_output, append_extended_facts
+from daydream.phases.inputs import (
+    TEST_OUTPUT_TAIL_LINES,
+    _render_bash_allowlist,
+    _tail_test_output,
+    append_extended_facts,
+)
 from daydream.phases.repair_outcome import classify_repair_outcome
 from daydream.phases.test_evidence import (
     RepairAttemptEvidence,
@@ -100,7 +105,12 @@ def _build_fix_prompt(
     """
     tail, truncated = _tail_test_output(test_output)
     if truncated:
-        output_section = f"Here is the tail of the test output:\n\n{tail}"
+        # Disclose the drop, and disclose how much: a repair that reads this as
+        # the whole failure record will chase a symptom the early lines named.
+        output_section = (
+            f"Here is the tail of the test output (truncated to its last "
+            f"{TEST_OUTPUT_TAIL_LINES} lines; earlier lines were dropped):\n\n{tail}"
+        )
     else:
         output_section = f"Here is the test output:\n\n{test_output}"
 
@@ -112,7 +122,9 @@ def _build_fix_prompt(
             files = [str(repo / f) if (repo / f).is_file() else f for f in files]
         if files:
             file_list = "\n".join(f"- {f}" for f in files)
-            parts.append(f"\nFiles modified during the fix phase:\n{file_list}")
+            # The list names where the findings point; it is not a record of what
+            # the previous fix turn changed, and must not read as one.
+            parts.append(f"\nFinding target files (not a diff of what changed):\n{file_list}")
         evidence = [value for item in feedback_items if (value := _item_evidence(item))]
         if evidence:
             evidence_list = "\n".join(f"- {value}" for value in evidence)
@@ -124,18 +136,60 @@ def _build_fix_prompt(
         parts.append("\nAnalyze the failures and fix them.")
     if feedback_items:
         parts.append("Focus on the files listed above.")
-        if concise_mode:
-            parts.append(
-                "Start with the files listed above; if a correct fix needs "
-                "another file, edit it and state which file."
-            )
-        else:
-            parts.append(
-                "Start with the files listed above; if a correct fix needs "
-                "another file, edit it and say which and why."
-            )
+        parts.append(
+            "Start with the files listed above. Edit authority is narrower than "
+            "that list: the authorized edit scope is the only set of paths you may "
+            "write, and anything outside it is reachable only by the scope-request "
+            "return path, never by editing it and reporting afterwards."
+        )
 
     return "\n".join(parts) + f"\n\n{GENERATED_FILES_PROMPT_RULE}\n" + _build_fix_style_suffix(concise_mode)
+
+
+def _build_repair_budget_clause(wall_budget_s: float, tool_call_budget: int | None) -> str:
+    """State the allowance the host will actually enforce, and nothing more.
+
+    A repair turn is wall-clock bounded; whether it is also tool-call bounded is
+    a fact about the resolved configuration, so an uncapped turn says so instead
+    of implying a cap that does not exist.
+    """
+    if tool_call_budget is None:
+        tool_line = "no tool-call cap is enforced, so spend the calls the diagnosis needs"
+    else:
+        tool_line = f"tool-call budget: {tool_call_budget} calls"
+    return (
+        f"\nTurn budget: {wall_budget_s:g}s of wall clock for this whole turn, and "
+        f"{tool_line}. Reaching the wall clock ends the turn mid-work: the partial "
+        "edits are kept and recorded, and the turn is not asked to verify them. "
+        "Prioritise the most likely root cause and land that fix rather than "
+        "covering every candidate.\n"
+    )
+
+
+def _compose_repair_prompt(
+    output: str = "",
+    feedback_items: list[dict[str, Any]] | None = None,
+    *,
+    repo: Path | None = None,
+    concise_mode: bool = False,
+    edit_scope: frozenset[str] = frozenset(),
+    wall_budget_s: float = phase_config.DEFAULT_WALL_BUDGET_S,
+    tool_call_budget: int | None = phase_config.DEFAULT_TOOL_CALL_BUDGET,
+    prompt_body: str | None = None,
+) -> str:
+    """Assemble the whole repair prompt: findings, edit authority, and real budget.
+
+    One composer, so the enforcement contract (authorized edit scope) and the
+    debugging workflow cannot drift into a prompt that contradicts itself.
+    ``prompt_body`` carries an extension's override of the ``fix`` prompt; when
+    absent the default renderer runs here.
+    """
+    prompt = prompt_body if prompt_body is not None else _build_fix_prompt(
+        output, feedback_items, repo=repo, concise_mode=concise_mode,
+    )
+    if edit_scope:
+        prompt += _build_fix_scope_clause(edit_scope, edit_scope)
+    return prompt + _build_repair_budget_clause(wall_budget_s, tool_call_budget)
 
 
 def _build_setup_investigator_prompt(test_output: str) -> str:
@@ -401,20 +455,27 @@ async def phase_test_and_heal(
             pre_untracked = set()
             pre_untracked_contents = {}
             snapshot_captured = False
-        fix_prompt = get_registry().prompt("fix")(
-            output, feedback_items, repo=work.repo,
+        wall_budget_s = phase_config.DEFAULT_WALL_BUDGET_S
+        tool_call_budget = phase_config.DEFAULT_TOOL_CALL_BUDGET
+        fix_prompt = _compose_repair_prompt(
+            output, feedback_items,
+            repo=work.repo,
             concise_mode=_backend_concise_fix_prompts(repair_instance),
+            edit_scope=footprint.run_allowed_paths,
+            wall_budget_s=wall_budget_s,
+            tool_call_budget=tool_call_budget,
+            prompt_body=get_registry().prompt("fix")(
+                output, feedback_items, repo=work.repo,
+                concise_mode=_backend_concise_fix_prompts(repair_instance),
+            ),
         )
         fix_prompt = append_extended_facts(fix_prompt, recipe)
-        fix_prompt += _build_fix_scope_clause(
-            footprint.run_allowed_paths, footprint.run_allowed_paths
-        )
         input_tree_key = capture_tree_key()
         started = time.monotonic()
         partial_output, continuation_token, abort_reason = await agent.run_agent(
             repair_instance, work.repo, fix_prompt, phase=DaydreamPhase.FIX,
-            tool_call_budget=phase_config.DEFAULT_TOOL_CALL_BUDGET,
-            wall_budget_s=phase_config.DEFAULT_WALL_BUDGET_S,
+            tool_call_budget=tool_call_budget,
+            wall_budget_s=wall_budget_s,
             run_context=run_context,
         )
         # The host, not the turn, decides what happened: the abort reason outranks

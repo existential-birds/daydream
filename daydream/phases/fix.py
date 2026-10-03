@@ -154,7 +154,9 @@ def _build_fix_scope_clause(
     """Render separate edit authorization and readable run context.
 
     The edit list is the enforcement contract. The wider read list is context
-    only and never grants write authority.
+    only and never grants write authority. A path outside the edit list is
+    reachable only by requesting it: name the path with evidence and let the
+    host widen the scope, rather than editing it and reporting after the fact.
     """
     edits = ", ".join(sorted(edit_scope)) or "(none)"
     readable_only = ", ".join(sorted(read_scope - edit_scope)) or "(none)"
@@ -163,6 +165,11 @@ def _build_fix_scope_clause(
         f"{edits}\n"
         "Run-readable context (read-only unless also listed in the edit scope): "
         f"{readable_only}\n"
+        "\nScope request (the only way outside that list): if a correct fix needs a "
+        "repository-relative path you are not authorized to edit, do NOT edit it. Name "
+        "the path in your final message, cite the file:line evidence that requires it, "
+        "and stop there; the host decides whether to widen the authorized scope for a "
+        "later attempt.\n"
     )
 
 
