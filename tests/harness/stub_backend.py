@@ -134,6 +134,10 @@ class StubBackend:
         # full confinement that must run before the suite is rerun.
         self.heal_fix_unauthorized: str | None = None
         self.heal_fix_unauthorized_line: str = "\n# unauthorized healing edit\n"
+        # Text a healing turn emits as its partial diagnosis and then never
+        # finishes: the real run_agent wall budget ends the turn, so the host
+        # records an interrupted repair rather than a completed one.
+        self.heal_fix_partial: str | None = None
         # Emit a runaway ToolStartEvent burst without a result to exercise budgets.
         self.runaway_fix: bool = False
         # Runaway pacing; zero still yields via sleep(0). Positive values can trip
@@ -697,6 +701,13 @@ class StubBackend:
         # The healing sentinel proves re-entry; environmental failures must leave
         # it absent.
         if pl.startswith("the tests failed"):
+            if self.heal_fix_partial is not None:
+                # Diagnosis, then no result: only the host budget can end this
+                # turn, which is exactly the interrupted repair under test.
+                yield TextEvent(text=self.heal_fix_partial)
+                async for event in self._runaway_burst("htc", self.runaway_fix_sleep_s):
+                    yield event
+                return
             (cwd / ".daydream-heal-fix-applied").write_text("healed\n")
             if self.heal_fix_generated is not None:
                 generated = cwd / self.heal_fix_generated

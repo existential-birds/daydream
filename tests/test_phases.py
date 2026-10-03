@@ -946,7 +946,15 @@ async def test_phase_test_and_heal_records_interrupted_repair_instead_of_discard
     assert all(len(excerpt) <= _REPAIR_EXCERPT_MAX_CHARS for excerpt in payload["focused_evidence"])
     # The interrupted tree is not verified, so the suite is not rerun against it.
     assert (result.passed, result.proceed) == (False, False)
-    assert backend.call_count == 2
+    # Test, repair, then the failure handoff: a run that stops on an interrupted
+    # repair writes the artifact a human reads, so the summarizer turn runs too.
+    assert backend.call_count == 3
+    assert "failure-summarizer" in backend.prompts[-1].lower()
+    handoffs = list(tmp_path.glob(".daydream/handoff-*.md"))
+    assert handoffs, "an interrupted repair must leave a handoff behind"
+    body = handoffs[0].read_text()
+    assert "wall_budget_exceeded" in body
+    assert "PARTIAL-DIAGNOSIS-abc123" in body
 
 @pytest.mark.asyncio
 async def test_unauthorized_repair_edit_is_confined_before_the_rerun(
@@ -1069,7 +1077,9 @@ async def test_failing_confinement_blocks_the_repair_and_records_the_failure(
 
     # The suite is never rerun against the unconverged tree.
     assert (result.passed, result.retries, result.proceed) == (False, 1, False)
-    assert backend.call_count == 2
+    # Test, repair, then the failure handoff naming the blocked repair.
+    assert backend.call_count == 3
+    assert "failure-summarizer" in backend.prompts[-1].lower()
     assert [r.outcome for r in result.repairs] == [RepairOutcome.SCOPE_BLOCKED]
     assert any("GitError" in diagnostic and "restore failed" in diagnostic
         for r in result.repairs for diagnostic in r.diagnostics)
@@ -1132,7 +1142,10 @@ async def test_phase_test_and_heal_aborts_when_generated_restore_fails(
     )
     result = await phases.phase_test_and_heal(backend, make_work(tmp_path), allow_standalone=True)
     assert (result.passed, result.retries, result.proceed) == (False, 1, False)
-    assert backend.call_count == 2
+    # Test, repair, then the failure handoff: the rejected tree is not rerun, and
+    # the artifact still names what happened.
+    assert backend.call_count == 3
+    assert "failure-summarizer" in backend.prompts[-1].lower()
 
 @pytest.mark.asyncio
 async def test_phase_test_and_heal_fix_prompt_absolute_path_and_no_turn_cap(

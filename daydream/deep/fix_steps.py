@@ -36,6 +36,7 @@ from daydream.phases import (
     FIX_VERIFY_RETARGETABLE_VERDICTS,
     PushAttemptError,
     PushReceipt,
+    RepairAttemptEvidence,
     TestAndHealResult,
     TestAttemptEvidence,
     phase_commit_push,
@@ -51,6 +52,7 @@ from daydream.run_context import resolve_run_context
 from daydream.trajectory import (
     DaydreamPhase,
     current_session_id,
+    get_current_recorder,
     now_iso,
     phase_scope,
     redact_structured_text,
@@ -738,6 +740,16 @@ def _test_attempt_payload(attempt: TestAttemptEvidence) -> dict[str, Any]:
     return payload
 
 
+def _repair_payload(repair: RepairAttemptEvidence) -> dict[str, Any]:
+    """Serialize one repair record: names, digests, and bounded excerpts only.
+
+    The same discipline ``evidence_reuse.audit_payload`` documents applies — the
+    artifact names what happened and points at the evidence, and never carries a
+    turn's raw prose.
+    """
+    return repair.payload()
+
+
 def _persist_test_verdict(
     ctx: FlowContext,
     state: FixCycleState,
@@ -745,6 +757,7 @@ def _persist_test_verdict(
     passed: bool,
     ignored: bool,
     attempts: list[TestAttemptEvidence],
+    repairs: list[RepairAttemptEvidence] | None = None,
 ) -> None:
     deep_state = DeepState(ctx.data)
     from daydream.remote_ci import local_host_facts
@@ -757,6 +770,9 @@ def _persist_test_verdict(
             "ignored": ignored,
             "retries": max(0, len(attempts) - 1),
             "attempts": [_test_attempt_payload(attempt) for attempt in attempts],
+            # Always present, never omitted: a consumer must not have to tell
+            # "no repair happened" from "this writer predates repair records".
+            "repairs": [_repair_payload(repair) for repair in (repairs or ())],
             "local_host": local_host_facts(),
         },
         sort_keys=True,
@@ -852,12 +868,17 @@ async def finalize_retained_tree_after_test(
             attempts.append(evidence)
             ignored = False if evidence.passed else _authorize_final_red_override(ctx)
             ran_test = True
+            # This extra pass runs no repair turn of its own, but it rewrites the
+            # same verdict file: the heal loop's records are re-emitted rather
+            # than erased, because a consumer must never read "no repair" out of
+            # a pass that merely did not need one.
             _persist_test_verdict(
                 ctx,
                 state,
                 passed=evidence.passed,
                 ignored=ignored,
                 attempts=attempts,
+                repairs=list(result.repairs),
             )
 
         if pass_number == 1 and (mutated or ran_test):
@@ -950,7 +971,22 @@ async def _step_test(ctx: FlowContext) -> Stop | None:
                 passed=result.passed,
                 ignored=result.ignored,
                 attempts=list(result.attempts),
+                repairs=list(result.repairs),
             )
+            # The concise reason codes also land on the enclosing step's telemetry,
+            # so a scan can tell an interrupted repair from a completed one
+            # without reading the artifact back.
+            recorder = get_current_recorder()
+            for repair in result.repairs:
+                code = repair.reason_code
+                if recorder is not None:
+                    recorder.emit_repair_outcome(
+                        execution_id=repair.execution_id,
+                        outcome=repair.outcome.value,
+                        abort_reason=repair.abort_reason,
+                        repair_reason_code=code.value if code is not None else None,
+                        changed_paths=repair.changed_paths,
+                    )
         except Exception as exc:
             return _confinement_stop(ctx, state, "test_failure", None, "Test evidence failed", str(exc))
     if not result.proceed:

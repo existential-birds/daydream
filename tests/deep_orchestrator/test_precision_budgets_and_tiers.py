@@ -457,6 +457,50 @@ async def test_environmental_failure_aborts_heal_loop(
     saw_test_step = "test" in _scan_trajectory_extra(run_root, traj, "daydream_phase")
     assert saw_test_step, "no TEST-phase trajectory step recorded -- heal phase not reached"
 
+async def test_failure_handoff_names_the_budget_reason_and_partial_diagnosis(
+    multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
+    mute_side_effects: Mute,
+) -> None:
+    """Requirement 5: the artifact a human reads says the repair was interrupted."""
+
+    _silence(monkeypatch, prompts=False)
+    monkeypatch.setattr("daydream.run_context._prompt_user", lambda *a, **kw: "y")
+    monkeypatch.setattr("daydream.config.DEFAULT_WALL_BUDGET_S", 0.3)
+    stub = _install_stub_backend(monkeypatch, multi_stack_target)
+    stub.fail_first_test_run = True
+    stub.heal_fix_partial = "PARTIAL-DIAGNOSIS-abc123"
+    # The interrupted turn is paced so the real wall budget, not the generator
+    # running dry, is what ends it.
+    stub.runaway_fix_sleep_s = 0.05
+    mute_side_effects(heal=False)
+
+    traj = tmp_path / "t.json"
+    with anyio.fail_after(60):
+        await run(make_config(multi_stack_target, trajectory_path=traj,
+                              assume="yes", output_mode="loop"))
+
+    verdict = json.loads((multi_stack_target / ".daydream" / "deep" / "test-verdict.json").read_text())
+    assert verdict["repairs"], "the repair record must reach the persisted verdict"
+    repair = verdict["repairs"][0]
+    assert repair["outcome"] == "budget_interrupted"
+    assert repair["abort_reason"] == "wall_budget_exceeded"
+
+    # The handoff lands in the session's run directory (and beside the artifacts
+    # for a recorder-less run); read whatever this run actually wrote.
+    handoffs = [
+        *multi_stack_target.glob(".daydream/handoff-*.md"),
+        *multi_stack_target.glob(".daydream/runs/*/handoff.md"),
+    ]
+    handoff = "".join(path.read_text() for path in handoffs)
+    assert "wall_budget_exceeded" in handoff, "the handoff must name the budget reason"
+    assert "PARTIAL-DIAGNOSIS-abc123" in handoff, "the handoff must carry the partial diagnosis"
+
+    # The same concise reason codes are scannable on the step's own telemetry.
+    events = _scan_phase_events(multi_stack_target / ".daydream", traj, "repair_outcome")
+    assert events, "the repair outcome must reach the enclosing step's telemetry"
+    assert {event["metadata"]["abort_reason"] for event in events} == {"wall_budget_exceeded"}
+    assert {event["metadata"]["outcome"] for event in events} == {"budget_interrupted"}
+
 async def test_repair_turn_uses_a_distinctly_configured_fix_backend(
     multi_stack_target: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -614,11 +658,17 @@ async def test_ephemeral_failure_handoff_projects_public_refs_without_private_pa
     assert str(multi_stack_target / "api.py") in observation["prompt"]
     assert observation["future_children"] == str(public_run / "trajectories")
     private_partial = observation["private_partial"]
+    # The summarizer's body is preserved verbatim; the host's repair record is
+    # appended after it, so equality holds up to that host-owned tail.
+    def _summarizer_body(text: str) -> str:
+        return text.partition("\n## Test repair attempts (host record)")[0]
+
     if response_kind == "clean":
-        assert body == observation["model_body"]
+        assert _summarizer_body(body) == observation["model_body"]
+        assert "budget_interrupted" not in body
     elif response_kind == "known-leaf":
         if trajectory_mode == "external":
-            assert body == observation["model_body"]
+            assert _summarizer_body(body) == observation["model_body"]
         else:
             assert "HANDOFF_STRUCTURED_SUCCESS" not in body
             assert "Tests did not report success" in body
