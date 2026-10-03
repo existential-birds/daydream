@@ -761,3 +761,30 @@ guard fault ceased to refuse. Thirty-one successful semantic CLI checks did not
 cover these failures. Neither training prototype is applied or counted; the real
 annotation reducer remains the shared validation authority. Further substantial
 internal redesign is required; difficult remaining work is not a blocker.
+
+### Fifteenth ordinary hook failure and harness correction
+
+Signed commit `36633a8d68faef75d52e135a7442b00b6d59b190` passed pre-commit
+checks, but its ordinary push stopped on two unchanged GitHub workflow pagination
+cases. Both actual fake-gh subprocess communications reached their 5s limit; the
+short-page case therefore reported timeout instead of the asserted incomplete
+population refusal. The gate passed 9735 tests /14 existing skips /134 warnings
+in 650.50s, with 90.86% coverage against the unchanged 86% floor. Push failed;
+these results do not establish a passing full gate for this checkpoint.
+
+The unchanged full async GitHub module passes 38 cases in focused serial use.
+Independent diagnosis found pytest loaded in every real fake-gh child solely for
+two postponed MonkeyPatch annotations. The minimal harness correction guards
+that import with TYPE_CHECKING; all function/class ASTs, schema/marker imports,
+responses, budget settings, pagination assertions and timeout/cancel/group/FD
+checks remain unchanged. It adds one test-support physical line and receives
+zero production/source credit. Independent root checks pass all six relevant
+boundary/timeout/cancel/idempotence cases; the worker's unchanged full async file
+passes 38 cases under auto xdist, plus four harness/schema consumers.
+
+Actual paired 16-concurrent /64-request shim probes preserve all payloads and
+128 journal records per variant within the same 5s bounds. Observed median/max
+startup is 121.9/370.0ms before and 46.8/211.6ms after. This demonstrates avoided
+startup cost, not proof of the historical scheduling cause or hook recovery.
+Production snapshot/metrics and independent 209-path coverage are unchanged.
+The ordinary full push retry remains required; no hook or signature is bypassed.
