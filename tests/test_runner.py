@@ -742,7 +742,13 @@ async def test_run_dispatches_to_expected_flow(
     observed = getattr(seen_config, expected_attr)
     assert observed == expected_value and type(observed) is type(expected_value)
 
-async def test_run_rejects_head_mismatch_before_dispatch(
+@pytest.mark.parametrize(
+    ("approved_head_sha", "expected_exit", "expected_called"),
+    [("DEADBEEF", 1, []), ("CAFEBABE", 0, ["_run_loop_deep"])],
+    ids=["rejects_mismatch", "allows_match"],
+)
+async def test_run_approved_head_gate_on_stubbed_workspace(
+    approved_head_sha: str, expected_exit: int, expected_called: list[str],
     monkeypatch: pytest.MonkeyPatch, patch_workspace: Any,
     silence_runner_ui: None,  # noqa: F841
     tmp_path: Path, make_config: Callable[..., 'RunConfig'],
@@ -751,41 +757,14 @@ async def test_run_rejects_head_mismatch_before_dispatch(
     _record = _make_recording_dispatch(called)
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
-    config = make_config(tmp_path, approved_head_sha="DEADBEEF")
+    config = make_config(tmp_path, approved_head_sha=approved_head_sha)
     exit_code = await runner.run(config)
-    assert exit_code == 1
-    assert called == []
+    assert exit_code == expected_exit
+    assert called == expected_called
 
-async def test_run_allows_matching_approved_head(
-    monkeypatch: pytest.MonkeyPatch, patch_workspace: Any,
-    silence_runner_ui: None,  # noqa: F841
-    tmp_path: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    called: list[str] = []
-    _record = _make_recording_dispatch(called)
-    for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
-    config = make_config(tmp_path, approved_head_sha="CAFEBABE")
-    exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called == ["_run_loop_deep"]
-
-async def test_run_rejects_head_mismatch_on_real_worktree(
-    monkeypatch: pytest.MonkeyPatch,
-    silence_runner_ui: None,  # noqa: F841
-    deep_target: Path, make_config: Callable[..., 'RunConfig'],
-) -> None:
-    called: list[str] = []
-    _record = _make_recording_dispatch(called)
-    for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
-    config = make_config(deep_target, approved_head_sha="DEADBEEF")
-    exit_code = await runner.run(config)
-    assert exit_code == 1
-    assert called == []
-
-async def test_run_allows_matching_approved_head_on_real_worktree(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("matching", [False, True], ids=["rejects_mismatch", "allows_match"])
+async def test_run_approved_head_gate_on_real_worktree(
+    matching: bool, monkeypatch: pytest.MonkeyPatch,
     silence_runner_ui: None,  # noqa: F841
     deep_target: Path, make_config: Callable[..., 'RunConfig'],
 ) -> None:
@@ -797,11 +776,12 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
     for name in _DISPATCH_TARGETS:
         monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
     real_head = _git(deep_target, "rev-parse", "HEAD").strip()
-    config = make_config(deep_target, approved_head_sha=real_head)
+    config = make_config(deep_target, approved_head_sha=real_head if matching else "DEADBEEF")
     exit_code = await runner.run(config)
-    assert exit_code == 0
-    assert called == ["_run_loop_deep"]
-    assert head_shas == [real_head]
+    assert exit_code == (0 if matching else 1)
+    assert called == (["_run_loop_deep"] if matching else [])
+    if matching:
+        assert head_shas == [real_head]
 
 @pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
 async def test_deep_run_mints_app_identity_before_posting_path(
@@ -939,30 +919,23 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
 # --- Per-phase model resolution tests --------------------------------------
 
 class TestResolveBackendPhaseModel:
-    def test_explicit_phase_flag_wins_over_table(self) -> None:
-        config = RunConfig(backend="claude", review_model="claude-haiku-4-5")
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-haiku-4-5"
-
-    def test_table_default_used_when_no_flag(self) -> None:
-        config = RunConfig(backend="claude")  # no review_model override
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "claude-opus-5"  # claude REVIEW default
-
-    def test_table_default_for_phase_without_flag(self) -> None:
-        config = RunConfig(backend="claude")
-        backend = runner._resolve_backend(config, "wonder")
-        assert backend.model == "claude-opus-5"
-
-    def test_codex_table_default(self) -> None:
-        config = RunConfig(backend="codex")
-        backend = runner._resolve_backend(config, "parse")
-        assert backend.model == "gpt-5.6-luna"  # codex PARSE default (cheap tier)
-
-    def test_backend_override_uses_overridden_backends_table(self) -> None:
-        config = RunConfig(backend="claude", review_backend="codex")
-        backend = runner._resolve_backend(config, "review")
-        assert backend.model == "gpt-5.6-sol"  # codex REVIEW default (heavy tier)
+    @pytest.mark.parametrize(
+        ("config_kwargs", "phase", "expected_model"),
+        [
+            ({"backend": "claude", "review_model": "claude-haiku-4-5"}, "review", "claude-haiku-4-5"),
+            ({"backend": "claude"}, "review", "claude-opus-5"),  # claude REVIEW default
+            ({"backend": "claude"}, "wonder", "claude-opus-5"),
+            ({"backend": "codex"}, "parse", "gpt-5.6-luna"),  # codex PARSE default (cheap tier)
+            ({"backend": "claude", "review_backend": "codex"}, "review", "gpt-5.6-sol"),  # codex heavy tier
+        ],
+        ids=["explicit_phase_flag_wins", "table_default", "table_default_phase_without_flag", "codex_table_default",
+             "backend_override_uses_overridden_table"],
+    )
+    def test_resolves_phase_model(
+        self, config_kwargs: dict[str, Any], phase: str, expected_model: str,
+    ) -> None:
+        backend = runner._resolve_backend(RunConfig(**config_kwargs), phase)
+        assert backend.model == expected_model
 
     def test_cache_returns_same_instance_for_same_phase_and_backend(self) -> None:
         cache: dict[tuple[str, str | None, str | None, Path | None], Backend] = {}

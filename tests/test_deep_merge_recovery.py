@@ -33,7 +33,7 @@ from daydream.review_budget import record_review_budget_stop, review_budget_path
 from daydream.run_config import RunConfig
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.stub_backend import install_stub_backend, silence
+from tests.harness.stub_backend import StubBackend, install_stub_backend, silence
 from tests.harness.trajectory import make_recorder
 from tests.test_deep_orchestrator import _merge_item, _run_deep
 
@@ -185,19 +185,28 @@ async def test_merge_salvage_applies_dedup_prefilter(
     assert "api.py" in files
     assert "App.tsx" not in files, f"cross-stack duplicate leaked into partial items: {files}"
 
+async def _salvage_then_reset(
+    monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None], target: Path, *,
+    emit: str = "prose with no item list",
+) -> StubBackend:
+    """Run one salvageable merge, then reset the stub for the resume under test."""
+    silence(monkeypatch)
+    mute_side_effects()
+    stub = install_stub_backend(monkeypatch, target)
+    stub.parse_severity = "high"
+    stub.merge_emit_str = emit
+    assert await _run_deep(target) != 0  # merge salvaged -> Stop(1)
+    stub.calls.clear()
+    stub.merge_emit_str = None
+    return stub
+
+
 async def test_merge_failure_resume_surfaces_prior_failure(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Fix resume warns about partial synthesis without treating __merge__ as a stack."""
-    silence(monkeypatch)
-    mute_side_effects()
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.merge_emit_str = "prose with no item list"
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    stub.calls.clear()
-    stub.merge_emit_str = None
+    await _salvage_then_reset(monkeypatch, mute_side_effects, multi_stack_target)
     assert await _run_deep(multi_stack_target, start_at="fix") == 0
     out = capsys.readouterr().out
     assert "Prior cross-stack synthesis failed; merged results are PARTIAL" in out
@@ -301,14 +310,7 @@ async def test_merge_failure_relaunch_picks_up_salvage(
 ) -> None:
     """R6/AC4: --start-at fix after salvage picks up partial items; no re-review, no re-merge."""
 
-    silence(monkeypatch)
-    mute_side_effects()
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.merge_emit_str = merge_str
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    stub.calls.clear()
-    stub.merge_emit_str = None
+    stub = await _salvage_then_reset(monkeypatch, mute_side_effects, multi_stack_target, emit=merge_str)
     # Accept the interactive fix gate so the resume consumes the salvaged
     # partial items; decline the later commit and posting gates.
     monkeypatch.setattr("daydream.runner._stdin_isatty", lambda: True)
@@ -338,14 +340,7 @@ async def test_merge_failure_merge_resume_skips_merge_entry(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Callable[..., None],
 ) -> None:
     """Merge resume excludes __merge__ from failed stacks and Uncovered stacks text."""
-    silence(monkeypatch)
-    mute_side_effects()
-    stub = install_stub_backend(monkeypatch, multi_stack_target)
-    stub.parse_severity = "high"
-    stub.merge_emit_str = "prose with no item list"
-    assert await _run_deep(multi_stack_target) != 0  # merge salvaged -> Stop(1)
-    stub.calls.clear()
-    stub.merge_emit_str = None
+    stub = await _salvage_then_reset(monkeypatch, mute_side_effects, multi_stack_target)
     stub.merge_emit_bare_list = [_merge_item(1, "store/cache.py", "high", desc="unbounded cache write")]
     assert await _run_deep(multi_stack_target, start_at="merge") == 0
     merge_calls = [c for c in stub.calls if "cross-stack merge agent" in c["prompt"].lower()]
