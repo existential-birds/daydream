@@ -247,6 +247,7 @@ async def test_findings_out_writes_a_diagram_artifact_phase_b_reposts_it(
     # Phase A stops before any GitHub write.
     assert _issue_comments(fake_gh) == []
     assert artifact["kind"] == "diagram"
+    assert artifact["head_sha"] == git_ops.head_sha(target), "Phase A declares the analyzed commit"
     assert artifact["findings"] == []
     results = artifact["diagrams"]["results"]
     assert results["flowchart"]["status"] == "rendered"

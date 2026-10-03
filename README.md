@@ -800,6 +800,8 @@ Coverage records run identity, exact stack/shard outcomes, captured head, diff m
 
 Findings and coverage are validated and atomically published together. Valid partial findings survive normal finalization; incomplete/failed results publish COMMENT notices and cannot authorize approval or stale-thread resolution. Commit-bound exports require a clean checkout and use captured identity and diff for placement. Interactive dirty reviews remain supported; publishers validate the independently trusted target.
 
+Every artifact Daydream writes declares the commit its analysis read, for `--review` and `--diagram-only` exports alike. A PR head that has moved away from the analyzed checkout ends the run non-zero, before any artifact is written. The commit is captured once at run start; no export path re-resolves it.
+
 Use a unique, initially absent output path for each invocation. Reusing a path requires an independently known expected run ID: failed replacement can preserve an old complete file. Missing/truncated output, process destruction and failed installation provide no valid current result.
 
 Resume and cache proofs require typed coverage for the exact revision and scope inventory. Missing, damaged or mismatched proofs restart review; same-revision partial resumes preserve failures, successful scope reruns clear them, and complete reuse receives the current run ID.
