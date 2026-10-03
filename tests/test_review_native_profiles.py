@@ -11,6 +11,7 @@ from daydream.deep.prompts import (
 )
 from daydream.deep.verification_prompts import build_verification_prompt
 from daydream.phases import build_alternative_review_prompt, build_intent_prompt
+from daydream.prompts.grounding import CWD_GROUNDING_INSTRUCTION
 from tests.harness.review_profile import default_strategy as _default_strategy
 
 
@@ -90,6 +91,12 @@ def test_prompt_builders_include_supplied_strategy_and_runtime_context() -> None
     assert "suppression-strategy-sentinel" in sup
     assert "/suppression-input.json" in sup and "/review.diff" in sup
     assert "verification-strategy-sentinel" in ver
+    # Strategy overrides must retain concrete host boundaries in rendered prompts.
+    for rendered in (sv, sup, ver):
+        assert CWD_GROUNDING_INSTRUCTION.format(cwd=Path("/review-repo")) in rendered
+    assert "never file, line, or id" in sv
+    assert "Default to DROPPING each finding" in sup
+    assert "Read-only contract (MANDATORY)" in ver
     assert "changed.py" in ver and "verification-candidate-sentinel" in ver
     assert "intent-strategy-sentinel" in intent
     assert "/review.diff" in intent and "+new behavior" in intent

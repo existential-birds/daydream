@@ -22,7 +22,7 @@ from pydantic import (
     model_validator,
 )
 
-from daydream.pr_review import FINDING_MARKER_RE
+from daydream.reviews.identity import FINDING_MARKER_RE
 from daydream.severity import SeverityLevel
 
 

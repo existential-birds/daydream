@@ -12,23 +12,7 @@ from typing import Any
 
 from daydream.git_ops import process
 from daydream.git_ops.models import GitError, GitTimeoutError, NotAWorktreeError, PathAbsentError
-from daydream.git_ops.references import (
-    _has_leading_dash as _has_leading_dash,
-    _merge_base_strict as _merge_base_strict,
-    _prefer_remote_base as _prefer_remote_base,
-    _upstream_and_ahead as _upstream_and_ahead,
-    _validate_pr_base_ref as _validate_pr_base_ref,
-    _validated_diff_object_id as _validated_diff_object_id,
-    branch_exists as branch_exists,
-    commit_exists as commit_exists,
-    default_branch as default_branch,
-    is_ancestor as is_ancestor,
-    merge_base as merge_base,
-    ref_exists as ref_exists,
-    resolve_diff_merge_base as resolve_diff_merge_base,
-    resolve_pr_merge_base as resolve_pr_merge_base,
-    upstream_ahead_count as upstream_ahead_count,
-)
+from daydream.git_ops.references import _prefer_remote_base
 from daydream.repository_paths import git_observed_path_is_confined
 
 # --- Pre-flight --------------------------------------------------------------

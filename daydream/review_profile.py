@@ -401,48 +401,6 @@ def build_default_profile() -> ReviewProfile:
     )
 
 
-# Host-owned protocol/envelope blocks each stage renders against (R13). The
-# envelope classification is classification-only -- it names the host-owned
-# protocol block (a real production symbol where one exists) each stage's
-# strategy content is rendered against; the actual render split is #886. The
-# strategy leg is derived from the packaged default's ``Strategy.source`` so
-# the classification can never drift from the strategy content it classifies.
-_ENVELOPE_BY_STAGE: dict[str, str] = {
-    # Exploration specialists are cwd-grounded in the audited repo.
-    "exploration.repository_survey": (
-        "daydream.prompts.grounding.CWD_GROUNDING_INSTRUCTION"
-    ),
-    "exploration.pattern_scan": (
-        "daydream.prompts.grounding.UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY"
-    ),
-    "exploration.dependency_trace": (
-        "daydream.deep.prompts.CONFIG_FLOW_TRACE_INSTRUCTION"
-    ),
-    "exploration.test_mapping": (
-        "daydream.deep.prompts.TEST_QUALITY_RUBRIC_INSTRUCTION"
-    ),
-    # Deep review spine.
-    "intent": "daydream.prompts.grounding.CWD_GROUNDING_INSTRUCTION",
-    "alternatives": "daydream.deep.prompts.TRUST_MODEL_INSTRUCTION",
-    "discovery.per_stack": (
-        "daydream.deep.prompts.CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION"
-    ),
-    "discovery.structural": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
-    "discovery.generic_fallback": (
-        "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION"
-    ),
-    "arbitration": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
-    "suppression": "daydream.deep.prompts.TRUST_MODEL_INSTRUCTION",
-    "merge": "daydream.improve.prompts.FINDING_FORMAT",
-    "supervision": "daydream.deep.prompts.CROSS_FILE_SYMBOL_EXISTENCE_INSTRUCTION",
-    "verification": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
-    # Improve audits render against the host finding format + hard rules.
-    # The category set is owned by the production playbook mapping, so a new
-    # audit category cannot leave this envelope table behind.
-    **{f"improve.audit.{c}": "daydream.improve.prompts.FINDING_FORMAT" for c in AUDIT_PLAYBOOK_SECTIONS},
-    "improve.vetting": "daydream.deep.prompts.VERIFICATION_PROTOCOL_INSTRUCTION",
-}
-
 
 def parse_profile(toml_text: str, *, source: str = "<string>") -> ReviewProfile:
     """Parse TOML strictly; omitted fields receive defaults before digesting.

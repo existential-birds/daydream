@@ -102,60 +102,6 @@ def _exists_on_disk(repo: Path, path: str) -> bool:
         return False
 
 
-def _context_excerpts(normalized: dict[str, Any]) -> list[Any]:
-    """Return the plan's excerpt list, creating it when a repair must append."""
-    context = normalized.get("context_excerpts")
-    if not isinstance(context, list):
-        context = []
-        normalized["context_excerpts"] = context
-    return context
-
-
-def _dedup_scope(normalized: dict[str, Any], *, repo: Path) -> None:
-    scope = normalized.get("scope")
-    if not isinstance(scope, dict):
-        return
-    for list_name in ("existing_paths", "new_paths", "out_of_scope_paths"):
-        entries = scope.get(list_name)
-        if not isinstance(entries, list):
-            continue
-        seen: set[str] = set()
-        kept: list[Any] = []
-        for entry in entries:
-            path = entry.get("path") if isinstance(entry, dict) else None
-            if isinstance(path, str):
-                if path in seen:
-                    continue
-                seen.add(path)
-            kept.append(entry)
-        scope[list_name] = kept
-    existing = scope.get("existing_paths")
-    new = scope.get("new_paths")
-    if isinstance(existing, list) and isinstance(new, list):
-        conflicts = set(contract._entry_paths(existing)) & set(contract._entry_paths(new))
-        for path in conflicts:
-            list_name = "new_paths" if _exists_on_disk(repo, path) else "existing_paths"
-            scope[list_name] = [
-                entry
-                for entry in scope[list_name]
-                if not (isinstance(entry, dict) and entry.get("path") == path)
-            ]
-    in_scope = set(contract._entry_paths(scope.get("existing_paths"))) | set(
-        contract._entry_paths(scope.get("new_paths"))
-    )
-    out_entries = scope.get("out_of_scope_paths")
-    if isinstance(out_entries, list):
-        scope["out_of_scope_paths"] = [
-            entry
-            for entry in out_entries
-            if not (
-                isinstance(entry, dict)
-                and isinstance(entry.get("path"), str)
-                and entry["path"].rstrip("/") in in_scope
-            )
-        ]
-
-
 _STEP_PATH_ROLE = (
     "Named by a plan step but left out of the authored scope lists; the host "
     "declared it in scope so the executor is allowed to change it."
@@ -180,114 +126,93 @@ def _referenced_paths(normalized: dict[str, Any]) -> Iterator[tuple[str, str]]:
             yield path, _TEST_PATH_ROLE
 
 
-def _declare_referenced_paths(
-    normalized: dict[str, Any],
-    *,
-    repo: Path,
-) -> None:
-    """Declare confined step/test paths before scope deduplication.
+def _reconcile_scope(normalized: dict[str, Any], *, repo: Path) -> None:
+    """Resolve authored and referenced paths into one writable scope.
 
-    Append as new paths; relocation then anchors nonempty existing files and
-    changes create operations to modify. Malformed or escaping paths stay at
-    their authored pointers for validation. Empty files remain new because they
-    have no excerpt to anchor.
+    Existing declarations win collisions only for real confined files. New or
+    undeclared nonempty files become existing paths with drift excerpts; empty
+    files remain new because they cannot supply an anchor. Malformed entries
+    stay at their authored pointers for validation.
     """
     scope = normalized.get("scope")
     if not isinstance(scope, dict):
         return
-    existing_entries = scope.get("existing_paths")
-    new_entries = scope.get("new_paths")
-    if not isinstance(existing_entries, list) or not isinstance(
-        new_entries, list
-    ):
-        return
-    declared = {*contract._entry_paths(existing_entries), *contract._entry_paths(new_entries)}
-    for path, role in _referenced_paths(normalized):
-        if (
-            path in declared
-            or not _valid_repository_file_path(path)
-            or not _path_is_confined(repo, path)
-        ):
+    for name in ("existing_paths", "new_paths", "out_of_scope_paths"):
+        entries = scope.get(name)
+        if not isinstance(entries, list):
             continue
-        declared.add(path)
-        new_entries.append({"path": path, "role": role})
-
-
-_RELOCATED_EXCERPT_MAX_LINES = 40
-
-
-def _quote_head_of_file(
-    normalized: dict[str, Any],
-    *,
-    path: str,
-    role: str,
-    line_count: int,
-) -> None:
-    """Anchor a relocated file once, reusing its authored role."""
-    context = _context_excerpts(normalized)
-    if any(
-        isinstance(entry, dict) and entry.get("path") == path
-        for entry in context
-    ):
-        return
-    context.append(
-        {
-            "path": path,
-            "start_line": 1,
-            "end_line": min(line_count, _RELOCATED_EXCERPT_MAX_LINES),
-            "file_role": role,
-        }
-    )
-
-
-def _relocate_existing_new_paths(
-    normalized: dict[str, Any],
-    *,
-    repo: Path,
-) -> None:
-    """Move nonempty existing files from new to existing scope and quote them.
-
-    Convert their create operations to modify. Malformed, escaping, non-file,
-    and empty-file paths remain unchanged for validation; an empty file can
-    still be created but cannot supply a drift excerpt.
-    """
-    scope = normalized.get("scope")
-    if not isinstance(scope, dict):
-        return
-    new_entries = scope.get("new_paths")
-    existing_entries = scope.get("existing_paths")
-    if not isinstance(new_entries, list) or not isinstance(
-        existing_entries, list
-    ):
-        return
-    kept: list[Any] = []
-    relocated: set[str] = set()
-    for entry in new_entries:
-        path = entry.get("path") if isinstance(entry, dict) else None
-        role = entry.get("role") if isinstance(entry, dict) else None
-        source = (
-            contract._read_repo_file(repo, path)
-            if isinstance(path, str) and isinstance(role, str)
-            else None
-        )
-        line_count = len(source.splitlines()) if source is not None else 0
-        if line_count < 1:
+        seen: set[str] = set()
+        kept: list[Any] = []
+        for entry in entries:
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, str):
+                if path in seen:
+                    continue
+                seen.add(path)
             kept.append(entry)
-            continue
-        existing_entries.append({"path": path, "role": role})
-        _quote_head_of_file(
-            normalized,
-            path=str(path),
-            role=str(role),
-            line_count=line_count,
-        )
-        relocated.add(str(path))
-    scope["new_paths"] = kept
-    if not relocated:
-        return
-    for _, change in contract._changes(normalized):
-        if change.get("path") in relocated and change.get("operation") == "create":
-            change["operation"] = "modify"
+        scope[name] = kept
+
+    existing = scope.get("existing_paths")
+    new = scope.get("new_paths")
+    if isinstance(existing, list) and isinstance(new, list):
+        declared = {*contract._entry_paths(existing), *contract._entry_paths(new)}
+        candidates = list(new)
+        for path, role in _referenced_paths(normalized):
+            if path not in declared and _valid_repository_file_path(path) and _path_is_confined(repo, path):
+                declared.add(path)
+                candidates.append({"path": path, "role": role})
+
+        conflicts = set(contract._entry_paths(existing)) & set(contract._entry_paths(new))
+        existing_wins = {path for path in conflicts if _exists_on_disk(repo, path)}
+        new_wins = conflicts - existing_wins
+        existing = [
+            entry for entry in existing
+            if not (isinstance(entry, dict) and isinstance(entry.get("path"), str) and entry["path"] in new_wins)
+        ]
+        kept_new: list[Any] = []
+        relocated: set[str] = set()
+        for entry in candidates:
+            candidate_path = entry.get("path") if isinstance(entry, dict) else None
+            candidate_role = entry.get("role") if isinstance(entry, dict) else None
+            if isinstance(candidate_path, str) and candidate_path in existing_wins:
+                continue
+            source = (
+                contract._read_repo_file(repo, candidate_path)
+                if isinstance(candidate_path, str) and isinstance(candidate_role, str) else None
+            )
+            line_count = len(source.splitlines()) if source is not None else 0
+            if line_count < 1:
+                kept_new.append(entry)
+                continue
+            existing.append({"path": candidate_path, "role": candidate_role})
+            relocated.add(str(candidate_path))
+            context = normalized.get("context_excerpts")
+            if not isinstance(context, list):
+                context = normalized["context_excerpts"] = []
+            if not any(anchor.get("path") == candidate_path for _, anchor in contract._object_entries(context)):
+                context.append({
+                    "path": candidate_path,
+                    "start_line": 1,
+                    "end_line": min(line_count, 40),
+                    "file_role": candidate_role,
+                })
+        scope["existing_paths"] = existing
+        scope["new_paths"] = kept_new
+        if relocated:
+            for _, change in contract._changes(normalized):
+                if change.get("path") in relocated and change.get("operation") == "create":
+                    change["operation"] = "modify"
+
+    in_scope = {*contract._entry_paths(scope.get("existing_paths")), *contract._entry_paths(scope.get("new_paths"))}
+    excluded = scope.get("out_of_scope_paths")
+    if isinstance(excluded, list):
+        scope["out_of_scope_paths"] = [
+            entry for entry in excluded if not (
+                isinstance(entry, dict)
+                and isinstance(entry.get("path"), str)
+                and entry["path"].rstrip("/") in in_scope
+            )
+        ]
 
 
 def _clamp_excerpt_end_lines(normalized: dict[str, Any], *, repo: Path) -> None:
@@ -369,9 +294,7 @@ def _normalize_authored(
     if not isinstance(authored, dict):
         return None
     normalized: dict[str, Any] = _normalize_value(authored, PLAN_AUTHOR_SCHEMA)
-    _declare_referenced_paths(normalized, repo=repo)
-    _dedup_scope(normalized, repo=repo)
-    _relocate_existing_new_paths(normalized, repo=repo)
+    _reconcile_scope(normalized, repo=repo)
     _clamp_excerpt_end_lines(normalized, repo=repo)
     return normalized
 

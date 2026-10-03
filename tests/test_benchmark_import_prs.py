@@ -32,7 +32,7 @@ from daydream.benchmark.schema import EXTRACTION_VERSION, Location, case_id_for,
 from daydream.benchmark.storage import WorkspaceCorrupt, load_json_strict, load_yaml_strict, sha256_file
 from daydream.benchmark.workspace import init_workspace, validate_workspace, workspace_status
 from daydream.git_ops import RateLimitError
-from daydream.pr_review import FINDING_MARKER_RE, finding_marker
+from daydream.reviews.identity import FINDING_MARKER_RE, finding_marker
 from tests.harness import github_schema as gs
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import (
@@ -249,7 +249,7 @@ def test_fetch_normalizes_all_rest_evidence(tmp_path: Path, fake_gh: FakeGh) -> 
     get_calls = fake_gh.calls("GET")
     header_args = [c.argv for c in get_calls if c.endpoint == "repos/o/r/pulls/101"]
     collection_args = [c.argv for c in get_calls if c.endpoint != "repos/o/r/pulls/101"]
-    assert header_args and "@json" in (header_args[0] or []) and "--paginate" not in (header_args[0] or [])
+    assert header_args and "--paginate" not in (header_args[0] or [])
     assert all("--paginate" in (a or []) for a in collection_args)
 
 def test_review_thread_queries_request_only_schema_fields() -> None:

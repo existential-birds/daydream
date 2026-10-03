@@ -802,7 +802,8 @@ async def test_operator_service_instance_id_generated_once_when_absent(monkeypat
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("raw",
-    ["not-a-pair", "key=%zz", "=value", "ke%Gy=value", "dup.key=one,dup.key=two", "dup.key=a%2Bone,dup.k%65y=two",
+    ["not-a-pair", "key=%zz", "key=%", "key=%0", "key=%E9", "=value", "ke%Gy=value",
+        "dup.key=one,dup.key=two", "dup.key=a%2Bone,dup.k%65y=two",
         "bad\x01key=value",
         "key=bad\x02value",
         "key=val\nue",

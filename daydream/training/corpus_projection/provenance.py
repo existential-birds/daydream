@@ -13,13 +13,16 @@ _PROFILE_FIELDS = (
 
 
 def extract_provenance(manifest_or_record: Mapping[str, Any]) -> dict[str, Any]:
-    """Carry all four native profile fields verbatim, using None when absent. Include skill only when
-    present. Stack falls back to the shared legacy skill-to-stack mapping, remaining None if
-    unresolved.
+    """Prefer flat profile fields, falling back to a canonical nested profile when all are absent.
+    Include skill only when present; stack falls back to the legacy skill mapping.
     """
     prov: dict[str, Any] = {
         "profile": {field: manifest_or_record.get(field) for field in _PROFILE_FIELDS},
     }
+
+    nested = manifest_or_record.get("profile")
+    if not any(prov["profile"].values()) and isinstance(nested, Mapping):
+        prov["profile"] = {field: nested.get(field) for field in _PROFILE_FIELDS}
 
     skill = manifest_or_record.get("skill")
     if skill is not None:

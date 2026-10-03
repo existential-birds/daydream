@@ -15,16 +15,36 @@
     "inventory_sha256": "da1ec8cc60740f71f9b15b35db6afc44b0a5d97c10c1c5654a5d29b59481f846"
   },
   "after": {
+    "files": 363,
+    "physical_loc": 110393,
+    "inventory_sha256": "80c5a87bc18d8476fe2846da924a0c517765924333b4339fb559768fe473ff72",
+    "source_loc": 84623,
+    "clone_loc": 2336,
+    "high_cc_functions": 497,
+    "high_cog_functions": 612
+  },
+  "physical_reduction_percent": 2.621,
+  "source_reduction_percent": 1.057,
+  "requested_physical_reduction_percent": 10,
+  "target_met": false,
+  "requested_source_reduction_percent": 10,
+  "physical_target_max": 102027,
+  "source_target_max": 76974,
+  "physical_shortfall_loc": 8366,
+  "source_shortfall_loc": 7649,
+  "reproduction": "docs/measurements/production-simplification-reproduce.md",
+  "continuation_start": {
+    "commit": "b98a9dd51fde81df5dc4534a85ab29a986f6a127",
     "files": 364,
     "physical_loc": 111025,
-    "source_loc": 85165,
-    "clone_loc": 2375,
-    "high_cc_functions": 501,
-    "high_cog_functions": 620,
-    "inventory_sha256": "65bba3996d14b87195f7240f875c51ec1d09c27e9893bc41cf301e040d0fa175"
+    "source_loc": 85165
   },
-  "physical_reduction_percent": 2.063,
-  "source_reduction_percent": 0.423,
-  "requested_physical_reduction_percent": 10,
-  "target_met": false
+  "continuation_reduction": {
+    "physical_loc": 632,
+    "source_loc": 542
+  },
+  "upstream": {
+    "pr_base_verified": "58cc88e4d7091b27afe1b2a6eec486504e255dfd",
+    "inherited_changes_since_recorded_baseline": false
+  }
 }

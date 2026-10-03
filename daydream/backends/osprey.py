@@ -11,7 +11,6 @@ import math
 import os
 from collections.abc import AsyncGenerator, Callable, Iterable
 from dataclasses import dataclass, field
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -33,10 +32,6 @@ from daydream.backends import (
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
-    raise_for_exit,
-    reap,
     teardown,
     write_temp_json_schema,
 )
@@ -525,8 +520,6 @@ class OspreyBackend:
             transport = CliTransport(
                 "osprey",
                 command,
-                stdin_mode=StdinMode.DEVNULL,
-                stderr_policy=StderrPolicy.DRAIN_TASK,
                 stderr_sink=_stderr_diagnostic_sink(stderr_lines),
                 # Repair non-UTF-8 tool output inside valid JSON rather than aborting.
                 decode_errors="replace",
@@ -796,17 +789,13 @@ class OspreyBackend:
                 else:
                     raise OspreyProtocolError(f"unknown Osprey JSONL event {event_name!r}")
 
-            returncode = await reap(transport)
+            returncode = await transport.wait()
             # Close descendant-held stderr before joining its drain, or EOF may never
             # arrive. This also completes diagnostics; finally's teardown is idempotent.
             await teardown(transport, self._transports)
             # No retryable= kwarg: osprey's PROCESS_EXIT is not retryable.
-            raise_for_exit(
-                returncode,
-                error_type=OspreyError,
-                category="PROCESS_EXIT",
-                build_message=partial(_osprey_process_exit_message, stderr_lines),
-            )
+            if returncode != 0:
+                raise OspreyError(_osprey_process_exit_message(stderr_lines, returncode), category="PROCESS_EXIT")
             if not saw_header:
                 raise OspreyProtocolError("Osprey produced no protocol header")
             if not saw_session_start:

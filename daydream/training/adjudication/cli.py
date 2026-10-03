@@ -509,16 +509,16 @@ def _report_items(
     state_dir: Path,
     as_of: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Enrich the complete queue using final_bundle's shared report implementation.
+    """Enrich the complete queue using the shared adjudication policy.
 
     Include decisive records so human judgments and the CLI's outcome denominator
     match the published coverage gate.
     """
-    from daydream.training.adjudication.final_bundle import _enrich_report_items
+    from daydream.training.adjudication.report import adjudicated_items
 
     items = build_queue(_load_sessions_for_index(index_root), include_decisive=True)
     observations = load_observations(state_dir / _OBSERVATIONS_FILENAME)
-    return _enrich_report_items(items, observations, as_of=as_of)
+    return adjudicated_items(items, observations, as_of=as_of)
 
 
 def handle_report(argv: list[str]) -> int:

@@ -18,7 +18,8 @@ from daydream import git_ops
 from daydream.config import DIAGRAM_MAX_NODES
 from daydream.deep import diagram_steps
 from daydream.findings import write_findings_artifact
-from daydream.pr_review import diagram_marker, parse_diagram_markers, validate_diagram_payload
+from daydream.pr_review import validate_diagram_payload
+from daydream.reviews.identity import diagram_marker, parse_diagram_markers
 from daydream.runner import run
 from tests.harness import diagram_repos as dr
 from tests.harness.diagram_repos import build_large_cross_module_repo, load_diagram_artifact as _artifact

@@ -27,7 +27,6 @@ from daydream.eval.analyzer import (
     collect_trajectory_paths,
     load_trajectories,
 )
-from daydream.eval.quality import _quality_python_parser
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     DaydreamPhase,
@@ -961,8 +960,6 @@ def test_analyze_quality_refuses_known_bad_tree_sitter(monkeypatch: pytest.Monke
     """
 
     monkeypatch.setattr(safety, "installed_tree_sitter_version", lambda: "0.26.0")
-    # Clear the parser cache so the bad-version guard sees the patched installation.
-    _quality_python_parser.cache_clear()
     with pytest.raises(safety.TreeSitterBadVersionError):
         _quality(tmp_path, {"mod.py": "def f():\n    return 1\n"})
 

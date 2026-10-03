@@ -2,89 +2,56 @@
 
 from __future__ import annotations
 
-import json
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, cast
 
 from daydream import git_ops
-from daydream.git_ops import process as git_process
-
-
-def _parse_ndjson(text: str) -> list[Any]:
-    """Parse nonblank gh NDJSON rows; malformed JSON raises GitError with the line number."""
-    values: list[Any] = []
-    for lineno, line in enumerate(text.splitlines(), start=1):
-        if not line.strip():
-            continue
-        try:
-            values.append(json.loads(line))
-        except json.JSONDecodeError as exc:
-            raise git_ops.GitError(f"gh returned non-JSON line {lineno}: {exc}") from exc
-    return values
-
 
 _RATE_LIMIT_ATTEMPTS = 3
-
-
 _RATE_LIMIT_MAX_SLEEP_S = 60.0
 
 
-def _call_with_rate_limit_retry(
-    call: Callable[[], Any],
-) -> tuple[Any, git_ops.RateLimitError | None]:
-    """Return the last result and its rate-limit classification after at most three calls."""
-    last = None
-    last_rate_limit: git_ops.RateLimitError | None = None
+class _ImportRateLimitError(Exception):
+    """A fetch exhausted its rate-limit retries; the PR becomes ``fetch_failed``."""
+
+
+def _request(
+    root: Path, endpoint: str, *, paginate: bool = False,
+    input_data: dict[str, Any] | None = None,
+) -> Any:
+    """Use the GitHub boundary for parsing, auth, and failures for every import read.
+
+    REST and GraphQL share the same bounded rate-limit policy. Only GraphQL
+    needs POST; its reads explicitly retain the existing timeout retry policy.
+    """
     for attempt in range(_RATE_LIMIT_ATTEMPTS):
-        proc = call()
-        if proc.returncode == 0:
-            return proc, None
-        error = git_process._gh_error_for(f"gh call failed: {proc.stderr.strip()}", proc.stderr)
-        if not isinstance(error, git_ops.RateLimitError):
-            return proc, None
-        retry_after = error.retry_after if error.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
-        wait = min(retry_after, _RATE_LIMIT_MAX_SLEEP_S)
-        if attempt < _RATE_LIMIT_ATTEMPTS - 1:
-            time.sleep(wait)
-        last = proc
-        last_rate_limit = error
-    return last, last_rate_limit
+        try:
+            return git_ops.gh_api(
+                root, endpoint, auth=git_ops.INHERIT_GITHUB_AUTH,
+                method="GET" if input_data is None else "POST",
+                paginate=paginate, jq=".[]" if paginate else None,
+                input_data=input_data, idempotent=input_data is not None,
+            )
+        except git_ops.RateLimitError as exc:
+            if attempt == _RATE_LIMIT_ATTEMPTS - 1:
+                raise _ImportRateLimitError(f"gh api {endpoint} rate limited: {exc}") from exc
+            wait = exc.retry_after if exc.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
+            time.sleep(min(wait, _RATE_LIMIT_MAX_SLEEP_S))
+    raise AssertionError("rate-limit attempts must be positive")
 
 
 def _fetch_with_retry(root: Path, owner_repo: str, number: int) -> dict[str, Any]:
-    """Fetch and parse the singular PR header with bounded retries and explicit rate-limit failures."""
-    endpoint = f"repos/{owner_repo}/pulls/{number}"
-    proc, rate_limit = _call_with_rate_limit_retry(
-        lambda: git_process._run_gh(root, ["api", endpoint, "--jq", "@json"], auth=git_ops.INHERIT_GITHUB_AUTH)
-    )
-    if proc.returncode != 0:
-        if rate_limit is not None:
-            raise _ImportRateLimitError(f"gh api {endpoint} rate limited: {proc.stderr.strip()}")
-        raise git_ops.GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
-    header = json.loads(proc.stdout)
+    """Fetch a singular PR header, rejecting any non-object response."""
+    header = _request(root, f"repos/{owner_repo}/pulls/{number}")
     if not isinstance(header, dict):
         raise git_ops.GitError(f"gh gives no PR header for {owner_repo}#{number}")
     return header
 
 
 def _rest(root: Path, endpoint: str) -> list[Any]:
-    """Fetch every REST page as NDJSON, retaining all rows or propagating the failure."""
-    proc, rate_limit = _call_with_rate_limit_retry(
-        lambda: git_process._run_gh(
-            root, ["api", "--paginate", endpoint, "--jq", ".[] | @json"], auth=git_ops.INHERIT_GITHUB_AUTH,
-        )
-    )
-    if proc.returncode != 0:
-        if rate_limit is not None:
-            raise _ImportRateLimitError(f"gh api {endpoint} rate limited: {proc.stderr.strip()}")
-        raise git_ops.GitError(f"gh api {endpoint} failed: {proc.stderr.strip()}")
-    return _parse_ndjson(proc.stdout)
-
-
-class _ImportRateLimitError(Exception):
-    """A fetch exhausted its rate-limit retries; the PR becomes ``fetch_failed``."""
+    """Fetch every REST page, retaining all rows or propagating the failure."""
+    return cast(list[Any], _request(root, endpoint, paginate=True))
 
 
 _REVIEW_THREADS_QUERY = """
@@ -126,26 +93,7 @@ def _graphql_with_rate_limit_retry(
     root: Path, variables: dict[str, Any], *, query: str = _REVIEW_THREADS_QUERY
 ) -> dict[str, Any]:
     """Apply bounded Retry-After retries to GraphQL; exhausted limits retain the rate_limit ledger classification."""
-    last_rate_limit: git_ops.RateLimitError | None = None
-    for attempt in range(_RATE_LIMIT_ATTEMPTS):
-        try:
-            resp = git_ops.gh_api(
-                root,
-                "graphql",
-                method="POST",
-                idempotent=True,
-                input_data={"query": query, "variables": variables}, auth=git_ops.INHERIT_GITHUB_AUTH,
-            )
-            return cast(dict[str, Any], resp)  # gh_api returns raw JSON; the GraphQL body is a dict
-        except git_ops.RateLimitError as exc:
-            last_rate_limit = exc
-            if attempt < _RATE_LIMIT_ATTEMPTS - 1:
-                wait = exc.retry_after if exc.retry_after is not None else _RATE_LIMIT_MAX_SLEEP_S
-                time.sleep(min(wait, _RATE_LIMIT_MAX_SLEEP_S))
-    assert last_rate_limit is not None
-    raise _ImportRateLimitError(
-        f"gh api graphql reviewThreads rate limited: {last_rate_limit}"
-    ) from last_rate_limit
+    return cast(dict[str, Any], _request(root, "graphql", input_data={"query": query, "variables": variables}))
 
 
 def _next_cursor(page_info: dict[str, Any], *, context: str) -> str | None:

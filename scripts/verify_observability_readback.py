@@ -33,12 +33,12 @@ import os
 import sys
 from pathlib import Path
 from typing import Any, Literal, Mapping
-from urllib.parse import urlsplit
 
 import anyio
 import httpx
 
 from daydream.json_utils import atomic_write_json
+from daydream.observability.config import ObservabilityError, validate_endpoint
 
 # ---------------------------------------------------------------------------
 # Frozen fixed dispositions (never include URLs/headers/bodies/exception text)
@@ -120,28 +120,11 @@ def validate_receipt(receipt: Mapping[str, Any]) -> None:
 
 
 def validate_base_url(raw: str, setting: str) -> str:
-    """Apply the exporter's HTTP(S) URL policy without importing its OTLP transport.
-
-    Require hostname/valid port; reject credentials, query, fragment, whitespace,
-    and controls.
-    """
+    """Use the exporter endpoint contract without loading OTLP transport machinery."""
     try:
-        parsed = urlsplit(raw)
-        valid = (
-            bool(parsed.hostname)
-            and parsed.username is None
-            and parsed.password is None
-            and not parsed.query
-            and not parsed.fragment
-            and not any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in raw)
-            and parsed.scheme in ("http", "https")
-        )
-        parsed.port  # noqa: B018 - validates malformed/out-of-range ports
-    except (ValueError, AttributeError):
-        valid = False
-    if not valid:
-        raise ReadbackError(f"{setting} must be a valid HTTP(S) URL without credentials, query, fragment or whitespace")
-    return raw.rstrip("/")
+        return validate_endpoint(raw, setting)
+    except ObservabilityError as exc:
+        raise ReadbackError(str(exc)) from None
 
 
 def _split_path(path: str) -> list[str]:

@@ -12,7 +12,7 @@ import pytest
 
 from daydream import cli, git_ops
 from daydream.archive.index import label_observation_history, query_runs, upsert_run
-from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
+from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
 from daydream.training import labeler_versions, reward
 from tests.harness.git_helpers import git
 from tests.harness.trajectory import make_manifest

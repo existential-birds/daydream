@@ -50,11 +50,7 @@ from daydream.backends._codex_events import (
 from daydream.backends._subprocess import stream_idle_timeout_s
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     process_exit_message,
-    raise_for_exit,
-    reap,
     teardown,
     write_temp_json_schema,
 )
@@ -467,9 +463,7 @@ class CodexBackend:
             transport = CliTransport(
                 "codex",
                 args,
-                stdin_mode=StdinMode.PIPE,
                 stdin_data=prompt.encode(),
-                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_CODEX_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(execution_cwd) if execution_cwd != cwd else None,
@@ -758,18 +752,17 @@ class CodexBackend:
                     yield diagnostic
 
             # Reap, emit final diagnostics, then raise a backend-specific exit error.
-            returncode = await reap(transport)
+            returncode = await transport.wait()
 
             for diagnostic in _take_final_diagnostics():
                 yield diagnostic
 
             # Report nonzero process exits even without turn.failed; empty/partial output is not success.
-            raise_for_exit(
-                returncode,
-                error_type=CodexError,
-                category="PROCESS_EXIT",
-                build_message=lambda rc: process_exit_message(display="Codex", returncode=rc, lines=non_json_lines),
-            )
+            if returncode != 0:
+                raise CodexError(
+                    process_exit_message(display="Codex", returncode=returncode, lines=non_json_lines),
+                    category="PROCESS_EXIT",
+                )
             if _pending_result is not None:
                 yield _pending_result
 

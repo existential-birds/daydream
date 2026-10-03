@@ -21,6 +21,7 @@ import anyio
 import pytest
 from rich.console import Console
 
+import daydream.reviews.rendering as review_rendering
 from daydream import clipboard, git_ops, pr_review, runner
 from daydream.archive import ArchiveFinalizationError
 from daydream.archive.git_context import GitContext
@@ -254,7 +255,9 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_args, **_kwargs: _ARTIFACT_PR)
     result = runner._write_findings_for_parsed(
         repo, RunConfig(pr_number=7, findings_out=str(private_path)), [],
-        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
+        renderers=pr_review.ReviewRenderers(
+            review_rendering.default_render_finding, review_rendering.default_render_summary,
+        ),
         run_info="Fixture run info", captured_pr=replace(_ARTIFACT_PR, head_sha=git_ops.head_sha(repo),
                                                        base_sha=git_ops.head_sha(repo)),
         terminal_result=terminal_result(head_sha=git_ops.head_sha(repo)), snapshot_diff="",
@@ -284,7 +287,9 @@ def test_diagram_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkey
     assert (
         runner._write_findings_for_parsed(
             repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth, kind="diagram",
-            renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
+            renderers=pr_review.ReviewRenderers(
+            review_rendering.default_render_finding, review_rendering.default_render_summary,
+        ),
             run_info="Fixture run info",
         )
         == 0

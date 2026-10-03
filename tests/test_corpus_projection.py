@@ -440,8 +440,11 @@ def test_native_profile_run_without_legacy_skill_validates() -> None:
     # skill only when a value exists, never for an explicit null (and honors
     # the record's own stack override).
     assert "skill" not in prov
-    assert prov["profile"] == {"profile_schema_version": None, "profile_name": None,
-                               "profile_source_kind": None, "profile_digest": None}
+    assert prov["profile"] == v2_record["profile"]
+    assert extract_provenance({**v2_record, "profile_name": "flat"})["profile"] == {
+        "profile_schema_version": None, "profile_name": "flat",
+        "profile_source_kind": None, "profile_digest": None,
+    }
 
 def test_legacy_skill_carried_as_provenance_never_required() -> None:
     prov = extract_provenance({"skill": "beagle-python:review-python", "profile_schema_version": None,

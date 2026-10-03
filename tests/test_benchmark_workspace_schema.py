@@ -39,7 +39,7 @@ from daydream.benchmark.schema import (
     validate_case_transition,
     validate_pr_transition,
 )
-from daydream.pr_review import finding_marker
+from daydream.reviews.identity import finding_marker
 
 
 def test_pyyaml_is_a_base_runtime_dependency() -> None:

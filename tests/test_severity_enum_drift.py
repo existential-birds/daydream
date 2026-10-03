@@ -19,14 +19,8 @@ import daydream.phases as phases
 import daydream.severity as severity
 from daydream import pr_comment_renderer
 from daydream.benchmark.harbor import verifier_core
-from daydream.pr_review import (
-    ClassifiedIssues,
-    ParsedIssue,
-    ReviewRenderers,
-    build_payload,
-    default_render_finding,
-    default_render_summary,
-)
+from daydream.pr_review import ClassifiedIssues, ParsedIssue, ReviewRenderers, build_payload
+from daydream.reviews.rendering import default_render_finding, default_render_summary
 from tests.harness.review_profile import sample_pr
 
 REPO = Path(__file__).resolve().parents[1]

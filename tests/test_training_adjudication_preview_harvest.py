@@ -165,3 +165,34 @@ def test_posterior_feed_is_pr_review_only(tmp_path: Path) -> None:
     assert len(gold) == 2  # decisive human verdicts promote both rows to gold
     assert all(e["posterior_eligible"] is False for e in gold if e["profile"] != "pr_review")
     assert all(e["posterior_eligible"] for e in gold if e["profile"] == "pr_review")
+
+
+def test_export_requires_human_judgment_against_current_evidence(tmp_path: Path) -> None:
+    root = write_sessions_index(tmp_path / "index")
+    sessions = _load_sessions(root)[0]
+    resolution = sessions[0]["resolutions"][0]
+    resolution["disposition"] = "accepted"
+    write_sessions_jsonl(root, sessions)
+    ledger = tmp_path / "ledger.json"
+    run_preview(root, ledger)
+    item = next(i for i in build_queue(sessions, include_decisive=True) if i["disposition"] == "accepted")
+    observations = tmp_path / "observations.jsonl"
+    judgment = {
+        "record_id": str(item["record_id"]), "disposition": "accepted", "evidence_digest": "stale",
+        "evidence": item["evidence"], "labeler": "human-1", "role": "rater", "rationale": "checked",
+        "valid_at": "2026-08-30T10:00:00+00:00", "observed_at": "2026-08-30T10:00:01+00:00",
+        "rubric_version": ADJUDICATION_LABELER_VERSION,
+    }
+    append_observation(observations, judgment)
+    stale = next(row for row in build_export_entries(root, ledger, observations_path=observations)
+                 if row["record_id"] == item["record_id"])
+    assert stale["disposition"] == "accepted"
+    assert stale["tier"] == "task-only" and stale["posterior_eligible"] is False
+
+    append_observation(observations, {
+        **judgment, "evidence_digest": str(item["evidence_digest"]),
+        "observed_at": "2026-08-30T10:00:02+00:00",
+    })
+    fresh = next(row for row in build_export_entries(root, ledger, observations_path=observations)
+                 if row["record_id"] == item["record_id"])
+    assert fresh["tier"] == "gold" and fresh["posterior_eligible"] is True

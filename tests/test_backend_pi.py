@@ -1100,6 +1100,31 @@ async def test_pi_generation_lifecycle_start_end_pair_around_tool() -> None:
     assert [p.kind for p in second_end.choice_parts] == ["text"]
     assert second_end.finish_reason == "stop"
 
+@pytest.mark.parametrize(("name", "arguments", "accepted"), [
+    ("read_file", {"path": "src/example.py"}, True),
+    ("read_file", None, True),
+    ("read_file", float("nan"), False),
+    ("/Users/private/tool", {}, False),
+])
+async def test_pi_generation_choices_admit_tool_arguments_once(
+    name: str, arguments: Any, accepted: bool,
+) -> None:
+    lines = [json.dumps(event) for event in [
+        {"type": "message_start", "message": {"role": "assistant"}},
+        {"type": "message_end", "message": {"role": "assistant", "content": [
+            {"type": "toolCall", "id": "call_1", "name": name, "arguments": arguments},
+        ]}},
+    ]]
+    proc = make_mock_process(lines)
+    with patch("daydream.backends._transport.asyncio.create_subprocess_exec", return_value=proc):
+        events = [event async for event in PiBackend(model="fixture-model").execute(Path("/tmp"), "go")]
+    end = next(event for event in events if isinstance(event, GenerationEndEvent))
+    assert len(end.choice_parts) == int(accepted)
+    if accepted:
+        assert isinstance(end.choice_parts[0], ToolCallChoicePart)
+        assert end.choice_parts[0].arguments == ({} if arguments is None else arguments)
+
+
 async def test_pi_native_ms_start_converts_exactly_and_chronology_holds() -> None:
     """Native Unix-ms start → exact ns; end receipt is host-observed and later."""
     events = await _collect_events(PiBackend(model="glm-5.2"), "go", fixture="generation_lifecycle.jsonl")

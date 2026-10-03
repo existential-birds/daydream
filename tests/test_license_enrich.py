@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from daydream.archive.hydrate import _curated_dir
+from daydream.archive.hydrate_admission import _curated_dir
 from daydream.archive.license_enrich import (
     _GITHUB_API,
     EnrichedEvidence,

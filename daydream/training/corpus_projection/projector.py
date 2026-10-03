@@ -8,6 +8,7 @@ gates, and write pinned manifests without Git or network access.
 
 import hashlib
 import json
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -34,7 +35,7 @@ from daydream.training.corpus_projection.selection import (
     retain_group_limits,
 )
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
-from daydream.training.corpus_projection.tiers import classify_tier
+from daydream.training.corpus_projection.tiers import Tier, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 
 __all__ = [
@@ -219,24 +220,11 @@ def _refuse_posterior_evidence(
             )
 
 
-def _merge_nested_profile(prov: dict[str, Any], row: Mapping[str, Any]) -> None:
-    """Use nested canonical profile fields only when no flat profile value exists."""
-    if any(prov["profile"].values()):
-        return
-    nested = row.get("profile")
-    if isinstance(nested, Mapping):
-        for field in prov["profile"]:
-            value = nested.get(field)
-            if value is not None:
-                prov["profile"][field] = value
-
-
 def _provenance_for(
     resolution_row: Mapping[str, Any], manifest_row: Mapping[str, Any]
 ) -> dict[str, Any]:
     """Prefer resolution provenance (flat or nested); fall back to the batch manifest."""
     prov = extract_provenance(resolution_row)
-    _merge_nested_profile(prov, resolution_row)
     if (
         not any(prov["profile"].values())
         and prov.get("skill") is None
@@ -369,6 +357,43 @@ def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[
     raise ValueError(f"bundle {bundle_dir}: {artifact_relpath} is not a trajectory object")
 
 
+def finding_resolutions(
+    session: Mapping[str, object],
+) -> Iterator[tuple[Mapping[str, Any], Tier]]:
+    """Enumerate and validate source findings once for projection and adjudication."""
+    session_id = session.get("session_id")
+    trajectory_id = session.get("trajectory_id")
+    segment_id = session.get("segment_id")
+    resolutions = session.get("resolutions")
+    for name, value in (
+        ("session_id", session_id),
+        ("trajectory_id", trajectory_id),
+        ("segment_id", segment_id),
+        ("resolutions", resolutions),
+    ):
+        if not value:
+            raise ValueError(f"project_findings: session missing required key {name!r}")
+    if not isinstance(resolutions, list):
+        raise ValueError(
+            f"project_findings: session {session_id!r} key 'resolutions' "
+            f"must be a list, got {type(resolutions).__name__}"
+        )
+
+    for index, resolution in enumerate(resolutions):
+        if not isinstance(resolution, Mapping):
+            raise ValueError(
+                f"project_findings: session {session_id!r} resolutions[{index}] "
+                f"is not a mapping (got {type(resolution).__name__})"
+            )
+        fingerprint = resolution.get("fingerprint")
+        if not fingerprint:
+            raise ValueError(
+                f"project_findings: session {session_id!r} resolutions[{index}] "
+                "missing required key 'fingerprint'"
+            )
+        yield resolution, classify_tier(resolution)
+
+
 @overload
 def project_findings(session: Mapping[str, object], *, return_adjudication: Literal[False] = False) -> list[Record]: ...
 
@@ -391,40 +416,14 @@ def project_findings(
     session_id = session.get("session_id")
     trajectory_id = session.get("trajectory_id")
     segment_id = session.get("segment_id")
-    resolutions = session.get("resolutions")
-    for name, value in (
-        ("session_id", session_id),
-        ("trajectory_id", trajectory_id),
-        ("segment_id", segment_id),
-        ("resolutions", resolutions),
-    ):
-        if not value:
-            raise ValueError(f"project_findings: session missing required key {name!r}")
-    if not isinstance(resolutions, list):
-        raise ValueError(
-            f"project_findings: session {session_id!r} key 'resolutions' "
-            f"must be a list, got {type(resolutions).__name__}"
-        )
 
     records: list[Record] = []
     adjudication: list[Record] = []
-    for index, resolution in enumerate(resolutions):
-        if not isinstance(resolution, Mapping):
-            raise ValueError(
-                f"project_findings: session {session_id!r} resolutions[{index}] "
-                f"is not a mapping (got {type(resolution).__name__})"
-            )
-        fingerprint = resolution.get("fingerprint")
-        if not fingerprint:
-            raise ValueError(
-                f"project_findings: session {session_id!r} resolutions[{index}] "
-                "missing required key 'fingerprint'"
-            )
-        tier = classify_tier(resolution)
+    for resolution, tier in finding_resolutions(session):
+        fingerprint = resolution["fingerprint"]
         disposition = resolution.get("disposition")
         evidence = list(resolution.get("evidence") or [])
         provenance = extract_provenance(resolution)
-        _merge_nested_profile(provenance, resolution)
         record = {
             "record_id": record_id(
                 str(session_id), str(trajectory_id), str(segment_id), str(fingerprint)

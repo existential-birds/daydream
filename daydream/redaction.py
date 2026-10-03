@@ -354,39 +354,33 @@ def _strict_suffix_is_sensitive(text: str, s2: int, key_end: int) -> bool:
     return "".join(norm) in _SENSITIVE_KEY_SUFFIXES
 
 
+# A normalized sensitive name can only begin at one of these literal prefixes.
+# Underscore boundaries also admit raw separators and camelCase joins; the
+# bounded normalizer below still decides sensitivity, including exact casing
+# boundaries. Lookahead keeps overlapping prefixes available after a rejection.
+_SENSITIVE_SUFFIX_PREFIX_PATTERN = re.compile(
+    "(?=(?:" + "|".join(member.replace("_", "[_.-]*") for member in sorted(_SENSITIVE_KEY_SUFFIXES)) + "))",
+    re.IGNORECASE | re.ASCII,
+)
+
+
 def _sensitive_suffix_matches(
     text: str,
     match: re.Match[str],
     pattern: re.Pattern[str],
 ) -> Iterator[re.Match[str]]:
-    """Yield sensitive suffixes of a nonsensitive anchored key, leftmost first.
+    """Yield sensitive suffixes of a nonsensitive key, leftmost first.
 
-    Examples include defauthorization and fooapi_key. Test each candidate in
-    bounded time and rematch only sensitive candidates, preserving linear scanning."""
-    s2 = match.start(2) + 1
+    Search literal sensitive prefixes in C before exact bounded normalization.
+    Quoted and separator-bearing keys retain the same final anchored match.
+    """
     key_end = match.end(2)
-    while s2 < key_end:
-        if text[s2] in _STRUCTURED_KEY_START_CHARS:
-            if _strict_suffix_is_sensitive(text, s2, key_end):
-                m2 = pattern.match(text, s2)
-                if m2 is not None:
-                    yield m2
-            if text[s2] not in _LOWER_OR_DIGIT_CHARS and not (
-                "A" <= text[s2] <= "Z"
-            ):
-                # Separator-run candidate: every position inside one
-                # contiguous run of non-alphanumeric key chars normalizes to
-                # the SAME suffix (leading separators collapse and the edge is
-                # stripped), so the run needs at most one evaluation — jump
-                # over the rest instead of walking it per position, which
-                # re-enabled the O(n^2) hang on separator-heavy key runs
-                # (issue #1236).
-                while s2 + 1 < key_end and not (
-                    "A" <= text[s2 + 1] <= "Z"
-                    or text[s2 + 1] in _LOWER_OR_DIGIT_CHARS
-                ):
-                    s2 += 1
-        s2 += 1
+    for candidate in _SENSITIVE_SUFFIX_PREFIX_PATTERN.finditer(text, match.start(2) + 1, key_end):
+        start = candidate.start()
+        if _strict_suffix_is_sensitive(text, start, key_end):
+            suffix = pattern.match(text, start)
+            if suffix is not None:
+                yield suffix
 
 
 def _redact_structured_pairs(text: str) -> str:

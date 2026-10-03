@@ -3,10 +3,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.training.adjudication import queue as queue_module
 from daydream.training.adjudication.queue import _NON_DECISIVE_DISPOSITIONS as queue_set, build_queue
 from daydream.training.corpus_projection.identity import record_id
-from daydream.training.corpus_projection.projector import project_findings
 from daydream.training.corpus_projection.tiers import _NON_DECISIVE_DISPOSITIONS as tiers_set
 from daydream.training.dispositions import NON_DECISIVE_DISPOSITIONS, is_decisive
 
@@ -64,17 +62,18 @@ def test_digest_drift_reopens_item_and_missing_digest_fails_closed() -> None:
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
 
-def test_decisive_adjudication_entry_fails_closed(monkeypatch: pytest.MonkeyPatch) -> None:
-    session = _session("s1", "fp-a", "ambiguous", "d1")
+def test_invalid_source_disposition_fails_closed() -> None:
+    session = _session("s1", "fp-a", "invalid", "d1")
+    with pytest.raises(TypeError, match="unknown disposition"):
+        build_queue([session])
 
-    def _forge_decisive(s: dict[str, object], **_kw: object) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-        # Forge a decisive record outside the projector to prove the queue guard is independent.
-        _, adjudication = project_findings(s, return_adjudication=True)
-        return [], [dict(e, disposition="accepted") for e in adjudication]
 
-    monkeypatch.setattr(queue_module, "project_findings", _forge_decisive)
+def test_decisive_source_without_evidence_fails_closed_even_when_excluded() -> None:
+    session = _session("s1", "fp-a", "accepted", "d1")
+    session["resolutions"][0]["evidence"] = []  # type: ignore[index]
     with pytest.raises(ValueError, match="fp-a"):
         build_queue([session])
+
 
 def test_disposition_sets_are_single_sourced() -> None:
     assert queue_set is NON_DECISIVE_DISPOSITIONS

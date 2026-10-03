@@ -1,6 +1,6 @@
-"""Build deterministic record_id-keyed queues using the projector's finding enumeration.
+"""Build deterministic record_id-keyed queues from validated source findings.
 
-Its adjudication output owns the non-decisive set; do not add a second filter.
+Projection and adjudication share finding validation and disposition policy.
 """
 
 from collections.abc import Mapping, Sequence
@@ -8,11 +8,10 @@ from typing import Any
 
 from daydream.training.adjudication.precedence import HUMAN_ROLES, reopen_on_digest_change
 from daydream.training.corpus_projection.identity import record_id
-from daydream.training.corpus_projection.projector import project_findings
+from daydream.training.corpus_projection.projector import finding_resolutions
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.dispositions import (
     NON_DECISIVE_DISPOSITIONS as _NON_DECISIVE_DISPOSITIONS,
-    is_decisive,
 )
 from daydream.training.labeler_versions import ADJUDICATION_LABELER_VERSION
 
@@ -31,9 +30,6 @@ def _profile_label(
         return str(profile_name)
     flat = resolution.get("profile")
     if isinstance(flat, Mapping):
-        nested_name = flat.get("profile_name")
-        if nested_name is not None:
-            return str(nested_name)
         return None
     return str(flat) if flat is not None else None
 
@@ -64,8 +60,7 @@ def build_queue(
 ) -> list[dict[str, object]]:
     """Rebuild a record_id-sorted queue with evidence-drift reopening.
 
-    Normally consume the projector's non-decisive adjudication entries, asserting
-    that disposition contract. Findings with prior observations also remain
+    Select non-decisive source findings. Findings with prior observations also remain
     available for human review, even when automatically decisive. include_decisive
     adds the complete record set for drift checks using the same item shape,
     status, and observation logic.
@@ -77,42 +72,18 @@ def build_queue(
     """
     items: list[dict[str, object]] = []
     for session in sessions:
-        records, adjudication = project_findings(session, return_adjudication=True)
-        entries = adjudication + [
-            r for r in records if is_decisive(str(r.get("disposition")))
-        ]
-        for entry in adjudication:
-            if entry["disposition"] not in _NON_DECISIVE_DISPOSITIONS:
-                raise ValueError(
-                    f"build_queue: adjudication entry for fingerprint "
-                    f"{entry.get('fingerprint') or entry.get('finding_fingerprint')!r} "
-                    f"has non-queue disposition {entry['disposition']!r}"
-                )
         session_id = str(session.get("session_id"))
         trajectory_id = str(session.get("trajectory_id"))
         segment_id = str(session.get("segment_id"))
-        by_fingerprint: dict[str, Mapping[str, object]] = {}
-        resolutions = session.get("resolutions")
-        for raw in resolutions if isinstance(resolutions, list) else []:
-            if isinstance(raw, Mapping) and raw.get("fingerprint"):
-                by_fingerprint[str(raw["fingerprint"])] = raw
-        for entry in entries:
-            fingerprint = str(
-                entry.get("fingerprint") or entry.get("finding_fingerprint")
-            )
-            disposition = entry["disposition"]
+        for resolution, _tier in finding_resolutions(session):
+            fingerprint = str(resolution["fingerprint"])
+            disposition = resolution["disposition"]
             finding_id = record_id(session_id, trajectory_id, segment_id, fingerprint)
             if (
                 not include_decisive and disposition not in _NON_DECISIVE_DISPOSITIONS
                 and finding_id not in (prior_observations or {})
             ):
                 continue
-            resolution = by_fingerprint.get(fingerprint)
-            if resolution is None:
-                raise ValueError(
-                    f"build_queue: adjudication entry fingerprint {fingerprint!r} not found "
-                    f"in session {session_id!r} resolutions"
-                )
             provenance = extract_provenance(resolution)
             fresh_digest = resolution.get("evidence_digest")
             if not isinstance(fresh_digest, str) or not fresh_digest:
@@ -124,7 +95,7 @@ def build_queue(
                 "record_id": finding_id,
                 "fingerprint": fingerprint,
                 "disposition": disposition,
-                "evidence": entry["evidence"],
+                "evidence": list(resolution.get("evidence") or []),
                 "evidence_digest": fresh_digest,
                 "session_id": session_id,
                 "trajectory_id": trajectory_id,

@@ -81,7 +81,6 @@ class _GenerationLedger:
         self._sealed_pending = 0
         self._retained_choice_bytes = 0
         self._cap_engaged = False
-        self._children_after_cap = False
         self._owner = "unresolved"
         self._resolved = False
         self._authoritative_total: dict[str, Any] | None = None
@@ -96,8 +95,6 @@ class _GenerationLedger:
             return
         if generation_id in self._drafts:
             return  # idempotent: a generation opens once
-        if self._cap_engaged:
-            self._children_after_cap = True
         self._drafts[generation_id] = _GenerationDraft(
             generation_id=generation_id,
             boundary_complete=bool(getattr(event, "boundary_complete", True)),
@@ -115,7 +112,6 @@ class _GenerationLedger:
         if self._cap_engaged:
             # Overflow mode: later children stay unbilled/custom and their
             # retained content is never admitted.
-            self._children_after_cap = True
             draft.ended = True
             draft.ended_at_unix_ns = draft.sealed_end_unix_ns
             return
@@ -166,7 +162,6 @@ class _GenerationLedger:
         if self._cap_engaged:
             return
         self._cap_engaged = True
-        self._children_after_cap = True
         self._diagnostics.append(diagnostic)
         self._drain_all(clear_content=True)
 
@@ -236,5 +231,5 @@ class _GenerationLedger:
             "resolved": self._resolved,
             "authoritative_total": (dict(self._authoritative_total) if self._authoritative_total else None),
             "diagnostics": list(self._diagnostics),
-            "children_after_cap": self._children_after_cap,
+            "children_after_cap": self._cap_engaged,
         }

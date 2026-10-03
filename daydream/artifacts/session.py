@@ -1,14 +1,16 @@
-"""Live artifact routing under one held workspace lease."""
+"""One leased artifact session owns routing, freezing, publication, and rollback."""
 
 from __future__ import annotations
 
 import fcntl
 import hashlib
 import os
+import secrets
 import stat
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
+from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
@@ -22,14 +24,16 @@ if TYPE_CHECKING:
 from daydream.artifacts import (
     external,
     filesystem,
-    finalization,
     ledger,
     publication,
+    transactions,
     transfer,
 )
 from daydream.artifacts.external import _AtomicNameExchange
 from daydream.artifacts.models import (
+    _DAYDREAM,
     _PUBLIC_LABELS,
+    _REVIEW_OUTPUT,
     _TRAJECTORY_LABELS,
     ArtifactDisposition,
     ArtifactEvidenceProvenance,
@@ -44,11 +48,13 @@ from daydream.artifacts.models import (
     _DestinationRecord,
     _RoutedRecord,
     _SessionState,
+    _TerminalState,
+    _Transition,
 )
 
 
 class ArtifactSession:
-    """Held workspace lease and strict live-path router for one run."""
+    """Held workspace lease and artifact lifecycle owner for one run."""
 
     def __init__(
         self,
@@ -91,66 +97,45 @@ class ArtifactSession:
             live_root=self.layout.live_root,
         )
 
-    @staticmethod
-    def _projection_kind(route: RoutedDestination) -> Literal["file", "directory"]:
-        return "directory" if route.label in (OutputLabel.PUBLIC_DAYDREAM, OutputLabel.DUMP_DIRECTORY) else "file"
-
-    def _projection_routes(self) -> tuple[RoutedDestination, ...]:
-        trajectory = self._trajectory_route
-        paired = () if trajectory is None else (trajectory.full, trajectory.partial)
-        return (*paired, *self._destinations)
-
-    def _project_explicit_route(self, declared: Path, from_attr: str, to_attr: str) -> Path | None:
-        for route in self._projection_routes():
-            if route.label is OutputLabel.PUBLIC_DAYDREAM:
-                continue
-            from_value = getattr(route, from_attr)
-            if from_value is None:
-                continue
-            if declared == from_value:
-                kind = self._projection_kind(route)
-                filesystem._validate_projection_ancestry(declared, expected_kind=kind)
-                to_value: Path | None = getattr(route, to_attr)
-                if to_value is None:
-                    raise ArtifactVisibilityError("registered artifact destination has no writable path")
-                filesystem._validate_projection_ancestry(to_value, expected_kind=kind)
-                return to_value
-        return None
-
-    def _project_public_subtree(self, declared: Path, from_attr: str, to_attr: str) -> Path | None:
-        for route in self._destinations:
-            if route.label is not OutputLabel.PUBLIC_DAYDREAM:
-                continue
-            from_root: Path | None = getattr(route, from_attr)
-            to_root: Path | None = getattr(route, to_attr)
-            if from_root is None or to_root is None:
-                raise ArtifactVisibilityError("registered artifact destination has no writable path")
-            if declared == from_root or from_root in declared.parents:
-                relative = declared.relative_to(from_root)
-                projected = to_root / relative
-                leaf_kind: Literal["directory", "either"] = "directory" if not relative.parts else "either"
-                filesystem._validate_projection_ancestry(declared, expected_kind=leaf_kind)
-                filesystem._validate_projection_ancestry(projected, expected_kind=leaf_kind)
-                return projected
-        return None
-
-    def _projected_path(self, path: Path, *, repo: Path, source: str, target: str) -> Path:
+    def _projected_path(self, path: Path, *, repo: Path, durable: bool) -> Path:
         self._route_repo(repo)
         declared = filesystem._projection_path(path)
-        projected = self._project_explicit_route(declared, source, target)
-        if projected is None:
-            projected = self._project_public_subtree(declared, source, target)
-        if projected is None:
-            raise ArtifactVisibilityError("path is not owned by a registered artifact destination")
-        return projected
+        trajectory = self._trajectory_route
+        paired = () if trajectory is None else (trajectory.full, trajectory.partial)
+        # Exact routes take precedence over the public subtree owner. A paired
+        # trajectory may write externally while freezing under that same subtree.
+        routes: list[RoutedDestination] = sorted(
+            (*paired, *self._destinations), key=lambda route: route.label is OutputLabel.PUBLIC_DAYDREAM
+        )
+        for route in routes:
+            source = route.write_path if durable else route.requested
+            target = route.requested if durable else route.write_path
+            subtree = route.label is OutputLabel.PUBLIC_DAYDREAM
+            if subtree and (source is None or target is None):
+                raise ArtifactVisibilityError("registered artifact destination has no writable path")
+            if source is None or (declared != source and not (subtree and source in declared.parents)):
+                continue
+            relative = declared.relative_to(source)
+            kind: Literal["file", "directory", "either"] = (
+                "either" if subtree and relative.parts
+                else "directory" if subtree or route.label is OutputLabel.DUMP_DIRECTORY
+                else "file"
+            )
+            filesystem._validate_projection_ancestry(declared, expected_kind=kind)
+            if target is None:
+                raise ArtifactVisibilityError("registered artifact destination has no writable path")
+            projected = target / relative
+            filesystem._validate_projection_ancestry(projected, expected_kind=kind)
+            return projected
+        raise ArtifactVisibilityError("path is not owned by a registered artifact destination")
 
     def durable_path_for(self, path: Path, *, repo: Path) -> Path:
         """Project one registered live write path to its durable destination."""
-        return self._projected_path(path, repo=repo, source="write_path", target="requested")
+        return self._projected_path(path, repo=repo, durable=True)
 
     def live_path_for(self, path: Path, *, repo: Path) -> Path:
         """Project one registered durable destination to its live write path."""
-        return self._projected_path(path, repo=repo, source="requested", target="write_path")
+        return self._projected_path(path, repo=repo, durable=False)
 
     def _require_active(self) -> None:
         if self._state is not _SessionState.ACTIVE:
@@ -638,7 +623,59 @@ class ArtifactSession:
         return tuple(sorted(snapshots, key=lambda document: document.trajectory_id))
 
     def freeze(self, run_snapshot: RunWriteSnapshot) -> ArtifactTreeSnapshot:
-        return finalization.freeze(self, run_snapshot)
+        self._require_active()
+        try:
+            run_snapshot.validate(self.layout.session_id)
+        except (ValueError, UnicodeError) as exc:
+            raise ArtifactVisibilityError(f"run snapshot {exc}") from exc
+        seen_paths: set[Path] = set()
+        for document in run_snapshot.documents:
+            path = document.path
+            route = self._trajectory_route
+            if route is not None and document.trajectory_id == self.layout.session_id:
+                selected = route.full if run_snapshot.status == "complete" else route.partial
+                if path not in (selected.requested, selected.frozen_path):
+                    raise ArtifactVisibilityError("run snapshot root path does not match its paired route")
+                if selected.frozen_path is None:
+                    raise ArtifactVisibilityError("run snapshot root has no frozen destination")
+                path = selected.frozen_path
+            elif route is not None:
+                try:
+                    path.relative_to(route.run_dir)
+                except ValueError as exc:
+                    raise ArtifactVisibilityError("run snapshot child path is outside its private run") from exc
+            if path in seen_paths:
+                raise ArtifactVisibilityError("run snapshot contains duplicate document identity")
+            seen_paths.add(path)
+            try:
+                relative = path.relative_to(self.layout.live_root)
+            except ValueError as exc:
+                raise ArtifactVisibilityError("run snapshot document path is outside live artifacts") from exc
+            filesystem._validate_relative_name(relative.as_posix())
+            cursor = self.layout.live_root
+            for part in relative.parts[:-1]:
+                cursor /= part
+                if cursor.exists() or cursor.is_symlink():
+                    metadata = cursor.lstat()
+                    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
+                        raise ArtifactVisibilityError("run snapshot path has unsafe ancestry")
+            filesystem._atomic_bytes(self.layout.live_root / relative, document.json_bytes)
+        entries = filesystem.manifest_tree(self.layout.live_root)
+        frozen_root = self.layout.live_root.parent / "frozen"
+        if frozen_root.exists() or frozen_root.is_symlink():
+            raise ArtifactVisibilityError("frozen artifact tree already exists")
+        filesystem._copy_tree(self.layout.live_root, frozen_root, entries)
+        filesystem._atomic_json(frozen_root.parent / "frozen-manifest.json", filesystem._manifest_payload(entries))
+        result = ArtifactTreeSnapshot(
+            session_id=self.layout.session_id,
+            workspace_key=self.layout.workspace_key,
+            root=frozen_root,
+            manifest=entries,
+            destinations=tuple(self._destinations),
+        )
+        self._frozen_snapshot = result
+        self._state = _SessionState.FROZEN
+        return result
 
     def finalization_merge_path(self, route: RoutedDestination, *, snapshot: ArtifactTreeSnapshot) -> Path:
         if self._state is not _SessionState.FROZEN or snapshot is not self._frozen_snapshot:
@@ -671,10 +708,207 @@ class ArtifactSession:
                 _fsync_directory(late_parent.parent)
 
     def finalize_frozen(self, snapshot: ArtifactTreeSnapshot, *, disposition: ArtifactDisposition) -> None:
-        finalization.finalize_frozen(self, snapshot, disposition=disposition)
+        if self._state is not _SessionState.FROZEN:
+            raise ArtifactVisibilityError("artifact session is not ready for frozen publication")
+        if snapshot is not self._frozen_snapshot:
+            raise ArtifactVisibilityError("frozen artifact snapshot identity mismatch")
+        if not isinstance(disposition, ArtifactDisposition):
+            raise ArtifactVisibilityError("artifact disposition is unsupported")
+        if len(snapshot.destinations) != len(self._destinations) or any(
+            actual is not expected for actual, expected in zip(snapshot.destinations, self._destinations, strict=True)
+        ):
+            raise ArtifactVisibilityError("frozen artifact destination identity mismatch")
+        if filesystem.manifest_tree(snapshot.root) != snapshot.manifest:
+            raise ArtifactVisibilityError("frozen artifact snapshot changed before publication")
+        if disposition is ArtifactDisposition.ROLLBACK:
+            self._restore_prior()
+            self._retire_late_paths()
+            self._state = _SessionState.PUBLISHED
+            return
+        public_entries = tuple(
+            entry
+            for entry in snapshot.manifest
+            if entry.path == _DAYDREAM or entry.path.startswith(f"{_DAYDREAM}/") or entry.path == _REVIEW_OUTPUT
+        )
+        transaction_id = f"publish-{self.layout.session_id}-{secrets.token_hex(8)}"
+        transaction = self.layout.state_root / "transactions" / transaction_id
+        transaction.mkdir(parents=True)
+        transactions._write_transaction_owner(
+            transaction,
+            workspace_key=self.layout.workspace_key,
+            session_id=self.layout.session_id,
+            kind="publish",
+        )
+        mark = partial(
+            transactions._write_transition,
+            transaction / "journal.json",
+            transaction_id=transaction_id,
+            session_id=self.layout.session_id,
+        )
+        publication_stage: Path | None = None
+        try:
+            filesystem._atomic_json(transaction / "publish-manifest.json", filesystem._manifest_payload(public_entries))
+            publication_stage = publication._create_source_stage(
+                self.layout.source,
+                transaction_id,
+                "publish",
+                workspace_key=self.layout.workspace_key,
+            )
+            public_stage = publication_stage / "public"
+            filesystem._copy_tree(snapshot.root, public_stage, public_entries)
+            canonical_stage = transaction / "canonical-stage"
+            filesystem._copy_tree(snapshot.root, canonical_stage, public_entries)
+            publish_records: list[_DestinationRecord] = []
+            for index, item in enumerate(self._routed):
+                destination, baseline_record = item.route, item.record
+                baseline_root = self._detach_transaction / f"destination-{index:04d}-baseline"
+                publish_baseline = transaction / f"destination-{index:04d}-baseline"
+                filesystem._copy_tree(baseline_root, publish_baseline, baseline_record.baseline)
+                projection = publication_stage / f"destination-{index:04d}"
+                filesystem._copy_tree(baseline_root, projection, baseline_record.baseline)
+                if destination.delivery is DestinationDelivery.LIVE_EXTERNAL:
+                    actual = filesystem.manifest_tree(Path(baseline_record.base), (baseline_record.relative,))
+                    root_entry = next((entry for entry in actual if entry.path == baseline_record.relative), None)
+                    installed_matches = (
+                        root_entry is not None
+                        and root_entry.kind == "file"
+                        and root_entry.sha256 == baseline_record.installed_sha256
+                    )
+                    if installed_matches:
+                        metadata = Path(baseline_record.requested).lstat()
+                        installed_matches = (
+                            not stat.S_ISLNK(metadata.st_mode)
+                            and stat.S_ISREG(metadata.st_mode)
+                            and (metadata.st_dev, metadata.st_ino)
+                            == (baseline_record.expected_dev, baseline_record.expected_ino)
+                        )
+                    if actual != baseline_record.baseline and not installed_matches:
+                        raise ArtifactVisibilityError("external artifact destination changed before finalization")
+                    published = actual
+                elif destination.delivery is DestinationDelivery.DEFERRED:
+                    if destination.frozen_path is None:
+                        raise ArtifactVisibilityError("deferred destination has no frozen path")
+                    write_relative = destination.frozen_path.relative_to(self.layout.live_root).as_posix()
+                    published = publication._overlay_destination(
+                        snapshot.root, write_relative, projection, baseline_record
+                    )
+                elif item.late is None:
+                    published = baseline_record.baseline
+                else:
+                    published = publication._overlay_destination(
+                        item.late.parent, item.late.name, projection, baseline_record
+                    )
+                publish_records.append(replace(baseline_record, published=published))
+            self._retire_late_paths()
+            ledger._write_destination_records(
+                transaction, publish_records, include_published=True, include_baseline=True
+            )
+            external._inherit_external_capability_proofs(self._detach_transaction, transaction)
+            mark(state=_Transition.PUBLISH_STAGED)
+        except BaseException:
+            if publication_stage is not None:
+                publication._retire_source_stage(
+                    self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
+                )
+            transactions._retire_transaction(
+                self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_RECONCILED
+            )
+            raise
+        self._state = _SessionState.PUBLISHING
+        (transaction / "public-backup").mkdir()
+        _fsync_directory(transaction)
+        mark(state=_Transition.PUBLISH_BACKED_UP)
+        publication._replace_public_from_tree(self.layout.source, public_stage, public_entries)
+        for index, record in enumerate(publish_records):
+            if record.delivery is DestinationDelivery.LIVE_EXTERNAL:
+                continue
+            publication._replace_destination_from_tree(
+                publication_stage / f"destination-{index:04d}",
+                record,
+                allowed=(record.baseline,),
+                desired=record.published,
+                transaction=transaction,
+                workspace_key=self.layout.workspace_key,
+                source=self.layout.source,
+            )
+        mark(state=_Transition.PUBLISH_INSTALLED)
+        canonical = self.layout.state_root / "canonical"
+        os.replace(canonical, transaction / "old-canonical")
+        os.replace(canonical_stage, canonical)
+        _fsync_directory(self.layout.state_root)
+        filesystem._atomic_json(
+            self.layout.state_root / "canonical-manifest.json", filesystem._manifest_payload(public_entries)
+        )
+        mark(state=_Transition.PUBLISH_VERIFIED)
+        self._canonical_entries = public_entries
+        transactions._retire_transaction(
+            self.layout.state_root,
+            self._detach_transaction,
+            terminal_state=_TerminalState.DETACHED_RECONCILED,
+        )
+        publication._retire_source_stage(
+            self.layout.source, transaction_id, "publish", workspace_key=self.layout.workspace_key
+        )
+        transactions._retire_transaction(
+            self.layout.state_root, transaction, terminal_state=_TerminalState.PUBLISH_VERIFIED
+        )
+        self._state = _SessionState.PUBLISHED
 
     def _restore_prior(self) -> None:
-        finalization.restore_prior(self)
+        state_root = self.layout.state_root
+        transaction = self._detach_transaction
+        if not transaction.exists():
+            # Already retired or already taken out of the replay path by an
+            # earlier attempt (``finalize_frozen`` and session close both call
+            # this). There is nothing left to restore from.
+            return
+        canonical = state_root / "canonical"
+        publication._reset_source_stage(
+            self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
+        )
+        source_stage = publication._create_source_stage(
+            self.layout.source,
+            transaction.name,
+            "restore",
+            workspace_key=self.layout.workspace_key,
+        )
+        # Destination failures and public failures need opposite treatment, so
+        # they are collected apart rather than into one list.
+        destination_errors: list[Exception] = []
+        public_errors: list[Exception] = []
+        try:
+            publication._restore_destination_records(self.layout.source, transaction, self._records(), source_stage)
+        except Exception as exc:
+            destination_errors.append(exc)
+        try:
+            projection = source_stage / "public"
+            filesystem._copy_tree(canonical, projection, self._canonical_entries)
+            publication._replace_public_from_tree(self.layout.source, projection, self._canonical_entries)
+        except Exception as exc:
+            public_errors.append(exc)
+        try:
+            publication._retire_source_stage(
+                self.layout.source, transaction.name, "restore", workspace_key=self.layout.workspace_key
+            )
+        except Exception as exc:
+            destination_errors.append(exc)
+        try:
+            external._cleanup_external_directories(transaction, self._created_external_parents)
+            self._created_external_parents.clear()
+        except Exception as exc:
+            destination_errors.append(exc)
+        if public_errors:
+            # The journal has to stay: the next session open replays it and
+            # reinstalls the public tree from canonical before anything can
+            # adopt the missing tree as a new baseline. Name it instead.
+            raise transactions._transaction_context(public_errors[0], state_root, transaction)
+        try:
+            self._retire_late_paths()
+        except Exception as exc:
+            destination_errors.append(exc)
+        if destination_errors:
+            raise transactions._clear_failed_restore(state_root, self.layout.source, transaction, destination_errors[0])
+        transactions._retire_transaction(state_root, transaction, terminal_state=_TerminalState.DETACHED_RECONCILED)
 
     def _close(self) -> None:
         self._state = _SessionState.CLOSED

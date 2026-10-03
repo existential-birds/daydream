@@ -40,13 +40,13 @@ class TransactionFaultDriver:
                 count = int(suffix)
             except ValueError:
                 raise ValueError(f"invalid target boundary {boundary!r}") from None
-            if not (0 <= count <= len(tx._replacement_order)):
+            if not (0 <= count <= len(tx._replacement_order())):
                 raise ValueError(f"target boundary {count!r} out of range")
             tx.prepare()
             if count == 0:
                 return
             tx._begin_committing()
-            for rel in tx._replacement_order[:count]:
+            for rel in tx._replacement_order()[:count]:
                 tx._apply_replacement(rel)
             return
         raise ValueError(f"unknown crash boundary {boundary!r}")

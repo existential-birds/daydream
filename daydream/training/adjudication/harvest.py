@@ -9,14 +9,12 @@ from typing import Any
 from daydream.training.adjudication.canonical import AnnotationDriftError
 from daydream.training.adjudication.export import EXPORT_KEYS
 from daydream.training.adjudication.observations import (
-    group_observations_by_record,
     load_observations,
     prior_adjudications,
 )
-from daydream.training.adjudication.precedence import DECISIVE_DISPOSITIONS, effective_adjudication
 from daydream.training.adjudication.preview import _load_sessions
 from daydream.training.adjudication.queue import build_queue
-from daydream.training.corpus_projection.tiers import classify_tier
+from daydream.training.adjudication.report import adjudicated_items
 
 __all__ = ["build_export_entries"]
 
@@ -70,28 +68,11 @@ def build_export_entries(
             drifted,
         )
 
-    grouped = group_observations_by_record(
-        observations, {str(item["record_id"]) for item in items}, "adjudicate export"
-    )
-
     exported: list[dict[str, Any]] = []
-    for item in items:
+    for item in adjudicated_items(items, observations):
         record_id = str(item["record_id"])
         disposition = str(item["disposition"])
         evidence = item["evidence"]
-        role: str = "automatic"
-        gold_eligible = False
-        if record_id in grouped:
-            resolved = effective_adjudication(grouped[record_id])
-            role = resolved["role"]
-            gold_eligible = resolved["gold_eligible"]
-            if (
-                role in ("rater", "adjudicator")
-                and resolved["evidence_digest"] == str(item["evidence_digest"])
-                and resolved["disposition"] in DECISIVE_DISPOSITIONS
-            ):
-                disposition = resolved["disposition"]
-
         profile = str(item["profile"])
         entry: dict[str, Any] = {
             "record_id": record_id,
@@ -105,22 +86,16 @@ def build_export_entries(
             "session_id": item["session_id"],
             "trajectory_id": item["trajectory_id"],
             "segment_id": item["segment_id"],
-            "tier": None,
-            "posterior_eligible": False,
+            "tier": item["tier"],
+            "posterior_eligible": item["posterior_eligible"],
             "rubric_version": item["rubric_version"],
         }
-        tier = classify_tier(entry)
-        if tier == "gold" and not gold_eligible:
-            # A failed human gate (conflict or review-required) withholds structurally eligible
-            # gold.
-            tier = "task-only"
-        entry["tier"] = tier
+        tier = item["tier"]
         if tier == "task-only":
             entry["exclusion_reason"] = (
                 f"non-decisive disposition {disposition!r} — missing decisive human verdict "
                 "(evidence carried for the adjudication pass)"
             )
-        entry["posterior_eligible"] = tier == "gold" and profile == "pr_review"
         assert set(entry) == set(EXPORT_KEYS), "export key drift"
         exported.append(entry)
     exported.sort(key=lambda e: str(e["record_id"]))

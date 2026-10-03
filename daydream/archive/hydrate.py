@@ -21,13 +21,9 @@ from typing import Any
 from daydream.archive import hydrate_rules, sanitize
 from daydream.archive._console import warn as _warn
 from daydream.archive.hydrate_admission import (
-    _curated_dir as _curated_dir,
     _iter_enrichment_cache,
-    _license_bucket as _license_bucket,
     _manifest_index_fields,
-    _policy_binding as _policy_binding,
-    _repo_license_decision as _repo_license_decision,
-    _session_identity as _session_identity,
+    _session_identity,
     admission_summary_buckets as admission_summary_buckets,
     apply_license_gate as apply_license_gate,
     build_import_ledger as build_import_ledger,
@@ -41,15 +37,12 @@ from daydream.archive.hydrate_admission import (
 )
 from daydream.archive.hydrate_discovery import (
     _is_bare_segment,
-    _validate_relpath as _validate_relpath,
+    _validate_relpath,
 )
 from daydream.archive.hydrate_stage import (
     _bundle_dirs,
-    _discovered_session_ids as _discovered_session_ids,
-    _download_discovery_block as _download_discovery_block,
     _manifest_remote_fields,
     _read_manifest_dict,
-    _require_manifest_dict as _require_manifest_dict,
     download_snapshot as download_snapshot,
     ingest_bundles as ingest_bundles,
 )

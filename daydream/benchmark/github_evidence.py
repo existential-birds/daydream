@@ -9,7 +9,7 @@ from typing import Any
 
 from daydream import git_ops
 from daydream.benchmark import schema
-from daydream.pr_review import FINDING_MARKER_RE
+from daydream.reviews.identity import FINDING_MARKER_RE
 
 
 def _as_author(raw: dict[str, Any]) -> dict[str, Any]:

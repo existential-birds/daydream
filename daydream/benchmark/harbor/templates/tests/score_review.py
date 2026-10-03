@@ -988,23 +988,16 @@ def run_verifier(
         )
 
         verdicts: list[verifier_core.Verdict] = []
-        matches: set[tuple[str, str]] = set()
         counting: _CountingClient | None = None
 
         if gold_parsed and artifact_raw.get("findings"):
             counting = _CountingClient(client)
             verdicts = asyncio.run(judge_pairs(gold_raw, artifact_raw["findings"], client=counting))
-            cand_ids = [
-                c.get("candidate_id", "") for c in artifact_raw["findings"]
-            ]
-            gold_ids = [g.finding_id for g in gold_parsed]
-            retained = verifier_core.retained_edges(verdicts, gold_ids, cand_ids)
-            matches = verifier_core.maximum_matching(retained, gold_ids, cand_ids)
             request_counts["requests"] = counting.requests
             if counting.errors:
                 errors.extend(_bounded_error(str(e)) for e in counting.errors)
 
-        reward = verifier_core.score_review(gold_parsed, artifact_raw, verdicts)
+        reward, matches = verifier_core.score_findings(gold_parsed, candidates, verdicts)
         inner = verifier_core.reward_details(gold_parsed, candidates, verdicts, matches)
         details = {**inner, **detail_prefix}
         _atomic_write(out_dir, "reward.json", verifier_core.reward_to_json(reward))

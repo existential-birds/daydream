@@ -234,7 +234,7 @@ def assemble_plan(
         return None, tuple(issues)
 
     commands = _expand_commands(normalized, recon_by_id=recon_by_id)
-    current_state_excerpts = [
+    normalized["current_state_excerpts"] = [
         {
             "path": entry["path"],
             "line_anchor": {
@@ -248,38 +248,22 @@ def assemble_plan(
         }
         for entry in normalized["context_excerpts"]
     ]
-    assembled = {
-        "title": normalized["title"],
-        "covered_fingerprints": list(normalized["covered_fingerprints"]),
-        "why_this_matters": dict(normalized["why_this_matters"]),
-        "current_state_excerpts": current_state_excerpts,
-        "commands_you_will_need": commands,
-        "scope": normalized["scope"],
-        "git_workflow": {
-            "branch_name": f"improve/{plan_slug(normalized['title'])}",
-            "branch_basis": GIT_BRANCH_BASIS,
-            "commit_boundaries": normalized["git_workflow"]["commit_boundaries"],
-            "commit_message_example": (
-                normalized["git_workflow"]["commit_message_example"]
-            ),
-            "push_policy": GIT_PUSH_POLICY,
-            "pull_request_policy": GIT_PULL_REQUEST_POLICY,
-        },
-        "steps": [
-            {
-                "id": f"step-{index}",
-                "order": index,
-                **step,
-            }
-            for index, step in enumerate(normalized["steps"], start=1)
-        ],
-        "test_plan": normalized["test_plan"],
-        "done_criteria": _injected_done_criteria(normalized),
-        "stop_conditions": _boilerplate_stop_conditions(
-            normalized, len(normalized["steps"])
-        ),
-    }
-    return assembled, ()
+    # Normalization already owns a detached copy. Enrich that one plan rather
+    # than projecting its validated fields through another parallel shape.
+    normalized["commands_you_will_need"] = commands
+    normalized["git_workflow"].update(
+        branch_name=f"improve/{plan_slug(normalized['title'])}",
+        branch_basis=GIT_BRANCH_BASIS,
+        push_policy=GIT_PUSH_POLICY,
+        pull_request_policy=GIT_PULL_REQUEST_POLICY,
+    )
+    for index, step in enumerate(normalized["steps"], start=1):
+        step.update(id=f"step-{index}", order=index)
+    normalized["done_criteria"] = _injected_done_criteria(normalized)
+    normalized["stop_conditions"] = _boilerplate_stop_conditions(normalized, len(normalized["steps"]))
+    for authored_only in ("context_excerpts", "false_assumption", "additional_command_refs"):
+        del normalized[authored_only]
+    return normalized, ()
 
 
 __all__ = [

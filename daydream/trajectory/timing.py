@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory.layout import PARTIAL_SUFFIX, RUN_DOCUMENT_NAME
@@ -133,9 +133,24 @@ def snapshot_trajectories(write_snapshot: RunWriteSnapshot) -> dict[str, Any]:
 
 def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | None:
     """Reduce one immutable run snapshot without reading live recorder state."""
-    payloads = _snapshot_payloads(write_snapshot)
+    return compute_payload_timing_summary(
+        _snapshot_payloads(write_snapshot),
+        root_trajectory_id=write_snapshot.root_trajectory_id,
+        status=write_snapshot.status,
+        cutoff_at=write_snapshot.cutoff_at,
+    )
+
+
+def compute_payload_timing_summary(
+    payloads: Sequence[dict[str, Any]],
+    *,
+    root_trajectory_id: str,
+    status: Literal["complete", "partial"] = "complete",
+    cutoff_at: str = "",
+) -> TimingSummary | None:
+    """Reduce parsed immutable evidence for archive/eval readers without reconstructing write state."""
     root = next(
-        (payload for payload in payloads if payload.get("trajectory_id") == write_snapshot.root_trajectory_id),
+        (payload for payload in payloads if payload.get("trajectory_id") == root_trajectory_id),
         None,
     )
     if root is None:
@@ -143,13 +158,13 @@ def compute_timing_summary(write_snapshot: RunWriteSnapshot) -> TimingSummary | 
     diagnostics = {key: 0 for key in _TIMING_DIAGNOSTIC_KEYS}
     root_extra = _timing_mapping(root.get("extra"))
     wall_start = _timing_timestamp(root_extra.get("run_started_at"))
-    wall_end_key = "snapshot_at" if write_snapshot.status == "partial" else "run_ended_at"
-    if write_snapshot.status == "partial" and root_extra.get("snapshot_at") != write_snapshot.cutoff_at:
+    wall_end_key = "snapshot_at" if status == "partial" else "run_ended_at"
+    if status == "partial" and root_extra.get("snapshot_at") != cutoff_at:
         return None
     if (
-        write_snapshot.status == "complete"
-        and write_snapshot.cutoff_at
-        and root_extra.get("run_ended_at") != write_snapshot.cutoff_at
+        status == "complete"
+        and cutoff_at
+        and root_extra.get("run_ended_at") != cutoff_at
     ):
         return None
     wall_end = _timing_timestamp(root_extra.get(wall_end_key))

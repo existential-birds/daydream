@@ -84,10 +84,10 @@ def _register_builtin_prompts(registry: Registry) -> None:
 
 def _register_builtin_renderers(registry: Registry) -> None:
     """Seed the built-in comment renderers (byte-identical to today's markdown)."""
-    from daydream import pr_review
+    from daydream.reviews import rendering
 
-    registry.override_renderer("finding", pr_review.default_render_finding)
-    registry.override_renderer("summary", pr_review.default_render_summary)
+    registry.override_renderer("finding", rendering.default_render_finding)
+    registry.override_renderer("summary", rendering.default_render_summary)
 
 
 def _register_builtin_flows(registry: Registry) -> None:

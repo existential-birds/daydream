@@ -506,8 +506,9 @@ async def _run_review_spine(
     target_dir = work.repo
 
     # Findings export is commit-bound. Capture target once and diff explicit SHA endpoints.
-    from daydream.pr_review import capture_pr_base_tip, find_open_pr, find_pr_by_number
+    from daydream.pr_review import find_open_pr, find_pr_by_number
     from daydream.review_result import AnalyzedRevision, PlannedScope, ReviewCoverage
+    from daydream.reviews.lookup import capture_pr_base_tip
 
     captured_pr = None
     pr_base_sha = None

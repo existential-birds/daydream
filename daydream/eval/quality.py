@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -60,31 +59,12 @@ _COMPREHENSION_TYPES = frozenset(
 )
 
 _MIN_CLONE_BLOCK = 3
-_MAX_CLONE_BLOCK = 20
 
 _QUALITY_CALIBRATION = {
     "human_verbosity": 0.19,
     "human_erosion": 0.34,
     "paper": "arXiv:2603.24755",
 }
-
-
-@lru_cache(maxsize=1)
-def _quality_python_parser() -> Any | None:
-    """Cache the Python parser; unavailable bindings yield None.
-
-    Known unsafe tree-sitter versions raise before parser construction.
-    """
-    try:
-        assert_tree_sitter_safe()
-        import tree_sitter_python
-        from tree_sitter import Language, Parser
-
-        return Parser(Language(tree_sitter_python.language()))
-    except TreeSitterBadVersionError:
-        raise
-    except Exception:
-        return None
 
 
 def _iter_tree(node: Any) -> Iterator[Any]:
@@ -162,7 +142,14 @@ def _parse_python_file(path: Path) -> tuple[Any, list[str]] | None:
 
     Failed candidates remain in scoped_files but contribute no metrics or clone evidence.
     """
-    parser = _quality_python_parser()
+    try:
+        from daydream.tree_sitter_index import get_parser
+
+        parser = get_parser("python")
+    except TreeSitterBadVersionError:
+        raise
+    except Exception:
+        return None
     if parser is None:
         return None
     try:
@@ -539,24 +526,25 @@ def _repeated_block_rows(
     *,
     require_distinct_sources: bool,
 ) -> dict[Path, set[int]]:
-    """Flag repeated stripped blocks of 3..20 nonblank lines.
+    """Flag repeated nonblank blocks using only their minimum three-line windows.
 
-    With require_distinct_sources, occurrences must span at least two paths.
+    Every longer clone is a union of repeated three-line windows, so scanning
+    additional lengths cannot add a flagged row. Distinct-source filtering
+    applies to each window before its rows enter the result.
     """
     flagged: dict[Path, set[int]] = {path: set() for path in stripped}
-    for length in range(_MIN_CLONE_BLOCK, _MAX_CLONE_BLOCK + 1):
-        by_block: dict[tuple[str, ...], list[tuple[Path, int]]] = {}
-        for path, lines in stripped.items():
-            for i in range(len(lines) - length + 1):
-                block = tuple(lines[i : i + length])
-                if all(block):
-                    by_block.setdefault(block, []).append((path, i))
-        for occurrences in by_block.values():
-            sources = {path for path, _ in occurrences} if require_distinct_sources else occurrences
-            if len(sources) < 2:
-                continue
-            for path, i in occurrences:
-                flagged[path].update(range(i, i + length))
+    by_block: dict[tuple[str, ...], list[tuple[Path, int]]] = {}
+    for path, lines in stripped.items():
+        for i in range(len(lines) - _MIN_CLONE_BLOCK + 1):
+            block = tuple(lines[i : i + _MIN_CLONE_BLOCK])
+            if all(block):
+                by_block.setdefault(block, []).append((path, i))
+    for occurrences in by_block.values():
+        sources = {path for path, _ in occurrences} if require_distinct_sources else occurrences
+        if len(sources) < 2:
+            continue
+        for path, i in occurrences:
+            flagged[path].update(range(i, i + _MIN_CLONE_BLOCK))
     return flagged
 
 
@@ -579,35 +567,6 @@ def _cross_file_clone_flagged_lines(
         if path not in target_set:
             flagged[path].clear()
     return flagged
-
-
-def _aggregate_per_file(
-    candidates: list[tuple[Path, str]],
-    parsed: dict[Path, Any],
-    parsed_lines: dict[Path, list[str]],
-    cross_file_flagged: dict[Path, set[int]],
-) -> tuple[dict[str, dict[str, Any]], float, float, int, int]:
-    """Aggregate parsed candidates; failed parses retain scope membership but add no metrics."""
-    per_file: dict[str, dict[str, Any]] = {}
-    total_mass = 0.0
-    high_mass = 0.0
-    total_flagged = 0
-    total_loc = 0
-    for path, rel in candidates:
-        root = parsed.get(path)
-        if root is None:
-            continue
-        quality = _file_quality_from_tree(
-            root,
-            parsed_lines[path],
-            cross_file_flagged=cross_file_flagged.get(path),
-        )
-        per_file[rel] = quality["entry"]
-        total_mass += quality["mass"]
-        high_mass += quality["high_mass"]
-        total_flagged += quality["flagged"]
-        total_loc += quality["loc"]
-    return per_file, total_mass, high_mass, total_flagged, total_loc
 
 
 def analyze_quality(
@@ -651,34 +610,27 @@ def analyze_quality(
     scoped = len(candidates)
 
     # Parse once. Failed parses remain scoped but unmeasured; eligible peers still provide clone evidence.
-    parsed: dict[Path, Any] = {}
-    parsed_lines: dict[Path, list[str]] = {}
-    file_lines: list[tuple[Path, list[str]]] = []
-    for path, _rel in scoped_files:
-        result = _parse_python_file(path)
-        if result is None:
-            continue
-        root, lines = result
-        file_lines.append((path, lines))
-        if candidate_path_set is None or path in candidate_path_set:
-            parsed[path] = root
-            parsed_lines[path] = lines
-
-    # Cross-file clones flag only parsed targets; peers provide evidence without metrics. Local
-    # clones are unioned per file.
+    parsed = {
+        path: result for path, _rel in scoped_files
+        if (result := _parse_python_file(path)) is not None
+    }
     cross_file_flagged = _cross_file_clone_flagged_lines(
-        file_lines,
-        target_paths=set(parsed) if candidate_paths is not None else None,
+        [(path, lines) for path, (_root, lines) in parsed.items()],
+        target_paths=candidate_path_set,
     )
-
-    per_file, total_mass, high_mass, total_flagged, total_loc = _aggregate_per_file(
-        candidates, parsed, parsed_lines, cross_file_flagged
-    )
+    qualities = {
+        rel: _file_quality_from_tree(*parsed[path], cross_file_flagged=cross_file_flagged.get(path))
+        for path, rel in candidates if path in parsed
+    }
+    total_mass = sum(quality["mass"] for quality in qualities.values())
+    high_mass = sum(quality["high_mass"] for quality in qualities.values())
+    total_flagged = sum(quality["flagged"] for quality in qualities.values())
+    total_loc = sum(quality["loc"] for quality in qualities.values())
 
     return {
         "erosion": round(high_mass / total_mass, 4) if total_mass > 0 else None,
         "verbosity": round(total_flagged / total_loc, 4) if total_loc > 0 else None,
-        "per_file": per_file,
+        "per_file": {rel: quality["entry"] for rel, quality in qualities.items()},
         "calibration": dict(_QUALITY_CALIBRATION),
         "scoped_files": scoped,
     }

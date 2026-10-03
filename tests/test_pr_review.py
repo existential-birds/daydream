@@ -11,6 +11,11 @@ from typing import Any
 import pytest
 
 import daydream.hunk_index as hunk_index
+import daydream.reviews.diagrams as review_diagrams
+import daydream.reviews.identity as review_identity
+import daydream.reviews.lookup as review_lookup
+import daydream.reviews.models as review_models
+import daydream.reviews.submission as review_submission
 from daydream import git_ops, pr_comment_renderer, pr_review
 from daydream.deep.artifacts import DeepArtifact
 from daydream.extensions import Registry, SummaryContext
@@ -18,7 +23,6 @@ from daydream.extensions.builtins import register_builtins
 from daydream.findings import ArtifactFinding, load_findings_artifact
 from daydream.git_ops import GitError
 from daydream.pr_review import (
-    DAYDREAM_FOOTER,
     InlineReviewComment,
     ParsedIssue,
     PRInfo,
@@ -26,22 +30,20 @@ from daydream.pr_review import (
     _parse_hunks,
     build_payload,
     classify,
-    default_render_finding,
-    default_render_summary,
-    diagram_marker,
     extract_anchors,
-    parse_diagram_markers,
-    parse_finding_markers,
     parsed_issues_from_items,
     resolve_review_renderers,
     snap_to_hunk,
 )
 from daydream.reconcile import PriorDiagramComment
 from daydream.review_budget import review_warnings
+from daydream.reviews.identity import DAYDREAM_FOOTER, diagram_marker, parse_diagram_markers, parse_finding_markers
 from daydream.reviews.rendering import (
     _build_consolidated_prompt,
     _render_body_section,
     _summary_findings,
+    default_render_finding,
+    default_render_summary,
     format_comment_body,
 )
 from daydream.run_config import RunConfig
@@ -65,10 +67,10 @@ def _inline(path: str = "a.py", line: int = 10, body: str = "x") -> InlineReview
 
 
 def _recording_fake_submit(captured: dict[str, pr_review.ClassifiedReviewPlan],) -> Any:
-    def fake_submit(plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
+    def fake_submit(plan: pr_review.ClassifiedReviewPlan, *, transport: review_submission.ReviewTransport
+    ) -> review_models.ClassifiedReviewResult:
         captured["plan"] = plan
-        return pr_review.ClassifiedReviewResult(status=pr_review.SubmissionStatus.POSTED,
+        return review_models.ClassifiedReviewResult(status=pr_review.SubmissionStatus.POSTED,
             review_url="https://github.com/acme/widgets/pull/42#pullrequestreview-1",
             posted_file_level=(), folded_file_level=(), final_review_posted=True, safe_error=None,
         )
@@ -199,7 +201,7 @@ def test_inline_body_has_footer_and_tags() -> None:
     assert "severity: `high`" in body
     assert "confidence: `HIGH`" in body
     assert body.rstrip().endswith("</sub>")
-    assert pr_review.DAYDREAM_REPO_URL in body
+    assert review_identity.DAYDREAM_REPO_URL in body
     assert "⚠️" in body
     assert "🔮 Prompt for AI Agents" in body
     assert "<details>" in body
@@ -434,7 +436,7 @@ def test_build_payload_shape(pr: PRInfo) -> None:
     assert "- **Reviewed commit:** [`head123`](https://github.com/acme/widgets/commit/head123)" in body
     assert "**Code Review Summary**" in body
     assert "🧙 Posted by [daydream v" in body
-    assert pr_review.DAYDREAM_REPO_URL in body
+    assert review_identity.DAYDREAM_REPO_URL in body
     assert "**Mode:**" not in body
     assert "**Severity:**" in body and "1 high" in body and "1 low" in body
     assert "**Confidence:**" in body and "1 HIGH" in body and "1 MEDIUM" in body
@@ -622,7 +624,7 @@ def test_pr_lookup_and_findings_export_accept_unavailable_head_slug(
 def test_head_slug_fallback_does_not_mask_invalid_present_value(value: Any) -> None:
     row = {"headRepository": {"name": "r", "nameWithOwner": value}, "headRepositoryOwner": {"login": "fork"}}
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+        review_lookup._head_repo_slug_from_row(row)
 
 @pytest.mark.parametrize("component", ["name", "login"])
 @pytest.mark.parametrize("value", [None, False, 7, "", " ", "a/b", "a\nb"])
@@ -630,12 +632,12 @@ def test_head_slug_fallback_rejects_invalid_components(component: str, value: An
     row = {"headRepository": {"name": "r", "nameWithOwner": ""}, "headRepositoryOwner": {"login": "fork"}}
     row["headRepository" if component == "name" else "headRepositoryOwner"][component] = value
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._head_repo_slug_from_row(row)
+        review_lookup._head_repo_slug_from_row(row)
 
 @pytest.mark.parametrize("slug", ["other/r", "fork/other"])
 def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
     with pytest.raises(GitError, match="contradictory head repository identity") as error:
-        pr_review._head_repo_slug_from_row({
+        review_lookup._head_repo_slug_from_row({
             "headRepository": {"name": "r", "nameWithOwner": slug, "id": "private-value"},
             "headRepositoryOwner": {"login": "fork"},
         })
@@ -643,7 +645,8 @@ def test_head_slug_rejects_contradictory_valid_identity(slug: str) -> None:
     assert slug not in str(error.value)
 
 def test_head_slug_allows_case_differences() -> None:
-    assert pr_review._head_repo_slug_from_row({"headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
+    assert review_lookup._head_repo_slug_from_row({
+        "headRepository": {"name": "Widgets", "nameWithOwner": "FORK/widgets"},
         "headRepositoryOwner": {"login": "fork"},
     }) == "FORK/widgets"
 
@@ -661,7 +664,7 @@ def test_pr_info_rejects_malformed_row_fields(monkeypatch: pytest.MonkeyPatch, g
     row[field] = value
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row|base branch|exact PR head"):
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
 
 @pytest.mark.parametrize("missing_field", ["headRepository", "headRepositoryOwner"])
 def test_pr_info_rejects_missing_requested_head_metadata(
@@ -671,7 +674,7 @@ def test_pr_info_rejects_missing_requested_head_metadata(
     del row[missing_field]
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
 
 def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypatch: pytest.MonkeyPatch, git_repo: Path,
 ) -> None:
@@ -680,7 +683,7 @@ def test_pr_info_rejects_malformed_owner_even_with_null_head_repository(monkeypa
     row["headRepositoryOwner"] = {"login": 7}
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
     with pytest.raises(GitError, match="invalid PR row"):
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
 
 @pytest.mark.parametrize("head_owner", [None, {"login": "former-owner"}])
 def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.MonkeyPatch, git_repo: Path, head_owner: Any,
@@ -690,7 +693,7 @@ def test_pr_info_accepts_null_same_repo_head_metadata(monkeypatch: pytest.Monkey
     row["headRepositoryOwner"] = head_owner
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("o", "r"))
 
-    assert pr_review._pr_info_from_row(git_repo, row).head_repo is None
+    assert review_lookup._pr_info_from_row(git_repo, row).head_repo is None
 
 def test_find_open_pr_propagates_current_branch_failure(monkeypatch: pytest.MonkeyPatch, git_repo: Path) -> None:
     def fail_branch(_repo: Path) -> str | None:
@@ -725,12 +728,12 @@ def test_pr_base_remote_matching_is_credential_safe(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(git_ops, "gh_repo_view_required", lambda _r, **_kwargs: ("acme", "widgets"),)
 
     with pytest.raises(GitError) as excinfo:
-        pr_review._pr_info_from_row(git_repo, row)
+        review_lookup._pr_info_from_row(git_repo, row)
     assert "top-secret" not in str(excinfo.value)
     assert "token=private" not in str(excinfo.value)
 
     _git(git_repo, "remote", "set-url", "origin", "https://user:fork-secret@github.com/forky/widgets.git?token=fork",)
-    assert pr_review._pr_info_from_row(git_repo, row).base_sha == base
+    assert review_lookup._pr_info_from_row(git_repo, row).base_sha == base
 
 
 class _FakeConsole:
@@ -827,7 +830,7 @@ async def test_post_warns_with_preserved_payload_path_on_failure(
     )
     err = "GitHub review submission failed (request payload preserved at /tmp/x.json)"
     monkeypatch.setattr(pr_review, "post_classified_review",
-        lambda _plan, *, transport: pr_review.ClassifiedReviewResult(
+        lambda _plan, *, transport: review_models.ClassifiedReviewResult(
             status=pr_review.SubmissionStatus.FAILED, review_url=None, posted_file_level=(), folded_file_level=(),
             final_review_posted=False, safe_error=err,
         ),
@@ -859,7 +862,7 @@ def test_github_transport_surfaces_only_structured_preserved_payload_path(
     monkeypatch.setattr(git_ops, "gh_api", fail_gh)
 
     result = pr_review.GitHubReviewTransport(target_dir=tmp_path, auth=git_ops.INHERIT_GITHUB_AUTH,).post_review(pr,
-        pr_review.ReviewPayload(
+        review_models.ReviewPayload(
             event=pr_review.ReviewEvent.COMMENT, commit_id=pr.head_sha, body="review body", comments=(),
         ),
     )
@@ -876,11 +879,11 @@ async def test_post_skipped_when_user_declines(monkeypatch: pytest.MonkeyPatch, 
     )
     submit_called = False
 
-    def fake_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: pr_review.ReviewTransport
-    ) -> pr_review.ClassifiedReviewResult:
+    def fake_submit(_plan: pr_review.ClassifiedReviewPlan, *, transport: review_submission.ReviewTransport
+    ) -> review_models.ClassifiedReviewResult:
         nonlocal submit_called
         submit_called = True
-        return pr_review.ClassifiedReviewResult(
+        return review_models.ClassifiedReviewResult(
             status=pr_review.SubmissionStatus.POSTED, review_url="x", posted_file_level=(), folded_file_level=(),
             final_review_posted=True, safe_error=None,
         )
@@ -1279,8 +1282,8 @@ def test_diagram_marker_round_trip() -> None:
     )
     assert parse_diagram_markers(body) == [("sequence", "a" * 40), ("flowchart", "a" * 40)]
     # A finding marker is a different namespace and must not cross-parse.
-    assert parse_diagram_markers(pr_review.finding_marker("f" * 64)) == []
-    assert pr_review.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
+    assert parse_diagram_markers(review_identity.finding_marker("f" * 64)) == []
+    assert review_identity.parse_finding_markers(diagram_marker("sequence", "a" * 40)) == []
 
 
 def _record_minimize(calls: list[tuple[str, str | None]]) -> Any:
@@ -1307,7 +1310,7 @@ def test_diagram_replacement_post_failure_keeps_prior_comment(
 
     monkeypatch.setattr(git_ops, "gh_api", fail_post)
 
-    result = pr_review.post_diagram_comment_to_pr(
+    result = review_diagrams.post_diagram_comment_to_pr(
         tmp_path, pr, body="diagram", kinds=["sequence"], bot_login="daydream",
     )
 
@@ -1333,7 +1336,7 @@ def test_diagram_replacement_posts_before_minimizing_matching_prior_comment(
 
     monkeypatch.setattr(git_ops, "gh_api", post)
 
-    result = pr_review.post_diagram_comment_to_pr(
+    result = review_diagrams.post_diagram_comment_to_pr(
         tmp_path, pr, body="diagram", kinds=["sequence"], bot_login="daydream",
     )
 
@@ -1457,7 +1460,7 @@ def test_base_tip_api_read_rejects_advanced_pr(
         calls.append(endpoint)
         return {"head": {"sha": "d" * 40 if advanced else pr.head_sha}, "base": {"sha": tip}}
     monkeypatch.setattr(git_ops, "gh_api", api)
-    assert pr_review.capture_pr_base_tip(Path("."), pr) == (None if advanced else tip)
+    assert review_lookup.capture_pr_base_tip(Path("."), pr) == (None if advanced else tip)
     assert calls == [f"repos/{pr.owner}/{pr.repo}/pulls/{pr.number}"]
 
 

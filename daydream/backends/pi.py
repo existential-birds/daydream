@@ -15,7 +15,6 @@ import time
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import ExitStack
-from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +37,6 @@ from daydream.backends import (
     ToolResultEvent,
     ToolStartEvent,
     TurnEndEvent,
-    _admit_json_value,
     _admit_native_unix_ms,
     _new_generation_id,
     _parsed_nonnegative_float,
@@ -53,11 +51,7 @@ from daydream.backends._subprocess import (
 )
 from daydream.backends._transport import (
     CliTransport,
-    StderrPolicy,
-    StdinMode,
     process_exit_message,
-    raise_for_exit,
-    reap,
     teardown,
 )
 from daydream.config import DEFAULT_PI_MODEL
@@ -679,9 +673,7 @@ class PiBackend:
             transport = CliTransport(
                 "pi",
                 args,
-                stdin_mode=StdinMode.PIPE if tools_disabled else StdinMode.DEVNULL,
                 stdin_data=full_prompt.encode("utf-8") if tools_disabled else None,
-                stderr_policy=StderrPolicy.MERGE_INTO_STDOUT,
                 limit=_PI_STDOUT_LIMIT_BYTES,
                 env=child_env,
                 cwd=str(cwd),
@@ -780,22 +772,15 @@ class PiBackend:
                                 call_id = block.get("id")
                                 call_name = block.get("name")
                                 if isinstance(call_id, str) and call_id and isinstance(call_name, str) and call_name:
-                                    arguments_admitted, _arguments_diag = _admit_json_value(block.get("arguments"))
-                                    if arguments_admitted is not None or block.get("arguments") is None:
-                                        try:
-                                            choice_parts.append(
-                                                ToolCallChoicePart(
-                                                    call_id=call_id,
-                                                    name=call_name,
-                                                    arguments=(
-                                                        arguments_admitted if arguments_admitted is not None else {}
-                                                    ),
-                                                )
-                                            )
-                                        except ValueError:
-                                            # Unsafe tool identity never enters the
-                                            # provider choice (fixed admission policy).
-                                            pass
+                                    try:
+                                        choice_parts.append(ToolCallChoicePart(
+                                            call_id=call_id,
+                                            name=call_name,
+                                            arguments={} if block.get("arguments") is None else block["arguments"],
+                                        ))
+                                    except ValueError:
+                                        # ToolCallChoicePart owns identity and argument admission.
+                                        pass
                         if text_parts:
                             last_assistant_text = "".join(text_parts)
                         # P18: seal the generation exactly once at the matching
@@ -913,7 +898,7 @@ class PiBackend:
                 # Streaming-only updates are captured by complete message/tool-end events.
 
             # Reap, yield terminal events, then format/check backend-specific process exits.
-            returncode = await reap(transport)
+            returncode = await transport.wait()
 
             if output_schema and last_assistant_text:
                 structured_result = extract_json(last_assistant_text)
@@ -921,13 +906,12 @@ class PiBackend:
                 yield terminal
 
             # Report nonzero exits even without turn_end errors; empty/partial output is not success.
-            raise_for_exit(
-                returncode,
-                error_type=PiError,
-                category="PROCESS_EXIT",
-                build_message=partial(_pi_process_exit_message, stderr_lines),
-                retryable=_is_retryable_exit_code(returncode),
-            )
+            if returncode != 0:
+                raise PiError(
+                    _pi_process_exit_message(stderr_lines, returncode),
+                    category="PROCESS_EXIT",
+                    retryable=_is_retryable_exit_code(returncode),
+                )
 
             if saw_turn_start and not saw_finish_reason:
                 raise PiError(

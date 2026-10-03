@@ -6,7 +6,6 @@ import pytest
 
 from daydream import git_ops
 from daydream.git_ops import GitError
-from daydream.pr_review import diagram_marker, finding_marker
 from daydream.reconcile import (
     PriorFinding,
     fetch_prior_diagram_comments,
@@ -14,6 +13,7 @@ from daydream.reconcile import (
     minimize_comment,
     partition,
 )
+from daydream.reviews.identity import diagram_marker, finding_marker
 
 # --- Canned gh_api responses for fetch_prior_findings ----------------------
 

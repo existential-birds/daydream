@@ -82,37 +82,6 @@ class _InvMetricsSum(TypedDict):
     cost: float
 
 
-@dataclass(frozen=True)
-class _CostDelta:
-    """Nonnegative residual max(0, CostEvent total - per-event sum), per dimension.
-
-    Repairs missing usage without double-counting backends that restate totals."""
-
-    prompt: int
-    completion: int
-    cached: int
-    cost: float
-    reasoning: int | None
-
-    @property
-    def nonzero(self) -> bool:
-        """True when any residual dimension exists (delta-0 restatement folds nothing)."""
-        return self.prompt != 0 or self.completion != 0 or self.cached != 0 or self.cost != 0.0
-
-    def residual_metrics(self, *, cost_usd: float | None, include_reasoning: bool) -> Metrics:
-        """Project residual usage; reasoning is included only within completion tokens."""
-        reasoning = None
-        if include_reasoning and self.reasoning is not None and self.reasoning <= self.completion:
-            reasoning = _reasoning_extra(self.reasoning)
-        return Metrics(
-            prompt_tokens=self.prompt,
-            completion_tokens=self.completion,
-            cached_tokens=self.cached,
-            cost_usd=None if cost_usd is None else self.cost,
-            extra=reasoning,
-        )
-
-
 # Fixed ASCII interruption text never includes tool data, keeping it redaction-stable.
 INCOMPLETE_CALL_CONTENT = "[interrupted: call did not complete before invocation ended]"
 
@@ -180,8 +149,8 @@ def _result_extra(event: ToolResultEvent) -> dict[str, Any]:
 class Invocation:
     """Buffer one conversation and billed usage. TurnEnd/Result close steps; finish closes partial turns.
 
-    Late tool results retain their originating step through open-buffer/closed-index
-    links. Recorder owns step IDs and ancestry.
+    Late tool results retain their originating step through append-only host indices.
+    Recorder owns step IDs and ancestry.
     """
 
     recorder: "TrajectoryRecorder"
@@ -193,7 +162,8 @@ class Invocation:
     started_at: str = ""
     ended_at: str = ""
     _open_step_dict: dict[str, Any] | None = None
-    _in_flight_tools: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # A pending turn occupies the next append-only step index; closing it never retargets tool ownership.
+    _in_flight_tools: dict[str, int] = field(default_factory=dict)
     _stop_reason: str | None = None
     _error_subtype: str | None = None
     # Per-dimension invocation sums reconcile restated CostEvent totals without double counting.
@@ -262,27 +232,32 @@ class Invocation:
         except Exception as exc:  # noqa: BLE001 - recording must never crash a run (Architecture Q7)
             ui.print_warning(_console, f"Trajectory recording: {type(exc).__name__}: {exc}")
 
-    def _reconcile_cost_delta(self, event: CostEvent) -> _CostDelta:
-        """Compute the per-dimension residual against the invocation’s summed metrics."""
-        return _CostDelta(
-            prompt=max(0, (event.input_tokens or 0) - self._inv_metrics_sum["prompt"]),
-            completion=max(0, (event.output_tokens or 0) - self._inv_metrics_sum["completion"]),
-            cached=max(0, (event.cached_tokens or 0) - self._inv_metrics_sum["cached"]),
-            cost=max(0.0, (event.cost_usd or 0.0) - self._inv_metrics_sum["cost"]),
-            reasoning=event.reasoning_tokens,
+    def _reconcile_cost_delta(self, event: CostEvent) -> Metrics:
+        """Repair only positive residuals; cache/reasoning remain usage subsets."""
+        completion = max(0, (event.output_tokens or 0) - self._inv_metrics_sum["completion"])
+        return Metrics(
+            prompt_tokens=max(0, (event.input_tokens or 0) - self._inv_metrics_sum["prompt"]),
+            completion_tokens=completion,
+            cached_tokens=max(0, (event.cached_tokens or 0) - self._inv_metrics_sum["cached"]),
+            cost_usd=None if event.cost_usd is None else max(0.0, event.cost_usd - self._inv_metrics_sum["cost"]),
+            extra=(
+                _reasoning_extra(event.reasoning_tokens)
+                if event.reasoning_tokens is not None and event.reasoning_tokens <= completion else None
+            ),
         )
 
     def _fold_cost_event(self, event: CostEvent) -> None:
         """Add only positive CostEvent residuals to step metrics and aggregate totals."""
         delta = self._reconcile_cost_delta(event)
+        nonzero = any((delta.prompt_tokens, delta.completion_tokens, delta.cached_tokens, delta.cost_usd))
         existing = self._open_step_dict["_metrics"] if self._open_step_dict is not None else None
         if existing is not None:
             # Fold residual usage into this metrics-bearing step so step sums match final totals;
             # backfill missing cost/reasoning.
-            if delta.nonzero:
+            if nonzero:
                 existing = _merge_metrics(
                     existing,
-                    delta.residual_metrics(cost_usd=event.cost_usd, include_reasoning=False),
+                    delta.model_copy(update={"extra": None}),
                 )
             updates: dict[str, Any] = {}
             if existing.cost_usd is None and event.cost_usd is not None:
@@ -299,11 +274,11 @@ class Invocation:
                 existing = existing.model_copy(update=updates)
             assert self._open_step_dict is not None
             self._open_step_dict["_metrics"] = existing
-        elif delta.nonzero:
+        elif nonzero:
             # Create a residual step only for positive usage. Reasoning remains a completion subset in Metrics.extra.
             self._ensure_open_step()
             assert self._open_step_dict is not None
-            self._open_step_dict["_metrics"] = delta.residual_metrics(cost_usd=event.cost_usd, include_reasoning=True)
+            self._open_step_dict["_metrics"] = delta
         # Zero-residual restatements create no phantom step and do not inflate total_steps.
         if event.model_name:
             if self._open_step_dict is not None:
@@ -311,10 +286,10 @@ class Invocation:
             self.recorder._upgrade_model_name(event.model_name)
         # Sum per-invocation residuals across phases, including CostEvent-only backends.
         self.recorder._accumulate_metrics(
-            prompt_tokens=delta.prompt,
-            completion_tokens=delta.completion,
-            cached_tokens=delta.cached,
-            cost_usd=None if event.cost_usd is None else delta.cost,
+            prompt_tokens=delta.prompt_tokens,
+            completion_tokens=delta.completion_tokens,
+            cached_tokens=delta.cached_tokens,
+            cost_usd=delta.cost_usd,
         )
 
     @singledispatchmethod
@@ -344,7 +319,7 @@ class Invocation:
             )
         )
         # Results stay attached to their originating step, even after it closes.
-        self._in_flight_tools[event.id] = {"open_dict": step, "closed_index": None}
+        self._in_flight_tools[event.id] = len(self.steps)
 
     @_dispatch.register
     def _observe_tool_result(self, event: ToolResultEvent) -> None:
@@ -354,10 +329,10 @@ class Invocation:
             self._ensure_open_step()["_unmatched_tool_results"].append(event.id)
             return
         result = ObservationResult(source_call_id=event.id, content=event.output, extra=_result_extra(event))
-        if host["open_dict"] is not None:
-            host["open_dict"]["_observation_results"].append(result)
+        if host == len(self.steps):
+            self._ensure_open_step()["_observation_results"].append(result)
         else:
-            self._amend_closed_step_observation(closed_index=host["closed_index"], result=result)
+            self._amend_closed_step_observation(closed_index=host, result=result)
 
     @_dispatch.register
     def _observe_metrics(self, event: MetricsEvent) -> None:
@@ -477,7 +452,7 @@ class Invocation:
         return self.recorder.redactor.redact_step(agent_step)
 
     def _close_open_step(self) -> None:
-        """Redact and append once; retarget pending tools to the closed step for late results."""
+        """Redact and append once; pending tools retain the same host index."""
         if self._open_step_dict is None:
             return
         d = self._open_step_dict
@@ -499,13 +474,6 @@ class Invocation:
                 extra_overrides=extra_overrides,
             )
         )
-        closed_index = len(self.steps) - 1
-        # Amend in-flight entries whose host Step just closed so a delayed
-        # ToolResultEvent can still find its host via closed_index.
-        for entry in self._in_flight_tools.values():
-            if entry["open_dict"] is d:
-                entry["open_dict"] = None
-                entry["closed_index"] = closed_index
 
     def _amend_closed_step_observation(self, *, closed_index: int, result: ObservationResult) -> None:
         """Append a late result to its closed host step, then redact the replacement."""
@@ -548,12 +516,7 @@ class Invocation:
             ]
         # Markers land per host Step in the same LIFO order finish()'s popitem loop uses.
         for host in reversed(in_flight):
-            if host["closed_index"] is not None:
-                steps[host["closed_index"]] = self._with_observation_result(
-                    steps[host["closed_index"]], self._interrupted_marker()
-                )
-            elif self._open_step_dict is not None and host["open_dict"] is self._open_step_dict:
-                steps[-1] = self._with_observation_result(steps[-1], self._interrupted_marker())
+            steps[host] = self._with_observation_result(steps[host], self._interrupted_marker())
         return steps
 
     @staticmethod
@@ -583,7 +546,7 @@ class Invocation:
         while self._in_flight_tools:
             _, host = self._in_flight_tools.popitem()
             self._amend_closed_step_observation(
-                closed_index=host["closed_index"],
+                closed_index=host,
                 result=self._interrupted_marker(),
             )
 

@@ -150,10 +150,19 @@ def _record_failure(
 
 
 def _set_attributes(span: trace.Span, policy: PrivacyPolicy, attributes: dict[str, Any]) -> None:
-    """Apply present attributes through the same privacy policy on every child span."""
+    """Redact and encode present attributes for scopes and child spans alike."""
     for key, value in attributes.items():
-        if value is not None:
-            span.set_attribute(key, policy.value(value))
+        if value is None:
+            continue
+        safe = policy.value(value)
+        scalar_array = (
+            isinstance(safe, list)
+            and (not safe or type(safe[0]) in (str, int, float, bool))
+            and all(type(item) is type(safe[0]) for item in safe)
+        )
+        if not isinstance(safe, (str, int, float, bool)) and not scalar_array:
+            safe = policy.json(safe)
+        span.set_attribute(key, safe)
 
 
 class SpanScope:
@@ -239,18 +248,7 @@ class SpanScope:
         if self.span is None or self.session is None:
             return
         try:
-            for key, value in attributes.items():
-                if value is None:
-                    continue
-                safe = self.session.policy.value(value)
-                scalar_array = (
-                    isinstance(safe, list)
-                    and (not safe or type(safe[0]) in (str, int, float, bool))
-                    and all(type(item) is type(safe[0]) for item in safe)
-                )
-                if not isinstance(safe, (str, int, float, bool)) and not scalar_array:
-                    safe = self.session.policy.json(safe)
-                self.span.set_attribute(key, safe)
+            _set_attributes(self.span, self.session.policy, attributes)
         except Exception:
             _logger.warning("Trace attributes could not be recorded")
 
@@ -387,8 +385,6 @@ class AttemptObserver:
         self.text: list[str] = []
         self.structured: Any = None
         self.tools: dict[str, trace.Span] = {}
-        self.tool_names: dict[str, str] = {}
-        self.message_usage: dict[str, dict[str, int | float]] = {}
         self.usage_metadata: dict[str, dict[str, Any]] = {}
         self.invocation_usage: dict[str, int | float] = {}
         self.final_usage: dict[str, int | float] = {}
@@ -524,8 +520,7 @@ class AttemptObserver:
             self.invocation_usage.update(values)
             self.scope.attrs({"daydream.started_at": event.started_at})
         else:
-            key = event.message_id or f"anonymous:{len(self.message_usage)}"
-            self.message_usage[key] = values
+            key = event.message_id or f"anonymous:{len(self.usage_metadata)}"
             self.usage_metadata[key] = {
                 "message_id": event.message_id,
                 "model": event.model_name,
@@ -581,7 +576,6 @@ class AttemptObserver:
             context=trace.set_span_in_context(self.scope.span) if self.scope.span else None,
         )
         self.tools[event.id] = span
-        self.tool_names[event.id] = event.name
         _set_attributes(
             span,
             policy,
@@ -788,8 +782,8 @@ class AttemptObserver:
             self.scope.attrs({"daydream.billing.owner": owner})
             self._end_generations(owner)
             usage: dict[str, int | float] = {}
-            for values in self.message_usage.values():
-                for name, value in values.items():
+            for metadata in self.usage_metadata.values():
+                for name, value in metadata["usage"].items():
                     usage[name] = usage.get(name, 0) + value
             usage.update(self.invocation_usage)
             usage.update(self.final_usage)

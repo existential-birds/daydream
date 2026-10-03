@@ -109,6 +109,34 @@ def test_transaction_commit_replaces_all_and_manifest_last(tmp_path: Path) -> No
     assert manifest.read_text() == "manifest-v2"
     assert not (tmp_path / "transactions").exists() or not list((tmp_path / "transactions").iterdir())
 
+
+@pytest.mark.parametrize("manifest_index", [0, 1, 2])
+def test_transaction_manifest_is_last_regardless_of_staging_order(
+    tmp_path: Path, manifest_index: int
+) -> None:
+    manifest = tmp_path / "benchmark.yaml"
+    manifest.write_text("old manifest")
+    retired = tmp_path / "retired.yaml"
+    retired.write_text("old case")
+    case = tmp_path / "case.yaml"
+    faults = TransactionFaultDriver(tmp_path, op_id="ordered", kind="write")
+    tx = faults.transaction
+    operations = [(case, b"new case"), (retired, None)]
+    operations.insert(manifest_index, (manifest, b"new manifest"))
+    for path, content in operations:
+        if content is None:
+            tx.retire(path, expected_sha256=sha256_file(path))
+        else:
+            tx.stage(path, content)
+    faults.halt_at("target-2")
+    assert case.read_bytes() == b"new case"
+    assert not retired.exists()
+    assert manifest.read_text() == "old manifest"
+    recover_startup(tmp_path)
+    assert not case.exists()
+    assert retired.read_text() == "old case"
+    assert manifest.read_text() == "old manifest"
+
 def test_transaction_has_no_fault_or_state_forging_surface(tmp_path: Path) -> None:
     tx = Transaction(tmp_path, op_id="surface", kind="write")
     assert not hasattr(tx, "inject_crash")

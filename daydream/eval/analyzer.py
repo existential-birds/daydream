@@ -21,12 +21,10 @@ from daydream.timeutil import parse_iso_timestamp
 from daydream.trajectory import (
     RUN_DOCUMENT_NAME,
     RUNS_DIRNAME,
-    RunWriteSnapshot,
-    TrajectoryDocumentSnapshot,
-    compute_timing_summary,
     run_document_path,
     siblings_directory,
 )
+from daydream.trajectory.timing import compute_payload_timing_summary
 
 # Trajectory loading
 
@@ -569,36 +567,24 @@ def analyze_timing(trajectories: dict[str, Any]) -> dict[str, Any]:
             main,
             *[item for item in trajectories.get("forked", []) if isinstance(item, dict)],
         ]
-        documents: list[TrajectoryDocumentSnapshot] = []
-        for index, payload in enumerate(payloads):
-            canonical = {key: value for key, value in payload.items() if key != "_source_file"}
-            trajectory_id = canonical.get("trajectory_id")
-            if not isinstance(trajectory_id, str):
-                trajectory_id = str(canonical.get("session_id", f"legacy-{index}"))
-                canonical["trajectory_id"] = trajectory_id
-            filename = payload.get("_source_file")
-            if not isinstance(filename, str):
-                filename = RUN_DOCUMENT_NAME if index == 0 else f"trajectory-{index}.json"
-            documents.append(
-                TrajectoryDocumentSnapshot(
-                    trajectory_id=trajectory_id,
-                    path=Path(filename),
-                    json_bytes=json.dumps(canonical, sort_keys=True).encode("utf-8"),
-                )
-            )
+        payloads = [
+            payload if isinstance(payload.get("trajectory_id"), str) else {
+                **payload, "trajectory_id": str(payload.get("session_id", f"legacy-{index}")),
+            }
+            for index, payload in enumerate(payloads)
+        ]
         raw_extra = main.get("extra")
         extra: dict[str, Any] = raw_extra if isinstance(raw_extra, dict) else {}
         partial = bool(extra.get("partial")) and isinstance(extra.get("snapshot_at"), str)
         cutoff = extra.get("snapshot_at") if partial else extra.get("run_ended_at")
         if not isinstance(cutoff, str):
             cutoff = ""
-        snapshot = RunWriteSnapshot(
+        summary = compute_payload_timing_summary(
+            payloads,
             status="partial" if partial else "complete",
             cutoff_at=cutoff,
-            root_trajectory_id=documents[0].trajectory_id,
-            documents=tuple(documents),
+            root_trajectory_id=payloads[0]["trajectory_id"],
         )
-        summary = compute_timing_summary(snapshot)
         if summary is not None:
             return {
                 **summary.to_dict(),

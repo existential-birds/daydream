@@ -209,8 +209,6 @@ class Transaction:
         self._dir = self._root / "transactions" / self._op_id
         ensure_private_dir(self._dir)
         self._states: dict[str, _TargetState] = {}
-        self._order: list[str] = []
-        self._replacement_order: list[str] = []
         self._applied_count = 0
         self._state: str = "open"
         self._created_dirs: list[str] = []
@@ -222,8 +220,7 @@ class Transaction:
 
     def _build_document(self) -> dict[str, Any]:
         targets = []
-        for rel in self._order:
-            st = self._states[rel]
+        for rel, st in self._states.items():
             targets.append(
                 {
                     "rel": rel,
@@ -239,7 +236,7 @@ class Transaction:
             "op_id": self._op_id,
             "kind": self._kind,
             "state": self._state,
-            "replacement_order": self._replacement_order,
+            "replacement_order": self._replacement_order(),
             "applied_count": self._applied_count,
             "created_dirs": self._created_dirs,
             "targets": targets,
@@ -267,7 +264,7 @@ class Transaction:
             raise WorkspaceCorrupt(f"{self._root}: duplicate staged target {rel!r}")
         target = self._root / rel
         ensure_private_dir(target.parent)
-        index = len(self._order)
+        index = len(self._states)
         stage_path = self._dir / f"stage-{index:04d}.bin"
         _atomic_write(stage_path, content, mode=0o600)
         after_digest = sha256_file(stage_path)
@@ -290,12 +287,6 @@ class Transaction:
             before_digest=before_digest,
             after_digest=after_digest,
         )
-        self._order.append(rel)
-        # benchmark.yaml is always last in the ordered replacement list.
-        if rel == "benchmark.yaml":
-            self._replacement_order = self._order.copy()
-        else:
-            self._replacement_order = [r for r in self._replacement_order if r != "benchmark.yaml"] + [rel]
 
     def retire(self, target_rel: str | Path, *, expected_sha256: str) -> None:
         """Stage exact-digest file retirement with a backup. Interrupted commits restore
@@ -315,7 +306,7 @@ class Transaction:
                 f"{self._root}: retirement target {rel!r} digest mismatch "
                 f"(expected {expected_sha256}, got {actual})"
             )
-        index = len(self._order)
+        index = len(self._states)
         backup_path = self._dir / f"backup-{index:04d}.bin"
         shutil.copyfile(target, backup_path)
         _fsync_file(backup_path)
@@ -328,10 +319,10 @@ class Transaction:
             before_digest=actual,
             after_digest=None,
         )
-        self._order.append(rel)
-        self._replacement_order = [
-            r for r in self._replacement_order if r != "benchmark.yaml"
-        ] + [rel]
+
+    def _replacement_order(self) -> list[str]:
+        """Derive stable journal order from the target owner; publish its manifest last."""
+        return sorted(self._states, key=lambda rel: rel == "benchmark.yaml")
 
     def prepare(self) -> None:
         """Persist the ``prepared`` journal (fsync'd) for startup recovery."""
@@ -360,7 +351,7 @@ class Transaction:
         """Replace in declared order, fsyncing each file and parent before applying the
         next target.
         """
-        for rel in self._replacement_order:
+        for rel in self._replacement_order():
             self._apply_replacement(rel)
 
     def _apply_replacement(self, rel: str) -> None:
@@ -389,34 +380,14 @@ class Transaction:
         self._state = "complete"
         self._write_journal()
         _fsync_file(self._journal_path())
-        for st in self._states.values():
-            if st.operation == "retire":
-                if (self._root / st.rel).exists():
-                    raise WorkspaceCorrupt(
-                        f"{self._root}: commit verify retired target {st.rel} still exists"
-                    )
-                continue
-            if st.after_digest is None:
-                raise WorkspaceCorrupt(
-                    f"{self._root}: commit verify replacement {st.rel} lacks after digest"
-                )
-            actual = sha256_file(self._root / st.rel)
-            if actual != st.after_digest:
-                raise WorkspaceCorrupt(
-                    f"{self._root}: commit verify {st.rel} expected {st.after_digest} got {actual}"
-                )
+        _verify_complete(self._root, self._dir, self._build_document(), retire=False)
 
     def commit(self) -> None:
-        """Run the full pipeline to ``complete`` and remove the journal."""
+        """Run the full pipeline; normal and recovered completion share verification."""
         self.prepare()
         self.begin_commit()
         self._complete_commit()
-        self._cleanup()
-
-    def _cleanup(self) -> None:
-        """Remove the journal + staging dir, leaving an empty ``transactions/`` root."""
-        if self._dir.exists():
-            shutil.rmtree(self._dir, ignore_errors=True)
+        shutil.rmtree(self._dir, ignore_errors=True)
 
     def __enter__(self) -> "Transaction":
         return self
@@ -684,15 +655,6 @@ def _targets_from_doc(doc: dict[str, Any]) -> list[dict[str, Any]]:
 
 def _rollback_prepared(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
     # Staged files only — no real target was replaced, so nothing to restore.
-    for t in _targets_from_doc(doc):
-        stage = t.get("stage")
-        if stage:
-            with suppress(OSError):
-                (op_dir / stage).unlink()
-        backup = t.get("backup")
-        if backup:
-            with suppress(OSError):
-                (op_dir / backup).unlink()
     if op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
     _remove_created_dirs(root, doc)
@@ -735,7 +697,7 @@ def _remove_created_dirs(root: Path, doc: dict[str, Any]) -> None:
             (root / rel).rmdir()
 
 
-def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
+def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any], *, retire: bool = True) -> None:
     for t in _targets_from_doc(doc):
         rel = _resolve_target(root, t["rel"])
         target = root / rel
@@ -754,7 +716,7 @@ def _verify_complete(root: Path, op_dir: Path, doc: dict[str, Any]) -> None:
             )
         # Recovery never widens a private target's mode, even if it drifted.
         os.chmod(target, 0o600)
-    if op_dir.exists():
+    if retire and op_dir.exists():
         shutil.rmtree(op_dir, ignore_errors=True)
 
 

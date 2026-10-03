@@ -24,7 +24,7 @@ from daydream.archive.index import (
 )
 from daydream.archive.manifest import Manifest
 from daydream.git_ops import GitError
-from daydream.pr_review import DAYDREAM_FOOTER, finding_marker
+from daydream.reviews.identity import DAYDREAM_FOOTER, finding_marker
 from daydream.training import harvest, labeler_versions, reward
 from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (

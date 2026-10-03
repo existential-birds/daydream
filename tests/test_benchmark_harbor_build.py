@@ -20,7 +20,7 @@ from daydream.benchmark.harbor.build import CompileError, compile_workspace
 from daydream.benchmark.manifest import load_benchmark_manifest
 from daydream.benchmark.storage import WorkspaceCorrupt, load_yaml_strict
 from daydream.benchmark.workspace import init_workspace
-from daydream.pr_review import FINDING_MARKER_RE, finding_marker
+from daydream.reviews.identity import FINDING_MARKER_RE, finding_marker
 from tests.harness.benchmark_judge import MatchClient, judge_env
 from tests.harness.fake_gh import FakeGh
 from tests.harness.git_helpers import git as _seed_git, init_repo, seed_pr_origin
