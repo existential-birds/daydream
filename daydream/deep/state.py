@@ -6,16 +6,17 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Generic, TypeVar, cast, overload
 
+from daydream.backends import ContinuationToken
+from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
 from daydream.deep.records import RecordPool
+from daydream.deep.reuse_store import ReuseCache
 from daydream.review_result import ReviewCoverage
+from daydream.test_execution import TestRecipe
 
 if TYPE_CHECKING:
-    from daydream.backends import ContinuationToken
     from daydream.deep.detection import StackAssignment
     from daydream.deep.diff import DeepDiffBoundInfo
     from daydream.deep.fix_state import FixCycleState, RetainedTreeSnapshot
-    from daydream.deep.latency import ArbiterPlan, LatencyRoute, RiskSummary
-    from daydream.deep.reuse_store import ReuseCache
     from daydream.exploration_runner import Tier
     from daydream.phases import PushReceipt
     from daydream.test_execution import TestRecipe
@@ -24,23 +25,36 @@ if TYPE_CHECKING:
 _T = TypeVar("_T")
 
 
+def _deep_diff_bound_info() -> type[DeepDiffBoundInfo]:
+    from daydream.deep.diff import DeepDiffBoundInfo
+
+    return DeepDiffBoundInfo
+
+
 class _StateField(Generic[_T]):
     """A checked mapping field with an optional fresh default and opt-in writes."""
 
     def __init__(
         self,
-        expected: type[object],
+        expected: type[object] | Callable[[], type[object]],
         *,
         key: str | None = None,
         label: str | None = None,
         default: Callable[[], _T] | None = None,
         writable: bool = False,
     ) -> None:
-        self.expected = expected
+        # `expected` may be a thunk: daydream.deep.diff imports DeepState, so a field
+        # typed by that module cannot import its type at class-body time.
+        self._expected = expected
         self.key = key
-        self.label = label or expected.__name__
+        self.label = label or (expected.__name__ if isinstance(expected, type) else "")
         self.default = default
         self.writable = writable
+
+    @property
+    def expected(self) -> type[object]:
+        # Builtin containers (list, dict, set) are callable too, so test for a type.
+        return self._expected if isinstance(self._expected, type) else self._expected()
 
     def __set_name__(self, owner: type[DeepState], name: str) -> None:
         self.name = name
@@ -117,14 +131,11 @@ class DeepState:
 
     diff_truncated = _StateField[bool](bool, default=bool)
 
-    @property
-    def diff_truncation(self) -> DeepDiffBoundInfo | None:
-        from daydream.deep.diff import DeepDiffBoundInfo
-
-        return cast(
-            DeepDiffBoundInfo | None,
-            self._optional("diff_truncation", DeepDiffBoundInfo, "DeepDiffBoundInfo or None"),
-        )
+    diff_truncation = _StateField["DeepDiffBoundInfo | None"](
+        _deep_diff_bound_info,
+        label="DeepDiffBoundInfo or None",
+        default=lambda: None,
+    )
 
     @property
     def tier(self) -> Tier:
@@ -179,45 +190,21 @@ class DeepState:
 
     single_stack_mode = _StateField[bool](bool)
 
-    @property
-    def latency_route(self) -> LatencyRoute | None:
-        from daydream.deep.latency import LatencyRoute
+    latency_route = _StateField["LatencyRoute | None"](
+        LatencyRoute, label="LatencyRoute or None", default=lambda: None
+    )
 
-        return cast(
-            LatencyRoute | None,
-            self._optional("latency_route", LatencyRoute, "LatencyRoute or None"),
-        )
+    reuse_cache = _StateField["ReuseCache | None"](
+        ReuseCache, label="ReuseCache or None", default=lambda: None
+    )
 
-    @property
-    def reuse_cache(self) -> ReuseCache | None:
-        from daydream.deep.reuse_store import ReuseCache
+    risk_summary = _StateField["RiskSummary | None"](
+        RiskSummary, label="RiskSummary or None", default=lambda: None
+    )
 
-        return cast(
-            ReuseCache | None,
-            self._optional("reuse_cache", ReuseCache, "ReuseCache or None"),
-        )
-
-    @property
-    def risk_summary(self) -> RiskSummary | None:
-        from daydream.deep.latency import RiskSummary
-
-        return cast(
-            RiskSummary | None,
-            self._optional("risk_summary", RiskSummary, "RiskSummary or None"),
-        )
-
-    @property
-    def arbiter_plan(self) -> ArbiterPlan | None:
-        from daydream.deep.latency import ArbiterPlan
-
-        return cast(
-            ArbiterPlan | None,
-            self._optional("arbiter_plan", ArbiterPlan, "ArbiterPlan or None"),
-        )
-
-    @arbiter_plan.setter
-    def arbiter_plan(self, value: ArbiterPlan) -> None:
-        self._data["arbiter_plan"] = value
+    arbiter_plan = _StateField["ArbiterPlan | None"](
+        ArbiterPlan, label="ArbiterPlan or None", default=lambda: None, writable=True
+    )
 
     log = _StateField[str](str)
 
@@ -235,20 +222,12 @@ class DeepState:
 
     record_pool = _StateField[RecordPool](RecordPool, writable=True)
 
-    @property
-    def arbiter_continuation(self) -> ContinuationToken | None:
-        from daydream.backends import ContinuationToken
-
-        return cast(
-            ContinuationToken | None,
-            self._optional(
-                "arbiter_continuation", ContinuationToken, "ContinuationToken or None"
-            ),
-        )
-
-    @arbiter_continuation.setter
-    def arbiter_continuation(self, value: ContinuationToken) -> None:
-        self._data["arbiter_continuation"] = value
+    arbiter_continuation = _StateField["ContinuationToken | None"](
+        ContinuationToken,
+        label="ContinuationToken or None",
+        default=lambda: None,
+        writable=True,
+    )
 
     merged_report = _StateField[Path](Path, writable=True)
 
@@ -269,18 +248,9 @@ class DeepState:
     def fix_cycle_state(self, value: FixCycleState) -> None:
         self._data["fix_cycle_state"] = value
 
-    @property
-    def test_recipe(self) -> TestRecipe | None:
-        from daydream.test_execution import TestRecipe
-
-        return cast(
-            TestRecipe | None,
-            self._optional("test_recipe", TestRecipe, "TestRecipe or None"),
-        )
-
-    @test_recipe.setter
-    def test_recipe(self, value: TestRecipe | None) -> None:
-        self._data["test_recipe"] = value
+    test_recipe = _StateField["TestRecipe | None"](
+        TestRecipe, label="TestRecipe or None", default=lambda: None, writable=True
+    )
 
     @property
     def iteration(self) -> int | None:
