@@ -8,7 +8,14 @@ from typing import Any
 
 import pytest
 
-from daydream.json_utils import atomic_write_bytes, atomic_write_json, extract_json
+from daydream.json_utils import (
+    atomic_write_bytes,
+    atomic_write_json,
+    extract_json,
+    extract_json_by_schema,
+    validates_schema,
+)
+from daydream.phases.schemas import PER_STACK_RECORD_SCHEMA
 
 
 class TestExtractJson:
@@ -72,6 +79,52 @@ class TestExtractJson:
         result = extract_json(text)
         assert isinstance(result, dict)
         assert [f["arb_id"] for f in result["findings"]] == [1, 2]
+
+class TestExtractJsonBySchema:
+    """Selection is driven by the boundary's acceptance predicate, never span size."""
+
+    def test_reported_case_resolves_to_empty_result(self) -> None:
+        text = ('The dependency impact: ["module", "moduleVersion", "surface"] were inspected. '
+                'No defects established. {"issues": []}')
+        sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value == {"issues": []}
+
+    def test_larger_incidental_object_does_not_win(self) -> None:
+        text = 'prefix {"a": [1,2,3,4,5,6,7,8]} trailing {"issues": []}'
+        sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value == {"issues": []}
+
+    def test_last_validating_candidate_in_document_order_wins(self) -> None:
+        rec = {"id": 1, "description": "x", "file": "f", "line": 1,
+               "severity": "low", "confidence": "HIGH", "rationale": "r", "evidence": "f:1"}
+        text = json.dumps({"issues": [rec]}) + ' then ' + json.dumps({"issues": []})
+        sel = extract_json_by_schema(text, schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value == {"issues": []}
+
+    def test_whole_text_that_parses_but_fails_schema_does_not_win(self) -> None:
+        sel = extract_json_by_schema('{"issues": [], "extra": 1}',
+                                     schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value is None
+
+    def test_nested_valid_fragment_inside_invalid_root_still_competes(self) -> None:
+        sel = extract_json_by_schema('prefix {bad {"issues": []}} suffix',
+                                     schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value == {"issues": []}
+
+    def test_rejection_reports_content_free_type_and_reason(self) -> None:
+        sel = extract_json_by_schema('["module", "moduleVersion", "surface"]',
+                                     schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value is None
+        assert sel.rejected_type == "list"
+        assert sel.rejected_reason == "type at $"
+        assert "module" not in (sel.rejected_reason or "")  # never candidate content
+        assert sel.candidate_count >= 1
+
+    def test_no_candidates_returns_none(self) -> None:
+        sel = extract_json_by_schema("This is just prose with no JSON whatsoever.",
+                                     schema=PER_STACK_RECORD_SCHEMA, accept=validates_schema)
+        assert sel.value is None
+        assert sel.candidate_count == 0
 
 class TestAtomicWritePrimitives:
     def test_bytes_roundtrip_and_replaces_prior_content(self, tmp_path: Path) -> None:
