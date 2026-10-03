@@ -27,11 +27,11 @@ from daydream.improve.reanchor import (
     _REANCHOR_DIR_SUFFIX,
     _SAFE_DIRNAME,
 )
+from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import (
     plan_slug,
     render_plan,
 )
-from daydream.redaction import redact_value
 from daydream.workspace import reject_public_operational_storage
 
 
@@ -172,7 +172,7 @@ class PlanWriteSession:
         selection: dict[str, Any],
     ) -> PlanOutcome:
         """Land one plan-writer result, writing its file when it is complete."""
-        safe = redact_value(selection)
+        safe = redact_model_value(selection)
         if not isinstance(safe, dict):
             return PlanOutcome("ignored", None, None, "")
         finding = safe.get("finding")

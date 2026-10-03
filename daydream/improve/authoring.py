@@ -19,7 +19,7 @@ from daydream.improve.plan_diagnostics import (
     _attempt_diagnostic,
 )
 from daydream.improve.prompts import PLAN_AUTHOR_SCHEMA, build_plan_writer_repair_prompt
-from daydream.redaction import redact_value
+from daydream.improve.redaction import redact_model_value
 from daydream.trajectory import DaydreamPhase, phase_scope
 
 
@@ -100,7 +100,7 @@ async def author_plan(
     generation_prompt = prompt
     for generation in range(2):
         output, aborted = await _generate_with_crash_retry(ctx, backend, generation_prompt)
-        output = redact_value(output)
+        output = redact_model_value(output)
         if aborted is not None:
             code = {
                 "tool_call_budget_exceeded": "TOOL_CALL_BUDGET_EXCEEDED",

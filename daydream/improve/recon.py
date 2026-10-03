@@ -33,9 +33,9 @@ from daydream.improve.partition import (
 from daydream.improve.prompts import (
     RECON_COMMAND_CONTRACT_BULLET,
 )
+from daydream.improve.redaction import redact_model_value
 from daydream.improve.repo_commands import enumerate_repository_commands
 from daydream.prompts.grounding import UNTRUSTED_REPOSITORY_CONTENT_BOUNDARY
-from daydream.redaction import redact_value
 from daydream.repository_paths import canonicalize_working_directory
 from daydream.services import (
     Service,
@@ -304,7 +304,7 @@ async def _step_recon(ctx: FlowContext) -> Stop | None:
     valid_commands: list[dict[str, Any]] = []
     command_errors: list[str] = []
     model_fields: dict[str, Any] = {}
-    safe_recon = redact_value(recon)
+    safe_recon = redact_model_value(recon)
     if isinstance(safe_recon, dict):
         raw_commands = safe_recon.get("commands")
         total_candidates = len(raw_commands) if isinstance(raw_commands, list) else 0

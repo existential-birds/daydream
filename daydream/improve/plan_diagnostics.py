@@ -10,7 +10,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from daydream.redaction import redact_value
+from daydream.improve.redaction import redact_model_value
 from daydream.trajectory import redact_text
 
 PLAN_WRITE_DIAGNOSTICS_SCHEMA_VERSION = 1
@@ -188,7 +188,7 @@ def record_plan_write_diagnostics(
             )
         ):
             existing_attempts = [
-                redact_value(item)
+                redact_model_value(item)
                 for item in existing["attempts"]
                 if isinstance(item, dict)
             ]
@@ -201,7 +201,7 @@ def record_plan_write_diagnostics(
             else {}
         ),
         "attempts": [
-            redact_value(item)
+            redact_model_value(item)
             for item in [*existing_attempts, *attempts]
         ],
     }

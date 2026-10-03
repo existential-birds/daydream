@@ -12,10 +12,10 @@ from pathlib import Path
 from typing import Any
 
 from daydream.improve.prioritize import member_alias, plan_priority
+from daydream.improve.redaction import redact_model_value
 from daydream.improve.render import (
     markdown_cell,
 )
-from daydream.redaction import redact_value
 from daydream.trajectory import redact_text
 
 REJECTIONS_SCHEMA_VERSION = 1
@@ -75,11 +75,11 @@ def record_rejections(
     if not entries:
         return
     rejected = [
-        redact_value(entry)
+        redact_model_value(entry)
         for entry in load_rejections(plans_dir).values()
     ]
     rejected.extend(
-        redact_value(dict(entry))
+        redact_model_value(dict(entry))
         for entry in entries
     )
     plans_dir.mkdir(parents=True, exist_ok=True)
