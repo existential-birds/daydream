@@ -691,3 +691,18 @@ Complete pinned fourteenth snapshot/report: /tmp/daydream-pr1444/fourteenth-fina
 Source reduction 3.833%, physical 5.214%; target false. Normal full hook verification,
 committed-byte proof and same-PR update remain due. CI evidence and hydration native
 producer investigations continue in isolated prototypes while this batch is frozen.
+
+The first normal fourteenth push gate refused publication: 9716 tests passed,
+14 existing skips,134 warnings,2 failures in648.34s; coverage90.82%, unchanged86%
+floor. Failures were an obsolete all-phase WorkContext signature assertion and
+an old two-argument commit spy. Both are migrated to the accepted native session,
+retaining no-wrapper, exactly-one-publication and all-fixes-landed coverage and
+adding bound-work/candidate assertions. No production byte or measurement changes.
+Affected full-file checks and independent exact migration review precede an
+ordinary signed correction commit and full hook-enabled push retry. No success
+is claimed until that retry completes; the PR remains draft at da6e4f27 remotely.
+
+Both affected full files pass after migration:22 tests in292.47s; scoped Ruff,
+mypy and diff checks pass. Independent read-only review confirms all five phase
+contracts/no-wrapper guard and exact-one/all-fixes publication assertions survive,
+with accepted-session binding assertions added. Production snapshot is unchanged.

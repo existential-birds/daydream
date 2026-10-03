@@ -11,6 +11,7 @@ import pytest
 import daydream
 from daydream import git_ops as _git_ops
 from daydream.config_file import DaydreamFileConfig, load_file_config
+from daydream.deep.fix_state import FixCycleState
 from daydream.deep.scope_issues import _scope_edit_fingerprint, _scope_edit_marker
 from daydream.git_ops import GitError
 from daydream.runner import run
@@ -228,7 +229,9 @@ async def test_parallel_fix_commit_runs_once_after_all(
     stub.fix_edit_line = fix_marker
     seen_at_commit: list[bool] = []
 
-    async def _spy_commit(backend: Any, work: Any, **kwargs: Any) -> None:
+    async def _spy_commit(session: FixCycleState, **kwargs: Any) -> None:
+        assert session.work.repo == multi_stack_target
+        assert session.candidate is not None
         seen_at_commit.append(all(fix_marker in (multi_stack_target / path).read_text() for path in files))
 
     monkeypatch.setattr("daydream.deep.fix_steps.phase_commit_push", _spy_commit)

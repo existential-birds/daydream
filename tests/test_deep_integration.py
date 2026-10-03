@@ -195,13 +195,17 @@ async def test_codex_shape_backend(multi_stack_target: Path, monkeypatch: pytest
         f"agents kwarg was passed somewhere: {agents_kwargs_seen}"
     )
 
-def test_phase_primitives_unmodified() -> None:
-    """Phase primitives accept backend then WorkContext; workspace resolves the base."""
-    # Other primitives: first two params are (backend, work).
-    for fn in (phase_understand_intent, phase_alternative_review, phase_fix, phase_test_and_heal, phase_commit_push,):
+def test_phase_primitives_use_native_owners() -> None:
+    """Review phases use work; testing and publication use the accepted repair session."""
+    for fn, expected in (
+        (phase_understand_intent, ("backend", "work")),
+        (phase_alternative_review, ("backend", "work")),
+        (phase_fix, ("backend", "work")),
+        (phase_test_and_heal, ("backend", "session")),
+        (phase_commit_push, ("session",)),
+    ):
         params = list(inspect.signature(fn).parameters.values())
-        assert params[0].name == "backend", (f"{fn.__name__} first param: {params[0].name}")
-        assert params[1].name == "work", (f"{fn.__name__} second param: {params[1].name}")
+        assert tuple(param.name for param in params[:len(expected)]) == expected, fn.__name__
 
     # D-39 negative guard: no "v2" or "_deep_" wrappers crept in.
 
