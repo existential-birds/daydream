@@ -11,7 +11,6 @@ from types import TracebackType
 from typing import TYPE_CHECKING, Any
 
 import anyio
-from jsonschema import Draft202012Validator
 from rich.console import Console
 
 if TYPE_CHECKING:
@@ -35,7 +34,12 @@ from daydream.backends.codex import supervisor_shell_command
 from daydream.config import BUDGET_CLEANUP_GRACE_S
 from daydream.diagnostics import exception_text, sanitize_verbose_message
 from daydream.extensions import get_registry
-from daydream.json_utils import SchemaAwareSelection, extract_json, extract_json_by_schema
+from daydream.json_utils import (
+    SchemaAwareSelection,
+    extract_json,
+    extract_json_by_schema,
+    validates_schema,
+)
 from daydream.observability.spans import agent_scope, attempt_scope
 from daydream.outage_circuit import CIRCUIT_CLOSED, CIRCUIT_HALF_OPEN
 from daydream.prompt_budget import PreparedSanctionedInputs
@@ -259,9 +263,11 @@ class StructuredOutputFailure(str):
         return value
 
 
-def _validates_schema(value: Any, schema: dict[str, Any]) -> bool:
-    """Return whether ``value`` validates against ``schema`` (shape + required)."""
-    return not any(Draft202012Validator(schema).iter_errors(value))
+#: Private alias for :func:`daydream.json_utils.validates_schema`, kept because
+#: four modules import this name.  The strict gate is implemented exactly once,
+#: in ``json_utils``; every structured-output boundary shares that predicate, so
+#: tightening it cannot silently diverge between two spellings.
+_validates_schema = validates_schema
 
 
 def _select_by_schema(text: str, schema: dict[str, Any], *, require_full_schema: bool) -> SchemaAwareSelection:
