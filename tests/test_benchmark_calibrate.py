@@ -2,6 +2,8 @@ import asyncio
 import json
 import re
 import stat
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -92,12 +94,31 @@ def test_loader_resolves_sibling_verifier_core() -> None:
     sr = calibrate._load_judge_template()
     template_dir = (calibrate._TEMPLATES / "tests").resolve()
     assert Path(sr.__file__).resolve() == template_dir / "score_review.py"
-    # The asset's bare import must resolve to the canonical host module.
+    # Host imports use the canonical module; compiled scripts use their sibling.
     assert sr.verifier_core is canonical_vc
 
     verdict = sr.parse_verdict({"match": True, "confidence": 0.9, "reasoning": "known verifier call"})
     assert isinstance(verdict, sr.verifier_core.Verdict)
     assert verdict.match is True and verdict.confidence == 0.9
+
+
+def test_judge_import_ignores_unrelated_bare_module() -> None:
+    """An existing bare module must neither replace the host core nor be mutated."""
+    probe = """
+import sys
+from types import ModuleType
+foreign = ModuleType('verifier_core')
+sys.modules['verifier_core'] = foreign
+from daydream.benchmark.harbor import calibrate, verifier_core
+judge = calibrate._load_judge_template()
+assert judge.verifier_core is verifier_core
+assert judge is calibrate._load_judge_template()
+assert sys.modules['verifier_core'] is foreign
+verdict = judge.parse_verdict({'match': True, 'confidence': 0.9, 'reasoning': 'match'})
+assert isinstance(verdict, verifier_core.Verdict)
+"""
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True)
+    assert result.returncode == 0, result.stdout + result.stderr
 
 def test_client_builder_threads_http_seam() -> None:
     fake, calls = _scripted_http([{"match": False, "confidence": 0.2, "reasoning": "n"}])

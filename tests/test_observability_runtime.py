@@ -21,7 +21,6 @@ from opentelemetry.sdk.trace.export import SpanExportResult
 from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
 from opentelemetry.trace import NonRecordingSpan, SpanContext, StatusCode, TraceFlags
 
-import daydream.observability.spans as spans_module
 from daydream.agent import run_agent
 from daydream.backends import (
     AgentEvent,
@@ -50,7 +49,8 @@ from daydream.observability.config import (
 from daydream.observability.privacy import PrivacyPolicy, diagnostic_scope
 from daydream.observability.runtime import trace_run
 from daydream.observability.spans import agent_scope, attempt_scope, step_scope
-from daydream.trajectory import DaydreamPhase
+from daydream.trajectory import DaydreamPhase, Invocation
+from tests.harness.trajectory import make_recorder
 
 
 @pytest.fixture
@@ -66,17 +66,24 @@ def _memory_tracing() -> tuple[InMemorySpanExporter, Registry]:
     return exporter, registry
 
 
-def _observe_generation(attempt: Any, *, text: bool = False, metrics: bool = False) -> None:
-    """Emit the canonical generation start/end pair shared by the generation tests."""
-    attempt.observe(GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000))
-    attempt.observe(GenerationEndEvent(
+def _observe_generation(
+    attempt: Any, *, text: bool = False, metrics: bool = False, invocation: Invocation | None = None,
+) -> None:
+    """Replay one generation to telemetry and, when supplied, its concrete invocation."""
+    events: list[AgentEvent] = [
+        GenerationStartEvent(generation_id="gen-1", observed_at_unix_ns=1788690314289000000),
+        GenerationEndEvent(
             generation_id="gen-1", native_started_at_unix_ms=1788690314289, ended_at_unix_ns=1788690709621000000,
             end_source="host_observed_message_end", choice_parts=(TextChoicePart(text="hello"),) if text else (),
             response_id="resp-1", model_name="pi-model", provider_name="pi", finish_reason="stop",
-        )
-    )
+        ),
+    ]
     if metrics:
-        attempt.observe(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
+        events.append(MetricsEvent("", 10, 2, None, 0.001, generation_id="gen-1"))
+    for event in events:
+        attempt.observe(event)
+        if invocation is not None:
+            invocation.observe(event)
 
 @pytest.mark.anyio
 async def test_owned_span_tree_usage_and_content() -> None:
@@ -987,28 +994,22 @@ async def test_descendant_spans_inherit_late_bound_session_identity() -> None:
         assert attrs.get("daydream.run.id") is not None
 
 @pytest.mark.anyio
-async def test_generation_child_billed_only_when_ledger_owner_is_children(monkeypatch: pytest.MonkeyPatch,) -> None:
-
+async def test_generation_child_billed_only_when_ledger_owner_is_children(tmp_path: Path) -> None:
     exporter, registry = _memory_tracing()
-    fabricated = {"trajectory_id": "session:descriptor", "invocation_id": "inv-1", "phase": "review",
-        "generation_lifecycle": {"drafts": [{
-                    "generation_id": "gen-1", "billed": True, "sealed_end_unix_ns": 1788690709621000000,
-                    "usage": {"input_tokens": 10, "output_tokens": 2},
-                }
-            ], "billing_owner": "generation_children",
-        },
-    }
-    # Simulate invocation finalization: the observer reads its frozen ledger at attempt finish.
-    recorder = type(
-        "FakeRecorder", (), {"_subtrajectories": [fabricated], "session_id": "session", "descriptor": "descriptor"},
-    )()
-
-    monkeypatch.setattr(spans_module, "get_current_recorder", lambda: recorder)
-
-    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+    recorder = make_recorder(tmp_path)
+    async with recorder, trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
         with agent_scope("review", backend="pi", model="requested"):
             async with attempt_scope(1) as attempt:
-                _observe_generation(attempt, text=True, metrics=True)
+                async with recorder.invocation(phase=DaydreamPhase.REVIEW) as invocation:
+                    attempt.invocation = invocation
+                    _observe_generation(attempt, text=True, metrics=True, invocation=invocation)
+                    total = CostEvent(0.001, 10, 2, measurement_source="terminal")
+                    attempt.observe(total)
+                    invocation.observe(total)
+                # A sibling finishes after this invocation but before its trace
+                # scope: its summary must never replace this attempt's ledger.
+                async with recorder.invocation(phase=DaydreamPhase.PARSE) as sibling:
+                    sibling.observe(CostEvent(0.002, 20, 4, measurement_source="terminal"))
     spans = exporter.get_finished_spans()
     generation = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "generation")
     attempt_span = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "attempt")

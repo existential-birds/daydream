@@ -6,7 +6,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from contextvars import ContextVar, Token
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from functools import singledispatchmethod
 from importlib.metadata import version
 from types import TracebackType
@@ -53,6 +53,8 @@ from daydream.trajectory import get_current_recorder
 
 if TYPE_CHECKING:
     from daydream.observability.runtime import TraceSession
+    from daydream.trajectory.generation import _GenerationLedger
+    from daydream.trajectory.invocation import Invocation
 
 _logger = logging.getLogger(__name__)
 _scope_attributes: ContextVar[dict[str, Any]] = ContextVar("daydream_trace_attributes", default={})
@@ -379,6 +381,7 @@ class AttemptObserver:
 
     def __init__(self, scope: SpanScope) -> None:
         self.scope = scope
+        self.invocation: Invocation | None = None
         self.request: dict[str, Any] | None = None
         self.messages: list[dict[str, Any]] = []
         self.reasoning: list[str] = []
@@ -550,7 +553,7 @@ class AttemptObserver:
         # Native start arrives at sealing; retain host receipt as an explicit fallback.
         self.generations.setdefault(
             event.generation_id,
-            {"observed_at_unix_ns": event.observed_at_unix_ns, "span": None, "sealed_end_unix_ns": None},
+            {"observed_at_unix_ns": event.observed_at_unix_ns, "span": None},
         )
 
     @staticmethod
@@ -664,12 +667,9 @@ class AttemptObserver:
             start_time=native_start_ns if native_start_ns is not None else draft["observed_at_unix_ns"],
         )
         draft["span"] = span
-        draft["generation_id"] = event.generation_id
-        draft["sealed_end_unix_ns"] = event.ended_at_unix_ns
-        draft["response_id"] = event.response_id
-        draft["model_name"] = event.model_name
-        draft["provider_name"] = event.provider_name
-        draft["finish_reason"] = event.finish_reason
+        # Retain sealed metadata only: choices are already projected into the
+        # child span and must not stay alive through invocation finalization.
+        draft["event"] = replace(event, choice_parts=())
         # Every generation inherits session identity for vendor tree routing.
         for key, value in _scope_attributes.get().items():
             if key in _INHERITED_ATTRIBUTES:
@@ -698,59 +698,33 @@ class AttemptObserver:
             span.set_attribute("gen_ai.output.messages", session.policy.json({"role": "assistant", "parts": parts}))
             span.set_attribute("daydream.generation.choice_parts", session.policy.json(parts))
 
-    def _resolve_billing_owner(self) -> str:
-        """Read frozen trajectory ownership, or bill the attempt on an authoritative total.
-
-        Absent generation evidence and absent authoritative total leave ownership unresolved.
-        """
-        lifecycle = self._generation_lifecycle()
-        if lifecycle is not None:
-            return str(lifecycle.get("billing_owner", "unresolved"))
-        return "structural_attempt" if self._saw_authoritative_total else "unresolved"
-
-    def _generation_lifecycle(self) -> dict[str, Any] | None:
-        """Read the latest finalized invocation lifecycle; invocation exits before attempt, including retries."""
-        try:
-            recorder = get_current_recorder()
-            if recorder is None:
-                return None
-            subtrajectories = getattr(recorder, "_subtrajectories", None) or []
-            if not subtrajectories:
-                return None
-            lifecycle = subtrajectories[-1].get("generation_lifecycle")
-            return lifecycle if isinstance(lifecycle, dict) else None
-        except Exception:
-            return None
-
-    def _end_generations(self, owner: str) -> None:
+    def _end_generations(self, owner: str, ledger: _GenerationLedger | None) -> None:
         """End pending spans once at sealed historical ends; only billed children get aliases.
 
         Unbilled children retain their custom generation evidence.
         """
-        billed_by_id = {
-            draft.get("generation_id"): bool(draft.get("billed"))
-            for draft in (self._generation_lifecycle() or {}).get("drafts", [])
-        }
-        for draft in self.generations.values():
+        for generation_id, draft in self.generations.items():
             span = draft.get("span")
             if span is None:
                 continue
             session = self.scope.session
-            billed = owner == "generation_children" and billed_by_id.get(draft.get("generation_id"), False)
+            recorded = ledger.drafts.get(generation_id) if ledger is not None else None
+            billed = owner == "generation_children" and recorded is not None and recorded.billed
             span.set_attribute("daydream.generation.billed", billed)
             if billed and session is not None:
+                event: GenerationEndEvent = draft["event"]
                 attrs = {
-                    "gen_ai.response.id": draft.get("response_id"),
-                    "gen_ai.response.model": draft.get("model_name"),
-                    "gen_ai.provider.name": draft.get("provider_name"),
-                    "gen_ai.response.finish_reasons": [draft["finish_reason"]] if draft.get("finish_reason") else None,
+                    "gen_ai.response.id": event.response_id,
+                    "gen_ai.response.model": event.model_name,
+                    "gen_ai.provider.name": event.provider_name,
+                    "gen_ai.response.finish_reasons": [event.finish_reason] if event.finish_reason else None,
                 }
                 _set_attributes(span, session.policy, attrs)
                 usage = draft.get("usage") or {}
                 for key, value in _usage_attributes(usage).items():
                     span.set_attribute(key, value)
                 span.set_status(Status(StatusCode.OK))
-            sealed_end = draft.get("sealed_end_unix_ns")
+            sealed_end = draft["event"].ended_at_unix_ns
             if sealed_end is not None:
                 span.end(end_time=sealed_end)
             else:
@@ -778,9 +752,13 @@ class AttemptObserver:
                     or ("cancelled" if exc is not None and not isinstance(exc, Exception) else "interrupted"),
                 )
             # Invocation finalization freezes one billing owner before generation spans end.
-            owner = self._resolve_billing_owner()
+            ledger = self.invocation._generation_ledger if self.invocation is not None else None
+            owner = (
+                ledger.billing_owner if ledger is not None
+                else "structural_attempt" if self._saw_authoritative_total else "unresolved"
+            )
             self.scope.attrs({"daydream.billing.owner": owner})
-            self._end_generations(owner)
+            self._end_generations(owner, ledger)
             usage: dict[str, int | float] = {}
             for metadata in self.usage_metadata.values():
                 for name, value in metadata["usage"].items():

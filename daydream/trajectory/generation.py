@@ -77,32 +77,32 @@ class _GenerationLedger:
     diagnostic, locks billing to structural-or-none, and leaves later children unbilled."""
 
     def __init__(self) -> None:
-        self._drafts: dict[str, _GenerationDraft] = {}
+        self.drafts: dict[str, _GenerationDraft] = {}
         self._sealed_pending = 0
         self._retained_choice_bytes = 0
         self._cap_engaged = False
-        self._owner = "unresolved"
+        self.billing_owner = "unresolved"
         self._resolved = False
         self._authoritative_total: dict[str, Any] | None = None
         self._diagnostics: list[str] = []
 
     def has_drafts(self) -> bool:
-        return bool(self._drafts)
+        return bool(self.drafts)
 
     def open(self, event: Any) -> None:
         generation_id = getattr(event, "generation_id", None)
         if not isinstance(generation_id, str) or not generation_id:
             return
-        if generation_id in self._drafts:
+        if generation_id in self.drafts:
             return  # idempotent: a generation opens once
-        self._drafts[generation_id] = _GenerationDraft(
+        self.drafts[generation_id] = _GenerationDraft(
             generation_id=generation_id,
             boundary_complete=bool(getattr(event, "boundary_complete", True)),
         )
 
     def seal(self, event: Any) -> None:
         generation_id = getattr(event, "generation_id", None)
-        draft = self._drafts.get(generation_id) if isinstance(generation_id, str) else None
+        draft = self.drafts.get(generation_id) if isinstance(generation_id, str) else None
         if draft is None or draft.sealed:
             return
         draft.sealed = True
@@ -166,7 +166,7 @@ class _GenerationLedger:
         self._drain_all(clear_content=True)
 
     def _drain_all(self, *, clear_content: bool) -> None:
-        for draft in self._drafts.values():
+        for draft in self.drafts.values():
             if not draft.ended:
                 draft.ended = True
                 draft.ended_at_unix_ns = draft.sealed_end_unix_ns
@@ -177,7 +177,7 @@ class _GenerationLedger:
 
     def record_usage(self, event: MetricsEvent) -> None:
         """Record late per-generation usage once, retaining only supplied dimensions."""
-        draft = self._drafts.get(event.generation_id or "")
+        draft = self.drafts.get(event.generation_id or "")
         if draft is not None and not draft.usage:
             draft.usage = _usage_dict(event)
 
@@ -202,12 +202,12 @@ class _GenerationLedger:
     def _resolve_owner(self) -> None:
         total = self._authoritative_total
         if total is None:
-            self._owner = "none" if self._drafts else "unresolved"
+            self.billing_owner = "none" if self.drafts else "unresolved"
             return
-        self._owner = "structural_attempt"
-        drafts = self._drafts.values()
+        self.billing_owner = "structural_attempt"
+        drafts = self.drafts.values()
         # Allocation requires complete sealed children with usage and no cap loss.
-        if not self._drafts or self._cap_engaged or any(
+        if not self.drafts or self._cap_engaged or any(
             not draft.sealed or not draft.boundary_complete or not draft.usage for draft in drafts
         ):
             return
@@ -218,16 +218,16 @@ class _GenerationLedger:
             if total.get(dimension) is not None and total[dimension] != child_total:
                 # Contradictory evidence bills neither side and remains unchanged.
                 self._diagnostics.append(_CONTRADICTION_DIAGNOSTIC)
-                self._owner = "none"
+                self.billing_owner = "none"
                 return
-        self._owner = "generation_children"
+        self.billing_owner = "generation_children"
         for draft in drafts:
             draft.billed = True
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "drafts": [draft.to_dict() for draft in self._drafts.values()],
-            "billing_owner": self._owner,
+            "drafts": [draft.to_dict() for draft in self.drafts.values()],
+            "billing_owner": self.billing_owner,
             "resolved": self._resolved,
             "authoritative_total": (dict(self._authoritative_total) if self._authoritative_total else None),
             "diagnostics": list(self._diagnostics),

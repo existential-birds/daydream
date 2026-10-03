@@ -34,6 +34,7 @@ from daydream.remote_ci import (
     wait_for_remote_ci,
     write_remote_ci_verdict,
 )
+from daydream.remote_ci.artifacts import read_terminal_remote_ci_verdict
 from tests.harness.fake_gh import FakeGh
 from tests.harness.processes import (
     fd_count,
@@ -413,6 +414,36 @@ def test_verdict_writer_atomically_replaces_prior_json(tmp_path: Path) -> None:
     loaded = json.loads(path.read_text(encoding="utf-8"))
     assert loaded["status"] == "no_ci"
     assert loaded["session_id"] == "session-2"
+
+@pytest.mark.parametrize(("required", "state", "elapsed", "expected"), [
+    (True, "pass", 20, "passed"), (True, "fail", 20, "failed"),
+    (False, "fail", 20, "passed"), (False, None, 120, "no_ci"),
+])
+def test_terminal_receipt_roundtrip_uses_live_ci_policy(
+    tmp_path: Path, required: bool, state: str | None, elapsed: float, expected: str,
+) -> None:
+    target = _target(tmp_path)
+    observations = () if state is None else (_observation("Build", state),)
+    snapshot = _snapshot(
+        target, binding=_binding(target, merge_sha=MERGE_SHA), merge=observations,
+        policy=RequiredPolicy((RequiredContext("Build", 10),) if required else (), True),
+    )
+    verdict = evaluate_remote_ci(snapshot, elapsed=elapsed, stable_polls=2, limits=RemoteCILimits())
+    assert verdict.status == expected
+    path = tmp_path / "receipt.json"
+    write_remote_ci_verdict(
+        path, verdict, session_id="session", poll_count=2,
+        started_at="2026-09-06T12:00:00Z", updated_at="2026-09-06T12:02:00Z",
+        discovery_deadline=120, completion_deadline=1800,
+    )
+    payload = json.loads(path.read_text())
+    assert read_terminal_remote_ci_verdict(payload, target_dir=tmp_path) == verdict
+    # An outcome cannot be manufactured by changing its display fields.
+    payload["status"] = "no_ci" if expected != "no_ci" else "passed"
+    payload["archive_state"] = "succeeded"
+    with pytest.raises(ValueError, match="outcome"):
+        read_terminal_remote_ci_verdict(payload, target_dir=tmp_path)
+
 
 def test_verdict_payload_persists_applied_polling_limits(tmp_path: Path) -> None:
     limits = RemoteCILimits(discovery_seconds=4.5, completion_seconds=9.5, stable_polls=3)

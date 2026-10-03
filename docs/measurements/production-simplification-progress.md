@@ -7,11 +7,11 @@ Continuation started at `b98a9dd51fde81df5dc4534a85ab29a986f6a127` on
 The original inventory and pinned Python 3.12 / scb-check 0.2.0 method reproduce
 113,364 physical lines and 85,527 source lines at baseline. The continuation's
 starting inventory reproduces 111,025 physical lines across 364 production files.
-The latest integrated snapshot has 363 production files, 110,393 physical lines,
-and 84,623 source lines (2.621% and 1.057% aggregate reductions). The starting
+The latest integrated snapshot has 363 production files, 110,239 physical lines,
+and 84,495 source lines (2.757% and 1.207% aggregate reductions). The starting
 commit also reproduces its recorded 85,165 source lines. Targets remain at most
-102,027 physical lines and 76,974 source lines: shortfalls are 8,366 physical and
-7,649 source lines. The target is unmet; focused improvements are not completion.
+102,027 physical lines and 76,974 source lines: shortfalls are 8,212 physical and
+7,521 source lines. The target is unmet; focused improvements are not completion.
 
 ## Decisions under integration
 
@@ -38,6 +38,21 @@ commit also reproduces its recorded 85,165 source lines. Targets remain at most
   tool-name state, duplicate usage collection, and a responsibility-free exporter
   subclass. Quality analysis owns one parse-result mapping.
 
+- Remote-CI receipt admission uses the producer's typed identities and one live
+  outcome evaluator; archive no longer maintains its own terminal policy and
+  identity models. Duplicate producers, partitions, polling limits, push binding,
+  and no-CI evidence remain checked. Noncanonical persisted PR URLs are rejected.
+- Plan landing shares rendering, text publication, durable entry construction,
+  and main-index publication across normal and reanchored destinations, preserving
+  their distinct outcome/error/cleanup order. An obsolete fingerprint-union
+  helper disappears; runtime member coverage remains the one reservation policy.
+- Telemetry binds its concrete invocation ledger rather than looking up the latest
+  completed summary; an intervening sibling cannot change billing ownership.
+  Generation metadata retains no raw choice content.
+- Host judge imports use normal package ownership. The dynamic asset cache and
+  process-wide module-registry rewrite disappear; compiled scripts retain their
+  standalone sibling core import.
+
 ## Verification so far
 
 Workers report focused backend, Improve, training, archive, and telemetry checks;
@@ -56,8 +71,18 @@ The group-cap case correctly capped fixes, tested retained changes, and pushed;
 remote CI was unavailable. Its unchanged isolated case and all 50 precision
 cases pass at the configured parallel worker count. Its failure message now
 includes the persisted CI diagnostic. No timing threshold or gate was weakened.
-The normal signed commit and pre-push gate are required; see PR #1444 for the
-final hook-enabled push outcome. The PR must remain draft while targets are unmet.
+Signed checkpoint `3a79584d` passed the normal pre-commit and pre-push hooks,
+including the full repository gate: 9,330 passed, 14 skipped, 90.07% coverage
+against the unchanged 86% floor. The next batch adds 204 judge/import/workspace
+checks, 251 agent/telemetry checks, 237 plan checks plus 21 focused member/real-flow
+checks, and 340 remote-CI/archive checks. Independent review included 1,961
+malformed-receipt differential cases with zero regressions. A broader archive run
+exhausted disk space (Errno 28); only owned completed disposable test directories
+were removed; the complete affected suite then passed (47 real workflow tests).
+The next pre-push hook first stopped at a mixed event list inferred as `object`
+in the new telemetry test. An explicit `list[AgentEvent]` preserves the closed
+event union; full mypy (748 files) and Ruff pass. The normal hook retry is pending;
+see PR #1444 for its final result. The PR must remain draft while targets are unmet.
 
 ## Remaining work
 

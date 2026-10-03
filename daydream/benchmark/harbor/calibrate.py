@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import importlib.util
 import json
 import os
 import sys
@@ -24,44 +23,13 @@ from daydream.benchmark.manifest import load_benchmark_manifest
 _HARBOR = Path(__file__).parent
 _TEMPLATES = _HARBOR / "templates"
 _CALIBRATION_DIR = _HARBOR / "calibration"
-_TEMPLATE_CACHE: dict[str, Any] = {}
-
-
-def _load_template_asset(path: Path, name: str) -> Any:
-    """Load/cache a template with its canonical sibling import, preserving class identity.
-    Restore sys.modules registrations afterward so later bare imports cannot silently
-    resolve to the template copy.
-    """
-    cached = _TEMPLATE_CACHE.get(name)
-    if cached is not None:
-        return cached
-    # Satisfy the asset's bare `import verifier_core` from the canonical host
-    # module (issue #1004): the template twin no longer exists.
-    import daydream.benchmark.harbor.verifier_core as _canonical_vc
-    prior_modules: dict[str, Any] = dict(sys.modules)
-
-    if "verifier_core" not in prior_modules:
-        sys.modules["verifier_core"] = _canonical_vc
-    try:
-        spec = importlib.util.spec_from_file_location(name, path)
-        assert spec is not None and spec.loader is not None
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[name] = module
-        spec.loader.exec_module(module)
-        _TEMPLATE_CACHE[name] = module
-        return module
-    finally:
-        for key in list(sys.modules):
-            if key in prior_modules:
-                if sys.modules[key] is not prior_modules[key]:
-                    sys.modules[key] = prior_modules[key]
-            else:
-                sys.modules.pop(key, None)
 
 
 def _load_judge_template() -> Any:
-    """Load the packaged ``score_review.py`` judge template as ``score_review``."""
-    return _load_template_asset(_TEMPLATES / "tests" / "score_review.py", "score_review")
+    """Use the packaged judge without altering unrelated module registrations."""
+    from daydream.benchmark.harbor.templates.tests import score_review
+
+    return score_review
 
 
 def _load_fixture_document() -> dict[str, Any]:

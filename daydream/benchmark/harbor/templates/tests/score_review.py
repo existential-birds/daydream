@@ -16,10 +16,15 @@ import re
 import sys
 import urllib.parse
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 import httpx
-import verifier_core
+
+if TYPE_CHECKING or __package__:
+    from daydream.benchmark.harbor import verifier_core
+else:
+    # Compiled tasks execute this asset alongside the standalone scoring core.
+    import verifier_core
 
 
 class _AsyncHttpClient(Protocol):

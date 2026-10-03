@@ -582,6 +582,7 @@ async def _run_agent(
                         invocation_cm as inv,
                         event_stream_scope,
                     ):
+                        observed.invocation = inv
                         if inv is not None:
                             inv.observe_user_step(prompt=prompt)
 

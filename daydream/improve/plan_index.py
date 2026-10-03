@@ -156,19 +156,6 @@ def _finding_package_fingerprint(finding: dict[str, Any]) -> str:
     return fingerprint if isinstance(fingerprint, str) else ""
 
 
-def _entry_fingerprints(entry: PlanIndexEntry) -> frozenset[str]:
-    return frozenset(
-        value
-        for value in (
-            entry.package_fingerprint,
-            entry.fingerprint,
-            *entry.member_fingerprints,
-            *entry.member_aliases,
-        )
-        if value
-    )
-
-
 def _finding_member_fingerprints(finding: dict[str, Any], *, fallback: str) -> tuple[str, ...]:
     members = _string_tuple(finding.get("member_fingerprints"))
     return members or ((fallback,) if fallback else ())
