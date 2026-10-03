@@ -12,6 +12,7 @@ from enum import StrEnum
 from typing import Any
 
 from daydream.diagnostics import exception_text
+from daydream.json_utils import extract_json
 
 
 class FailureClass(StrEnum):
@@ -72,14 +73,50 @@ _PERMANENT_CONDITION_RE = re.compile(
 
 #: Numeric-seconds ``retry[- ]after[: ]N`` token in a failure message. Shared
 #: by the agent retry branch and any backend that carries a hint in text rather
-#: than on the exception attribute.
+#: than on the exception attribute. Structured payloads are read first (see
+#: :func:`_structured_retry_hint`); this regex is the fallback for plain text.
 _RETRY_HINT_RE = re.compile(r"retry[- ]after[:\s]+([+-]?\d+(?:\.\d+)?)", re.IGNORECASE)
+
+#: Normalised header names admitted from a structured ``metadata.headers`` map.
+#: Matching on the lowercased, stripped key is what makes the read case-insensitive.
+_STRUCTURED_RETRY_HINT_KEY: frozenset[str] = frozenset({"retry-after"})
+
+
+def _structured_retry_hint(message: str) -> float | None:
+    """Read a hint from a provider JSON payload, guarded at every level.
+
+    The decoded payload, its ``metadata``, and its ``headers`` must each be a
+    mapping before any key lookup; the first admitted header wins. Anything else
+    yields no hint so the text fallback stays live. Values pass through the
+    shared decoder, so no second numeric rule is introduced here."""
+    payload = extract_json(message)
+    if not isinstance(payload, Mapping):
+        return None
+    metadata = payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    headers = metadata.get("headers")
+    if not isinstance(headers, Mapping):
+        return None
+    for key, value in headers.items():
+        if not isinstance(key, str) or key.strip().lower() not in _STRUCTURED_RETRY_HINT_KEY:
+            continue
+        hint = decode_retry_recovery_allowance(value)
+        if hint is not None:
+            return hint
+    return None
 
 
 def parse_message_retry_hint(message: str) -> float | None:
-    """Return finite nonnegative retry-after seconds, including zero; else None."""
+    """Return finite nonnegative retry-after seconds, including zero; else None.
+
+    A structured ``metadata.headers.Retry-After`` value wins when it decodes; the
+    legacy plain-text token is the fallback for messages without one."""
     if not message:
         return None
+    structured = _structured_retry_hint(message)
+    if structured is not None:
+        return structured
     match = _RETRY_HINT_RE.search(message)
     return decode_retry_recovery_allowance(match.group(1)) if match else None
 

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **retry:** honor a provider `Retry-After` hint from a status-prefixed JSON error (read through the existing `json_utils.extract_json` convention, case-insensitive header match, shared numeric decoder) and never shorten an admitted wait to the jitter cap — the hint is evaluated against the remaining recovery allowance and invocation deadline only, and a hint that exceeds either stops the retry ladder with the existing insufficient-budget reason (issue #1438).
 - **cli:** `--log` was removed; use `--verbose` for the redacted plain agent-event stream on `stdout` plus redacted chained fatal diagnostics on `stderr` (issue #1236).
 
 ## [0.29.0] - 2026-09-10
