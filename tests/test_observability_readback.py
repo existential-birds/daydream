@@ -478,6 +478,46 @@ def test_langsmith_ambiguous_root_rejected(
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_AMBIGUOUS_ROOT
 
+def test_langsmith_converged_third_snapshot_owns_returned_rows_count_and_hash(
+    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    receipt = _write_receipt(tmp_path, destinations=["langsmith"])
+    data = json.loads(receipt.read_text())
+    run_id, project = data["run_id"], data["langsmith_project"]
+    metadata = {"daydream_run_id": run_id}
+    root = _ls_run("root-1", metadata=metadata)
+    accepted = [
+        root,
+        _ls_run("child-1", run_type="llm", parent_run_id="root-1", metadata=metadata),
+        _ls_run("tool-1", run_type="tool", parent_run_id="root-1", metadata=metadata),
+    ]
+    tree_reads = 0
+
+    def query(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
+        nonlocal tree_reads
+        payload = json.loads(record["body"])
+        runs = accepted
+        if "id" in payload:
+            runs = [root]
+        elif payload.get("filter", "").startswith("eq(trace_id"):
+            tree_reads += 1
+            # A/B/A: the second tree is incomplete, the third matches the first.
+            runs = [root] if tree_reads == 2 else accepted
+        return 200, {"Content-Type": "application/json"}, json.dumps({"runs": runs}).encode()
+
+    fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(project))
+    fake_vendor.respond("POST", "/runs/query", query)
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path)
+    result = json.loads(result_path.read_text())
+    assert tree_reads == 3
+    assert result["stored_contract_passed"] is True
+    assert result["matrix_rows"] == []
+    stored = result["destinations"]["langsmith"]
+    assert stored["count"] == len(accepted)
+    assert stored["snapshot_hash"] == _verifier.stable_hash([
+        _verifier._run_identity(run) for run in accepted
+    ])
+
 def test_langsmith_unstable_tree_fails_closed(
     tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -505,6 +545,40 @@ def test_langsmith_unstable_tree_fails_closed(
     assert _run_verify(receipt, result_path, budget_s=5.0) != 0
     result = json.loads(result_path.read_text())
     assert result["terminal"] == _verifier.DISPOSITION_UNSTABLE
+
+@pytest.mark.parametrize("destination", ["honeyhive", "langsmith"])
+def test_third_snapshot_failure_retains_destination_disposition(
+    tmp_path: Path, fake_vendor: FakeVendorServer, monkeypatch: pytest.MonkeyPatch, destination: str,
+) -> None:
+    receipt = _write_receipt(tmp_path, destinations=[destination])
+    data = json.loads(receipt.read_text())
+    root = _ls_run("root-1", metadata={"daydream_run_id": data["run_id"]})
+    reads = 0
+
+    def read(record: Mapping[str, Any]) -> tuple[int, dict[str, str], bytes]:
+        nonlocal reads
+        payload = json.loads(record["body"])
+        if destination == "langsmith" and not payload.get("filter", "").startswith("eq(trace_id"):
+            return 200, {"Content-Type": "application/json"}, json.dumps({"runs": [root]}).encode()
+        reads += 1
+        if reads == 3:
+            return 401, {"Content-Type": "application/json"}, b"{}"
+        if destination == "honeyhive":
+            result = {"events": [_hh_event(f"event-{reads}", data["session_id"])], "count": 1}
+        else:
+            result = {"runs": [_ls_run(f"root-{reads}", metadata={"daydream_run_id": data["run_id"]})]}
+        return 200, {"Content-Type": "application/json"}, json.dumps(result).encode()
+
+    if destination == "honeyhive":
+        fake_vendor.respond("POST", "/v1/events/search", read)
+    else:
+        fake_vendor.respond("GET", "/api/v1/sessions", _sessions_ok(data["langsmith_project"]))
+        fake_vendor.respond("POST", "/runs/query", read)
+    result_path = _verify_against(fake_vendor, monkeypatch, receipt, tmp_path, expect_zero=False)
+    result = json.loads(result_path.read_text())
+    assert reads == 3
+    expected = _verifier.DISPOSITION_AUTH if destination == "honeyhive" else _verifier.DISPOSITION_UNSTABLE
+    assert result["terminal"] == expected
 
 
 # One immutable deadline: real loopback peers

@@ -330,25 +330,23 @@ async def read_honeyhive(
                 return {"error": DISPOSITION_SHAPE, "detail": "rows/count reconciliation failed"}
             page += 1
 
-    def _snapshot(read: dict[str, Any]) -> tuple[str, str]:
-        """(ordered-ids hash, ordered id list) for one complete read."""
+    def _snapshot(read: dict[str, Any]) -> str:
+        """Fingerprint the admitted identities of one complete read."""
         ids = [event.get("id", event.get("event_id")) for event in read["rows"]]
         ordered = sorted(identity for identity in ids if isinstance(identity, str))
-        return stable_hash({"session": session_id, "count": read["count"], "ids": ordered}), ",".join(ordered)
+        return stable_hash({"session": session_id, "count": read["count"], "ids": ordered})
 
     # Two stable complete post-shutdown snapshots are required (the same
     # stability contract as the LangSmith exact-ID tree).
     first = await _read_complete()
     if "error" in first:
         return {"disposition": first["error"], "detail": first["detail"]}
-    first_hash, first_ids = _snapshot(first)
+    first_hash = _snapshot(first)
 
     second = await _read_complete()
     if "error" in second:
         return {"disposition": second["error"], "detail": second["detail"]}
-    second_hash, _second_ids = _snapshot(second)
-
-    stable = second if second_hash == first_hash else None
+    stable = second if _snapshot(second) == first_hash else None
     if stable is None:
         # One bounded stable re-check after a short sleep inside the deadline.
         if client_ctx.remaining() <= 0:
@@ -357,19 +355,19 @@ async def read_honeyhive(
         third = await _read_complete()
         if "error" in third:
             return {"disposition": third["error"], "detail": third["detail"]}
-        third_hash, _third_ids = _snapshot(third)
-        if third_hash != first_hash:
+        if _snapshot(third) != first_hash:
             return {"disposition": DISPOSITION_UNSTABLE, "detail": "two equal complete snapshots not reached"}
         stable = third
 
+    ids = [event.get("id", event.get("event_id")) for event in stable["rows"]]
     return {
         "disposition": DISPOSITION_PASS,
         "destination": "honeyhive",
         "session_id": session_id,
         "count": stable["count"],
-        "ids": [event.get("id", event.get("event_id")) for event in stable["rows"]],
+        "ids": ids,
         "snapshot_hash": first_hash,
-        "ids_hash": first_ids,
+        "ids_hash": ",".join(sorted(identity for identity in ids if isinstance(identity, str))),
         "rows": stable["rows"],
         "detail": f"expected run {expected_run_id}; two stable complete snapshots",
     }
@@ -505,22 +503,19 @@ async def read_langsmith(
     first = await _tree_read()
     if first["disposition"] != DISPOSITION_PASS:
         return first
-    second = await _tree_read()
-    if second["disposition"] != DISPOSITION_PASS:
-        return second
-    first_runs = first["runs"]
-    second_runs = second["runs"]
-    first_hash = stable_hash([_run_identity(r) for r in first_runs])
-    second_hash = stable_hash([_run_identity(r) for r in second_runs])
-    if first_hash != second_hash:
+    stable = await _tree_read()
+    if stable["disposition"] != DISPOSITION_PASS:
+        return stable
+    first_hash = stable_hash([_run_identity(r) for r in first["runs"]])
+    if stable_hash([_run_identity(r) for r in stable["runs"]]) != first_hash:
         # One bounded stable re-check after a short sleep inside the deadline.
         if client_ctx.remaining() <= 0:
             return {"disposition": DISPOSITION_UNSTABLE, "detail": "tree snapshots disagreed and deadline elapsed"}
         await anyio.sleep(min(0.5, client_ctx.remaining()))
-        third = await _tree_read()
+        stable = await _tree_read()
         if (
-            third["disposition"] != DISPOSITION_PASS
-            or stable_hash([_run_identity(r) for r in third["runs"]]) != first_hash
+            stable["disposition"] != DISPOSITION_PASS
+            or stable_hash([_run_identity(r) for r in stable["runs"]]) != first_hash
         ):
             return {"disposition": DISPOSITION_UNSTABLE, "detail": "two equal complete snapshots not reached"}
     return {
@@ -530,8 +525,8 @@ async def read_langsmith(
         "run_id": run_id,
         "root_id": root_id,
         "trace_id": trace_id,
-        "count": len(second_runs),
-        "runs": second_runs,
+        "count": len(stable["runs"]),
+        "runs": stable["runs"],
         "snapshot_hash": first_hash,
         "detail": "exact-ID tree reached two equal snapshots",
     }

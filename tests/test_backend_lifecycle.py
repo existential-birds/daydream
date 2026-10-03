@@ -19,7 +19,7 @@ from daydream.backends._transport import (
     teardown,
 )
 from daydream.backends.codex import CodexBackend, CodexError
-from daydream.backends.osprey import OspreyBackend, OspreyError
+from daydream.backends.osprey import OspreyBackend, OspreyConfig, OspreyError
 from daydream.backends.pi import (
     _PI_DEFAULT_RETRY_ATTEMPTS,
     PiBackend,
@@ -184,7 +184,7 @@ async def test_pi_process_exit_retryable_for_oom_exit_code() -> None:
 async def test_osprey_process_exit_message_anchor_and_count() -> None:
     with pytest.raises(OspreyError) as exc_info:
         await _drive(
-            OspreyBackend(osprey_binary="fake"),
+            OspreyBackend(OspreyConfig(osprey_binary="fake")),
             _osprey_stream(),  # valid protocol/session_start/…/session_end JSONL
             exit_code=1,
             stderr_lines=DIAG,  # 25 drained stderr lines; the sink caps at 10
@@ -206,7 +206,7 @@ async def test_pi_clean_exit_lifecycle() -> None:
     _assert_clean_lifecycle(backend, proc)
 
 async def test_osprey_clean_exit_lifecycle() -> None:
-    backend = OspreyBackend(osprey_binary="fake")
+    backend = OspreyBackend(OspreyConfig(osprey_binary="fake"))
     _events, proc = await _drive(backend, _osprey_stream())
     _assert_clean_lifecycle(backend, proc)
 

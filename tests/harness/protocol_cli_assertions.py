@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from daydream.backends import ResultEvent, TextEvent
 from daydream.backends._transport import CliTransport
-from daydream.backends.osprey import OspreyBackend
+from daydream.backends.osprey import OspreyBackend, OspreyConfig
 from daydream.backends.pi import PiBackend
 
 
@@ -46,7 +46,7 @@ def make_cancel_probe(kind: Literal["pi", "osprey"]) -> tuple[Any, MagicMock]:
         backend = PiBackend(model="glm-5.2")
         transport = CliTransport("pi", ["pi", "--mode", "json"], limit=1024)
     else:
-        backend = OspreyBackend(osprey_binary="fake")
+        backend = OspreyBackend(OspreyConfig(osprey_binary="fake"))
         transport = CliTransport("osprey", ["osprey", "agent"], limit=1024)
     proc = MagicMock()
     proc.returncode = None

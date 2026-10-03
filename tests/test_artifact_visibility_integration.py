@@ -837,19 +837,19 @@ def _write_osprey_sandbox_extension(
     ext_dir.write_module(
         "from pathlib import Path\n"
         "from daydream.agent import run_agent\n"
-        "from daydream.backends.osprey import OspreyBackend\n"
+        "from daydream.backends.osprey import OspreyBackend, OspreyConfig\n"
         "from daydream.extensions import FlowStep\n"
         "from daydream.prompt_budget import prepare_sanctioned_inputs\n"
         "from daydream.trajectory import DaydreamPhase\n"
         "from tests.test_artifact_visibility_integration import BACKEND_SINK\n"
         "async def _probe(ctx):\n"
         "    assert ctx.artifacts is not None\n"
-        f"    backend = OspreyBackend(\n"
-        "        'fixture-model',\n"
+        f"    backend = OspreyBackend(OspreyConfig(\n"
+        "        model='fixture-model',\n"
         "        sandbox=True,\n"
         f"        allowed_roots=[{roots_literal}],\n"
         f"        osprey_binary={str(osprey_binary)!r},\n"
-        "    )\n"
+        "    ))\n"
         "    BACKEND_SINK.append(backend)\n"
         f"    sanctioned_path = Path({str(sanctioned_path)!r})\n"
         "    prepared = prepare_sanctioned_inputs(\n"
@@ -920,8 +920,8 @@ async def test_runner_extension_osprey_sandbox_preserves_roots_and_inlines_input
     assert len(BACKEND_SINK) == 1
     backend = BACKEND_SINK.pop()
     assert type(backend).__name__ == "OspreyBackend"
-    assert backend.sandbox is True
-    assert backend.allowed_roots == (str(sanctioned_dir),)
+    assert backend.config.sandbox is True
+    assert backend.config.allowed_roots == (str(sanctioned_dir),)
 
     _assert_frozen_outputs(repo, archive_dir, explicit_trajectory, dump_dir, backend="osprey", model="fixture-model")
 

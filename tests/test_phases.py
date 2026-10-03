@@ -124,7 +124,7 @@ from tests.harness.backend import ScriptedBackend
 from tests.harness.fake_clock import FakeClock
 from tests.harness.git_helpers import commit as git_commit, git, init_repo
 from tests.harness.review_profile import default_strategy as _default_strategy
-from tests.harness.review_result import merge_result, review_scopes
+from tests.harness.review_result import merge_result, record_pool, review_scopes
 from tests.harness.trajectory import make_recorder, read_trajectory
 
 _RESULT = ResultEvent(structured_output=None, continuation=None)
@@ -1357,13 +1357,13 @@ async def test_phase_per_stack_reviews_threads_exploration_dir_to_structural_rev
     alts.write_text("[]")
     stacks = [StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api/main.py"], is_docs_only=False,)]
 
-    results, failures = await review_scopes(
+    coverage = await review_scopes(
         backend, make_work(tmp_path), stacks, diff_path=diff, intent_path=intent, alternatives_path=alts,
         exploration_dir=exploration_dir, allow_standalone=True,
     )
 
-    assert failures == {}
-    assert STRUCTURE_STACK_NAME in results
+    assert coverage.unfinished_scopes == {}
+    assert coverage.scopes[STRUCTURE_STACK_NAME]["status"] == "complete"
     structural_prompt = next(p for p in backend.prompts if "structural" in p)
     assert "# Exploration Summary" in structural_prompt
     assert "# Affected Files" in structural_prompt
@@ -3000,7 +3000,7 @@ def _setup_alternative_review(tmp_path: Path) -> dict[str, object]:
     return {"diff_path": diff_file, "intent_summary": "Adds a login page."}
 
 def _setup_cross_stack_merge(tmp_path: Path) -> dict[str, object]:
-    return {"per_stack_records_paths": [tmp_path / "r.json"], "intent_path": tmp_path / "i.md",
+    return {"record_pool": record_pool(tmp_path, paths=[tmp_path / "r.json"]), "intent_path": tmp_path / "i.md",
         "alternatives_path": tmp_path / "a.json", "dedup_candidates_path": tmp_path / "d.json",
     }
 
@@ -3069,9 +3069,11 @@ async def test_merge_writes_canonical_json_and_renders_markdown(
     )
 
     report_path = await phase_cross_stack_merge(
-        ScriptedBackend(events=_structured_turn(structured)), work, per_stack_records_paths=[tmp_path / "r.json"],
+        ScriptedBackend(events=_structured_turn(structured)), work,
+        record_pool=record_pool(tmp_path, structural=json.loads(struct_path.read_text())["issues"],
+            paths=[tmp_path / "r.json"], structural_path=struct_path),
         intent_path=tmp_path / "i.md", alternatives_path=tmp_path / "a.json", dedup_candidates_path=tmp_path / "d.json",
-        structural_records_path=struct_path, allow_standalone=True,
+        allow_standalone=True,
     )
 
     items = json.loads(DeepArtifact.MERGED_ITEMS.at(deep_dir(work.repo, allow_standalone=True)).read_text())["items"]
@@ -3120,8 +3122,9 @@ async def test_merge_sanctioned_inputs_use_real_transport_specific_budget(
         _write_sized(exploration / "affected_files.md", "affected", 701)
 
         call = phase_cross_stack_merge(
-            backend, work, per_stack_records_paths=[python_records, generic_records], intent_path=intent,
-            alternatives_path=alternatives, dedup_candidates_path=dedup, structural_records_path=structural,
+            backend, work, record_pool=record_pool(deep, json.loads(records)["issues"],
+                paths=[python_records, generic_records], structural_path=structural), intent_path=intent,
+            alternatives_path=alternatives, dedup_candidates_path=dedup,
             exploration_dir=exploration, allow_standalone=True,
         )
         if inline:
@@ -3223,7 +3226,8 @@ async def test_cross_stack_merge_agent_phase_label(
     async with recorder:
         await phase_cross_stack_merge(ScriptedBackend(
                 events=(TextEvent(text="merged"), ResultEvent(structured_output=_MERGE_ITEMS, continuation=None),)
-            ), make_work(tmp_path), per_stack_records_paths=[tmp_path / "r.json"], intent_path=tmp_path / "i.md",
+            ), make_work(tmp_path), record_pool=record_pool(tmp_path, paths=[tmp_path / "r.json"]),
+            intent_path=tmp_path / "i.md",
             alternatives_path=tmp_path / "a.json", dedup_candidates_path=tmp_path / "d.json", allow_standalone=True,
         )
 
@@ -3238,7 +3242,7 @@ async def test_merge_raises_on_empty_agent_output(
     """Empty/invalid agent output raises ValueError -- no silent [] fallback."""
     with pytest.raises(ValueError):
         await phase_cross_stack_merge(
-            ScriptedBackend(), make_work(tmp_path), per_stack_records_paths=[tmp_path / "r.json"],
+            ScriptedBackend(), make_work(tmp_path), record_pool=record_pool(tmp_path, paths=[tmp_path / "r.json"]),
             intent_path=tmp_path / "i.md", alternatives_path=tmp_path / "a.json",
             dedup_candidates_path=tmp_path / "d.json", allow_standalone=True,
         )
@@ -4006,7 +4010,7 @@ def test_merge_demotion_preserves_original_severity_and_marks_distrust(tmp_path:
             "confidence": "HIGH", "rationale": "r", "evidence": "e",
         }
     ]
-    _write_single_stack_merged_items(tmp_path, dd, records, None, allow_standalone=True)
+    _write_single_stack_merged_items(tmp_path, dd, record_pool(dd, records), allow_standalone=True)
 
     items = json.loads(DeepArtifact.MERGED_ITEMS.at(dd).read_text())["items"]
     assert items[0]["line"] == 2272  # beyond tolerance -> NOT snapped

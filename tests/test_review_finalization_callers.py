@@ -14,7 +14,7 @@ from daydream.deep.detection import StackAssignment
 from daydream.review_budget import ReviewLimits
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.review_result import review_scopes
+from tests.harness.review_result import record_pool, review_scopes
 
 
 def _stop_then_finalize(result: dict[str, Any]) -> ScriptedBackend:
@@ -33,7 +33,7 @@ async def test_structural_finalizer_captures_prioritized_diff_without_session(
     intent.write_text("PRESERVE_AUTHOR_INTENT")
     alternatives = tmp_path / "alternatives.json"
     alternatives.write_text("ADVISORY " * 4000)
-    results, failures = await review_scopes(backend, make_work(tmp_path),
+    coverage = await review_scopes(backend, make_work(tmp_path),
         [StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py"], is_docs_only=False)],
         diff_path=diff, intent_path=intent, alternatives_path=alternatives,
         intent_authoritative=True, allow_standalone=True,
@@ -43,8 +43,8 @@ async def test_structural_finalizer_captures_prioritized_diff_without_session(
     assert "AUTHORITATIVE" in backend.last_prompt
     assert "api.py" in backend.last_prompt
     assert "Investigation allowance" not in backend.last_prompt
-    assert "budget exhausted" in failures[STRUCTURE_STACK_NAME]
-    assert STRUCTURE_STACK_NAME in results
+    assert "budget exhausted" in coverage.unfinished_scopes[STRUCTURE_STACK_NAME]
+    assert coverage.scopes[STRUCTURE_STACK_NAME]["status"] == "incomplete"
     records = next(tmp_path.rglob("stack-structure-records.json"))
     saved = json.loads(records.read_text())
     assert saved["incomplete"] is True
@@ -64,7 +64,8 @@ async def test_merge_finalizer_prioritizes_records_and_keeps_budget_failure(
     dedup = tmp_path / "dedup.json"
     dedup.write_text("ADVISORY " * 4000)
     with pytest.raises(phases.CrossStackMergeError, match="budget exhausted"):
-        await phases.phase_cross_stack_merge(backend, make_work(tmp_path), per_stack_records_paths=[records],
+        await phases.phase_cross_stack_merge(backend, make_work(tmp_path),
+            record_pool=record_pool(tmp_path, json.loads(records.read_text())["issues"], paths=[records]),
             intent_path=intent, alternatives_path=alternatives, dedup_candidates_path=dedup,
             failed_stacks={"react": "budget exhausted"}, allow_standalone=True,
         )
@@ -83,11 +84,11 @@ async def test_ordinary_reviewer_rejects_invalid_envelope(
     intent.write_text("intent")
     alternatives = tmp_path / "alternatives.json"
     alternatives.write_text("[]")
-    results, failures = await review_scopes(backend, make_work(tmp_path),
+    coverage = await review_scopes(backend, make_work(tmp_path),
         [StackAssignment(stack_name="python", files=["api.py"], is_docs_only=False)],
         diff_path=diff, intent_path=intent, alternatives_path=alternatives, allow_standalone=True)
-    assert results == {}
-    assert failures["python"] == "malformed_output: reviewer response did not satisfy its schema"
+    assert coverage.scopes["python"]["status"] == "failed"
+    assert coverage.unfinished_scopes["python"] == "malformed_output: reviewer response did not satisfy its schema"
     assert not list(tmp_path.rglob("stack-python-records.json"))
 
 async def test_intent_requires_nonempty_provider_evidence(

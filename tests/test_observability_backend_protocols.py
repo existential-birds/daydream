@@ -27,7 +27,7 @@ from claude_agent_sdk.types import AgentDefinition
 from daydream import runner
 from daydream.backends import GenerationEndEvent, GenerationStartEvent, RequestEvent
 from daydream.backends.claude import ClaudeBackend
-from daydream.backends.osprey import OspreyBackend
+from daydream.backends.osprey import OspreyBackend, OspreyConfig
 from daydream.backends.pi import PiBackend
 from daydream.run_config import RunConfig
 from tests.conftest import ExtDir
@@ -591,12 +591,48 @@ async def test_osprey_strict_protocol_fixture_through_runner(
     assert attempt["kind"] == "SPAN_KIND_INTERNAL"
     _assert_leak_free(receiver, canary)
 
+@pytest.mark.parametrize("content_mode", ["full", "metadata"])
+async def test_osprey_private_config_never_reaches_real_export_wire(
+    content_mode: str, ext_dir: ExtDir, feature_branch_repo: Path, make_config: Callable[..., RunConfig],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    private = "private-osprey-native-config-9d03"
+    _flow(ext_dir, f"""
+from pathlib import Path
+from daydream.backends.osprey import OspreyBackend, OspreyConfig
+backend = OspreyBackend(OspreyConfig(
+    model={"/" + private + "/model"!r}, osprey_binary={private + "-binary"!r},
+    persona={private + "-persona"!r}, toolset={private + "-toolset"!r},
+    allowed_roots=[Path({"/" + private + "/root"!r})],
+    atif_output=Path({"/" + private + "/atif.json"!r}),
+    tool_result_raw_dir=Path({"/" + private + "/raw"!r}),
+    osprey_home=Path({"/" + private + "/home"!r}),
+    vars=[({private + "-key"!r}, {private + "-value"!r})],
+))
+await run_agent(backend, ctx.work.repo, "inspect sample", phase=DaydreamPhase.REVIEW)
+""")
+    spawner = install_fake_cli_process(monkeypatch, private + "-binary", lines=_osprey_lines("ordinary reply"))
+    with otlp_collector() as receiver:
+        _configure_otlp(monkeypatch, receiver.base_url + "/v1/traces")
+        monkeypatch.setenv("DAYDREAM_TRACE_CONTENT", content_mode)
+        assert await runner.run(_flow_config(make_config, feature_branch_repo, backend="osprey")) == 0
+    argv, kwargs = _spawner(spawner)
+    assert argv[0] == private + "-binary"
+    assert kwargs["env"]["OSPREY_HOME"] == "/" + private + "/home"
+    payload = json.dumps([request["body"] for request in receiver.requests])
+    assert receiver.requests and private not in payload
+    attrs = attributes(_attempt(receiver.spans))
+    assert attrs["daydream.request.config.persona_present"] is True
+    assert attrs["daydream.request.config.toolset_present"] is True
+    assert attrs["daydream.request.config.vars_count"] == 1
+
+
 async def test_osprey_explicit_zero_temperature_reaches_argv_and_config(
     monkeypatch: pytest.MonkeyPatch, feature_branch_repo: Path,
 ) -> None:
     canary = _CANARIES["osprey"]
     spawner = install_fake_cli_process(monkeypatch, "osprey", lines=_osprey_lines(canary))
-    backend = OspreyBackend(osprey_binary="osprey", temperature=0.0)
+    backend = OspreyBackend(OspreyConfig(osprey_binary="osprey", temperature=0.0))
     events = []
     async for event in backend.execute(feature_branch_repo, f"prompt {canary}"):
         events.append(event)

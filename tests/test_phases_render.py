@@ -23,7 +23,7 @@ from daydream.phases import (
 )
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
-from tests.harness.review_result import merge_result, review_scopes
+from tests.harness.review_result import merge_result, record_pool, review_scopes
 
 
 def _rec(monkeypatch: Any) -> Console:
@@ -76,7 +76,7 @@ async def test_merge_prints_item_count(
     await phase_cross_stack_merge(
         backend,
         make_work(tmp_path),
-        per_stack_records_paths=[],
+        record_pool=record_pool(tmp_path),
         intent_path=intent,
         alternatives_path=alts,
         allow_standalone=True,
@@ -173,7 +173,7 @@ async def test_per_stack_failures_summarized_once(
     ]
     backend = _per_stack_backend({"stack-a", "stack-b"})
 
-    successes, failures = await review_scopes(
+    coverage = await review_scopes(
         cast(Backend, backend),
         work,
         stacks,
@@ -184,8 +184,8 @@ async def test_per_stack_failures_summarized_once(
     )
 
     out = rec.export_text()
-    assert set(failures) == {"stack-a", "stack-b"}
-    assert set(successes) == {"stack-c"}
+    assert set(coverage.unfinished_scopes) == {"stack-a", "stack-b"}
+    assert coverage.scopes["stack-c"]["status"] == "complete"
     # ONE consolidated end-of-phase summary names BOTH failed stacks -- not two
     # scattered inline warnings. The summary header is emitted exactly once.
     assert "stack-a" in out and "stack-b" in out

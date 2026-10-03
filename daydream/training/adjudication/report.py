@@ -7,9 +7,9 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from daydream.training.adjudication.canonical import _evidence_after_as_of
 from daydream.training.adjudication.observations import group_observations_by_record
 from daydream.training.adjudication.precedence import effective_adjudication
+from daydream.training.adjudication.snapshot import evidence_after_as_of
 from daydream.training.corpus_projection.tiers import classify_tier
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
 
@@ -77,7 +77,7 @@ def adjudicated_items(
         # canonical serializer and the corpus projection (tiers.py C5/M9): an
         # evidence-after-as_of record must classify "silver" here exactly as it
         # does on the canonical record — never gold/posterior_eligible.
-        enriched_item["evidence_after_as_of"] = _evidence_after_as_of(enriched_item, as_of)
+        enriched_item["evidence_after_as_of"] = evidence_after_as_of(enriched_item, as_of)
         # The gold gate has one implementation (classify_tier); gold-eligibility
         # comes from the human-observation resolution (conflict/review-required
         # decisive judgments stay out of the gold tier). A classifier failure

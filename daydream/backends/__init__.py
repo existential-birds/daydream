@@ -198,17 +198,16 @@ def create_backend(
     if name == "osprey":
         if execution_input is not None:
             raise ValueError("explicit BackendExecutionInput is not supported for osprey")
-        return OspreyBackend(
+        return OspreyBackend(OspreyConfig(
             model=model,
-            cwd=cwd,
             reasoning_effort=reasoning_effort,
-            osprey_binary=osprey_binary,
-        )
+            osprey_binary=osprey_binary or "",
+        ))
     raise ValueError(f"Unknown backend: {name!r}. Expected 'claude', 'codex', 'pi', or 'osprey'.")
 
 
 from daydream.backends.claude import ClaudeBackend, MaxTurnsError  # noqa: E402
-from daydream.backends.osprey import OspreyBackend  # noqa: E402
+from daydream.backends.osprey import OspreyBackend, OspreyConfig  # noqa: E402
 from daydream.backends.pi import PiBackend  # noqa: E402
 
 __all__ = [
@@ -231,6 +230,7 @@ __all__ = [
     "MetricsEvent",
     "ModelUsageTotals",
     "OspreyBackend",
+    "OspreyConfig",
     "OspreyRequestConfig",
     "PiBackend",
     "PiRequestConfig",

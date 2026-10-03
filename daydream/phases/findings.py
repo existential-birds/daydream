@@ -21,9 +21,8 @@ from daydream.deep.dedup import (
 from daydream.deep.location_validator import validate_records
 from daydream.deep.records import (
     RECORD_SOURCE_UIDS_KEY,
+    RecordPool,
     item_source_uids,
-    record_issues,
-    record_issues_or_empty,
     record_uid,
     stamp_item_uids,
     union_source_uids,
@@ -240,25 +239,17 @@ def _record_item(record: dict[str, Any], lens: str) -> dict[str, Any]:
     return {**record, "lens": lens, RECORD_SOURCE_UIDS_KEY: union_source_uids([record_uid(record)])}
 
 
-def _load_structural_items(path: Path | None) -> list[dict[str, Any]]:
-    """Load current structural records; requested artifacts must remain readable."""
-    if path is None:
-        return []
-    records = record_issues(json.loads(path.read_text()))
-    if records is None or any(not isinstance(record, dict) or not record_uid(record) for record in records):
-        raise ValueError('Structural records require the current host identity envelope')
-    return [_record_item(record, 'structural') for record in records]
-
-
 def _append_structural_and_write_merged(
     base_items: list[dict[str, Any]],
-    structural_records_path: Path | None,
+    record_pool: RecordPool,
     items_path: Path,
     report_path: Path,
     canonical_path: Path,
 ) -> None:
     """Fold structural twins, gate evidence, validate locations, then publish both views."""
-    structural = _fold_structural_duplicates(base_items, _load_structural_items(structural_records_path), items_path)
+    structural = _fold_structural_duplicates(
+        base_items, [_record_item(record, "structural") for record in record_pool.structural], items_path,
+    )
     items = normalize_items(_evidence_gate_then_validate(base_items + structural, items_path))
     items_path.write_text(json.dumps({"items": items}, indent=2))
     ui.print_info(agent.console, f"Merged into {len(items)} items")
@@ -279,9 +270,9 @@ def _reset_merged_outputs(canonical_path: Path, report_path: Path, items_path: P
 def _write_single_stack_merged_items(
     repo: Path,
     deep_dir_path: Path,
-    all_records: list[dict[str, Any]],
-    structural_records_path: Path | None,
+    record_pool: RecordPool,
     *,
+    records: list[dict[str, Any]] | None = None,
     failed_stacks: dict[str, str] | None = None,
     artifact_session: ArtifactSession | None = None,
     allow_standalone: bool = False,
@@ -306,8 +297,8 @@ def _write_single_stack_merged_items(
     # Clear stale outputs (mirrors phase_cross_stack_merge).
     _reset_merged_outputs(canonical_path, report_path, items_path)
     _append_structural_and_write_merged(
-        [_record_item(record, "per-stack") for record in all_records],
-        structural_records_path, items_path, report_path, canonical_path,
+        [_record_item(record, "per-stack") for record in (record_pool.language if records is None else records)],
+        record_pool, items_path, report_path, canonical_path,
     )
 
 
@@ -321,38 +312,14 @@ _MAX_REPORTED_UNKNOWN_UIDS = 10
 
 def _validate_agent_source_uids(
     agent_items: list[dict[str, Any]],
-    per_stack_records_paths: list[Path],
-    structural_records_path: Path | None,
+    record_pool: RecordPool,
 ) -> None:
     """Clamp model source_uids to the run's real language/structural record pool in place.
 
     Unknown claims are discarded without dropping findings. Every dict item receives
     a source_uids list, possibly empty to honestly represent absent provenance.
     """
-    # Unreadable records cannot establish model-owned provenance.
-    pool: set[str] = set()
-    records_paths = list(per_stack_records_paths)
-    if structural_records_path is not None:
-        records_paths.append(structural_records_path)
-    for records_path in records_paths:
-        if not records_path.is_file():
-            continue
-        try:
-            loaded = json.loads(records_path.read_text())
-        except (json.JSONDecodeError, OSError) as exc:
-            ui.print_warning(
-                agent.console,
-                f"Skipping {records_path.name} for source_uids validation: {type(exc).__name__}: {exc}",
-            )
-            continue
-        issues = record_issues_or_empty(loaded)
-        if not isinstance(issues, list):
-            continue
-        for record in issues:
-            if isinstance(record, dict):
-                uid = record_uid(record)
-                if uid:
-                    pool.add(uid)
+    pool = {record_uid(record) for record in record_pool.records if record_uid(record)}
 
     unknown: dict[str, None] = {}
     unattributed = 0

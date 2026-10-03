@@ -8,7 +8,6 @@ gates, and write pinned manifests without Git or network access.
 
 import hashlib
 import json
-from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -17,13 +16,13 @@ from typing import Any, Literal, Mapping, cast, overload
 from daydream.archive.index import normalize_as_of
 from daydream.archive.sanitize import _derivative_digest
 from daydream.json_utils import atomic_write_bytes, canonical_json
+from daydream.training.adjudication.snapshot import FindingRecord
 from daydream.training.corpus import _is_posterior_leak, _trajectory_set_hash
 from daydream.training.corpus_projection.bundle import (
     CuratedBundle,
     _verify_sha256sums,
     load_curated_bundle,
 )
-from daydream.training.corpus_projection.identity import record_id
 from daydream.training.corpus_projection.license import load_license_policy, resolve_repo_decision
 from daydream.training.corpus_projection.provenance import extract_provenance
 from daydream.training.corpus_projection.segments import segment
@@ -35,7 +34,6 @@ from daydream.training.corpus_projection.selection import (
     retain_group_limits,
 )
 from daydream.training.corpus_projection.splits import SPLIT_FILENAMES, assign_split
-from daydream.training.corpus_projection.tiers import Tier, classify_tier
 from daydream.training.exclusion import EXCLUSION_PATH
 
 __all__ = [
@@ -357,43 +355,6 @@ def _read_trajectory_documents(bundle_dir: Path, artifact_relpath: str) -> list[
     raise ValueError(f"bundle {bundle_dir}: {artifact_relpath} is not a trajectory object")
 
 
-def finding_resolutions(
-    session: Mapping[str, object],
-) -> Iterator[tuple[Mapping[str, Any], Tier]]:
-    """Enumerate and validate source findings once for projection and adjudication."""
-    session_id = session.get("session_id")
-    trajectory_id = session.get("trajectory_id")
-    segment_id = session.get("segment_id")
-    resolutions = session.get("resolutions")
-    for name, value in (
-        ("session_id", session_id),
-        ("trajectory_id", trajectory_id),
-        ("segment_id", segment_id),
-        ("resolutions", resolutions),
-    ):
-        if not value:
-            raise ValueError(f"project_findings: session missing required key {name!r}")
-    if not isinstance(resolutions, list):
-        raise ValueError(
-            f"project_findings: session {session_id!r} key 'resolutions' "
-            f"must be a list, got {type(resolutions).__name__}"
-        )
-
-    for index, resolution in enumerate(resolutions):
-        if not isinstance(resolution, Mapping):
-            raise ValueError(
-                f"project_findings: session {session_id!r} resolutions[{index}] "
-                f"is not a mapping (got {type(resolution).__name__})"
-            )
-        fingerprint = resolution.get("fingerprint")
-        if not fingerprint:
-            raise ValueError(
-                f"project_findings: session {session_id!r} resolutions[{index}] "
-                "missing required key 'fingerprint'"
-            )
-        yield resolution, classify_tier(resolution)
-
-
 @overload
 def project_findings(session: Mapping[str, object], *, return_adjudication: Literal[False] = False) -> list[Record]: ...
 
@@ -413,46 +374,12 @@ def project_findings(
     ``return_adjudication`` is true. Raises ``ValueError`` naming the
     session and the offending key on a malformed resolution.
     """
-    session_id = session.get("session_id")
-    trajectory_id = session.get("trajectory_id")
-    segment_id = session.get("segment_id")
-
     records: list[Record] = []
     adjudication: list[Record] = []
-    for resolution, tier in finding_resolutions(session):
-        fingerprint = resolution["fingerprint"]
-        disposition = resolution.get("disposition")
-        evidence = list(resolution.get("evidence") or [])
-        provenance = extract_provenance(resolution)
-        record = {
-            "record_id": record_id(
-                str(session_id), str(trajectory_id), str(segment_id), str(fingerprint)
-            ),
-            "record_type": "outcome-finding",
-            "session_id": session_id,
-            "trajectory_id": trajectory_id,
-            "task_segment": segment_id,
-            "finding_fingerprint": fingerprint,
-            "tier": tier,
-            "disposition": disposition,
-            "outcome_label": disposition if tier == "gold" else None,
-            "evidence": evidence,
-            "profile": provenance["profile"],
-            "stack": provenance["stack"],
-        }
-        records.append(record)
-        if tier == "task-only":
-            adjudication.append(
-                {
-                    "fingerprint": fingerprint,
-                    "disposition": disposition,
-                    "evidence": evidence,
-                    "exclusion_reason": (
-                        f"non-decisive disposition {disposition!r} — missing decisive "
-                        "human verdict (evidence carried for the adjudication pass)"
-                    ),
-                }
-            )
+    for finding in FindingRecord.from_session(session):
+        records.append(finding.project())
+        if finding.tier == "task-only":
+            adjudication.append(finding.adjudication())
 
     if return_adjudication:
         return records, adjudication
@@ -543,24 +470,21 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                 ]
                 if not resolutions:
                     continue
-                session_view: dict[str, Any] = {
+                findings = list(FindingRecord.from_session({
                     "session_id": seg.session_id,
                     "trajectory_id": seg.trajectory_id,
                     "segment_id": seg.segment_id,
                     "resolutions": resolutions,
-                }
-                seg_records, seg_adjudication = project_findings(
-                    session_view, return_adjudication=True
-                )
+                }))
                 # Still validate every segment, including duplicate session views.
                 if seg.session_id in projected_sessions:
                     continue
                 projected_sessions.add(seg.session_id)
-                resolution_by_fp = {
-                    str(row.get("fingerprint")): row for row in resolutions
-                }
-                for rec in seg_records:
-                    fingerprint = str(rec["finding_fingerprint"])
+                for finding in findings:
+                    fingerprint = str(finding.fingerprint)
+                    tier = finding.tier
+                    if tier == "task-only":
+                        adjudication.append(finding.adjudication())
                     decision = decisions.get(seg.session_id)
                     if decision is None:
                         raise ValueError(
@@ -570,27 +494,15 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                     record_decision: dict[str, Any] = decision
                     # Non-decisive findings enter training only as opt-in, schema-distinct
                     # process-trace/task-only records. Their adjudication report stays intact.
-                    if str(rec["tier"]) == "task-only":
+                    if tier == "task-only":
                         if not config.emit_process_traces:
                             continue
-                        resolution = resolution_by_fp.get(fingerprint, {})
-                        emit_records: list[Record] = []
-                        for derived_type in ("process-trace", "task-only"):
-                            derived = dict(rec)
-                            derived["record_type"] = derived_type
-                            derived["tier"] = classify_tier(
-                                resolution, record_type=derived_type
-                            )
-                            derived["outcome_label"] = None
-                            derived["record_id"] = record_id(
-                                seg.session_id,
-                                seg.trajectory_id,
-                                seg.segment_id,
-                                f"{derived_type}:{fingerprint}",
-                            )
-                            emit_records.append(derived)
+                        emit_records = [
+                            finding.project(record_type=record_type)
+                            for record_type in ("process-trace", "task-only")
+                        ]
                     else:
-                        emit_records = [rec]
+                        emit_records = [finding.project()]
                     for rec in emit_records:
                         _refuse_posterior_evidence(
                             seg.session_id,
@@ -605,7 +517,7 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                             salt=config.salt,
                         )
                         prov = _provenance_for(
-                            resolution_by_fp.get(fingerprint, {}), batch_manifest_row
+                            finding.resolution, batch_manifest_row
                         )
                         rec_valid_at = _max_valid_at(
                             cast(list[Record], rec["evidence"]), config.as_of
@@ -669,7 +581,6 @@ def build_frozen_corpus(config: BuildFrozenCorpusConfig) -> dict[str, Any]:
                             lineage_fields["diff_ref"] = task_identity["diff_ref"]
                         rec["schema_version"] = "2"
                         records.append(rec)
-                adjudication.extend(seg_adjudication)
 
     records.sort(key=lambda r: str(r["record_id"]))
     adjudication.sort(key=lambda r: str(r["fingerprint"]))

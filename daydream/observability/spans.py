@@ -335,6 +335,9 @@ def step_scope(
 
 
 def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanScope:
+    diagnostic = None
+    if model is not None:
+        model, diagnostic = _admit_identity_label(model, max_chars=_MAX_MODEL_NAME_CHARS, context="model_name")
     return SpanScope(
         current_session(),
         f"invoke_agent {phase}",
@@ -343,6 +346,7 @@ def agent_scope(phase: str, *, backend: str, model: str | None = None) -> SpanSc
             "daydream.phase": phase,
             "daydream.backend": backend,
             "daydream.configured.model": model,
+            "daydream.configured.model.diagnostic": diagnostic.code if diagnostic is not None else None,
             "daydream.agent.name": phase,
             "gen_ai.agent.name": phase,
             "gen_ai.operation.name": "invoke_agent",

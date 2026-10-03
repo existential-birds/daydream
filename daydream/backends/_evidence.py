@@ -263,23 +263,23 @@ class OspreyRequestConfig(EffectiveRequestConfig):
     immutable_surface: bool | None = None
     compress_context: bool | None = None
     ultracode: bool | None = None
-    turn_timeout: int | None = None
-    stream_idle_timeout_secs: int | None = None
-    streaming_timeout_secs: int | None = None
-    empty_completion_threshold: int | None = None
-    driver_max_retries: int | None = None
-    compress_min_bytes: int | None = None
-    tool_result_cap: int | None = None
-    tool_result_head: int | None = None
-    tool_result_tail: int | None = None
-    tool_result_max_lines: int | None = None
-    retry_failure_threshold: int | None = None
-    no_progress_family_threshold: int | None = None
-    no_progress_family_window: int | None = None
-    no_progress_artifact_threshold: int | None = None
-    no_progress_suppression_window: int | None = None
-    max_subagents: int | None = None
-    llm_rpm: int | None = None
+    turn_timeout: int | None = field(default=None, metadata={"osprey_group": "timeout"})
+    stream_idle_timeout_secs: int | None = field(default=None, metadata={"osprey_group": "timeout"})
+    streaming_timeout_secs: int | None = field(default=None, metadata={"osprey_group": "timeout"})
+    empty_completion_threshold: int | None = field(default=None, metadata={"osprey_group": "timeout"})
+    driver_max_retries: int | None = field(default=None, metadata={"osprey_group": "timeout"})
+    compress_min_bytes: int | None = field(default=None, metadata={"osprey_group": "result"})
+    tool_result_cap: int | None = field(default=None, metadata={"osprey_group": "result"})
+    tool_result_head: int | None = field(default=None, metadata={"osprey_group": "result"})
+    tool_result_tail: int | None = field(default=None, metadata={"osprey_group": "result"})
+    tool_result_max_lines: int | None = field(default=None, metadata={"osprey_group": "result"})
+    retry_failure_threshold: int | None = field(default=None, metadata={"osprey_group": "result"})
+    no_progress_family_threshold: int | None = field(default=None, metadata={"osprey_group": "result"})
+    no_progress_family_window: int | None = field(default=None, metadata={"osprey_group": "result"})
+    no_progress_artifact_threshold: int | None = field(default=None, metadata={"osprey_group": "result"})
+    no_progress_suppression_window: int | None = field(default=None, metadata={"osprey_group": "result"})
+    max_subagents: int | None = field(default=None, metadata={"osprey_group": "limit"})
+    llm_rpm: int | None = field(default=None, metadata={"osprey_group": "limit"})
     observation_update_bytes: int | None = None
     observation_inline_bytes: int | None = None
     observation_admission_bytes: int | None = None

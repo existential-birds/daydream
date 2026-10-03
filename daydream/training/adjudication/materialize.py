@@ -2,7 +2,7 @@
 
 Acquire fresh production evidence through read-only harvest services; legacy
 and index-only history can supply stored resolutions. Serialize all findings
-through snapshot.build_canonical_record. Never append observations, update
+through the immutable FindingRecord owner. Never append observations, update
 resume/completion markers, or write the hydrated SQLite index.
 """
 
@@ -20,7 +20,7 @@ from daydream.training.adjudication.preview import (
     _SESSIONS_OUT_FILENAME as _SESSIONS_OUT_FILENAME,
     _load_sessions,
 )
-from daydream.training.adjudication.snapshot import build_canonical_record, snapshot_id
+from daydream.training.adjudication.snapshot import FindingRecord, snapshot_id
 from daydream.training.dispositions import DECISIVE_DISPOSITIONS
 from daydream.training.labeler_signals import resolution_from_dict
 
@@ -28,18 +28,6 @@ __all__ = ["run_materialize"]
 
 _MANIFEST_FILENAME = "preview-manifest.json"
 _ANNOTATIONS_FILENAME = "annotations.jsonl"
-
-# Disposition written for a conflicted generation's materialized records
-# (sessions.jsonl). The operator queue (``queue.build_queue``'s default
-# non-decisive set) and the final bundle's sessions.jsonl must route the
-# finding to task-only adjudication -- never gold -- and the archive
-# `rubric_json` keeps the real decisive disposition for provenance (the
-# canonical harvest restores it from the fresh queue). Corpus-v2's gold gate
-# (``tiers.classify_tier``) keys solely on disposition/evidence and never
-# reads the ``conflicting`` flag, so a decisive disposition here would still
-# classify gold; a non-decisive disposition forces ``task-only``.
-_CONFLICTED_DISPOSITION = "ambiguous"
-
 
 def index_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
     """Load sessions from ``sessions.jsonl`` when present, else the hydrated index."""
@@ -136,7 +124,7 @@ def _semantic_resolutions_readonly(
     retain their stored-evidence adapter. Production trajectories never need
     an annotation field or a prior canonical write.
     """
-    from daydream.training.harvest import HarvestConfig, collect_annotation, make_harvest_services
+    from daydream.training.harvest import HarvestConfig, HarvestPass
     from daydream.training.harvest_types import HarvestRow
     from daydream.trajectory import run_directory, run_document_path
     from daydream.ui import create_console
@@ -161,10 +149,7 @@ def _semantic_resolutions_readonly(
             {**row, "archive_path": str(run_dir.resolve())}, row_number=1,
         )
         config = HarvestConfig(archive_dir=index_root, dry_run=True)
-        _linked_row, payload = collect_annotation(
-            harvest_row, services=make_harvest_services(config), readonly=True,
-            console=create_console(),
-        )
+        _linked_row, payload = HarvestPass(config).collect_annotation(harvest_row, console=create_console())
         rubric = json.loads(payload.rubric_json or "{}")
         resolutions = rubric.get("per_finding_resolutions")
         if not isinstance(resolutions, list) or not resolutions:
@@ -321,35 +306,11 @@ def run_materialize(
             if not isinstance(row, dict):
                 raise ValueError(f"materialize: non-object resolution row in session data: {row!r}")
             resolution = resolution_from_dict(row)
-            record = build_canonical_record(
-                session,
-                resolution,
-                evidence_observed_at=pin["evidence_observed_at"],
-                as_of=pin.get("as_of"),
+            finding = FindingRecord.snapshot(
+                session, resolution, evidence_observed_at=pin["evidence_observed_at"],
+                as_of=pin.get("as_of"), conflicting=bool(session.get("conflicting")),
             )
-            if session.get("conflicting"):
-                # The session-level conflict flag rides on every emitted
-                # per-finding record so downstream consumers (canonical
-                # harvest) can exclude the disposition from decisive labels
-                # while the full record — flag included — lands in rubric_json.
-                # The winner's decisive disposition is neutralized to
-                # ``_CONFLICTED_DISPOSITION``: the operator queue (build_queue's
-                # default non-decisive set) and the final bundle's sessions.jsonl
-                # then route the finding to task-only adjudication — never gold,
-                # one disposition in the bundle — while the canonical harvest
-                # restores the real decisive disposition for the archive
-                # rubric_json provenance from the freshly re-derived queue.
-                record["conflicting"] = True
-                record["disposition"] = _CONFLICTED_DISPOSITION
-                # The record embeds the session-shape view (``resolutions``)
-                # that ``project_findings``/``build_queue`` consume; neutralize
-                # its disposition too, or the operator queue would still
-                # classify the finding gold (``tiers.classify_tier`` reads the
-                # resolution, never the record's top-level disposition).
-                for nested in record.get("resolutions") or []:
-                    if isinstance(nested, dict):
-                        nested["disposition"] = _CONFLICTED_DISPOSITION
-            records.append(record)
+            records.append(finding.canonical(project_conflict=True))
     records.sort(key=lambda r: str(r["record_id"]))
 
     id_digest = hashlib.sha256(

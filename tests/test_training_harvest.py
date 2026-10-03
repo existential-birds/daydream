@@ -30,12 +30,9 @@ from daydream.training.backfill_cache import BackfillCache
 from daydream.training.harvest import (
     AnnotationPayload,
     HarvestConfig,
-    HarvestServices,
-    acquire_harvest_evidence,
+    HarvestPass,
     assemble_scoring_inputs,
     build_annotation as _build_annotation,
-    make_harvest_services,
-    run_harvest,
 )
 from daydream.training.harvest_types import HarvestEvidence, HarvestRow
 from daydream.training.labeler_signals import (
@@ -151,7 +148,7 @@ def _typed_row(raw: dict[str, Any], *, row_number: int = 1) -> HarvestRow:
 
 def _services(config: HarvestConfig, *, github: Callable[..., Any]) -> HarvestTestServices:
     """Build an explicit per-run service with only the GitHub boundary replaced."""
-    return HarvestTestServices(make_harvest_services(config), github=github)
+    return HarvestTestServices(HarvestPass(config), github=github)
 
 
 def _pr_row(run_dir: Path, session_id: str, *, pr_number: int = 7) -> dict[str, Any]:
@@ -172,15 +169,15 @@ def _write_recommended_patch(run_dir: Path) -> None:
 
 def _acquire_annotation(
     raw: dict[str, Any], *, run_dir: Path | None = None, archive_dir: Path, gh_api: Callable[..., Any],
-    repo_clone: Path | None = None, services: HarvestServices | None = None, valid_at_override: str | None = None,
+    repo_clone: Path | None = None, services: HarvestPass | None = None, valid_at_override: str | None = None,
 ) -> AnnotationPayload:
     """Acquire through an explicit provider, then exercise the pure reducer."""
     row = _typed_row(raw)
     if run_dir is not None:
         assert row.archive_path == run_dir
     config = HarvestConfig(archive_dir=archive_dir)
-    provider = services or HarvestTestServices(make_harvest_services(config), github=gh_api)
-    evidence = acquire_harvest_evidence(row, services=provider, repo_resolution=repo_clone,
+    provider = services or HarvestTestServices(HarvestPass(config), github=gh_api)
+    evidence = provider.acquire_harvest_evidence(row, repo_resolution=repo_clone,
         base_sha_status="available" if repo_clone is not None else "unavailable", valid_at_override=valid_at_override,
     )
     return _build_annotation(row, evidence)
@@ -369,7 +366,7 @@ def test_build_annotation_pr_uses_pooled_prior_and_persists_reviewers(tmp_path: 
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh, repo_clone=tmp_path,
-        services=HarvestTestServices(make_harvest_services(config),
+        services=HarvestTestServices(HarvestPass(config),
             github=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable"),
                 reviews=[{"user": {"login": "alice"}}, {"user": {"login": "carol"}}],
             ), reviewer_prior=lambda *_args, **_kwargs: (0.8, 12),
@@ -387,7 +384,7 @@ def test_build_annotation_below_threshold_falls_back_to_default_prior(tmp_path: 
     _write_findings(run_dir, _FP_A)
     rb = json.loads(_acquire_annotation(
             row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh, repo_clone=tmp_path,
-            services=HarvestTestServices(make_harvest_services(HarvestConfig(archive_dir=tmp_path)),
+            services=HarvestTestServices(HarvestPass(HarvestConfig(archive_dir=tmp_path)),
                 github=_fake_gh(merged=False, comments=_finding_comments(_FP_A, reply="not applicable"),
                     reviews=[{"user": {"login": "alice"}}],
                 ), reviewer_prior=lambda *_args, **_kwargs: (0.9, 4),
@@ -404,7 +401,7 @@ def test_build_annotation_local_row_has_no_reviewer_prior(tmp_path: Path) -> Non
     row = _local_row(run_dir, "s_local")
     config = HarvestConfig(archive_dir=tmp_path)
     p = _acquire_annotation(row, run_dir=run_dir, archive_dir=tmp_path, gh_api=_unused_gh, repo_clone=tmp_path,
-        services=HarvestTestServices(make_harvest_services(config),
+        services=HarvestTestServices(HarvestPass(config),
             local_commit_applied=lambda *_args, **_kwargs: LocalCommitAppliedSignal("rejected"),
             reviewer_prior=lambda *_args, **_kwargs: pytest.fail("local rows have no reviewer prior"),
         ),
@@ -510,9 +507,7 @@ async def test_harvest_writes_one_annotation_with_canonical_merge_time(tmp_path:
 ) -> None:
     _seed_archived_deep_run(archive_dir, "s1")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(
-        config, services=_services(config, github=_fake_gh(merged_at=merged_at, comments=_REPLIED_FINDING)),
-    )
+    summary = await _services(config, github=_fake_gh(merged_at=merged_at, comments=_REPLIED_FINDING)).run()
     obs = latest_label_observation(archive_dir, "s1")
     assert obs is not None
     assert summary["annotated"] == 1
@@ -548,10 +543,10 @@ async def test_harvest_rejects_malformed_index_row_before_any_side_effect(
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "cache")
     services = HarvestTestServices(
-        make_harvest_services(config), rows=[malformed], completed_sessions=_completed_sessions,
+        HarvestPass(config), rows=[malformed], completed_sessions=_completed_sessions,
         resolve_repo=_resolve_repo, github=_github, append_annotation=_append_annotation,
     )
-    summary = await run_harvest(config, services=services)
+    summary = await services.run()
 
     assert summary["considered"] == 1
     assert summary["errors"] == 1
@@ -569,11 +564,11 @@ async def test_harvest_validates_completed_rows_before_resume_filtering(tmp_path
     malformed_completed = {"session_id": "done", "archive_path": "relative/bronze"}
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "cache")
     services = HarvestTestServices(
-        make_harvest_services(config), rows=[malformed_completed, completed, fresh], completed={"done"},
+        HarvestPass(config), rows=[malformed_completed, completed, fresh], completed={"done"},
         github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING),
     )
 
-    summary = await run_harvest(config, services=services)
+    summary = await services.run()
 
     assert summary == {"considered": 2, "annotated": 1, "would_annotate": 0, "skipped": 0, "errors": 1, "aborted": 0}
     assert latest_label_observation(archive_dir, "done") is None
@@ -584,11 +579,9 @@ async def test_harvest_unresolved_daydream_comment_stays_unknown(tmp_path: Path,
     run_dir = _seed_archived_deep_run(archive_dir, "s-contest")
     _write_findings(run_dir, _FP_A)
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    await run_harvest(config,
-        services=_services(
+    await _services(
             config, github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_finding_comments(_FP_A)),
-        ),
-    )
+        ).run()
     row = query_runs(archive_dir, "session_id = ?", ("s-contest",))[0]
     assert json.loads(row["outcome_labels"]) == []  # unknown, never "accepted"
 
@@ -603,7 +596,7 @@ async def test_harvest_relinks_orphan_run_and_labels_it(tmp_path: Path, archive_
             commit_pulls=_ORPHAN_COMMIT_PULLS,
         )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    await run_harvest(config, services=_services(config, github=github))
+    await _services(config, github=github).run()
     row = query_runs(archive_dir, "session_id = ?", ("s-orph",))[0]
     assert row["pr_number"] == 7 and row["pr_repo"] == "org/repo"  # linkage persisted
     assert json.loads(row["outcome_labels"]) == ["contested"]  # now labelable (was orphan)
@@ -631,7 +624,7 @@ async def test_harvest_fork_pr_404_degrades_not_drops(
         return {}
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_fork_404))
+    summary = await _services(config, github=_gh_fork_404).run()
 
     assert summary["errors"] == 0  # benign 404 degraded; not a hard error
     obs = latest_label_observation(archive_dir, "s-fork")
@@ -649,7 +642,7 @@ async def test_harvest_orphan_422_degrades_not_drops(tmp_path: Path, archive_dir
     With no clone, the label is unknown; the row is neither dropped nor rejected."""
     _seed_orphan_run(archive_dir, tmp_path, session_id="s-orph-422")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
+    summary = await _services(config, github=_gh_unpushed_422).run()
 
     assert summary["errors"] == 0  # benign 422 degraded; not a hard error
     assert latest_label_observation(archive_dir, "s-orph-422") is not None  # annotated via local path
@@ -681,7 +674,7 @@ async def test_harvest_deleted_branch_ref_labels_unknown_not_rejected(
         branch="feat/squash-merged-and-deleted", source_path=clone,
     )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
+    summary = await _services(config, github=_gh_unpushed_422).run()
 
     assert summary["errors"] == 0  # benign 422 + unreadable window degrade, not error
     assert latest_label_observation(archive_dir, "s-gone") is not None  # still annotated
@@ -714,7 +707,7 @@ async def test_harvest_squash_merged_branch_recovers_accepted_from_base_branch(
     )
     _write_recommended_patch(run_dir)
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
+    summary = await _services(config, github=_gh_unpushed_422).run()
 
     assert summary["errors"] == 0
     row = query_runs(archive_dir, "session_id = ?", ("s-squash",))[0]
@@ -731,7 +724,7 @@ async def test_harvest_live_branch_with_no_followup_commits_still_labels_rejecte
         source_path=clone,
     )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
+    summary = await _services(config, github=_gh_unpushed_422).run()
 
     assert summary["errors"] == 0
     row = query_runs(archive_dir, "session_id = ?", ("s-live",))[0]
@@ -756,7 +749,7 @@ async def test_harvest_live_branch_with_applied_fix_labels_accepted(tmp_path: Pa
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
+    await _services(config, github=_gh_unpushed_422).run()
 
     row = query_runs(archive_dir, "session_id = ?", (session_id,))[0]
     assert json.loads(row["outcome_labels"]) == ["accepted"]
@@ -767,9 +760,7 @@ async def test_harvest_merged_pr_with_zero_comments_is_not_labeled_accepted(tmp_
     Zero unresolved comments is vacuous when there were no comments at all."""
     _seed_archived_deep_run(archive_dir, "s-vacuous")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(
-        config, services=_services(config, github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00")),
-    )
+    summary = await _services(config, github=_fake_gh(merged_at="2026-02-01T00:00:00+00:00")).run()
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
     row = query_runs(archive_dir, "session_id = ?", ("s-vacuous",))[0]
@@ -792,7 +783,7 @@ async def test_harvest_merged_pr_with_reject_reply_is_contested(tmp_path: Path, 
             ],
         )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=github))
+    summary = await _services(config, github=github).run()
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
     row = query_runs(archive_dir, "session_id = ?", ("s-reject",))[0]
@@ -818,7 +809,7 @@ async def test_harvest_unmerged_pr_with_no_semantic_reply_is_unknown(
         return {"merged": False, "merged_at": None, "state": "open"}
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_open))
+    summary = await _services(config, github=_gh_open).run()
 
     assert summary["errors"] == 0 and summary["annotated"] == 1
     row = query_runs(archive_dir, "session_id = ?", ("s-open",))[0]
@@ -854,11 +845,9 @@ async def test_labeler_version_is_not_reward_version(tmp_path: Path, archive_dir
         return True
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config,
-        services=HarvestTestServices(
-            make_harvest_services(config), github=_applied_finding_gh(), append_annotation=_capture,
-        ),
-    )
+    summary = await HarvestTestServices(
+            HarvestPass(config), github=_applied_finding_gh(), append_annotation=_capture,
+        ).run()
 
     assert summary["annotated"] == 1
     assert captured["labeler_version"] == labeler_versions.LABELER_POLICY_VERSION
@@ -892,7 +881,7 @@ async def test_harvest_local_branch_accept_keeps_label_but_is_not_posterior_evid
     _git(clone, "add", "app.py")
     _commit(clone, "apply the recommended fix")
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_unpushed_422))
+    summary = await _services(config, github=_gh_unpushed_422).run()
 
     assert summary["errors"] == 0
     row = query_runs(archive_dir, "session_id = ?", ("s-local-tier",))[0]
@@ -915,7 +904,7 @@ async def test_harvest_dry_run_mutates_row_in_memory_but_suppresses_set_run_pr_l
             merged_at="2026-02-01T00:00:00+00:00", comments=_UNRESOLVED_FINDING, commit_pulls=_ORPHAN_COMMIT_PULLS,
         )
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c", dry_run=True)
-    summary = await run_harvest(config, services=_services(config, github=github))
+    summary = await _services(config, github=github).run()
 
     assert summary["would_annotate"] == 1
     assert summary["annotated"] == 0
@@ -936,7 +925,7 @@ async def test_harvest_leaves_true_local_run_unlinked(tmp_path: Path, archive_di
         raise AssertionError(f"PR endpoints must not be hit for an unlinked local run ({endpoint})")
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_no_pr))
+    summary = await _services(config, github=_gh_no_pr).run()
     row = query_runs(archive_dir, "session_id = ?", ("s-local",))[0]
     assert row["pr_number"] is None
     assert summary["errors"] == 0
@@ -945,9 +934,9 @@ async def test_re_harvest_is_idempotent(tmp_path: Path, archive_dir: Any, monkey
     _seed_archived_deep_run(archive_dir, "s1")
     github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
     first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
-    await run_harvest(first_config, services=_services(first_config, github=github))
+    await _services(first_config, github=github).run()
     second_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2")
-    second = await run_harvest(second_config, services=_services(second_config, github=github))
+    second = await _services(second_config, github=github).run()
     assert len(label_observation_history(archive_dir, "s1")) == 1  # deduped
     assert second["skipped"] == 1 and second["annotated"] == 0
 
@@ -956,10 +945,10 @@ async def test_re_harvest_appends_on_version_bump(tmp_path: Path, archive_dir: A
     _seed_archived_deep_run(archive_dir, "s1")
     github = _fake_gh(merged_at="2026-02-01T00:00:00+00:00", comments=_REPLIED_FINDING)
     first_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c1")
-    await run_harvest(first_config, services=_services(first_config, github=github))
+    await _services(first_config, github=github).run()
     monkeypatch.setattr("daydream.training.labeler_versions.LABELER_POLICY_VERSION", "980-policy-bump")
     second_config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c2")
-    await run_harvest(second_config, services=_services(second_config, github=github))
+    await _services(second_config, github=github).run()
     assert len(label_observation_history(archive_dir, "s1")) == 2
 
 async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_path: Path, archive_dir: Any,) -> None:
@@ -974,7 +963,7 @@ async def test_harvest_aborts_cleanly_on_rate_limit_and_preserves_resume(tmp_pat
 
     cache_dir = tmp_path / "c"
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
-    summary = await run_harvest(config, services=_services(config, github=_gh))
+    summary = await _services(config, github=_gh).run()
     assert summary["aborted"] == 1
     done = BackfillCache(cache_dir=cache_dir, inner=_gh).completed_sessions()
     assert "s1" in done and "s2" not in done
@@ -1004,7 +993,7 @@ def test_harvest_services_binds_explicit_github_auth(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(git_ops, "gh_api", _github)
     config = HarvestConfig(archive_dir=tmp_path / "archive")
-    services = make_harvest_services(config, github_auth=auth)
+    services = HarvestPass(config, github_auth=auth)
 
     assert services.github("o/r", "endpoint") == {"ok": True}
     assert seen_auth == [auth]
@@ -1020,7 +1009,7 @@ def _resolve_repo_with_services(
             "repo_slug": repo_slug,
         }, row_number=1,
     )
-    services = make_harvest_services(HarvestConfig(archive_dir=tmp_path / "archive", repo_clone_root=clone_cache))
+    services = HarvestPass(HarvestConfig(archive_dir=tmp_path / "archive", repo_clone_root=clone_cache))
     return services.resolve_repo(row, console=create_console())
 
 
@@ -1107,7 +1096,7 @@ async def test_harvest_propagates_confirmed_merge_comment_fetch_error(
         return {}
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=cache_dir)
-    summary = await run_harvest(config, services=_services(config, github=_gh_merge_ok_comments_fail))
+    summary = await _services(config, github=_gh_merge_ok_comments_fail).run()
 
     assert summary["errors"] == 1  # comment-fetch error propagated, merge evidence not discarded
     assert latest_label_observation(archive_dir, session_id) is None  # not annotated
@@ -1131,7 +1120,7 @@ async def test_harvest_keeps_labeled_row_when_reviewer_lookup_errors(tmp_path: P
         return {"merged": True, "merged_at": "2026-02-01T00:00:00+00:00"}
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh_reviews_fail))
+    summary = await _services(config, github=_gh_reviews_fail).run()
 
     assert summary["errors"] == 0  # reviewer-lookup failure degraded, row not dropped
     obs = latest_label_observation(archive_dir, "s-reviews-err")
@@ -1155,7 +1144,7 @@ async def test_harvest_degrades_benign_giterror_rows_instead_of_dropping(tmp_pat
         return merged(repo, endpoint, **kw)
 
     config = HarvestConfig(archive_dir=archive_dir, cache_dir=tmp_path / "c")
-    summary = await run_harvest(config, services=_services(config, github=_gh))
+    summary = await _services(config, github=_gh).run()
 
     assert summary["aborted"] == 0  # the GitError rows did NOT abort the sweep
     assert summary["annotated"] == 10 and summary["errors"] == 0

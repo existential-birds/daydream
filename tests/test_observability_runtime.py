@@ -138,6 +138,27 @@ async def test_owned_span_tree_usage_and_content() -> None:
     }.items():
         assert tool_attrs[key] == value
 
+@pytest.mark.parametrize("model, diagnostic", [
+    ("/private/native-config/model", "config_identity_private_path"),
+    ("C:\\private\\model", "config_identity_private_path"),
+    ("~/.private/model", "config_identity_private_path"),
+    ("api_key=host-model-credential", "config_identity_redaction_changed"),
+    ("model\nunsafe", "config_identity_unsafe_characters"),
+    ("m" * 257, "config_identity_too_long"),
+])
+async def test_configured_agent_model_uses_bounded_identity_admission(model: str, diagnostic: str) -> None:
+    exporter, registry = _memory_tracing()
+    async with trace_run(ObservabilityConfig(destinations=("memory",)), registry, flow="review"):
+        with agent_scope("review", backend="osprey", model=model):
+            pass
+    spans = exporter.get_finished_spans()
+    agent = next(span for span in spans if (span.attributes or {}).get("daydream.span.kind") == "agent")
+    attrs = agent.attributes or {}
+    assert "daydream.configured.model" not in attrs
+    assert attrs["daydream.configured.model.diagnostic"] == diagnostic
+    assert model not in str([dict(span.attributes or {}) for span in spans])
+
+
 @pytest.mark.anyio
 async def test_attempt_and_nested_step_do_not_inherit_unobserved_request_metadata() -> None:
     exporter, registry = _memory_tracing()

@@ -256,7 +256,7 @@ def _projector_findings_map(
     Prefer the run head_sha, matching the archive writer's evidence_sha. With no
     run anchor, use the reply digest; this intentionally leaves imported rows
     ambiguous because the archive never stored that digest as its anchor."""
-    from daydream.training.corpus_projection.projector import project_findings
+    from daydream.training.adjudication.snapshot import FindingRecord
     from daydream.training.labeler_versions import reply_evidence_digest
 
     findings_map: dict[str, list[dict[str, Any]]] = {}
@@ -265,22 +265,14 @@ def _projector_findings_map(
         run = (runs_by_session or {}).get(session_id) or {}
         run_anchor = run.get("head_sha")
         rows: list[dict[str, Any]] = []
-        for finding in project_findings(session):
-            evidence = finding["evidence"]
-            if not isinstance(evidence, list):
-                raise ValueError(
-                    f"session {session_id!r}: projected finding "
-                    f"{finding['finding_fingerprint']!r} carries malformed evidence"
-                )
-            rows.append(
-                {
-                    "record_id": finding["record_id"],
-                    "evidence_sha": (
-                        str(run_anchor) if run_anchor else reply_evidence_digest(evidence)
-                    ),
-                    "fingerprint": finding["finding_fingerprint"],
-                }
-            )
+        for finding in FindingRecord.from_session(session):
+            rows.append({
+                "record_id": finding.record_id,
+                "evidence_sha": str(run_anchor) if run_anchor else reply_evidence_digest(
+                    list(finding.resolution.get("evidence") or []),
+                ),
+                "fingerprint": finding.fingerprint,
+            })
         findings_map[session_id] = rows
     return findings_map
 

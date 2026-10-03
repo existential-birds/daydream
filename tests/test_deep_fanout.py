@@ -12,8 +12,9 @@ import pytest
 from daydream.backends import Backend, ResultEvent, TextEvent
 from daydream.config import STRUCTURE_STACK_NAME
 from daydream.deep import prompts as _prompts, sharding
-from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path
+from daydream.deep.artifacts import deep_dir as _deep_dir, per_stack_records_path, per_stack_review_path
 from daydream.deep.detection import StackAssignment, detect_stacks
+from daydream.review_result import ReviewCoverage
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend, Turn
 from tests.harness.review_result import review_scopes
@@ -53,9 +54,9 @@ async def _run_per_stack(
     make_work: Callable[..., WorkContext],
     backend: Backend,
     stacks: list[StackAssignment],
-) -> tuple[dict[str, Path], dict[str, str]]:
+) -> ReviewCoverage:
     diff, intent, alts = _mk_context_files(tmp_path)
-    results, failures = await review_scopes(
+    return await review_scopes(
         backend,
         make_work(tmp_path),
         stacks,
@@ -64,7 +65,6 @@ async def _run_per_stack(
         alternatives_path=alts,
         allow_standalone=True,
     )
-    return results, failures
 
 
 async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
@@ -75,8 +75,8 @@ async def test_budget_checkpoint_is_persisted_with_incomplete_coverage(
     async def checkpoint(*args: Any, **kwargs: Any) -> Any:
         return {"issues": [issue]}, None, "wall_budget_exceeded"
     monkeypatch.setattr("daydream.agent.run_agent", checkpoint)
-    _, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks()[:1])
-    assert "python" in failures
+    coverage = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks()[:1])
+    assert "python" in coverage.unfinished_scopes
     saved = json.loads(per_stack_records_path(tmp_path / ".daydream/deep", "python").read_text())
     assert saved["issues"][0]["description"] == issue["description"]
     assert saved["incomplete"] is True
@@ -99,10 +99,10 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks())
+        coverage = await _run_per_stack(tmp_path, make_work, _review_backend(), _mk_stacks())
 
-    assert set(results) == {"python", "react", "generic"}
-    assert failures == {}
+    assert set(coverage.scopes) == {"python", "react", "generic"}
+    assert coverage.unfinished_scopes == {}
     step = _deep_dispatch(read_trajectory(recorder.path))
     assert _dispatch_descriptors(step) == ["deep-python", "deep-react", "deep-generic"]
     assert _dispatch_encloses_children(step, recorder.target_dir)
@@ -114,15 +114,16 @@ async def test_phase_per_stack_reviews_dispatch_interval_success(tmp_path: Path,
 async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..., WorkContext]) -> None:
     """D-17/D-18/D-38: fan-out preserves per-stack calls, paths, prompts, and isolation."""
     backend = _review_backend()
-    results, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
+    coverage = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
 
-    assert set(results.keys()) == {"python", "react", "generic"}
-    assert failures == {}
+    assert set(coverage.scopes) == {"python", "react", "generic"}
+    assert coverage.unfinished_scopes == {}
     assert len(backend.prompts) == 3
     assert all(c["agents"] is None for c in backend.calls)
-    paths = set(results.values())
+    paths = {per_stack_review_path(_deep_dir(tmp_path, allow_standalone=True), scope) for scope in coverage.scopes}
     assert len(paths) == 3
     for p in paths:
+        assert p.is_file()
         assert p.name.startswith("stack-") and p.name.endswith("-review.md")
 
     # Issue #745 (AC4): the reviewer emits PER_STACK_RECORD_SCHEMA structured
@@ -133,7 +134,7 @@ async def test_fan_out_invokes_each_stack(tmp_path: Path, make_work: Callable[..
     # the records artifact exists and carries the declared issues.
 
     deep_dir_path = _deep_dir(tmp_path, allow_standalone=True)
-    for name in results:
+    for name in coverage.scopes:
         records = per_stack_records_path(deep_dir_path, name)
         assert records.is_file(), f"missing {records.name} for {name}"
         saved = json.loads(records.read_text())
@@ -205,14 +206,14 @@ async def test_phase_per_stack_reviews_partial_dispatch_continues_after_one_fail
     recorder = make_recorder(tmp_path)
 
     async with recorder:
-        results, failures = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
+        coverage = await _run_per_stack(tmp_path, make_work, backend, _mk_stacks())
 
-    assert "python" in results
-    assert "generic" in results
-    assert "react" not in results
-    # Failure surfaces in the returned failures dict with the exception reason.
-    assert "react" in failures
-    assert "simulated react failure" in failures["react"]
+    assert coverage.scopes["python"]["status"] == "complete"
+    assert coverage.scopes["generic"]["status"] == "complete"
+    assert coverage.scopes["react"]["status"] == "failed"
+    # Failure surfaces in the authoritative coverage with the exception reason.
+    assert "react" in coverage.unfinished_scopes
+    assert "simulated react failure" in coverage.unfinished_scopes["react"]
     step = _deep_dispatch(read_trajectory(recorder.path))
     # The failed backend still writes a bounded child error trajectory, so its
     # ref remains part of the exact attempted fan-out evidence.
@@ -239,9 +240,9 @@ async def test_per_stack_prompts_are_skill_free(tmp_path: Path, make_work: Calla
         StackAssignment(stack_name=STRUCTURE_STACK_NAME, files=["api.py", "App.tsx"], is_docs_only=False),
     ]
 
-    _, failures = await _run_per_stack(tmp_path, make_work, backend, stacks)
+    coverage = await _run_per_stack(tmp_path, make_work, backend, stacks)
 
-    assert failures == {}
+    assert coverage.unfinished_scopes == {}
     assert len(backend.prompts) == 7
     joined = "\n\n".join(backend.prompts)
 

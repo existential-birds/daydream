@@ -27,17 +27,17 @@ from tests.test_training_adjudication_publish import _final_bundle
 ])
 def test_corpus_harvest_exit_code_maps_summary(monkeypatch: pytest.MonkeyPatch, summary: dict[str, Any], expected: int
 ) -> None:
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+    async def _fake_run_harvest(_pass: Any, **_: Any) -> dict[str, Any]:
         return summary
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    monkeypatch.setattr("daydream.training.harvest.HarvestPass.run", _fake_run_harvest)
     assert cli_main(["corpus", "harvest", "--dry-run"]) == expected
 
 def test_corpus_harvest_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
-    async def _fake_run_harvest(_config: Any, **_: Any) -> dict[str, Any]:
+    async def _fake_run_harvest(_pass: Any, **_: Any) -> dict[str, Any]:
         called["hit"] = True
         return {"errors": 0, "annotated": 0, "skipped": 0, "total": 0}
-    monkeypatch.setattr("daydream.training.harvest.run_harvest", _fake_run_harvest)
+    monkeypatch.setattr("daydream.training.harvest.HarvestPass.run", _fake_run_harvest)
     assert cli_main(["corpus", "harvest", "--dry-run"]) == 0
     assert called["hit"]
 

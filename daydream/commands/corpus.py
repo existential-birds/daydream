@@ -2,7 +2,6 @@
 
 import argparse
 from collections.abc import Callable
-from functools import partial
 from pathlib import Path
 
 import anyio
@@ -264,8 +263,7 @@ def _handle_harvest_command(argv: list[str]) -> int:
         session_filter=args.session,
         gh_request_spacing_sec=args.gh_spacing_sec,
     )
-    services = _harvest.make_harvest_services(config)
-    summary = anyio.run(partial(_harvest.run_harvest, services=services), config)
+    summary = anyio.run(_harvest.HarvestPass(config).run)
     print_info(console, str(summary))
     if summary.get("aborted", 0) >= 1 or summary.get("errors", 0) > 0:
         return 1

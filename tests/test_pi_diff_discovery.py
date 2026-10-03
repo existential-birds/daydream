@@ -36,14 +36,14 @@ async def test_small_pi_review_keeps_structural_dispatch(
         return {"issues": []}, None, None
 
     monkeypatch.setattr("daydream.agent.run_agent", review)
-    results, failures = await review_scopes(PiBackend(model="fixture"), make_work(tmp_path),
+    coverage = await review_scopes(PiBackend(model="fixture"), make_work(tmp_path),
         [StackAssignment("python", ["app.py"]), StackAssignment("structure", ["app.py"])],
         diff_path=diff, diff_text=diff.read_text(), intent_path=intent,
         alternatives_path=tmp_path / "alternatives.json", allow_standalone=True,
         run_context=RunContext(InteractionPolicy(interactive=False)),
     )
-    assert failures == {}
-    assert set(results) == {"python", "structure"}
+    assert coverage.unfinished_scopes == {}
+    assert set(coverage.scopes) == {"python", "structure"}
     assert len(calls) == 2
     deep = tmp_path / ".daydream/deep"
     assert not (deep / "coverage-receipts.json").exists()

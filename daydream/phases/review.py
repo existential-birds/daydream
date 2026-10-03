@@ -418,7 +418,7 @@ async def phase_per_stack_reviews(
     reuse_cache: ReuseCache | None = None,
     phase_identity: PhaseIdentity | None = None,
     coverage: ReviewCoverage,
-) -> tuple[dict[str, Path], dict[str, str]]:
+) -> None:
     """Run scoped per-stack reviews under the backend fan-out limit and record each result.
 
     """
@@ -435,7 +435,7 @@ async def phase_per_stack_reviews(
         strategies = {name: defaults[name].content for name in (
             "discovery.per_stack", "discovery.structural", "discovery.generic_fallback",
         )}
-    results: dict[str, Path] = {}
+    completed: set[str] = set()
     limiter = anyio.CapacityLimiter(
         effective_fanout_concurrency(10, backend)
     )
@@ -512,7 +512,7 @@ async def phase_per_stack_reviews(
                         cache_valid = False
                     if cache_valid:
                         reuse_unit.record_hit(hit)
-                        results[stack.stack_name] = output_path
+                        completed.add(stack.stack_name)
                         coverage.record_scope(stack.stack_name, "complete")
                         return
                     ui.print_warning(agent.console,
@@ -617,7 +617,7 @@ async def phase_per_stack_reviews(
                         reasons=(*coverage.scopes[stack_name]["reason_codes"], ReasonCode.MALFORMED_ARTIFACT),
                         diagnostic=f"{type(exc).__name__}: {exception_text(exc) or '(unavailable)'}")
                     return
-                results[stack_name] = output_path
+                completed.add(stack_name)
                 if budget_reason is None:
                     coverage.record_scope(stack_name, "complete")
                 if reuse_unit is not None and budget_reason is None:
@@ -638,7 +638,7 @@ async def phase_per_stack_reviews(
             for stack in stacks:
                 tg.start_soon(_review_stack, stack)
         if dispatch is not None and coverage.unfinished_scopes:
-            finish_partial_or_failed(dispatch, results)
+            finish_partial_or_failed(dispatch, completed)
 
     failures = coverage.unfinished_scopes
     if failures:
@@ -648,5 +648,3 @@ async def phase_per_stack_reviews(
             f"Per-stack reviews failed for {len(failures)} stack(s); "
             "failures will be passed to the merge step.\n" + lines,
         )
-
-    return results, failures

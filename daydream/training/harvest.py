@@ -1,6 +1,6 @@
 """Harvest immutable bronze signals into bitemporal label and reward annotations.
 
-HarvestServices owns acquisition and persistence; build_annotation reduces a
+HarvestPass owns acquisition and persistence; build_annotation reduces a
 validated row and frozen evidence without I/O. Posterior false-positive cost
 stays beside the pure intrinsic composite. Qualifying decisive reply time pins
 PR outcomes, falling back to merge time; local outcomes have no valid-time pin.
@@ -22,18 +22,30 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass, replace
+from contextlib import closing
+from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
+import anyio
 from rich.console import Console
 
 from daydream import git_ops
 from daydream.archive.git_safe import _DEFAULT_HOSTS, normalize_remote_url
+from daydream.archive.index import (
+    append_label_observation,
+    query_runs,
+    readonly_connection,
+    reviewer_set_penalty_prior,
+    set_run_pr_link,
+)
 from daydream.git_ops import GitError, GitHubAuth, RateLimitError
 from daydream.training import labeler_versions, reward
 from daydream.training.adjudication.snapshot import record_evidence_digest
+from daydream.training.backfill_cache import BackfillCache
 from daydream.training.base_sha import materialize_base_sha
 from daydream.training.harvest_types import BaseShaStatus, HarvestEvidence, HarvestRow
 from daydream.training.labeler_signals import (
@@ -43,7 +55,9 @@ from daydream.training.labeler_signals import (
     PerFindingResolution,
     PRMergeSignal,
     comment_resolution_signal,
+    fix_applied_signal,
     index_pr_review_comments,
+    local_commit_applied_signal,
     per_finding_resolution_signal,
     pr_link_signal,
     pr_merge_signal,
@@ -68,72 +82,6 @@ _PRIOR_SUFFICIENCY_THRESHOLD = 10
 graduate from the ``0.5`` maximum-entropy default to the observed pooled mean
 (spec C4). Below this, ``outcome_prior`` is left ``None`` (the reducer applies the
 ``0.5`` default), though ``outcome_prior_n`` still records the pooled count for audit."""
-
-
-class HarvestServices(Protocol):
-    """All stateful acquisition and persistence used by one harvest pass."""
-
-    @property
-    def archive_dir(self) -> Path: ...
-
-    @property
-    def progress_path(self) -> Path | None: ...
-
-    def query_rows(self, session_filter: str | None) -> Sequence[Mapping[str, Any]]: ...
-
-    def completed_sessions(self) -> set[str]: ...
-
-    def resolve_repo(self, row: HarvestRow, *, console: Console) -> Path | None: ...
-
-    def materialize_base_sha(
-        self,
-        row: HarvestRow,
-        repo_clone: Path | None,
-        *,
-        console: Console,
-    ) -> BaseShaStatus: ...
-
-    def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any: ...
-
-    def reviewer_prior(
-        self,
-        logins: tuple[str, ...],
-        *,
-        before_valid_at: str,
-        exclude_session: str,
-        repo_slug: str | None,
-    ) -> tuple[float | None, int]: ...
-
-    def set_pr_link(self, row: HarvestRow, number: int, repo: str) -> None: ...
-
-    def read_scoring_inputs(self, row: HarvestRow) -> ScoringInputs: ...
-
-    def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]: ...
-
-    def fix_applied(
-        self,
-        row: HarvestRow,
-        *,
-        changed_files: tuple[str, ...],
-        repo_clone: Path,
-    ) -> FixAppliedSignal: ...
-
-    def local_commit_applied(
-        self,
-        row: HarvestRow,
-        *,
-        repo_clone: Path,
-    ) -> LocalCommitAppliedSignal: ...
-
-    def append_annotation(self, row: HarvestRow, payload: AnnotationPayload) -> bool: ...
-
-    def mark_session_done(self, session_id: str) -> None: ...
-
-    def now_iso(self) -> str: ...
-
-    def backoff_sleep(self, seconds: float) -> None: ...
-
-    async def sleep_between_rows(self, seconds: float) -> None: ...
 
 
 def _read_review_output(run_dir: Path) -> str | None:
@@ -247,29 +195,6 @@ carries the field for schema stability; outcome derivation does not depend on
 it for the PR-review path."""
 
 
-def _safe_fix_applied(
-    row: HarvestRow,
-    *,
-    services: HarvestServices,
-    changed_files: tuple[str, ...],
-    repo_clone: Path,
-) -> FixAppliedSignal:
-    """Check recommended hunks, using the legacy diff fallback when required.
-
-    Missing archive data or an empty changed-file set returns _FIX_APPLIED_STUB.
-    """
-    if not changed_files:
-        return _FIX_APPLIED_STUB
-    try:
-        return services.fix_applied(
-            row,
-            changed_files=changed_files,
-            repo_clone=repo_clone,
-        )
-    except (FileNotFoundError, OSError, GitError):
-        return _FIX_APPLIED_STUB
-
-
 # HTTP statuses meaning the PR/commit is genuinely absent (fork/deleted PR 404,
 # unpushed-SHA 422) so a row may degrade to its local posterior; every other gh
 # failure is transient and must propagate so resume retries, not mislabel (#166).
@@ -280,97 +205,6 @@ def _is_benign_pr_absence(exc: GitError) -> bool:
     """Recognize HTTP 404 as absent; unknown statuses propagate as transient failures."""
     match = re.search(r"\bHTTP (\d{3})\b", str(exc))
     return match is not None and int(match.group(1)) in _BENIGN_PR_ABSENCE_STATUSES
-
-
-def _build_rubric_pr(
-    row: HarvestRow,
-    *,
-    services: HarvestServices,
-    github: Callable[..., Any],
-    repo_clone: Path,
-    pr_merge: PRMergeSignal,
-    pr_author_logins: frozenset[str] = frozenset(),
-    review_author_logins: frozenset[str] = frozenset(),
-) -> Rubric:
-    """Combine a fetched PR state with scoped comment, fix, and finding signals.
-
-    Fetch comments once; PR/review author sets govern decisive reply eligibility."""
-    signal_row = row.as_signal_row()
-    # Fetch + index the PR's review comments once; both resolution signals
-    # consume this index instead of each hitting the /comments endpoint.
-    recorded_fingerprints = services.read_recorded_fingerprints(row)
-    comment_threads = index_pr_review_comments(
-        signal_row,
-        gh_api=github,
-        session_fingerprints=list(recorded_fingerprints),
-    )
-    comments = comment_resolution_signal(signal_row, gh_api=github, threads=comment_threads)
-    fix = _safe_fix_applied(
-        row,
-        services=services,
-        changed_files=row.changed_files,
-        repo_clone=repo_clone,
-    )
-    rubric = Rubric(
-        pr_merge=pr_merge,
-        fix_applied=fix,
-        comment_resolution=comments,
-        local_commit_applied=None,
-        posterior_source="pr_review",
-    )
-    if recorded_fingerprints:
-        per_finding = per_finding_resolution_signal(
-            signal_row,
-            recorded_fingerprints=list(recorded_fingerprints),
-            gh_api=github,
-            threads=comment_threads,
-            pr_author_logins=pr_author_logins,
-            review_author_logins=review_author_logins,
-        )
-        rubric = replace(rubric, per_finding_resolutions=list(per_finding))
-    return rubric
-
-
-def _build_rubric_local(
-    row: HarvestRow,
-    *,
-    services: HarvestServices,
-    repo_clone: Path,
-    clone_resolved: bool = False,
-) -> Rubric:
-    """Build local-branch signals, forcing unknown when no clone was resolved.
-
-    An archive-directory placeholder cannot establish that a fix was rejected.
-    """
-    # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
-    # degraded PR row's merge evidence was merely unavailable, so emit "unknown"
-    # rather than risk a "rejected" false negative.
-    if row.is_pr or not clone_resolved:
-        local = LocalCommitAppliedSignal(verdict="unknown")
-    else:
-        try:
-            local = services.local_commit_applied(
-                row,
-                repo_clone=repo_clone,
-            )
-        except (FileNotFoundError, OSError):
-            local = LocalCommitAppliedSignal(verdict="unknown")
-    pr_merge = PRMergeSignal(merged=False, merged_at=None)
-    comments = CommentResolutionSignal(total=0, replied=0, unresolved=0)
-    return Rubric(
-        pr_merge=pr_merge,
-        fix_applied=_FIX_APPLIED_STUB,
-        comment_resolution=comments,
-        local_commit_applied=local,
-        posterior_source="local_branch",
-        per_finding_resolutions=[
-            PerFindingResolution(
-                fingerprint=fingerprint, comment_id=None, disposition="missing",
-                evidence_digest=labeler_versions.reply_evidence_digest([]),
-            )
-            for fingerprint in services.read_recorded_fingerprints(row)
-        ],
-    )
 
 
 def _pr_state_for_rubric(rubric: Rubric) -> str | None:
@@ -410,69 +244,6 @@ class AnnotationPayload:
     has_posterior: bool
     reply_classifier_version: str | None = None
     reply_evidence_digest: str | None = None
-
-
-def acquire_harvest_evidence(
-    row: HarvestRow,
-    *,
-    services: HarvestServices,
-    repo_resolution: Path | None,
-    base_sha_status: BaseShaStatus,
-    valid_at_override: str | None = None,
-) -> HarvestEvidence:
-    """Acquire one row's complete external evidence in established order."""
-    repo_clone = repo_resolution or services.archive_dir
-    pr_merge = None
-    if row.is_pr:
-        try:
-            pr_merge = pr_merge_signal(row.as_signal_row(), gh_api=services.github)
-        except RateLimitError:
-            raise
-        except GitError as exc:
-            if not _is_benign_pr_absence(exc):
-                raise
-
-    reviewer_logins: list[str] = []
-    pooled_prior = None
-    prior_n = 0
-    if pr_merge is None:
-        rubric = _build_rubric_local(
-            row, services=services, repo_clone=repo_clone,
-            clone_resolved=repo_resolution is not None,
-        )
-    else:
-        try:
-            reviewer_logins = reviewer_logins_signal(row.as_signal_row(), gh_api=services.github)
-        except RateLimitError:
-            raise
-        except GitError:
-            pass
-        rubric = _build_rubric_pr(
-            row, services=services, github=services.github, repo_clone=repo_clone,
-            pr_merge=pr_merge,
-            pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
-            review_author_logins=frozenset(reviewer_logins),
-        )
-        pooled_prior, prior_n = services.reviewer_prior(
-            tuple(reviewer_logins),
-            before_valid_at=_rubric_valid_at(rubric) or services.now_iso(),
-            exclude_session=row.session_id,
-            repo_slug=row.repo_slug,
-        )
-
-    # Preserve the established boundary: bronze reads occur after posterior,
-    # reviewer, and prior acquisition.
-    scoring_inputs = services.read_scoring_inputs(row)
-    return HarvestEvidence(
-        scoring_inputs=scoring_inputs,
-        rubric=rubric,
-        reviewer_logins=tuple(reviewer_logins),
-        pooled_prior=pooled_prior,
-        prior_n=prior_n,
-        repo_resolution=repo_resolution,
-        base_sha_status=base_sha_status,
-        valid_at_override=valid_at_override,
-    )
 
 
 def build_annotation(row: HarvestRow, evidence: HarvestEvidence) -> AnnotationPayload:
@@ -670,138 +441,465 @@ class HarvestConfig:
     gh_request_spacing_sec: float = 0.8
 
 
-def make_harvest_services(
-    config: HarvestConfig,
-    *,
-    github_auth: GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
-) -> HarvestServices:
-    """Create side-effect-free production adapters for one harvest pass."""
-    from daydream.training.harvest_services import ProductionHarvestServices
+class HarvestPass:
+    """Own acquisition, reduction, persistence, and resume state for one archive pass."""
 
-    return ProductionHarvestServices(config, github_auth)
+    def __init__(self, config: HarvestConfig, *, github_auth: GitHubAuth = git_ops.INHERIT_GITHUB_AUTH) -> None:
+        self._config = config
+        self._github_auth = github_auth
+        self._cache: BackfillCache | None = None
+        self._fetched_repos: set[Path] = set()
 
+    @property
+    def archive_dir(self) -> Path:
+        return self._config.archive_dir
 
-def collect_annotation(
-    row: HarvestRow, *, services: HarvestServices, readonly: bool, console: Console,
-) -> tuple[HarvestRow, AnnotationPayload]:
-    """Collect and reduce the same evidence for preview and canonical harvest.
+    @property
+    def progress_path(self) -> Path | None:
+        return self._config.cache_dir / "progress.jsonl" if self._config.cache_dir is not None else None
 
-    Read-only callers supply dry-run services; linking is then in-memory only.
-    """
-    repo_resolution = services.resolve_repo(row, console=console)
-    base_sha_status = services.materialize_base_sha(
-        row,
-        repo_resolution,
-        console=console,
-    )
-    # Re-link orphan runs before acquiring their posterior. Persistence
-    # remains at this exact boundary, so a later row failure keeps the
-    # durable link as before.
-    if not row.is_pr:
-        try:
-            link = pr_link_signal(row.as_signal_row(), gh_api=services.github)
-        except RateLimitError:
-            raise
-        except GitError as exc:
-            if not _is_benign_pr_absence(exc):
-                raise
-            print_warning(
-                console,
-                f"harvest: PR link lookup failed for session {row.session_id}; "
-                f"degrading to local-branch posterior: {type(exc).__name__}: {exc}",
-            )
-            link = None
-        if link is not None:
-            number, slug = link
-            if not readonly:
-                services.set_pr_link(row, number, slug)
-            row = replace(row, pr_number=number, pr_repo=slug)
-
-    evidence = acquire_harvest_evidence(
-        row,
-        services=services,
-        repo_resolution=repo_resolution,
-        base_sha_status=base_sha_status,
-    )
-    return row, build_annotation(row, evidence)
-
-
-async def run_harvest(
-    config: HarvestConfig,
-    *,
-    services: HarvestServices,
-) -> dict[str, int]:
-    """Validate the archive queue, acquire evidence, and persist annotations."""
-    requested_archive = config.archive_dir.resolve()
-    services_archive = services.archive_dir.resolve()
-    if requested_archive != services_archive:
-        raise ValueError(
-            f"harvest archive ownership mismatch: requested {requested_archive}, services {services_archive}"
+    def _uncached_github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
+        return _github_with_retry(
+            repo,
+            endpoint,
+            auth=self._github_auth,
+            backoff_sleep=self.backoff_sleep,
+            **kwargs,
         )
-    raw_queue = services.query_rows(config.session_filter)
-    console = create_console()
-    queue: list[HarvestRow] = []
-    invalid_rows = 0
-    for row_number, raw in enumerate(raw_queue, start=1):
-        try:
-            queue.append(HarvestRow.from_mapping(raw, row_number=row_number))
-        except ValueError as exc:
-            invalid_rows += 1
-            print_warning(console, f"harvest: {exc}")
 
-    summary = {
-        "considered": invalid_rows,
-        "annotated": 0,
-        "would_annotate": 0,
-        "skipped": 0,
-        "errors": invalid_rows,
-        "aborted": 0,
-    }
-    if not queue:
-        return summary
-
-    # BackfillCache creation and progress reads remain lazy until every raw row
-    # has crossed the validation boundary. Invalid rows still count even when a
-    # valid sibling is removed by the resume filter.
-    done = services.completed_sessions()
-    queue = [row for row in queue if row.session_id not in done]
-    summary["considered"] += len(queue)
-
-    for row in queue:
-        try:
-            row, payload = collect_annotation(
-                row, services=services, readonly=config.dry_run, console=console,
+    def _cache_instance(self) -> BackfillCache | None:
+        if self._config.cache_dir is None or self._config.dry_run:
+            return None
+        if self._cache is None:
+            self._cache = BackfillCache(
+                cache_dir=self._config.cache_dir,
+                inner=self._uncached_github,
             )
-            if config.dry_run:
-                summary["would_annotate"] += 1
-            else:
-                if services.append_annotation(row, payload):
-                    summary["annotated"] += 1
+        return self._cache
+
+    def query_rows(self, session_filter: str | None) -> Sequence[Mapping[str, Any]]:
+        if not self.archive_dir.exists():
+            raise FileNotFoundError(f"archive_dir does not exist: {self.archive_dir}")
+        if self._config.dry_run:
+            with closing(readonly_connection(self.archive_dir)) as conn:
+                return [
+                    dict(row)
+                    for row in conn.execute(
+                        "SELECT * FROM runs WHERE session_id LIKE ? || '%'",
+                        (session_filter or "",),
+                    )
+                ]
+        if session_filter:
+            return query_runs(
+                self.archive_dir,
+                "session_id LIKE ? || '%'",
+                (session_filter,),
+            )
+        return query_runs(self.archive_dir)
+
+    def completed_sessions(self) -> set[str]:
+        cache = self._cache_instance()
+        return cache.completed_sessions() if cache is not None else set()
+
+    def resolve_repo(self, row: HarvestRow, *, console: Console) -> Path | None:
+        clone_cache = self._config.repo_clone_root or (
+            self._config.cache_dir / "repos" if self._config.cache_dir else None
+        )
+        if self._config.dry_run:
+            candidates = [row.source_path]
+            if clone_cache is not None and row.repo_slug:
+                candidates.append(clone_cache / row.repo_slug)
+            return next((p for p in candidates if p is not None and (p / ".git").exists()), None)
+        return _resolve_repo_for_row(
+            row,
+            clone_cache,
+            fetched_repos=self._fetched_repos,
+            console=console,
+        )
+
+    def materialize_base_sha(
+        self,
+        row: HarvestRow,
+        repo_clone: Path | None,
+        *,
+        console: Console,
+    ) -> BaseShaStatus:
+        if self._config.dry_run:
+            return "available" if row.base_sha else "unavailable"
+        return _materialize_base_sha_if_missing(row, repo_clone, console=console)
+
+    def github(self, repo: str, endpoint: str, **kwargs: Any) -> Any:
+        cache = self._cache_instance()
+        if cache is not None:
+            return cache(repo, endpoint, **kwargs)
+        return self._uncached_github(repo, endpoint, **kwargs)
+
+    def reviewer_prior(
+        self,
+        logins: tuple[str, ...],
+        *,
+        before_valid_at: str,
+        exclude_session: str,
+        repo_slug: str | None,
+    ) -> tuple[float | None, int]:
+        return reviewer_set_penalty_prior(
+            self.archive_dir,
+            list(logins),
+            before_valid_at=before_valid_at,
+            exclude_session=exclude_session,
+            repo_slug=repo_slug,
+            readonly=self._config.dry_run,
+        )
+
+    def read_recorded_fingerprints(self, row: HarvestRow) -> tuple[str, ...]:
+        if row.findings_fingerprints is not None:
+            return row.findings_fingerprints
+        try:
+            data = json.loads((row.archive_path / "findings.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ()
+        findings = data.get("findings") if isinstance(data, dict) else None
+        if not isinstance(findings, list):
+            return ()
+        return tuple(
+            str(finding["fingerprint"])
+            for finding in findings
+            if isinstance(finding, dict) and "fingerprint" in finding
+        )
+
+    @staticmethod
+    def _file_at(repo: Path, path: str, sha: str) -> str:
+        try:
+            return git_ops.show(repo, sha, path).decode("utf-8", errors="replace")
+        except GitError:
+            return ""
+
+    def fix_applied(
+        self,
+        row: HarvestRow,
+        *,
+        changed_files: tuple[str, ...],
+        repo_clone: Path,
+    ) -> FixAppliedSignal:
+        if not changed_files:
+            return _FIX_APPLIED_STUB
+        try:
+            return fix_applied_signal(
+                row.as_signal_row(),
+                changed_files=list(changed_files),
+                repo_clone=repo_clone,
+                diff_fetcher=git_ops.diff_name_only,
+                commits_in_window_fetcher=lambda repo, head, base: list(
+                    reversed(git_ops.log_shas_since(repo, head, base))
+                ),
+                file_at_fetcher=self._file_at,
+            )
+        except (FileNotFoundError, OSError, GitError):
+            return _FIX_APPLIED_STUB
+
+
+    def local_commit_applied(
+        self,
+        row: HarvestRow,
+        *,
+        repo_clone: Path,
+    ) -> LocalCommitAppliedSignal:
+        return local_commit_applied_signal(
+            row.as_signal_row(),
+            repo_clone=repo_clone,
+            commits_since_fetcher=lambda repo, branch, since: git_ops.log_shas(
+                repo,
+                branch,
+                since=since,
+            ),
+            file_at_fetcher=self._file_at,
+        )
+
+    def append_annotation(self, row: HarvestRow, payload: AnnotationPayload) -> bool:
+        return append_label_observation(
+            self.archive_dir,
+            row.session_id,
+            labeler_version=labeler_versions.LABELER_POLICY_VERSION,
+            **asdict(payload),
+        )
+
+    def mark_session_done(self, session_id: str) -> None:
+        cache = self._cache_instance()
+        if cache is not None:
+            cache.mark_session_done(session_id)
+
+    @staticmethod
+    def now_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+    @staticmethod
+    def backoff_sleep(seconds: float) -> None:
+        time.sleep(seconds)
+
+    @staticmethod
+    async def sleep_between_rows(seconds: float) -> None:
+        await anyio.sleep(seconds)
+
+    def _build_rubric_pr(
+        self, row: HarvestRow,
+        *,
+        repo_clone: Path,
+        pr_merge: PRMergeSignal,
+        pr_author_logins: frozenset[str] = frozenset(),
+        review_author_logins: frozenset[str] = frozenset(),
+    ) -> Rubric:
+        """Combine a fetched PR state with scoped comment, fix, and finding signals.
+
+        Fetch comments once; PR/review author sets govern decisive reply eligibility."""
+        signal_row = row.as_signal_row()
+        # Fetch + index the PR's review comments once; both resolution signals
+        # consume this index instead of each hitting the /comments endpoint.
+        recorded_fingerprints = self.read_recorded_fingerprints(row)
+        comment_threads = index_pr_review_comments(
+            signal_row,
+            gh_api=self.github,
+            session_fingerprints=list(recorded_fingerprints),
+        )
+        comments = comment_resolution_signal(signal_row, gh_api=self.github, threads=comment_threads)
+        fix = self.fix_applied(
+            row,
+            changed_files=row.changed_files,
+            repo_clone=repo_clone,
+        )
+        rubric = Rubric(
+            pr_merge=pr_merge,
+            fix_applied=fix,
+            comment_resolution=comments,
+            local_commit_applied=None,
+            posterior_source="pr_review",
+        )
+        if recorded_fingerprints:
+            per_finding = per_finding_resolution_signal(
+                signal_row,
+                recorded_fingerprints=list(recorded_fingerprints),
+                gh_api=self.github,
+                threads=comment_threads,
+                pr_author_logins=pr_author_logins,
+                review_author_logins=review_author_logins,
+            )
+            rubric = replace(rubric, per_finding_resolutions=list(per_finding))
+        return rubric
+
+
+    def _build_rubric_local(
+        self, row: HarvestRow,
+        *,
+        repo_clone: Path,
+        clone_resolved: bool = False,
+    ) -> Rubric:
+        """Build local-branch signals, forcing unknown when no clone was resolved.
+
+        An archive-directory placeholder cannot establish that a fix was rejected.
+        """
+        # Invariant: the local-commit posterior is valid ONLY for PR-less runs. A
+        # degraded PR row's merge evidence was merely unavailable, so emit "unknown"
+        # rather than risk a "rejected" false negative.
+        if row.is_pr or not clone_resolved:
+            local = LocalCommitAppliedSignal(verdict="unknown")
+        else:
+            try:
+                local = self.local_commit_applied(
+                    row,
+                    repo_clone=repo_clone,
+                )
+            except (FileNotFoundError, OSError):
+                local = LocalCommitAppliedSignal(verdict="unknown")
+        pr_merge = PRMergeSignal(merged=False, merged_at=None)
+        comments = CommentResolutionSignal(total=0, replied=0, unresolved=0)
+        return Rubric(
+            pr_merge=pr_merge,
+            fix_applied=_FIX_APPLIED_STUB,
+            comment_resolution=comments,
+            local_commit_applied=local,
+            posterior_source="local_branch",
+            per_finding_resolutions=[
+                PerFindingResolution(
+                    fingerprint=fingerprint, comment_id=None, disposition="missing",
+                    evidence_digest=labeler_versions.reply_evidence_digest([]),
+                )
+                for fingerprint in self.read_recorded_fingerprints(row)
+            ],
+        )
+
+
+    def acquire_harvest_evidence(
+        self, row: HarvestRow,
+        *,
+        repo_resolution: Path | None,
+        base_sha_status: BaseShaStatus,
+        valid_at_override: str | None = None,
+    ) -> HarvestEvidence:
+        """Acquire one row's complete external evidence in established order."""
+        repo_clone = repo_resolution or self.archive_dir
+        pr_merge = None
+        if row.is_pr:
+            try:
+                pr_merge = pr_merge_signal(row.as_signal_row(), gh_api=self.github)
+            except RateLimitError:
+                raise
+            except GitError as exc:
+                if not _is_benign_pr_absence(exc):
+                    raise
+
+        reviewer_logins: list[str] = []
+        pooled_prior = None
+        prior_n = 0
+        if pr_merge is None:
+            rubric = self._build_rubric_local(
+                row, repo_clone=repo_clone,
+                clone_resolved=repo_resolution is not None,
+            )
+        else:
+            try:
+                reviewer_logins = reviewer_logins_signal(row.as_signal_row(), gh_api=self.github)
+            except RateLimitError:
+                raise
+            except GitError:
+                pass
+            rubric = self._build_rubric_pr(
+                row, repo_clone=repo_clone,
+                pr_merge=pr_merge,
+                pr_author_logins=frozenset({pr_merge.author_login}) if pr_merge.author_login else frozenset(),
+                review_author_logins=frozenset(reviewer_logins),
+            )
+            pooled_prior, prior_n = self.reviewer_prior(
+                tuple(reviewer_logins),
+                before_valid_at=_rubric_valid_at(rubric) or self.now_iso(),
+                exclude_session=row.session_id,
+                repo_slug=row.repo_slug,
+            )
+
+        # Preserve the established boundary: bronze reads occur after posterior,
+        # reviewer, and prior acquisition.
+        scoring_inputs = assemble_scoring_inputs(row.archive_path)
+        return HarvestEvidence(
+            scoring_inputs=scoring_inputs,
+            rubric=rubric,
+            reviewer_logins=tuple(reviewer_logins),
+            pooled_prior=pooled_prior,
+            prior_n=prior_n,
+            repo_resolution=repo_resolution,
+            base_sha_status=base_sha_status,
+            valid_at_override=valid_at_override,
+        )
+
+
+    def collect_annotation(
+        self, row: HarvestRow, *, console: Console,
+    ) -> tuple[HarvestRow, AnnotationPayload]:
+        """Collect and reduce the same evidence for preview and canonical harvest.
+
+        Dry-run policy belongs to this pass; preview linking remains in-memory only.
+        """
+        repo_resolution = self.resolve_repo(row, console=console)
+        base_sha_status = self.materialize_base_sha(
+            row,
+            repo_resolution,
+            console=console,
+        )
+        # Re-link orphan runs before acquiring their posterior. Persistence
+        # remains at this exact boundary, so a later row failure keeps the
+        # durable link as before.
+        if not row.is_pr:
+            try:
+                link = pr_link_signal(row.as_signal_row(), gh_api=self.github)
+            except RateLimitError:
+                raise
+            except GitError as exc:
+                if not _is_benign_pr_absence(exc):
+                    raise
+                print_warning(
+                    console,
+                    f"harvest: PR link lookup failed for session {row.session_id}; "
+                    f"degrading to local-branch posterior: {type(exc).__name__}: {exc}",
+                )
+                link = None
+            if link is not None:
+                number, slug = link
+                if not self._config.dry_run:
+                    set_run_pr_link(self.archive_dir, row.session_id, number, slug)
+                row = replace(row, pr_number=number, pr_repo=slug)
+
+        evidence = self.acquire_harvest_evidence(
+            row,
+            repo_resolution=repo_resolution,
+            base_sha_status=base_sha_status,
+        )
+        return row, build_annotation(row, evidence)
+
+
+    async def run(self) -> dict[str, int]:
+        """Validate the archive queue, acquire evidence, and persist annotations."""
+        config = self._config
+        raw_queue = self.query_rows(config.session_filter)
+        console = create_console()
+        queue: list[HarvestRow] = []
+        invalid_rows = 0
+        for row_number, raw in enumerate(raw_queue, start=1):
+            try:
+                queue.append(HarvestRow.from_mapping(raw, row_number=row_number))
+            except ValueError as exc:
+                invalid_rows += 1
+                print_warning(console, f"harvest: {exc}")
+
+        summary = {
+            "considered": invalid_rows,
+            "annotated": 0,
+            "would_annotate": 0,
+            "skipped": 0,
+            "errors": invalid_rows,
+            "aborted": 0,
+        }
+        if not queue:
+            return summary
+
+        # BackfillCache creation and progress reads remain lazy until every raw row
+        # has crossed the validation boundary. Invalid rows still count even when a
+        # valid sibling is removed by the resume filter.
+        done = self.completed_sessions()
+        queue = [row for row in queue if row.session_id not in done]
+        summary["considered"] += len(queue)
+
+        for row in queue:
+            try:
+                row, payload = self.collect_annotation(
+                    row, console=console,
+                )
+                if config.dry_run:
+                    summary["would_annotate"] += 1
                 else:
-                    summary["skipped"] += 1
-                # A successful append or dedup is complete for resume. A raised
-                # write never advances the marker.
-                services.mark_session_done(row.session_id)
-        except RateLimitError:
-            summary["aborted"] = 1
-            resume_marker = services.progress_path
-            abort_msg = (
-                "harvest: GitHub rate limit exhausted; aborting cleanly. "
-                f"Resume from {resume_marker} by re-running with the same --cache-dir."
-                if resume_marker is not None
-                else "harvest: GitHub rate limit exhausted; aborting cleanly."
-            )
-            print_warning(console, abort_msg)
-            break
-        except Exception as exc:  # noqa: BLE001 - per-row isolation by design
-            summary["errors"] += 1
-            print_warning(
-                console,
-                f"harvest: session {row.session_id} failed: {type(exc).__name__}: {exc}",
-            )
-            continue
+                    if self.append_annotation(row, payload):
+                        summary["annotated"] += 1
+                    else:
+                        summary["skipped"] += 1
+                    # A successful append or dedup is complete for resume. A raised
+                    # write never advances the marker.
+                    self.mark_session_done(row.session_id)
+            except RateLimitError:
+                summary["aborted"] = 1
+                resume_marker = self.progress_path
+                abort_msg = (
+                    "harvest: GitHub rate limit exhausted; aborting cleanly. "
+                    f"Resume from {resume_marker} by re-running with the same --cache-dir."
+                    if resume_marker is not None
+                    else "harvest: GitHub rate limit exhausted; aborting cleanly."
+                )
+                print_warning(console, abort_msg)
+                break
+            except Exception as exc:  # noqa: BLE001 - per-row isolation by design
+                summary["errors"] += 1
+                print_warning(
+                    console,
+                    f"harvest: session {row.session_id} failed: {type(exc).__name__}: {exc}",
+                )
+                continue
 
-        if not config.dry_run:
-            await services.sleep_between_rows(config.gh_request_spacing_sec)
+            if not config.dry_run:
+                await self.sleep_between_rows(config.gh_request_spacing_sec)
 
-    return summary
+        return summary

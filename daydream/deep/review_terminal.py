@@ -36,7 +36,7 @@ def finalize_review(ctx: FlowContext, pipeline_state: str, *, no_diff: bool = Fa
         from daydream.phases.findings import _write_single_stack_merged_items
         try:
             _write_single_stack_merged_items(
-                ctx.work.repo, state.dd, state.record_pool.language, state.record_pool.structural_path,
+                ctx.work.repo, state.dd, state.record_pool,
                 failed_stacks=state.unfinished_scopes or None, artifact_session=ctx.artifacts,
                 allow_standalone=ctx.allow_standalone_artifacts,
             )

@@ -81,10 +81,41 @@ exhausted disk space (Errno 28); only owned completed disposable test directorie
 were removed; the complete affected suite then passed (47 real workflow tests).
 The next pre-push hook first stopped at a mixed event list inferred as `object`
 in the new telemetry test. An explicit `list[AgentEvent]` preserves the closed
-event union; full mypy (748 files) and Ruff pass. The normal hook retry is pending;
-see PR #1444 for its final result. The PR must remain draft while targets are unmet.
+event union; full mypy (748 files) and Ruff pass. Signed checkpoint `0a54165e` then passed the normal hook retry and push:
+9,340 passed, 14 skipped, 90.46% branch coverage; all required checks passed. The PR must remain draft while targets are unmet.
 
 ## Remaining work
+
+The third coherent batch removes the HarvestServices protocol/factory and reciprocal
+workflow forwarding. HarvestPass binds one frozen config, archive and acquisition
+policy; callers cannot retarget archive or supply a conflicting dry-run flag.
+FindingRecord retains immutable source, identity and adjudication, deriving distinct
+consumer views instead of mutating/restoring conflict state or fingerprint-rejoining
+frozen projections. RecordPool supplies already-admitted structural records and UIDs
+to merge/salvage; repeated disk reconstruction and empty-merge proof disappear.
+OspreyConfig owns native options; closed request fields define scalar argv order,
+and the exact-base immutable request evidence excludes private paths/variables.
+Logical agent model identity now passes the existing bounded privacy admission.
+Readback binds accepted rows/count/hash to the same stable snapshot, correcting
+LangSmith A/B/A acceptance with mismatched B rows.
+
+Focused verification: 86 harvest/ownership/CLI tests plus 23 real CLI/cache/preview
+checks; 227 finding-owner checks and a 960-case exact semantic differential;
+396 merge/phase/cache/real-resume checks (two existing skips) plus 25 attribution
+checks; 201 backend/protocol/runtime/real-visibility checks and 4,000 byte-identical
+native argv differentials; 36 readback/replay checks including real loopback A/B/A.
+Required mypy passes all 747 source files; Ruff passes. Independent reviews of each
+owner and the integrated diff found no material issue. Full normal pre-push gate
+is pending for this checkpoint. Provisional final batch measurement is 84,225
+source / 109,892 physical / 362 files: 1.522% source / 3.063% physical reduction,
+leaving 7,251 source / 7,865 physical lines above the targets. Exact owned inventory
+and source counts include every new module; no upstream baseline advance exists.
+
+Next assessed candidates include one captured annotation publication bundle.
+RL scoring input caching was rejected: complete-caller accounting showed 1–6
+source lines saved and extra derivative state. Internal curation class grouping
+was also rejected because it would mostly rename stateless ownership. These
+findings are not blockers; larger supported-workflow simplification remains.
 
 Continue looking for substantial behavior-preserving architecture reduction;
 current changes do not approach the aggregate target. Integrate worker edits,
