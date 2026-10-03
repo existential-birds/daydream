@@ -300,8 +300,8 @@ preamble. `review` / `comment` run the review spine and stop after `post-review`
 `shallow` forces `single_stack_mode`; `loop` is the default fixing flow;
 `diagram` runs the separate `diagram` flow below over the same preamble.
 
-`.review-output.md` cleanup is not a flow step; it runs in `_run_review_spine`
-after `run_flow` returns, tied to a successful outcome, an applicable mode, and
+`.review-output.md` cleanup is not a flow step; it runs in `run_deep` after
+`run_flow` returns, tied to a successful outcome, an applicable mode, and
 `config.findings_out is None`.
 
 `fix` and `fix-verify` (issue #744) are wrapped together in a `LoopGroup`

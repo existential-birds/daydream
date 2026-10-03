@@ -369,42 +369,6 @@ DIAGRAM_STEPS: tuple[FlowStep, ...] = (
 )
 
 
-@bind_resolved_run_context
-async def run_deep(
-    config: RunConfig,
-    work: WorkContext,
-    *,
-    run_artifacts: _RunArtifacts | None = None,
-    run_context: RunContext | None = None,
-    github_execution: GitHubExecutionInput | None = None,
-    backend_factory: BackendFactory | None = None,
-    allow_standalone: bool = False,
-) -> int:
-    """Prepare and execute the registered deep flow for review, comment, shallow or loop.
-
-    Resolve diff, stacks, routing and preflight before dispatch. start_at supports
-    TTT, per-stack, merge and fix resumes. Runner-managed calls supply run_artifacts;
-    standalone calls require explicit allow_standalone=True and no active session.
-    Return the pipeline exit code.
-    """
-    run_context = resolve_run_context(run_context)
-    if run_artifacts is None and not allow_standalone:
-        raise ArtifactVisibilityError("standalone deep flow requires allow_standalone=True")
-    if run_artifacts is None and artifact_session_active():
-        raise ArtifactVisibilityError("standalone deep flow cannot run inside an active artifact session")
-    execution = github_execution or GitHubExecutionInput()
-    return await _run_review_spine(
-        config,
-        work,
-        _resolve_mode(config),
-        run_artifacts=run_artifacts,
-        run_context=run_context,
-        github_execution=execution,
-        backend_factory=backend_factory,
-        allow_standalone=allow_standalone,
-    )
-
-
 def _collapse_stacks_for_shallow(
     stacks: list[StackAssignment],
     changed_files: list[str],
@@ -496,20 +460,31 @@ def _prepare_review_stacks(
 
 
 @bind_resolved_run_context
-async def _run_review_spine(
+async def run_deep(
     config: RunConfig,
     work: WorkContext,
-    mode: str,
     *,
-    run_artifacts: _RunArtifacts | None,
+    run_artifacts: _RunArtifacts | None = None,
     run_context: RunContext | None = None,
-    github_execution: GitHubExecutionInput,
+    github_execution: GitHubExecutionInput | None = None,
     backend_factory: BackendFactory | None = None,
     allow_standalone: bool = False,
 ) -> int:
-    """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
-    artifact_session = None if run_artifacts is None else run_artifacts.session
+    """Prepare and execute the registered deep flow for review, comment, shallow or loop.
+
+    Resolve diff, stacks, routing and preflight before dispatch. start_at supports
+    TTT, per-stack, merge and fix resumes. Runner-managed calls supply run_artifacts;
+    standalone calls require explicit allow_standalone=True and no active session.
+    Return the pipeline exit code.
+    """
     run_context = resolve_run_context(run_context)
+    if run_artifacts is None and not allow_standalone:
+        raise ArtifactVisibilityError("standalone deep flow requires allow_standalone=True")
+    if run_artifacts is None and artifact_session_active():
+        raise ArtifactVisibilityError("standalone deep flow cannot run inside an active artifact session")
+    artifact_session = None if run_artifacts is None else run_artifacts.session
+    mode = _resolve_mode(config)
+    github_execution = github_execution or GitHubExecutionInput()
     # Late imports to avoid circular dependency with runner.
     from daydream.git_ops import GitError, GitTimeoutError
     from daydream.hunk_index import write_hunk_index
