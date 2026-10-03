@@ -265,13 +265,21 @@ def test_findings_preparation_diagnostic_does_not_expose_private_write_path(
     assert "Findings artifact prepared." in output
     assert str(private_path) not in output
 
-def test_diagram_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Diagram target resolution without local PR objects uses the owning session."""
+def test_diagram_artifact_uses_the_captured_pr_and_the_run_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A captured identity replaces target resolution; classification keeps the run auth."""
     repo = tmp_path / "repo"
     _init_repo(repo)
+    (repo / "app.py").write_text("VALUE = 1\n")
+    _git(repo, "add", "app.py")
+    _commit(repo, "base")
+    head = git_ops.head_sha(repo)
     auth = git_ops.StaticGitHubAuth({"PATH": "/usr/bin", "GH_TOKEN": "artifact-owner"})
     seen: list[git_ops.GitHubAuth] = []
-    monkeypatch.setattr("daydream.pr_review.find_pr_by_number", lambda *_args, **_kwargs: _ARTIFACT_PR)
+    monkeypatch.setattr("daydream.pr_review.find_pr_by_number",
+                        lambda *_a, **_k: pytest.fail("no live PR lookup at export"))
+
     def read_diff(
         target_dir: Path, number: int, *, auth: git_ops.GitHubAuth = git_ops.INHERIT_GITHUB_AUTH,
     ) -> str:
@@ -281,16 +289,26 @@ def test_diagram_artifact_diff_fallback_uses_the_run_auth(tmp_path: Path, monkey
         return ""
     monkeypatch.setattr(git_ops, "gh_pr_diff", read_diff)
     destination = tmp_path / "findings.json"
-    assert (
+
+    assert runner._write_findings_for_parsed(
+        repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth, kind="diagram",
+        renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
+        run_info="Fixture run info", captured_pr=replace(_ARTIFACT_PR, head_sha=head, base_sha=head),
+    ) == 0
+
+    # base == head leaves the local changed-file diff empty, so the GitHub-side
+    # read is reached and must carry the owning session's auth.
+    assert seen == [auth]
+    assert json.loads(destination.read_text())["head_sha"] == head
+    assert "artifact-owner" not in destination.read_text()
+
+    # The captured identity is required: the writer has no live-lookup fallback left.
+    with pytest.raises(TypeError):
         runner._write_findings_for_parsed(
             repo, RunConfig(pr_number=7, findings_out=str(destination)), [], auth=auth, kind="diagram",
             renderers=pr_review.ReviewRenderers(pr_review.default_render_finding, pr_review.default_render_summary),
             run_info="Fixture run info",
-        )
-        == 0
-    )
-    assert seen == [auth]
-    assert "artifact-owner" not in destination.read_text()
+        )  # type: ignore[call-arg]
 
 def _feature_repo(tmp_path: Path, *, remote: bool = False) -> Path:
     """Real git repo with one committed change on ``feature`` over ``main``."""

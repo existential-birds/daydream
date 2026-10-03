@@ -710,16 +710,32 @@ async def _step_post_diagram(ctx: FlowContext) -> Stop:
     payload: dict[str, Any] = diagrams.get("payload") or {}
 
     if ctx.config.findings_out is not None:
-        from daydream.pr_review import resolve_review_renderers
+        from daydream.pr_review import find_open_pr, find_pr_by_number, resolve_review_renderers
         from daydream.pr_run_info import LiveRunInfoSource, render_live_run_info
 
         run_info = render_live_run_info(LiveRunInfoSource(get_current_recorder(), ctx.artifacts))
         if run_info.diagnostic is not None:
             print_warning(console, run_info.diagnostic)
+        try:
+            pr = (find_pr_by_number(ctx.work.repo, ctx.config.pr_number, auth=ctx.github_execution.auth)
+                  if ctx.config.pr_number is not None
+                  else find_open_pr(ctx.work.repo, auth=ctx.github_execution.auth))
+        except GitError as exc:
+            print_error(console, "Findings Artifact", f"cannot resolve target PR: {exc}")
+            return Stop(1)
+        if pr is None:
+            print_error(
+                console,
+                "Findings Artifact",
+                "no PR resolvable for --findings-out — the artifact must declare its "
+                "target (pass --pr-number or open a PR for this branch)",
+            )
+            return Stop(1)
         return Stop(
             _emit_diagram_findings(
                 ctx.work.repo, ctx.config, payload, auth=ctx.github_execution.auth,
                 run_info=run_info.markdown, renderers=resolve_review_renderers(ctx.registry),
+                captured_pr=pr,
             )
         )
 
