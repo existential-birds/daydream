@@ -379,6 +379,19 @@ def _valid_case() -> Any:
     return CaseDocument.model_validate(_valid_case_dict())
 
 
+def _unreplayable_snapshot(
+    *, reason: str, detail: str, policy: str = "final_pr_head", requested_head: str = "final",
+    original_base_sha: str | None = None, requested_base_sha: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "status": "unreplayable", "policy": policy, "requested_head": requested_head,
+        "original_base_sha": original_base_sha, "requested_base_sha": requested_base_sha,
+        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
+        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
+        "error": {"reason": reason, "detail": detail},
+    }
+
+
 def test_case_id_derivation() -> None:
     assert case_id_for(101, "0123456789abcdef0123456789abcdef01234567") == "pr-000101-0123456789ab"
 
@@ -402,13 +415,11 @@ def test_ready_snapshot_requires_merge_base_resolution_marker() -> None:
 
 def test_base_drift_is_the_only_new_snapshot_reason() -> None:
     raw = _valid_case_dict()
-    raw["snapshot"] = {
-        "status": "unreplayable", "policy": "explicit_head", "requested_head": "a" * 40, "original_base_sha": "b" * 40,
-        "requested_base_sha": "0123456789abcdef0123456789abcdef01234567",
-        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
-        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
-        "error": {"reason": "base_drift", "detail": "one extra path"},
-    }
+    raw["snapshot"] = _unreplayable_snapshot(
+        policy="explicit_head", requested_head="a" * 40, original_base_sha="b" * 40,
+        requested_base_sha="0123456789abcdef0123456789abcdef01234567",
+        reason="base_drift", detail="one extra path",
+    )
     raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
         "clean_attested": False, "gold_status": None, "findings": [], "task_spec_sha256": None,
     })
@@ -453,24 +464,17 @@ def test_unreplayable_curation_requires_unreplayable_snapshot() -> None:
     with pytest.raises(ValidationError):           # ready snapshot + unreplayable state
         CaseDocument.model_validate(raw)
     # a genuine unreplayable snapshot + unreplayable state loads
-    raw["snapshot"] = {"status": "unreplayable", "policy": "final_pr_head", "requested_head": "final",
-        "original_base_sha": None, "requested_base_sha": None,
-        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
-        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
-        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
-    }
+    raw["snapshot"] = _unreplayable_snapshot(reason="head_not_on_pr", detail="head sha not on PR")
     doc = CaseDocument.model_validate(raw)
     assert doc.curation.state == "unreplayable"
 
 def test_unreplayable_snapshot_requires_matching_curation_unless_excluded() -> None:
     raw = _valid_case_dict()
-    raw["snapshot"] = {
-        "status": "unreplayable", "policy": "explicit_head", "requested_head": "a" * 40, "original_base_sha": "b" * 40,
-        "requested_base_sha": "0123456789abcdef0123456789abcdef01234567",
-        "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
-        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
-        "error": {"reason": "head_not_on_pr", "detail": "not on PR"},
-    }
+    raw["snapshot"] = _unreplayable_snapshot(
+        policy="explicit_head", requested_head="a" * 40, original_base_sha="b" * 40,
+        requested_base_sha="0123456789abcdef0123456789abcdef01234567",
+        reason="head_not_on_pr", detail="not on PR",
+    )
     with pytest.raises(ValidationError):
         CaseDocument.model_validate(raw)
 
@@ -489,12 +493,7 @@ def test_snapshot_requested_base_must_match_pull_request_base() -> None:
 
 def test_unreplayable_snapshot_requires_error_and_null_bundle() -> None:
     raw = _valid_case_dict()
-    raw["snapshot"] = {
-        "status": "unreplayable", "policy": "final_pr_head", "requested_head": "final", "original_base_sha": None,
-        "requested_base_sha": None, "original_head_sha": "0123456789abcdef0123456789abcdef01234567",
-        "base_tree_sha": None, "head_tree_sha": None, "diff_sha256": None, "bundle_file": None, "bundle_sha256": None,
-        "error": {"reason": "head_not_on_pr", "detail": "head sha not on PR"},
-    }
+    raw["snapshot"] = _unreplayable_snapshot(reason="head_not_on_pr", detail="head sha not on PR")
     raw["curation"].update({"state": "unreplayable", "snapshot_attested": False,
         "clean_attested": False, "gold_status": None, "findings": [], "task_spec_sha256": None,
     })

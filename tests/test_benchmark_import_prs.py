@@ -1117,9 +1117,7 @@ def _curate_case(ws: Path, case_file: Any) -> None:
 
 
 def test_refresh_body_only_change_stales_gold(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # state=ready, attested
+    ws = _import_ready_case(tmp_path, fake_gh)
     # PR body feeds compiled task context.
     hdr = dict(_PR_HEADER)
     hdr["body"] = "EDITED body that changes compiled context"
@@ -1129,9 +1127,7 @@ def test_refresh_body_only_change_stales_gold(tmp_path: Path, fake_gh: FakeGh) -
     assert case["curation"]["state"] == "stale"        # task-input contract changed -> stale
 
 def test_refresh_metadata_only_change_updates_checksums_without_staling(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    ws = _import_ready_case(tmp_path, fake_gh)
     before = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
     before_import_sha = before["source"]["import_sha256"]
     hdr = dict(_PR_HEADER)
@@ -1617,10 +1613,7 @@ def test_missing_prior_import_is_nonfatal_first_run(tmp_path: Path) -> None:
 
 
 def test_refresh_stale_clears_task_spec_approval(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)   # seed REST with one evidence comment
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")   # ready + attested (with digest, per Task 4)
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
@@ -1707,11 +1700,18 @@ def _rest_comment(
     return comment
 
 
-def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
+def _import_ready_case(tmp_path: Path, fake_gh: FakeGh, *, evidence: bool = False) -> Path:
+    """Import PR 101, then mark its case ready and attested for a refresh test."""
     ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
+    if evidence:
+        fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    return ws
+
+
+def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: FakeGh) -> None:
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments",
         [_rest_comment(1), {**_rest_comment(99), "path": "b.py", "body": "unrelated nit"}],
     )
@@ -1721,10 +1721,7 @@ def test_refresh_unrelated_new_comment_does_not_stale(tmp_path: Path, fake_gh: F
     assert case["curation"]["findings"]
 
 def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1, line=7)])
     assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None) == 0
     case = load_yaml_strict(ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml")
@@ -1735,9 +1732,7 @@ def test_refresh_changed_anchor_on_referenced_evidence_stales(tmp_path: Path, fa
 
 
 def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    ws = _import_ready_case(tmp_path, fake_gh)
     hdr = dict(_PR_HEADER)
     hdr["head"] = {"ref": "feature/cache", "sha": "b" * 40}   # live head now advanced (valid 40-hex)
     _seed_preflight(ws, fake_gh, pull_header=hdr)
@@ -1752,9 +1747,7 @@ def test_refresh_after_head_advance_keeps_case_id(tmp_path: Path, fake_gh: FakeG
 
 
 def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    ws = _import_ready_case(tmp_path, fake_gh)
     before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
     fake_gh.set_response("GET", "repos/o/r/pulls/101", {"__error__": "API rate limit exceeded Retry-After: 1"})
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=True, origin_url=None)
@@ -1768,10 +1761,7 @@ def test_refresh_failure_preserves_linkage_and_records_attempt(tmp_path: Path, f
     assert (ws / "cases" / "pr-000101-aaaaaaaaaaaa.yaml").exists()  # case still indexed
 
 def test_refresh_corrupt_prior_anchor_stages_ledger_failure(tmp_path: Path, fake_gh: FakeGh) -> None:
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
     before = load_yaml_strict(ws / "benchmark.yaml")["pull_requests"][0]
     import_path = ws / "imports" / "pr-000101.json"
     imp = load_json_strict(import_path)
@@ -1852,10 +1842,7 @@ def test_refresh_noncanonical_referenced_source_id_fails_closed(tmp_path: Path, 
 def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Replies are evidence-only, so gaining reply status changes the projection hash and curation basis."""
 
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
 
     reply = dict(_rest_comment(1))
     reply["in_reply_to_id"] = 10
@@ -1868,10 +1855,7 @@ def test_refresh_gained_reply_status_flips_signature_and_stales(tmp_path: Path, 
 def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Plain re-import applies the same per-case stale gate as refresh."""
 
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
     fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1, line=7)])
     rc = gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], refresh=False, origin_url=None)
     assert rc == 0
@@ -1882,10 +1866,7 @@ def test_reimport_changed_referenced_evidence_stales(tmp_path: Path, fake_gh: Fa
 def test_refresh_precanon_duplicate_db_id_verdict_is_deterministic(tmp_path: Path, fake_gh: FakeGh) -> None:
     """Matching any legacy projection preserves curation, independent of set order."""
 
-    ws = _preflight_workspace(tmp_path, fake_gh)
-    fake_gh.set_response("GET", "repos/o/r/pulls/101/comments", [_rest_comment(1)])
-    assert gi.run_import_prs(ws, pr_numbers=[101], heads=["final"], origin_url=None) == 0
-    _curate_case(ws, "pr-000101-aaaaaaaaaaaa.yaml")    # references github:inline_comment:1
+    ws = _import_ready_case(tmp_path, fake_gh, evidence=True)
 
     # Legacy REST and GraphQL copies shared an ID but differed in commit anchors.
     import_path = ws / "imports/pr-000101.json"

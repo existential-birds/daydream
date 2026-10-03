@@ -39,6 +39,15 @@ from tests.test_deep_orchestrator import (
 )
 
 
+def _arrange(
+    monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute, *, commit: bool = True,
+) -> None:
+    """Quiet output, force the interactive fix gate, and mute backend side effects."""
+    _silence(monkeypatch)
+    _force_interactive(monkeypatch)
+    mute_side_effects(commit=commit)
+
+
 async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, archive_dir: Path, make_config: MakeConfig,
     mute_side_effects: Mute,
@@ -46,9 +55,7 @@ async def test_fix_failure_reverts_partial_edit_and_marks_manifest_partial(
     """Real-path: a fix group that raises MaxTurnsError mid-edit is rolled back, its partial content saved, and the
     archived run is marked ``partial``."""
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
+    _arrange(monkeypatch, mute_side_effects)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_edit_line = "# retained successful group\n"
@@ -84,9 +91,7 @@ async def test_fix_preflight_unconfined_finding_archives_blocked_item_identities
 ) -> None:
     """Footprint preflight blocks unsafe paths before fixing and records why."""
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects(commit=False)
+    _arrange(monkeypatch, mute_side_effects, commit=False)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
 
     # Symlink-escape finding: src/handler.py is a repo-local path whose real
@@ -129,9 +134,7 @@ async def test_fix_failure_confines_orphan_and_restores_protected_file_in_archiv
 ) -> None:
     """Real runner confines a failed fixer and archives its restore audit."""
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
+    _arrange(monkeypatch, mute_side_effects)
     stub = _install_stub_backend(monkeypatch, multi_stack_target)
     stub.fix_partial_then_maxturns = "App.tsx"
     stub.fix_orphan_file = "store/uuid.go"
@@ -352,9 +355,7 @@ async def test_fix_quality_gate_malformed_resume_artifact_repairs(
     gate_p = deep / "fix-quality-gate.json"
     gate_p.write_text("[]")
 
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
+    _arrange(monkeypatch, mute_side_effects)
     _install_stub_backend(monkeypatch, target)
 
     warnings = _capture_warnings(monkeypatch, "daydream.deep.quality_gate.print_warning")
@@ -373,9 +374,7 @@ async def test_fix_quality_gate_second_run_discards_prior_session_rounds(
 ) -> None:
 
     target = _build_gate_target(tmp_path, "gate_session_resume")
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
+    _arrange(monkeypatch, mute_side_effects)
     stub = _install_stub_backend(monkeypatch, target)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     stub.fix_edit_line = _FIX_EDIT_VERBOSE
@@ -410,9 +409,7 @@ async def test_fix_quality_gate_covers_authorized_secondary_edit(
 ) -> None:
 
     target = _build_gate_target_with_helper(tmp_path, "gate_secondary_edit")
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
+    _arrange(monkeypatch, mute_side_effects)
     stub = _ExtraEditBackend(target, target / "helper.py", _FIX_EDIT_VERBOSE)
     # Related-file authority belongs to the synthesis contract, rather than
     # the reviewer's stricter per-stack record envelope.
@@ -466,9 +463,7 @@ async def test_fix_quality_gate_excludes_scrubbed_secondary_file(
     """An out-of-diff module created by the fixer is scrubbed before the quality gate records candidates."""
 
     target = _build_scope_creep_target(tmp_path, "gate_missing_baseline")
-    _silence(monkeypatch)
-    _force_interactive(monkeypatch)
-    mute_side_effects()
+    _arrange(monkeypatch, mute_side_effects)
     stub = _ExtraEditBackend(target, target / "new_module.py", "def extra():\n    return 1\n", append=False)
     stub.merge_items = [_merge_item(1, "api.py", "high")]
     monkeypatch.setattr("daydream.runner.create_backend", lambda name, model=None, **kwargs: stub)

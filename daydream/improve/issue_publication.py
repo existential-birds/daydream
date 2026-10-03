@@ -84,11 +84,7 @@ async def _step_publish_issues(ctx: FlowContext) -> None:
     }
     ctx.data["issue_publication"] = publication
     if not enabled:
-        artifacts.write_artifact(
-            ctx.data["improve_dir"] / artifacts.PUBLISHED_ISSUES_FILENAME,
-            publication,
-            phase=trajectory.DaydreamPhase.PLAN_WRITE,
-        )
+        _save_publication(ctx, publication, final=True)
         return
 
     candidates: list[tuple[dict[str, Any], dict[str, Any], Path]] = []
