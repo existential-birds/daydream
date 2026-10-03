@@ -82,7 +82,7 @@ def test_adjudicate_publication_commands_run_through_main(tmp_path: Path, monkey
 
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(
-        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+        hub, FinalAnnotationBundle.read(bundle),
     )
     final_destination = tmp_path / "downloaded-final"
     assert cli_main(["corpus", "adjudicate", "download-final", "--curation-id", curation_id,

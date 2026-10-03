@@ -3,7 +3,7 @@ import json
 import os
 import shutil
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -224,7 +224,7 @@ def test_concurrent_checkpoint_pointer_deletion_is_not_recreated(tmp_path: Path)
         delete_on_batch = False
 
         def commit_files_atomic(
-            self, mapping: dict[str | Path, Path], commit_message: str, *, parent_commit: str, branch: str,
+            self, mapping: Mapping[str, bytes], commit_message: str, *, parent_commit: str, branch: str,
         ) -> str:
             if self.delete_on_batch and any(str(path).endswith("/batch-latest.json") for path in mapping):
                 self.delete_on_batch = False
@@ -390,7 +390,6 @@ def _published_installer(operation: str, root: Path, hub: AnnotationsHub) -> Cal
         bundle, curation_id = _final_bundle(root)
         published = publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
         return partial(_download_final, hub, curation_id, published["final_snapshot_id"], published["hub_commit_sha"])
     state, manifest = _state_v2(root)
@@ -614,7 +613,6 @@ def test_final_publish_rejects_nonproducer_coverage_report(case: str, tmp_path: 
     with pytest.raises((ValueError, PublicDestinationError), match="coverage-report"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
 
     assert hub.commit_order == []
@@ -639,7 +637,6 @@ def test_final_publish_rejects_nonproducer_lineage(case: str, tmp_path: Path, hu
     with pytest.raises(ValueError, match="lineage.json"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
 
     assert hub.commit_order == []
@@ -666,7 +663,6 @@ def test_final_publish_rejects_tampered_policy_binding(
     with pytest.raises(ValueError, match="policy-binding.json"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
 
     assert hub.commit_order == []
@@ -690,7 +686,6 @@ def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(tmp_
 
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
 
     assert result["hub_commit_sha"] == hub.commit_order[-1]["sha"]
@@ -707,7 +702,6 @@ def test_final_publish_returns_actual_success_commit_is_last_and_idempotent(tmp_
     downloaded_before = len(hub.downloaded_revision_log)
     assert publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     ) == result
     assert len(hub.commit_order) == commits
     assert all(revision is not None for _, revision in hub.downloaded_revision_log[downloaded_before:])
@@ -735,7 +729,6 @@ def test_final_publish_hashes_the_same_bytes_it_uploads_during_local_replacement
         patch.setattr(Path, "read_bytes", read_then_replace)
         published = publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
 
     assert replaced
@@ -762,7 +755,7 @@ def test_final_bundle_rejects_mutable_buffers_before_publication(
 
     with pytest.raises(ValueError, match="annotations.jsonl.*immutable bytes"):
         bundle = FinalAnnotationBundle(semantic)
-        publish_final_annotation_bundle(hub, bundle, staging_parent=tmp_path)
+        publish_final_annotation_bundle(hub, bundle)
     assert hub.info_revision_log == []
     assert hub.commit_order == []
 
@@ -772,9 +765,10 @@ def test_final_publication_uses_owned_bytes_after_staging_source_disappears(
     root, curation_id = _final_bundle(tmp_path)
     bundle = FinalAnnotationBundle.read(root)
     expected = dict(bundle.files)
-    shutil.rmtree(root)
+    shutil.rmtree(tmp_path)
 
-    result = publish_final_annotation_bundle(hub, bundle, staging_parent=tmp_path)
+    result = publish_final_annotation_bundle(hub, bundle)
+    tmp_path.mkdir()
     destination = tmp_path / "reconstructed"
     _download_final(hub, curation_id, bundle.final_snapshot_id, result["hub_commit_sha"], destination)
     assert {name: (destination / name).read_bytes() for name in expected} == expected
@@ -790,7 +784,6 @@ def test_final_publish_accepts_real_bundle_root_under_symlinked_ancestor(tmp_pat
 
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
 
     assert result["hub_commit_sha"] == hub.repo_info().sha
@@ -803,7 +796,6 @@ def test_final_publish_still_refuses_a_declared_symlink_bundle_root(tmp_path: Pa
     with pytest.raises(ValueError, match="final bundle must be a real directory"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(linked),
-            staging_parent=linked.parent.resolve(),
         )
 
     assert hub.info_revision_log == []
@@ -816,7 +808,6 @@ def test_final_publish_retries_typed_compare_and_swap_conflicts(stage: str, tmp_
 
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
 
     assert result["hub_commit_sha"] == hub.commit_order[-1]["sha"]
@@ -832,7 +823,6 @@ def test_final_publish_refuses_populated_same_prefix_collision(tmp_path: Path, h
     with pytest.raises(HydrationError, match="collision"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert len(hub.commit_order) == before
 
@@ -842,7 +832,6 @@ def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit
     bundle, _curation_id = _final_bundle(tmp_path)
     source_result = publish_final_annotation_bundle(
         source_hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     data_tree = source_hub.revision_files(source_result["data_commit_sha"])
     data_mapping = {path: value for path, value in data_tree.items() if path.startswith(source_result["prefix"])}
@@ -860,7 +849,6 @@ def test_final_publish_accepts_valid_rival_success_bound_to_distinct_data_commit
 
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
 
     assert result["data_commit_sha"] == rival_data
@@ -884,7 +872,6 @@ def test_final_publish_refuses_malformed_or_mismatched_success_marker(
     bundle, _curation_id = _final_bundle(tmp_path)
     first = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     if b"PLACEHOLDER" in marker:
         marker = marker.replace(b"PLACEHOLDER", first["final_snapshot_id"].encode())
@@ -894,7 +881,6 @@ def test_final_publish_refuses_malformed_or_mismatched_success_marker(
     with pytest.raises((ValueError, HydrationError)):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert len(hub.commit_order) == before
 
@@ -902,7 +888,6 @@ def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(tmp_pa
     bundle, _curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     marker = _canonical_bytes({
             "schema_version": "annotation-success/v1", "final_snapshot_id": result["final_snapshot_id"],
@@ -914,7 +899,6 @@ def test_final_publish_refuses_success_marker_with_unknown_valid_data_oid(tmp_pa
     with pytest.raises(HydrationError, match="unknown revision"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
 
 @pytest.mark.parametrize("name",
@@ -930,7 +914,6 @@ def test_final_publish_secret_in_every_semantic_file_commits_nothing(name: str, 
     with pytest.raises(PublicDestinationError, match="credential-shaped"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert hub.commit_order == []
 
@@ -944,7 +927,6 @@ def test_final_publish_rejects_symlinked_semantic_input_before_hub_access(tmp_pa
     with pytest.raises(ValueError, match="regular file"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert hub.info_revision_log == []
 
@@ -953,7 +935,6 @@ def test_final_download_requires_fresh_destination(kind: str, tmp_path: Path, hu
     bundle, curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     destination = tmp_path / "download"
     if kind == "file":
@@ -1014,7 +995,6 @@ def test_final_download_is_pinned_and_installs_one_complete_fresh_tree(tmp_path:
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     hub.info_revision_log.clear()
     hub.downloaded_revision_log.clear()
@@ -1148,7 +1128,6 @@ def test_final_publish_verification_failure_never_returns_success(after_stage: s
     with pytest.raises(HydrationError, match="collision"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     stages = [entry["stage"] for entry in hub.atomic_attempt_log]
     if after_stage == "data":
@@ -1161,7 +1140,6 @@ def test_final_publish_rejects_changed_data_behind_success_marker(tmp_path: Path
     bundle, _curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     hub.seed_remote_files({f"{result['prefix']}annotations.jsonl": b"changed-behind-marker\n"})
     before = len(hub.commit_order)
@@ -1169,7 +1147,6 @@ def test_final_publish_rejects_changed_data_behind_success_marker(tmp_path: Path
     with pytest.raises(HydrationError, match="collision"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert len(hub.commit_order) == before
 
@@ -1185,14 +1162,13 @@ def test_final_publish_rejects_missing_data_behind_success_marker(tmp_path: Path
 
     hub = MissingListingHub(repo_id="org/private-annotations")
     bundle, _curation_id = _final_bundle(tmp_path)
-    publish_final_annotation_bundle(hub, FinalAnnotationBundle.read(bundle), staging_parent=(bundle).parent.resolve())
+    publish_final_annotation_bundle(hub, FinalAnnotationBundle.read(bundle))
     hub.hide = True
     before = len(hub.commit_order)
 
     with pytest.raises(HydrationError, match="collision"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert len(hub.commit_order) == before
 
@@ -1207,7 +1183,6 @@ def test_final_publish_rejects_non_normalized_remote_prefix_paths(bad_name: str,
     with pytest.raises(ValueError, match="path"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
 
 def test_final_publish_secret_shaped_identity_commits_nothing(tmp_path: Path, hub: AnnotationsHub) -> None:
@@ -1220,7 +1195,6 @@ def test_final_publish_secret_shaped_identity_commits_nothing(tmp_path: Path, hu
     with pytest.raises(PublicDestinationError, match="credential-shaped"):
         publish_final_annotation_bundle(
             hub, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     assert hub.commit_order == []
 
@@ -1237,7 +1211,6 @@ def test_final_download_last_remote_read_failure_leaves_no_stage(tmp_path: Path)
     bundle, curation_id = _final_bundle(tmp_path)
     result = publish_final_annotation_bundle(
         hub, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     hub.fail = True
     destination = tmp_path / "download"
@@ -1252,7 +1225,6 @@ def test_final_publish_and_download_refuse_public_repository(tmp_path: Path) -> 
     private = AnnotationsHub(repo_id="org/private-annotations")
     published = publish_final_annotation_bundle(
         private, FinalAnnotationBundle.read(bundle),
-        staging_parent=bundle.parent.resolve(),
     )
     public = AnnotationsHub(
         repo_id="org/public-annotations", private=False, files=private.revision_files(published["hub_commit_sha"]),
@@ -1261,7 +1233,6 @@ def test_final_publish_and_download_refuse_public_repository(tmp_path: Path) -> 
     with pytest.raises(PublicDestinationError, match="public Hub"):
         publish_final_annotation_bundle(
             public, FinalAnnotationBundle.read(bundle),
-            staging_parent=bundle.parent.resolve(),
         )
     with pytest.raises(PublicDestinationError, match="public Hub"):
         _download_final(

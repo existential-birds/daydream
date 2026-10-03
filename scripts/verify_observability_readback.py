@@ -715,17 +715,15 @@ def _reconcile_replay(
         for row_index, row in enumerate(rows):
             metadata: dict[str, Any] = {}
             if isinstance(row, dict):
-                # Prefer vendor extra.metadata over legacy metadata/config; first-seen keys win.
-                # compare_stored validates storage shape.
-                for candidate_name in ("extra.metadata", "metadata", "config"):
-                    candidate: Any = row
-                    ok = True
-                    for part in candidate_name.split("."):
-                        if not isinstance(candidate, dict):
-                            ok = False
-                            break
-                        candidate = candidate.get(part)
-                    if ok and isinstance(candidate, dict):
+                # First-seen keys retain extra.metadata > metadata > config precedence.
+                extra = row.get("extra")
+                candidates = (
+                    extra.get("metadata") if isinstance(extra, dict) else None,
+                    row.get("metadata"),
+                    row.get("config"),
+                )
+                for candidate in candidates:
+                    if isinstance(candidate, dict):
                         for key, value in candidate.items():
                             metadata.setdefault(str(key), value)
             # Separation invariant (plan §250): a native pi session identity
@@ -754,19 +752,16 @@ def _reconcile_replay(
             if usage_seen:
                 billed_by_destination[destination] = billed_by_destination.get(destination, 0) + 1
                 # Absent response-model/provider keys are tolerated; present wrong identities fail.
-                stored_model = walk_metadata(metadata, "gen_ai.response.model")
-                if model is not None and stored_model not in (None, model):
-                    fail(
-                        DISPOSITION_SHAPE,
-                        f"{destination}.rows[{row_index}].gen_ai.response.model",
-                        "billed owner model mismatch",
-                    )
-                if provider is not None and walk_metadata(metadata, "gen_ai.provider.name") not in (provider, None):
-                    fail(
-                        DISPOSITION_SHAPE,
-                        f"{destination}.rows[{row_index}].gen_ai.provider.name",
-                        "billed owner provider mismatch",
-                    )
+                for key, identity, detail in (
+                    ("gen_ai.response.model", model, "billed owner model mismatch"),
+                    ("gen_ai.provider.name", provider, "billed owner provider mismatch"),
+                ):
+                    if identity is not None and walk_metadata(metadata, key) not in (None, identity):
+                        fail(
+                            DISPOSITION_SHAPE,
+                            f"{destination}.rows[{row_index}].{key}",
+                            detail,
+                        )
                 stored_response = walk_metadata(metadata, "gen_ai.response.id")
                 if stored_response is not None and response_ids and stored_response not in response_ids:
                     fail(
@@ -784,18 +779,16 @@ def _reconcile_replay(
             if is_pinned_generation:
                 # The pinned first generation: exact historical-equivalent
                 # equality for sealed end and duration.
-                if sealed is not None and sealed_ns is not None and sealed != sealed_ns:
-                    fail(
-                        DISPOSITION_SHAPE,
-                        f"{destination}.rows[{row_index}].daydream.generation.sealed_end_unix_ns",
-                        "sealed end mismatch",
-                    )
-                if elapsed is not None and duration_ns is not None and elapsed != duration_ns:
-                    fail(
-                        DISPOSITION_SHAPE,
-                        f"{destination}.rows[{row_index}].daydream.generation.duration_ns",
-                        "duration mismatch",
-                    )
+                for key, stored, pinned, detail in (
+                    ("sealed_end_unix_ns", sealed, sealed_ns, "sealed end mismatch"),
+                    ("duration_ns", elapsed, duration_ns, "duration mismatch"),
+                ):
+                    if stored is not None and pinned is not None and stored != pinned:
+                        fail(
+                            DISPOSITION_SHAPE,
+                            f"{destination}.rows[{row_index}].daydream.generation.{key}",
+                            detail,
+                        )
             elif stored_native_ms is not None:
                 # Later generations must satisfy their own native-start/sealed-end/duration relationship.
                 if isinstance(sealed, int) and isinstance(stored_native_ms, int):

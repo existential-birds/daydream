@@ -7,8 +7,10 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
-from dataclasses import asdict, dataclass, field
+from collections.abc import Mapping
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, TypeGuard
 
 from daydream.benchmark.harbor import calibrate, run as run_mod, verifier_core
@@ -22,100 +24,25 @@ class ObjectiveError(Exception):
 
 @dataclass(frozen=True)
 class Objective:
-    """Count-derived micro-metrics pooled through verifier_core.aggregate_metrics. Any
-    unscored trial makes the result ineligible for comparison.
+    """Canonical pooled metrics plus completion accounting for one native run.
+
+    Any unscored trial makes the result ineligible for comparison. Keep the
+    scorer's metric names and types until the existing per-run wire projection.
     """
 
-    tp: int
-    fp: int
-    fn: int
-    precision: float
-    recall: float
-    f1: float
-    clean_task_count: int
+    metrics: Mapping[str, float | int]
     clean_pass_count: int
-    clean_accuracy: float
-    task_count: int
-    scored_task_count: int
     candidate_count: int
     gold_count: int
-    infra_error_task_count: int
     verifier_error_task_count: int
     malformed_task_count: int
     failed_task_count: int
     comparison_eligible: bool
-    mean_task_score: float
-    location_pairs_scored: int = 0
-    severity_pairs_scored: int = 0
-    location_exact: int = 0
-    location_near: int = 0
-    location_file: int = 0
-    location_miss: int = 0
-    total_location_exact: int = 0
-    total_location_near: int = 0
-    total_location_file: int = 0
-    total_location_miss: int = 0
-    severity_exact: int = 0
-    severity_within_1: int = 0
-    total_severity_exact: int = 0
-    total_severity_within_1: int = 0
-    location_exact_rate: float = 0.0
-    location_near_rate: float = 0.0
-    location_file_rate: float = 0.0
-    location_miss_rate: float = 0.0
-    severity_exact_rate: float = 0.0
-    severity_within_1_rate: float = 0.0
-    severity_mean_distance: float = 0.0
-    severity_credit: float = 0.0
-    location_credit: float = 0.0
     tokens: float | None = None
     cost: float | None = None
 
-    def _as_metric_dict(self) -> dict[str, float | int]:
-        """Project into the canonical aggregate_metrics output shape for exact scorer
-        comparison.
-        """
-        return {key: getattr(self, field) for field, (key, _) in _METRIC_FIELDS.items()}
-
-
-# The scorer names differ only for headline rates/counts; casts preserve the public types.
-_METRIC_FIELDS: dict[str, tuple[str, type[int] | type[float]]] = {
-    "precision": ("micro_precision", float),
-    "recall": ("micro_recall", float),
-    "f1": ("micro_f1", float),
-    "mean_task_score": ("mean_task_score", float),
-    "clean_accuracy": ("clean_accuracy", float),
-    "task_count": ("task_count", int),
-    "scored_task_count": ("scored_task_count", int),
-    "infra_error_task_count": ("infra_error_task_count", int),
-    "clean_task_count": ("clean_task_count", int),
-    "tp": ("total_tp", int),
-    "fp": ("total_fp", int),
-    "fn": ("total_fn", int),
-    "location_pairs_scored": ("location_pairs_scored", int),
-    "severity_pairs_scored": ("severity_pairs_scored", int),
-    "location_exact_rate": ("location_exact_rate", float),
-    "location_near_rate": ("location_near_rate", float),
-    "location_file_rate": ("location_file_rate", float),
-    "location_miss_rate": ("location_miss_rate", float),
-    "location_credit": ("location_credit", float),
-    "location_exact": ("location_exact", int),
-    "location_near": ("location_near", int),
-    "location_file": ("location_file", int),
-    "location_miss": ("location_miss", int),
-    "total_location_exact": ("total_location_exact", int),
-    "total_location_near": ("total_location_near", int),
-    "total_location_file": ("total_location_file", int),
-    "total_location_miss": ("total_location_miss", int),
-    "severity_exact": ("severity_exact", int),
-    "severity_within_1": ("severity_within_1", int),
-    "total_severity_exact": ("total_severity_exact", int),
-    "total_severity_within_1": ("total_severity_within_1", int),
-    "severity_exact_rate": ("severity_exact_rate", float),
-    "severity_within_1_rate": ("severity_within_1_rate", float),
-    "severity_mean_distance": ("severity_mean_distance", float),
-    "severity_credit": ("severity_credit", float),
-}
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
 
 
 @dataclass(frozen=True)
@@ -254,10 +181,22 @@ def objective_to_json(run: CompletedRun) -> dict[str, object]:
     objective_dict: dict[str, object] | None = None
     if run.objective is not None:
         obj = run.objective
-        # Every Objective field is a flat scalar, so asdict copies the exact
-        # reported shape. The two optional tokens/cost fields stay absent
-        # (rather than null) unless the run actually recorded them.
-        objective_dict = asdict(obj)
+        objective_dict = {
+            item.name: getattr(obj, item.name)
+            for item in fields(Objective)
+            if item.name != "metrics"
+        }
+        metrics = dict(obj.metrics)
+        for wire_name, metric_name in (
+            ("tp", "total_tp"),
+            ("fp", "total_fp"),
+            ("fn", "total_fn"),
+            ("precision", "micro_precision"),
+            ("recall", "micro_recall"),
+            ("f1", "micro_f1"),
+        ):
+            metrics[wire_name] = metrics.pop(metric_name)
+        objective_dict.update(metrics)
         if obj.tokens is None:
             del objective_dict["tokens"]
         if obj.cost is None:
@@ -605,11 +544,8 @@ def _build_objective(
         _row_int(row, "gold_count") for row in rows if row is not None
     )
     clean_task_count = int(agg["clean_task_count"])
-    metric_values: dict[str, Any] = {
-        field: convert(agg[key]) for field, (key, convert) in _METRIC_FIELDS.items()
-    }
     return Objective(
-        **metric_values,
+        metrics=agg,
         clean_pass_count=int(round(agg["clean_accuracy"] * clean_task_count)),
         candidate_count=candidate_count,
         gold_count=gold_count,

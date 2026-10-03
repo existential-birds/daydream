@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import warnings
-from collections.abc import Iterator, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -212,6 +212,19 @@ def upsert_run(archive_dir: Path, fields: Mapping[str, Any]) -> None:
     with _connection(archive_dir) as conn:
         conn.execute(_UPSERT_SQL, _run_upsert_values(fields))
         conn.commit()
+
+
+def replace_run_inventory(archive_dir: Path, fields: Iterable[Mapping[str, Any]]) -> None:
+    """Atomically replace current runs without changing append-only label history.
+
+    Hydration derives this population from its surviving directories; retaining
+    old run rows after a gate moves those directories would resurrect exclusions.
+    Observations are independently keyed history, not children of current runs.
+    """
+    values = [_run_upsert_values(row) for row in fields]
+    with _connection(archive_dir) as conn, conn:
+        conn.execute("DELETE FROM runs")
+        conn.executemany(_UPSERT_SQL, values)
 
 
 def append_label_observation(

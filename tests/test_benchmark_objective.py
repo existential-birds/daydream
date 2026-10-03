@@ -118,8 +118,8 @@ def test_objective_parses_scored_and_infra_trials(tmp_path: Path) -> None:
     assert first is not None and run.task_rows[1] is None
     assert first["tp"] == 2
     assert run.objective is not None
-    assert run.objective.infra_error_task_count == 1
-    assert run.objective.scored_task_count == 1
+    assert run.objective.metrics['infra_error_task_count'] == 1
+    assert run.objective.metrics['scored_task_count'] == 1
 
 def test_objective_clean_task_is_not_infra_failure(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
@@ -129,8 +129,8 @@ def test_objective_clean_task_is_not_infra_failure(tmp_path: Path) -> None:
     _seed_trials(ws, run_id, [_reward(clean_task=1, clean_pass=1)])
     run = objective.read_completed_run(ws, run_id, env={})
     assert run.objective is not None
-    assert run.objective.clean_task_count == 1
-    assert run.objective.infra_error_task_count == 0
+    assert run.objective.metrics['clean_task_count'] == 1
+    assert run.objective.metrics['infra_error_task_count'] == 0
 
 def test_objective_malformed_numeric_fails_closed(tmp_path: Path) -> None:
     ws = _ws(tmp_path)
@@ -173,14 +173,14 @@ def test_objective_metrics_equal_verifier_core(tmp_path: Path) -> None:
     flat = list(run.task_rows)
     assert run.objective is not None
     expected = verifier_core.aggregate_metrics(flat)
-    assert run.objective.tp == expected["total_tp"]
-    assert run.objective.fp == expected["total_fp"]
-    assert run.objective.fn == expected["total_fn"]
-    assert run.objective.precision == expected["micro_precision"]
-    assert run.objective.recall == expected["micro_recall"]
-    assert run.objective.f1 == expected["micro_f1"]
-    assert run.objective.task_count == expected["task_count"]
-    assert run.objective.infra_error_task_count == expected["infra_error_task_count"]
+    assert run.objective.metrics['total_tp'] == expected["total_tp"]
+    assert run.objective.metrics['total_fp'] == expected["total_fp"]
+    assert run.objective.metrics['total_fn'] == expected["total_fn"]
+    assert run.objective.metrics['micro_precision'] == expected["micro_precision"]
+    assert run.objective.metrics['micro_recall'] == expected["micro_recall"]
+    assert run.objective.metrics['micro_f1'] == expected["micro_f1"]
+    assert run.objective.metrics['task_count'] == expected["task_count"]
+    assert run.objective.metrics['infra_error_task_count'] == expected["infra_error_task_count"]
 
 def test_objective_tokens_cost_absent_when_unrecorded(tmp_path: Path) -> None:
     ws = _complete_ws(tmp_path)
@@ -229,12 +229,12 @@ def test_aggregate_suite_pools_micro_metrics_and_never_mean(tmp_path: Path) -> N
         {"workspace": str(a), "run_id": "r1"}, {"workspace": str(b), "run_id": "r2"},
     ]}
     suite = objective.aggregate_suite(manifest, env={})
-    assert suite.objective.precision == pytest.approx(2 / 6)  # pooled, not mean
-    assert suite.objective.precision != pytest.approx((0.5 + 0.25) / 2)
+    assert suite.objective.metrics['micro_precision'] == pytest.approx(2 / 6)  # pooled, not mean
+    assert suite.objective.metrics['micro_precision'] != pytest.approx((0.5 + 0.25) / 2)
     a_rows = objective.read_completed_run(a, "r1", env={}).task_rows
     b_rows = objective.read_completed_run(b, "r2", env={}).task_rows
     flat = a_rows + b_rows   # flattened per-task dicts across both runs
-    assert suite.objective._as_metric_dict() == verifier_core.aggregate_metrics(flat)
+    assert dict(suite.objective.metrics) == verifier_core.aggregate_metrics(flat)
 
 def test_aggregate_suite_experiment_id_stable_under_reorder_rejects_dup(tmp_path: Path) -> None:
     a = _complete_ws_at(tmp_path, "a", "r1", [_reward(tp=1, fp=0, fn=0)])
@@ -274,7 +274,7 @@ def test_suite_pooled_output_equals_authoritative_scoring_end_to_end(tmp_path: P
     a_rows = objective.read_completed_run(a, "r1", env={}).task_rows
     b_rows = objective.read_completed_run(b, "r2", env={}).task_rows
     flat = a_rows + b_rows   # the exact flattened per-task rows across both runs
-    assert suite.objective._as_metric_dict() == verifier_core.aggregate_metrics(flat)
+    assert dict(suite.objective.metrics) == verifier_core.aggregate_metrics(flat)
 
 def test_suite_manifest_validation(tmp_path: Path) -> None:
     good = {"schema_version": 1, "entries": [
@@ -315,12 +315,11 @@ def test_identity_to_dict_is_single_source_for_all_projections(tmp_path: Path) -
 def test_objective_metric_dict_includes_axis_keys() -> None:
     # Shape parity (P-NUMERIC-ROW): the objective projection must carry the
     # exact key set the authoritative aggregate_metrics returns.
-    assert set(objective.Objective(
-        tp=0, fp=0, fn=0, precision=1.0, recall=1.0, f1=1.0, clean_task_count=0, clean_pass_count=0, clean_accuracy=1.0,
-        task_count=0, scored_task_count=0, candidate_count=0, gold_count=0,
-        infra_error_task_count=0, verifier_error_task_count=0, malformed_task_count=0, failed_task_count=0,
-        comparison_eligible=True, mean_task_score=1.0,
-    )._as_metric_dict()) == set(verifier_core.aggregate_metrics([]))
+    pooled = objective._build_objective([], 0, Path("@fixture"), "empty")
+    assert set(pooled.metrics) == set(verifier_core.aggregate_metrics([]))
+    with pytest.raises(TypeError):
+        pooled.metrics["micro_f1"] = 0.0  # type: ignore[index]
+
 
 def test_objective_json_carries_reported_axes(tmp_path: Path) -> None:
     ws = _complete_ws(tmp_path,
@@ -334,7 +333,7 @@ def test_objective_json_carries_reported_axes(tmp_path: Path) -> None:
     assert run.objective is not None
     blob = objective.objective_to_json(run)["objective"]
     assert isinstance(blob, dict)
-    metric = run.objective._as_metric_dict()
+    metric = dict(run.objective.metrics)
     axis_keys = ["location_pairs_scored", "severity_pairs_scored",
         "location_exact", "location_near", "location_file", "location_miss",
         "total_location_exact", "total_location_near", "total_location_file", "total_location_miss",
@@ -345,5 +344,95 @@ def test_objective_json_carries_reported_axes(tmp_path: Path) -> None:
     for key in axis_keys:
         assert key in blob, f"objective JSON drops {key!r}"
         assert blob[key] == metric[key]
-        assert blob[key] == getattr(run.objective, key)
+        assert blob[key] == run.objective.metrics[key]
     assert len(axis_keys) == 23
+
+
+def test_objective_captures_metrics_before_source_mutation() -> None:
+    metrics = verifier_core.aggregate_metrics([])
+    admitted = objective.Objective(
+        metrics=metrics, clean_pass_count=0, candidate_count=0, gold_count=0,
+        verifier_error_task_count=0, malformed_task_count=0, failed_task_count=0,
+        comparison_eligible=True,
+    )
+    metrics["micro_f1"] = 0.25
+    assert admitted.metrics["micro_f1"] == 1.0
+    with pytest.raises(TypeError):
+        admitted.metrics["micro_f1"] = 0.5  # type: ignore[index]
+
+
+@pytest.mark.parametrize("command", ["objective", "aggregate"])
+@pytest.mark.parametrize("destination", ["-", "file"])
+def test_native_objective_cli_emits_exact_metrics_and_pure_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], command: str, destination: str,
+) -> None:
+    from daydream.cli import main
+
+    for name, value in _env().items():
+        monkeypatch.setenv(name, value)
+    ws = _complete_ws(tmp_path, trials=[_reward(tp=2, fp=1), _reward(fn=1)])
+    original = {path.relative_to(ws): path.read_bytes() for path in ws.rglob("*") if path.is_file()}
+    if command == "objective":
+        argv = ["benchmark", command, str(ws), "--run-id", "run-1"]
+    else:
+        manifest = tmp_path / "suite.json"
+        manifest.write_text(json.dumps({
+            "schema_version": 1,
+            "entries": [{"workspace": str(ws), "run_id": "run-1"}],
+        }))
+        argv = ["benchmark", command, str(manifest)]
+    output = tmp_path / "objective.json"
+    target = "-" if destination == "-" else str(output)
+    with pytest.raises(SystemExit) as exit_info:
+        main([*argv, "--json", target])
+    assert exit_info.value.code == 0
+    captured = capsys.readouterr()
+    blob = json.loads(captured.out if destination == "-" else output.read_text())
+    metrics = blob["objective"]
+    assert metrics["task_count"] == metrics["scored_task_count"] == 2
+    if command == "objective":
+        assert metrics["tp"] == 2 and metrics["fp"] == metrics["fn"] == 1
+        assert metrics["precision"] == metrics["recall"] == metrics["f1"] == pytest.approx(2 / 3)
+        assert not {"total_tp", "micro_f1", "metrics", "tokens", "cost"} & metrics.keys()
+    else:
+        assert metrics["total_tp"] == 2 and metrics["total_fp"] == metrics["total_fn"] == 1
+        assert metrics["micro_precision"] == metrics["micro_recall"] == metrics["micro_f1"] == pytest.approx(2 / 3)
+        assert "tp" not in metrics and "f1" not in metrics
+    human = captured.err if destination == "-" else captured.out
+    assert "micro_f1=0.6667" in human
+    assert str(ws) not in json.dumps(blob)
+    assert {path.relative_to(ws): path.read_bytes() for path in ws.rglob("*") if path.is_file()} == original
+
+
+@pytest.mark.parametrize("command", ["objective", "aggregate"])
+def test_native_objective_cli_failed_admission_preserves_existing_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str], command: str,
+) -> None:
+    from daydream.cli import main
+
+    for name, value in _env().items():
+        monkeypatch.setenv(name, value)
+    ws = _complete_ws(tmp_path)
+    output = tmp_path / "objective.json"
+    output.write_bytes(b"existing approved result\n")
+    if command == "objective":
+        argv = ["benchmark", command, str(ws), "--run-id", "missing"]
+    else:
+        manifest = tmp_path / "suite.json"
+        manifest.write_text(json.dumps({
+            "schema_version": 1,
+            "entries": [
+                {"workspace": str(ws), "run_id": "run-1"},
+                {"workspace": str(ws), "run_id": "missing"},
+            ],
+        }))
+        argv = ["benchmark", command, str(manifest)]
+    with pytest.raises(SystemExit) as exit_info:
+        main([*argv, "--json", str(output)])
+    assert exit_info.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "missing" in captured.err
+    assert output.read_bytes() == b"existing approved result\n"

@@ -40,10 +40,10 @@ def test_publication_hubs_are_separate_durable_stores_with_packaged_pins() -> No
     assert hubs.annotations.list_repo_files(hubs.annotations.repo_info("main").sha) == []
     assert hubs.policy_path.is_file()
 
-def test_annotation_hub_atomic_commit_preserves_pinned_trees_and_logs(tmp_path: Path) -> None:
+def test_annotation_hub_atomic_commit_preserves_pinned_trees_and_logs() -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap", files={"a": b"old"})
     base = hub.repo_info("main").sha
-    mapping = _mapping(tmp_path / "input", {"b": b"new", "a": b"changed"})
+    mapping = {"b": b"new", "a": b"changed"}
     revision = hub.commit_files_atomic(mapping, "batch", parent_commit=base, branch="main")
     assert re.fullmatch(r"[0-9a-f]{40}", revision)
     assert revision != base
@@ -61,11 +61,11 @@ def test_annotation_hub_atomic_commit_preserves_pinned_trees_and_logs(tmp_path: 
     assert hub.atomic_attempt_log[-1]["parent_commit"] == base
     assert hub.atomic_attempt_log[-1]["branch"] == "main"
 
-def test_annotation_hub_stale_parent_has_no_tree_commit(tmp_path: Path) -> None:
+def test_annotation_hub_stale_parent_has_no_tree_commit() -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     before = hub.repo_info("main").sha
     tree = hub.revision_files(before)
-    mapping = _mapping(tmp_path / "input", {"a": b"new"})
+    mapping = {"a": b"new"}
     with pytest.raises(HubConcurrentUpdateError):
         hub.commit_files_atomic(mapping, "stale", parent_commit="f" * 40, branch="main")
     assert hub.repo_info("main").sha == before
@@ -74,13 +74,13 @@ def test_annotation_hub_stale_parent_has_no_tree_commit(tmp_path: Path) -> None:
     assert hub.commit_order == []
 
 @pytest.mark.parametrize("stage", ["batch", "data", "success"])
-def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(tmp_path: Path, stage: str,) -> None:
+def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(stage: str,) -> None:
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
     base = hub.repo_info("main").sha
     path = {"batch": "annotations/cur/checkpoints/batch-latest.json", "data": "annotations/cur/final/annotations.jsonl",
         "success": "annotations/cur/final/_SUCCESS",
     }[stage]
-    mapping = _mapping(tmp_path / "input", {path: b"candidate"})
+    mapping = {path: b"candidate"}
     hub.queue_concurrent_commit(stage, {"rival": b"durable remote state"})
     with pytest.raises(HubConcurrentUpdateError):
         hub.commit_files_atomic(mapping, "candidate", parent_commit=base, branch="main")
@@ -94,21 +94,21 @@ def test_annotation_hub_can_inject_one_rival_commit_per_publication_stage(tmp_pa
     assert hub.download_file("rival", final) == b"durable remote state"
     assert len(hub.commit_order) == 2
 
-def test_annotation_hub_commit_identity_binds_parent_message_paths_and_bytes(tmp_path: Path) -> None:
-    def commit(label: str, *, content: bytes = b"one", message: str = "same", path: str = "a") -> str:
+def test_annotation_hub_commit_identity_binds_parent_message_paths_and_bytes() -> None:
+    def commit(*, content: bytes = b"one", message: str = "same", path: str = "a") -> str:
         hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
         parent = hub.repo_info("main").sha
         return hub.commit_files_atomic(
-            _mapping(tmp_path / label, {path: content}), message, parent_commit=parent, branch="main",
+            {path: content}, message, parent_commit=parent, branch="main",
         )
 
-    baseline = commit("baseline")
-    assert baseline == commit("equal")
-    assert baseline != commit("bytes", content=b"two")
-    assert baseline != commit("message", message="different")
-    assert baseline != commit("path", path="b")
+    baseline = commit()
+    assert baseline == commit()
+    assert baseline != commit(content=b"two")
+    assert baseline != commit(message="different")
+    assert baseline != commit(path="b")
     hub = AnnotationsHub(curation_id="cur", snapshot_id="snap")
-    mapping = _mapping(tmp_path / "parent", {"a": b"one"})
+    mapping = {"a": b"one"}
     first = hub.commit_files_atomic(mapping, "same", parent_commit=hub.repo_info("main").sha, branch="main")
     second = hub.commit_files_atomic(mapping, "same", parent_commit=first, branch="main")
     assert first == baseline

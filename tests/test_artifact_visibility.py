@@ -49,6 +49,7 @@ from daydream.artifact_visibility import (
 from daydream.artifacts import (
     external as artifact_external,
     filesystem as artifact_filesystem,
+    ledger as artifact_ledger,
     models as artifact_models,
     ownership as artifact_ownership,
     publication as artifact_publication,
@@ -1704,6 +1705,61 @@ async def test_trajectory_output_route_pairs_external_baselines_and_rejects_unpa
         for label in (OutputLabel.EXPLICIT_TRAJECTORY, OutputLabel.EXPLICIT_TRAJECTORY_PARTIAL,):
             with pytest.raises(ArtifactVisibilityError, match="paired trajectory"):
                 session.register_destination(requested, label=label)
+
+@pytest.mark.parametrize(("field", "value"), [
+    ("expected_dev", True), ("expected_ino", False), ("expected_dev", 1.0),
+    ("expected_ino", "PRIVATE-DESTINATION-CANARY"),
+    ("requested", {"secret": "PRIVATE-DESTINATION-CANARY"}),
+    ("private_extra", "PRIVATE-DESTINATION-CANARY"),
+])
+async def test_destination_ledger_rejects_typed_corruption_without_exposing_inputs(
+    source: Path, field: str, value: object,
+) -> None:
+    requested = source / "findings.json"
+    requested.write_bytes(b"prior findings must survive malformed admission")
+    async with open_artifact_session(_work(source), session_id="closed-destination") as session:
+        session.register_destination(requested, label=OutputLabel.FINDINGS_OUTPUT)
+        transaction = session._detach_transaction
+        registry_path = transaction / "destinations.json"
+        registry = _load_json(registry_path)
+        baseline_path = transaction / "destination-0000-baseline" / requested.name
+        baseline = baseline_path.read_bytes()
+        corrupted = json.loads(json.dumps(registry))
+        corrupted["destinations"][0][field] = value
+        _atomic_json(registry_path, corrupted)
+        try:
+            with pytest.raises(ArtifactVisibilityError, match="destination registry is malformed") as error:
+                artifact_ledger._load_destination_records(transaction, include_published=False)
+            assert "PRIVATE-DESTINATION-CANARY" not in str(error.value)
+            if error.value.__cause__ is not None:
+                assert "PRIVATE-DESTINATION-CANARY" not in str(error.value.__cause__)
+            assert baseline_path.read_bytes() == baseline
+            assert not requested.exists()
+            assert _load_json(registry_path) == corrupted
+        finally:
+            _atomic_json(registry_path, registry)
+    assert requested.read_bytes() == b"prior findings must survive malformed admission"
+
+
+def test_destination_ledger_exports_only_native_record_fields(tmp_path: Path) -> None:
+    @dataclass(frozen=True)
+    class PrivateDestination(artifact_models._DestinationRecord):
+        private_credential: str = "PRIVATE-DESTINATION-CANARY"
+
+    record = PrivateDestination(
+        record_id="destination-0000", requested=str(tmp_path / "output"),
+        base=str(tmp_path), relative="output", label=OutputLabel.FINDINGS_OUTPUT,
+        delivery=artifact_models.DestinationDelivery.DEFERRED, expected_kind="file",
+        baseline_state="absent", baseline=(), missing_parents=(),
+    )
+    artifact_ledger._write_destination_records(tmp_path, [record], include_published=False, include_baseline=True)
+    wire = (tmp_path / "destinations.json").read_bytes()
+    assert b"private_credential" not in wire and b"PRIVATE-DESTINATION-CANARY" not in wire
+    loaded = artifact_ledger._load_destination_records(tmp_path, include_published=False)
+    assert len(loaded) == 1
+    assert loaded[0].requested == record.requested
+    assert loaded[0].label is record.label
+
 
 async def test_trajectory_route_paths_are_composed_from_the_layout_surface(source: Path) -> None:
     session_id = "layout-route"

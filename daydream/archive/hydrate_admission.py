@@ -40,7 +40,7 @@ from daydream.archive.hydrate_types import (
     DedupeResult,
     HydrationError,
 )
-from daydream.archive.index import manifest_index_fields, query_runs, upsert_run
+from daydream.archive.index import manifest_index_fields, query_runs, replace_run_inventory
 from daydream.json_utils import atomic_write_json
 from daydream.redaction import redact_text
 from daydream.timeutil import now_iso_utc
@@ -206,6 +206,7 @@ def _staging_local_source_path(raw: Any, stage: Path) -> str | None:
 
 def rebuild_index(stage: Path) -> None:
     """Index admitted derivatives with credential-free URLs and staging-local paths."""
+    fields: list[dict[str, Any]] = []
     for derivative, data in _derivative_manifests(stage):
         kwargs = manifest_index_fields(data)
         # A hydrated bundle never attests the local executable that is rebuilding it.
@@ -214,7 +215,8 @@ def rebuild_index(stage: Path) -> None:
         kwargs["repo_slug"], kwargs["remote_url"] = slug, canonical
         kwargs["source_path"] = _staging_local_source_path(_read_manifest_field(data, "source_path"), stage)
         kwargs["archive_path"] = str(derivative)
-        upsert_run(stage, kwargs)
+        fields.append(kwargs)
+    replace_run_inventory(stage, fields)
 
 
 def build_resolution_map(

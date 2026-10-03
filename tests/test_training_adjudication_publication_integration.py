@@ -181,7 +181,6 @@ def test_ordinary_checkpoint_survives_total_vm_loss_and_final_cli_download(
             with pytest.raises(ValueError, match=filename.replace(".", r"\.")):
                 publish_final_annotation_bundle(
                     hubs.annotations, FinalAnnotationBundle.read(bundle),
-                    staging_parent=bundle.parent.resolve(),
                 )
             assert len(hubs.annotations.commit_order) == commit_count
         finally:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -123,7 +124,7 @@ class FakeHub:
 
     def commit_files_atomic(
         self,
-        mapping: dict[str | Path, Path],
+        mapping: Mapping[str, bytes],
         commit_message: str,
         *,
         parent_commit: str,
@@ -138,8 +139,8 @@ class FakeHub:
             )
 
         additions = [
-            (str(path_in_repo), Path(local_path).read_bytes())
-            for path_in_repo, local_path in sorted(mapping.items(), key=lambda item: str(item[0]))
+            (path_in_repo, content)
+            for path_in_repo, content in sorted(mapping.items())
         ]
         new_tree = dict(self.files)
         for path_in_repo, content in additions:

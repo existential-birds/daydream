@@ -51,7 +51,7 @@ def _write_destination_records(
                 "index": index,
                 **{
                     field.name: getattr(record, field.name)
-                    for field in fields(record)
+                    for field in fields(_DestinationRecord)
                     if field.name not in {"baseline", "published"}
                 },
             }

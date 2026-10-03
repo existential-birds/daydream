@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import json
 import re
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -122,7 +121,7 @@ class AnnotationHubClient(Protocol):
 
     def commit_files_atomic(
         self,
-        mapping: dict[str | Path, Path],
+        mapping: Mapping[str, bytes],
         commit_message: str,
         *,
         parent_commit: str,
@@ -415,7 +414,7 @@ def publish_annotation_state(
         payloads = {**batch_mapping_bytes, stable_path: pointer_bytes}
         try:
             revision = _commit_payloads(
-                client, payloads, staging_parent=state_dir.parent,
+                client, payloads,
                 parent=current_revision, message=commit_message, operation="annotation checkpoint",
             )
         except HubConcurrentUpdateError:
@@ -699,26 +698,19 @@ def _commit_payloads(
     client: AnnotationHubClient,
     payloads: Mapping[str, bytes],
     *,
-    staging_parent: Path,
     parent: str,
     message: str,
     operation: str,
 ) -> str:
     """Commit captured bytes with CAS; leave typed races for the caller to retry."""
-    with tempfile.TemporaryDirectory(prefix=".daydream-annotation-", dir=staging_parent) as temp:
-        mapping: dict[str | Path, Path] = {}
-        for index, (path, data) in enumerate(sorted(payloads.items())):
-            local = Path(temp) / str(index)
-            local.write_bytes(data)
-            mapping[path] = local
-        try:
-            return client.commit_files_atomic(
-                mapping, message, parent_commit=parent, branch=ANNOTATION_BRANCH,
-            )
-        except HubConcurrentUpdateError:
-            raise
-        except Exception as exc:
-            raise HubUnavailableError(redact_text(f"{operation} commit failed: {exc}")) from None
+    try:
+        return client.commit_files_atomic(
+            payloads, message, parent_commit=parent, branch=ANNOTATION_BRANCH,
+        )
+    except HubConcurrentUpdateError:
+        raise
+    except Exception as exc:
+        raise HubUnavailableError(redact_text(f"{operation} commit failed: {exc}")) from None
 
 
 def _verify_data_commit(client: AnnotationHubClient, data_oid: str, bundle: FinalAnnotationBundle) -> None:
@@ -763,8 +755,6 @@ def _verified_existing_success(
 def publish_final_annotation_bundle(
     client: AnnotationHubClient,
     bundle: FinalAnnotationBundle,
-    *,
-    staging_parent: Path,
 ) -> dict[str, Any]:
     """Publish captured validated bytes in data then success commits."""
     curation_id = bundle.curation_id
@@ -796,7 +786,7 @@ def publish_final_annotation_bundle(
         try:
             data_oid = _commit_payloads(
                 client, {f"{prefix}{name}": data for name, data in data_payloads.items()},
-                staging_parent=staging_parent, parent=current,
+                parent=current,
                 message=commit_message, operation="final annotation",
             )
         except HubConcurrentUpdateError:
@@ -828,7 +818,7 @@ def publish_final_annotation_bundle(
         try:
             success_oid = _commit_payloads(
                 client, {f"{prefix}{_SUCCESS_FILENAME}": marker},
-                staging_parent=staging_parent, parent=current,
+                parent=current,
                 message=success_message, operation="final annotation",
             )
         except HubConcurrentUpdateError:

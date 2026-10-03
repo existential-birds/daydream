@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
@@ -188,7 +188,10 @@ class AnnotationsHub(FakeHub):
 
     def upload_files(self, mapping: dict[str | Path, Path], commit_message: str,) -> None:
         """Preserve the legacy surface while committing atomically to main."""
-        self.commit_files_atomic(mapping, commit_message, parent_commit=self._head, branch="main",)
+        self.commit_files_atomic(
+            {str(path): local.read_bytes() for path, local in mapping.items()},
+            commit_message, parent_commit=self._head, branch="main",
+        )
 
     def repo_info(self, revision: str | None = None) -> RepoInfo:
         self.info_revision_log.append(revision)
@@ -215,16 +218,10 @@ class AnnotationsHub(FakeHub):
 
     def seed_remote_files(self, files: dict[str, bytes], message: str = "fixture seed") -> str:
         """Create an immutable external revision, without retaining local files."""
-        with tempfile.TemporaryDirectory(prefix="daydream-annotation-fixture-") as staging:
-            mapping: dict[str | Path, Path] = {}
-            for index, (path, data) in enumerate(sorted(files.items())):
-                local = Path(staging) / str(index)
-                local.write_bytes(data)
-                mapping[path] = local
-            return super().commit_files_atomic(mapping, message, parent_commit=self._head, branch="main",)
+        return super().commit_files_atomic(files, message, parent_commit=self._head, branch="main")
 
     def commit_files_atomic(
-        self, mapping: dict[str | Path, Path], commit_message: str, *, parent_commit: str, branch: str,
+        self, mapping: Mapping[str, bytes], commit_message: str, *, parent_commit: str, branch: str,
     ) -> str:
         paths = sorted(map(str, mapping))
         stage = ("success" if any(path.endswith("/_SUCCESS") for path in paths)

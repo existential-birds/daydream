@@ -127,7 +127,7 @@ def test_hf_client_requires_token_env(monkeypatch: pytest.MonkeyPatch) -> None:
 class _FakeCommitOperationAdd:
     error: Exception | None = None
 
-    def __init__(self, *, path_in_repo: str, path_or_fileobj: str) -> None:
+    def __init__(self, *, path_in_repo: str, path_or_fileobj: bytes) -> None:
         if self.error is not None:
             raise self.error
         self.path_in_repo = path_in_repo
@@ -154,21 +154,13 @@ def _install_fake_hf_atomic(monkeypatch: pytest.MonkeyPatch, *, oid: str = "b" *
     monkeypatch.setattr(hydrate, "_import_hf_hub", lambda: fake_hf)
     return api
 
-def _write_atomic_mapping(tmp_path: Path, payloads: dict[str, bytes]) -> dict[str | Path, Path]:
-    tmp_path.mkdir(parents=True, exist_ok=True)
-    mapping: dict[str | Path, Path] = {}
-    for index, (remote, payload) in enumerate(payloads.items()):
-        local = tmp_path / f"atomic-{index}.bin"
-        local.write_bytes(payload)
-        mapping[remote] = local
-    return mapping
-
-def _commit_state(tmp_path: Path) -> None:
+def _commit_state() -> None:
     client = hydrate.HfHubClient("org/private-ds")
     client.commit_files_atomic(
-        _write_atomic_mapping(tmp_path, {"state.json": b"{}"}), "annotation batch", parent_commit="a" * 40,
+        {"state.json": b"{}"}, "annotation batch", parent_commit="a" * 40,
         branch="main",
     )
+
 
 def _hf_http_error(status: int, message: str = "Hub request failed") -> HfHubHTTPError:
     request = httpx.Request("POST", "https://huggingface.co/api/datasets/org/private-ds/commit/main")
@@ -179,12 +171,10 @@ def _hf_error_without_response() -> HfHubHTTPError:
     error.response = None  # type: ignore[assignment]  # malformed third-party exception
     return error
 
-def test_hf_atomic_commit_uses_one_guarded_dataset_commit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hf_atomic_commit_uses_one_guarded_dataset_commit(monkeypatch: pytest.MonkeyPatch) -> None:
     api = _install_fake_hf_atomic(monkeypatch)
     client = hydrate.HfHubClient("org/private-ds")
-    mapping = _write_atomic_mapping(
-        tmp_path, {"z/final.bin": b"third", "a/first.bin": b"first", "m/middle.bin": b"second"},
-    )
+    mapping = {"z/final.bin": b"third", "a/first.bin": b"first", "m/middle.bin": b"second"}
 
     sha = client.commit_files_atomic(
         mapping, "annotation batch", parent_commit="a" * 40, branch=hydrate.ANNOTATION_BRANCH,
@@ -206,22 +196,22 @@ def test_hf_atomic_commit_uses_one_guarded_dataset_commit(tmp_path: Path, monkey
     ],
 )
 def test_hf_atomic_commit_constructor_errors_are_redacted_and_never_concurrent(
-    operation_error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    operation_error: Exception, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     api = _install_fake_hf_atomic(monkeypatch, operation_error=operation_error)
     with pytest.raises(hydrate.HydrationError) as excinfo:
-        _commit_state(tmp_path)
+        _commit_state()
     assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
     assert "hf_secret_token" not in str(excinfo.value)
     assert api.create_commit_calls == []
 
 def test_hf_atomic_commit_maps_only_precondition_failed_to_concurrent_update(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    monkeypatch: pytest.MonkeyPatch
 ) -> None:
     secret = "https://user:hf_secret_token@huggingface.co/private"
     api = _install_fake_hf_atomic(monkeypatch, error=_hf_http_error(412, secret))
     with pytest.raises(hydrate.HubConcurrentUpdateError) as excinfo:
-        _commit_state(tmp_path)
+        _commit_state()
     assert len(api.create_commit_calls) == 1
     assert "hf_secret_token" not in str(excinfo.value)
 
@@ -239,29 +229,29 @@ def test_hf_atomic_commit_maps_only_precondition_failed_to_concurrent_update(
     ],
 )
 def test_hf_atomic_commit_does_not_misclassify_other_errors(
-    error: Exception, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    error: Exception, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_hf_atomic(monkeypatch, error=error)
     with pytest.raises(hydrate.HydrationError) as excinfo:
-        _commit_state(tmp_path)
+        _commit_state()
     assert not isinstance(excinfo.value, hydrate.HubConcurrentUpdateError)
     assert "hf_secret_token" not in str(excinfo.value)
 
-def test_hf_atomic_commit_rejects_non_commit_oid(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hf_atomic_commit_rejects_non_commit_oid(monkeypatch: pytest.MonkeyPatch) -> None:
     _install_fake_hf_atomic(monkeypatch, oid="not-a-commit")
     with pytest.raises(hydrate.HydrationError, match="invalid commit OID"):
-        _commit_state(tmp_path)
+        _commit_state()
 
-def test_fake_hub_atomic_commit_installs_one_content_derived_tree(tmp_path: Path) -> None:
+def test_fake_hub_atomic_commit_installs_one_content_derived_tree() -> None:
     parent = "a" * 40
     first = FakeHub(repo_id="org/private-ds", files={"existing": b"old"}, head_sha=parent)
     second = FakeHub(repo_id="org/private-ds", files={"existing": b"old"}, head_sha=parent)
     first_sha = first.commit_files_atomic(
-        _write_atomic_mapping(tmp_path / "first", {"b": b"two", "a": b"one"}), "annotation batch", parent_commit=parent,
+        {"b": b"two", "a": b"one"}, "annotation batch", parent_commit=parent,
         branch="main",
     )
     second_sha = second.commit_files_atomic(
-        _write_atomic_mapping(tmp_path / "second", {"b": b"changed", "a": b"one"}), "annotation batch",
+        {"b": b"changed", "a": b"one"}, "annotation batch",
         parent_commit=parent, branch="main",
     )
 
@@ -272,14 +262,14 @@ def test_fake_hub_atomic_commit_installs_one_content_derived_tree(tmp_path: Path
     assert first.download_file("b", revision=first_sha) == b"two"
     assert first.commit_order == [{"contains": ["a", "b"], "sha": first_sha}]
 
-def test_fake_hub_atomic_commit_stale_parent_changes_nothing(tmp_path: Path) -> None:
+def test_fake_hub_atomic_commit_stale_parent_changes_nothing() -> None:
     parent = "a" * 40
     hub = FakeHub(repo_id="org/private-ds", files={"existing": b"old"}, head_sha=parent)
     before_files = dict(hub.files)
     before_commits = list(hub.commit_order)
     with pytest.raises(hydrate.HubConcurrentUpdateError):
         hub.commit_files_atomic(
-            _write_atomic_mapping(tmp_path, {"new": b"value"}), "annotation batch", parent_commit="b" * 40,
+            {"new": b"value"}, "annotation batch", parent_commit="b" * 40,
             branch="main",
         )
     assert hub.files == before_files
@@ -1226,3 +1216,31 @@ def test_repo_commit_unresolved_is_a_license_bucket_code() -> None:
     assert REASON_CODE_REPO_COMMIT_UNRESOLVED in EXCLUSION_CODES
     buckets = admission_summary_buckets([("s1", REASON_CODE_REPO_COMMIT_UNRESOLVED)])
     assert buckets["license_evidence_missing"] == 1 and sum(buckets.values()) == 1
+
+
+def test_hf_atomic_commit_uses_captured_bytes_with_native_operation_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from huggingface_hub import CommitOperationAdd  # noqa: PLC0415  # exercise actual optional transport
+
+    api = _FakeAtomicApi()
+    fake_hf = SimpleNamespace(CommitOperationAdd=CommitOperationAdd, HfApi=lambda *, token: api)
+    monkeypatch.setattr(hydrate, "_import_hf_hub", lambda: fake_hf)
+    payloads = {"z/index.db": b"\x00\xff\x80binary", "a/manifest.json": b"{}\n"}
+    client = hydrate.HfHubClient("org/private-ds")
+
+    revision = client.commit_files_atomic(
+        payloads, "captured annotation", parent_commit="a" * 40, branch=hydrate.ANNOTATION_BRANCH,
+    )
+
+    assert revision == "b" * 40
+    assert len(api.create_commit_calls) == 1
+    operations = api.create_commit_calls[0]["operations"]
+    assert [operation.path_in_repo for operation in operations] == sorted(payloads)
+    for operation in operations:
+        expected = payloads[operation.path_in_repo]
+        assert operation.path_or_fileobj is expected
+        assert operation.upload_info.sha256 == hashlib.sha256(expected).digest()
+        assert operation.upload_info.size == len(expected)
+        with operation.as_file() as stream:
+            assert stream.read() == expected

@@ -174,7 +174,7 @@ def test_legacy_publish_stage_must_be_a_real_directory(kind: str, tmp_path: Path
 
     hub = AnnotationsHub(repo_id="org/private-annotations")
     with pytest.raises(ValueError, match="exactly the seven semantic files"):
-        publish_final_annotation_bundle(hub, FinalAnnotationBundle.read(out), staging_parent=(out).parent.resolve())
+        publish_final_annotation_bundle(hub, FinalAnnotationBundle.read(out))
     assert hub.commit_order == []
 
 def test_build_final_bundle_unpinned_as_of_emits_empty_not_none(tmp_path: Path) -> None:

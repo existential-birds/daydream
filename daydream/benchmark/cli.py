@@ -468,8 +468,8 @@ def _handle_benchmark_objective(args: argparse.Namespace) -> int:
     if obj is not None:
         print(
             f"objective {run.run_id}: comparison_eligible={obj.comparison_eligible} "
-            f"micro_f1={obj.f1:.4f} tasks={obj.task_count} "
-            f"scored={obj.scored_task_count} infra={obj.infra_error_task_count}",
+            f"micro_f1={obj.metrics['micro_f1']:.4f} tasks={obj.metrics['task_count']} "
+            f"scored={obj.metrics['scored_task_count']} infra={obj.metrics['infra_error_task_count']}",
             file=out_stream,
         )
     else:
@@ -485,7 +485,7 @@ def _suite_objective_to_json(suite: objective.SuiteObjective) -> dict[str, objec
     from daydream.benchmark.harbor import objective
 
     identity = suite.identity
-    objective_json = suite.objective._as_metric_dict()
+    objective_json = dict(suite.objective.metrics)
     return {
         "experiment_id": suite.experiment_id,
         "profile_digest": suite.profile_digest,
@@ -529,8 +529,8 @@ def _handle_benchmark_aggregate(args: argparse.Namespace) -> int:
         file=out_stream,
     )
     print(
-        f"aggregate {suite.objective.task_count} tasks, "
-        f"micro_f1={suite.objective.f1:.4f}, experiment_id={suite.experiment_id}",
+        f"aggregate {suite.objective.metrics['task_count']} tasks, "
+        f"micro_f1={suite.objective.metrics['micro_f1']:.4f}, experiment_id={suite.experiment_id}",
         file=out_stream,
     )
     return 0

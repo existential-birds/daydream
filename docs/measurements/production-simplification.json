@@ -16,22 +16,22 @@
   },
   "after": {
     "files": 362,
-    "physical_loc": 108842,
+    "physical_loc": 108776,
     "inventory_sha256": "76cc2585344c06d20088698af1466bab69e33436b8d4e3882a0511bd5590422f",
-    "source_loc": 83415,
-    "clone_loc": 2252,
-    "high_cc_functions": 493,
+    "source_loc": 83349,
+    "clone_loc": 2240,
+    "high_cc_functions": 492,
     "high_cog_functions": 604
   },
-  "physical_reduction_percent": 3.989,
-  "source_reduction_percent": 2.469,
+  "physical_reduction_percent": 4.047,
+  "source_reduction_percent": 2.547,
   "requested_physical_reduction_percent": 10,
   "target_met": false,
   "requested_source_reduction_percent": 10,
   "physical_target_max": 102027,
   "source_target_max": 76974,
-  "physical_shortfall_loc": 6815,
-  "source_shortfall_loc": 6441,
+  "physical_shortfall_loc": 6749,
+  "source_shortfall_loc": 6375,
   "reproduction": "docs/measurements/production-simplification-reproduce.md",
   "continuation_start": {
     "commit": "b98a9dd51fde81df5dc4534a85ab29a986f6a127",
@@ -40,8 +40,8 @@
     "source_loc": 85165
   },
   "continuation_reduction": {
-    "physical_loc": 2183,
-    "source_loc": 1750
+    "physical_loc": 2249,
+    "source_loc": 1816
   },
   "upstream": {
     "pr_base_verified": "58cc88e4d7091b27afe1b2a6eec486504e255dfd",

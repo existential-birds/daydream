@@ -417,7 +417,7 @@ def test_cli_download_final_installs_exact_success_revision(
     hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(
-        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+        hub, FinalAnnotationBundle.read(bundle),
     )
     destination = tmp_path / "downloaded"
 
@@ -439,7 +439,7 @@ def test_cli_download_final_rejects_existing_destination_before_download(
     hub = _wired_hub(monkeypatch)
     bundle, curation_id = _final_bundle(tmp_path)
     published = publish_final_annotation_bundle(
-        hub, FinalAnnotationBundle.read(bundle), staging_parent=bundle.parent.resolve(),
+        hub, FinalAnnotationBundle.read(bundle),
     )
     hub.downloaded_revision_log.clear()
     destination = tmp_path / "downloaded"

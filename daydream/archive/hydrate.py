@@ -14,7 +14,7 @@ import os
 import re
 import shutil
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -474,7 +474,7 @@ class HfHubClient:
 
     def commit_files_atomic(
         self,
-        mapping: dict[str | Path, Path],
+        mapping: Mapping[str, bytes],
         commit_message: str,
         *,
         parent_commit: str,
@@ -487,9 +487,9 @@ class HfHubClient:
             operations = [
                 self._hf.CommitOperationAdd(
                     path_in_repo=str(path_in_repo),
-                    path_or_fileobj=str(local_path),
+                    path_or_fileobj=content,
                 )
-                for path_in_repo, local_path in sorted(mapping.items(), key=lambda item: str(item[0]))
+                for path_in_repo, content in sorted(mapping.items())
             ]
         except Exception as exc:
             raise HydrationError(

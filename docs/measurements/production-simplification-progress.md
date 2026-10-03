@@ -7,11 +7,12 @@ Continuation started at `b98a9dd51fde81df5dc4534a85ab29a986f6a127` on
 The original inventory and pinned Python 3.12 / scb-check 0.2.0 method reproduce
 113,364 physical lines and 85,527 source lines at baseline. The continuation's
 starting inventory reproduces 111,025 physical lines across 364 production files.
-The latest integrated snapshot has 363 production files, 110,239 physical lines,
-and 84,495 source lines (2.757% and 1.207% aggregate reductions). The starting
-commit also reproduces its recorded 85,165 source lines. Targets remain at most
-102,027 physical lines and 76,974 source lines: shortfalls are 8,212 physical and
-7,521 source lines. The target is unmet; focused improvements are not completion.
+The latest pushed checkpoint `4d2967f626d6e83c754ae4ac7b74bd93e580476a` has
+362 production files, 108,842 physical lines and 83,415 source lines
+(3.989% and 2.469% aggregate reductions). Starting source LOC is 85,165.
+Targets remain at most 102,027 physical and 76,974 source lines: shortfalls are
+6,815 physical and 6,441 source lines. The objective remains unmet; useful
+owner consolidation and passing checks do not establish completion.
 
 ## Decisions under integration
 
@@ -367,3 +368,70 @@ forwards the native keyword and exercises ambient and captured execution inputs;
 all original per-phase/exit assertions remain, with identity assertions added.
 No production or measurement changes were needed. Focused variants pass; the
 ordinary signed amend and full hook-enabled push retry are pending.
+
+Signed checkpoint `4d2967f6` passed the normal amend and ordinary push retry:
+9,443 tests passed, 14 skipped, 203 warnings, 90.52% branch coverage against the
+unchanged 86% floor; lock/sync, Ruff, both Vulture scans, mypy (747 files),
+actionlint, coverage artifact and naming all passed. Runtime 593.24 seconds.
+All 362 committed production paths/bytes exactly match the independently measured
+sixth snapshot. GitHub confirms this head, the recorded baseline base, and draft
+status; the existing PR description now reports these results and shortfalls.
+
+Seventh wave under integration: native current run-inventory replacement resolves
+a demonstrated SQL/staged-directory disagreement after license/fixture exclusion;
+immutable observation history remains independent and re-admission survives. It
+adds seven source lines and receives no simplification credit. Harbor Objective
+will retain the scorer's immutable native metric mapping instead of 35 scalar
+mirrors and bidirectional aliases; producer/caller cost is being verified.
+Artifact durable record admission is prototyped outside the checkout until native
+reader/recovery costs and strict identity proofs justify integration. Rejected
+whole-invocation, UI lifecycle, plan authoring and RL scoring mergers retain
+distinct live obligations; these negative assessments are not a blocker or a
+claim that the target has been achieved.
+
+## Seventh integrated checkpoint (verification pending)
+
+The complete fixed production inventory contains 362 files, 108,776 physical
+lines and 83,349 source lines (4.047% physical, 2.547% source reductions).
+The source and physical shortfalls remain 6,375 and 6,749 lines; the target is
+not met. This wave removes 66 source / 66 physical lines in aggregate, counting
+the stage-index correctness change’s added lines. High CC falls to 492; high
+cognitive complexity remains 604 and clone LOC falls to 2,240.
+
+- Harbor objectives retain one immutable captured metric mapping. The mirrored
+  scalar fields and bidirectional cast/alias registry disappear. Six per-run
+  JSON aliases remain at the final wire encoder; suite JSON stays canonical.
+  Differential values/diagnostics match in 4,051 cases; object key order is not
+  claimed byte-identical. Real objective/aggregate CLI cases preserve output,
+  failure admission, and workspace bytes.
+- Archive rebuild replaces the current run inventory transactionally, after
+  normalizing all surviving derivatives. License/fixture rejection cannot leave
+  a stale SQL run row. Independent historical observations remain intact; native
+  re-admission and collision behavior remains checked. This fix adds seven
+  source and fifteen physical lines, rather than receiving reduction credit.
+- Artifact destination serialization uses the exact declared base vocabulary,
+  preventing private subclass fields from reaching the durable wire. All seven
+  added durable-corruption/private-subclass regression cases remain. The proposed
+  typed-record/context rewrite was rejected: readable guard layout showed a net
+  six source / eleven physical lines added, with more conditional routing and
+  complexity. Existing loader, manifest and transient recovery owners are retained
+  byte-for-byte; the one-line privacy fix receives zero LOC credit.
+- Final annotation publication passes sealed bytes directly to the installed
+  native Hub CommitOperationAdd. Its sibling temporary-directory allocation,
+  file-copy mapping, and staging-parent threading disappear. Both commits, CAS,
+  readback, privacy scans, and verified installation remain. Actual HF byte
+  hashing and publication after source-parent deletion are exercised.
+- Readback reconciliation uses the three concrete vendor metadata locations
+  and shared identity/timing comparison rules. 12,000 native JSON cases preserve
+  exact diagnostics/errors. Readable calls remain expanded; the final net is six
+  source lines, not the larger packed prototype estimate.
+
+Focused checks passed: 720 archive/workflow checks; 218 artifact/recovery checks
+plus one existing skip (before record prototype rollback), with eight final
+unchanged-native-owner/privacy checks; 357 annotation/Hub/CLI checks; Harbor objective/CLI
+checks and six explicit real commands; 36 readback/replay checks. Independent
+owner reviews passed. Full integrated normal-hook verification is pending.
+The original baseline and inventory scope remain unchanged. A literal-prompt
+duplication assessment found no repeated twelve-line production string blocks
+to consolidate; no prompt behavior was removed for line credit. Broader review
+evidence, corpus/checkpoint, and original extraction ownership assessments continue.

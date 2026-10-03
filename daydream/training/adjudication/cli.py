@@ -706,7 +706,7 @@ def handle_publish_final(argv: list[str]) -> int:
     try:
         bundle = FinalAnnotationBundle.read(bundle_dir)
         client = _make_client(args.hub_repo)
-        result = publish_final_annotation_bundle(client, bundle, staging_parent=bundle_dir.parent.resolve())
+        result = publish_final_annotation_bundle(client, bundle)
     except (ValueError, HubUnavailableError, HydrationError, PublicDestinationError, FileNotFoundError) as exc:
         print_error(create_console(), "adjudicate publish-final failed", str(exc))
         return 1
