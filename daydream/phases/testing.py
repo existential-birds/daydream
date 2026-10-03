@@ -208,11 +208,12 @@ def _reject_test_healing_generated_file_edits(
         return []
 
     ref = snapshot or "HEAD"
-    recovery_dir = artifact_dir_for(
+    artifact_root = artifact_dir_for(
         repo,
         session=artifact_session,
         allow_standalone=allow_standalone,
-    ) / "partial-fixes"
+    )
+    recovery_dir = artifact_root / "partial-fixes"
 
     try:
         changed = git_ops.changed_files_against(
@@ -286,11 +287,7 @@ def _reject_test_healing_generated_file_edits(
             restoration_failed = True
 
     if direct_violations:
-        artifact = artifact_dir_for(
-            repo,
-            session=artifact_session,
-            allow_standalone=allow_standalone,
-        ) / "deep" / "generated-file-violations.json"
+        artifact = artifact_root / "deep" / "generated-file-violations.json"
         try:
             artifact.parent.mkdir(parents=True, exist_ok=True)
             artifact.write_text(

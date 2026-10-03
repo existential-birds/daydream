@@ -175,14 +175,19 @@ async def specialist_pre_scan(*args: Any, **kwargs: Any) -> ExplorationContext:
 
 
 # Pure helpers
+def _py_ts_diff() -> str:
+    """Python + TypeScript multifile fixtures: 4 files, so the parallel tier runs."""
+    return ((FIXTURES / "python_multifile.diff").read_text()
+            + (FIXTURES / "typescript_multifile.diff").read_text())
+
+
 def test_count_changed_files_counts_unique_paths() -> None:
     assert count_changed_files("") == 0
     one = (FIXTURES / "trivial_single.diff").read_text()
     assert count_changed_files(one) == 1
     py = (FIXTURES / "python_multifile.diff").read_text()
     assert count_changed_files(py) == 2
-    combined = py + (FIXTURES / "typescript_multifile.diff").read_text()
-    assert count_changed_files(combined) == 4
+    assert count_changed_files(_py_ts_diff()) == 4
 
 def test_select_tier_thresholds() -> None:
     assert select_tier(0) == "skip"
@@ -243,9 +248,7 @@ def test_specialist_rows_carry_llm_provenance(tmp_path: Path) -> None:
     assert by_path["daydream/extra.py"].provenance == "llm"
 
 def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path: Path) -> None:
-    py = (FIXTURES / "python_multifile.diff").read_text()
-    ts = (FIXTURES / "typescript_multifile.diff").read_text()
-    diff_text = py + ts  # 4 files -> parallel tier, so the test_mapper specialist runs
+    diff_text = _py_ts_diff()
     backend = _specialist_backend(results=_VALID_ENVELOPE)
     ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
     exploration_dir = tmp_path / "exploration"
@@ -255,9 +258,7 @@ def test_test_mapper_source_file_flows_through_pre_into_test_map_json(tmp_path: 
 
 
 def test_parallel_tier_launches_three_agents(tmp_path: Path) -> None:
-    py = (FIXTURES / "python_multifile.diff").read_text()
-    ts = (FIXTURES / "typescript_multifile.diff").read_text()
-    diff_text = py + ts
+    diff_text = _py_ts_diff()
     backend = _specialist_backend()
     ctx = anyio.run(lambda: specialist_pre_scan(cast(Backend, backend), tmp_path, diff_text))
 
@@ -275,9 +276,7 @@ def test_parallel_tier_launches_three_agents(tmp_path: Path) -> None:
 
 def test_parallel_tier_separates_changed_targets_from_known_context(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    py = (FIXTURES / "python_multifile.diff").read_text()
-    ts = (FIXTURES / "typescript_multifile.diff").read_text()
-    diff_text = py + ts
+    diff_text = _py_ts_diff()
     monkeypatch.setattr("daydream.exploration_runner.detect_affected_files", lambda *_: [
         FileInfo("src/api.ts", "modified"), FileInfo("src/models.ts", "imports"),
         FileInfo("tests/api.test.ts", "imported_by"),
@@ -493,9 +492,7 @@ def test_parse_envelope_handles_missing_keys(tmp_path: Path) -> None:
     assert ctx.conventions == []
 
 def test_specialist_failure_doesnt_cancel_others(tmp_path: Path) -> None:
-    py = (FIXTURES / "python_multifile.diff").read_text()
-    ts = (FIXTURES / "typescript_multifile.diff").read_text()
-    diff_text = py + ts  # 4 files -> parallel tier
+    diff_text = _py_ts_diff()
     def responder(*args: Any, **kwargs: Any) -> Any:
         if args[2] == PATTERN_SCANNER_SCHEMA:
             raise RuntimeError("pattern scanner exploded")
