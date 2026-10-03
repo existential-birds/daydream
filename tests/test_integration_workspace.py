@@ -13,11 +13,11 @@ from typing import Any, Callable
 import pytest
 
 from daydream import git_ops, runner
-from daydream.backends import ResultEvent, TextEvent
-from daydream.flows.engine import BackendFactory
+from daydream.backends import BackendExecutionInput, ResultEvent, TextEvent
 from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from daydream.run_context import current_run_context
+from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import git as _git
 
@@ -41,19 +41,20 @@ def _make_feature_branch_on_origin(tmp_path: Path, bare_origin: Path, branch: st
     return sha
 
 
-def _stub_run_loop_deep(monkeypatch: pytest.MonkeyPatch, on_dispatch: Callable[[Any, Any], None]) -> None:
+def _stub_run_deep(monkeypatch: pytest.MonkeyPatch, on_dispatch: Callable[[Any, Any], None]) -> None:
     """Capture the real workspace/config dispatch and return success."""
 
     async def _stub(
-        work: Any, config: Any, run_artifacts: Any = None, *, run_context: Any, github_execution: GitHubExecutionInput,
-        backend_factory: BackendFactory | None,
+        config: RunConfig, work: WorkContext, *, run_artifacts: Any, run_context: Any,
+        github_execution: GitHubExecutionInput, backend_execution: BackendExecutionInput | None, allow_standalone: bool,
     ) -> int:
         assert run_context is current_run_context()
-        assert backend_factory is None
+        assert backend_execution is None
+        assert not allow_standalone
         on_dispatch(work, config)
         return 0
 
-    monkeypatch.setattr("daydream.runner._run_loop_deep", _stub)
+    monkeypatch.setattr("daydream.deep.orchestrator.run_deep", _stub)
 
 
 @pytest.fixture(autouse=True)
@@ -122,7 +123,7 @@ async def test_branch_only_on_origin_creates_ephemeral_runs_review_cleans_up(
         # Sanity: the ephemeral worktree exists on disk while we're inside it.
         assert work.repo.is_dir()
 
-    _stub_run_loop_deep(monkeypatch, _capture)
+    _stub_run_deep(monkeypatch, _capture)
 
     config = RunConfig(target=str(repo_with_origin), branch="feat/X", shallow=True, cleanup=False,)
     exit_code = await runner.run(config)
@@ -170,7 +171,7 @@ async def test_branch_also_checked_out_locally_warns_uses_origin(
         captured["is_ephemeral"] = work.is_ephemeral
         captured["repo"] = work.repo
 
-    _stub_run_loop_deep(monkeypatch, _capture)
+    _stub_run_deep(monkeypatch, _capture)
 
     config = RunConfig(target=str(repo_with_origin), branch="feat/Y", shallow=True, cleanup=False,)
     exit_code = await runner.run(config)
@@ -203,7 +204,7 @@ async def test_comment_mode_without_open_pr_runs_deep_flow(
         captured["head_sha"] = work.head_sha
         captured["output_mode"] = config.output_mode
 
-    _stub_run_loop_deep(monkeypatch, _capture)
+    _stub_run_deep(monkeypatch, _capture)
 
     config = RunConfig(target=str(repo_with_origin), branch="feat/Z", output_mode="comment", cleanup=False,)
     exit_code = await runner.run(config)
@@ -235,7 +236,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
             }
         ],
     )
-    # Stop _run_loop_deep after open_workspace resolves; assertions below check
+    # Stop run_deep after open_workspace resolves; assertions below check
     # the resolved WorkContext.
     captured: dict[str, Any] = {}
 
@@ -243,7 +244,7 @@ async def test_comment_mode_with_open_pr_uses_pr_base(
         captured["base_branch"] = work.base_branch
         captured["is_ephemeral"] = work.is_ephemeral
 
-    _stub_run_loop_deep(monkeypatch, _capture)
+    _stub_run_deep(monkeypatch, _capture)
 
     config = RunConfig(target=str(repo_with_origin), branch="feat/W", output_mode="comment", cleanup=False,)
     exit_code = await runner.run(config)
@@ -276,7 +277,7 @@ async def test_review_mode_on_base_branch_does_not_error(
         routed["base_branch"] = work.base_branch
         routed["head_branch"] = work.head_branch
 
-    _stub_run_loop_deep(monkeypatch, _capture)
+    _stub_run_deep(monkeypatch, _capture)
 
     config = RunConfig(target=str(repo_with_origin), output_mode="review", cleanup=False,)
     exit_code = await runner.run(config)
@@ -284,6 +285,6 @@ async def test_review_mode_on_base_branch_does_not_error(
     assert exit_code == 0
     # WrongBranchError must NOT have been raised.
     assert captured.get("title") != "Wrong Branch"
-    # _run_loop_deep was reached.
+    # run_deep was reached.
     assert routed["base_branch"] == "main"
     assert routed["head_branch"] == "main"

@@ -27,16 +27,12 @@ from daydream.archive.hydrate_rules import (
 from daydream.archive.importer import (
     IMPORT_REASON_CODES,
     REDACTED_PATH,
-    accounting,
-    build_import_ledger,
+    _dedupe_observations,
     canonical_payload_digest,
-    classify_run_level,
-    dedupe_observations,
     gold_eligible,
-    link_session_identity,
     merge_imported_observations,
+    plan_import,
     redact_imported_metadata,
-    run_pure_import,
 )
 from daydream.archive.index import (
     LABEL_OBSERVATION_NAMES,
@@ -59,48 +55,42 @@ def build_hydrated_index_with_session(session_id: str, digest: str) -> dict[str,
     ``{session_id: {"derivative_digest": ..., "record_id": ...}}``."""
     return {session_id: {"derivative_digest": digest, "record_id": f"rec-{session_id}"}}
 
-def _record(session_id: str, digest: str = D, repo_slug: str | None = "org/repo", base_sha: str | None = "a" * 40,
-    head_sha: str | None = "b" * 40,
-) -> dict[str, str | None]:
-    return {"session_id": session_id, "derivative_digest": digest, "repo_slug": repo_slug, "base_sha": base_sha,
-        "head_sha": head_sha,
-    }
-
 def test_link_session_by_session_id() -> None:
     idx = build_hydrated_index_with_session(SID, digest=D)
-    result = link_session_identity([_record(SID)], hydrated_index=idx, repo_slug_sha_lookup={})
-    entry = result["linked"][SID]
-    assert entry["hub_session_id"] == SID
-    assert entry["matched_by"] == "session_id"
+    result = plan_import([[_import_row(SID, evidence_sha="c" * 64)]],
+                         hydrated_index=idx, repo_slug_sha_lookup={}, projector_findings={})
+    assert result.linked_rows[0]["session_id"] == SID
+    assert result.identity_summary[SID]["matched_by"] == "session_id"
 
 def test_link_fallback_repo_slug_sha() -> None:
     lookup = {("org/repo", "a" * 40, "b" * 40): "hub-999"}
-    result = link_session_identity([_record("s1")], hydrated_index={}, repo_slug_sha_lookup=lookup)
-    entry = result["linked"]["s1"]
-    assert entry["hub_session_id"] == "hub-999"
-    assert entry["matched_by"] == "repo_slug_sha"
+    result = plan_import([[_import_row("s1", evidence_sha="c" * 64)]],
+                         hydrated_index={}, repo_slug_sha_lookup=lookup, projector_findings={})
+    assert result.linked_rows[0]["session_id"] == "hub-999"
+    assert result.identity_summary["s1"]["matched_by"] == "repo_slug_sha"
 
 def test_unmatched_and_conflict_buckets() -> None:
     idx = build_hydrated_index_with_session(SID, digest=D)
-    records = [
-        _record("no-such-session"),  # no Hub entry, no fallback hit
-        _record(SID, digest="e" * 64),  # conflicting derivative digest
-    ]
-    r = link_session_identity(records, hydrated_index=idx, repo_slug_sha_lookup={})
-    assert "no-such-session" in r["unmatched"]
-    assert SID in r["identity_conflict"]
+    records = [_import_row("no-such-session", evidence_sha="c" * 64),
+               _import_row(SID, evidence_sha="e" * 64, derivative_digest="e" * 64)]
+    result = plan_import([records], hydrated_index=idx, repo_slug_sha_lookup={}, projector_findings={})
+    assert result.linked_rows == []
+    assert result.ledger["accounting"][REASON_CODE_IMPORT_UNMATCHED_SESSION] == 1
+    assert result.ledger["accounting"][REASON_CODE_IMPORT_IDENTITY_CONFLICT] == 1
 
 def test_conflicting_digest_never_links() -> None:
     idx = build_hydrated_index_with_session(SID, digest=D)
-    r = link_session_identity([_record(SID, digest="e" * 64)], hydrated_index=idx, repo_slug_sha_lookup={})
-    assert r["linked"] == {}
-    assert SID in r["identity_conflict"]
+    result = plan_import([[_import_row(SID, evidence_sha="e" * 64, derivative_digest="e" * 64)]],
+                         hydrated_index=idx, repo_slug_sha_lookup={}, projector_findings={})
+    assert result.linked_rows == []
+    assert result.ledger["observations"][0]["reason_code"] == REASON_CODE_IMPORT_IDENTITY_CONFLICT
 
 def test_missing_fallback_fields_raises(tmp_path: Path) -> None:
-    record = _record("s-broken", repo_slug=None, base_sha=None, head_sha=None)
-    record.pop("derivative_digest")
+    row = _import_row("s-broken", evidence_sha="c" * 64)
+    row.update(repo_slug=None, base_sha=None, head_sha=None)
+    row.pop("derivative_digest")
     with pytest.raises(ValueError, match="s-broken"):
-        link_session_identity([record], hydrated_index={}, repo_slug_sha_lookup={})
+        plan_import([[row]], hydrated_index={}, repo_slug_sha_lookup={}, projector_findings={})
 
 def _seed_run(root: Path) -> None:
     upsert_run(root, make_manifest(session_id=SID, repo_slug="org/repo", head_sha="b" * 40, base_sha="a" * 40,),)
@@ -136,21 +126,21 @@ def test_overlapping_backups_byte_identical(tmp_path: Path) -> None:
     src_a, src_b = mk_backup_pair(tmp_path, evidence_sha="c" * 64)
     inv_a = read_label_rows(src_a)
     inv_b = read_label_rows(src_b)
-    merged = dedupe_observations([inv_a, inv_b])
-    canon = canonical_digest(merged["rows"])
-    merged_once = dedupe_observations([inv_a])
-    assert canonical_digest(dedupe_observations([merged_once["rows"], inv_b])["rows"]) == canon
-    assert canonical_digest(dedupe_observations([merged["rows"], inv_b])["rows"]) == canon
-    assert canonical_digest(dedupe_observations([inv_b, inv_a])["rows"]) == canon
+    merged = _dedupe_observations([inv_a, inv_b])
+    canon = canonical_digest(merged[0])
+    merged_once = _dedupe_observations([inv_a])
+    assert canonical_digest(_dedupe_observations([merged_once[0], inv_b])[0]) == canon
+    assert canonical_digest(_dedupe_observations([merged[0], inv_b])[0]) == canon
+    assert canonical_digest(_dedupe_observations([inv_b, inv_a])[0]) == canon
 
 def test_no_duplicate_same_evidence_diff_observed_at(tmp_path: Path) -> None:
     src_a, src_b = mk_backup_pair(tmp_path, evidence_sha="c" * 64)
-    merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
-    keys = {(r["session_id"], r["evidence_sha"], r["labels"]) for r in merged["rows"]}
-    assert len(keys) == len(merged["rows"])  # no dup evidence rows survived
-    assert merged["deduped_count"] == 1
-    assert len(merged["rows"]) == 1
-    assert merged["rows"][0]["observed_at"] == _OBSERVED_A
+    merged = _dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
+    keys = {(r["session_id"], r["evidence_sha"], r["labels"]) for r in merged[0]}
+    assert len(keys) == len(merged[0])  # no dup evidence rows survived
+    assert merged[2] == 1
+    assert len(merged[0]) == 1
+    assert merged[0][0]["observed_at"] == _OBSERVED_A
 
 def test_every_generation_kept_never_keep_latest(tmp_path: Path) -> None:
     # Two *distinct* evidence generations (different policy versions) must both
@@ -159,9 +149,9 @@ def test_every_generation_kept_never_keep_latest(tmp_path: Path) -> None:
     _seed_generation(src_a, observed_at="2026-05-03T00:00:00+00:00", evidence_sha="e" * 64, labels=["accepted"],)
     inv_a = read_label_rows(src_a)
     inv_b = read_label_rows(src_b)
-    merged = dedupe_observations([inv_a, inv_b])
-    assert len(merged["rows"]) == 2
-    assert {r["evidence_sha"] for r in merged["rows"]} == {"c" * 64, "e" * 64}
+    merged = _dedupe_observations([inv_a, inv_b])
+    assert len(merged[0]) == 2
+    assert {r["evidence_sha"] for r in merged[0]} == {"c" * 64, "e" * 64}
 
 def test_human_rows_across_backups_kept(tmp_path: Path) -> None:
     # Human-sourced rows are never auto-deduped by the writer, so identical
@@ -173,8 +163,8 @@ def test_human_rows_across_backups_kept(tmp_path: Path) -> None:
             root, SID, labels=["rejected"], pr_state=None, labeler_version="1055-human-r1", evidence_sha="f" * 64,
             source="human", observed_at=at,
         )
-    merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
-    human = [r for r in merged["rows"] if r["source"] == "human"]
+    merged = _dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
+    human = [r for r in merged[0] if r["source"] == "human"]
     assert len(human) == 2
     assert len({r["observed_at"] for r in human}) == 2
 
@@ -185,11 +175,11 @@ def test_identical_human_rows_collapse(tmp_path: Path) -> None:
             root, SID, labels=["rejected"], pr_state=None, labeler_version="1055-human-r1", evidence_sha="f" * 64,
             source="human", observed_at="2026-05-04T00:00:00+00:00",
         )
-    merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
-    human = [r for r in merged["rows"] if r["source"] == "human"]
+    merged = _dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
+    human = [r for r in merged[0] if r["source"] == "human"]
     assert len(human) == 1
     # one auto duplicate from the backup pair + one human duplicate
-    assert merged["deduped_count"] == 2
+    assert merged[2] == 2
 
 def test_same_tuple_diff_payload_routes_to_content_conflict(tmp_path: Path) -> None:
     # The versioned dedup tuple matches but the immutable payload differs
@@ -197,10 +187,10 @@ def test_same_tuple_diff_payload_routes_to_content_conflict(tmp_path: Path) -> N
     # never silently keeps one.
     src_a, src_b = mk_backup_pair(tmp_path, evidence_sha="c" * 64)
     _force_insert_rubric_variant(src_b, observed_at="2026-05-05T00:00:00+00:00")
-    merged = dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
-    assert merged["rows"] == []
-    assert len(merged["content_conflict"]) == 3
-    assert merged["deduped_count"] == 0
+    merged = _dedupe_observations([read_label_rows(src_a), read_label_rows(src_b)])
+    assert merged[0] == []
+    assert len(merged[1]) == 3
+    assert merged[2] == 0
 
 def _force_insert_rubric_variant(root: Path, *, observed_at: str) -> None:
     """Insert a row matching the tuple but carrying a different rubric_json."""
@@ -218,8 +208,8 @@ def _force_insert_rubric_variant(root: Path, *, observed_at: str) -> None:
     write.close()
 
 def test_empty_inventories(tmp_path: Path) -> None:
-    merged = dedupe_observations([[], []])
-    assert merged == {"rows": [], "deduped_count": 0, "content_conflict": []}
+    merged = _dedupe_observations([[], []])
+    assert merged == ([], [], 0)
 
 def make_observation(ver: str) -> dict[str, Any]:
     """Minimal observation dict with all version axes set to ``ver``."""
@@ -238,65 +228,68 @@ def make_session_row(*, session_id: str = SID, evidence_sha: str = "c" * 64, lab
     record_id: str | None = None,
 ) -> dict[str, Any]:
     """A run-level (session-scoped, no record_id) label observation row."""
-    return {"session_id": session_id, "observed_at": _OBSERVED_A, "record_id": record_id, "evidence_sha": evidence_sha,
-        "labels": json.dumps(labels) if isinstance(labels, list) else (labels or '["finding-accepted"]'),
-        "source": "human",
-    }
+    return dict(_import_row(session_id, evidence_sha=evidence_sha), record_id=record_id,
+                labels=json.dumps(labels) if isinstance(labels, list) else (labels or '["finding-accepted"]'),
+                source="human")
 
 def test_run_level_label_never_fans_out() -> None:
     rec = make_session_row()
-    out = classify_run_level([rec], projector_findings={})
-    assert out["per_finding"].get(SID) is None
-    assert SID in out["run_level_only"]
-    assert out["ambiguous_run_mapping"] == {}
+    out = plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                      repo_slug_sha_lookup={}, projector_findings={})
+    assert out.ledger["observations"][0]["reason_code"] == REASON_CODE_IMPORT_RUN_LEVEL_ONLY
+    assert out.identity_summary[SID]["validation_outcome"] == "run_level_only"
 
 def test_ambiguous_mapping_routes_to_queue() -> None:
     rec = make_session_row()
-    ambiguous = {SID: [{"record_id": "r1", "evidence_sha": "z" * 64}, {"record_id": "r2", "evidence_sha": "y" * 64},]}
-    out = classify_run_level([rec], projector_findings=ambiguous)
-    assert SID in out["ambiguous_run_mapping"]
-    assert out["per_finding"].get(SID) is None
-    assert SID not in out["run_level_only"]
+    ambiguous = {SID: [{"record_id": "r1", "evidence_sha": "z" * 64}, {"record_id": "r2", "evidence_sha": "y" * 64}]}
+    out = plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                      repo_slug_sha_lookup={}, projector_findings=ambiguous)
+    assert out.ledger["observations"][0]["reason_code"] == REASON_CODE_IMPORT_STALE_EVIDENCE
+    assert out.identity_summary[SID]["validation_outcome"] == "ambiguous"
 
 def test_decisive_identity_and_digest_match_lands_per_finding() -> None:
     rec = make_session_row(evidence_sha="c" * 64)
     findings = {SID: [{"record_id": "r1", "evidence_sha": "c" * 64}]}
-    out = classify_run_level([rec], projector_findings=findings)
-    assert out["per_finding"][SID] == [rec]
-    assert out["run_level_only"] == {}
-    assert out["ambiguous_run_mapping"] == {}
+    out = plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                      repo_slug_sha_lookup={}, projector_findings=findings)
+    assert out.ledger["observations"][0]["reason_code"] == REASON_CODE_IMPORT_DECISIVE_PER_FINDING
+    assert out.identity_summary[SID]["validation_outcome"] == "matched"
 
 def test_multiple_candidates_one_digest_match_is_decisive() -> None:
     rec = make_session_row(evidence_sha="c" * 64)
-    findings = {SID: [{"record_id": "r1", "evidence_sha": "z" * 64}, {"record_id": "r2", "evidence_sha": "c" * 64},]}
-    out = classify_run_level([rec], projector_findings=findings)
-    assert out["per_finding"][SID] == [rec]
+    findings = {SID: [{"record_id": "r1", "evidence_sha": "z" * 64}, {"record_id": "r2", "evidence_sha": "c" * 64}]}
+    out = plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                      repo_slug_sha_lookup={}, projector_findings=findings)
+    assert out.ledger["observations"][0]["reason_code"] == REASON_CODE_IMPORT_DECISIVE_PER_FINDING
 
 def test_malformed_labels_json_raises_naming_session() -> None:
     rec = make_session_row(labels="{not-json")
     with pytest.raises(ValueError, match=SID):
-        classify_run_level([rec], projector_findings={})
+        plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                    repo_slug_sha_lookup={}, projector_findings={})
 
 def test_referenced_finding_missing_fields_raises() -> None:
     rec = make_session_row(evidence_sha="c" * 64)
     findings = {SID: [{"record_id": "r1"}]}  # no evidence_sha
     with pytest.raises(ValueError, match="evidence_sha"):
-        classify_run_level([rec], projector_findings=findings)
+        plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                    repo_slug_sha_lookup={}, projector_findings=findings)
 
 def test_per_finding_row_is_not_run_level() -> None:
     rec = make_session_row(record_id="r1")
-    out = classify_run_level([rec], projector_findings={})
-    assert out["per_finding"][SID] == [rec]
-    assert out["run_level_only"] == {}
-    assert out["ambiguous_run_mapping"] == {}
+    out = plan_import([[rec]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                      repo_slug_sha_lookup={}, projector_findings={})
+    assert out.ledger["observations"][0]["reason_code"] == REASON_CODE_IMPORT_DECISIVE_PER_FINDING
+    assert out.identity_summary[SID]["validation_outcome"] == "matched"
 
 def test_buckets_account_for_every_row() -> None:
     run_level = make_session_row()
-    per_finding = make_session_row(record_id="r1", evidence_sha="c" * 64)
-    out = classify_run_level([run_level, per_finding], projector_findings={})
-    total = sum(len(v) for v in out["per_finding"].values())
-    total += len(out["run_level_only"]) + len(out["ambiguous_run_mapping"])
-    assert total == 2
+    per_finding = make_session_row(record_id="r1", evidence_sha="e" * 64)
+    out = plan_import([[run_level, per_finding]], hydrated_index=build_hydrated_index_with_session(SID, D),
+                      repo_slug_sha_lookup={}, projector_findings={})
+    assert len(out.ledger["observations"]) == 2
+    assert out.ledger["accounting"][REASON_CODE_IMPORT_RUN_LEVEL_ONLY] == 1
+    assert out.ledger["accounting"][REASON_CODE_IMPORT_DECISIVE_PER_FINDING] == 1
 
 SIX_BUCKET_CODES = IMPORT_REASON_CODES
 
@@ -345,19 +338,19 @@ def _six_row_fixture() -> tuple[list[dict[str, Any]], dict[str, dict[str, Any]],
 
 def test_reason_codes_sum_to_source_row_count() -> None:
     rows, hydrated_index, projector_findings = _six_row_fixture()
-    result = run_pure_import(
+    result = plan_import(
         [rows], hydrated_index=hydrated_index, repo_slug_sha_lookup={}, projector_findings=projector_findings,
     )
-    counts = [result["accounting"][code] for code in SIX_BUCKET_CODES]
-    assert set(result["accounting"]) == set(SIX_BUCKET_CODES)
+    counts = [result.ledger["accounting"][code] for code in SIX_BUCKET_CODES]
+    assert set(result.ledger["accounting"]) == set(SIX_BUCKET_CODES)
     assert sum(counts) == len(rows)  # M7: bucket sum == source row count
 
 def test_each_bucket_reason_stable() -> None:
     rows, hydrated_index, projector_findings = _six_row_fixture()
-    result = run_pure_import(
+    result = plan_import(
         [rows], hydrated_index=hydrated_index, repo_slug_sha_lookup={}, projector_findings=projector_findings,
     )
-    acc = result["accounting"]
+    acc = result.ledger["accounting"]
     assert acc[REASON_CODE_IMPORT_UNMATCHED_SESSION] == 1
     assert acc[REASON_CODE_IMPORT_IDENTITY_CONFLICT] == 1
     assert acc[REASON_CODE_IMPORT_STALE_EVIDENCE] == 1
@@ -367,10 +360,10 @@ def test_each_bucket_reason_stable() -> None:
 
 def test_ledger_mirrors_hydrate_import_ledger_shape() -> None:
     rows, hydrated_index, projector_findings = _six_row_fixture()
-    result = run_pure_import(
+    result = plan_import(
         [rows], hydrated_index=hydrated_index, repo_slug_sha_lookup={}, projector_findings=projector_findings,
     )
-    ledger = build_import_ledger(result)
+    ledger = result.ledger
     assert ledger["schema_version"] == HYDRATION_INDEX_SCHEMA_VERSION
     assert set(ledger["accounting"]) == set(SIX_BUCKET_CODES)
     assert sum(ledger["accounting"].values()) == len(ledger["observations"])
@@ -385,15 +378,20 @@ def test_ledger_mirrors_hydrate_import_ledger_shape() -> None:
     for entry in ledger["observations"]:
         assert set(entry) == {"session_id", "observed_at", "source", "reason_code"}
 
-def test_unclassifiable_row_raises_naming_it() -> None:
-    # A merged row absent from every link/run-level result and carrying no
-    # dedupe conflict: fail closed with a ValueError naming the row — never
-    # an implicit drop (M7).
-    row = _import_row("s-orphan", evidence_sha="7" * 64)
-    with pytest.raises(ValueError, match="s-orphan"):
-        accounting([row], content_conflict=[], link_result={"linked": {}, "unmatched": {}, "identity_conflict": {}},
-            run_level_result={"per_finding": {}, "run_level_only": {}, "ambiguous_run_mapping": {}},
-        )
+def test_generation_identity_precedence_keeps_complete_accounting() -> None:
+    linked = _import_row(SID, evidence_sha="1" * 64)
+    conflict = _import_row(SID, evidence_sha="2" * 64, derivative_digest="e" * 64)
+    unmatched = _import_row(SID, evidence_sha="3" * 64)
+    unmatched.pop("derivative_digest")
+    result = plan_import([[linked, conflict, unmatched]],
+                         hydrated_index=build_hydrated_index_with_session(SID, D),
+                         repo_slug_sha_lookup={}, projector_findings={})
+    # Every generation contributes to the session's accumulated buckets. Historical
+    # conflict precedence governs the ledger while identity-linked rows remain mergeable.
+    assert len(result.ledger["observations"]) == 3
+    assert result.ledger["accounting"][REASON_CODE_IMPORT_IDENTITY_CONFLICT] == 3
+    assert len(result.linked_rows) == 3
+    assert result.identity_summary[SID] == {"matched_by": "session_id", "validation_outcome": "run_level_only"}
 
 def _row_with_digest(row: dict[str, Any]) -> dict[str, Any]:
     """Attach the inventory-time payload digest a merge validates against."""

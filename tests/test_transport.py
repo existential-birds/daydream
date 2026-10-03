@@ -94,7 +94,8 @@ async def test_transport_teardown_is_idempotent_and_group_signalling() -> None:
 
     t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", GROUP_HOLDER_CLI])
     await t.start()
-    proc = t.processes[0]
+    proc = t._proc
+    assert proc is not None
     pgid = os.getpgid(proc.pid)
     assert pgid == proc.pid  # start_new_session => session leader => pid is the pgid
     it = t.lines(timeout_for_line=lambda: 5.0).__aiter__()
@@ -114,7 +115,8 @@ async def test_transport_cancel_all_is_shielded() -> None:
 
     t = CliTransport(cli="fake", limit=LIMIT, argv=[sys.executable, "-c", GROUP_HOLDER_CLI])
     await t.start()
-    pgid = os.getpgid(t.processes[0].pid)
+    assert t._proc is not None
+    pgid = os.getpgid(t._proc.pid)
 
     async def consume() -> None:
         try:

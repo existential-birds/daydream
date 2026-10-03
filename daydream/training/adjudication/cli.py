@@ -19,7 +19,7 @@ from typing import Any
 from daydream.archive.hydrate import HubUnavailableError, HydrationError, PublicDestinationError, _make_client
 from daydream.archive.importer import (
     merge_imported_observations,
-    run_pure_import,
+    plan_import,
 )
 from daydream.json_utils import atomic_write_bytes
 from daydream.training.adjudication.canonical import read_jsonl, run_canonical_harvest
@@ -27,15 +27,9 @@ from daydream.training.adjudication.export import validate_export_rows, write_ex
 from daydream.training.adjudication.harvest import build_export_entries
 from daydream.training.adjudication.import_local import (
     _build_import_report,
-    _hydrated_identity_index,
-    _identity_summary,
     _ImportGateError,
     _inventory_import_roots,
-    _link_imported_rows,
-    _load_import_index_runs,
-    _load_import_index_sessions,
-    _pinned_identity_lookup,
-    _projector_findings_map,
+    _load_import_index,
     _write_import_merge,
 )
 from daydream.training.adjudication.local_history import project_local_history
@@ -822,26 +816,21 @@ def handle_import_local_observations(argv: list[str]) -> int:
             parser.error("--publish requires --manifest")
     console = create_console()
     try:
-        inventory = _inventory_import_roots(
-            args.archive_root, console=None if args.json else console
-        )
+        inventory = _inventory_import_roots(args.archive_root, console=None if args.json else console)
         # Real identity inputs, derived from the pinned index — never empty
         # literals: the hydrated-index map for session linkage and the
         # projector's per-finding map for exact run-level evidence matching.
-        sessions = _load_import_index_sessions(args.index_root)
-        index_runs_by_session = _load_import_index_runs(args.index_root, sessions)
-        hydrated_index = _hydrated_identity_index(sessions, args.index_root)
-        projector_findings = _projector_findings_map(
-            sessions, index_runs_by_session
+        sessions, index_runs_by_session, hydrated_index, aliases, projector_findings = _load_import_index(
+            args.index_root,
         )
-        result = run_pure_import(
+        result = plan_import(
             inventory["inventories"],
             hydrated_index=hydrated_index,
-            repo_slug_sha_lookup=_pinned_identity_lookup(index_runs_by_session),
+            repo_slug_sha_lookup=aliases,
             projector_findings=projector_findings,
             unmatched_identity_less=True,
         )
-        linked_rows = _link_imported_rows(result)
+        linked_rows = result.linked_rows
         # Validate the finding projection before either canonical store writes.
         imported_judgments, finding_decisions = project_local_history(linked_rows, sessions)
         # Dry-run still exercises the merge's fail-closed drift gate, but the
@@ -862,7 +851,8 @@ def handle_import_local_observations(argv: list[str]) -> int:
         )
         if not args.dry_run:
             imported_judgments, finding_decisions = project_local_history(
-                merge_state["scan"]["payload"], sessions,
+                merge_state["scan"]["payload"],
+                sessions,
             )
             for judgment in imported_judgments:
                 append_observation(args.state_dir / _OBSERVATIONS_FILENAME, judgment)
@@ -878,20 +868,18 @@ def handle_import_local_observations(argv: list[str]) -> int:
         return 1
 
     report = _build_import_report(
-        inventory["sources"], result, dry_run=bool(args.dry_run), merge_state=merge_state,
-        identity_summary=_identity_summary(result),
+        inventory["sources"],
+        result,
+        dry_run=bool(args.dry_run),
+        merge_state=merge_state,
     )
     report["finding_decisions"] = finding_decisions
     report["finding_observations"] = len(imported_judgments)
     if args.publish:
         try:
-            report["publish"] = _publish_import_state(
-                args.archive_dir, args.state_dir, args.hub_repo, args.manifest
-            )
+            report["publish"] = _publish_import_state(args.archive_dir, args.state_dir, args.hub_repo, args.manifest)
         except _ImportGateError as exc:
-            print_error(
-                console, "adjudicate import-local-observations publish failed", str(exc)
-            )
+            print_error(console, "adjudicate import-local-observations publish failed", str(exc))
             return 1
         except (ValueError, OSError, HubUnavailableError, HydrationError, PublicDestinationError) as exc:
             print_error(console, "adjudicate import-local-observations failed", str(exc))
@@ -908,8 +896,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
             + (
                 f"{report['merge']['planned']} merge(s) planned; nothing written"
                 if args.dry_run
-                else f"{report['merge']['appended']} appended, "
-                f"{report['merge']['deduped']} deduped by the writer"
+                else f"{report['merge']['appended']} appended, {report['merge']['deduped']} deduped by the writer"
             )
             + (f"; published to {report['publish']['prefix']}" if args.publish else ""),
         )
@@ -920,7 +907,7 @@ def handle_import_local_observations(argv: list[str]) -> int:
             json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         (args.state_dir / "import-ledger.json").write_text(
-            json.dumps(result["ledger"], indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            json.dumps(result.ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
     return 0
 

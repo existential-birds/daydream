@@ -54,7 +54,7 @@ from daydream.findings import (
     write_findings_artifact,
 )
 from daydream.flows import FlowContext, run_flow
-from daydream.flows.engine import BackendCache, BackendFactory
+from daydream.flows.engine import BackendCache
 from daydream.git_ops import GitError
 from daydream.hunk_index import write_hunk_index
 from daydream.observability.config import (
@@ -285,21 +285,6 @@ async def run(
     if config is None:
         config = RunConfig()
 
-    backend_factory: BackendFactory | None = None
-    if execution is not None:
-        backend_execution = execution.backend
-
-        def create_for_context(
-            flow_config: RunConfig, phase: str, cache: BackendCache,
-            cwd: Path, audit: AuditWorkspace | None,
-        ) -> Backend:
-            return _resolve_backend(
-                flow_config, phase, cache, cwd=cwd, audit_workspace=audit,
-                execution_input=backend_execution,
-            )
-
-        backend_factory = create_for_context
-
     # Codex backends need shell output visible (the commands ARE the signal), so
     # disable quiet when any phase resolves to codex. Done before backend construction.
     quiet = config.quiet
@@ -319,7 +304,6 @@ async def run(
     with bind_run_context(run_context):
         return await _run_with_context(
             config, private_roots=private_roots, run_context=run_context,
-            backend_factory=backend_factory,
             backend_execution=None if execution is None else execution.backend,
             github_execution=None if execution is None else execution.github,
         )
@@ -328,7 +312,6 @@ async def run(
 async def _run_with_context(
     config: RunConfig, *, private_roots: PrivateRootLocations | None,
     run_context: RunContext,
-    backend_factory: BackendFactory | None = None,
     backend_execution: BackendExecutionInput | None = None,
     github_execution: github_app.GitHubExecutionInput | None = None,
 ) -> int:
@@ -417,7 +400,6 @@ async def _run_with_context(
             result = await _run_workspace(
                 config, target_dir, skip_tests=skip_tests, private_owner=private_owner,
                 run_context=run_context, github_execution=session.execution,
-                backend_factory=backend_factory,
                 backend_execution=backend_execution,
             )
             observed.finish(result)
@@ -439,7 +421,6 @@ async def _run_workspace(
     config: RunConfig, target_dir: Path, *, skip_tests: bool,
     private_owner: PrivateWorkspaceOwner, run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
     backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Keep workspace errors inside the run span so returned failures are recorded."""
@@ -481,7 +462,7 @@ async def _run_workspace(
                 try:
                     result = await _dispatch(
                         work, dispatch_config, run_artifacts, run_context=run_context,
-                        github_execution=github_execution, backend_factory=backend_factory,
+                        github_execution=github_execution, backend_execution=backend_execution,
                     )
                 except BaseException as exc:
                     primary = exc
@@ -563,49 +544,6 @@ def _require_reviewable_branch(work: WorkContext, config: RunConfig) -> None:
         )
 
 
-# Built-in deep-flow mode aliases (review / shallow / deep all route to the
-# single deep flow in different modes, #330). Kept as a module constant so
-# downstream consumers (e.g. archive manifest tier gate) share the same list.
-
-
-async def _dispatch_selected_flow(
-    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
-    run_context: RunContext,
-    github_execution: github_app.GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
-) -> int:
-    """Resolve built-in aliases before registered flows.
-
-    Review/shallow/deep aliases share the deep flow. Unknown names raise
-    ``UnresolvedExtensionError`` for ``run`` to render as an Extension Error.
-    """
-    name = config.flow_name
-    assert name is not None
-
-    # Built-in mode aliases: resolve before the registry lookup so the deep
-    # routing wins over the "not registered" error.
-    if name in DEEP_FLOW_ALIASES:
-        if name in ("shallow", "deep"):
-            _require_reviewable_branch(work, config)
-        return await _run_loop_deep(
-            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_factory=backend_factory,
-        )
-    if name == "improve":
-        return await _run_improve(
-            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_factory=backend_factory,
-        )
-
-    # Resolve-check first; unknown names raise UnresolvedExtensionError, caught
-    # by run()'s Extension Error panel (exit 1). Do not swallow it here.
-    get_registry().flow(name)
-    return await _run_custom_flow(
-        work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-        backend_factory=backend_factory,
-    )
-
-
 def _verify_approved_head(work: WorkContext, config: RunConfig) -> int:
     """Reject a checkout that has drifted from a maintainer-approved PR head."""
     approved = config.approved_head_sha
@@ -623,31 +561,40 @@ async def _dispatch(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Verify the approved head and dispatch the selected flow."""
     if work.is_unborn:
         if config.flow_name != "improve" or config.approved_head_sha is not None:
             raise GitError("unborn checkout cannot satisfy a commit-anchored review")
-        return await _run_improve(
-            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_factory=backend_factory,
-        )
     head_status = _verify_approved_head(work, config)
     if head_status != 0:
         return head_status
 
-    if config.flow_name is not None:
-        return await _dispatch_selected_flow(
+    if config.flow_name == "improve":
+        return await _run_improve(
             work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-            backend_factory=backend_factory,
+            backend_execution=backend_execution,
+        )
+    if config.flow_name is not None and config.flow_name not in DEEP_FLOW_ALIASES:
+        # Resolve before preparing custom-flow artifacts or making model calls.
+        get_registry().flow(config.flow_name)
+        return await _run_custom_flow(
+            work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
+            backend_execution=backend_execution,
         )
 
-    if config.output_mode not in ("comment", "review", "diagram"):
+    if config.flow_name in ("shallow", "deep") or (
+        config.flow_name is None and config.output_mode not in ("comment", "review", "diagram")
+    ):
         _require_reviewable_branch(work, config)
-    return await _run_loop_deep(
-        work, config, run_artifacts, run_context=run_context, github_execution=github_execution,
-        backend_factory=backend_factory,
+    from daydream.deep.orchestrator import run_deep
+
+    _resolve_review_profile(config)
+    return await run_deep(
+        config, work, run_artifacts=run_artifacts, run_context=run_context, github_execution=github_execution,
+        backend_execution=backend_execution,
+        allow_standalone=False,
     )
 
 
@@ -775,7 +722,7 @@ async def _run_improve(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Preamble for the registered repository-wide improve flow."""
     from daydream.improve.artifacts import improve_dir
@@ -809,7 +756,6 @@ async def _run_improve(
         run_artifacts=run_artifacts,
         allow_standalone=False,
     ):
-        _resolve_review_profile(config)
         # The standalone snapshot gives improve independent Git storage. The
         # root-bound backend capability below is the separate filesystem-tool
         # boundary; neither mechanism is described as an OS sandbox.
@@ -832,7 +778,7 @@ async def _run_improve(
                 private_workspace_owner=run_artifacts.owner,
                 artifacts=run_artifacts.session,
                 run_context=run_context, github_execution=github_execution,
-                _backend_factory=backend_factory,
+                backend_execution=backend_execution,
                 allow_standalone_artifacts=False,
             )
             ctx.data["audit_repo"] = audit.repo
@@ -879,7 +825,7 @@ async def _run_custom_flow(
     work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
     run_context: RunContext,
     github_execution: github_app.GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
 ) -> int:
     """Seed a registered custom flow with diff/log/branch and a shared recorder.
 
@@ -908,7 +854,6 @@ async def _run_custom_flow(
         run_artifacts=run_artifacts,
         allow_standalone=False,
     ):
-        _resolve_review_profile(config)
         ctx = FlowContext(
             config=config,
             work=work,
@@ -917,7 +862,7 @@ async def _run_custom_flow(
             private_workspace_owner=run_artifacts.owner,
             artifacts=run_artifacts.session,
             run_context=run_context, github_execution=github_execution,
-            _backend_factory=backend_factory,
+            backend_execution=backend_execution,
             allow_standalone_artifacts=False,
         )
         ctx.data["post_to_pr"] = False  # custom flows do not post to PR by default
@@ -936,23 +881,3 @@ async def _run_custom_flow(
         console.print()
 
         return await run_flow(ctx.registry, flow_name, ctx)
-
-
-# Helper: deep (single-flow dispatch)
-
-
-async def _run_loop_deep(
-    work: WorkContext, config: RunConfig, run_artifacts: _RunArtifacts, *,
-    run_context: RunContext,
-    github_execution: github_app.GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
-) -> int:
-    """Delegate to the deep-mode orchestrator (the only PR-process flow, #330)."""
-    from daydream.deep.orchestrator import run_deep
-
-    _resolve_review_profile(config)
-    return await run_deep(
-        config, work, run_artifacts=run_artifacts, run_context=run_context, github_execution=github_execution,
-        backend_factory=backend_factory,
-        allow_standalone=False,
-    )

@@ -12,6 +12,7 @@ from rich.markup import escape as escape_markup
 from daydream import git_ops
 from daydream.agent import console
 from daydream.artifact_visibility import ArtifactVisibilityError, artifact_dir_for, artifact_session_active
+from daydream.backends import BackendExecutionInput
 from daydream.config import (
     DEFAULT_DEEP_SHARD_ENABLED,
     DEFAULT_DEEP_SHARD_FANOUT_CAP,
@@ -73,7 +74,7 @@ from daydream.deep.sharding import shard_stacks
 from daydream.deep.state import DeepState
 from daydream.extensions import get_registry
 from daydream.extensions.api import FlowStep
-from daydream.flows.engine import BackendFactory, FlowContext, run_flow
+from daydream.flows.engine import FlowContext, run_flow
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import PushReceipt
 from daydream.review_budget import review_deadline_scope, review_scale_for_diff
@@ -380,7 +381,7 @@ async def run_deep(
     run_artifacts: _RunArtifacts | None = None,
     run_context: RunContext | None = None,
     github_execution: GitHubExecutionInput | None = None,
-    backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
     allow_standalone: bool = False,
 ) -> int:
     """Prepare and execute the registered deep flow for review, comment, shallow or loop.
@@ -403,7 +404,7 @@ async def run_deep(
         run_artifacts=run_artifacts,
         run_context=run_context,
         github_execution=execution,
-        backend_factory=backend_factory,
+        backend_execution=backend_execution,
         allow_standalone=allow_standalone,
     )
 
@@ -487,7 +488,7 @@ async def _run_review_spine(
     run_artifacts: _RunArtifacts | None,
     run_context: RunContext | None = None,
     github_execution: GitHubExecutionInput,
-    backend_factory: BackendFactory | None = None,
+    backend_execution: BackendExecutionInput | None = None,
     allow_standalone: bool = False,
 ) -> int:
     """Review-spine preamble for the deep pipeline (the former ``run_deep`` body)."""
@@ -500,7 +501,7 @@ async def _run_review_spine(
         _git_branch,
         _git_log,
     )
-    from daydream.run_artifacts import _open_recorder, _resolve_review_profile
+    from daydream.run_artifacts import _open_recorder
     from daydream.run_config import _default_backend_name, _resolved_latency_profile
 
     target_dir = work.repo
@@ -583,10 +584,6 @@ async def _run_review_spine(
         run_artifacts=run_artifacts,
         allow_standalone=allow_standalone,
     ) as recorder:
-        # Composition-root re-entry: resolution already happened in
-        # ``_run_loop_deep`` before this recorder existed; this no-op resolve
-        # records the profile onto the active recorder (R12).
-        _resolve_review_profile(config)
         console.print()
         print_info(console, f"Target directory: {target_dir}")
         print_info(console, f"Branch: {branch}")
@@ -726,7 +723,7 @@ async def _run_review_spine(
             artifacts=None if run_artifacts is None else run_artifacts.session,
             run_context=run_context,
             github_execution=github_execution,
-            _backend_factory=backend_factory,
+            backend_execution=backend_execution,
             data={
                 "mode": mode,
                 "review_coverage": coverage,

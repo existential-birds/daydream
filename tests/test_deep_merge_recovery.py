@@ -46,7 +46,7 @@ CROSS_STACK_MERGE_ERR_MSG = "Cross-stack merge returned no item list (got Struct
 
 
 async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle(
-    tmp_path: Path, make_work: Callable[..., WorkContext],
+    tmp_path: Path, make_work: Callable[..., WorkContext], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A deterministic merge remains a complete #733 unit and a resumable phase."""
     dd = deep_dir(tmp_path, allow_standalone=True)
@@ -72,8 +72,9 @@ async def test_empty_merge_cold_reuse_and_resume_preserve_coverage_and_lifecycle
             "exploration_dir": None, "reuse_cache": cache,
             "review_coverage": coverage,
         },
-        allow_standalone_artifacts=True, _backend_factory=lambda *args: backend,
+        allow_standalone_artifacts=True,
     )
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     recorder = make_recorder(tmp_path)
     async with recorder:
         # Each successful synthesis must supersede its own stale salvage and

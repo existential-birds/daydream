@@ -72,14 +72,19 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_json(path, payload, sort_keys=True)
 
 
-def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Select accepted/rejected gold labels with localized finding text.
+def _outcome_rows(
+    records: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, list[dict[str, Any]]]]:
+    """Capture gold labels in file order and their pinned training partitions.
 
     Preserve admission evidence and promote lineage.labeler_policy_version only
     when absent at top level. Missing policy stays missing so model admission
     refuses it; missing text or identity on a labeled row raises RuntimeError.
     """
     rows: list[dict[str, Any]] = []
+    partitions: dict[str, list[dict[str, Any]]] = {
+        split: [] for split in ("train", "validation", "holdout")
+    }
     for rec in records:
         comment_id = rec.get("session_id")
         text = rec.get("finding_text")
@@ -108,7 +113,9 @@ def _outcome_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if isinstance(lineage_obj, dict) and lineage_obj.get("labeler_policy_version") is not None:
                 row["labeler_policy_version"] = lineage_obj["labeler_policy_version"]
         rows.append(row)
-    return rows
+        split = _record_views(rec)[1]["split"]
+        partitions[split].append(row)
+    return rows, partitions
 
 
 def _sft_rows(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -237,37 +244,8 @@ def _rft_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
-def _frozen_split_from_projection(
-    projection: V2Projection, labels_path: Path, *, seed: int
-) -> FrozenSplit:
-    """Use the validated projection partition: train+validation train, holdout evaluates.
-
-    The shared split builder writes the same content digest and sidecar as
-    freeze_split. Report the projection's holdout rate, not a run-time tuning
-    value. Refuse a holdout with no gold outcome rows.
-    """
-    train = _outcome_rows(
-        [*projection.by_split["train"], *projection.by_split["validation"]],
-    )
-    held_out = _outcome_rows(projection.by_split["holdout"])
-    if not held_out:
-        raise RuntimeError(
-            "stage0 refused: the projection frozen split has no gold outcome rows in "
-            "its holdout split; the gate would evaluate against nothing and refuses closed"
-        )
-    holdout_rate = float(cast(float, projection.lineage["holdout_rate"]))
-    return gate_mod._build_frozen_split(
-        labels_path,
-        train_rows=train,
-        held_out_rows=held_out,
-        seed=seed,
-        held_out_fraction=holdout_rate,
-    )
-
-
 def _run_stage0(
     config: PipelineConfig,
-    records: list[dict[str, Any]],
     stage_dir: Path,
     *,
     projection: V2Projection,
@@ -276,7 +254,7 @@ def _run_stage0(
 
     Dry and ordinary runs perform identical Stage-0 work.
     """
-    rows = _outcome_rows(records)
+    rows, partitions = _outcome_rows(projection.records)
     if not rows:
         raise RuntimeError(
             "stage0 gate evidence missing: corpus carries no gold outcome rows "
@@ -286,10 +264,17 @@ def _run_stage0(
     labels_path = stage_dir / "labels.jsonl"
     labels_path.write_text("\n".join(json.dumps(r, sort_keys=True) for r in rows))
 
-    split = _frozen_split_from_projection(
-        projection,
+    if not partitions["holdout"]:
+        raise RuntimeError(
+            "stage0 refused: the projection frozen split has no gold outcome rows in "
+            "its holdout split; the gate would evaluate against nothing and refuses closed"
+        )
+    split = gate_mod._build_frozen_split(
         labels_path,
+        train_rows=[*partitions["train"], *partitions["validation"]],
+        held_out_rows=partitions["holdout"],
         seed=config.seed,
+        held_out_fraction=float(cast(float, projection.lineage["holdout_rate"])),
     )
     model: OutcomeModel = train_outcome_model(
         labels_path,
@@ -439,7 +424,7 @@ def run_pipeline(config: PipelineConfig, *, dry_run: bool) -> dict[str, Any]:
         stage_dir = out_dir / stage
         if stage == "stage0":
             entry, gate_report, frozen_split = _run_stage0(
-                config, records, stage_dir, projection=projection
+                config, stage_dir, projection=projection
             )
             stage_entries[stage] = entry
             split_digest = frozen_split.digest

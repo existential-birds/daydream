@@ -7,14 +7,13 @@ from __future__ import annotations
 import asyncio
 import json
 import tempfile
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncGenerator, Callable
 from pathlib import Path
 from typing import Any
 
 import anyio
 
 from daydream.backends._subprocess import (
-    cancel_processes,
     readline_with_idle_timeout,
     terminate_process,
 )
@@ -44,7 +43,6 @@ class CliTransport:
         # backend's ``decode_errors="replace"`` construction below).
         self._decode_errors = decode_errors
         self._drain_task: asyncio.Task[None] | None = None
-        self.processes: list[asyncio.subprocess.Process] = []
         self._proc: asyncio.subprocess.Process | None = None
         self._spawn_kwargs: dict[str, object] = {
             "limit": limit,
@@ -75,7 +73,6 @@ class CliTransport:
             **self._spawn_kwargs,  # type: ignore[arg-type]
         )
         self._proc = proc
-        self.processes.append(proc)
 
         if self._stdin_data is not None:
             stdin_writer = proc.stdin
@@ -114,7 +111,7 @@ class CliTransport:
 
     async def lines(
         self, timeout_for_line: Callable[[], float | None]
-    ) -> AsyncIterator[str]:
+    ) -> AsyncGenerator[str, None]:
         """Read stripped lines with a fresh response/tool-active idle window per line. Propagate stalls
         and oversized-line ValueError; decoding stays strict unless the adapter requests replacement.
         """
@@ -154,15 +151,11 @@ class CliTransport:
     @classmethod
     async def cancel_all(cls, transports: list[CliTransport]) -> None:
         """Shield and join teardown and stderr drains for every tracked live process."""
-        await cancel_processes([
-            proc for t in transports for proc in t.processes if proc.returncode is None
-        ])
         with anyio.CancelScope(shield=True):
-            # Iterate a snapshot: a backend's teardown ``finally`` removes its
-            # transport from this caller-owned list in place while we await, so
-            # a live iteration can raise 'list changed size during iteration'.
-            for t in list(transports):
-                await t.drain_finished()
+            # Capture native owners before awaiting: their finally blocks remove
+            # registry entries while cancellation settles each process and drain.
+            captured = [transport for transport in list(transports) if transport._proc is not None]
+            await asyncio.gather(*(teardown(transport, transports) for transport in captured))
 
 
 # Number of captured non-JSON lines printed in a PROCESS_EXIT message. The

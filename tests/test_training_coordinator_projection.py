@@ -13,7 +13,8 @@ import pytest
 
 from daydream.training.coordinator import PipelineConfig, run_pipeline
 from daydream.training.corpus_projection.splits import assign_split
-from daydream.training.gate import _split_digest
+from daydream.training.gate import _build_frozen_split, _split_digest
+from daydream.training.reward_model import train_outcome_model
 from daydream.training.rft import RftConfig, run_rft
 from daydream.training.stacks import load_v2_projection
 from tests.fixtures.training.build_projection_50 import build_projection_50
@@ -127,8 +128,12 @@ def _build_projection(
 def _holdout_gold_comment_ids(proj_dir: Path) -> list[str]:
     proj = load_v2_projection(proj_dir)
     ids = []
-    for record in proj.by_split["holdout"]:
-        if record.get("tier") == "gold" and record.get("outcome_label") in ("accepted", "rejected"):
+    for record in proj.records:
+        if (
+            cast(dict[str, object], record["lineage"])["split"] == "holdout"
+            and record.get("tier") == "gold"
+            and record.get("outcome_label") in ("accepted", "rejected")
+        ):
             ids.append(str(record["session_id"]))
     return ids
 
@@ -173,6 +178,46 @@ def test_stage0_v2_gold_record_without_finding_text_fails_closed(tmp_path: Path)
     cfg = PipelineConfig(projection=proj_dir, out_dir=tmp_path / "out")
     with pytest.raises(RuntimeError, match="finding_text"):
         run_pipeline(cfg, dry_run=False)
+
+
+def test_stage0_uses_pinned_splits_even_when_records_are_in_other_files(tmp_path: Path) -> None:
+    """File order determines labels; pinned partition order determines seeded SGD."""
+    proj_dir = _build_projection(tmp_path)
+    records: list[dict[str, Any]] = []
+    for split in ("validation", "holdout", "train"):
+        records.extend(json.loads(line) for line in (proj_dir / f"{split}.jsonl").read_text().splitlines())
+    (proj_dir / "train.jsonl").write_text("".join(json.dumps(record) + "\n" for record in records))
+    (proj_dir / "validation.jsonl").write_text("")
+    (proj_dir / "holdout.jsonl").write_text("")
+
+    rows_by_split: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "holdout": []}
+    labels = []
+    for record in records:
+        if record["outcome_label"] not in ("accepted", "rejected"):
+            continue
+        row = {
+            "comment_id": record["session_id"],
+            "text": record["finding_text"],
+            "label": record["outcome_label"],
+            "labeler_policy_version": record["lineage"]["labeler_policy_version"],
+        }
+        labels.append(row)
+        rows_by_split[record["lineage"]["split"]].append(row)
+    expected_labels = tmp_path / "expected-labels.jsonl"
+    expected_labels.write_text("\n".join(json.dumps(row, sort_keys=True) for row in labels))
+    expected_split = _build_frozen_split(
+        expected_labels,
+        train_rows=[*rows_by_split["train"], *rows_by_split["validation"]],
+        held_out_rows=rows_by_split["holdout"],
+        seed=0,
+        held_out_fraction=HOLDOUT_RATE,
+    )
+    expected_model = train_outcome_model(expected_labels, split=expected_split, seed=0)
+
+    out = tmp_path / "out"
+    run_pipeline(PipelineConfig(projection=proj_dir, out_dir=out, stages=("stage0",)), dry_run=False)
+    assert (out / "stage0/labels.jsonl").read_bytes() == expected_labels.read_bytes()
+    assert json.loads((out / "stage0/model-state.json").read_text()) == expected_model.state_dict()
 
 def test_stage2_v2_truncated_sha_fails_closed(tmp_path: Path) -> None:
     proj_dir = _build_projection(tmp_path, base_sha="abc123")

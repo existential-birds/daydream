@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from daydream.backends import Backend
+from daydream.backends import BackendExecutionInput
+from daydream.backends.pi import PiBackend
 from daydream.extensions import (
     BreakLoop,
     FlowStep,
@@ -16,8 +17,7 @@ from daydream.extensions import (
 )
 from daydream.flows.engine import FlowContext, run_flow
 from daydream.run_config import RunConfig
-from daydream.runner import _resolve_backend
-from daydream.workspace import AuditWorkspace, WorkContext
+from daydream.workspace import WorkContext
 
 
 def _trace(tag: str) -> Callable[[FlowContext], Awaitable[Stop | BreakLoop | None]]:
@@ -65,29 +65,22 @@ def test_backend_for_resolves_pi_model_from_workspace(tmp_path: Path) -> None:
 
     assert ctx.backend_for("review").model == "gpt-5.6-luna"
 
-def test_backend_factory_uses_context_workspace_and_cache(tmp_path: Path) -> None:
-
+def test_captured_backend_execution_uses_context_workspace_and_cache(tmp_path: Path) -> None:
     settings = tmp_path / ".pi" / "settings.json"
     settings.parent.mkdir()
     settings.write_text('{"defaultModel": "context-model"}')
-    ctx = _ctx(Registry(), repo=tmp_path, run_id="factory")
+    execution = BackendExecutionInput.from_environment({"HOME": str(tmp_path)}, backend="pi")
+    ctx = _ctx(Registry(), repo=tmp_path, run_id="execution")
     ctx.config.backend = "pi"
-    resolved_phases: list[str] = []
-    def factory(config: RunConfig, phase: str, cache: dict[tuple[str, str | None, str | None, Path | None], Backend],
-        cwd: Path, audit: AuditWorkspace | None,
-    ) -> Backend:
-        resolved_phases.append(phase)
-        assert config is ctx.config
-        assert cache is ctx._backend_cache
-        assert cwd == tmp_path
-        assert audit is ctx.audit_workspace
-        return _resolve_backend(config, phase, cache, cwd=cwd, audit_workspace=audit)
-    ctx._backend_factory = factory
+    ctx.backend_execution = execution
     review = ctx.backend_for("review")
     assert review.model == "context-model"
     assert ctx.backend_for("review") is review
     assert len(ctx._backend_cache) == 1
-    assert resolved_phases == ["review", "review"]
+    assert isinstance(review, PiBackend)
+    assert review._execution_input is execution
+    assert "backend_execution" not in repr(ctx)
+
 
 async def test_order_gating_stop_and_loop() -> None:
     reg = Registry()

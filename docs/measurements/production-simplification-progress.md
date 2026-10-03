@@ -275,3 +275,95 @@ continuation removes 1,453 source / 1,765 physical. Inventory unchanged and ever
 owned Python module/runtime template counted. Targets remain false. All production
 owners are frozen for independent integrated review and ordinary signed commit/
 push hooks; next read-side prototype remains outside the repository meanwhile.
+
+Fifth independent integrated review reproduced the entire pinned SCB JSON and every owned
+production path/byte; no unresolved material finding. Broader baseline-to-current review
+was sampled, not an every-line new audit of the earlier draft. Signed checkpoint a187b7e7646702acbe5453a252304f622c80dd2b
+is pushed with ordinary hooks: 9,430 passed / 14 existing skips / 203 warnings, 597.21s;
+90.52% branch coverage, unchanged 86% floor. Lock/sync, Ruff, both Vulture scans, mypy
+747 files, actionlint, coverage artifact and naming pass. Every committed production byte
+matches fifth-final. PR remains draft with both targets false. Freeze lifts for sixth
+native transport lifecycle, flow dispatch/recorder ownership, and hydrated read acquisition.
+
+Sixth wave in progress (aggregate snapshot and required gate still outstanding):
+- Native CliTransport teardown owns cancellation; its duplicate process list and
+  standalone batch helper disappear. Captured exited roots close inherited pipes;
+  pending native spawn owners remain registered. Process-group policy is unchanged.
+  Two-file source 252→242 (-10), physical 363→349 (-14, one EOF blank).
+  273 focused checks pass with one existing skip; broader native/OTLP checks,
+  Ruff/mypy/Vulture and independent Flow review pass.
+- Runner dispatch directly owns admitted native flow selection; recorder scope owns
+  profile stamping. Forwarding helpers and re-entry projection disappear; nested
+  runs preserve the outer recorder's profile. Three-file source 1,638→1,602 (-36),
+  physical 2,149→2,080 (-69 including comments/EOF cleanup, no source credit).
+  2,016 decision and 14 real model/recorder baseline comparisons match; 911 focused
+  checks, Ruff/mypy/deadcode and independent backend review pass. High CC and
+  cognitive counts each rise by one after consolidation.
+- Hydrated adjudication reads capture one native connection's runs instead of
+  reopening and reconstructing acquisition state. Preview parses/hashes one byte
+  capture; JSONL authority, immutable SQL/WAL refusal, and transport-versus-gold
+  admission remain distinct. Six-file source 1,920→1,870 (-50), physical
+  2,490→2,408 (-82); 37 exact real hydration/harvest cases and 171 integrated
+  checks pass, plus final affected checks and a meaningful byte-race regression.
+  Ruff/mypy and independent Flow review pass; high CC rises by one.
+- Stage0 drops V2Projection's stored by_split mirror and repeated outcome-row
+  projection. One admitted projection captures labels in file order and training
+  partitions in pinned lineage order; train precedes validation for seeded SGD,
+  including valid records stored in other split files. No labels-file/model/gold
+  gate or resume check is removed. Two-file source 577→564 (-13), physical
+  772→749 (-23); 64 actual CPU pipeline/load/resume/failure-artifact cases match,
+  40 focused checks and Ruff/mypy pass. Independent backend review passes.
+
+Next positive full-cost candidates: concrete archive import classification plan
+(~103 source after callers), and captured BackendExecutionInput replacing the sole
+runner factory passthrough (20 source, fixes ignored effort override on embedded
+runs). Public native commit/push flattening is being verified separately.
+Rejected again after full cost: test recipe Pydantic admission needs JSON-list,
+unresolved-value, and source/value coupling adapters, leaving the previous small
+20–30 saving and extra ownership. No edit made. Backend event normalization,
+HTTP/gRPC delivery, audit/vet versus deep arbitration, and rollback modes retain
+materially different obligations; their superficial similarity is not evidence
+that any supported path can be deleted. These are negative assessments, not
+completion or blocking conditions. Both aggregate targets remain outstanding.
+
+Sixth integrated fixed snapshot supersedes all per-owner estimates: 83,415 source /
+108,842 physical, 362 files, unchanged inventory SHA256; clones 2,252, high CC 493,
+high cognitive 604. This wave removes 297 source / 418 physical lines, counting all
+callers and new model fields. Aggregate reduction: 2.469% source / 3.989% physical.
+Shortfall remains 6,441 source / 6,815 physical. Target remains false; no module is
+moved outside the baseline inventory and no test/documentation reduction is credited.
+- ImportPlan owns classified merge rows, reason ledger, and identity summary, removing
+  object-id membership rejoins and four standalone partition/accounting adapters.
+  Whole three-file source 1,504→1,372 (-132), physical 1,854→1,694 (-160), high CC
+  12→10, high cognitive 12→9. Six thousand exact plan/error comparisons and 216
+  importer/adjudication/real-CLI/publication/atomic-write checks pass. Contradictory
+  generations retain historical session/row precedence. Independent Flow review passes.
+- Captured BackendExecutionInput replaces the sole runner factory closure, type,
+  branch, and repeated forwarding. Embedded effort overrides now use distinct native
+  cache entries instead of silently receiving the default effort. Native environment,
+  audit/cwd and public agent/backend contracts are unchanged. Whole three-file source
+  1,424→1,404 (-20), physical 1,904→1,880 (-24), thresholds unchanged. 229 checks,
+  actual native Codex/Pi construction, Ruff/mypy/Vulture and Flow review pass.
+- Public phase_commit_push directly owns its one supported workflow. Unused private
+  commit-only/noninteractive modes, extra context binding, forwarding signature and
+  intermediate allocation disappear. Public CommitPushResult type/export remains;
+  hook/index/tree checks and exact remote receipt remain. Whole two-file source
+  524→488 (-36), physical 637→591 (-46), complexity thresholds unchanged.
+  380 expanded checks pass with two unchanged host skips; two additional no-op and
+  real commit/push recorder checks and eleven complete native Git/bare-remote
+  before/after cases pass. Independent backend review passes.
+
+All sixth production/test owners are frozen for independent aggregate review and
+ordinary signed commit/push hooks. GitHub PR base remains the recorded baseline,
+so no inherited upstream reduction is included. Adjudication CLI error handling
+remains local: its argparse/Rich command and stage policies deliberately catch
+materially different exceptions; a dispatcher-wide catch would change errors or
+add routing. The next GitHub refresh acquisition prototype remains outside repo.
+
+The sixth ordinary pre-push gate passed lock/sync, Ruff, both Vulture scans, and
+mypy, then stopped at one outdated deep resolver spy missing the newly captured
+execution_input keyword (9,441 passed, 14 skipped, 90.52% coverage). The test now
+forwards the native keyword and exercises ambient and captured execution inputs;
+all original per-phase/exit assertions remain, with identity assertions added.
+No production or measurement changes were needed. Focused variants pass; the
+ordinary signed amend and full hook-enabled push retry are pending.

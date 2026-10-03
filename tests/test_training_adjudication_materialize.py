@@ -7,8 +7,8 @@ import pytest
 
 from daydream.archive.hydrate import HubUnavailableError
 from daydream.archive.index import append_label_observation
-from daydream.training.adjudication.import_local import _hydrated_identity_index
-from daydream.training.adjudication.materialize import _trajectory_resolutions_readonly, run_materialize
+from daydream.training.adjudication.import_local import _load_import_index
+from daydream.training.adjudication.materialize import run_materialize
 from daydream.trajectory import run_directory, run_document_path
 from tests.harness.adjudication import make_hydrated_sqlite_index, write_sessions_jsonl
 from tests.test_training_adjudication_canonical import _PIN, _index
@@ -155,8 +155,8 @@ def test_hydrated_readers_address_the_layout_run_directory(tmp_path: Path) -> No
     _seed_legacy_trajectory(root, "s1")
 
     assert run_document_path(run_directory(root, "s1")).is_file()
-    assert _trajectory_resolutions_readonly(root, "s1") is not None
-    assert _hydrated_identity_index([{"session_id": "s1"}], root)["s1"]["record_id"] == "s1"
+    assert run_materialize(root, tmp_path / "materialized", pin=_PIN)["record_count"] == 1
+    assert _load_import_index(root)[2]["s1"]["record_id"] == "s1"
 
 def test_materialize_skips_legacy_labels_only_sessions_without_trajectory(tmp_path: Path,) -> None:
     """A labels-only row without a trajectory is evidence-only and yields no resolutions; it must not abort
@@ -246,3 +246,37 @@ def test_materialize_fails_loudly_on_uncheckpointed_wal(tmp_path: Path) -> None:
             run_materialize(root, tmp_path / "out", pin=_PIN)
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("sidecar", ["corrupt", "wal"])
+def test_materialized_sessions_remain_authoritative_beside_an_unreadable_index(
+    tmp_path: Path, sidecar: str,
+) -> None:
+    root = _index(tmp_path)
+    (root / "index.db").write_bytes(b"not a SQLite database")
+    if sidecar == "wal":
+        (root / "index.db-wal").write_bytes(b"uncheckpointed")
+    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+    assert run_materialize(root, tmp_path / "out", pin=_PIN)["record_count"] == 1
+    # Import needs authoritative parents, even though snapshot transport does not.
+    with pytest.raises((ValueError, sqlite3.DatabaseError)):
+        _load_import_index(root)
+    assert before == {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+
+
+def test_materialize_transports_decisive_rows_without_applying_the_queue_gold_gate(tmp_path: Path) -> None:
+    from daydream.training.adjudication.preview import run_preview
+    from daydream.training.corpus_projection.tiers import GoldGateError
+
+    root = _index(tmp_path)
+    source = root / "sessions.jsonl"
+    session = json.loads(source.read_text())
+    session["resolutions"][0].update(disposition="accepted", evidence=[])
+    source.write_text(json.dumps(session) + "\n")
+    out = tmp_path / "out"
+    assert run_materialize(root, out, pin=_PIN)["record_count"] == 1
+    record = json.loads((out / "sessions.jsonl").read_text())
+    assert record["disposition"] == "accepted" and record["evidence"] == []
+    with pytest.raises(GoldGateError):
+        run_preview(root, tmp_path / "ledger.json")
+    assert not (tmp_path / "ledger.json").exists()

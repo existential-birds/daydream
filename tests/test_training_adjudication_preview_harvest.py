@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -196,3 +197,40 @@ def test_export_requires_human_judgment_against_current_evidence(tmp_path: Path)
     fresh = next(row for row in build_export_entries(root, ledger, observations_path=observations)
                  if row["record_id"] == item["record_id"])
     assert fresh["tier"] == "gold" and fresh["posterior_eligible"] is True
+
+
+def test_session_revision_hash_binds_the_same_bytes_as_parsed_findings(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = write_sessions_index(tmp_path / "index")
+    revision_file = root / "index-revision.txt"
+    revision_file.unlink(missing_ok=True)
+    source = root / "sessions.jsonl"
+    captured = source.read_bytes()
+    replacement = captured.replace(b'"unanswered"', b'"missing"')
+    read_text = Path.read_text
+    read_bytes = Path.read_bytes
+    replaced = False
+
+    def replace_after_capture(path: Path) -> None:
+        nonlocal replaced
+        if path == source and not replaced:
+            source.write_bytes(replacement)
+            replaced = True
+
+    def changing_text(path: Path, *args: Any, **kwargs: Any) -> str:
+        value = read_text(path, *args, **kwargs)
+        replace_after_capture(path)
+        return value
+
+    def changing_bytes(path: Path) -> bytes:
+        value = read_bytes(path)
+        replace_after_capture(path)
+        return value
+
+    monkeypatch.setattr(Path, "read_text", changing_text)
+    monkeypatch.setattr(Path, "read_bytes", changing_bytes)
+    sessions, revision = _load_sessions(root)
+    assert sessions[0]["resolutions"][0]["disposition"] == "unanswered"
+    assert revision == hashlib.sha256(captured).hexdigest()
+    assert source.read_bytes() == replacement

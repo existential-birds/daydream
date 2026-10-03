@@ -62,12 +62,13 @@ def _load_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
         )
     sessions: list[dict[str, Any]] = []
     try:
-        for line in sessions_path.read_text(encoding="utf-8").splitlines():
+        source_bytes = sessions_path.read_bytes()
+        for line in source_bytes.decode("utf-8").splitlines():
             if line.strip():
                 sessions.append(json.loads(line))
     except (OSError, json.JSONDecodeError) as exc:
         raise HubUnavailableError(f"unreadable hydrated index at {sessions_path}: {exc}") from exc
-    index_revision = hashlib.sha256(sessions_path.read_bytes()).hexdigest()
+    index_revision = hashlib.sha256(source_bytes).hexdigest()
     revision_file = index_root / _REVISION_FILENAME
     if revision_file.is_file():
         # Delegate pinned-revision resolution to hydrate.py's resolver: a
@@ -91,7 +92,7 @@ def run_preview(
     evidence raises the queue builder's ValueError."""
     from daydream.training.adjudication.materialize import index_sessions
 
-    sessions, index_revision = index_sessions(index_root)
+    sessions, index_revision, _runs = index_sessions(index_root)
     prior = prior_adjudications(load_observations(observations_path)) if observations_path else None
     items = [
         {k: item[k] for k in _ITEM_KEYS} for item in build_queue(sessions, prior_observations=prior)

@@ -48,20 +48,18 @@ def _write_projection(tmp_path: Path, record_ids: list[str]) -> Path:
     (out / "_SUCCESS").write_text("ok\n", encoding="utf-8")
     return out
 
-def test_load_v2_projection_returns_per_split_records_lineage_and_digests(tmp_path: Path,) -> None:
+def test_load_v2_projection_returns_pinned_records_lineage_and_digests(tmp_path: Path,) -> None:
     record_ids = [f"rec-{i:04d}" for i in range(30)]
     out = _write_projection(tmp_path, record_ids)
     proj = load_v2_projection(out)
 
     assert isinstance(proj, V2Projection)
-    assert set(proj.by_split) == {"train", "validation", "holdout"}
     # Every record lands in the split its id deterministically assigns.
     for record in proj.records:
         expected = assign_split(str(record["record_id"]), salt=SALT, holdout_rate=HOLDOUT_RATE, val_rate=VAL_RATE)
-        assert proj.by_split[expected] is not None
-        assert record in proj.by_split[expected]
+        assert cast(dict[str, object], record["lineage"])["split"] == expected
+    assert {record["record_id"] for record in proj.records} == set(record_ids)
     assert len(proj.records) == len(record_ids)
-    assert sum(len(v) for v in proj.by_split.values()) == len(record_ids)
     assert proj.lineage["salt"] == SALT
 
 def test_load_v2_projection_digest_is_deterministic(tmp_path: Path) -> None:

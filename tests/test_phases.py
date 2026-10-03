@@ -58,7 +58,6 @@ from daydream.phases import (
     phase_cross_stack_merge,
     phase_understand_intent,
     phase_verify_recommendations,
-    publish,
     require_empty_staged_index,
 )
 from daydream.phases.findings import (
@@ -83,9 +82,6 @@ from daydream.phases.inputs import (
     _git_branch,
     _git_log,
     _inlineable_diff,
-)
-from daydream.phases.publish import (
-    _do_commit,
 )
 from daydream.phases.review_prompts import (
     _exploration_pointer,
@@ -450,6 +446,12 @@ def test_test_healing_guard_preserves_preexisting_untracked_bytes(
     assert violations == expected_violations
     assert migration.read_bytes() == original
 
+def _add_bare_origin(repo: Path) -> None:
+    """Give strict publication fixtures a real remote while retaining ordinary hooks."""
+    remote = repo.parent / f"{repo.name}-publication.git"
+    git(repo.parent, "init", "--bare", str(remote))
+    git(repo, "remote", "add", "origin", str(remote))
+
 def _retained_commit_tree(repo: Path, paths: set[str]) -> dict[str, Any]:
     """Supply real retained-tree evidence with the test's explicit authorized paths."""
     return {
@@ -459,10 +461,11 @@ def _retained_commit_tree(repo: Path, paths: set[str]) -> dict[str, Any]:
     }
 
 @pytest.mark.asyncio
-async def test_do_commit_excludes_preexisting_untracked_from_tree(
+async def test_phase_commit_push_excludes_preexisting_untracked_from_tree(
     git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
 ) -> None:
 
+    _add_bare_origin(git_repo)
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")  # tracked baseline
     git(git_repo, "add", "app.py")
@@ -470,9 +473,9 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     (git_repo / "app.py").write_text("x = 1\n")            # daydream change (tracked modification)
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
     backend = ScriptedBackend()
-    ok = await _do_commit(backend, work, push=False, **_retained_commit_tree(work.repo, {"app.py"}),)
-    assert ok.committed is True
-    assert ok.push is None
+    ok = await phase_commit_push(backend, work, **_retained_commit_tree(work.repo, {"app.py"}),
+        run_context=RunContext(InteractionPolicy(assume="yes")))
+    assert ok is not None
     # The commit exists and its tree has the daydream change but NOT notes.txt.
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
@@ -483,10 +486,11 @@ async def test_do_commit_excludes_preexisting_untracked_from_tree(
     assert "Daydream-Run:" in git(git_repo, "log", "-1", "--format=%B")
 
 @pytest.mark.asyncio
-async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
+async def test_phase_commit_push_commits_exactly_the_prestaged_set_host_side(
     git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
 ) -> None:
 
+    _add_bare_origin(git_repo)
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")            # tracked baseline
     (git_repo / "helper.py").write_text("h = 0\n")
@@ -496,11 +500,10 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     (git_repo / "helper.py").write_text("h = 1\n")         # daydream change
     (git_repo / "notes.txt").write_text("user scratch\n")  # pre-existing untracked
 
-    ok = await _do_commit(ScriptedBackend(), work, push=False, items=[{"file": "app.py", "description": "fix app"}],
+    ok = await phase_commit_push(ScriptedBackend(), work, items=[{"file": "app.py", "description": "fix app"}],
         **_retained_commit_tree(work.repo, {"app.py", "helper.py"}),
-    )
-    assert ok.committed is True
-    assert ok.push is None
+        run_context=RunContext(InteractionPolicy(assume="yes")))
+    assert ok is not None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert sorted(committed) == ["app.py", "helper.py"]
     assert "notes.txt" in git(git_repo, "status", "--porcelain")
@@ -510,11 +513,12 @@ async def test_do_commit_commits_exactly_the_prestaged_set_host_side(
     assert "under-commit" not in out
 
 @pytest.mark.asyncio
-async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
+async def test_phase_commit_push_excludes_daydream_run_artifacts_from_tree(
     git_repo: Path, make_work: Callable[..., WorkContext], capsys: pytest.CaptureFixture[str],
 ) -> None:
     """Runtime artifacts must stay out of commits even when .daydream/ is not ignored."""
 
+    _add_bare_origin(git_repo)
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")
     git(git_repo, "add", "app.py")
@@ -528,14 +532,40 @@ async def test_do_commit_excludes_daydream_run_artifacts_from_tree(
     (dd / "deep").mkdir(parents=True)
     (dd / "deep" / "fix-quality-gate.json").write_text("{}\n")
     backend = ScriptedBackend()
-    ok = await _do_commit(backend, work, push=False, **_retained_commit_tree(work.repo, {"app.py"}),)
-    assert ok.committed is True
-    assert ok.push is None
+    ok = await phase_commit_push(backend, work, **_retained_commit_tree(work.repo, {"app.py"}),
+        run_context=RunContext(InteractionPolicy(assume="yes")))
+    assert ok is not None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
     assert not any(p.startswith(".daydream/") for p in committed), (
         f"commit tree carries .daydream/ artifacts: {committed}"
     )
+
+@pytest.mark.asyncio
+async def test_phase_commit_push_empty_retained_tree_does_not_commit_or_push(
+    tmp_path: Path, make_work: Callable[..., WorkContext],
+) -> None:
+    """An admitted empty tree preserves the local/index/remote state and returns no receipt."""
+    repo = _pushable_repo(tmp_path)
+    before = git_ops.head_sha(repo)
+    hook_marker = tmp_path / "empty-hook.log"
+    hook = repo / ".git" / "hooks" / "pre-push"
+    hook.write_text(f"#!/bin/sh\nprintf 'ran\n' > {shlex.quote(str(hook_marker))}\n")
+    hook.chmod(0o755)
+    backend = ScriptedBackend()
+
+    result = await phase_commit_push(
+        backend, make_work(repo), run_context=RunContext(InteractionPolicy(assume="yes")),
+        **_retained_commit_tree(repo, set()),
+    )
+
+    assert result is None
+    assert git_ops.head_sha(repo) == before
+    assert git(repo, "status", "--porcelain") == ""
+    assert git(repo, "diff", "--cached") == ""
+    assert git(repo, "ls-remote", "origin", "refs/heads/main") == ""
+    assert not hook_marker.exists()
+    assert backend.calls == []
 
 @pytest.mark.asyncio
 async def test_host_commit_push_verifies_remote_before_success(
@@ -547,13 +577,11 @@ async def test_host_commit_push_verifies_remote_before_success(
     (work_repo / "fix.py").write_text("fixed\n")  # the daydream change
 
     work = make_work(work_repo)
-    ok = await _do_commit(
-        ScriptedBackend(), work, push=True, interactive=False, items=[{"file": "fix.py", "description": "fix bug"}],
-        **_retained_commit_tree(work.repo, {"fix.py"}),
-    )
-    assert ok.committed is True
-    assert ok.push is not None
-    assert ok.push.pushed_repository is None
+    ok = await phase_commit_push(
+        ScriptedBackend(), work, items=[{"file": "fix.py", "description": "fix bug"}],
+        **_retained_commit_tree(work.repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
+    assert ok is not None
+    assert ok.pushed_repository is None
 
     sha = git_ops.head_sha(work_repo)
     assert git_ops.remote_contains_commit(work_repo, "main", sha, remote="origin") is True
@@ -577,19 +605,17 @@ async def test_push_receipt_uses_raw_github_remote_and_real_hook(tmp_path: Path,
     hook.chmod(0o755)
     (repo / "app.py").write_text("x = 1\n")
 
-    result = await _do_commit(
-        ScriptedBackend(), make_work(repo), push=True, interactive=False,
+    result = await phase_commit_push(
+        ScriptedBackend(), make_work(repo),
             **_retained_commit_tree(repo, {"app.py"}),
-        config=_hook_run_config(),
-    )
+        config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
 
-    assert result.committed is True
-    assert result.push is not None
-    assert result.push.remote == "origin"
-    assert result.push.branch == "feature"
-    assert result.push.sha == git(repo, "rev-parse", "HEAD")
-    assert result.push.pushed_repository == "fork-user/widgets"
-    assert git(remote, "rev-parse", "refs/heads/feature") == result.push.sha
+    assert result is not None
+    assert result.remote == "origin"
+    assert result.branch == "feature"
+    assert result.sha == git(repo, "rev-parse", "HEAD")
+    assert result.pushed_repository == "fork-user/widgets"
+    assert git(remote, "rev-parse", "refs/heads/feature") == result.sha
     assert hook_marker.read_text() == "ran\n"
 
 @pytest.mark.asyncio
@@ -614,10 +640,9 @@ async def test_push_rejects_remote_url_changed_by_real_hook(tmp_path: Path, make
     (repo / "app.py").write_text("x = 1\n")
 
     with pytest.raises(PushAttemptError) as exc_info:
-        await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
+        await phase_commit_push(ScriptedBackend(), make_work(repo),
             **_retained_commit_tree(repo, {"app.py"}),
-            config=_hook_run_config(),
-        )
+            config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert exc_info.value.receipt.pushed_repository == "fork-user/widgets"
     assert git(repo, "config", "--get", "remote.origin.url") == replacement
@@ -636,10 +661,9 @@ async def test_push_failure_reported_as_failure_even_with_local_commit(
 
     work = make_work(work_repo)
     with pytest.raises(GitError):
-        await _do_commit(
-            ScriptedBackend(), work, push=True, interactive=False, items=[{"file": "fix.py", "description": "fix bug"}],
-            **_retained_commit_tree(work.repo, {"fix.py"}),
-        )
+        await phase_commit_push(
+            ScriptedBackend(), work, items=[{"file": "fix.py", "description": "fix bug"}],
+            **_retained_commit_tree(work.repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
     # The local commit was still created with the deterministic message.
     assert git(work_repo, "log", "-1", "--format=%B").startswith("fix:")
     out = capsys.readouterr().out
@@ -658,8 +682,8 @@ async def test_push_attempt_error_carries_exact_attempted_identity(
     (repo / "app.py").write_text("x = 1\n")
 
     with pytest.raises(git_ops.GitError) as exc_info:
-        await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
-            **_retained_commit_tree(repo, {"app.py"}),)
+        await phase_commit_push(ScriptedBackend(), make_work(repo),
+            **_retained_commit_tree(repo, {"app.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert type(exc_info.value).__name__ == "PushAttemptError"
     receipt = exc_info.value.receipt  # type: ignore[attr-defined]
@@ -678,13 +702,12 @@ async def test_push_verification_failure_surfaces_even_when_push_succeeds(
     (work_repo / "fix.py").write_text("fixed\n")
     work = make_work(work_repo)
     with pytest.raises(git_ops.GitError):
-        await _do_commit(
-            ScriptedBackend(), work, push=True, interactive=False, items=[{"file": "fix.py", "description": "fix bug"}],
-            **_retained_commit_tree(work.repo, {"fix.py"}),
-        )
+        await phase_commit_push(
+            ScriptedBackend(), work, items=[{"file": "fix.py", "description": "fix bug"}],
+            **_retained_commit_tree(work.repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
 
 @pytest.mark.asyncio
-async def test_do_commit_requires_retained_tree_authority(
+async def test_phase_commit_push_requires_retained_tree_authority(
     git_repo: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """Missing retained authority fails before any index or worktree mutation."""
@@ -696,29 +719,30 @@ async def test_do_commit_requires_retained_tree_authority(
     before = git(git_repo, "status", "--porcelain")
     head = git_ops.head_sha(git_repo)
     with pytest.raises(TypeError, match="retained_paths, retained_states, and initial_index are required"):
-        await _do_commit(ScriptedBackend(), make_work(git_repo), push=False)
+        await phase_commit_push(ScriptedBackend(), make_work(git_repo),
+        run_context=RunContext(InteractionPolicy(assume="yes")))
     assert git(git_repo, "status", "--porcelain") == before
     assert git_ops.head_sha(git_repo) == head
     assert git(git_repo, "diff", "--cached") == ""
 
 
-async def test_do_commit_retains_authorized_new_files(
+async def test_phase_commit_push_retains_authorized_new_files(
     git_repo: Path, make_work: Callable[..., WorkContext],
 ) -> None:
     """Explicit retained paths preserve a fix-created file without guessing its origin."""
 
+    _add_bare_origin(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")
     git(git_repo, "add", "app.py")
     git_commit(git_repo, "baseline app.py")
     (git_repo / "app.py").write_text("x = 1\n")                    # daydream change
     (git_repo / "generated.py").write_text("created by fix\n")     # fix-created NEW file
 
-    ok = await _do_commit(ScriptedBackend(), make_work(git_repo), push=False,
-        interactive=False, items=[{"file": "app.py", "description": "fix app"}],
+    ok = await phase_commit_push(ScriptedBackend(), make_work(git_repo),
+        items=[{"file": "app.py", "description": "fix app"}],
         **_retained_commit_tree(git_repo, {"app.py", "generated.py"}),
-    )
-    assert ok.committed is True
-    assert ok.push is None
+        run_context=RunContext(InteractionPolicy(assume="yes")))
+    assert ok is not None
     committed = git(git_repo, "show", "--name-only", "--format=", "HEAD").split()
     assert "app.py" in committed
     assert "generated.py" in committed
@@ -771,12 +795,10 @@ async def test_hook_aware_push_runs_suite_exactly_once(
         (repo / "fix.py").write_text("fixed\n")  # the daydream change
 
         runs = _record_host_runs(monkeypatch, output="")
-        ok = await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
+        ok = await phase_commit_push(ScriptedBackend(), make_work(repo),
             items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
-            config=_hook_run_config(),
-        )
-        assert ok.committed is True
-        assert ok.push is not None
+            config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
+        assert ok is not None
         assert len(runs) == expected_runs, (
             f"hook_present={hook_present}: expected {expected_runs} host run(s), got {len(runs)}"
         )
@@ -801,10 +823,9 @@ async def test_hook_aware_push_red_suite_blocks_push(
     _record_host_runs(monkeypatch, exit_status=1, output="1 failed")
 
     with pytest.raises(RuntimeError, match="Pre-push validation"):
-        await _do_commit(ScriptedBackend(), make_work(repo), push=True, interactive=False,
+        await phase_commit_push(ScriptedBackend(), make_work(repo),
             items=[{"file": "fix.py", "description": "fix bug"}], **_retained_commit_tree(repo, {"fix.py"}),
-            config=_hook_run_config(),
-        )
+            config=_hook_run_config(), run_context=RunContext(InteractionPolicy(assume="yes")))
     # Nothing was pushed: the remote still reports the baseline sha only.
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == remote_head_before
     # The local commit exists but is unpushed.
@@ -3601,6 +3622,7 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
 
     repo = tmp_path / "repo"
     init_repo(repo)
+    _add_bare_origin(repo)
     (repo / "app.py").write_text("before\n")
     git(repo, "add", "app.py")
     git_commit(repo, "baseline")
@@ -3625,13 +3647,11 @@ async def test_strict_commit_stages_retained_paths_once_and_commits_staged_index
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("strict commit must not restage")),
     )
 
-    committed = await publish._do_commit(
+    committed = await phase_commit_push(
         ScriptedBackend(), make_work(repo), retained_paths=frozenset({"app.py"}), retained_states=retained_states,
-        initial_index=initial_index,
-    )
+        initial_index=initial_index, run_context=RunContext(InteractionPolicy(assume="yes")))
 
-    assert committed.committed is True
-    assert committed.push is None
+    assert committed is not None
     assert calls == {"stage": 1, "commit_staged": 1}
     assert git(repo, "show", "HEAD:app.py") == "after"
 
@@ -3643,6 +3663,7 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
 
     repo = tmp_path / "repo"
     init_repo(repo)
+    _add_bare_origin(repo)
     (repo / "base.py").write_text("baseline\n")
     git(repo, "add", "base.py")
     git_commit(repo, "baseline")
@@ -3656,9 +3677,9 @@ async def test_strict_commit_accepts_new_file_permissions_without_changing_owner
     retained = frozenset({"new.py"})
     before_states = git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"])
 
-    assert (await publish._do_commit(ScriptedBackend(), make_work(repo), retained_paths=retained,
+    assert (await phase_commit_push(ScriptedBackend(), make_work(repo), retained_paths=retained,
         retained_states=git_ops.snapshot_worktree_paths(repo, retained), initial_index=initial_index,
-    )).committed is True
+        run_context=RunContext(InteractionPolicy(assume="yes")))) is not None
 
     assert git(repo, "show", "HEAD:new.py") == "new retained content"
     assert git_ops.snapshot_worktree_paths(repo, ["new.py", "private.txt"]) == before_states
@@ -3678,6 +3699,7 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
 
     repo = tmp_path / "repo"
     init_repo(repo)
+    _add_bare_origin(repo)
     native = os.fsdecode(b"native-\xff.py")
     try:
         (repo / native).write_bytes(b"private or retained\n")
@@ -3696,9 +3718,9 @@ async def test_strict_commit_preserves_non_utf8_retained_and_protected_paths(
     if native_retained:
         (repo / native).write_bytes(b"retained after\n")
 
-    assert (await publish._do_commit(ScriptedBackend(), make_work(repo), retained_paths=retained,
+    assert (await phase_commit_push(ScriptedBackend(), make_work(repo), retained_paths=retained,
         retained_states=git_ops.snapshot_worktree_paths(repo, retained), initial_index=initial_index,
-    )).committed is True
+        run_context=RunContext(InteractionPolicy(assume="yes")))) is not None
     assert (repo / native).read_bytes() == (
         b"retained after\n" if native_retained else b"private or retained\n"
     )
@@ -3720,6 +3742,7 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
 
     repo = tmp_path / "repo"
     init_repo(repo)
+    _add_bare_origin(repo)
     (repo / "app.py").write_text("before\n")
     artifact = repo / artifact_path
     if preexisting:
@@ -3741,17 +3764,16 @@ async def test_strict_commit_real_hook_distinguishes_runtime_artifacts_from_user
     )
     hook.chmod(0o755)
 
-    async def commit_retained() -> phases.CommitPushResult:
-        return await publish._do_commit(
+    async def commit_retained() -> phases.PushReceipt | None:
+        return await phase_commit_push(
             ScriptedBackend(), make_work(repo), retained_paths=frozenset({"app.py"}), retained_states=retained_states,
-            initial_index=initial_index,
-        )
+            initial_index=initial_index, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     if must_block:
         with pytest.raises(git_ops.GitError, match="push blocked"):
             await commit_retained()
     else:
-        assert (await commit_retained()).committed is True
+        assert (await commit_retained()) is not None
     assert artifact.read_text() == "hook runtime\n"
     assert git(repo, "diff-tree", "--no-commit-id", "--name-only", "-r", "HEAD") == "app.py"
     assert git(repo, "diff", "--cached") == ""
@@ -3764,6 +3786,7 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
 
     repo = tmp_path / "repo"
     init_repo(repo)
+    _add_bare_origin(repo)
     (repo / "app.py").write_text("before\n")
     git(repo, "add", "app.py")
     git_commit(repo, "baseline")
@@ -3784,10 +3807,9 @@ async def test_strict_commit_blocks_after_commit_hook_mutates_worktree_or_index(
     monkeypatch.setattr(git_ops, "commit_staged", _mutating_commit)
 
     with pytest.raises(git_ops.GitError, match=r"Local commit [0-9a-f]+ was created.*push blocked",):
-        await publish._do_commit(
+        await phase_commit_push(
             ScriptedBackend(), make_work(repo), retained_paths=frozenset({"app.py"}), retained_states=retained_states,
-            initial_index=initial_index,
-        )
+            initial_index=initial_index, run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert git(repo, "show", "HEAD:app.py") == "after"
     expected_worktree = "hook mutation\n" if hook_mutation == "worktree" else "after\n"
@@ -4180,13 +4202,12 @@ async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
     config = _hook_run_config()
     recipe = resolve_test_recipe(config, config, repo_root=repo)
     identity = _execution_identity(repo, recipe=recipe, argv=("true",))
-    ok = await _do_commit(ScriptedBackend(), work, push=True, interactive=False,
+    ok = await phase_commit_push(ScriptedBackend(), work,
         items=[{"file": "fix.py", "description": "fix bug"}], config=config, recipe=recipe,
         evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
-        **_retained_commit_tree(repo, {"fix.py"}),
-    )
+        **_retained_commit_tree(repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
 
-    assert ok.committed is True and ok.push is not None
+    assert ok is not None
     assert runs == [], "the redundant proactive suite run is the only thing removed"
     assert hook_log.exists(), "the pre-push hook must still execute"
     assert git_ops.remote_contains_commit(repo, "main", git_ops.head_sha(repo), remote="origin")
@@ -4197,10 +4218,10 @@ async def test_hook_aware_push_reuses_evidence_but_still_runs_the_hook(
     (repo_two / "fix.py").write_text("fixed\n")
     baseline = _record_host_runs(monkeypatch, output="")
 
-    await _do_commit(ScriptedBackend(), make_work(repo_two), push=True, interactive=False,
+    await phase_commit_push(ScriptedBackend(), make_work(repo_two),
         items=[{"file": "fix.py", "description": "fix bug"}],
         **_retained_commit_tree(repo_two, {"fix.py"}), config=_hook_run_config(),
-    )
+        run_context=RunContext(InteractionPolicy(assume="yes")))
 
     assert len(baseline) == 1, "the no-evidence baseline pays exactly one orchestrator run"
 
@@ -4220,11 +4241,10 @@ async def test_hook_failure_still_blocks_the_push_on_a_reuse_hit(
     identity = _execution_identity(repo, recipe=recipe, argv=("true",))
 
     with pytest.raises((GitError, PushAttemptError)):
-        await _do_commit(ScriptedBackend(), work, push=True, interactive=False,
+        await phase_commit_push(ScriptedBackend(), work,
             items=[{"file": "fix.py", "description": "fix bug"}],
             config=config, recipe=recipe, evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
-            **_retained_commit_tree(repo, {"fix.py"}),
-        )
+            **_retained_commit_tree(repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
     assert runs == []
 
 @pytest.mark.asyncio
@@ -4245,12 +4265,11 @@ async def test_matching_evidence_cannot_bypass_failed_commit_verification(
     hook.write_text("#!/bin/sh\nprintf 'hook mutation\n' > fix.py\n")
     hook.chmod(0o755)
     with pytest.raises(GitError, match="post-commit validation failed; push blocked"):
-        await _do_commit(
-            ScriptedBackend(), make_work(repo), push=True, interactive=False,
+        await phase_commit_push(
+            ScriptedBackend(), make_work(repo),
             items=[{"file": "fix.py", "description": "fix bug"}], config=config, recipe=recipe,
             evidence=_reuse_offer(identity), retained_tree_key=identity.output_tree_key,
-            **_retained_commit_tree(repo, {"fix.py"}),
-        )
+            **_retained_commit_tree(repo, {"fix.py"}), run_context=RunContext(InteractionPolicy(assume="yes")))
     assert runs == [], "failed commit verification must stop before reusing or rerunning tests"
     assert git(repo, "ls-remote", "origin", "refs/heads/main") == ""
     assert (repo / "fix.py").read_text() == "hook mutation\n"

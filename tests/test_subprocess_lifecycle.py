@@ -2,15 +2,17 @@
 
 import asyncio
 import os
+import sys
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from daydream import runner
 from daydream.backends import AUDIT_ROOT_ISOLATION
-from daydream.backends._subprocess import cancel_processes, terminate_process
+from daydream.backends._subprocess import terminate_process
+from daydream.backends._transport import CliTransport, teardown
 from daydream.backends.codex import CodexBackend
 from tests.harness.processes import (
     GROUP_HOLDER_CLI,
@@ -58,15 +60,94 @@ async def test_terminate_process_is_idempotent() -> None:
     await terminate_process(proc)
     await terminate_process(proc)  # must not raise
 
-async def test_cancel_processes_kills_groups_and_releases_fds() -> None:
-    """cancel_processes reaps every tracked process group, not just direct children."""
+async def test_cancel_transports_kills_groups_and_releases_fds() -> None:
+    """Native transport cancellation reaps every group, not just direct children."""
     base = fd_count()
-    procs = [await _spawn_holder() for _ in range(2)]
-    pgids = [os.getpgid(p.pid) for p in procs]
-    await cancel_processes(procs)
-    for pgid in pgids:
-        await wait_for_process_group_gone(pgid)
-    await wait_for_fd_baseline(base)
+    transports: list[CliTransport] = []
+    pgids: list[int] = []
+    try:
+        for _ in range(2):
+            transport = CliTransport("python3", ["python3", "-c", GROUP_HOLDER_CLI], limit=1024)
+            transports.append(transport)
+            await transport.start()
+            lines = transport.lines(lambda: None)
+            assert await anext(lines) == "UP"
+            await lines.aclose()
+            assert transport._proc is not None
+            pgids.append(os.getpgid(transport._proc.pid))
+        await CliTransport.cancel_all(transports)
+        assert transports == []
+        for pgid in pgids:
+            await wait_for_process_group_gone(pgid)
+        await wait_for_fd_baseline(base)
+    finally:
+        await CliTransport.cancel_all(transports)
+
+
+async def test_cancel_transports_preserves_pending_spawn_ownership(monkeypatch: pytest.MonkeyPatch) -> None:
+    native_spawn = asyncio.create_subprocess_exec
+    captured: list[asyncio.subprocess.Process] = []
+    entered = asyncio.Event()
+    release = asyncio.Event()
+
+    async def delayed_capture(*args: str, **kwargs: Any) -> asyncio.subprocess.Process:
+        child = await native_spawn(*args, **kwargs)
+        captured.append(child)
+        entered.set()
+        await release.wait()
+        return child
+
+    monkeypatch.setattr("daydream.backends._transport.asyncio.create_subprocess_exec", delayed_capture)
+    transport = CliTransport("fixture", [sys.executable, "-c", "import time; time.sleep(30)"], limit=1024)
+    transports = [transport]
+    startup = asyncio.create_task(transport.start())
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert captured[0].returncode is None
+        await CliTransport.cancel_all(transports)
+        assert transports == [transport]
+        assert captured[0].returncode is None
+        release.set()
+        await startup
+        await CliTransport.cancel_all(transports)
+        assert transports == []
+        assert await asyncio.wait_for(captured[0].wait(), timeout=5) < 0
+    finally:
+        release.set()
+        await startup
+        await teardown(transport, transports)
+
+
+async def test_cancel_transports_closes_exited_root_inherited_pipes(tmp_path: Path) -> None:
+    ready = tmp_path / "descendant-ready"
+    release = tmp_path / "descendant-release"
+    finished = tmp_path / "descendant-finished"
+    descendant = (
+        f"import pathlib,time; pathlib.Path({str(ready)!r}).touch(); p=pathlib.Path({str(release)!r});\n"
+        "while not p.exists(): time.sleep(0.01)\n"
+        f"pathlib.Path({str(finished)!r}).touch()"
+    )
+    # An independent pipe writer keeps this proof independent of platform rules
+    # for signaling a group whose leader already exited; group reaping is tested above.
+    root = f"import subprocess,sys; subprocess.Popen([sys.executable, '-c', {descendant!r}], start_new_session=True)"
+    transport = CliTransport("fixture", [sys.executable, "-c", root], stderr_sink=lambda _: None, limit=1024)
+    transports = [transport]
+    try:
+        await transport.start()
+        await _wait_for_file(ready, timeout_s=5)
+        async with asyncio.timeout(5):
+            while transport.returncode is None:
+                await asyncio.sleep(0.01)
+        assert transport.returncode == 0
+        assert transport._drain_task is not None and not transport._drain_task.done()
+        await asyncio.wait_for(CliTransport.cancel_all(transports), timeout=5)
+        assert transports == []
+        assert transport._drain_task is None
+        assert not release.exists()
+    finally:
+        release.touch()
+        await teardown(transport, transports)
+        await _wait_for_file(finished, timeout_s=5)
 
 
 async def _wait_for_file(path: Path, *, timeout_s: float = 60.0) -> None:
@@ -102,7 +183,7 @@ async def test_runner_run_aborted_improve_reaps_group_and_releases_fds(
     point. The run task is cancelled once the CLI reports ready (marker file
     written after the grandchild's fork — see ``_wait_for_file``), driving
     ``run_agent``'s shutdown path (``except BaseException`` -> ``backend.cancel()``
-    -> ``cancel_processes`` -> group signal + transport close).
+    -> native transport teardown -> group signal + transport close).
 
     Assertions are the issue #303 contract: the CLI's process group no longer
     exists (``os.killpg(pgid, 0)`` raises ``ProcessLookupError`` — no orphaned

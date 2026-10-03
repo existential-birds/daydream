@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -33,16 +34,12 @@ from daydream.trajectory import redact_value
 __all__ = [
     "IMPORT_REASON_CODES",
     "REDACTED_PATH",
-    "accounting",
-    "build_import_ledger",
     "canonical_payload_digest",
-    "classify_run_level",
-    "dedupe_observations",
     "gold_eligible",
-    "link_session_identity",
     "merge_imported_observations",
     "redact_metadata_value",
-    "run_pure_import",
+    "ImportPlan",
+    "plan_import",
 ]
 
 # Every surviving observation gets one stable reason; accounted plus deduped equals the
@@ -72,11 +69,6 @@ _WRITER_FIELDS: tuple[str, ...] = tuple(
     for name in LABEL_OBSERVATION_NAMES
     if name not in ("session_id", "observed_at", "legacy")
 )
-
-_REASON_UNMATCHED = "no_hub_entry"
-_REASON_CONFLICT = "derivative_digest_conflict"
-_REASON_RUN_LEVEL_ONLY = "no_projected_findings"
-_REASON_AMBIGUOUS = "ambiguous_finding_mapping"
 
 # Keep this evidence identity aligned with the canonical writer auto-dedup tuple.
 _TUPLE_FIELDS = (
@@ -287,7 +279,9 @@ def _dedup_tuple(row: dict[str, Any]) -> tuple[Any, ...]:
     )
 
 
-def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, Any]:
+def _dedupe_observations(
+    inventories: list[list[dict[str, Any]]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], int]:
     """Merge overlapping inventories without collapsing distinct evidence generations."""
     # Group every input row by dedup tuple, carrying its payload digest.
     groups: dict[tuple[Any, ...], list[tuple[dict[str, Any], str]]] = {}
@@ -319,259 +313,156 @@ def dedupe_observations(inventories: list[list[dict[str, Any]]]) -> dict[str, An
 
     rows.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r.get("source", "auto")))
     conflicts.sort(key=lambda r: (str(r["session_id"]), str(r["observed_at"]), r.get("source", "auto")))
-    return {"rows": rows, "deduped_count": deduped_count, "content_conflict": conflicts}
+    return rows, conflicts, deduped_count
 
 
-def link_session_identity(
-    records: list[dict[str, Any]],
-    *,
-    hydrated_index: dict[str, dict[str, Any]],
-    repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
-    unmatched_identity_less: bool = False,
-) -> dict[str, dict[str, Any]]:
-    """Link records to hydrated sessions by identity/digest, then repo/base/head."""
-    linked: dict[str, dict[str, str]] = {}
-    unmatched: dict[str, str] = {}
-    identity_conflict: dict[str, str] = {}
+@dataclass(frozen=True)
+class ImportPlan:
+    """One admitted local inventory: exact merge rows and its reason-coded ledger.
 
-    def _hub_id_from_lookup(value: Any) -> str:
-        if isinstance(value, dict):
-            return str(value["hub_session_id"])
-        return str(value)
+    Identity summary and ledger describe original source session ids; linked rows
+    carry remapped Hub session ids and the payload digest checked before writes.
+    """
 
-    for record in records:
-        session_id = str(record["session_id"])
-        digest = record.get("derivative_digest")
-        hub_entry = hydrated_index.get(session_id)
-
-        if hub_entry is not None:
-            hub_digest = hub_entry.get("derivative_digest")
-            if hub_digest is not None and hub_digest == digest:
-                linked[session_id] = {"hub_session_id": session_id, "matched_by": "session_id"}
-                continue
-            if hub_digest is not None and digest is not None and hub_digest != digest:
-                identity_conflict[session_id] = _REASON_CONFLICT
-                continue
-
-        # Fallback: repo_slug + base_sha + head_sha must all be present.
-        repo_slug = record.get("repo_slug")
-        base_sha = record.get("base_sha")
-        head_sha = record.get("head_sha")
-        if not repo_slug or not base_sha or not head_sha:
-            if unmatched_identity_less:
-                unmatched[session_id] = _REASON_UNMATCHED
-                continue
-            msg = (
-                f"session {session_id!r} has no Hub index entry and is missing "
-                "the repo_slug/base_sha/head_sha fields required for the "
-                "identity fallback"
-            )
-            raise ValueError(msg)
-        fallback = repo_slug_sha_lookup.get((str(repo_slug), str(base_sha), str(head_sha)))
-        if fallback is None:
-            unmatched[session_id] = _REASON_UNMATCHED
-        else:
-            linked[session_id] = {
-                "hub_session_id": _hub_id_from_lookup(fallback),
-                "matched_by": "repo_slug_sha",
-            }
-
-    return {"linked": linked, "unmatched": unmatched, "identity_conflict": identity_conflict}
+    linked_rows: list[dict[str, Any]]
+    identity_summary: dict[str, dict[str, Any]]
+    ledger: dict[str, Any]
+    deduped_count: int
 
 
-def classify_run_level(
-    records: list[dict[str, Any]],
-    *,
-    projector_findings: dict[str, list[dict[str, Any]]],
-) -> dict[str, Any]:
-    """Partition observations into per-finding, run-level-only, or ambiguous evidence."""
-    per_finding: dict[str, list[dict[str, Any]]] = {}
-    run_level_only: dict[str, str] = {}
-    ambiguous: dict[str, str] = {}
-
-    for record in records:
-        session_id = str(record["session_id"])
-        if record.get("record_id"):
-            # Already per-finding evidence: accounted in per_finding, never
-            # routed through the run-level buckets.
-            per_finding.setdefault(session_id, []).append(record)
-            continue
-
-        labels = record.get("labels")
-        if isinstance(labels, str):
-            try:
-                labels = json.loads(labels)
-            except json.JSONDecodeError as exc:
-                msg = f"session {session_id!r} has malformed labels JSON: {exc}"
-                raise ValueError(msg) from exc
-        if not isinstance(labels, list):
-            msg = f"session {session_id!r} has non-list labels field: {labels!r}"
-            raise ValueError(msg)
-
-        findings = projector_findings.get(session_id)
-        if not findings:
-            run_level_only[session_id] = _REASON_RUN_LEVEL_ONLY
-            continue
-
-        evidence_sha = record.get("evidence_sha")
-        matches = []
-        for finding in findings:
-            if "record_id" not in finding or "evidence_sha" not in finding:
-                msg = (
-                    f"session {session_id!r} references a malformed projected "
-                    f"finding (missing 'record_id'/'evidence_sha'): {finding!r}"
-                )
-                raise ValueError(msg)
-            if finding["evidence_sha"] == evidence_sha:
-                matches.append(finding)
-
-        if len(matches) == 1:
-            # Decisive identity+evidence-digest match on exactly one finding.
-            per_finding.setdefault(session_id, []).append(record)
-        else:
-            # Ambiguous finding attribution goes to adjudication and never fans out.
-            ambiguous[session_id] = _REASON_AMBIGUOUS
-
-    return {
-        "per_finding": per_finding,
-        "run_level_only": run_level_only,
-        "ambiguous_run_mapping": ambiguous,
-    }
-
-
-def _row_reason_codes(
-    merged_rows: list[dict[str, Any]],
-    *,
-    content_conflict: list[dict[str, Any]],
-    link_result: dict[str, Any],
-    run_level_result: dict[str, Any],
-) -> list[tuple[dict[str, Any], str]]:
-    """Classify every row: conflicts, then version eligibility, then run-level routing; reject gaps."""
-    conflict_ids = {id(row) for row in content_conflict}
-    per_finding_ids = {
-        id(row)
-        for rows in run_level_result["per_finding"].values()
-        for row in rows
-    }
-    unmatched_sids = set(link_result["unmatched"])
-    link_conflict_sids = set(link_result["identity_conflict"])
-    run_level_only_sids = set(run_level_result["run_level_only"])
-    ambiguous_sids = set(run_level_result["ambiguous_run_mapping"])
-
-    classified: list[tuple[dict[str, Any], str]] = []
-    for row in (*content_conflict, *merged_rows):
-        session_id = str(row["session_id"])
-        if id(row) in conflict_ids or session_id in link_conflict_sids:
-            code = REASON_CODE_IMPORT_IDENTITY_CONFLICT
-        elif session_id in unmatched_sids:
-            code = REASON_CODE_IMPORT_UNMATCHED_SESSION
-        elif not gold_eligible(row):
-            code = REASON_CODE_IMPORT_INVALID_VERSION
-        elif id(row) in per_finding_ids:
-            code = REASON_CODE_IMPORT_DECISIVE_PER_FINDING
-        elif session_id in run_level_only_sids:
-            code = REASON_CODE_IMPORT_RUN_LEVEL_ONLY
-        elif session_id in ambiguous_sids:
-            code = REASON_CODE_IMPORT_STALE_EVIDENCE
-        else:
-            msg = (
-                f"imported observation for session {session_id!r} at "
-                f"{row.get('observed_at')!r} cannot be classified into an "
-                "import bucket; refusing to drop the row silently"
-            )
-            raise ValueError(msg)
-        classified.append((row, code))
-    return classified
-
-
-def accounting(
-    merged_rows: list[dict[str, Any]],
-    *,
-    content_conflict: list[dict[str, Any]],
-    link_result: dict[str, Any],
-    run_level_result: dict[str, Any],
-) -> dict[str, int]:
-    """Count surviving and conflicting rows by import reason code."""
-    counts = {code: 0 for code in IMPORT_REASON_CODES}
-    for _row, code in _row_reason_codes(
-        merged_rows,
-        content_conflict=content_conflict,
-        link_result=link_result,
-        run_level_result=run_level_result,
-    ):
-        counts[code] += 1
-    return counts
-
-
-def run_pure_import(
+def plan_import(
     inventories: list[list[dict[str, Any]]],
     *,
     hydrated_index: dict[str, dict[str, Any]],
     repo_slug_sha_lookup: dict[tuple[str, str, str], Any],
     projector_findings: dict[str, list[dict[str, Any]]],
     unmatched_identity_less: bool = False,
-) -> dict[str, Any]:
-    """Compose dedupe, identity linkage, finding classification, accounting, and ledger."""
-    merged = dedupe_observations(inventories)
-    link_result = link_session_identity(
-        merged["rows"],
-        hydrated_index=hydrated_index,
-        repo_slug_sha_lookup=repo_slug_sha_lookup,
-        unmatched_identity_less=unmatched_identity_less,
-    )
-    run_level_result = classify_run_level(
-        merged["rows"], projector_findings=projector_findings
-    )
-    counts = accounting(
-        merged["rows"],
-        content_conflict=merged["content_conflict"],
-        link_result=link_result,
-        run_level_result=run_level_result,
-    )
-    result: dict[str, Any] = {
-        "rows": merged["rows"],
-        "deduped_count": merged["deduped_count"],
-        "content_conflict": merged["content_conflict"],
-        "link": link_result,
-        "run_level": run_level_result,
-        "accounting": counts,
-    }
-    result["ledger"] = build_import_ledger(result)
-    return result
+) -> ImportPlan:
+    """Admit, link, and classify a complete inventory before producing merge rows.
 
+    All generations of a source session contribute to its identity and attribution
+    buckets. Keep historical precedence when generations disagree: identity
+    conflict, unmatched identity, invalid versions, then finding/run-level evidence.
+    """
+    rows, conflicts, deduped_count = _dedupe_observations(inventories)
+    linked: dict[str, tuple[str, str]] = {}
+    unmatched: set[str] = set()
+    identity_conflict: set[str] = set()
+    # Complete identity admission before evidence admission, including rows that
+    # ultimately remain unmatched; malformed metadata never becomes an implicit drop.
+    for row in rows:
+        sid = str(row["session_id"])
+        digest = row.get("derivative_digest")
+        hub = hydrated_index.get(sid)
+        if hub is not None and hub.get("derivative_digest") is not None:
+            if hub["derivative_digest"] == digest:
+                linked[sid] = (sid, "session_id")
+                continue
+            if digest is not None:
+                identity_conflict.add(sid)
+                continue
+        triplet = tuple(row.get(key) for key in ("repo_slug", "base_sha", "head_sha"))
+        if not all(triplet):
+            if not unmatched_identity_less:
+                raise ValueError(
+                    f"session {sid!r} has no Hub index entry and is missing "
+                    "the repo_slug/base_sha/head_sha fields required for the "
+                    "identity fallback"
+                )
+            unmatched.add(sid)
+            continue
+        repo, base, head = triplet
+        fallback = repo_slug_sha_lookup.get((str(repo), str(base), str(head)))
+        if fallback is None:
+            unmatched.add(sid)
+        else:
+            linked[sid] = (str(fallback["hub_session_id"] if isinstance(fallback, dict) else fallback), "repo_slug_sha")
 
-def build_import_ledger(result: dict[str, Any]) -> dict[str, Any]:
-    """Build the versioned hydration-compatible ledger and verify complete row accounting."""
-    accounting = result["accounting"]
-    observations = sorted(
-        (
+    per_finding: set[str] = set()
+    run_level_only: set[str] = set()
+    ambiguous: set[str] = set()
+    classified: list[tuple[dict[str, Any], bool, bool]] = [(row, False, True) for row in conflicts]
+    for row in rows:
+        sid = str(row["session_id"])
+        matched = bool(row.get("record_id"))
+        if not matched:
+            labels = row.get("labels")
+            if isinstance(labels, str):
+                try:
+                    labels = json.loads(labels)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(f"session {sid!r} has malformed labels JSON: {exc}") from exc
+            if not isinstance(labels, list):
+                raise ValueError(f"session {sid!r} has non-list labels field: {labels!r}")
+            findings = projector_findings.get(sid)
+            if not findings:
+                run_level_only.add(sid)
+            else:
+                matches = 0
+                for finding in findings:
+                    if "record_id" not in finding or "evidence_sha" not in finding:
+                        raise ValueError(
+                            f"session {sid!r} references a malformed projected "
+                            f"finding (missing 'record_id'/'evidence_sha'): {finding!r}"
+                        )
+                    matches += finding["evidence_sha"] == row.get("evidence_sha")
+                matched = matches == 1
+                if not matched:
+                    ambiguous.add(sid)
+        if matched:
+            per_finding.add(sid)
+        classified.append((row, matched, False))
+
+    accounting = {code: 0 for code in IMPORT_REASON_CODES}
+    observations: list[dict[str, str]] = []
+    for row, matched, content_conflict in classified:
+        sid = str(row["session_id"])
+        if content_conflict or sid in identity_conflict:
+            code = REASON_CODE_IMPORT_IDENTITY_CONFLICT
+        elif sid in unmatched:
+            code = REASON_CODE_IMPORT_UNMATCHED_SESSION
+        elif not gold_eligible(row):
+            code = REASON_CODE_IMPORT_INVALID_VERSION
+        elif matched:
+            code = REASON_CODE_IMPORT_DECISIVE_PER_FINDING
+        elif sid in run_level_only:
+            code = REASON_CODE_IMPORT_RUN_LEVEL_ONLY
+        else:
+            code = REASON_CODE_IMPORT_STALE_EVIDENCE
+        accounting[code] += 1
+        observations.append(
             {
-                "session_id": str(row["session_id"]),
+                "session_id": sid,
                 "observed_at": str(row["observed_at"]),
                 "source": str(row.get("source", "")),
                 "reason_code": code,
             }
-            for row, code in _row_reason_codes(
-                result["rows"],
-                content_conflict=result["content_conflict"],
-                link_result=result["link"],
-                run_level_result=result["run_level"],
-            )
-        ),
-        key=lambda entry: (entry["session_id"], entry["observed_at"], entry["source"]),
-    )
-    if sum(accounting.values()) != len(observations):
-        msg = (
-            f"import accounting mismatch: buckets account for "
-            f"{sum(accounting.values())} row(s) but the ledger carries "
-            f"{len(observations)} observation(s)"
         )
-        raise ValueError(msg)
-    return {
-        "schema_version": HYDRATION_INDEX_SCHEMA_VERSION,
-        "accounting": dict(accounting),
-        "observations": observations,
+    observations.sort(key=lambda entry: (entry["session_id"], entry["observed_at"], entry["source"]))
+    linked_rows: list[dict[str, Any]] = []
+    for row in rows:
+        link = linked.get(str(row["session_id"]))
+        if link is not None:
+            merged = dict(row, session_id=link[0])
+            merged["payload_digest"] = canonical_payload_digest(merged, include_observed_at=merged["source"] != "auto")
+            linked_rows.append(merged)
+    identity_summary = {
+        sid: {
+            "matched_by": linked[sid][1] if sid in linked else None,
+            "validation_outcome": (
+                "matched" if sid in per_finding else "ambiguous" if sid in ambiguous else "run_level_only"
+            )
+            if sid in linked
+            else "unmatched",
+        }
+        for sid in sorted(linked.keys() | unmatched | identity_conflict)
     }
+    return ImportPlan(
+        linked_rows,
+        identity_summary,
+        {"schema_version": HYDRATION_INDEX_SCHEMA_VERSION, "accounting": accounting, "observations": observations},
+        deduped_count,
+    )
 
 
 def gold_eligible(observation: dict[str, Any]) -> bool:

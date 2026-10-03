@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -29,14 +30,23 @@ __all__ = ["run_materialize"]
 _MANIFEST_FILENAME = "preview-manifest.json"
 _ANNOTATIONS_FILENAME = "annotations.jsonl"
 
-def index_sessions(index_root: Path) -> tuple[list[dict[str, Any]], str]:
-    """Load sessions from ``sessions.jsonl`` when present, else the hydrated index."""
+def index_sessions(
+    index_root: Path,
+) -> tuple[list[dict[str, Any]], str, dict[str, dict[str, Any]] | None]:
+    """Read source sessions and revision, retaining the hydrated run inventory.
+
+    JSONL takes precedence and supplies no acquired SQL authority (None). Import
+    may independently read its co-located archive; preview/materialize need not.
+    """
     if (index_root / _SESSIONS_OUT_FILENAME).is_file():
-        return _load_sessions(index_root)
+        sessions, revision = _load_sessions(index_root)
+        return sessions, revision, None
     return _sessions_from_hydrated_stage(index_root)
 
 
-def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]], str]:
+def _sessions_from_hydrated_stage(
+    index_root: Path,
+) -> tuple[list[dict[str, Any]], str, dict[str, dict[str, Any]]]:
     """Materialize fresh bronze evidence, falling back to stored resolutions for legacy history.
 
     Acquire production evidence even when annotations exist, so drift checks see
@@ -54,55 +64,63 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
         raise HubUnavailableError(
             f"hydrated index sessions file not found: {index_root / 'sessions.jsonl'}"
         )
-    rows = _readonly_query(index_root / "index.db", "SELECT * FROM runs")
-    if not rows:
-        raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
-    sessions: list[dict[str, Any]] = []
-    for row in rows:
-        session_id = str(row["session_id"])
-        observations = _readonly_query(
-            index_root / "index.db",
-            "SELECT * FROM label_observations WHERE session_id = ?",
-            (session_id,),
-        )
-        conflicting = False
-        resolutions = _semantic_resolutions_readonly(index_root, row)
-        session: dict[str, Any]
-        if observations:
-            winner, conflicting = _winning_observation(observations)
-            rubric_raw = winner.get("rubric_json")
-            if rubric_raw is not None:
-                try:
-                    rubric = json.loads(rubric_raw)
-                except (KeyError, TypeError, ValueError) as exc:
-                    raise HubUnavailableError(
-                        f"session {session_id!r}: unreadable winning rubric_json: {exc}"
-                    ) from exc
-                if not isinstance(rubric, dict):
-                    raise HubUnavailableError(
-                        f"session {session_id!r}: winning rubric_json is not an object"
-                    )
-                per_finding = rubric.get("per_finding_resolutions")
-                if resolutions is None and isinstance(per_finding, list) and per_finding:
-                    resolutions = per_finding
-        # DB-only history and legacy embedded resolutions remain supported.
-        # Production bronze was already acquired above, independently of the
-        # winner's dispositions and without changing the pinned source tree.
-        if resolutions is None:
-            resolutions = _trajectory_resolutions_readonly(index_root, session_id)
+    try:
+        conn = readonly_connection(index_root)
+    except ValueError as exc:
+        raise HubUnavailableError(str(exc)) from exc
+    with closing(conn):
+        runs = {str(row["session_id"]): dict(row) for row in conn.execute("SELECT * FROM runs")}
+        if not runs:
+            raise HubUnavailableError(f"hydrated index at {index_root} has no runs")
+        sessions: list[dict[str, Any]] = []
+        for row in runs.values():
+            session_id = str(row["session_id"])
+            observations = [dict(observation) for observation in conn.execute(
+                "SELECT * FROM label_observations WHERE session_id = ?", (session_id,),
+            )]
+            conflicting = False
+            resolutions, trajectory = _source_resolutions_readonly(index_root, row)
+            session: dict[str, Any]
+            if observations:
+                winner, conflicting = _winning_observation(observations)
+                rubric_raw = winner.get("rubric_json")
+                if rubric_raw is not None:
+                    try:
+                        rubric = json.loads(rubric_raw)
+                    except (KeyError, TypeError, ValueError) as exc:
+                        raise HubUnavailableError(
+                            f"session {session_id!r}: unreadable winning rubric_json: {exc}"
+                        ) from exc
+                    if not isinstance(rubric, dict):
+                        raise HubUnavailableError(
+                            f"session {session_id!r}: winning rubric_json is not an object"
+                        )
+                    per_finding = rubric.get("per_finding_resolutions")
+                    if resolutions is None and isinstance(per_finding, list) and per_finding:
+                        resolutions = per_finding
+            # DB-only history and legacy embedded resolutions remain supported.
+            # Production bronze was already acquired above, independently of the
+            # winner's dispositions and without changing the pinned source tree.
             if resolutions is None:
-                continue
-        if not resolutions:
-            continue  # An explicitly empty bronze finding inventory has no records.
-        session = {
-            "session_id": session_id,
-            "trajectory_id": session_id,
-            "segment_id": session_id,
-            "resolutions": resolutions,
-        }
-        if conflicting:
-            session["conflicting"] = True
-        sessions.append(session)
+                if trajectory is None:
+                    continue
+                resolutions = trajectory.get("resolutions")
+                if not isinstance(resolutions, list) or not resolutions:
+                    raise HubUnavailableError(
+                        f"hydrated trajectory for session {session_id!r} carries no "
+                        "per-finding resolutions to materialize"
+                    )
+            if not resolutions:
+                continue  # An explicitly empty bronze finding inventory has no records.
+            session = {
+                "session_id": session_id,
+                "trajectory_id": session_id,
+                "segment_id": session_id,
+                "resolutions": resolutions,
+            }
+            if conflicting:
+                session["conflicting"] = True
+            sessions.append(session)
     downloads = index_root / "downloads"
     if not downloads.is_dir():
         raise HubUnavailableError(f"hydrated index at {index_root} has no downloads/ revision pin")
@@ -112,12 +130,12 @@ def _sessions_from_hydrated_stage(index_root: Path) -> tuple[list[dict[str, Any]
             f"hydrated index at {index_root} has {len(revisions)} downloaded revisions; "
             "expected exactly one pinned source commit"
         )
-    return sessions, revisions[0]
+    return sessions, revisions[0], runs
 
 
-def _semantic_resolutions_readonly(
+def _source_resolutions_readonly(
     index_root: Path, row: dict[str, Any],
-) -> list[dict[str, Any]] | None:
+) -> tuple[list[dict[str, Any]] | None, dict[str, Any] | None]:
     """Acquire live evidence for production bronze, including on re-harvest.
 
     Legacy snapshots with embedded resolutions and DB-only imported histories
@@ -132,17 +150,17 @@ def _semantic_resolutions_readonly(
     run_dir = run_directory(index_root, str(row["session_id"]))
     path = run_document_path(run_dir)
     if not path.is_file():
-        return None
+        return None, None
     try:
         trajectory = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(trajectory, dict):
             raise ValueError("trajectory must be an object")
         if "resolutions" in trajectory:
-            return None
+            return None, trajectory
         findings_path = run_dir / "findings.json"
         findings = json.loads(findings_path.read_text()).get("findings") if findings_path.is_file() else None
         if findings == [] or (findings is None and row.get("total_findings") == 0):
-            return []
+            return [], trajectory
         # Hydration owns the bronze path; never follow an archived producer's
         # absolute archive_path into a different tree.
         harvest_row = HarvestRow.from_mapping(
@@ -166,58 +184,11 @@ def _semantic_resolutions_readonly(
                 **resolution,
             }
             for resolution in resolutions
-        ]
+        ], trajectory
     except Exception as exc:
         raise HubUnavailableError(
             f"semantic preview for session {row['session_id']!r} failed: {exc}"
         ) from exc
-
-
-def _trajectory_resolutions_readonly(
-    index_root: Path, session_id: str
-) -> list[dict[str, Any]] | None:
-    """Read legacy embedded resolutions when observation history cannot materialize them.
-
-    This includes new sessions, human rows with NULL rubric_json, and imported
-    labels-only history. An absent trajectory returns None for evidence-only
-    sessions; present unreadable, malformed, or empty data raises HubUnavailableError
-    naming the session rather than silently dropping it.
-    """
-    from daydream.trajectory import run_directory, run_document_path
-
-    trajectory_path = run_document_path(run_directory(index_root, session_id))
-    if not trajectory_path.is_file():
-        return None
-    try:
-        trajectory = json.loads(trajectory_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        raise HubUnavailableError(
-            f"unreadable hydrated trajectory at {trajectory_path}: {exc}"
-        ) from exc
-    resolutions = trajectory.get("resolutions") if isinstance(trajectory, dict) else None
-    if not isinstance(resolutions, list) or not resolutions:
-        raise HubUnavailableError(
-            f"hydrated trajectory for session {session_id!r} carries no "
-            "per-finding resolutions to materialize"
-        )
-    return resolutions
-
-
-def _readonly_query(
-    db_path: Path, sql: str, params: tuple[Any, ...] = ()
-) -> list[dict[str, Any]]:
-    """SELECT through readonly_connection without WAL pragmas or sidecar creation.
-
-    Its immutable read mode refuses surviving uncheckpointed index.db-wal files.
-    """
-    try:
-        conn = readonly_connection(db_path.parent)
-    except ValueError as exc:
-        raise HubUnavailableError(str(exc)) from exc
-    try:
-        return [dict(r) for r in conn.execute(sql, params).fetchall()]
-    finally:
-        conn.close()
 
 
 def _winning_observation(
@@ -295,7 +266,7 @@ def run_materialize(
     # ``snapshot_id`` raises the documented ValueError naming the missing
     # component, never a KeyError from ``pin["evidence_observed_at"]``.
     pin_id = snapshot_id(pin)
-    sessions, index_revision = index_sessions(index_root)
+    sessions, index_revision, _runs = index_sessions(index_root)
 
     records: list[dict[str, Any]] = []
     for session in sessions:

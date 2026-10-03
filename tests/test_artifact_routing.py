@@ -22,8 +22,9 @@ from daydream.artifact_visibility import (
 )
 from daydream.backends import ResultEvent, TextEvent
 from daydream.deep.orchestrator import run_deep
+from daydream.review_profile import ProfileError
 from daydream.run_config import RunConfig
-from daydream.trajectory import DaydreamPhase, DaydreamRunFlow
+from daydream.trajectory import DaydreamPhase, DaydreamRunFlow, get_current_recorder
 from daydream.workspace import WorkContext
 from tests.harness.backend import ScriptedBackend
 from tests.harness.git_helpers import bare_remote, git
@@ -33,19 +34,43 @@ async def test_recorder_public_output_requires_standalone_opt_in(tmp_path: Path,
 ) -> None:
     config = make_config(tmp_path)
     with pytest.raises(ArtifactVisibilityError, match="allow_standalone=True"):
-        run_artifacts._open_recorder(config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,)
+        async with run_artifacts._open_recorder(
+            config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM,
+        ):
+            pytest.fail("standalone admission should fail before entry")
     assert not (tmp_path / ".daydream").exists()
 
-    recorder = run_artifacts._open_recorder(
+    async with run_artifacts._open_recorder(
         config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
-    )
-    async with recorder:
+    ) as recorder:
         await run_agent(ScriptedBackend(
                 events=[TextEvent(text="Standalone result"), ResultEvent(structured_output=None, continuation=None)],
             ), tmp_path, "Record one standalone turn.", phase=DaydreamPhase.REVIEW,
         )
     assert recorder.path.is_file()
     assert json.loads(recorder.path.read_text())["session_id"] == recorder.session_id
+
+@pytest.mark.parametrize("profile_contents", [None, 'schema_version = 1\nname = "bad"\nunknown = true\n'])
+async def test_standalone_recorder_invalid_profile_fails_without_fallback_or_model_calls(
+    tmp_path: Path, make_config: Callable[..., RunConfig], profile_contents: str | None,
+) -> None:
+    profile_path = tmp_path / "invalid-profile.toml"
+    if profile_contents is not None:
+        profile_path.write_text(profile_contents, encoding="utf-8")
+    config = make_config(tmp_path, review_profile_path=profile_path)
+    backend = ScriptedBackend(events=[
+        TextEvent(text="Must not run"), ResultEvent(structured_output=None, continuation=None),
+    ])
+    previous = get_current_recorder()
+    with pytest.raises(ProfileError, match="invalid-profile.toml"):
+        async with run_artifacts._open_recorder(
+            config=config, target_dir=tmp_path, work=None, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
+        ):
+            await run_agent(backend, tmp_path, "Must not run.", phase=DaydreamPhase.REVIEW)
+    assert get_current_recorder() is previous
+    assert config.review_profile is None
+    assert backend.call_count == 0
+    assert not (tmp_path / ".daydream").exists()
 
 @pytest.mark.parametrize("entrypoint", ["deep", "recorder"])
 async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
@@ -73,9 +98,10 @@ async def test_standalone_entry_rejects_borrowing_a_bound_artifact_session(
             if entrypoint == "deep":
                 await run_deep(config, work, allow_standalone=True)
             else:
-                run_artifacts._open_recorder(
+                async with run_artifacts._open_recorder(
                     config=config, target_dir=repo, work=work, flow_kind=DaydreamRunFlow.CUSTOM, allow_standalone=True,
-                )
+                ):
+                    pytest.fail("active-session admission should fail before entry")
         assert not (repo / ".daydream").exists()
         assert (live / "deep" / "prior.txt").read_bytes() == b"prior session evidence\n"
         assert sorted(path.relative_to(live) for path in live.rglob("*")) == before

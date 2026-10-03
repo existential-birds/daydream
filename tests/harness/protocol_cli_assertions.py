@@ -53,6 +53,6 @@ def make_cancel_probe(kind: Literal["pi", "osprey"]) -> tuple[Any, MagicMock]:
     proc.wait = AsyncMock(side_effect=[asyncio.TimeoutError(), 0])
     proc.terminate = MagicMock()
     proc.kill = MagicMock()
-    transport.processes.append(proc)
+    transport._proc = proc
     backend._transports = [transport]
     return backend, proc

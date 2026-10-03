@@ -123,7 +123,7 @@ def run_canonical_harvest(
     """
     pin = _load_pin(materialize_dir)
     materialized = _load_materialized_records(materialize_dir)
-    sessions, _index_revision = index_sessions(index_root)
+    sessions, _index_revision, _runs = index_sessions(index_root)
     # The complete set is the drift authority: widened materialization emits a
     # record for every disposition, so the fresh queue must include the
     # automatic decisive records too — an unresolved-only queue would

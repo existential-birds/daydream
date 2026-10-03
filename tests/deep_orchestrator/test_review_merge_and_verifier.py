@@ -11,6 +11,7 @@ import anyio
 import pytest
 
 from daydream import runner as _runner
+from daydream.backends import BackendExecutionInput
 from daydream.config import REVIEW_OUTPUT_FILE
 from daydream.config_file import DaydreamFileConfig
 from daydream.deep import dedup as _dedup, detection as _detection, prompts as _prompts
@@ -22,6 +23,7 @@ from daydream.deep.artifacts import (
 from daydream.deep.diff import _diff_changed_files
 from daydream.deep.prompts import build_merge_prompt
 from daydream.findings import load_findings_artifact
+from daydream.github_app import GitHubExecutionInput
 from daydream.run_config import RunConfig
 from daydream.runner import _resolve_backend
 from tests.deep_orchestrator.empty_synthesis_support import EmptyReviewBackend, empty_review_config
@@ -602,21 +604,29 @@ async def test_resume_fix_skips_pr_post(multi_stack_target: Path, monkeypatch: p
         f"post_review_to_pr_from_report should be skipped on --start-at fix, got {len(post_calls)} call(s)"
     )
 
+@pytest.mark.parametrize("injected", [False, True], ids=["ambient", "captured"])
 async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     multi_stack_target: Path, monkeypatch: pytest.MonkeyPatch, mute_side_effects: Mute,
+    injected: bool,
 ) -> None:
     seen_phases: list[str] = []
+    execution = BackendExecutionInput.from_environment(
+        {"PRIVATE_NATIVE_CONTEXT": "captured-run-value"}, backend="claude",
+    ) if injected else None
+    seen_execution: list[BackendExecutionInput | None] = []
     original = _runner._resolve_backend
 
     def spy(config: Any, phase: Any, cache: Any = None, *, cwd: Any = None, audit_workspace: Any = None,
         effort_override: Any = None,
+        execution_input: BackendExecutionInput | None = None,
     ) -> Any:
         seen_phases.append(phase)
+        seen_execution.append(execution_input)
         return original(config, phase, cache, cwd=cwd, audit_workspace=audit_workspace, effort_override=effort_override,
+            execution_input=execution_input,
         )
 
-    # run_deep imports _resolve_backend from daydream.runner, so patching it there
-    # intercepts every call site under per-phase resolution.
+    # FlowContext resolves each phase through the runner with the same private input.
     monkeypatch.setattr("daydream.runner._resolve_backend", spy)
 
     # Accept the fix gate so fix/test/commit run; pin interactivity so the "y"
@@ -637,7 +647,10 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
 
     monkeypatch.setattr("daydream.phases.fix.phase_fix", _stub_fix)
 
-    exit_code = await _run_deep(multi_stack_target)
+    config = RunConfig(target=str(multi_stack_target), start_at="review", cleanup=False)
+    exit_code = await _runner.run(config, execution=(
+        _runner.RunnerExecutionInput(execution, GitHubExecutionInput()) if execution is not None else None
+    ))
     assert exit_code == 0
 
     # Issue #745: the pre-merge parse-<stack> stage was removed (reviewers emit
@@ -647,6 +660,7 @@ async def test_resolve_backend_called_with_each_phase_in_deep_flow(
     missing = expected_phases - captured
     assert not missing, f"Deep orchestrator missing per-phase resolver calls for {missing}; got {sorted(captured)}"
     assert "wonder" not in captured  # The default design lens shares per_stack_review.
+    assert seen_execution and all(value is execution for value in seen_execution)
 
 def test_intent_phase_resolves_to_sonnet_default(monkeypatch: pytest.MonkeyPatch) -> None:
     """AC3: the ``intent`` phase resolves to ``claude-sonnet-5`` by default."""

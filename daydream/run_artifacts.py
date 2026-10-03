@@ -1,6 +1,8 @@
 """Capture run identity, own recorder writes, and finalize immutable evidence."""
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, NamedTuple
@@ -19,7 +21,7 @@ from daydream.backends import BackendExecutionInput
 from daydream.config import DEFAULT_PI_MODEL
 from daydream.extensions import Registry, UnresolvedExtensionError, get_registry
 from daydream.observability.runtime import associate_run_trajectory
-from daydream.review_profile import resolve_from_runconfig
+from daydream.review_profile import ResolvedProfile, resolve_from_runconfig
 from daydream.run_config import (
     DEEP_FLOW_ALIASES,
     RunConfig,
@@ -35,7 +37,6 @@ from daydream.trajectory import (
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
     default_trajectory_path,
-    get_current_recorder,
 )
 from daydream.ui import print_error
 from daydream.workspace import WorkContext
@@ -100,7 +101,8 @@ class _RunArtifacts:
             raise
 
 
-def _open_recorder(
+@asynccontextmanager
+async def _open_recorder(
     *,
     config: RunConfig,
     target_dir: Path,
@@ -108,10 +110,10 @@ def _open_recorder(
     flow_kind: DaydreamRunFlow,
     run_artifacts: _RunArtifacts | None = None,
     allow_standalone: bool = False,
-) -> TrajectoryRecorder:
-    """Open every flow's recorder with consistent identity, paths, and retention.
+) -> AsyncIterator[TrajectoryRecorder]:
+    """Own each flow's recorder scope, profile attribution, identity, paths, and retention.
 
-    Flows must use this factory so dump-artifacts and strict archive finalization
+    Flows must use this context so dump-artifacts and strict archive finalization
     retain their snapshots. Direct standalone callers opt in with
     ``allow_standalone=True`` and no artifact session; they retain and archive none.
     """
@@ -165,33 +167,22 @@ def _open_recorder(
         on_write=None if run_artifacts is None else run_artifacts.capture.retain,
     )
     associate_run_trajectory(recorder.session_id)
-    return recorder
+    async with recorder:
+        profile = _resolve_review_profile(config)
+        recorder.record_profile(
+            schema_version=profile.profile.schema_version,
+            name=profile.name,
+            source_kind=profile.source_kind,
+            digest=profile.digest,
+        )
+        yield recorder
 
 
-def _resolve_review_profile(config: RunConfig) -> None:
-    """Resolve and validate the review profile once at the runner composition root."""
+def _resolve_review_profile(config: RunConfig) -> ResolvedProfile:
+    """Admit the policy once; its concrete recorder owns attribution."""
     if config.review_profile is None:
         config.review_profile = resolve_from_runconfig(config)
-    _record_review_profile(config)
-
-
-def _record_review_profile(config: RunConfig) -> None:
-    """Record profile version, name, source, and digest when both profile and recorder exist.
-
-    Deep dispatch resolves before opening its recorder, then calls this again from
-    inside the recorder scope to capture the resolved policy.
-    """
-    if config.review_profile is None:
-        return
-    recorder = get_current_recorder()
-    if recorder is None:
-        return
-    recorder.record_profile(
-        schema_version=config.review_profile.profile.schema_version,
-        name=config.review_profile.name,
-        source_kind=config.review_profile.source_kind,
-        digest=config.review_profile.digest,
-    )
+    return config.review_profile
 
 
 class RecorderBackendNames(NamedTuple):

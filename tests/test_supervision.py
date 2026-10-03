@@ -152,7 +152,8 @@ async def test_supervise_empty_builtin_skips_provider_and_preserves_input_artifa
             data={"dd": dd, "review_coverage": coverage, "items_file": items_file, "diff_path": diff,
                   "intent_path": intent, "alts_path": alternatives, "exploration_dir": None,
                   "merged_report": dd / "public-report.md"},
-            _backend_factory=lambda *_args: backend)
+        )
+        monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
         await _step_supervise(ctx)
         outcome = coverage.phases["supervision"]
         assert outcome["status"] == ("incomplete" if contract == "nonempty" else "complete")

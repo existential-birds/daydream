@@ -37,8 +37,8 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
         "    first = ctx.backend_for(phase)\n"
         "    assert first is ctx.backend_for(phase)\n"
         f"    assert ctx.config.identity == ctx.run_context.github_identity.login == {login!r}\n"
-        f"    assert (ctx._backend_factory is not None) is {injected!r}\n"
-        "    assert '_backend_factory' not in repr(ctx)\n"
+        f"    assert (ctx.backend_execution is not None) is {injected!r}\n"
+        "    assert 'backend_execution' not in repr(ctx)\n"
         "    assert 'github_execution' not in repr(ctx)\n"
         "    if ctx.audit_workspace is not None:\n"
         "        assert first.audit_root == ctx.audit_workspace.repo\n"
@@ -122,3 +122,39 @@ async def test_runner_factory_reaches_real_flows_and_preserves_ordinary_fallback
     trajectory = (tmp_path / "trajectory.json").read_text()
     assert "factory-owned-private-key" not in trajectory
     assert "parent-private-key" not in trajectory
+
+
+async def test_runner_captured_execution_preserves_native_effort_overrides_and_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Embedded arbiter groups use their own native effort with the same private capability."""
+    from daydream.backends.codex import CodexBackend
+    from daydream.extensions import Registry
+    from daydream.flows.engine import FlowContext
+    from daydream.workspace import WorkContext
+
+    execution = BackendExecutionInput.from_environment(
+        {"HOME": str(tmp_path), "PRIVATE_NATIVE_CANARY": "private-owned-value"}, backend="codex",
+    )
+    config = RunConfig(backend="codex", model="captured-model", non_interactive=True)
+
+    async def capture(config: RunConfig, **kwargs: Any) -> int:
+        assert kwargs["backend_execution"] is execution
+        work = WorkContext(
+            repo=tmp_path, source=tmp_path, base_branch="main", base_sha="0" * 40,
+            head_branch="main", head_sha="0" * 40, is_ephemeral=False, run_id="execution-effort",
+        )
+        ctx = FlowContext(config, work, Registry(), backend_execution=kwargs["backend_execution"])
+        medium = ctx.backend_for_effort("arbiter", "medium")
+        high = ctx.backend_for_effort("arbiter", "xhigh")
+        assert isinstance(medium, CodexBackend) and isinstance(high, CodexBackend)
+        assert (medium.reasoning_effort, high.reasoning_effort) == ("medium", "xhigh")
+        assert medium.model == high.model == "captured-model"
+        assert medium._execution_input is high._execution_input is execution
+        assert medium is ctx.backend_for_effort("arbiter", "medium")
+        assert medium is not high and len(ctx._backend_cache) == 2
+        assert "backend_execution" not in repr(ctx) and "private-owned-value" not in repr(ctx)
+        return 0
+
+    monkeypatch.setattr(runner, "_run_with_context", capture)
+    assert await runner.run(config, execution=runner.RunnerExecutionInput(execution, GitHubExecutionInput())) == 0

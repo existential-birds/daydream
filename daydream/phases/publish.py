@@ -307,14 +307,12 @@ def _validate_reuse_offer(
 
 
 @bind_resolved_run_context
-async def _do_commit(
+async def phase_commit_push(
     backend: Backend,
     work: WorkContext,
     *,
-    push: bool = False,
-    interactive: bool = False,
-    items: list[dict[str, Any]] | None = None,
     config: Any = None,
+    items: list[dict[str, Any]] | None = None,
     retained_paths: frozenset[str] | None = None,
     retained_states: tuple[git_ops.GitPathState, ...] | None = None,
     initial_index: git_ops.IndexSnapshot | None = None,
@@ -322,42 +320,44 @@ async def _do_commit(
     evidence: TestAttemptEvidence | None = None,
     retained_tree_key: str | None = None,
     run_context: RunContext | None = None,
-) -> CommitPushResult:
-    """Commit exactly the retained, tested tree through ordinary repository hooks.
+) -> PushReceipt | None:
+    """Gate and publish the retained tree through normal hooks and exact-state checks.
 
-    The three retained-tree arguments are required when committing. The index
-    must still match its empty pre-run snapshot; staging and post-hook checks
-    prove the committed content matches that retained tree. A declined gate
-    leaves fixes uncommitted and still requires successful test evidence.
+    retained_paths, retained_states, and the empty initial_index snapshot are required
+    for staging. Optional findings shape the deterministic commit message. Evidence
+    and retained_tree_key must arrive together and agree; malformed offers fail.
 
-    A push succeeds only when its captured branch, HEAD, and remote remain
-    unchanged and the remote reports that exact commit. Failed pushes carry
-    their attempted receipt in PushAttemptError for the caller's audit.
+    Declining leaves fixes uncommitted but still requires successful validation;
+    validation errors propagate to the orchestrator's failed commit step. A push
+    succeeds only when its captured branch, HEAD, and remote remain unchanged and
+    the remote reports that exact commit. PushAttemptError retains the attempted
+    receipt for the caller's audit when pushing or verification fails.
     """
     del backend  # host-native commit: no agent turn (issue #726)
-    _validate_reuse_offer(evidence, retained_tree_key)
     run_context = resolve_run_context(run_context)
+    agent.console.print()
+    ui.print_info(agent.console, "Committing and pushing changes...")
+    _validate_reuse_offer(evidence, retained_tree_key)
 
-    if interactive:
-        # Resolve both interaction axes here for every commit path: --yes commits,
-        # unattended defaults decline, otherwise prompt with a decline default.
-        decision = run_context.confirm(
-            safe_default=False,
-            question="Commit and push changes? [y/N]",
-            default="n",
-            console=agent.console,
+    # Resolve both interaction axes here for every commit path: --yes commits,
+    # unattended defaults decline, otherwise prompt with a decline default.
+    decision = run_context.confirm(
+        safe_default=False,
+        question="Commit and push changes? [y/N]",
+        default="n",
+        console=agent.console,
+    )
+    if not decision:
+        ui.print_dim(agent.console, "Skipping commit and push")
+        # Declining commit still runs host tests; failures stop the run.
+        await _validate_declined_fixes(
+            work,
+            config,
+            recipe=recipe,
+            evidence=evidence,
+            retained_tree_key=retained_tree_key,
         )
-        if not decision:
-            ui.print_dim(agent.console, "Skipping commit and push")
-            # Declining commit still runs host tests; failures stop the run.
-            await _validate_declined_fixes(
-                work,
-                config,
-                recipe=recipe,
-                evidence=evidence,
-                retained_tree_key=retained_tree_key,
-            )
-            return CommitPushResult(committed=False, push=None)
+        return None
 
     if retained_paths is None or retained_states is None or initial_index is None:
         raise TypeError("retained_paths, retained_states, and initial_index are required for committing")
@@ -373,7 +373,7 @@ async def _do_commit(
     )
     if not staged_states:
         ui.print_info(agent.console, "Nothing to commit — no daydream changes")
-        return CommitPushResult(committed=False, push=None)
+        return None
 
     def _verify_strict(checked: str) -> None:
         assert retained_paths is not None
@@ -404,7 +404,7 @@ async def _do_commit(
 
     # Reuse may skip Daydream's proactive test run after strict verification.
     # The repository's actual pre-push hook always runs during push_branch.
-    if push and git_ops.has_executable_pre_push_hook(work.repo):
+    if git_ops.has_executable_pre_push_hook(work.repo):
         cmd = _canonical_test_cmd(config) if recipe is None else _recipe_command(recipe)
         if cmd is None:
             ui.print_warning(
@@ -429,100 +429,54 @@ async def _do_commit(
 
             _verify_strict("post-hook")
 
-    push_receipt: PushReceipt | None = None
-    if push:
-        # The push + remote verification is its own trajectory phase
-        # (issue #726 task 12).
-        async with host_phase_scope(DaydreamPhase.PUSH):
-            remote = "origin"
-            branch = git_ops.current_branch(work.repo)
-            if branch is None:
-                raise GitError(
-                    f"Cannot push: {work.repo} is in a detached-HEAD state "
-                    "with no current branch"
-                )
-            sha = git_ops.head_sha(work.repo)
-            raw_remote = git_ops.remote_url(work.repo, remote)
-            pushed_repository = None
-            if raw_remote is not None:
-                normalized_repository = normalize_remote_url(raw_remote)[0]
-                if normalized_repository is not None:
-                    pushed_repository = normalized_repository.lower()
-            attempted = PushReceipt(
-                remote=remote,
-                branch=branch,
-                sha=sha,
-                pushed_repository=pushed_repository,
+    # The push + remote verification is its own trajectory phase
+    # (issue #726 task 12).
+    async with host_phase_scope(DaydreamPhase.PUSH):
+        remote = "origin"
+        branch = git_ops.current_branch(work.repo)
+        if branch is None:
+            raise GitError(
+                f"Cannot push: {work.repo} is in a detached-HEAD state "
+                "with no current branch"
             )
-            try:
-                git_ops.push_branch(work.repo, branch, remote=remote)
-                if (
-                    git_ops.current_branch(work.repo) != branch
-                    or git_ops.head_sha(work.repo) != sha
-                    or git_ops.remote_url(work.repo, remote) != raw_remote
-                ):
-                    raise GitError(
-                        "Push verification failed: local branch, HEAD, or configured "
-                        "remote URL changed during the push"
-                    )
-                # Success requires the remote to actually hold the exact SHA
-                # captured before push.
-                if not git_ops.remote_contains_commit(
-                    work.repo, branch, sha, remote=remote
-                ):
-                    raise GitError(
-                        f"Push verification failed: remote {remote!r} does not report "
-                        f"refs/heads/{branch} at {sha} after the push"
-                    )
-            except GitError as exc:
-                raise PushAttemptError(str(exc), receipt=attempted) from exc
-            push_receipt = attempted
+        sha = git_ops.head_sha(work.repo)
+        raw_remote = git_ops.remote_url(work.repo, remote)
+        pushed_repository = None
+        if raw_remote is not None:
+            normalized_repository = normalize_remote_url(raw_remote)[0]
+            if normalized_repository is not None:
+                pushed_repository = normalized_repository.lower()
+        attempted = PushReceipt(
+            remote=remote,
+            branch=branch,
+            sha=sha,
+            pushed_repository=pushed_repository,
+        )
+        try:
+            git_ops.push_branch(work.repo, branch, remote=remote)
+            if (
+                git_ops.current_branch(work.repo) != branch
+                or git_ops.head_sha(work.repo) != sha
+                or git_ops.remote_url(work.repo, remote) != raw_remote
+            ):
+                raise GitError(
+                    "Push verification failed: local branch, HEAD, or configured "
+                    "remote URL changed during the push"
+                )
+            # Success requires the remote to actually hold the exact SHA
+            # captured before push.
+            if not git_ops.remote_contains_commit(
+                work.repo, branch, sha, remote=remote
+            ):
+                raise GitError(
+                    f"Push verification failed: remote {remote!r} does not report "
+                    f"refs/heads/{branch} at {sha} after the push"
+                )
+        except GitError as exc:
+            raise PushAttemptError(str(exc), receipt=attempted) from exc
 
-    return CommitPushResult(committed=True, push=push_receipt)
-
-
-@bind_resolved_run_context
-async def phase_commit_push(
-    backend: Backend,
-    work: WorkContext,
-    *,
-    config: Any = None,
-    items: list[dict[str, Any]] | None = None,
-    retained_paths: frozenset[str] | None = None,
-    retained_states: tuple[git_ops.GitPathState, ...] | None = None,
-    initial_index: git_ops.IndexSnapshot | None = None,
-    recipe: TestRecipe | None = None,
-    evidence: TestAttemptEvidence | None = None,
-    retained_tree_key: str | None = None,
-    run_context: RunContext | None = None,
-) -> PushReceipt | None:
-    """Gate commit/push of the retained tree through normal hooks and exact-state checks.
-
-    retained_paths, retained_states, and the empty initial_index snapshot are required
-    for staging. Optional findings shape the deterministic commit message. Evidence
-    and retained_tree_key must arrive together and agree; malformed offers fail.
-
-    Declining leaves fixes uncommitted but still requires successful validation;
-    validation errors propagate to the orchestrator's failed commit step.
-    """
-    run_context = resolve_run_context(run_context)
-    agent.console.print()
-    ui.print_info(agent.console, "Committing and pushing changes...")
-    result = await _do_commit(
-        backend, work, push=True, interactive=True,
-        config=config,
-        items=items,
-        retained_paths=retained_paths,
-        retained_states=retained_states,
-        initial_index=initial_index,
-        recipe=recipe,
-        evidence=evidence,
-        retained_tree_key=retained_tree_key,
-        run_context=run_context,
-    )
-    if result.push is not None:
-        ui.print_success(agent.console, "Changes pushed; verifying remote CI...")
-    return result.push
+    ui.print_success(agent.console, "Changes pushed; verifying remote CI...")
+    return attempted
 
 
 def build_commit_message(

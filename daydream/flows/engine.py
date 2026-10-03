@@ -6,7 +6,6 @@ unchanged, leaving error policy with each step.
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -24,7 +23,7 @@ from daydream.run_context import bind_run_context, resolve_run_context
 
 if TYPE_CHECKING:
     from daydream.artifact_visibility import ArtifactSession, PrivateWorkspaceOwner
-    from daydream.backends import Backend
+    from daydream.backends import Backend, BackendExecutionInput
     from daydream.extensions.registry import FlowEntry, Registry
     from daydream.review_profile import Pipeline, ResolvedProfile
     from daydream.run_config import RunConfig
@@ -33,7 +32,6 @@ if TYPE_CHECKING:
 
 
 type BackendCache = dict[tuple[str, str | None, str | None, Path | None], Backend]
-type BackendFactory = Callable[[RunConfig, str, BackendCache, Path, AuditWorkspace | None], Backend]
 
 
 @dataclass
@@ -42,11 +40,11 @@ class FlowContext:
 
     Unresolved or partial review profiles use packaged strategy/pipeline defaults.
     Direct callers may omit run_context to inherit the bound runtime or standalone
-    policy. Backend instances share this context's cache; a runner-bound factory
-    receives config, cache, workspace, and audit boundary.
+    policy. Backend instances share this context's cache and captured execution
+    input; effort overrides retain the same workspace and audit boundary.
 
-    GitHub execution is an explicit capability excluded from repr/serialization;
-    standalone callers inherit ambient credentials. Never copy it into data or
+    Backend and GitHub execution are explicit private capabilities; standalone
+    callers inherit ambient credentials. Never copy them into data or
     artifacts. Standalone artifact access requires explicit opt-in; runner contexts
     instead supply their owned artifact session.
     """
@@ -64,7 +62,7 @@ class FlowContext:
     github_execution: GitHubExecutionInput = field(
         default_factory=GitHubExecutionInput, repr=False, compare=False, kw_only=True,
     )
-    _backend_factory: BackendFactory | None = field(
+    backend_execution: BackendExecutionInput | None = field(
         default=None, repr=False, compare=False, kw_only=True,
     )
     _backend_cache: BackendCache = field(
@@ -72,12 +70,7 @@ class FlowContext:
     )
 
     def _backend(self, phase: str, *, effort: str | None = None) -> Backend:
-        """Resolve ``phase``'s backend, honoring a runner-bound factory seam."""
-        if self._backend_factory is not None:
-            return self._backend_factory(
-                self.config, phase, self._backend_cache, self.work.repo, self.audit_workspace,
-            )
-
+        """Resolve ``phase``'s backend using this context's captured execution input."""
         from daydream.runner import _resolve_backend
 
         return _resolve_backend(
@@ -87,6 +80,7 @@ class FlowContext:
             cwd=self.work.repo,
             audit_workspace=self.audit_workspace,
             effort_override=effort,
+            execution_input=self.backend_execution,
         )
 
     def backend_for(self, phase: str) -> Backend:

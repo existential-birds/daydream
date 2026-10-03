@@ -70,12 +70,12 @@ async def test_per_stack_rerun_clears_stale_structural_outputs_before_review(
     ctx = FlowContext(
         config=make_config(tmp_path, start_at=start_at), work=make_work(tmp_path), registry=get_registry(),
         allow_standalone_artifacts=True, run_context=RunContext(InteractionPolicy(interactive=False)),
-        _backend_factory=lambda *_: backend,
         data={"dd": dd, "review_coverage": review_coverage(files=("api.py",), phases=()),
               "diff_path": diff, "diff": diff.read_text(), "intent_path": intent,
               "alts_path": alternatives, "exploration_dir": None, "failed_stacks": {},
               "stacks": [StackAssignment("python", ["api.py"]), StackAssignment("structure", ["api.py"])]},
     )
+    monkeypatch.setattr("daydream.runner.create_backend", lambda *_args, **_kwargs: backend)
     await _per_stack_body(ctx, include_alternatives=False)
     assert sorted(attempted) == ["primary", "structure"]
     assert json.loads(artifacts[0].read_text())["issues"] == []

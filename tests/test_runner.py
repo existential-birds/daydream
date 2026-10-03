@@ -23,6 +23,7 @@ from rich.console import Console
 
 import daydream.reviews.rendering as review_rendering
 from daydream import clipboard, git_ops, pr_review, runner
+from daydream.agent import run_agent
 from daydream.archive import ArchiveFinalizationError
 from daydream.archive.git_context import GitContext
 from daydream.archive.manifest import (
@@ -36,6 +37,7 @@ from daydream.backends import (
     AgentEvent,
     AuditIsolationError,
     Backend,
+    BackendExecutionInput,
     ResultEvent,
     TextEvent,
 )
@@ -49,7 +51,7 @@ from daydream.deep.artifacts import (
 from daydream.exploration import ExplorationContext
 from daydream.extensions import get_registry
 from daydream.extensions.loader import build_registry
-from daydream.flows.engine import BackendFactory, FlowContext
+from daydream.flows.engine import FlowContext
 from daydream.github_app import GitHubExecutionInput
 from daydream.phases import TestAndHealResult, TestAttemptEvidence
 from daydream.pr_review import PRInfo
@@ -63,10 +65,12 @@ from daydream.run_config import DEEP_FLOW_ALIASES, RunConfig
 from daydream.run_context import RunContext, current_run_context
 from daydream.run_snapshot import ArchiveRunSnapshot
 from daydream.trajectory import (
+    DaydreamPhase,
     DaydreamRunFlow,
     RunWriteSnapshot,
     TrajectoryDocumentSnapshot,
     TrajectoryRecorder,
+    get_current_recorder,
 )
 from daydream.ui import get_shutdown_panel, set_shutdown_panel
 from daydream.workspace import AuditWorkspace, WorkContext, _resolve_base
@@ -431,6 +435,42 @@ async def test_artifact_session_runner_controlled_custom_flow_publishes_after_mo
     assert external_trajectory.read_bytes() == archived_bytes
     assert json.loads((archived_run / "manifest.json").read_text())["session_id"] == public_run.name
 
+async def test_nested_runner_profiles_belong_to_their_own_recorders(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path,
+) -> None:
+    """Resolving an embedded native run cannot rewrite its active parent's policy."""
+    repo = _feature_repo(tmp_path)
+    _write_probe_flow(ext_dir, "inner-profile")
+    profile_path = tmp_path / "inner-profile.toml"
+    profile_path.write_text('schema_version = 1\nname = "inner-policy"\n', encoding="utf-8")
+    backend = ScriptedBackend(events=[TextEvent(text="Recorded turn"), _RESULT])
+    monkeypatch.setattr(runner, "create_backend", lambda *_args, **_kwargs: backend)
+    outer_path = tmp_path / "outer-trajectory.json"
+    outer = make_recorder(tmp_path, path=outer_path)
+    outer.record_profile(schema_version=1, name="outer-policy", source_kind="test", digest="outer-digest")
+    config = RunConfig(
+        target=str(repo), base="main", flow_name="inner-profile", review_profile_path=profile_path,
+        run_eval=False, archive=True, non_interactive=True,
+    )
+    async with outer:
+        await run_agent(backend, repo, "Outer turn before the embedded run.", phase=DaydreamPhase.REVIEW)
+        assert await _run_private(config, tmp_path) == 0
+        assert get_current_recorder() is outer
+        await run_agent(backend, repo, "Outer turn after the embedded run.", phase=DaydreamPhase.REVIEW)
+
+    public_run, archived_run = _assert_one_published_run(repo, archive_dir)
+    inner = json.loads((public_run / "trajectory.json").read_text())["extra"]
+    archived = json.loads((archived_run / "manifest.json").read_text())
+    assert config.review_profile is not None
+    assert inner["profile_name"] == archived["profile_name"] == "inner-policy"
+    assert inner["profile_digest"] == archived["profile_digest"] == config.review_profile.digest
+    assert inner["profile_source_kind"] == archived["profile_source_kind"] == "explicit"
+    parent = json.loads(outer_path.read_text())["extra"]
+    assert parent["profile_name"] == "outer-policy"
+    assert parent["profile_digest"] == "outer-digest"
+    assert parent["profile_source_kind"] == "test"
+    assert backend.call_count == 3
+
 async def test_forced_ephemeral_runner_records_source_while_backend_uses_worktree(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ext_dir: Any, archive_dir: Path
 ) -> None:
@@ -695,35 +735,48 @@ def silence_runner_ui(silence_console: Callable[..., None]) -> None:
     """Mute runner UI only; phase hero/model bindings stay live for the AWAKEN ordering test."""
     silence_console("daydream.runner")
 
-_DISPATCH_TARGETS = ("_run_loop_deep", "_run_improve")
+_DISPATCH_TARGETS = ("run_deep", "_run_improve")
 
 def _make_recording_dispatch(
     called: list[str], on_call: Callable[[str, Any, Any, RunContext], None] | None = None,
 ) -> Any:
     def _record(name: str) -> Any:
-        async def stub(
-            work: Any, config: Any, _run_artifacts: Any = None, *,
-            run_context: RunContext, github_execution: GitHubExecutionInput, backend_factory: BackendFactory | None,
-        ) -> int:
+        def capture(work: WorkContext, config: RunConfig, run_context: RunContext) -> int:
             assert run_context is current_run_context()
             called.append(name)
             if on_call is not None:
                 on_call(name, work, config, run_context)
             return 0
-        return stub
+
+        async def deep_stub(
+            config: RunConfig, work: WorkContext, *, run_artifacts: Any,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_execution: BackendExecutionInput | None, allow_standalone: bool,
+        ) -> int:
+            assert not allow_standalone
+            return capture(work, config, run_context)
+
+        async def improve_stub(
+            work: WorkContext, config: RunConfig, _run_artifacts: Any, *,
+            run_context: RunContext, github_execution: GitHubExecutionInput,
+            backend_execution: BackendExecutionInput | None,
+        ) -> int:
+            return capture(work, config, run_context)
+
+        return deep_stub if name.endswith("run_deep") else improve_stub
     return _record
 
 @pytest.mark.parametrize(
     ("expected_target", "config_kwargs", "expected_attr", "expected_value"),
     [
         # A PR number is metadata and does not select a separate dispatch path.
-        ("_run_loop_deep", {"pr_number": 42}, "pr_number", 42),
-        ("_run_loop_deep", {"output_mode": "comment"}, "output_mode", "comment"),
-        ("_run_loop_deep", {"output_mode": "review"}, "output_mode", "review"),
+        ("run_deep", {"pr_number": 42}, "pr_number", 42),
+        ("run_deep", {"output_mode": "comment"}, "output_mode", "comment"),
+        ("run_deep", {"output_mode": "review"}, "output_mode", "review"),
         # Diagram-only skips reviewable-branch enforcement because it neither fixes nor commits.
-        ("_run_loop_deep", {"output_mode": "diagram", "diagram": "sequence"}, "output_mode", "diagram"),
-        ("_run_loop_deep", {"output_mode": "loop", "shallow": True}, "shallow", True),
-        ("_run_loop_deep", {"output_mode": "loop"}, "shallow", False),
+        ("run_deep", {"output_mode": "diagram", "diagram": "sequence"}, "output_mode", "diagram"),
+        ("run_deep", {"output_mode": "loop", "shallow": True}, "shallow", True),
+        ("run_deep", {"output_mode": "loop"}, "shallow", False),
         ("_run_improve", {"flow_name": "improve"}, "flow_name", "improve"),
     ],
     ids=[
@@ -743,7 +796,9 @@ async def test_run_dispatches_to_expected_flow(
         called.append((name, work, config))
     _record = _make_recording_dispatch([], _capture)
     for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+        monkeypatch.setattr(
+            f"daydream.deep.orchestrator.{name}" if name == "run_deep" else f"daydream.runner.{name}", _record(name),
+        )
     config = make_config(tmp_path, **config_kwargs)
     exit_code = await runner.run(config)
     assert exit_code == 0
@@ -761,7 +816,9 @@ async def test_run_rejects_head_mismatch_before_dispatch(
     called: list[str] = []
     _record = _make_recording_dispatch(called)
     for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+        monkeypatch.setattr(
+            f"daydream.deep.orchestrator.{name}" if name == "run_deep" else f"daydream.runner.{name}", _record(name),
+        )
     config = make_config(tmp_path, approved_head_sha="DEADBEEF")
     exit_code = await runner.run(config)
     assert exit_code == 1
@@ -775,11 +832,13 @@ async def test_run_allows_matching_approved_head(
     called: list[str] = []
     _record = _make_recording_dispatch(called)
     for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+        monkeypatch.setattr(
+            f"daydream.deep.orchestrator.{name}" if name == "run_deep" else f"daydream.runner.{name}", _record(name),
+        )
     config = make_config(tmp_path, approved_head_sha="CAFEBABE")
     exit_code = await runner.run(config)
     assert exit_code == 0
-    assert called == ["_run_loop_deep"]
+    assert called == ["run_deep"]
 
 async def test_run_rejects_head_mismatch_on_real_worktree(
     monkeypatch: pytest.MonkeyPatch,
@@ -789,7 +848,9 @@ async def test_run_rejects_head_mismatch_on_real_worktree(
     called: list[str] = []
     _record = _make_recording_dispatch(called)
     for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+        monkeypatch.setattr(
+            f"daydream.deep.orchestrator.{name}" if name == "run_deep" else f"daydream.runner.{name}", _record(name),
+        )
     config = make_config(deep_target, approved_head_sha="DEADBEEF")
     exit_code = await runner.run(config)
     assert exit_code == 1
@@ -806,12 +867,14 @@ async def test_run_allows_matching_approved_head_on_real_worktree(
         head_shas.append(work.head_sha)
     _record = _make_recording_dispatch(called, _capture)
     for name in _DISPATCH_TARGETS:
-        monkeypatch.setattr(f"daydream.runner.{name}", _record(name))
+        monkeypatch.setattr(
+            f"daydream.deep.orchestrator.{name}" if name == "run_deep" else f"daydream.runner.{name}", _record(name),
+        )
     real_head = _git(deep_target, "rev-parse", "HEAD").strip()
     config = make_config(deep_target, approved_head_sha=real_head)
     exit_code = await runner.run(config)
     assert exit_code == 0
-    assert called == ["_run_loop_deep"]
+    assert called == ["run_deep"]
     assert head_shas == [real_head]
 
 @pytest.mark.parametrize("flow_name", [None, "deep"], ids=["default_deep", "explicit_deep"])
@@ -884,7 +947,7 @@ async def test_review_run_does_not_mint_app_identity(
     _record = _make_recording_dispatch([], _check_identity)
     monkeypatch.setattr("daydream.github_app._mint_installation_token", mint_forbidden)
     monkeypatch.setattr("daydream.pr_review.post_review_to_pr_from_report", post_forbidden)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
+    monkeypatch.setattr("daydream.deep.orchestrator.run_deep", _record("run_deep"))
     rc = await runner.run(make_config(tmp_path, output_mode="review", pr_repo="acme/widgets"))
     assert rc == 0
 
@@ -941,7 +1004,7 @@ async def test_comment_mode_without_open_pr_dispatches_to_deep_flow(
         seen["output_mode"] = config.output_mode
         seen["branch"] = config.branch
     _record = _make_recording_dispatch([], _capture)
-    monkeypatch.setattr("daydream.runner._run_loop_deep", _record("_run_loop_deep"))
+    monkeypatch.setattr("daydream.deep.orchestrator.run_deep", _record("run_deep"))
     config = make_config(tmp_path, output_mode="comment", branch="feat/missing")
     exit_code = await runner.run(config)
     assert exit_code == 0
@@ -1249,9 +1312,9 @@ def test_runconfig_defaults_non_interactive_false() -> None:
 @pytest.mark.parametrize(
     ("dispatch_target", "config_kwargs"),
     [
-        ("daydream.runner._run_loop_deep", {"output_mode": "loop"}),
-        ("daydream.runner._run_loop_deep", {"output_mode": "loop", "shallow": True}),
-        ("daydream.runner._run_loop_deep", {"output_mode": "comment"}),
+        ("daydream.deep.orchestrator.run_deep", {"output_mode": "loop"}),
+        ("daydream.deep.orchestrator.run_deep", {"output_mode": "loop", "shallow": True}),
+        ("daydream.deep.orchestrator.run_deep", {"output_mode": "comment"}),
         ("daydream.runner._run_improve", {"flow_name": "improve"}),
     ], ids=["deep_loop", "shallow", "comment", "improve"],
 )
@@ -1540,16 +1603,18 @@ async def test_fix_cycle_failing_tests_bounded_fix_then_handoff(
         ),
     ],
 )
-def test_open_recorder_backend_identity(
+async def test_open_recorder_backend_identity(
     tmp_path: Path, config: RunConfig, flow: DaydreamRunFlow, expected: tuple[str, str, str, str],
 ) -> None:
     target_dir = tmp_path / "project"
     target_dir.mkdir()
     config.target = str(target_dir)
     config.run_eval = False
-    recorder = _open_recorder(allow_standalone=True, config=config, target_dir=target_dir, work=None, flow_kind=flow)
-    assert (recorder.backend_name, recorder.review_backend_name,
-            recorder.fix_backend_name, recorder.test_backend_name) == expected
+    async with _open_recorder(
+        allow_standalone=True, config=config, target_dir=target_dir, work=None, flow_kind=flow,
+    ) as recorder:
+        assert (recorder.backend_name, recorder.review_backend_name,
+                recorder.fix_backend_name, recorder.test_backend_name) == expected
 
 
 def _build_manifest(config: RunConfig, flow: DaydreamRunFlow, tmp_path: Path) -> dict[str, Any]:

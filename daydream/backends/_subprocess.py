@@ -137,10 +137,3 @@ def _close_process_io(proc: asyncio.subprocess.Process) -> None:
         transport.close()
     if proc.stdin is not None:
         proc.stdin.close()
-
-
-async def cancel_processes(processes: list[asyncio.subprocess.Process]) -> None:
-    """Shield and join teardown of a process snapshot, releasing all groups and pipes."""
-    snapshot = list(processes)
-    with anyio.CancelScope(shield=True):
-        await asyncio.gather(*(terminate_process(process) for process in snapshot))

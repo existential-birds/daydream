@@ -30,8 +30,9 @@ from daydream.cli import _signal_handler
 from daydream.deep.artifacts import DeepArtifact
 from daydream.eval.analyzer import analyze_costs, load_trajectories
 from daydream.phases.publish import (
-    _do_commit,
+    phase_commit_push,
 )
+from daydream.run_context import InteractionPolicy, RunContext
 from daydream.trajectory import (
     PARTIAL_SUFFIX,
     RUN_DOCUMENT_NAME,
@@ -2194,10 +2195,13 @@ def test_remote_ci_artifact_paths_are_named_under_deep_dir(tmp_path: Path) -> No
     assert DeepArtifact.REMOTE_CI_VERDICT.at(tmp_path) == tmp_path / "remote-ci-verdict.json"
     assert DeepArtifact.REMOTE_CI_HANDOFF.at(tmp_path) == tmp_path / "remote-ci-handoff.json"
 
-async def test_do_commit_records_commit_phase_event(git_repo: Path, make_work: Any,) -> None:
-    """Real-path: _do_commit's host-native commit emits a distinct ``commit``
+async def test_phase_commit_push_records_commit_phase_event(git_repo: Path, make_work: Any,) -> None:
+    """Real-path: Publication's host-native commit emits a distinct ``commit``
     phase event with duration_ms + stop_reason (issue #726 task 12)."""
 
+    remote = git_repo.parent / "publication.git"
+    subprocess.run(["git", "init", "--bare", str(remote)], check=True, capture_output=True)
+    subprocess.run(["git", "remote", "add", "origin", str(remote)], cwd=git_repo, check=True)
     work = make_work(git_repo)
     (git_repo / "app.py").write_text("x = 0\n")
     _git_add_commit(git_repo)
@@ -2205,19 +2209,25 @@ async def test_do_commit_records_commit_phase_event(git_repo: Path, make_work: A
 
     rec = make_recorder(git_repo)
     async with rec:
-        ok = await _do_commit(
-            ScriptedBackend(), work, push=False,
+        ok = await phase_commit_push(
+            ScriptedBackend(), work,
+            run_context=RunContext(InteractionPolicy(assume="yes")),
             retained_paths=frozenset({"app.py"}),
             retained_states=git_ops.snapshot_worktree_paths(git_repo, {"app.py"}),
             initial_index=git_ops.snapshot_index(git_repo),
         )
-    assert ok.committed is True
-    assert ok.push is None
+    assert ok is not None
+    assert git_ops.remote_contains_commit(git_repo, ok.branch, ok.sha, remote=ok.remote)
 
     commit_ends = [x.to_dict() for x in rec._phase_events if x.phase.value == "commit" and x.event == "phase_end"]
     assert len(commit_ends) == 1
     assert commit_ends[0]["metadata"]["stop_reason"] == "completed"
     assert commit_ends[0]["metadata"]["duration_ms"] >= 0
+
+    push_ends = [x.to_dict() for x in rec._phase_events if x.phase.value == "push" and x.event == "phase_end"]
+    assert len(push_ends) == 1
+    assert push_ends[0]["metadata"]["stop_reason"] == "completed"
+    assert push_ends[0]["metadata"]["duration_ms"] >= 0
 
 
 def _git_add_commit(repo: Path) -> None:

@@ -34,13 +34,12 @@ __all__ = [
 
 @dataclass(frozen=True)
 class V2Projection:
-    """Validated records in train/validation/holdout file order, grouped by split.
+    """Validated records in train/validation/holdout file order.
 
     lineage contains the pinned assignment parameters; digest covers sorted
     (relative path, file hash) pairs for every projection file."""
 
     records: list[dict[str, object]]
-    by_split: dict[str, list[dict[str, object]]] = field(default_factory=dict)
     lineage: dict[str, object] = field(default_factory=dict)
     digest: str = ""
 
@@ -254,7 +253,7 @@ def load_v2_projection(
     """Load gate-clean records, verify pinned splits, and digest the directory.
 
     Missing split files become ValueError. Missing/invalid lineage and every
-    recomputed split mismatch refuse the entire load before grouping."""
+    recomputed split mismatch refuse the entire load before returning any records."""
     projection_dir = Path(path)
     try:
         records = load_dataset_v2(projection_dir, allow_copyleft=allow_copyleft)
@@ -266,15 +265,8 @@ def load_v2_projection(
     lineage = _load_lineage(projection_dir)
     _enforce_split_consistency(records, lineage, projection_dir)
 
-    by_split: dict[str, list[dict[str, object]]] = {name: [] for name in SPLIT_FILENAMES}
-    for record in records:
-        # Identity and split consistency were validated before grouping.
-        split = cast(dict[str, object], record["lineage"])["split"]
-        by_split[cast(str, split)].append(record)
-
     return V2Projection(
         records=records,
-        by_split=by_split,
         lineage=lineage,
         digest=_directory_digest(projection_dir),
     )
